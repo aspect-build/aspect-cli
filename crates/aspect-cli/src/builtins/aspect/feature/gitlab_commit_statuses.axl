@@ -41,15 +41,42 @@ future feature that wants merge-blocking semantics.
 `skipped` is the GitLab-blessed mapping for "ran with non-fatal findings"
 — see `lib/gitlab.axl::_commit_status_skipped`. Renders without a red ✗.
 
+## Restyling or rewriting the commit status
+
+`Phases.status_surface_update` is consulted before every write and
+returns a verdict — publish, or publish with a different style or body. A commit
+status carries no body, only the one-line description, so that is `update.body`
+(re-truncated to 255 chars after a rewrite); `update.style` is the state this
+write would post, from the table above:
+
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "Phases", "surface_replace")
+
+    def _prefix_team(ctx: TaskContext, info: StatusSurfaceUpdate):
+        return surface_replace("[platform] " + info.body)
+
+    def config(ctx):
+        ctx.traits[Phases].status_surface_update.append(_prefix_team)
+
+`remove` isn't supported — commit statuses are post-only — so a removal is
+downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
+
+Hooks see every surface that consults them, so scope with `update.surface` when
+more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
+
 ## Templates and metadata
 
 Rendering goes through the shared `check_dispatch.RENDERERS` table —
 templates and `metadata_keys` configure exactly as they do for
-`GithubStatusChecks`:
+`GithubStatusChecks`. `template_preset` selects a named bundle of templates
+as the starting layout and `templates` overrides individual slots on top of
+it (see `template_presets`). Flat "summary"/"details" keys apply to every
+task kind; a per-task-kind block overlays them for that kind alone (see
+`check_dispatch.resolve_templates`):
 
     def config(ctx: ConfigContext):
         ctx.features[GitlabCommitStatuses].args.templates = {
-            "summary": "my custom {{ status_label }} template",
+            "summary": my_shared_summary_template,
+            "lint": {"details": my_lint_details_template},
         }
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
@@ -71,6 +98,7 @@ load(
     "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
+    "resolve_templates",
     "should_emit_update",
 )
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
@@ -78,7 +106,12 @@ load("../private/lib/environment.axl", "feature_logger", "workflows_results_url"
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../private/lib/lifecycle.axl",
+    "Phases",
+    "TaskUpdate",
+    "resolve_surface_update",
+)
 load(
     "../private/lib/rate_limit.axl",
     "BUCKET_APP",
@@ -87,6 +120,7 @@ load(
     "effective_throttle_factor",
     "should_emit_phase_change",
 )
+load("../private/lib/template_presets.axl", "template_presets")
 
 _LOG = feature_logger("GitLab commit statuses")
 
@@ -150,9 +184,10 @@ def _state_for(status, final):
     return None
 
 def _gitlab_commit_statuses(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
+    preset_templates = template_presets.templates(ctx.args.template_preset)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode
@@ -214,7 +249,30 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             (links.get("aspect_url") or "")
         )
 
-    def _post_status(ctx, state, output, links):
+    def _decide(ctx, status, final, state, output):
+        """Run this write past `status_surface_update`, returning the
+        `(state, description)` to post.
+
+        A commit status carries no body, only the 255-char description, so that
+        one line is what a hook sees and can rewrite (re-truncated after). A
+        `remove` is unreachable here — `resolve_surface_update` downgrades it for
+        surfaces that can't retract.
+        """
+        description = _truncate_description(
+            (output or {}).get("title", "") or (output or {}).get("summary", ""),
+        )
+        decision = resolve_surface_update(
+            ctx,
+            lifecycle,
+            "gitlab_commit_status",
+            status,
+            final,
+            state,
+            description,
+        )
+        return (decision.style, _truncate_description(decision.body))
+
+    def _post_status(ctx, state, description, links):
         token = _state.get("_gitlab_token")
         if not token:
             return
@@ -223,7 +281,6 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # the same (name, sha, ref) triple POSTs. We still track our
         # last-posted state so live-refresh callers can decide whether
         # to re-POST.
-        description = _truncate_description((output or {}).get("title", "") or (output or {}).get("summary", ""))
         target_url = _resolve_target_url(links)
         result = gitlab.commit_status.post(
             ctx,
@@ -301,13 +358,14 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             initial_links,
-            templates,
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
         )
-        _post_status(ctx, "pending", initial_output, initial_links)
+        (initial_state, initial_desc) = _decide(ctx, "running", False, "pending", initial_output)
+        _post_status(ctx, initial_state, initial_desc, initial_links)
 
     def _task_update(ctx, update):
-        # Latch the subject (raw) before init/render: setup_phase sets
+        # Latch the subject (raw) before init/render: phases.setup sets
         # it on the first update, but a later update may refine it.
         # Empty means "no change", keep prior.
         if update.subject:
@@ -375,7 +433,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             status,
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             links,
-            templates,
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
         )
 
@@ -388,10 +446,14 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # GitlabStatusComments feature.
         if desired_state == None:
             return
-        if desired_state == _state.get("_last_state"):
-            return
 
-        _post_status(ctx, desired_state, output, links)
+        # Dedup on the state we'd actually POST, so a `status_surface_update`
+        # restyle is compared against what it last posted rather than against
+        # the state it overrode.
+        (post_state, description) = _decide(ctx, status, final, desired_state, output)
+        if post_state == _state.get("_last_state"):
+            return
+        _post_status(ctx, post_state, description, links)
 
     lifecycle.task_update.append(_task_update)
 
@@ -433,11 +495,13 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = "Map of template overrides for the rendered status output. " +
-                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
-                          "string. Empty dict (default) uses the feature's built-in templates. " +
-                          "Note: only the rendered `title` lands on the commit status (in " +
-                          "`description`, truncated to 255 chars) — the full body is rendered " +
-                          "into the GitlabStatusComments rolling note.",
+                          "Flat keys \"title\" / \"summary\" / \"details\" (Jinja2 strings) apply to every " +
+                          "task kind; a per-task-kind block (\"build\", \"test\", \"lint\", " +
+                          "\"format\", \"gazelle\", \"delivery\", \"warming\") overlays them for " +
+                          "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
+                          "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
+                          "`state` and `status`; a broken title falls back to the built-in layout. " +
+                          "Empty dict (default) leaves the selected `template_preset` in effect. Note: only the rendered `title` lands on the commit status (in `description`, truncated to 255 chars) \u2014 the full body is rendered into the GitlabStatusComments rolling note.",
         ),
         "metadata_keys": args.string_list(
             default = [],
@@ -445,5 +509,5 @@ GitlabCommitStatuses = feature(
             description = "Additional BES build_metadata keys to surface in the render-context (used " +
                           "by sibling features like GitlabStatusComments). Use [\"*\"] for all keys.",
         ),
-    },
+    } | template_presets.args(),
 )

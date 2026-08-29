@@ -45,6 +45,7 @@ never copied into a Starlark value here. When no snippet is rendered, the
 surface still shows the failing label + action mnemonics + the CI link.
 """
 
+load("@std//time.axl", "time")
 load("./ci.axl", "detect_ci_host", "resolve_build_url")
 load(
     "./environment.axl",
@@ -53,11 +54,20 @@ load(
     "feature_logger",
     "is_aspect_workflows_runner",
 )
+load("./lifecycle.axl", "Phases", "phases")
 load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet", "has_snippet")
 load("./path_glob.axl", "match_path")
-load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
+load(
+    "./repro_commands.axl",
+    "ASPECT_CLI_INSTALL_HINT_MARKDOWN",
+    "build_aspect_command",
+    "build_bazel_command",
+    "flavor_allows",
+    "print_repro_and_fix",
+    "repro_prefix",
+)
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "pluralize", "truncate_for_title")
+load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "join_url", "pluralize", "truncate_for_title")
 load("./tips.axl", "decorate_tip")
 
 # Max unique failed-target labels to keep detail for (entries are small).
@@ -268,6 +278,12 @@ def _repro_with_prefix(prefix, labels, max_chars):
         return ("", 0)
     return (base + " ".join(included), len(included))
 
+# Keys a task resolves before the build and `process_event` must not clobber
+# when `build_started` resets the accumulator for a new (or retried) stream.
+# All three feed the Aspect Web UI link — two identify the invocation, one is its
+# base URL off a runner; see `resolve_aspect_url`.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url"]
+
 def init_data():
     """Create a fresh data accumulator.
 
@@ -275,6 +291,9 @@ def init_data():
     `["bazel"]`. The rendered "Bazel details" reads `data["bazel"][...]`;
     root scalars stay at the root so non-bazel tasks can populate them too.
     See `crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md` for the schema.
+
+    `_TASK_OWNED_KEYS` names the root scalars that survive a `build_started`
+    reset.
     """
     return {
         # start/finish ms since epoch. build/test: from BES (process_event).
@@ -287,6 +306,15 @@ def init_data():
         # bazel_runner.axl after Build::spawn; "" when no sinks. Differs from
         # build_started.uuid (Bazel's server-side UUID).
         "sink_invocation_id": "",
+        # True when Bazel uploads to the Aspect BES backend itself, so the CLI
+        # streams no sink there and `resolve_aspect_url` keys on Bazel's
+        # invocation_id. Set by the task before spawning; see
+        # bazel/build_events.axl::bes_streamed_by_bazel.
+        "bes_streamed_by_bazel": False,
+        # Aspect Web UI base URL for the BES backend this build reports to, the
+        # fallback base for `resolve_aspect_url`. Set by bazel_runner.axl; see
+        # deployment_flags.axl::advertised_results_url.
+        "aspect_results_url": "",
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
         "repro_commands": [],
@@ -452,14 +480,14 @@ def process_event(data, event):
     kind = event.kind
 
     if kind == "build_started":
-        # Reset state for the new stream (handles retries). Preserve the
-        # task-managed sink_invocation_id (set before this event) — wiping it
-        # would drop the Aspect Workflows link from every annotation.
-        preserved_sink_id = data.get("sink_invocation_id", "") or ""
+        # Reset state for the new stream (handles retries), less the keys the
+        # task owns and sets before this event — wiping those would drop the
+        # Aspect Workflows link from every annotation.
+        preserved = {k: data[k] for k in _TASK_OWNED_KEYS if k in data}
         fresh = init_data()
         for k in fresh:
             data[k] = fresh[k]
-        data["sink_invocation_id"] = preserved_sink_id
+        data.update(preserved)
 
         payload = event.payload
         uuid = bes_get(payload, "uuid", "") or ""
@@ -924,35 +952,41 @@ def process_event(data, event):
 
     return False
 
-def _join_url(base, id):
-    """Join base URL + invocation id with exactly one slash (tolerates a trailing
-    slash on `base`)."""
-    return (base if base.endswith("/") else base + "/") + id
-
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Keyed on `sink_invocation_id`, NOT Bazel's `invocation_id`: the Aspect Web
-    UI indexes by the UUID the gRPC sink (`stream_sink.rs`) mints up-front when
-    spawning BES subscribers — that's the stream-level id the backend sees;
-    Bazel's own UUID is unknown to the backend (would 404).
+    Keyed on the id most directly identifying the invocation:
 
-    Tasks with sinks active set `data["sink_invocation_id"]` from
-    `build.sink_invocation_id` right after `ctx.bazel.build(...)` (the runtime
-    mints it inside `Build::spawn`). See `bazel_runner.axl`. Without sinks the
-    field is empty and we suppress the link.
+      - `sink_invocation_id` when the CLI streamed it — the UUID the gRPC sink
+        (`stream_sink.rs`) mints up-front when spawning BES subscribers. The
+        `results` handle's `invocation()` sets it from `build.sink_invocation_id`
+        right after `ctx.bazel.build(...)` (the runtime mints it inside
+        `Build::spawn`).
+      - `data["bazel"]["invocation_id"]` when `bes_streamed_by_bazel` says Bazel
+        uploaded it instead, in which case no sink — and so no sink id — exists.
+
+    The Web UI resolves `/i/<id>` under either the BES envelope UUID (the sink id) or
+    the Bazel invocation id carried in the events, so both forms land on the same
+    page; the sink id is preferred simply because it is the one this process minted.
+    Without either id the link is suppressed.
 
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
         ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
+
+    `data["aspect_results_url"]` is the fallback base — the viewer advertised for the
+    BES backend this build reports to (see `deployment_flags.axl`) — so a local
+    `--remote` build renders the same link off a runner.
     """
-    base = links.get("results_base_url", "") if links else ""
+    base = (links.get("results_base_url", "") if links else "") or data.get("aspect_results_url", "")
     if not base:
         return ""
     inv_id = data.get("sink_invocation_id", "") or ""
+    if not inv_id and data.get("bes_streamed_by_bazel"):
+        inv_id = data.get("bazel", {}).get("invocation_id", "") or ""
     if not inv_id:
         return ""
-    return _join_url(base, inv_id)
+    return join_url(base, inv_id)
 
 def aspect_web_ui_url(env: std.Env, data: dict) -> str:
     """Aspect Web UI invocation URL, or "" when unavailable. Joins
@@ -1168,6 +1202,61 @@ def compute_reproducer_command(data, task_kind, max_chars = MAX_REPRO_CHARS):
 # GitHub check-run title cap. Subject within is capped tighter at SUBJECT_TITLE_MAX.
 _TITLE_MAX_LEN = 160
 
+# Default title layout, shared by every renderer kind: `{icon} {task_kind}
+# {subject} · {state}`, with each clause dropped when empty. Kept as a template
+# so `compose_title` renders the built-in through the same path as an override
+# — a config-supplied template can therefore only differ in layout, never in
+# which values are available.
+TITLE_TEMPLATE = (
+    "{% if icon %}{{ icon }}{% endif %}" +
+    "{% if task_kind %}{% if icon %} {% endif %}{{ task_kind }}{% endif %}" +
+    "{% if subject %} {{ subject }}{% endif %}" +
+    "{% if state %}{% if icon or task_kind or subject %} · {% endif %}{{ state }}{% endif %}"
+)
+
+def title_vars(status, state, target_pattern = "", task_kind = ""):
+    """Template variables for a `title` override.
+
+    `state` is the per-kind verdict clause the renderer computed (e.g. "Passed",
+    "3 errors, 8 warnings", "Running..."); the rest mirror what the built-in
+    layout uses. `subject` is pre-truncated to `SUBJECT_TITLE_MAX` so a long
+    target pattern can't blow the title cap on its own.
+    """
+    return {
+        "icon": emoji_for_status(status),
+        "task_kind": task_kind,
+        "subject": truncate_for_title(target_pattern, SUBJECT_TITLE_MAX) if target_pattern else "",
+        "state": state,
+        "status": status,
+    }
+
+def compose_title(ctx, template, status, state, target_pattern = "", task_kind = ""):
+    """Render a check-run / annotation title, honoring a `title` override.
+
+    Never returns "". A title is the one field every surface needs — GitHub's
+    check-run API requires `output.title`, and it's the line reviewers scan —
+    so an override that can't produce one degrades to the built-in layout
+    rather than aborting the task or emitting a blank. Two ways that happens:
+
+      - the template fails to render (see `render_title_or_fallback`);
+      - it renders successfully but blank, which a *syntactically valid*
+        template can do whenever every variable it references is empty (e.g.
+        `"{{ subject }}"` on a task with no target pattern).
+
+    The fallback can't itself come up empty: `TITLE_TEMPLATE` always emits
+    `icon`, and `emoji_for_status` has a non-empty default for every status.
+
+    Truncated to `_TITLE_MAX_LEN` after rendering: an override that ignores the
+    caps still can't produce a title GitHub would reject.
+    """
+    data = title_vars(status, state, target_pattern = target_pattern, task_kind = task_kind)
+    text = render_title_or_fallback(ctx, template or TITLE_TEMPLATE, data).strip()
+    if not text:
+        if template:
+            _RENDER_LOG.warn(ctx.std, "title rendered blank, using the built-in layout: %r" % template)
+        text = ctx.template.jinja2(TITLE_TEMPLATE, data = data).strip()
+    return truncate_for_title(text, _TITLE_MAX_LEN)
+
 def summary_title(data, status, target_pattern = "", task_kind = ""):
     """Build the check run title in the form '<status_emoji> <task_kind> <subject> · <state>'.
 
@@ -1212,6 +1301,11 @@ def summary_title(data, status, target_pattern = "", task_kind = ""):
         title = state
     return truncate_for_title(title, _TITLE_MAX_LEN)
 
+def summary_title_state(data, status):
+    """The verdict clause `summary_title` puts after `·`, exposed as the
+    `state` variable for a `title` template override."""
+    return compute_invocation_state(data, status)
+
 def conclusion(status, data):
     """Bazel build/test task's terminal bookend conclusion. Delegates
     to `compute_invocation_state(data, status)` so the bookend reads
@@ -1227,15 +1321,13 @@ def conclusion(status, data):
 def now_ms(ctx):
     """Current time in ms since epoch (for rate-limiting status updates).
 
-    Uses `date '+%s000'` (epoch seconds + "000"), not `%3N`/`%N` which macOS
-    date lacks. Second-rounded, fine for the 1s default throttle.
+    Backed by the runtime clock (`time.now_ms()`); the `ctx` parameter is kept
+    for call-site compatibility but unused. Was a `date '+%s000'` subprocess per
+    call — millisecond-accurate now and free of the ~4-forks/sec cost during a
+    build's status-update loop.
     """
-    result = ctx.std.process.command("date").args(["+%s000"]).stdout("piped").spawn().wait_with_output()
-    if result.status.code == 0:
-        val = result.stdout.strip()
-        if val:
-            return int(val)
-    return 0
+    _ = ctx
+    return time.now_ms()
 
 # Check run rendering — Jinja2 templates + data builders for the
 # "bazel_results" task_update kind. render_check_output() is the public entry
@@ -1908,6 +2000,14 @@ def compute_invocation_state(data, status):
         for bucket in _FAILURE_BUCKETS:
             if counts.get(bucket, 0) > 0:
                 return _BUCKET_INVOCATION_LABELS[bucket]
+
+        # `aspect run` builds a target and then executes it. When the build
+        # succeeded and the program exited non-zero there is no failure bucket,
+        # and the fallback below would report a build failure for a build that
+        # worked. Only `run` sets this.
+        run_exit = (data.get("run") or {}).get("exit_code", 0)
+        if run_exit:
+            return "Run failed (exit %d)" % run_exit
         return _BUCKET_INVOCATION_LABELS[_BUCKET_FAILED_TO_BUILD]
 
     for group in _BUCKET_PRIORITY_GROUPS:
@@ -2318,15 +2418,16 @@ def _sorted_dedup(args, allow_env):
 def render_bes_url(data: dict) -> str:
     """Full BES results URL from `data["bazel"]`, or "" when unavailable.
 
-    Keyed on Bazel's own `invocation_id` (the --bes_results_url backend only
-    sees that UUID). BES counterpart to `aspect_web_ui_url`, which keys on
-    sink_invocation_id.
+    Keyed on Bazel's own `invocation_id`, mirroring the link Bazel itself prints from
+    `--bes_results_url`. BES counterpart to `aspect_web_ui_url`, which keys on
+    `sink_invocation_id`; against the Aspect Web UI the two resolve to the same page
+    (see `resolve_aspect_url`).
     """
     base = data["bazel"].get("bes_results_url", "")
     inv = data["bazel"].get("invocation_id", "")
     if not base or not inv:
         return ""
-    return _join_url(base, inv)
+    return join_url(base, inv)
 
 def format_run_date(ctx, epoch_ms):
     """Format an epoch-ms timestamp as a human-readable date (e.g.
@@ -3245,6 +3346,24 @@ def render_summary_or_fallback(ctx, template, data, surface = "check"):
     """
     return _render_or_fallback(ctx, template, data, _SUMMARY_FALLBACK_TEMPLATE, surface + " summary")
 
+def render_title_or_fallback(ctx, template, data):
+    """Render a title, degrading to the built-in layout on error.
+
+    Unlike the summary/details fallbacks — which surface a visible "unavailable"
+    marker — a failed title falls back to `TITLE_TEMPLATE` so the surface still
+    gets a correct, informative title. The marker approach would replace the one
+    line reviewers scan with an error string. The warning still names the
+    offending template so the config author can find it.
+
+    `TITLE_TEMPLATE` itself is trusted (no macros, only the `title_vars` keys),
+    so the fallback render can't fail in turn.
+    """
+    ok, text = ctx.template.try_jinja2(template, data = data)
+    if ok:
+        return text
+    _RENDER_LOG.warn(ctx.std, "title failed to render, using the built-in layout: %s" % text)
+    return ctx.template.jinja2(TITLE_TEMPLATE, data = data)
+
 def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = "", config_items = None, complete_suffix = ""):
     """Build Jinja2 template data for SUMMARY_TEMPLATE.
 
@@ -3439,7 +3558,7 @@ def _build_retry_attempt_rows(data, links):
     rows = []
     for a in attempts:
         sink_id = a.get("sink_invocation_id", "") or ""
-        url = _join_url(base, sink_id) if (base and sink_id) else ""
+        url = join_url(base, sink_id) if (base and sink_id) else ""
         rows.append({
             "attempt": a.get("attempt", 0),
             "outcome": "passed" if a.get("exit_code", 1) == 0 else "failed",
@@ -4484,12 +4603,362 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     return {
-        "title": summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            summary_title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,
     }
+
+# ─── The `results` handle: BES accumulation + status surfaces ─────────────────
+#
+# `results.build(ctx)` / `results.test(ctx)` wrap `phases.new(ctx, init_data())`
+# and own every surface interaction a bazel build/test task makes: the live
+# progress emit gate, per-attempt phase rows + retry archiving, the terminal
+# emit, and repro-command production. A task that wants none of this simply
+# doesn't construct a handle — the `bazel.build(ctx)` invocation handle runs
+# fine without it. The status/progress text helpers below moved here verbatim
+# from the old `bazel_runner.axl` (they were always results logic).
+
+# BES event kinds `process_event` consumes. Passed as `kinds=` to the results
+# iterator so the send-side filter drops the noisy unconsumed kinds (`progress`,
+# `named_set_of_files`, …) before they are cloned into this subscriber's buffer.
+# MUST stay in sync with the `process_event` switch — `bazel_results_test.axl`
+# has a drift test asserting both directions.
+RESULTS_KINDS = [
+    "build_started",
+    "structured_command_line",
+    "options_parsed",
+    "build_metadata",
+    "workspace_status",
+    "action_completed",
+    "target_configured",
+    "target_completed",
+    "test_result",
+    "test_summary",
+    "build_metrics",
+    "build_finished",
+    "configuration",
+    "aborted",
+]
+
+def _pick_status(command, data, had_failure, terminal):
+    """Lifecycle status from accumulated BES counters. `command` is
+    "build"/"test"; `had_failure` folds failed actions/tests. Aborted wins;
+    a flaky-only test outcome flips to `warning`."""
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure:
+        return "failed" if terminal else "failing"
+    if command == "test" and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
+        return "warning"
+    return "passed" if terminal else "running"
+
+def _passed_text(command, bz):
+    if command == "test":
+        passed = bz.get("passed_test_total", 0)
+        failed = bz.get("failed_test_total", 0)
+        flaky = bz.get("flaky_test_total", 0)
+        cached = bz.get("cached_test_total", 0)
+        total = passed + failed
+        if total == 0:
+            return "no tests"
+        text = "%d/%d passed" % (passed, total)
+        extras = []
+        if flaky > 0:
+            extras.append("%d flaky" % flaky)
+        if cached > 0:
+            extras.append("%d cached" % cached)
+        if extras:
+            text = text + " · " + " · ".join(extras)
+        return text
+    n = bz.get("targets_total", 0)
+    return ("%d built" % n) if n > 0 else "ok"
+
+def _compact_text(command, status, data):
+    """Compact Result-cell text (PR-comment surface)."""
+    bz = data.get("bazel", {}) or {}
+    if status == "running":
+        if command == "test":
+            ran = bz.get("passed_test_total", 0) + bz.get("failed_test_total", 0)
+            total = bz.get("targets_total", 0)
+            if total > 0 and ran > 0:
+                return "%d/%d tests run" % (ran, total)
+        elif command == "build":
+            n = bz.get("targets_total", 0)
+            if n > 0:
+                return "%d targets" % n
+        return ""
+    if status == "warning" or status == "passed":
+        return _passed_text(command, bz)
+    if status == "failing" or status == "failed":
+        if command == "test":
+            f = bz.get("failed_test_total", 0)
+            if f > 0:
+                return "%d test%s failed" % (f, "s" if f != 1 else "")
+        return ""
+    return ""
+
+_TERMINAL_VERB = {
+    "passed": "complete",
+    "warning": "complete",
+    "failed": "failed",
+    "failing": "failing",
+    "aborted": "aborted",
+}
+
+def _live_progress(data, command, status):
+    """Compose the "Last update" `ProgressStyles` from the latest BES counters
+    (see the old bazel_runner for the phrasing examples). `stream` stays empty —
+    the bazel UI prints its own streaming progress."""
+    base = "Bazel " + command
+    if status == "running" or status == "":
+        running_detail = ""
+        if command == "test":
+            passed = data["bazel"].get("passed_test_total", 0) or 0
+            failed = data["bazel"].get("failed_test_total", 0) or 0
+            flaky = data["bazel"].get("flaky_test_total", 0) or 0
+            total = passed + failed + flaky
+            if total > 0:
+                expected = data["bazel"].get("test_targets_configured", 0) or 0
+                if expected >= total:
+                    running_detail = format_int_comma(total) + " of " + pluralize(expected, "test") + " run"
+                else:
+                    running_detail = pluralize(total, "test") + " run"
+                if failed > 0:
+                    running_detail = running_detail + " · " + pluralize(failed, "failed", plural = "failed")
+        if not running_detail:
+            targets = data["bazel"].get("targets_total", 0) or 0
+            if targets > 0:
+                running_detail = pluralize(targets, "target") + " built"
+            else:
+                actions = data["bazel"].get("actions_executed", 0) or 0
+                if actions > 0:
+                    running_detail = pluralize(actions, "action") + " executed"
+        lead = "running..."
+        detail = running_detail
+    else:
+        lead = _TERMINAL_VERB.get(status, status)
+        detail = _compact_text(command, status, data)
+
+    suffix = (" (" + detail + ")") if detail else ""
+    return phases.ProgressStyles(
+        body = base + " " + lead + suffix,
+        stream = "",
+        # Same text without the `Bazel <command>` lead, which a surface that
+        # prints the task label beside it already says.
+        short = lead + suffix,
+    )
+
+# ms since the last live emit before a heartbeat is forced (matches
+# MIN_HEARTBEAT_INTERVAL_MS); measured off the monotonic clock.
+def _elapsed_ms(since_monotonic):
+    return int((time.monotonic() - since_monotonic) * 1000)
+
+def _results_new(ctx, command):
+    """Shared constructor for `results.build` / `results.test`. Owns
+    `phases.new(ctx, init_data())`, a small heartbeat/attempt state cell, and a
+    deferred abort guard so a fatal error still concludes the surface."""
+    ph = phases.new(ctx, init_data())
+    data = ph.data
+
+    # first: next emit bypasses the surface throttle (priority).
+    # last_monotonic: monotonic seconds at the last emit (0 → first tick emits).
+    # attempts: count of spawned attempts (human-numbered). label: current
+    # spawn-phase body, reused by `invocation()`'s link re-emit.
+    # concluded: set by conclude(); the abort guard stands down when True.
+    m = {
+        "first": True,
+        "last_monotonic": 0.0,
+        "attempts": 0,
+        "label": "",
+        "concluded": False,
+        "bazel_streams_bes": False,
+        "results_url": "",
+    }
+
+    def _emit(status, priority):
+        ph.dispatch(phases.Update(
+            kind = "bazel_results",
+            status = status,
+            progress = _live_progress(data, command, status),
+            priority = priority,
+            data = data,
+        ))
+        m["first"] = False
+        m["last_monotonic"] = time.monotonic()
+
+    def setup(targets, rc, bazel_streams_bes = False, results_url = ""):
+        # `rc` is the live run command the invocation handle already registered
+        # (`use_rc`); the health checks in setup_surface read it via ctx.bazel.
+        _ = rc
+
+        # Properties of the resolved flags, so they hold for every attempt; `m`
+        # keeps them to restore onto each retry's fresh `data`.
+        m["bazel_streams_bes"] = bazel_streams_bes
+        m["results_url"] = results_url
+        data["bes_streamed_by_bazel"] = bazel_streams_bes
+        data["aspect_results_url"] = results_url
+        ph.setup_surface(" ".join(targets), "bazel_results")
+
+    def attempt(index, prior = None):
+        m["attempts"] = index + 1
+        if index == 0:
+            phase_id = command
+            m["label"] = "Spawning bazel " + command + "..."
+            phase_cli = "Spawning bazel " + command
+            phase_desc = "Run bazel tests" if command == "test" else "Build bazel targets"
+        else:
+            # Archive the just-finished (failed) attempt BEFORE resetting `data`
+            # (archive holds the `bazel` sub-dict by reference). Iter `index-1`
+            # ran human attempt `index`.
+            prior_code = prior.code if prior != None else 1
+            prior_attempts = archive_bazel_attempt(data, index, prior_code)
+            ph.reset(init_data())
+            data["bazel_attempts"] = prior_attempts
+            data["bes_streamed_by_bazel"] = m["bazel_streams_bes"]
+            data["aspect_results_url"] = m["results_url"]
+            m["first"] = True
+            phase_id = command + "_retry_" + str(index + 1)
+            m["label"] = "Retrying bazel " + command + "... (attempt " + str(index + 1) + ")"
+            phase_cli = "Retrying bazel " + command + " (attempt " + str(index + 1) + ")"
+            phase_desc = "Retry attempt — " + ("Run bazel tests" if command == "test" else "Build bazel targets")
+
+        ph.update(
+            _pick_status(command, data, had_failure = False, terminal = False),
+            phases.ProgressStyles(body = m["label"], stream = phase_cli),
+            kind = "bazel_results",
+            phase = phases.Phase(
+                name = phase_id,
+                description = phase_desc,
+                emoji = "🧪" if command == "test" else "🔨",
+            ),
+        )
+
+    def invocation(inv):
+        data["sink_invocation_id"] = inv.sink_invocation_id
+
+        # Surface the Aspect Workflows link now rather than on the next
+        # heartbeat. Body only (no CLI re-print).
+        if inv.sink_invocation_id:
+            ph.update(
+                _pick_status(command, data, had_failure = False, terminal = False),
+                phases.ProgressStyles(body = m["label"]),
+                kind = "bazel_results",
+            )
+
+    def process(event):
+        # `event` is a BuildEvent, or None on a quiet heartbeat tick.
+        interesting = process_event(data, event) if event != None else False
+        heartbeat = _elapsed_ms(m["last_monotonic"]) >= MIN_HEARTBEAT_INTERVAL_MS
+        if not (interesting or heartbeat):
+            return
+        had_failure = (
+            data["bazel"]["failed_actions_total"] > 0 or
+            data["bazel"]["failed_test_total"] > 0
+        )
+        _emit(_pick_status(command, data, had_failure = had_failure, terminal = False), priority = m["first"])
+
+    def conclude(w, targets):
+        m["concluded"] = True
+
+        # BuildStatus.code is Option<i32> (None on abnormal exit); key the
+        # verdict off the reliable `success` bool and coerce a numeric code.
+        code = 0 if w.success else (w.code if w.code != None else 1)
+
+        # If retries occurred, append the final attempt so `bazel_attempts` holds
+        # the full ordered history (failed priors + final).
+        if data.get("bazel_attempts"):
+            archive_bazel_attempt(data, m["attempts"], code)
+
+        final_status = _pick_status(command, data, had_failure = not w.success, terminal = True)
+
+        # Per-subcommand + per-failure repro commands, flavor-gated. Keyed by the
+        # subcommand that REPRODUCES each failure (a test that failed to build
+        # reruns via `bazel build`). Moved verbatim from bazel_runner.
+        flavors = ctx.args.repro_flavors if hasattr(ctx.args, "repro_flavors") else []
+        prefix = repro_prefix(ctx)
+        by_sub = failed_labels_by_subcommand(data)
+
+        def _add(cmd, slug, description = "", target = ""):
+            if cmd and flavor_allows(flavors, slug):
+                data["repro_commands"].append(phases.ReproFixCommand(
+                    command = cmd,
+                    description = description,
+                    slug = slug,
+                    target = target,
+                ))
+
+        def _add_pair(subcommand, labels, target = ""):
+            if not labels:
+                return
+            _add(prefix + build_aspect_command(subcommand, [], labels), subcommand + "-repro-aspect", target = target)
+            _add(prefix + build_bazel_command(subcommand, labels), subcommand + "-repro-vanilla-bazel", description = "vanilla bazel", target = target)
+
+        for sub in ("build", "test"):
+            if by_sub[sub]:
+                _add_pair(sub, collapse_repro_targets(by_sub[sub], targets))
+        for sub in ("build", "test"):
+            for label in by_sub[sub]:
+                _add_pair(sub, [label], target = label)
+
+        ph.suggest_fixes(
+            "bazel_results",
+            final_status,
+            exit_code = w.code,
+            bazel_subcommand = command,
+            targets = targets,
+            failed_targets = failed_labels(data),
+        )
+
+        bookend = conclusion(final_status, data)
+        ph.dispatch(phases.Update(
+            kind = "bazel_results",
+            status = final_status,
+            final = True,
+            conclusion = bookend,
+            data = data,
+            progress = _live_progress(data, command, final_status),
+        ))
+        print_repro_and_fix(ctx.std, data, final_status)
+        return TaskConclusion(exit_code = code, text = bookend, flagged = final_status == "warning")
+
+    def _abort_guard():
+        # Fatal error / interrupt before conclude(): flip the surface off
+        # "running" so it doesn't stick. ctx.defer runs even on a Starlark error.
+        if m["concluded"]:
+            return
+        ph.dispatch(phases.Update(
+            kind = "bazel_results",
+            status = "aborted",
+            final = True,
+            conclusion = conclusion("aborted", data),
+            data = data,
+            progress = _live_progress(data, command, "aborted"),
+        ))
+
+    ctx.defer(_abort_guard)
+
+    return struct(
+        ph = ph,
+        data = data,
+        # Emit BES events only when a status surface is listening — mirrors the
+        # old `need_bes` gate (no surfaces → bazel runs with no BEP fifo).
+        live = bool(ctx.traits[Phases].task_update),
+        setup = setup,
+        attempt = attempt,
+        invocation = invocation,
+        process = process,
+        conclude = conclude,
+    )
+
+results = namespace(
+    build = lambda ctx: _results_new(ctx, "build"),
+    test = lambda ctx: _results_new(ctx, "test"),
+    KINDS = RESULTS_KINDS,
+)

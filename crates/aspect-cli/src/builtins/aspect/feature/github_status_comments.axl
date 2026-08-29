@@ -82,7 +82,7 @@ load("../private/lib/checkrun.axl", "checkrun")
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "github")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../private/lib/lifecycle.axl", "Phases")
 load("../private/lib/log_snippet.axl", "code_fence_for")
 load(
     "../private/lib/rate_limit.axl",
@@ -96,6 +96,7 @@ load(
 )
 load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
 load("../private/lib/result_text.axl", "severity_for_status")
+load("../private/lib/template_presets.axl", "template_presets")
 load(
     "../private/lib/tips.axl",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -117,11 +118,10 @@ GITHUB_STATUS_COMMENT_ROLES = ["prs.write"]
 
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
-# Fallback CI-host link label/icon for entries serialized without host metadata
+# Fallback CI-host link label for entries serialized without host metadata
 # (older entries, or hosts not in the registry). New entries carry the detected
-# host's `ci_host_label` / `ci_host_icon` from `detect_ci_host`.
+# host's `ci_host_label` from `detect_ci_host`.
 _DEFAULT_CI_HOST_LABEL = "GitHub Actions"
-_DEFAULT_CI_HOST_ICON = "🐙"
 
 # Cross-workflow state block embedded in the rendered comment.
 #
@@ -182,25 +182,16 @@ _DEFAULT_STATUS_BADGES = {
 # changed in AXL.
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
-## ✨ Aspect Workflows Tasks
+## Aspect Workflows Tasks
 {% if started_at %}📅 {{ started_at }}<br>
 {% endif %}{% if not entries -%}
 _No tasks have reported yet._
 {% else -%}
-{% macro section(label, icon, items) -%}
-{% if items %}
-## {{ icon }} {{ items|length }} {{ label }} task{{ "s" if items|length != 1 else "" }}
+## Task Results
 
-{% for e in items -%}
-- {{ status_badges[e._badge_key] }} {{ e.name or e.kind }}{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+{% for e in entries -%}
+- {{ status_badges[e._badge_key] }} **{{ e.name or e.kind }}**{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._result_text %} · {{ e._result_text }}{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}
 {% endfor -%}
-{% endif -%}
-{% endmacro -%}
-{{ section("in progress", "🔄", sections.running) -}}
-{{ section("failed",      "❌", sections.failed) -}}
-{{ section("failing",     "❌", sections.failing) -}}
-{{ section("flagged",     "⚠️", sections.flagged) -}}
-{{ section("successful",  "✅", sections.successful) -}}
 {% macro snippet_block(s) %}
 ❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} `{{ s.label }}` {{ s.verb }}:
 {{ s.fence }}text
@@ -316,20 +307,19 @@ def _links_cell_text(entry):
     parts = []
 
     if entry.get("aspect_url"):
-        parts.append("✨ [Aspect](%s)" % entry["aspect_url"])
+        parts.append("[Aspect](%s)" % entry["aspect_url"])
 
     # Independent of the Aspect link — both render when set.
     bes_url = entry.get("bes_url", "")
     if bes_url and bes_url != entry.get("aspect_url", ""):
-        parts.append("🔗 [BES](%s)" % bes_url)
+        parts.append("[BES](%s)" % bes_url)
 
     if entry.get("ci_run_url"):
-        icon = entry.get("ci_host_icon") or _DEFAULT_CI_HOST_ICON
         label = entry.get("ci_host_label") or _DEFAULT_CI_HOST_LABEL
-        parts.append("%s [%s](%s)" % (icon, label, entry["ci_run_url"]))
+        parts.append("[%s](%s)" % (label, entry["ci_run_url"]))
 
     if entry.get("check_run_url"):
-        parts.append("☑️ [Check](%s)" % entry["check_run_url"])
+        parts.append("[Check](%s)" % entry["check_run_url"])
 
     return " · ".join(parts)
 
@@ -338,10 +328,57 @@ def _elapsed_text(entry):
     ms = entry.get("elapsed_ms", 0) or 0
     if ms <= 0:
         return ""
-    return "⏱ " + format_duration_ms(ms)
+    return format_duration_ms(ms)
+
+def dropped_terminal_contribute_warning(task_name, error):
+    """Warn that a task's terminal contribution never reached the API.
+
+    Mid-run this is unremarkable — the next tick retries. On the terminal
+    update there is no next tick, so if the comment-state fallback cannot post
+    either, the task's entry keeps whatever a previous post captured and
+    reports a finished task as still running. Traced rather than warned, that
+    failure is invisible in a normal CI log.
+    """
+    return ("Terminal status for %s could not be contributed to the status-comment API (%s); " +
+            "falling back to coordinating through the comment itself") % (task_name, error or "unknown")
+
+def denied_terminal_post_warning(task_name, post_grant_run):
+    """Warn that a task's terminal status was contributed but not posted.
+
+    A terminal publish is the job's last word — there is no later emit from
+    this task. If the server withholds the post and no other job posts
+    afterwards, the entry stays frozen at whatever the previous post captured,
+    reporting a finished task as still running for as long as the comment
+    lives. That failure is otherwise invisible, so it gets a log line naming
+    the grant holder when the server reports one (older servers do not).
+    """
+    held = " (post grant held by run %s)" % post_grant_run if post_grant_run else ""
+    return ("Terminal status for %s was contributed but the server withheld the comment post; " +
+            "it will only appear if another job posts later%s") % (task_name, held)
+
+def _with_failed_phase(entry, text):
+    """Prefix `failed in <phase>` when the phase adds something.
+
+    A producer's short text names the outcome but not where it happened, and
+    the phase is often a step of its own — gazelle's `diff`, lint's `filter`.
+    Dropped only when the phase is the task's own kind, which the row already
+    prints beside the text. The long-form path below keeps the prefix
+    unconditionally: its surfaces render the text on its own, with no task
+    label next to it to make the phase redundant.
+    """
+    if entry.get("status", "") != "failed":
+        return text
+    phase = entry.get("failed_in_phase", "")
+    if not phase or phase == entry.get("kind", ""):
+        return text
+    return "failed in %s · %s" % (phase, text)
 
 def _result_cell_text(entry):
-    """Compose the row's result text from the producer's `progress.body`.
+    """Compose the row's result text.
+
+    A producer may supply `progress.short` for surfaces that name the task
+    beside the text; it is used as-is apart from the failed-phase prefix (see
+    `_with_failed_phase`). Otherwise the text is composed from `progress.body`.
 
     Layout per status:
       aborted                       — `aborted (reason)?`
@@ -358,6 +395,11 @@ def _result_cell_text(entry):
             text = text + " (%s)" % entry["abort_reason"]
         return text
     pg = entry.get("progress", {}) or {}
+
+    short = pg.get("short", "")
+    if short:
+        return _with_failed_phase(entry, short)
+
     body = pg.get("body", "")
 
     parts = []
@@ -601,12 +643,13 @@ def _ci_identity(env, marker):
 
 def _progress_dict(progress_styles):
     """Serialize a ProgressStyles record to a dict surviving the contribution
-    JSON round-trip (entry["progress"]["body"/"stream"])."""
+    JSON round-trip (entry["progress"]["body"/"stream"/"short"])."""
     if progress_styles == None:
-        return {"body": "", "stream": ""}
+        return {"body": "", "stream": "", "short": ""}
     return {
         "body": progress_styles.body or "",
         "stream": progress_styles.stream or "",
+        "short": progress_styles.short or "",
     }
 
 def _results_subset(
@@ -1293,7 +1336,7 @@ def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, o
     return _merge_state(existing_state, head_sha, run_id, workflow_name, my_entries, {})
 
 def _github_status_comments(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     # GHSC publishes the check-run URL via `checkrun.set_url`;
     # `checkrun.url(ctx)` returns "" until then.
@@ -1343,7 +1386,9 @@ def _github_status_comments(ctx: FeatureContext):
 
     # args.custom(dict, ...) hands None at runtime, not the declared default.
     templates = ctx.args.templates or {}
-    body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
+    body_template = (templates.get("body") or
+                     template_presets.templates(ctx.args.template_preset).get("body") or
+                     _DEFAULT_BODY_TEMPLATE)
     status_badges = dict(_DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
@@ -1629,7 +1674,17 @@ def _github_status_comments(ctx: FeatureContext):
             # API unreachable / errored — fall back to coordinating through the
             # comment's own state block (read → merge our entry → render →
             # post), so a single job still renders a correct comment.
-            _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
+            # Mid-run this is unremarkable — the next tick retries. On the
+            # terminal update there is no next tick: if the fallback below
+            # cannot post, the task's last state is whatever a previous post
+            # captured, so the failure is worth naming rather than tracing.
+            if final:
+                _LOG.warn(ctx.std, dropped_terminal_contribute_warning(
+                    ctx.task.name,
+                    result.get("error", ""),
+                ))
+            else:
+                _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return
 
@@ -1654,6 +1709,12 @@ def _github_status_comments(ctx: FeatureContext):
         _state["_shown_fixes"] = sel["shown_fixes"]
 
         if not result.get("should_post"):
+            # Mid-run denials are routine throttling; a terminal one is not.
+            if final:
+                _LOG.warn(ctx.std, denied_terminal_post_warning(
+                    ctx.task.name,
+                    result.get("post_grant_run", ""),
+                ))
             return
 
         # Resolve the comment id before posting so we PATCH the existing comment
@@ -1885,6 +1946,10 @@ def prepare_for_render(entries):
     """Public test hook; see `_prepare_for_render`."""
     return _prepare_for_render(entries)
 
+def result_cell_text(entry):
+    """Public test hook; see `_result_cell_text`."""
+    return _result_cell_text(entry)
+
 def rehydrate_entries(entries):
     """Rehydrate API/state-block entries' command lists in place; see
     `_rehydrate_entries`. Used by sibling features (e.g. GitLab) that render
@@ -2035,7 +2100,7 @@ GithubStatusComments = feature(
                           "ci_run_url, aspect_url, check_run_url, current_phase, progress, " +
                           "failed_in_phase, repro_commands, fix_commands, …}), and `repro_rows` / " +
                           "`fix_rows` (deduped across siblings via dedup_and_attribute). " +
-                          "Empty dict → built-in default. config.axl only.",
+                          "Empty dict → the selected `template_preset`. config.axl only.",
         ),
         "status_badges": args.custom(
             dict,
@@ -2047,5 +2112,5 @@ GithubStatusComments = feature(
                           "override is keyed by badge_key not raw lifecycle status. " +
                           "config.axl only.",
         ),
-    },
+    } | template_presets.args(),
 )

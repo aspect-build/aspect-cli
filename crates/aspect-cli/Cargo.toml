@@ -15,6 +15,12 @@ default-run = "aspect-cli"
 name = "aspect-cli"
 path = "src/main.rs"
 
+[features]
+# Set unconditionally by every Bazel-built target (bazel/rust/defs.bzl).
+# Builds with this feature always embed the @aspect builtins; without it,
+# debug builds load them live from the source tree (src/builtins/mod.rs).
+bazel = []
+
 [dependencies]
 aspect-telemetry = { path = "../aspect-telemetry" }
 axl-runtime = { path = "../axl-runtime" }
@@ -41,6 +47,8 @@ tracing-subscriber = "0.3.20"
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6.0.0"
+mimalloc = { version = "0.1", default-features = false, features = ["secure"] }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

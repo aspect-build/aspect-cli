@@ -3,106 +3,209 @@
 A struct-based fake `ctx` substitutes for a real `TaskContext` (like
 `repro_commands_test.axl`), so tests run without the CLI / auth engine. The
 `ctx.aspect.auth.deployment_endpoints` call is faked to return a fixed endpoints
-struct; `ctx.args.is_explicit` is faked from a set of explicitly-set arg names.
+struct, and `ctx.std.env.var` from a fixed map.
 
-`fail()` cannot be caught in Starlark, so the error paths (an explicitly-set
-capability the deployment doesn't advertise) are exercised by the CLI end-to-end,
-not here. These cover the resolution matrix: explicit-wins-over-umbrella, the
-umbrella skipping unadvertised capabilities, and positive injection.
+`fail()` cannot be caught in Starlark, so the error paths (a named capability the
+deployment doesn't advertise, `--deployment` with no `--remote`, a bad capability
+token, a value naming no capabilities) are exercised by the CLI end-to-end, not here.
+These cover the resolution matrix: the default capability set, `exec` as additive,
+`no-` subtraction, `none`, and the build-result URL — that it comes from the same
+source as the backend being reported to, and that `--bes_results_url` is injected only
+when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
+`bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "deployment_endpoint_flags", "join_and")
+load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _endpoints(name, cache = "", bes = "", exec = ""):
-    return struct(name = name, cache = cache, bes = bes, exec = exec)
+def _endpoints(name, cache = "", bes = "", exec = "", results_url = ""):
+    return struct(name = name, cache = cache, bes = bes, exec = exec, results_url = results_url)
 
-def _ctx(endpoints, deployment = "", explicit = [], aspect_remote = False, aspect_remote_cache = False, aspect_bes_backend = False, aspect_remote_exec = False):
-    """A fake ctx: fixed deployment_endpoints, and args whose is_explicit reports
-    the names in `explicit` and whose booleans are as given."""
-    explicit_set = {n: True for n in explicit}
+def _ctx(endpoints, deployment = "", remote = "", env = {}):
+    """A fake ctx: fixed deployment_endpoints, args carrying --deployment/--remote,
+    and an env map for the ASPECT_WORKFLOWS_BES_RESULTS_URL lookup. Pass
+    `remote = BARE` for a valueless `--remote`, matching what clap substitutes."""
     return struct(
         args = struct(
-            is_explicit = lambda name: name in explicit_set,
             deployment = deployment,
-            aspect_remote = aspect_remote,
-            aspect_remote_cache = aspect_remote_cache,
-            aspect_bes_backend = aspect_bes_backend,
-            aspect_remote_exec = aspect_remote_exec,
+            remote = remote,
         ),
+        std = struct(env = struct(var = lambda name: env.get(name, ""))),
         aspect = struct(auth = struct(
             deployment_endpoints = lambda deployment: endpoints,
         )),
     )
 
-def _test_no_flags_injects_nothing(ctx):
-    got = deployment_endpoint_flags(_ctx(_endpoints("gcp", cache = "c", bes = "b", exec = "e")))
-    _eq("no capability flags → no base flags", got.base_flags, [])
-    _eq("no capability flags → no bes", got.bes_backends, [])
+_ALL = _endpoints("gcp", cache = "cache.gcp", bes = "bes.gcp", exec = "remote.gcp", results_url = "https://app.gcp/i/")
 
-def _test_umbrella_injects_everything_advertised(ctx):
-    got = deployment_endpoint_flags(_ctx(
-        _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
-        aspect_remote = True,
-    ))
+def _test_parse_defaults(ctx):
+    # Bare --remote arrives as the sentinel: the two accelerators on, exec off.
+    # Neither is named, so an unadvertised one is skipped rather than failing.
+    spec = parse_remote(BARE)
+    _eq("bare --remote → cache", spec.on["cache"], True)
+    _eq("bare --remote → bes", spec.on["bes"], True)
+    _eq("bare --remote → no exec", spec.on["exec"], False)
+    _eq("bare --remote names nothing", spec.named, [])
+
+def _test_parse_omitted_is_off(ctx):
+    spec = parse_remote("")
+    _eq("omitted → cache off", spec.on["cache"], False)
+    _eq("omitted → bes off", spec.on["bes"], False)
+    _eq("omitted → exec off", spec.on["exec"], False)
+
+def _test_parse_exec_is_additive(ctx):
+    # The case that motivated the grammar: `exec` adds to the defaults rather than
+    # replacing them, and counts as named (so an exec-less deployment is an error).
+    spec = parse_remote("exec")
+    _eq("exec keeps cache", spec.on["cache"], True)
+    _eq("exec keeps bes", spec.on["bes"], True)
+    _eq("exec on", spec.on["exec"], True)
+    _eq("exec counts as named", spec.named, ["exec"])
+
+def _test_parse_negation(ctx):
+    spec = parse_remote("exec,no-bes")
+    _eq("no-bes subtracts bes", spec.on["bes"], False)
+    _eq("cache still on", spec.on["cache"], True)
+    _eq("exec still on", spec.on["exec"], True)
+    _eq("a negated capability is not a request", spec.named, ["exec"])
+
+    only_bes = parse_remote("no-cache")
+    _eq("no-cache subtracts cache", only_bes.on["cache"], False)
+    _eq("no-cache leaves bes", only_bes.on["bes"], True)
+
+def _test_parse_last_mention_wins(ctx):
+    # Tokens apply left to right, so a re-enable after a negation sticks (and is
+    # then a named request).
+    spec = parse_remote("no-exec,exec")
+    _eq("re-enabled exec", spec.on["exec"], True)
+    _eq("re-enabled exec counts as named", spec.named, ["exec"])
+
+    off = parse_remote("exec,no-exec")
+    _eq("negated last → off", off.on["exec"], False)
+    _eq("negated last → not named", off.named, [])
+
+def _test_parse_none(ctx):
+    spec = parse_remote("none")
+    _eq("none → cache off", spec.on["cache"], False)
+    _eq("none → bes off", spec.on["bes"], False)
+    _eq("none → exec off", spec.on["exec"], False)
+
+def _test_parse_all_negated_wires_nothing(ctx):
+    # Negating every default is a longhand `none`: legal, and wires nothing.
+    spec = parse_remote("no-cache,no-bes")
+    _eq("all negated → nothing on", [v for v in spec.on.values() if v], [])
+    _eq("all negated → nothing named", spec.named, [])
     _eq(
-        "umbrella → cache + exec base flags",
-        got.base_flags,
-        ["--remote_cache=grpcs://remote.gcp", "--remote_executor=grpcs://remote.gcp"],
+        "and so injects nothing",
+        deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache,no-bes")).base_flags,
+        [],
     )
-    _eq("umbrella → bes backend", got.bes_backends, ["grpcs://bes.gcp"])
 
-def _test_umbrella_skips_unadvertised_capability(ctx):
-    # Deployment advertises cache + bes but NO exec: umbrella must skip exec
-    # silently (no fail), injecting only what's advertised.
-    got = deployment_endpoint_flags(_ctx(
-        _endpoints("aws", cache = "remote.aws", bes = "bes.aws"),
-        aspect_remote = True,
-    ))
-    _eq("umbrella, no exec → cache only in base flags", got.base_flags, ["--remote_cache=grpcs://remote.aws"])
-    _eq("umbrella, no exec → bes backend", got.bes_backends, ["grpcs://bes.aws"])
+def _test_no_remote_injects_nothing(ctx):
+    got = deployment_endpoint_flags(_ctx(_ALL))
+    _eq("no --remote → no base flags", got.base_flags, [])
+    _eq("no --remote → no bes", got.bes_backends, [])
 
-def _test_granular_cache_only(ctx):
-    got = deployment_endpoint_flags(_ctx(
-        _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
-        explicit = ["aspect_remote_cache"],
-        aspect_remote_cache = True,
-    ))
-    _eq("granular cache → only cache", got.base_flags, ["--remote_cache=grpcs://remote.gcp"])
-    _eq("granular cache → no bes", got.bes_backends, [])
+def _test_default_wires_cache_and_bes(ctx):
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = BARE))
+    _eq("bare --remote → cache only in base flags", got.base_flags, ["--remote_cache=grpcs://cache.gcp"])
+    _eq("bare --remote → bes backend", got.bes_backends, ["grpcs://bes.gcp"])
+    _eq("no executor without exec", [f for f in got.base_flags if "executor" in f], [])
 
-def _test_explicit_false_overrides_umbrella(ctx):
-    # --aspect-remote --aspect-remote-exec=false → everything but exec.
-    got = deployment_endpoint_flags(_ctx(
-        _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
-        explicit = ["aspect_remote_exec"],
-        aspect_remote = True,
-        aspect_remote_exec = False,
-    ))
+def _test_exec_adds_executor(ctx):
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = "exec"))
     _eq(
-        "explicit exec=false overrides umbrella → cache only, no executor",
+        "exec → cache + executor",
         got.base_flags,
-        ["--remote_cache=grpcs://remote.gcp"],
+        ["--remote_cache=grpcs://cache.gcp", "--remote_executor=grpcs://remote.gcp"],
     )
-    _eq("still gets bes from umbrella", got.bes_backends, ["grpcs://bes.gcp"])
+    _eq("exec keeps bes", got.bes_backends, ["grpcs://bes.gcp"])
 
-def _test_umbrella_reports_injected_capabilities(ctx):
+def _test_no_bes_skips_sink(ctx):
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = "exec,no-bes"))
+    _eq("no-bes → no sink", got.bes_backends, [])
+    _eq("no-bes still records the deployment's bes", got.bes_uri, "grpcs://bes.gcp")
+
+def _test_exec_without_cache_wires_executor_only(ctx):
+    # `no-cache,exec` leaves Bazel to route CAS/AC through --remote_executor (the
+    # equivalence delivery.axl and cache_diff.axl rely on), so no --remote_cache is
+    # injected and the announcement names only remote execution.
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache,exec"))
+    _eq("exec alone → executor only", got.base_flags, ["--remote_executor=grpcs://remote.gcp"])
+    _eq("exec alone → announced as execution only", got.capabilities, [
+        ("remote execution", "grpcs://remote.gcp"),
+    ])
+
+def _test_parse_tolerates_whitespace(ctx):
+    # A quoted list from a config.axl or shell alias may carry spaces.
+    spec = parse_remote(" exec , no-bes ")
+    _eq("spaced tokens still parse", [spec.on["exec"], spec.on["bes"]], [True, False])
+    _eq("spaced tokens still count as named", spec.named, ["exec"])
+
+def _test_default_skips_unadvertised(ctx):
+    # A deployment with no exec and no bes: bare --remote names neither, so both are
+    # skipped silently rather than failing.
+    got = deployment_endpoint_flags(_ctx(_endpoints("aws", cache = "cache.aws"), remote = BARE))
+    _eq("skips unadvertised bes", got.bes_backends, [])
+    _eq("wires the cache it does have", got.base_flags, ["--remote_cache=grpcs://cache.aws"])
+
+def _test_reports_injected_capabilities(ctx):
     # The "Using deployment …" capabilities are (label, uri) pairs in cache/exec
     # order. BES is wired (bes_backends) but announced via its own streaming line,
     # so it is not among the reported capabilities.
-    got = deployment_endpoint_flags(_ctx(
-        _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
-        aspect_remote = True,
-    ))
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = "exec"))
     _eq("deployment name carried", got.deployment, "gcp")
     _eq("capabilities carry label + uri in cache/exec order (no bes)", got.capabilities, [
-        ("remote cache", "grpcs://remote.gcp"),
+        ("remote cache", "grpcs://cache.gcp"),
         ("remote execution", "grpcs://remote.gcp"),
     ])
-    _eq("bes still wired as a backend", got.bes_backends, ["grpcs://bes.gcp"])
+
+def _test_results_url_carried_off_discovery(ctx):
+    flags = deployment_endpoint_flags(_ctx(_ALL, remote = BARE))
+    _eq("results_url carried off discovery", flags.results_url, "https://app.gcp/i/")
+
+def _test_capability_labels(ctx):
+    """The prose labels behind `aspect auth status`' usage hint, in wiring order and
+    covering only what the deployment advertises."""
+    _eq("cache + bes", capability_labels(_endpoints("x", cache = "c", bes = "b")), ["remote cache", "BES backend"])
+    _eq(
+        "cache/exec/bes order",
+        capability_labels(_ALL),
+        ["remote cache", "remote execution", "BES backend"],
+    )
+    _eq("nothing advertised", capability_labels(_endpoints("x")), [])
+
+    # REMOTE_DEFAULT_CAPS is what bare --remote wires, so the opt-in remote execution
+    # is dropped even when the deployment serves it.
+    _eq(
+        "restricted to the default caps drops exec",
+        capability_labels(_ALL, only = REMOTE_DEFAULT_CAPS),
+        ["remote cache", "BES backend"],
+    )
+
+def _test_announcement_line(ctx):
+    """The "Using deployment …" line names each injected base-flag capability with
+    its endpoint, and is empty when nothing was injected (so nothing is printed)."""
+    line = deployment_announcement(deployment_endpoint_flags(_ctx(_ALL, remote = "exec")))
+    _eq(
+        "names the deployment and each base-flag capability",
+        line,
+        "Using deployment 'gcp' for remote cache (grpcs://cache.gcp), and remote execution (grpcs://remote.gcp)",
+    )
+
+    # BES is announced by its own "Streaming build events to …" line, not this one.
+    if "bes.gcp" in line:
+        fail("announcement should not mention the BES backend: %r" % line)
+
+    _eq("nothing injected → no line", deployment_announcement(deployment_endpoint_flags(_ctx(_ALL))), "")
+    _eq(
+        "bes-only → no line (nothing to announce here)",
+        deployment_announcement(deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache"))),
+        "",
+    )
 
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
@@ -112,12 +215,24 @@ def _test_join_and(ctx):
     _eq("three", join_and(["remote cache", "remote execution", "bes backend"]), "remote cache, remote execution, and bes backend")
 
 _UNIT_TESTS = [
-    _test_no_flags_injects_nothing,
-    _test_umbrella_injects_everything_advertised,
-    _test_umbrella_skips_unadvertised_capability,
-    _test_granular_cache_only,
-    _test_explicit_false_overrides_umbrella,
-    _test_umbrella_reports_injected_capabilities,
+    _test_parse_defaults,
+    _test_parse_omitted_is_off,
+    _test_parse_exec_is_additive,
+    _test_parse_negation,
+    _test_parse_last_mention_wins,
+    _test_parse_none,
+    _test_parse_all_negated_wires_nothing,
+    _test_parse_tolerates_whitespace,
+    _test_no_remote_injects_nothing,
+    _test_default_wires_cache_and_bes,
+    _test_exec_adds_executor,
+    _test_no_bes_skips_sink,
+    _test_exec_without_cache_wires_executor_only,
+    _test_default_skips_unadvertised,
+    _test_reports_injected_capabilities,
+    _test_capability_labels,
+    _test_announcement_line,
+    _test_results_url_carried_off_discovery,
     _test_join_and,
 ]
 
@@ -128,6 +243,7 @@ def _test_impl(ctx):
     return 0
 
 deployment_flags_tests = task(
+    summary = "Run the deployment flags AXL unit tests.",
     kind = "test-deployment-flags",
     group = ["dev"],
     implementation = _test_impl,

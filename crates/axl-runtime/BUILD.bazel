@@ -50,9 +50,9 @@ rust_library(
         "@crates//:minijinja",
         "@crates//:nix",
         "@crates//:prost",
-        "@crates//:psl",
         "@crates//:rand",
         "@crates//:reqwest",
+        "@crates//:rmcp",
         "@crates//:semver",
         "@crates//:serde",
         "@crates//:serde_json",
@@ -79,6 +79,8 @@ rust_library(
 
 rust_test(
     name = "test",
+    # `out::tests::no_panicking_print_macros` embeds the crate's own sources.
+    compile_data = glob(["src/**/*.rs"]),
     crate = ":axl-runtime",
     # basil is the fake `bazel` used by `engine::bazel::build::tests`.
     # The test reads `BASIL_BIN` (a rootpath under runfiles) to locate the

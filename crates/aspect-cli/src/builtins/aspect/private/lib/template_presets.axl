@@ -1,0 +1,178 @@
+"""Named bundles of status-surface template overrides.
+
+A preset is one coherent layout for the CI status surfaces, selected by name
+through each surface feature's `template_preset` arg. It resolves as the
+lower-precedence `base` layer of `check_dispatch.resolve_templates`, so a
+config's own `args.templates` still overrides individual slots on top of it.
+
+To add a preset, register a `TemplatePreset` in `_PRESETS`. The rules
+`_validation_errors` enforces at load time, and why each exists:
+
+  - The registered key must equal the preset's own `name`, and `description`
+    must be set — both are user-visible, in `--help` and `aspect feature`.
+
+  - `_DEFAULT` must name a registered preset. Clap validates a config-supplied
+    value against `values`, but not on `--help` or `aspect feature`, so a
+    broken default would leave those paths quietly reporting a layout that
+    cannot render. The load-time check covers them.
+
+  - A slot's value must be a non-empty string. `""` cannot blank a slot:
+    renderers resolve `templates.get(slot) or BUILT_IN`, so a falsy override
+    yields the built-in it meant to replace. Use a comment-only template
+    (`{# blank #}`) instead. `title` cannot be blanked by any means — a blank
+    render falls back to the built-in layout because GitHub requires a
+    check-run title.
+
+  - A per-kind block must name a real task kind, and every slot must be one a
+    renderer actually consumes. A misspelled slot is inert: it would leave the
+    preset selectable while changing nothing.
+
+A preset may cover any subset of the surfaces. `template_preset` is a
+per-feature arg, so a config selects presets surface by surface — a preset that
+only defines check-surface slots is a normal thing to write, and applying it to
+a comment feature simply leaves `body` on the built-in. Slots a preset does not
+define always fall through, which is the same rule that makes the empty `full`
+preset render exactly today's output.
+
+Author a preset's templates as new strings, never by extracting fragments out
+of the built-in template constants — live configs `.replace()` against those
+behind their own load-time drift guards.
+"""
+
+load("./check_dispatch.axl", "COMMENT_TEMPLATE_SLOT", "RENDERER_TEMPLATE_SLOTS", "TEMPLATE_SCOPE_KEYS")
+
+TemplatePreset = record(
+    name = field(str),
+    description = field(str),
+    templates = field(dict, default = {}),
+)
+
+# `full` deliberately contributes nothing: every renderer already falls back to
+# its built-in when a slot is absent, so the shipped layout *is* the empty
+# preset. Output stays byte-identical with no template string duplicated here.
+_PRESETS = {
+    "full": TemplatePreset(
+        name = "full",
+        description = "the complete report — every target bucket, the Bazel details umbrella, and workspace status",
+        templates = {},
+    ),
+}
+
+_DEFAULT = "full"
+
+def _slot_errors(preset_name: str, slot: str, template) -> list[str]:
+    if type(template) != "string":
+        return ["preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template)]
+    if not template:
+        return [("preset {!r}: {!r} is empty, which yields the built-in it meant to replace. " +
+                 "Use a comment-only template such as `{{# blank #}}`.").format(preset_name, slot)]
+    return []
+
+# Every slot a preset may set at the top level: the renderer slots plus the
+# comment body.
+_TOP_LEVEL_SLOTS = RENDERER_TEMPLATE_SLOTS + [COMMENT_TEMPLATE_SLOT]
+
+def _scope_block_errors(preset_name: str, kind: str, block) -> list[str]:
+    """Errors in one per-kind block, `{"lint": {"summary": ...}}`.
+
+    `body` is deliberately not a valid slot here: one comment aggregates every
+    sibling task, so there is no single kind to scope it to.
+    """
+    if type(block) != "dict":
+        return [("preset {!r}: {!r} is a task kind, so it must map to a dict of slot overrides, " +
+                 "got {!r}").format(preset_name, kind, block)]
+
+    errors = []
+    for slot in sorted(block.keys()):
+        if slot not in RENDERER_TEMPLATE_SLOTS:
+            errors.append("preset {!r}: {!r} is not a slot of the {!r} block; expected one of {}".format(
+                preset_name,
+                slot,
+                kind,
+                ", ".join(RENDERER_TEMPLATE_SLOTS),
+            ))
+            continue
+        errors.extend(_slot_errors(preset_name, "%s.%s" % (kind, slot), block[slot]))
+    return errors
+
+def _top_level_errors(preset_name: str, key: str, value) -> list[str]:
+    """Errors for a top-level entry that is not a per-kind block."""
+    if type(value) == "dict":
+        return ["preset {!r}: {!r} is not a task kind; expected one of {}".format(
+            preset_name,
+            key,
+            ", ".join(TEMPLATE_SCOPE_KEYS),
+        )]
+    if key not in _TOP_LEVEL_SLOTS:
+        return ["preset {!r}: {!r} is not a template slot; expected one of {}".format(
+            preset_name,
+            key,
+            ", ".join(_TOP_LEVEL_SLOTS),
+        )]
+    return _slot_errors(preset_name, key, value)
+
+def _preset_errors(name: str, preset: TemplatePreset) -> list[str]:
+    errors = []
+    if name != preset.name:
+        errors.append("preset registered under {!r} but names itself {!r}".format(name, preset.name))
+    if not preset.description:
+        errors.append("preset {!r} has no description; it is shown in `--help`".format(name))
+
+    for key in sorted(preset.templates.keys()):
+        value = preset.templates[key]
+        if key in TEMPLATE_SCOPE_KEYS:
+            errors.extend(_scope_block_errors(name, key, value))
+        else:
+            errors.extend(_top_level_errors(name, key, value))
+    return errors
+
+def _validation_errors(presets: dict, default: str) -> list[str]:
+    """Every problem with a registry, as messages. Pure, so the rules stay unit-testable."""
+    errors = []
+    if default not in presets:
+        errors.append("default preset {!r} is not registered; known presets: {}".format(
+            default,
+            ", ".join(sorted(presets.keys())),
+        ))
+    for name in sorted(presets.keys()):
+        errors.extend(_preset_errors(name, presets[name]))
+    return errors
+
+def _validate(presets: dict, default: str) -> list[str]:
+    """Check a registry at load time; return its sorted names."""
+    errors = _validation_errors(presets, default)
+    if errors:
+        fail("invalid template preset registry:\n  " + "\n  ".join(errors))
+    return sorted(presets.keys())
+
+_NAMES = _validate(_PRESETS, _DEFAULT)
+
+def _templates(name: str) -> dict:
+    """The template overrides `name` contributes, shaped as a `resolve_templates` layer."""
+    if name not in _PRESETS:
+        fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
+    return _PRESETS[name].templates
+
+def _arg_description() -> str:
+    """The `template_preset` help text, listing each registered preset."""
+    return ("Named bundle of Jinja2 templates for this feature's rendered output. " +
+            "Slots set via this feature's `templates` arg override the preset. Presets: " +
+            "; ".join(["%s is %s" % (n, _PRESETS[n].description) for n in _NAMES]) + ".")
+
+def _args() -> dict:
+    """The `template_preset` arg every status-surface feature declares. Splat into `args = {...}`."""
+    return {
+        "template_preset": args.string(
+            default = _DEFAULT,
+            values = _NAMES,
+            description = _arg_description(),
+        ),
+    }
+
+template_presets = namespace(
+    DEFAULT = _DEFAULT,
+    NAMES = _NAMES,
+    args = _args,
+    templates = _templates,
+    validation_errors = _validation_errors,
+)

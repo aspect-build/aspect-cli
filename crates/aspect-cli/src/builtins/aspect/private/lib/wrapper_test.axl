@@ -166,6 +166,7 @@ def _test_impl(ctx):
     return 0
 
 wrapper_tests = task(
+    summary = "Run the wrapper AXL unit tests.",
     kind = "test-wrapper",
     group = ["dev"],
     implementation = _test_impl,

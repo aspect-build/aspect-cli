@@ -166,10 +166,10 @@ jobs:
       # lld can't accept Go's non-PIC relocations on x86_64. See .bazelrc.
       - run:
           name: Gazelle Task — from-source (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-cci-debug
+          command: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-cci-debug
       - run:
           name: Gazelle Task — from-source
-          command: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-cci
+          command: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-cci
   delivery-task:
     machine: true
     resource_class: aspect-build/aspect-default

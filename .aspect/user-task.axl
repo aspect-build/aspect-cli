@@ -17,6 +17,7 @@ def _impl(ctx: TaskContext) -> int:
 
 user_task = task(
     group = ["user", "nested"],
+    summary = "Test fixture: a nested user task exercising config-supplied arg defaults.",
     implementation = _impl,
     args = {
         "message": args.custom(str, default = "hello world", description = "The message string to print on each iteration"),

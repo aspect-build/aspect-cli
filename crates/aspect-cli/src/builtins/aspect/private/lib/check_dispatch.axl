@@ -2,7 +2,7 @@
 
 `GithubStatusChecks` (`feature/github_status_checks.axl`) and
 `BuildkiteAnnotations` (`feature/buildkite_annotations.axl`) both
-subscribe to the same `TaskLifecycleTrait` slots, dispatch on
+subscribe to the same `Phases` slots, dispatch on
 `task_update.kind`, and share the same throttle / link-augmentation
 logic. This module hosts the parts that should stay in lockstep when a
 new task kind is added or a renderer's signature evolves.
@@ -13,6 +13,11 @@ Split here, not in the features:
   renderer_for_kind(kind)
   kind_for_task(task_kind)   Initial kind to use before the first
                              task_update has fired.
+  resolve_templates(templates, task_kind, base = None)
+                             Narrow layered template overrides to the flat
+                             dict the renderers accept.
+  snippet_budget_for(surface)
+                             Per-surface inline log-snippet budget.
   to_display_name(name)      snake_case → CamelCase task display name.
   make_render_ctx(state)     Build the render_ctx dict the per-kind
                              renderers consume from a feature's
@@ -120,6 +125,65 @@ def kind_for_task(task_kind):
     Falls back to "bazel_results" for unknown task kinds.
     """
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
+
+# Task-kind keys a `templates` dict may nest an override under, as opposed to
+# the flat slot keys that address every kind at once.
+TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
+
+# Slots the per-kind renderers consume. Valid as a flat key or inside a
+# per-kind block; anything else in a `templates` dict is inert.
+RENDERER_TEMPLATE_SLOTS = ["details", "summary", "title"]
+
+# The PR/MR summary comment's only slot, owned by the comment features. Listed
+# here so preset validation can see the whole slot vocabulary in one place — a
+# lib cannot import a feature. Never scopeable per task kind: one comment
+# aggregates every sibling task, so there is no single kind to scope it to.
+COMMENT_TEMPLATE_SLOT = "body"
+
+def _layer_overrides(layer, task_kind, label):
+    """One layer's flat keys, overlaid with its `task_kind` block."""
+    resolved = {k: v for k, v in layer.items() if k not in TEMPLATE_SCOPE_KEYS}
+    scoped = layer.get(task_kind) or {}
+    if type(scoped) != "dict":
+        fail("%s[%r] must be a dict of template overrides, got %r" % (label, task_kind, scoped))
+    resolved.update(scoped)
+    return resolved
+
+def resolve_templates(templates, task_kind, base = None):
+    """Narrow template overrides to the flat {"title", "summary", "details"} dict
+    the per-kind renderers accept.
+
+    Two shapes are supported within a layer, and they compose:
+
+      {"summary": ...}                     — applies to every task kind
+      {"lint": {"summary": ...}}           — applies to `lint` tasks only
+
+    A per-kind block overlays the flat keys, so a config can set a shared
+    default and override one kind without restating the rest. `task_kind` is
+    the task's own kind ("build", "lint", …), not the renderer kind, since
+    that is how tasks are addressed everywhere else in config (`ctx.tasks[…]`);
+    it also keeps `build` and `test` separable even though both render through
+    `bazel_results`.
+
+    `base` is an optional lower-precedence layer of the same shape — the
+    templates contributed by the selected preset — which `templates` overrides.
+    Resolving the layers in order rather than merging them first is what keeps
+    four levels of precedence distinct:
+
+        base flat  <  base scoped  <  templates flat  <  templates scoped
+
+    Merging the two dicts up front would collapse that: a per-kind block in
+    `base` would outrank an explicit flat key in `templates`, letting a preset
+    beat the config that selected it.
+
+    Returns None when nothing applies, matching what the renderers treat as
+    "use the built-ins".
+    """
+    resolved = {}
+    for (label, layer) in [("template preset", base), ("templates", templates)]:
+        if layer:
+            resolved.update(_layer_overrides(layer, task_kind, label))
+    return resolved or None
 
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).
 # Status checks / BK annotations are glanceable and bump the surface size caps

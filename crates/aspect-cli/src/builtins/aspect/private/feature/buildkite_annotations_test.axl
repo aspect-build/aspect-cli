@@ -1,18 +1,26 @@
-"""Snapshot tests for `feature/buildkite_annotations.axl`.
+"""Tests for `feature/buildkite_annotations.axl`.
 
-Run with:
-  aspect dev test-bk-annotation-snapshots
+Two suites, both dry-run — we never invoke `buildkite-agent annotate`, and
+instead drive the per-kind renderers plus the feature's `format_body` /
+`severity_for_status` helpers directly.
 
-Dry-run style — we don't actually invoke `buildkite-agent annotate`. Instead,
-we call the per-kind renderers + the feature's `format_body` / `severity_for_status`
-helpers directly and print what *would* be sent to BK for each scenario.
-
-Coverage:
+`aspect dev test-bk-annotation-snapshots` prints what *would* be sent to BK
+for each scenario, so a rendering regression shows up as a visible diff:
   - Each task kind (bazel_results, lint_results, delivery_results,
     format_results, gazelle_results, warming_results)
   - Each terminal status (passed, failed)
   - Style selection edge cases: soft-lint passing with warnings, delivery
     all-skipped, delivery all-failed, soft-format passing with files.
+
+`aspect dev test-bk-annotation-templates` asserts the two customization
+contracts a config writes against:
+  - `args.templates` — overrides reach the rendered body, "title"/"summary"/
+    "details" are independent, per-task-kind blocks overlay the flat keys,
+    every renderer module exports the templates a config patches, and a broken
+    template degrades to a fallback.
+  - `Phases.status_surface_update` — verdicts resolve, chain, and
+    compose across surfaces, and a `remove` no surface can honor downgrades to
+    a publish.
 """
 
 load("@aspect//feature/buildkite_annotations.axl", "format_body")
@@ -43,28 +51,59 @@ load(
 )
 load(
     "../lib/bazel_results.axl",
+    BAZEL_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    BAZEL_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     bazel_render_check_output = "render_check_output",
 )
-load("../lib/check_dispatch.axl", "make_render_ctx")
+load(
+    "../lib/check_dispatch.axl",
+    "TEMPLATE_SCOPE_KEYS",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "resolve_templates",
+)
 load(
     "../lib/delivery_results.axl",
+    DELIVERY_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    DELIVERY_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     delivery_render_check_output = "render_check_output",
 )
 load(
     "../lib/format_results.axl",
+    FORMAT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    FORMAT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     format_render_check_output = "render_check_output",
 )
 load(
     "../lib/gazelle_results.axl",
+    GAZELLE_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    GAZELLE_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     gazelle_render_check_output = "render_check_output",
 )
 load(
+    "../lib/lifecycle.axl",
+    "SURFACE_PUBLISH",
+    "SURFACE_REMOVE",
+    "StatusSurface",
+    "StatusSurfaceAction",
+    "StatusSurfaceUpdate",
+    "apply_status_surface_hooks",
+    "resolve_surface_update",
+    "surface_replace",
+    "surface_restyle",
+)
+load(
     "../lib/lint_results.axl",
+    LINT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    LINT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     lint_render_check_output = "render_check_output",
 )
 load("../lib/result_text.axl", "severity_for_status")
 load(
     "../lib/warming_results.axl",
+    WARMING_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    WARMING_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     warming_init_data = "init_data",
     warming_render_check_output = "render_check_output",
 )
@@ -142,6 +181,13 @@ def _make_warming_archive_failed():
     r["warming"]["archive_error"] = "the warming archiver exited with code 3"
     return r
 
+# How much of each rendered body the snapshot prints — enough to catch a
+# rendering regression without flooding. Cut by line, never by character or
+# byte count: the summary carries a live `ctx.task.elapsed_ms` reading, so a
+# character offset lands somewhere different once a run crosses a digit
+# boundary (99ms -> 100ms) and splits a different line in half.
+_SNAPSHOT_MAX_LINES = 70
+
 def _test_impl(ctx):
     scenarios = [
         # (label,                                       kind,                data,                               status,    final, subject,      task_kind)
@@ -200,11 +246,10 @@ def _test_impl(ctx):
         print("buildkite-agent annotate --style %s --context %s --scope=job" % (style, context_id))
         print("─" * 70)
 
-        # Show first 2500 chars of the formatted body — enough to see the
-        # title/summary and the first chunk of the body without flooding.
-        print(body[:2500])
-        if len(body) > 2500:
-            print("... [truncated, full length: %d chars]" % len(body))
+        body_lines = body.split("\n")
+        print("\n".join(body_lines[:_SNAPSHOT_MAX_LINES]))
+        if len(body_lines) > _SNAPSHOT_MAX_LINES:
+            print("... [truncated]")
         print("")
 
     print(sep)
@@ -212,8 +257,478 @@ def _test_impl(ctx):
     return 0
 
 bk_annotation_snapshot_tests = task(
+    summary = "Run the bk annotation snapshots AXL unit tests.",
     kind = "test-bk-annotation-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _contains(label, haystack, needle):
+    if needle not in haystack:
+        fail("%s: %r not found in %r" % (label, needle, haystack[:400]))
+
+def _not_contains(label, haystack, needle):
+    if needle in haystack:
+        fail("%s: %r unexpectedly present in %r" % (label, needle, haystack[:400]))
+
+# renderer kind -> its exported (SUMMARY_TEMPLATE, DETAILS_TEMPLATE). Importing
+# these at all is half the assertion: a config can only patch a built-in the
+# module actually exports.
+_KIND_TEMPLATES = {
+    "bazel_results": (BAZEL_SUMMARY_TEMPLATE, BAZEL_DETAILS_TEMPLATE),
+    "lint_results": (LINT_SUMMARY_TEMPLATE, LINT_DETAILS_TEMPLATE),
+    "format_results": (FORMAT_SUMMARY_TEMPLATE, FORMAT_DETAILS_TEMPLATE),
+    "gazelle_results": (GAZELLE_SUMMARY_TEMPLATE, GAZELLE_DETAILS_TEMPLATE),
+    "delivery_results": (DELIVERY_SUMMARY_TEMPLATE, DELIVERY_DETAILS_TEMPLATE),
+    "warming_results": (WARMING_SUMMARY_TEMPLATE, WARMING_DETAILS_TEMPLATE),
+}
+
+def _test_templates_impl(ctx: TaskContext) -> int:
+    """`args.templates` overrides reach the rendered annotation body, and each
+    renderer's built-in templates are importable so configs can patch them.
+
+    Guards the customization contract documented in the feature docstring:
+    the summary template is shared across kinds (so one override applies
+    everywhere), and every kind re-exports it for patching.
+    """
+    data = _make_build_passed()
+    rc = _render_ctx("//...", "build")
+
+    default_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), None, None)
+    default_body = format_body(default_out, "bazel_results", "passed", final = True)
+    _contains("default summary line", default_body, ":speech_balloon: **Last update:**")
+
+    # The patch-the-default pattern from the feature docstring: anchor on the
+    # built-in's last-update line and swap it for a Buildkite-native one.
+    anchor = ":speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"
+    _contains("anchor present in exported template", BAZEL_SUMMARY_TEMPLATE, anchor)
+    patched = BAZEL_SUMMARY_TEMPLATE.replace(
+        anchor,
+        ":buildkite: **Status:** `{{ last_update }}`{% endif %}",
+    )
+
+    custom_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), {"summary": patched}, None)
+    custom_body = format_body(custom_out, "bazel_results", "passed", final = True)
+    _contains("custom summary line rendered", custom_body, ":buildkite: **Status:**")
+    _not_contains("default summary line replaced", custom_body, ":speech_balloon: **Last update:**")
+
+    # An override of one key must leave the other's output untouched. The
+    # summary is asserted by substring, not equality — it embeds a live
+    # elapsed-time reading that ticks between renders.
+    _eq("details untouched by summary override", custom_out.get("text"), default_out.get("text"))
+
+    details_out = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        rc,
+        _bk_links(),
+        {"details": "CUSTOM DETAILS BODY"},
+        None,
+    )
+    _eq("details override applied", details_out.get("text"), "CUSTOM DETAILS BODY")
+    _contains(
+        "summary untouched by details override",
+        details_out.get("summary"),
+        ":speech_balloon: **Last update:** `build task complete`",
+    )
+
+    # The summary being byte-identical across kinds is what lets one
+    # `templates` override serve every task kind a feature renders.
+    for kind, (summary_tmpl, details_tmpl) in _KIND_TEMPLATES.items():
+        if not summary_tmpl:
+            fail("%s: SUMMARY_TEMPLATE is empty" % kind)
+        if not details_tmpl:
+            fail("%s: DETAILS_TEMPLATE is empty" % kind)
+        _eq("%s summary matches bazel_results" % kind, summary_tmpl, BAZEL_SUMMARY_TEMPLATE)
+        _contains("%s summary carries the patch anchor" % kind, summary_tmpl, anchor)
+
+    # Details templates are kind-specific — a shared details body would mean
+    # the per-kind renderers had collapsed into one.
+    if LINT_DETAILS_TEMPLATE == BAZEL_DETAILS_TEMPLATE:
+        fail("lint and bazel details templates should differ")
+
+    # A broken template degrades to the fallback body instead of aborting.
+    broken_out = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        rc,
+        _bk_links(),
+        {"summary": "{% if unclosed %}"},
+        None,
+    )
+    _contains("broken summary degrades to fallback", broken_out.get("summary"), "unavailable")
+
+    _assert_title_overrides(ctx, data, rc)
+    _assert_resolve_templates()
+    _assert_status_surface_hooks(ctx)
+
+    print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
+    return 0
+
+def _fake_lifecycle(handlers):
+    """Minimal stand-in for the lifecycle trait — `apply_status_surface_hooks`
+    reads only `.status_surface_update`."""
+    return struct(status_surface_update = handlers)
+
+def _surface_update(status, final, style = "info", body = "RENDERED", surface = "buildkite_annotation"):
+    return StatusSurfaceUpdate(
+        surface = StatusSurface(surface).value,
+        status = status,
+        final = final,
+        style = style,
+        body = body,
+        task_kind = "build",
+        task_name = "build-test",
+    )
+
+def _assert_status_surface_hooks(ctx):
+    """`status_surface_update` hooks decide publish / remove / restyle /
+    rewrite; they chain in order and resolve to exactly what the caller
+    writes. (The remove-latch — a removed surface never re-posts — lives in
+    feature state, covered by the stub-agent e2e runs, not here.)"""
+
+    def _drop_passed(ctx, info):
+        if info.final and info.status == "passed":
+            return SURFACE_REMOVE
+        return SURFACE_PUBLISH
+
+    # No handlers → publish unchanged.
+    _eq("no handlers publishes", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True)).action, StatusSurfaceAction("publish"))
+
+    one = _fake_lifecycle([_drop_passed])
+
+    # The customer's case: a green task's annotation is retracted at the end.
+    _eq("terminal passed removes", apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action, StatusSurfaceAction("remove"))
+
+    # Live updates keep posting, so a long task stays visible while it runs.
+    _eq("live passed publishes", apply_status_surface_hooks(ctx, one, _surface_update("passed", False)).action, StatusSurfaceAction("publish"))
+
+    # Statuses the hook doesn't name are always kept.
+    for st in ["failed", "warning", "aborted"]:
+        _eq("terminal %s publishes" % st, apply_status_surface_hooks(ctx, one, _surface_update(st, True)).action, StatusSurfaceAction("publish"))
+
+    # A restyle publishes with the overridden style.
+    def _warn(ctx, info):
+        return surface_restyle("warning")
+
+    restyled = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn]), _surface_update("passed", True))
+    _eq("restyle publishes", restyled.action, StatusSurfaceAction("publish"))
+    _eq("restyle sets style", restyled.style, "warning")
+
+    # `remove` short-circuits, so a later handler can't resurrect the write.
+    _eq(
+        "remove short-circuits",
+        apply_status_surface_hooks(ctx, _fake_lifecycle([_drop_passed, _warn]), _surface_update("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+
+    # A restyle threads into the next handler's info, so a handler reacting to
+    # its predecessor sees the edit and the last writer wins.
+    def _escalate_warning(ctx, info):
+        if info.style == "warning":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
+
+    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _escalate_warning]), _surface_update("passed", True))
+    _eq("style threads through the chain", chained.style, "error")
+
+    # A publish is returned resolved — style and body always set, falling back
+    # to the incoming values — so the caller writes it without re-resolving.
+    untouched = apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True))
+    _eq("body defaults to the rendered one", untouched.body, "RENDERED")
+    _eq("style defaults to the resolved severity", untouched.style, "info")
+    _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_update("failed", True)).body, "RENDERED")
+
+    # Rewriting the content is the point of handing hooks `update.body`.
+    def _append_runbook(ctx, info):
+        return surface_replace(info.body + " +RUNBOOK")
+
+    replaced = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook]), _surface_update("failed", True))
+    _eq("replace publishes", replaced.action, StatusSurfaceAction("publish"))
+    _eq("replace rewrites body", replaced.body, "RENDERED +RUNBOOK")
+
+    # Each handler sees its predecessor's edit, so rewrites compose.
+    composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_update("failed", True))
+    _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
+
+    # An edit earlier in the chain survives a later plain publish: the resolved
+    # verdict carries the threaded style/body, not just the last return value.
+    def _plain(ctx, info):
+        return SURFACE_PUBLISH
+
+    kept = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _plain]), _surface_update("passed", True))
+    _eq("restyle survives a later plain publish", kept.style, "warning")
+    kept_body = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _plain]), _surface_update("failed", True))
+    _eq("rewrite survives a later plain publish", kept_body.body, "RENDERED +RUNBOOK")
+
+    # A rewrite can restyle at the same time.
+    def _replace_and_restyle(ctx, info):
+        return surface_replace("NEW", style = "error")
+
+    both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_update("passed", True))
+    _eq("replace can restyle", both.style, "error")
+    _eq("replace sets body", both.body, "NEW")
+
+    # Rewrite works on every surface that consults the hook, and a restyle is
+    # honored when it answers in that surface's own vocabulary.
+    for (surface, style) in [
+        ("buildkite_annotation", "error"),
+        ("github_check", "neutral"),
+        ("gitlab_commit_status", "canceled"),
+    ]:
+        def _replace_for_surface(ctx, info):
+            return surface_replace("NEW", style = style)
+
+        resolved = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_replace_for_surface]),
+            _surface_update("passed", True, surface = surface),
+        )
+        _eq("%s honors replace" % surface, resolved.body, "NEW")
+        _eq("%s honors restyle" % surface, resolved.style, style)
+
+    # A style from another surface's vocabulary is refused, so an unscoped hook
+    # can't corrupt the surfaces it wasn't written for — Buildkite's "warning"
+    # matches no GitHub conclusion, and GitHub's client would conclude `failure`.
+    for (surface, incoming, foreign) in [
+        ("github_check", "success", "warning"),
+        ("gitlab_commit_status", "success", "neutral"),
+        ("buildkite_annotation", "info", "canceled"),
+    ]:
+        def _foreign_restyle(ctx, info):
+            return surface_restyle(foreign)
+
+        refused = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_foreign_restyle]),
+            _surface_update("passed", True, style = incoming, surface = surface),
+        )
+        _eq("%s refuses a foreign style" % surface, refused.style, incoming)
+        _eq("%s still publishes" % surface, refused.action, StatusSurfaceAction("publish"))
+
+    # A refused style doesn't discard a body rewrite in the same verdict.
+    def _foreign_style_with_body(ctx, info):
+        return surface_replace("KEPT", style = "warning")
+
+    mixed = apply_status_surface_hooks(
+        ctx,
+        _fake_lifecycle([_foreign_style_with_body]),
+        _surface_update("passed", True, style = "success", surface = "github_check"),
+    )
+    _eq("refused style keeps the body rewrite", mixed.body, "KEPT")
+    _eq("refused style keeps the incoming style", mixed.style, "success")
+
+    # A handler that forgets to return — the `task_update` shape, which this
+    # hook's name parallels — degrades to publish-unchanged rather than failing
+    # the task, since the build itself is fine.
+    def _forgot_to_return(ctx, update):
+        pass
+
+    none_ret = apply_status_surface_hooks(ctx, _fake_lifecycle([_forgot_to_return]), _surface_update("passed", True))
+    _eq("None degrades to publish", none_ret.action, StatusSurfaceAction("publish"))
+    _eq("None keeps the body", none_ret.body, "RENDERED")
+    _eq("None keeps the style", none_ret.style, "info")
+
+    # `update.surface` is a plain string, so a hook scopes itself with a literal
+    # (as it does for `info.status`) rather than needing the enum.
+    def _bk_only(ctx, info):
+        if info.surface == "buildkite_annotation":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
+
+    scoped = _fake_lifecycle([_bk_only])
+    _eq(
+        "literal surface comparison matches",
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True)).style,
+        "error",
+    )
+    _eq(
+        "literal surface comparison skips others",
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True, surface = "github_check")).style,
+        "info",
+    )
+
+    # `resolve_surface_update` is what surfaces actually call: it builds the info
+    # record, validating the surface name, and reads task identity off `ctx`.
+    def _echo_identity(ctx, info):
+        return surface_replace("%s|%s|%s" % (info.surface, info.task_kind, info.task_name))
+
+    wrapped = resolve_surface_update(
+        ctx,
+        _fake_lifecycle([_echo_identity]),
+        "buildkite_annotation",
+        "passed",
+        True,
+        "success",
+        "RENDERED",
+    )
+    _eq(
+        "wrapper passes surface + task identity through",
+        wrapped.body,
+        "buildkite_annotation|%s|%s" % (ctx.task.kind, ctx.task.name),
+    )
+    _eq("wrapper resolves style when untouched", wrapped.style, "success")
+
+    # `remove` is Buildkite-only: the surfaces that can't retract downgrade to a
+    # publish rather than dropping the write or silently ignoring the verdict.
+    _eq(
+        "buildkite honors remove",
+        apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+    for surface in ["github_check", "gitlab_commit_status"]:
+        downgraded = apply_status_surface_hooks(ctx, one, _surface_update("passed", True, surface = surface))
+        _eq("%s downgrades remove" % surface, downgraded.action, StatusSurfaceAction("publish"))
+        _eq("%s keeps its body when downgraded" % surface, downgraded.body, "RENDERED")
+        _eq("%s keeps its style when downgraded" % surface, downgraded.style, "info")
+
+    # A refused verdict is skipped, not chain-ending: one unscoped or buggy
+    # handler must not silence the handlers after it. Each of the three refusal
+    # kinds is followed here by a handler whose valid edit has to survive.
+    def _neutral(ctx, update):
+        return surface_restyle("neutral")
+
+    def _foreign_for_gh(ctx, update):
+        return surface_restyle("warning")  # a Buildkite style; refused here
+
+    for (label, first) in [
+        ("unsupported remove", _drop_passed),
+        ("None return", _forgot_to_return),
+        ("foreign style", _foreign_for_gh),
+    ]:
+        survived = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([first, _neutral]),
+            _surface_update("passed", True, surface = "github_check"),
+        )
+        _eq("later handler runs after a refused %s" % label, survived.style, "neutral")
+
+    # The supported case still short-circuits: once Buildkite's annotation is
+    # actually being retracted there is nothing left for a later hook to edit.
+    _eq(
+        "honored remove ends the chain",
+        apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_drop_passed, _neutral]),
+            _surface_update("passed", True),
+        ).action,
+        StatusSurfaceAction("remove"),
+    )
+
+def _assert_title_overrides(ctx, data, rc):
+    """A "title" override replaces the annotation title, renders with the
+    documented variables, and degrades to the built-in layout when broken."""
+    default_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), None, None)
+    _eq("default title", default_out.get("title"), "✅ build //... · Successful build")
+
+    def _title(tmpl, status = "passed"):
+        out = bazel_render_check_output(ctx, data, status, rc, _bk_links(), {"title": tmpl}, None)
+        return out.get("title")
+
+    _eq("plain override", _title("Build is done"), "Build is done")
+
+    # Every variable the arg description promises.
+    _eq(
+        "all title vars",
+        _title("{{ icon }}|{{ task_kind }}|{{ subject }}|{{ state }}|{{ status }}"),
+        "✅|build|//...|Successful build|passed",
+    )
+
+    # The per-kind `state` clause is what makes an override useful — it carries
+    # the verdict the renderer computed, so a config can reorder or reword the
+    # layout without reimplementing the status logic.
+    _eq("state tracks status", _title("{{ state }}", status = "running"), "Running...")
+
+    # An override of the title must not disturb the other fields. The summary is
+    # checked by substring, not equality — it embeds a live elapsed-time reading
+    # that ticks between renders.
+    override_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), {"title": "X"}, None)
+    _contains(
+        "summary untouched by title override",
+        override_out.get("summary"),
+        ":speech_balloon: **Last update:** `build task complete`",
+    )
+    _eq("details untouched by title override", override_out.get("text"), default_out.get("text"))
+
+    # Unlike summary/details — which surface a visible "unavailable" marker — a
+    # broken title falls back to the built-in layout, since an error string
+    # would replace the one line reviewers actually scan.
+    _eq("broken title falls back to built-in", _title("{% if unclosed %}"), default_out.get("title"))
+
+    # A *syntactically valid* template can still render blank when every
+    # variable it references is empty. GitHub requires `output.title` on a check
+    # run, so that must fall back too rather than emit "".
+    _eq("blank title falls back to built-in", _title("   "), default_out.get("title"))
+    nosubject_rc = _render_ctx("", "build")
+    nosubject_default = bazel_render_check_output(ctx, data, "passed", nosubject_rc, _bk_links(), None, None)
+    nosubject_blank = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        nosubject_rc,
+        _bk_links(),
+        {"title": "{{ subject }}"},
+        None,
+    )
+    _eq(
+        "title referencing only an empty var falls back",
+        nosubject_blank.get("title"),
+        nosubject_default.get("title"),
+    )
+    if not nosubject_blank.get("title"):
+        fail("title must never be empty")
+
+    # Titles are capped so an override can't produce one GitHub would reject.
+    long_title = _title("{{ subject }}" + ("x" * 400))
+    if len(long_title) > 160:
+        fail("title not truncated: %d chars" % len(long_title))
+
+def _assert_resolve_templates():
+    """`resolve_templates` narrows a feature's `args.templates` to the flat
+    dict the renderers take, honoring per-task-kind scoping."""
+    _eq("empty stays None", resolve_templates({}, "build"), None)
+    _eq("None stays None", resolve_templates(None, "build"), None)
+
+    # Flat keys are the pre-scoping shape and must keep applying to every kind.
+    flat = {"summary": "S", "details": "D"}
+    for kind in ["build", "test", "lint", "format", "gazelle", "delivery", "warming"]:
+        _eq("flat applies to %s" % kind, resolve_templates(flat, kind), {"summary": "S", "details": "D"})
+
+    # A scoped block applies to its own kind and is invisible to others.
+    scoped = {"lint": {"details": "LINT"}}
+    _eq("scoped hits its kind", resolve_templates(scoped, "lint"), {"details": "LINT"})
+    _eq("scoped misses other kinds", resolve_templates(scoped, "build"), None)
+
+    # Scoped overlays flat: shared default, one kind special-cased.
+    both = {"summary": "S", "details": "D", "lint": {"details": "LINT"}}
+    _eq("overlay replaces details", resolve_templates(both, "lint"), {"summary": "S", "details": "LINT"})
+    _eq("overlay leaves others flat", resolve_templates(both, "build"), {"summary": "S", "details": "D"})
+
+    # build and test are separable even though both render via bazel_results.
+    split = {"build": {"summary": "B"}, "test": {"summary": "T"}}
+    _eq("build scope", resolve_templates(split, "build"), {"summary": "B"})
+    _eq("test scope", resolve_templates(split, "test"), {"summary": "T"})
+
+    # An unknown task kind sees only the flat keys — no crash, no scoped block.
+    _eq("unknown kind falls back to flat", resolve_templates(both, "mystery"), {"summary": "S", "details": "D"})
+
+    # Every scope key must name a task kind that actually has a renderer,
+    # else a config could scope an override that never fires.
+    for kind in TEMPLATE_SCOPE_KEYS:
+        if renderer_for_kind(kind_for_task(kind)) == None:
+            fail("scope key %r has no renderer" % kind)
+
+bk_annotation_template_tests = task(
+    summary = "Run the bk annotation template customization AXL unit tests.",
+    kind = "test-bk-annotation-templates",
+    group = ["dev"],
+    implementation = _test_templates_impl,
     args = {},
 )

@@ -39,9 +39,11 @@ pub fn install() {
 }
 
 /// Test hook: crash the process immediately per `ASPECT_INTERNAL_TEST_CRASH`
-/// (`segv`, `abort`, `segv-thread`, or `stackoverflow-thread`), otherwise a
-/// no-op. Lets the end-to-end tests drive a real crash — on the main thread, a
-/// spawned thread, or via stack overflow — through a spawned binary. Kept
+/// (`segv`, `abort`, `segv-thread`, `stackoverflow-thread`, `segv-atexit`,
+/// `segv-detached-at-exit`, or `double-free`), otherwise a no-op. Lets the
+/// end-to-end tests drive a real crash — on the main thread, a spawned thread,
+/// via stack overflow, during teardown, or through the allocator's corruption
+/// detector — in a spawned binary. Kept
 /// separate from [`install`] so a test can exercise the
 /// `ASPECT_NO_CRASH_HANDLER` opt-out (handler skipped) while still crashing.
 #[doc(hidden)]
@@ -125,6 +127,35 @@ mod unix {
                 })
                 .join()
                 .ok();
+            }
+            // Crash during process teardown, after `main` has returned: the
+            // libc exit path runs atexit handlers and static destructors, and
+            // a fault there must still be reported.
+            Ok("segv-atexit") => {
+                extern "C" fn boom() {
+                    // SAFETY: intentional null write to raise SIGSEGV.
+                    unsafe { std::ptr::null_mut::<u8>().write_volatile(1) }
+                }
+                // SAFETY: registering an atexit handler.
+                unsafe { libc::atexit(boom) };
+            }
+            // Double free: the allocator detects it and our registered error
+            // handler turns it into an abort (mimalloc's default handler would
+            // report and continue). SAFETY: intentional, to exercise that path.
+            Ok("double-free") => unsafe {
+                let layout = std::alloc::Layout::from_size_align(64, 8).unwrap();
+                let p = std::alloc::alloc(layout);
+                std::alloc::dealloc(p, layout);
+                std::alloc::dealloc(p, layout);
+            },
+            // Crash on a detached thread while the main thread is exiting —
+            // the shape of a background reader still running at teardown.
+            Ok("segv-detached-at-exit") => {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // SAFETY: intentional null write to raise SIGSEGV.
+                    unsafe { std::ptr::null_mut::<u8>().write_volatile(1) }
+                });
             }
             _ => {}
         }

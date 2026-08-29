@@ -7,11 +7,13 @@ extern crate self as axl_runtime;
 pub mod banner;
 pub mod builtins;
 pub mod ci;
+pub mod color;
 pub mod diag;
 pub mod docs;
 pub mod engine;
 pub mod eval;
 pub mod module;
+pub mod out;
 pub mod trace;
 
 /// Bazel subprocess live-tracking. Re-exported so `aspect-cli`'s

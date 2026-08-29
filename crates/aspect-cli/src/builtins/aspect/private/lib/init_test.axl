@@ -176,6 +176,7 @@ def _test_impl(ctx):
     return 0
 
 init_tests = task(
+    summary = "Run the init AXL unit tests.",
     kind = "test-init",
     group = ["dev"],
     implementation = _test_impl,

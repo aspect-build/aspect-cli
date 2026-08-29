@@ -3,6 +3,13 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
+use starlark::collections::SmallMap;
+
+/// Keys [`server_info`] requests and then looks up in the parsed output. Shared
+/// so the two sides can't drift — a lookup that misses the requested spelling
+/// reads as "bazel didn't report it".
+const SERVER_PID_KEY: &str = "server_pid";
+const RELEASE_KEY: &str = "release";
 
 /// Parse the value of `bazel info release` into a semver version.
 ///
@@ -21,6 +28,30 @@ fn parse_release(value: &str) -> Option<semver::Version> {
     semver::Version::parse(ver_str).ok()
 }
 
+/// Parse `bazel info` stdout into a key/value map.
+///
+/// Bazel formats the output by how many keys were requested: exactly one key
+/// prints the bare value, while zero (all keys) or two or more print
+/// `key: value` lines. A single key is therefore taken from the request rather
+/// than the output — parsing it as a pair would yield nothing, or split a value
+/// that itself contains `": "` (e.g. a Windows path).
+pub fn parse_output<S: AsRef<str>>(stdout: &str, keys: &[S]) -> SmallMap<String, String> {
+    let mut map = SmallMap::new();
+    if let [key] = keys {
+        let value = stdout.trim();
+        if !value.is_empty() {
+            map.insert(key.as_ref().to_string(), value.to_string());
+        }
+        return map;
+    }
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once(": ") {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    map
+}
+
 /// Query bazel server info (server_pid, release version).
 ///
 /// The version is `None` when Bazel reports a non-release build (see
@@ -36,8 +67,8 @@ pub fn server_info_with_startup_flags(
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("info");
-    cmd.arg("server_pid");
-    cmd.arg("release");
+    cmd.arg(SERVER_PID_KEY);
+    cmd.arg(RELEASE_KEY);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
@@ -61,35 +92,35 @@ pub fn server_info_with_startup_flags(
         )));
     }
 
-    // When bazel info is called with multiple keys it emits "key: value" lines.
     let stdout = String::from_utf8_lossy(&c.stdout);
-    let mut pid: Option<u32> = None;
-    let mut version: Option<semver::Version> = None;
-    for line in stdout.lines() {
-        if let Some((key, value)) = line.split_once(": ") {
-            match key.trim() {
-                "server_pid" => {
-                    pid = value.trim().parse::<u32>().ok();
-                }
-                "release" => {
-                    version = parse_release(value);
-                    if version.is_none() {
-                        // Not an error; version-conditional flags assume latest.
-                        // Logged for diagnosability when flag resolution looks off.
-                        tracing::debug!(
-                            release = %value.trim(),
-                            "bazel reported a non-release version; \
-                             version-conditional flags will assume latest"
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    parse_server_info(&stdout)
+}
 
-    let pid =
-        pid.ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
+/// Pull `(server_pid, release)` out of `bazel info server_pid release` stdout.
+///
+/// A missing or unparseable `server_pid` is an error — callers need the pid.
+/// A missing or non-release version is not: version-conditional flags fall
+/// back to assuming latest.
+fn parse_server_info(stdout: &str) -> io::Result<(u32, Option<semver::Version>)> {
+    let info = parse_output(stdout, &[SERVER_PID_KEY, RELEASE_KEY]);
+
+    let version = info.get(RELEASE_KEY).and_then(|v| {
+        let version = parse_release(v);
+        if version.is_none() {
+            // Logged for diagnosability when flag resolution looks off.
+            tracing::debug!(
+                release = %v,
+                "bazel reported a non-release version; \
+                 version-conditional flags will assume latest"
+            );
+        }
+        version
+    });
+
+    let pid = info
+        .get(SERVER_PID_KEY)
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
 
     Ok((pid, version))
 }
@@ -184,7 +215,92 @@ pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_release;
+    use super::{parse_output, parse_release, parse_server_info};
+
+    #[test]
+    fn server_info_reads_pid_and_version() {
+        let (pid, version) =
+            parse_server_info("server_pid: 12345\nrelease: release 9.0.0\n").unwrap();
+        assert_eq!(pid, 12345);
+        assert_eq!(version, Some(semver::Version::new(9, 0, 0)));
+    }
+
+    #[test]
+    fn server_info_tolerates_a_non_release_version() {
+        let (pid, version) =
+            parse_server_info("server_pid: 7\nrelease: development version\n").unwrap();
+        assert_eq!(pid, 7);
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn server_info_requires_a_parseable_pid() {
+        for stdout in ["release: release 9.0.0\n", "server_pid: not-a-pid\n", ""] {
+            let err = parse_server_info(stdout).unwrap_err();
+            assert!(
+                err.to_string().contains("did not return server_pid"),
+                "unexpected error for {stdout:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_key_is_taken_from_the_request() {
+        // `bazel info <key>` prints the bare value with no `key: ` prefix.
+        let map = parse_output("/tmp/ws/bazel-out\n", &["output_path"]);
+        assert_eq!(
+            map.get("output_path").map(String::as_str),
+            Some("/tmp/ws/bazel-out")
+        );
+    }
+
+    #[test]
+    fn single_key_value_containing_a_colon_is_not_split() {
+        let map = parse_output("C:\\ws\\out: dir/command.log\n", &["command_log"]);
+        assert_eq!(
+            map.get("command_log").map(String::as_str),
+            Some("C:\\ws\\out: dir/command.log")
+        );
+    }
+
+    #[test]
+    fn multiple_keys_are_parsed_as_pairs() {
+        let map = parse_output(
+            "output_path: /tmp/ws/bazel-out\noutput_base: /tmp/ws\n",
+            &["output_path", "output_base"],
+        );
+        assert_eq!(
+            map.get("output_path").map(String::as_str),
+            Some("/tmp/ws/bazel-out")
+        );
+        assert_eq!(map.get("output_base").map(String::as_str), Some("/tmp/ws"));
+    }
+
+    #[test]
+    fn no_keys_parses_every_pair() {
+        let map = parse_output::<&str>(
+            "bazel-bin: /tmp/ws/bin\noutput_path: /tmp/ws/bazel-out\n",
+            &[],
+        );
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("bazel-bin").map(String::as_str),
+            Some("/tmp/ws/bin")
+        );
+    }
+
+    #[test]
+    fn lines_without_a_pair_separator_are_skipped() {
+        let map = parse_output::<&str>("a bare line\noutput_base: /tmp/ws\n", &[]);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("output_base").map(String::as_str), Some("/tmp/ws"));
+    }
+
+    #[test]
+    fn empty_output_yields_no_entries() {
+        assert!(parse_output("\n", &["output_path"]).is_empty());
+        assert!(parse_output::<&str>("", &[]).is_empty());
+    }
 
     #[test]
     fn parses_a_plain_release() {

@@ -62,7 +62,7 @@ def detect_buildkite_build_url(env):
     set; the bare build URL when only `BUILDKITE_BUILD_URL` is present;
     or "" otherwise. Exposed as an `env`-only helper for callers that
     don't have a full `ctx` in scope (e.g. the `_collect_*` metadata
-    functions in `lib/build_metadata.axl`).
+    functions in `bazel/build_metadata.axl`).
     """
     build_url = env.var("BUILDKITE_BUILD_URL") or ""
     job_id = env.var("BUILDKITE_JOB_ID") or ""

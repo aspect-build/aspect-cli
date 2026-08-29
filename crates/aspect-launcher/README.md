@@ -185,3 +185,16 @@ environment variable; the launcher writes its downloader cache to
 ## Debugging
 
 Set `ASPECT_DEBUG=1` to enable verbose logging of the download and caching flow.
+
+Set `ASPECT_DEBUG_CLI=1` to run the `aspect-cli-debug-<target>` release variant
+instead of the primary binary. It is the same code built to fail loudly rather
+than fast — unstripped, so a crash report resolves to function and `file:line`,
+and with debug assertions enabled across the dependency graph. Expect a larger
+download and slower execution, so prefer it only while reproducing a crash.
+
+The variant is cached separately from the primary binary, so switching back and
+forth does not re-download either one. Releases before v2026.31.10 do not
+publish it; on those the launcher logs the fallback and uses the primary binary.
+
+This only applies when the source does not name an `artifact` explicitly — a
+configured artifact name is used verbatim.

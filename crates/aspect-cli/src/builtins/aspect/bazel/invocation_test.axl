@@ -1,0 +1,194 @@
+"""Tests for the `bazel.build(ctx)` invocation-handle seams.
+
+Exercises the public dispatch helpers, which are the seam every
+task that drives its own spawn loop calls after `build.wait()` /
+`test.wait()` to fire
+`bazel_trait.bazel_attempt_end` and `bazel_trait.build_end` hooks. The
+helpers are short, but they're the contract every task depends on —
+silent breakage here would skip every Workflows-feature recovery hook.
+
+Also covers `target_patterns`, which decides whether the `targets` arg's
+default reaches Bazel — get that wrong and a caller-forwarded
+`--target_pattern_file` collides with an invented pattern, which Bazel
+rejects outright.
+
+Every section but the last is pure logic. The last one spawns a real Bazel,
+because the thing it guards — an invocation that Bazel rejects outright —
+only exists once there is a real process to reject it.
+
+Run with:
+  aspect dev test-bazel-invocation
+"""
+
+load("@aspect//bazel/invocation.axl", "target_patterns")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _record_into(recorder, key, name):
+    """Build a hook callable that appends `(name, exit_code)` into
+    `recorder[key]`. The name lets a test pin both order and per-hook
+    invocation."""
+
+    def _hook(_ctx, exit_code):
+        recorder[key].append((name, exit_code))
+
+    return _hook
+
+def _trait(attempt_hooks = [], build_end_hooks = []) -> BazelTrait:
+    """A real `BazelTrait` carrying only the two hook lists the
+    dispatchers read; every other field takes its declared default."""
+    return BazelTrait(
+        bazel_attempt_end = attempt_hooks,
+        build_end = build_end_hooks,
+    )
+
+def _test_attempt_dispatch_empty_is_noop(ctx: TaskContext) -> None:
+    """No hooks registered → dispatcher must not error."""
+    dispatch_bazel_attempt_end(ctx, _trait(), 0)
+
+def _test_build_end_dispatch_empty_is_noop(ctx: TaskContext) -> None:
+    """No hooks registered → dispatcher must not error."""
+    dispatch_bazel_build_end(ctx, _trait(), 0)
+
+def _test_attempt_dispatch_invokes_in_order(ctx: TaskContext) -> None:
+    """Multiple attempt_end hooks fire in registration order, each
+    receiving the exit_code passed to the dispatcher."""
+    recorder = {"attempt": []}
+    trait = _trait(attempt_hooks = [
+        _record_into(recorder, "attempt", "first"),
+        _record_into(recorder, "attempt", "second"),
+        _record_into(recorder, "attempt", "third"),
+    ])
+    dispatch_bazel_attempt_end(ctx, trait, 37)
+    _eq(
+        "ordered invocation with exit_code passthrough",
+        recorder["attempt"],
+        [("first", 37), ("second", 37), ("third", 37)],
+    )
+
+def _test_build_end_dispatch_invokes_in_order(ctx: TaskContext) -> None:
+    """Same contract as attempt_end."""
+    recorder = {"build_end": []}
+    trait = _trait(build_end_hooks = [
+        _record_into(recorder, "build_end", "a"),
+        _record_into(recorder, "build_end", "b"),
+    ])
+    dispatch_bazel_build_end(ctx, trait, 0)
+    _eq(
+        "ordered invocation with exit_code passthrough",
+        recorder["build_end"],
+        [("a", 0), ("b", 0)],
+    )
+
+def _test_attempt_dispatch_does_not_fire_build_end(ctx: TaskContext) -> None:
+    """Dispatchers are separately addressable; calling attempt_end must
+    not also fire the build_end list."""
+    recorder = {"attempt": [], "build_end": []}
+    trait = _trait(
+        attempt_hooks = [_record_into(recorder, "attempt", "a")],
+        build_end_hooks = [_record_into(recorder, "build_end", "b")],
+    )
+    dispatch_bazel_attempt_end(ctx, trait, 0)
+    _eq("attempt fired", recorder["attempt"], [("a", 0)])
+    _eq("build_end not fired", recorder["build_end"], [])
+
+def _fake_rc(values = {}):
+    """Stand-in for a `RunCommand`: `target_patterns` calls only `flag_value`.
+    Same shape as the fakes in `bazel_flags_test.axl` /
+    `deployment_flags_test.axl`, keyed `{command: {flag: value}}` so a test can
+    pin that the lookup is command-scoped. The real last-wins / `=`-form /
+    two-token matching lives in `crates/bazelrc` and is tested there."""
+    return struct(flag_value = lambda name, command: values.get(command, {}).get(name))
+
+def _test_default_reaches_bazel_when_nothing_else_supplies_patterns(_):
+    """No pattern file anywhere → the arg default is the target list."""
+    _eq(
+        "default pattern forwarded",
+        target_patterns(False, ["..."], "", _fake_rc(), "build"),
+        ["..."],
+    )
+
+def _test_forwarded_flag_suppresses_the_default(_):
+    """`--bazel-flag=--target_pattern_file=…` with no positionals: Bazel must
+    see the flag and no residue, or it fails the invocation outright."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq("default suppressed", target_patterns(False, ["..."], "", rc, "build"), [])
+
+def _test_explicit_patterns_always_reach_bazel(_):
+    """Explicit patterns alongside a forwarded pattern file are forwarded as-is
+    so Bazel reports the conflict — the handle owns no second spelling of it."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq(
+        "explicit patterns preserved",
+        target_patterns(True, ["//foo:bar"], "", rc, "build"),
+        ["//foo:bar"],
+    )
+
+def _test_aspect_own_flag_suppresses_the_default(_):
+    """aspect's own `--target-pattern-file` is resolved before the rc exists, so
+    it is passed in directly rather than read back off `rc`."""
+    _eq(
+        "default suppressed",
+        target_patterns(False, ["..."], "/tmp/p", _fake_rc(), "build"),
+        [],
+    )
+
+def _test_lookup_is_command_scoped(_):
+    """A pattern file set for `build` must not suppress the default for a
+    `test` run — `flag_value` is asked about the running subcommand."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq("test unaffected", target_patterns(False, ["..."], "", rc, "test"), ["..."])
+
+
+def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
+    """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
+    it exit without ever opening the build-event pipe, and the invocation has
+    to surface that exit rather than wait on a writer that can never arrive.
+
+    Requires `build_events`, since that is what puts a pipe there to wait on.
+    A regression stalls this task until the CI job's own timeout — loud
+    enough to spot, which is the point of running it here against a real
+    Bazel rather than a fake."""
+    events = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        "//crates/galvanize:galvanize",
+        build_events = [events],
+        flags = ["--definitely_not_a_flag"],
+        stderr = None,
+    )
+    seen = 0
+    for _ in events:
+        seen += 1
+    status = build.wait()
+    if status.success:
+        fail("expected Bazel to reject --definitely_not_a_flag")
+    _eq("rejected command line yields no events", seen, 0)
+
+def _test_impl(ctx: TaskContext) -> int:
+    _test_attempt_dispatch_empty_is_noop(ctx)
+    _test_build_end_dispatch_empty_is_noop(ctx)
+    _test_attempt_dispatch_invokes_in_order(ctx)
+    _test_build_end_dispatch_invokes_in_order(ctx)
+    _test_attempt_dispatch_does_not_fire_build_end(ctx)
+    _test_default_reaches_bazel_when_nothing_else_supplies_patterns(ctx)
+    _test_forwarded_flag_suppresses_the_default(ctx)
+    _test_explicit_patterns_always_reach_bazel(ctx)
+    _test_aspect_own_flag_suppresses_the_default(ctx)
+    _test_lookup_is_command_scoped(ctx)
+
+    # Spawns a real Bazel; keep it last so a stall cannot mask the pure
+    # sections above.
+    _test_rejected_command_line_does_not_hang(ctx)
+    print("invocation_test.axl: OK (11 sections)")
+    return 0
+
+invocation_tests = task(
+    summary = "Run the bazel invocation-handle AXL unit tests.",
+    kind = "test-bazel-invocation",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

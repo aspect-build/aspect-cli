@@ -915,3 +915,107 @@ impl FutureAlloc for HttpResponse {
         self.alloc_value(heap)
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    fn find_header_end(bytes: &[u8]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn read_request(mut stream: std::os::unix::net::UnixStream) -> String {
+        let mut request = Vec::new();
+        let mut content_len = None;
+
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).expect("read request");
+            assert!(read > 0, "client closed before completing the request");
+            request.extend_from_slice(&chunk[..read]);
+
+            if let Some(header_end) = find_header_end(&request) {
+                let body_start = header_end + 4;
+                let expected = *content_len.get_or_insert_with(|| {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content-length"))
+                        })
+                        .unwrap_or(0)
+                });
+                if request.len() >= body_start + expected {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .expect("write response");
+                    return String::from_utf8(request).expect("HTTP request is UTF-8");
+                }
+            }
+        }
+    }
+
+    fn capture_unix_request(call: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("http.sock");
+        let listener = UnixListener::bind(&socket).expect("bind unix HTTP socket");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            read_request(stream)
+        });
+
+        let code = format!(
+            r#"
+def _impl(ctx):
+    response = ctx.http().{call}(
+        url = "http://localhost/delivery",
+        headers = {{"Content-Type": "application/json"}},
+        data = "{{\"host\":\"gh\",\"digest\":\"abc\"}}",
+        unix_socket = {socket:?},
+    ).block()
+    if response.status != 200 or response.body != "ok":
+        fail("unexpected response: {{}} {{}}".format(response.status, response.body))
+    return 0
+
+t = task(implementation = _impl)
+"#,
+            socket = socket.to_string_lossy(),
+        );
+        crate::test::eval(&code)
+            .run_task(0)
+            .expect("AXL HTTP request succeeds");
+        server.join().expect("server thread")
+    }
+
+    #[test]
+    fn query_sends_body_over_unix_socket() {
+        let request = capture_unix_request("query");
+        assert!(
+            request.starts_with("QUERY /delivery HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with("{\"host\":\"gh\",\"digest\":\"abc\"}"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn delete_sends_body_over_unix_socket() {
+        let request = capture_unix_request("delete");
+        assert!(
+            request.starts_with("DELETE /delivery HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with("{\"host\":\"gh\",\"digest\":\"abc\"}"),
+            "{request}"
+        );
+    }
+}

@@ -66,7 +66,7 @@ Tasks own the *flow* (which Bazel command runs when, what extra processing happe
 
 ## The per-task lifecycle
 
-`TaskLifecycleTrait` (defined in [`private/lib/lifecycle.axl`](private/lib/lifecycle.axl)) has a **single** slot, **`task_update(ctx, TaskUpdate)`**, fired zero or more times during the task. The *first* and *last* updates carry extra meaning, so one hook covers the whole lifecycle:
+`Phases` (defined in [`private/lib/lifecycle.axl`](private/lib/lifecycle.axl)) has a **single** slot, **`task_update(ctx, TaskUpdate)`**, fired zero or more times during the task. The *first* and *last* updates carry extra meaning, so one hook covers the whole lifecycle:
 
 - **First update → init.** A handler's first `task_update` is its cue to initialize: authenticate, create the GitHub check run / first BK annotation, and read `update.subject` for the rendered title. `setup_phase` (see below) emits this first update — the `🔧 Setup` phase mark — at the very start of every task, so init always lands inside the Setup phase. Each handler guards init with a private `_state["_initialized"]` flag.
 
@@ -112,7 +112,7 @@ return <TaskConclusion>
 
 ## Customizing repro & fix suggestions
 
-`TaskLifecycleTrait` has a second slot, `repro_fix_suggestion`, that lets a user `config.axl` accept, reject, or modify the `aspect …` / `bazel …` repro and fix commands tasks emit at terminal-emit time. Common uses: rewrite `aspect …` to an internal wrapper command, strip flags the user wants kept private, suppress fix suggestions deemed unsafe in their CI environment.
+`Phases` has a second slot, `repro_fix_suggestion`, that lets a user `config.axl` accept, reject, or modify the `aspect …` / `bazel …` repro and fix commands tasks emit at terminal-emit time. Common uses: rewrite `aspect …` to an internal wrapper command, strip flags the user wants kept private, suppress fix suggestions deemed unsafe in their CI environment.
 
 Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` with `ReproFixCommand` records (defined in [`private/lib/lifecycle.axl`](private/lib/lifecycle.axl)). The framework runs every registered handler over un-hooked entries on each surface emit via `dispatch_task_update`, so no downstream consumer — CLI printer, GHSC check-run body, BK annotation, GitHub PR-comment rollup — ever sees an un-hooked entry. The `_hooked` flag on each record guarantees the hook chain runs at most once per entry, so producers and surfaces can emit freely.
 
@@ -142,7 +142,7 @@ load("@aspect//:traits.axl",
      "REPRO_FIX_REJECT",
      "ReproFixInfo",
      "ReproFixSuggestion",
-     "TaskLifecycleTrait",
+     "Phases",
      "repro_fix_replace")
 
 # Suggestion slugs you want to drop globally.
@@ -161,7 +161,7 @@ def _rewrite_aspect_for_lint(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSu
     )
 
 def config(ctx: ConfigContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
     lifecycle.repro_fix_suggestion.append(_reject_dropped_slugs)
     lifecycle.repro_fix_suggestion.append(_rewrite_aspect_for_lint)
 ```
@@ -178,9 +178,9 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 
 | Trait                        | Defined in                                                                | Slots                                                                                                       | Status / Purpose |
 |------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|------------------|
-| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `build_end`, `build_retry`, `build_event_sinks`, `task_flags`, `flags`, `startup_flags`, `extra_flags`, `extra_startup_flags`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. |
+| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `build_end`, `build_retry`, `bazel_attempt_end`, `build_event_sinks`, `task_flags`, `rc_flags`, `flags`, `startup_flags`, `base_flags`, `extra_flags`, `extra_startup_flags`, `bes_backends`, `bes_results_sources`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. |
 | **`HealthCheckTrait`**       | [private/lib/health_check.axl](private/lib/health_check.axl)                              | `health_check`                                                                                              | ✅ Clean. Hook lists only. |
-| **`TaskLifecycleTrait`**     | [private/lib/lifecycle.axl](private/lib/lifecycle.axl)                                    | `task_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
+| **`Phases`**     | [private/lib/lifecycle.axl](private/lib/lifecycle.axl)                                    | `task_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
 | **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `delivery_target`, `delivery_end`, `delivery_manifest`, `render_manifest_file`, `upload_manifest` | ✅ Clean. Hook callables only. |
 | **`ArtifactsTrait`**         | [private/lib/artifacts.axl](private/lib/artifacts.axl)                                    | `artifacts_browse_url`, `artifact_urls`, `testlogs_label_urls`                                              | ⚠️ **Legacy** — data fields used as cross-feature state. Migrating to Pattern 2 (feature-owned + Callable trait). See [Artifact uploads](#artifact-uploads). |
 | **`GitHubStatusChecksTrait`**| [feature/github_status_checks.axl](feature/github_status_checks.axl)      | `templates`, `metadata_keys`                                                                                | ⚠️ **Legacy** — user-facing config on a trait. Migrating to feature `args`. |
@@ -199,7 +199,7 @@ Tasks declare which traits they *use* in the `traits = [...]` arg of the `task(.
 ```python
 build = task(
     name = "build",
-    traits = [BazelTrait, HealthCheckTrait, TaskLifecycleTrait,
+    traits = [BazelTrait, HealthCheckTrait, Phases,
               GitHubStatusChecksTrait, ArtifactsTrait],
     implementation = _impl,
     ...
@@ -329,7 +329,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 
 def task():
     return Task(
-        traits = [BazelTrait, TaskLifecycleTrait, ...] + tips.TRAITS + artifacts.TRAITS,
+        traits = [BazelTrait, Phases, ...] + tips.TRAITS + artifacts.TRAITS,
         # NO `features = [...]` — see "Rules: what tasks must not do" below.
         ...
     )
@@ -743,7 +743,7 @@ The canonical flow, with annotations. Use it as a checklist when reading or writ
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait    = ctx.traits[HealthCheckTrait]
-    lifecycle   = ctx.traits[TaskLifecycleTrait]
+    lifecycle   = ctx.traits[Phases]
 
     data = init_data()
     data["start_time_ms"]  = now_ms(ctx)
@@ -820,7 +820,7 @@ The `lint.axl` impl is the closest to this template; `format.axl` and `gazelle.a
 ## How to add a new task
 
 1. Create `crates/aspect-cli/src/builtins/aspect/<task_name>.axl` and follow the [canonical flow](#anatomy-of-a-task-_impl).
-2. **Declare the trait surface.** If your task drives Bazel, declare `BazelTrait`. If it surfaces data in CI, declare `TaskLifecycleTrait`. If it should print runner-env / health-check sections on Buildkite, declare `HealthCheckTrait`. For artifact uploads, splat `+ artifacts.TRAITS` (NOT `ArtifactsTrait` — that's the legacy data-field shape being migrated out). Same for tips: `+ tips.TRAITS`.
+2. **Declare the trait surface.** If your task drives Bazel, declare `BazelTrait`. If it surfaces data in CI, declare `Phases`. If it should print runner-env / health-check sections on Buildkite, declare `HealthCheckTrait`. For artifact uploads, splat `+ artifacts.TRAITS` (NOT `ArtifactsTrait` — that's the legacy data-field shape being migrated out). Same for tips: `+ tips.TRAITS`.
 3. **Do NOT list features** in the task constructor. Tasks declare trait surfaces only; feature loading happens through a separate channel (framework default, user `.aspect/config.axl`). See [Rules: what tasks must not do](#rules-what-tasks-must-not-do).
 4. Decide the `task_update.kind`. If your task's data shape matches an existing renderer (build/test → `bazel_results`, lint → `lint_results`, etc.), reuse it. Otherwise add a new kind — see [How to add a new task kind](#how-to-add-a-new-task-kind-new-renderer).
 5. Wire the task in `MODULE.aspect`'s task registry.

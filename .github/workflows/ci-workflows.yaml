@@ -220,7 +220,7 @@ jobs:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64.
       - name: Gazelle Task — from-source
-        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha
+        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha
   gazelle-from-source-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -233,7 +233,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha-debug
+        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha-debug
   lint-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -271,7 +271,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build Task
-        run: bazel --aspect:disable_plugins --aspect:lock_version build --task:name build-gha
+        run: bazel build --task:name build-gha
   build-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -283,7 +283,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 bazel --aspect:disable_plugins --aspect:lock_version build --task:name build-gha-debug
+        run: ASPECT_DEBUG=1 bazel build --task:name build-gha-debug
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -334,8 +334,8 @@ jobs:
       - name: Build Task (ephemeral)
         run: |
           aspect build --task:name build-gha-ephemeral \
-            --bazel-flag=--remote_cache= \
-            --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
+            --remote_cache= \
+            --disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
   test-task-ephemeral:
     runs-on: ubuntu-latest
@@ -355,8 +355,8 @@ jobs:
         # action (stderr snippet) surface together.
         run: |
           aspect test --task:name test-gha-ephemeral \
-            --bazel-flag=--remote_cache= \
-            --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
+            --remote_cache= \
+            --disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
   # Render each template preset with the freshly-built `aspect init` and build
   # the generated workspace. Catches CLI-side breakage of the init renderer
@@ -560,9 +560,18 @@ jobs:
             cd crates/aspect-cli
             "$LAUNCHER" user user-task-subdir
           )
+          # These four smoke checks assert CLI behavior, not status reporting, so
+          # the job's own status is the signal — same reasoning as the delivery
+          # digest jobs. Reporting anything is actively misleading here: two of
+          # them pass Bazel a flag it must reject, so the PR comment carried two
+          # red rows for a passing PR.
+          no_status=(
+            --github-status-checks:enabled=false
+            --github-status-comments:enabled=false
+          )
           echo "--- aspect run smoke (//examples/deliverable)"
-          "$LAUNCHER" run //examples/deliverable:py_deliverable
-          "$LAUNCHER" run //examples/deliverable:sh_deliverable -- forwarded-arg
+          "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:py_deliverable
+          "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:sh_deliverable -- forwarded-arg
           echo "--- aspect help"
           "$LAUNCHER" help
           echo "--- aspect-launcher --version"
@@ -571,38 +580,49 @@ jobs:
           "$CLI" --version
           echo "--- aspect version"
           "$LAUNCHER" version
-          echo "--- invalid task-id"
-          "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
-          echo "--- invalid task-key"
-          "$LAUNCHER" build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
-          echo "--- aspect dev test-template-snapshots"
-          "$LAUNCHER" dev test-template-snapshots
-          echo "--- aspect dev test-lint-template-snapshots"
-          "$LAUNCHER" dev test-lint-template-snapshots
-          echo "--- aspect dev test-lint-annotation-plan"
-          "$LAUNCHER" dev test-lint-annotation-plan
-          echo "--- aspect dev test-format-template-snapshots"
-          "$LAUNCHER" dev test-format-template-snapshots
-          echo "--- aspect dev test-gazelle-template-snapshots"
-          "$LAUNCHER" dev test-gazelle-template-snapshots
-          echo "--- aspect dev test-delivery-template-snapshots"
-          "$LAUNCHER" dev test-delivery-template-snapshots
-          echo "--- aspect dev test-bk-annotation-snapshots"
-          "$LAUNCHER" dev test-bk-annotation-snapshots
-          echo "--- aspect dev test-pr-comment-snapshots"
-          "$LAUNCHER" dev test-pr-comment-snapshots
-          echo "--- aspect dev test-github-detect"
-          "$LAUNCHER" dev test-github-detect
-          echo "--- aspect dev test-gitlab-detect"
-          "$LAUNCHER" dev test-gitlab-detect
-          echo "--- aspect dev test-gitlab-client"
-          "$LAUNCHER" dev test-gitlab-client
-          echo "--- aspect dev test-tips"
-          "$LAUNCHER" dev test-tips
-          echo "--- aspect dev test-rate-limit"
-          "$LAUNCHER" dev test-rate-limit
-          echo "--- aspect dev test-runner-job-history"
-          "$LAUNCHER" dev test-runner-job-history
+          # Both must be rejected by the CLI's own validation, before it spawns
+          # bazel. Match the message, not just a non-zero exit: an unrecognized
+          # *flag* is forwarded to bazel now, so a misspelled flag here would
+          # still "fail" — after a full bazel invocation.
+          echo "--- invalid --task:id"
+          "$LAUNCHER" build --task:id not-a-uuid //... 2>&1 | grep -q "is not a valid UUID" \
+            || { echo "ERROR: --task:id should reject a non-UUID"; exit 1; }
+          echo "--- invalid --task:name"
+          "$LAUNCHER" build --task:name "bad key!" //... 2>&1 | grep -q "contains invalid characters" \
+            || { echo "ERROR: --task:name should reject invalid chars"; exit 1; }
+          # A flag Bazel rejects has to come back as Bazel's error. This is the
+          # shape that used to hang: Bazel exits without opening the build-event
+          # pipe, and the reader waited on it forever. `timeout` bounds a
+          # regression to a clear failure instead of the whole job budget.
+          # Both spellings have to behave identically: the explicit escape
+          # hatch, and the bare flag this routes to Bazel on its own.
+          # Capture rather than pipe into `grep -q`. Piping discards everything
+          # the CLI writes, so any warning these invocations emit — including
+          # the withheld-post diagnostic — is invisible, and grep exiting at the
+          # match closes the pipe mid-write. Capturing keeps the output in the
+          # job log and lets the reader stay to EOF, matching what the delivery
+          # jobs already do.
+          # `timeout` exits 124 when it kills the command. Check that before the
+          # grep: the error text is printed early, so a launcher that prints it
+          # and *then* hangs — the regression this guards — still satisfies the
+          # grep. Only the exit status distinguishes the two.
+          assert_rejects_flag() {
+            local label="$1"; shift
+            local out code
+            out="$(timeout 180 "$LAUNCHER" build "${no_status[@]}" "$@" //... 2>&1)" && code=0 || code=$?
+            echo "$out"
+            if [ "$code" -eq 124 ]; then
+              echo "ERROR: $label hung until the 180s timeout instead of failing"; exit 1
+            fi
+            echo "$out" | grep -q "Unrecognized option" \
+              || { echo "ERROR: $label must fail with Bazel's own error"; exit 1; }
+          }
+          echo "--- flag rejected by Bazel (--bazel-flag)"
+          assert_rejects_flag "a Bazel-rejected flag" --bazel-flag=--definitely_not_a_flag
+          echo "--- flag rejected by Bazel (bare)"
+          assert_rejects_flag "a bare Bazel-rejected flag" --definitely_not_a_flag
+          echo "--- aspect dev test-* (every AXL suite)"
+          ./tools/run-axl-suites.sh "$LAUNCHER"
   # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
   # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
   # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`
@@ -613,7 +633,11 @@ jobs:
   # Smoke-tests the new test-task flags. Ported from the Buildkite
   # `test-flags-task` step. `--target-pattern-file` is forwarded to Bazel
   # verbatim, so the assertion is just that aspect resolves the file and the run
-  # completes. `--coverage` is exercised against an sh_test rather than a
+  # completes. The IDE/BSP step re-runs the same pattern file in the shape the
+  # IntelliJ Bazel plugin produces through the tools/bazel wrapper — Bazel's
+  # own flag spellings behind `--bazel-flag` — asserting that the composed
+  # command line is one Bazel accepts.
+  # `--coverage` is exercised against an sh_test rather than a
   # rust_test: toolchains_llvm_bootstrapped 0.5.2 (pinned in MODULE.bazel) ships
   # without libclang_rt.profile.a, so any rust_test under --collect_code_coverage
   # fails CppLink (upstream hermeticbuild/hermetic-llvm#318, fixed in #468 — not
@@ -636,7 +660,19 @@ jobs:
           echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
           echo "//examples/test_states:always_pass" >> "$PATTERNS"
           aspect test --task:name test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
+
+          echo "--- IDE/BSP shape — bazel flags typed directly, and one still wrapped"
+          # --tool_tag stays wrapped on purpose: --bazel-flag= is still supported
+          # and this is the only place CI exercises that spelling.
+          aspect build --task:name test-gha-ide-target-pattern-file \
+            --target_pattern_file="$PATTERNS" \
+            --bazel-flag=--tool_tag=bazelbsp:3.2.0
           rm -f "$PATTERNS"
+
+          echo "--- bazel flags in Bazel's own spellings, both slots"
+          aspect --output_base "$RUNNER_TEMP/aspect-space-form-ob" \
+            build --task:name test-gha-bazel-flag-spellings \
+            -c opt --jobs 8 --nobuild //examples/test_states:always_pass
 
           echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
           REPORT=$(mktemp)

@@ -1,3 +1,4 @@
+use crate::errln;
 use std::{io, os::unix::ffi::OsStrExt, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
@@ -349,7 +350,7 @@ impl DiskStore {
                                     }
                                     Err(err) => {
                                         if dep.urls.len() > 1 && i != dep.urls.len() - 1 {
-                                            eprintln!("failed to fetch `{url}`: {err}");
+                                            errln!("failed to fetch `{url}`: {err}");
                                         }
                                         last_err = Some(err);
                                         if i == dep.urls.len() - 1 {

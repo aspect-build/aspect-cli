@@ -1,3 +1,4 @@
+use crate::errln;
 use std::{
     collections::HashMap,
     sync::OnceLock,
@@ -25,8 +26,7 @@ use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::super::stream::Subscriber;
 use super::retry::{
-    BufferOverflow, RetryBuffer, RetryConfig, SinkError, SinkOutcome, SinkStats, backoff,
-    is_retryable,
+    RetryBuffer, RetryConfig, SinkError, SinkOutcome, SinkStats, backoff, is_retryable,
 };
 
 #[derive(Debug)]
@@ -42,8 +42,6 @@ enum DriveOutcome {
     Transient(ClientError),
     /// Server returned a non-retryable status; terminal regardless of budget.
     Fatal(ClientError),
-    /// Buffer overflowed while we held unacked events; terminal.
-    BufferFull(BufferOverflow),
     /// Upstream broadcaster closed (subscriber disconnected) without ever
     /// emitting `last_message`. Treat as clean shutdown — no more events to
     /// send, just wait for outstanding acks then exit.
@@ -58,7 +56,6 @@ impl DriveOutcome {
             DriveOutcome::UpstreamClosed => "UpstreamClosed".to_string(),
             DriveOutcome::Transient(e) => format!("Transient({e})"),
             DriveOutcome::Fatal(e) => format!("Fatal({e})"),
-            DriveOutcome::BufferFull(e) => format!("BufferFull({e})"),
         }
     }
 }
@@ -101,7 +98,7 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
         return;
     }
     let short = invocation_id.get(..8).unwrap_or(invocation_id);
-    eprintln!("BES sink {endpoint} [{short}]: {msg}");
+    errln!("BES sink {endpoint} [{short}]: {msg}");
 }
 
 /// Emit a user-facing `WARNING:` for this sink, prefixed `BES sink <endpoint>:`
@@ -271,7 +268,7 @@ async fn work(
     }
 
     let mut state = StreamState {
-        buffer: RetryBuffer::new(retry.retry_max_buffer_size),
+        buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
         next_seq: 1,
         max_acked: 0,
         last_message_sent: false,
@@ -289,10 +286,11 @@ async fn work(
             &endpoint,
             &invocation_id,
             &format!(
-                "entering drive_stream (attempt={}, next_seq={}, buffered={})",
+                "entering drive_stream (attempt={}, next_seq={}, buffered={} events / {} bytes)",
                 attempt,
                 state.next_seq,
-                state.buffer.len()
+                state.buffer.len(),
+                state.buffer.bytes(),
             ),
         );
         let acked_before = state.max_acked;
@@ -370,10 +368,6 @@ async fn work(
                     stats,
                     Err(finalize(&endpoint, format!("non-retryable: {err}"))),
                 );
-            }
-            DriveOutcome::BufferFull(err) => {
-                let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
-                return (stats, Err(finalize(&endpoint, err.to_string())));
             }
         }
     }
@@ -504,9 +498,7 @@ async fn preload_first_event(
                 seq,
                 &event,
             );
-            if let Err(overflow) = state.buffer.push(seq, req.clone()) {
-                return Err(DriveOutcome::BufferFull(overflow));
-            }
+            state.buffer.push(seq, req.clone());
             if sender.send(req).await.is_err() {
                 return Err(DriveOutcome::Transient(ClientError::Status(
                     tonic::Status::unavailable("request stream closed before bidi open"),
@@ -717,6 +709,24 @@ async fn drive_stream(
         ),
     );
 
+    // Evicted events were streamed on the previous connection but are no longer
+    // retained, so any the server had not yet acked cannot be resent and will be
+    // missing from it. Warn rather than debug-log: BES upload never fails the
+    // build, making this the only signal that data may be incomplete.
+    let evicted = state.buffer.take_evicted();
+    if evicted > 0 {
+        warn(
+            endpoint,
+            &format!(
+                "replay buffer exceeded its {} byte budget; {evicted} build event(s) \
+                 were dropped from it and cannot be resent on this reconnect. Raise \
+                 {} to retain more.",
+                retry.retry_max_buffer_bytes,
+                super::retry::RETRY_MAX_BUFFER_BYTES_ENV,
+            ),
+        );
+    }
+
     // Replay any buffered (unacked) events under their original sequence
     // numbers. The server dedups via OrderedBuildEvent.sequence_number.
     // Skip the entry `preload_first_event` already sent — server would
@@ -802,9 +812,7 @@ async fn drive_stream(
                     &event,
                 );
 
-                if let Err(overflow) = state.buffer.push(seq, req.clone()) {
-                    return DriveOutcome::BufferFull(overflow);
-                }
+                state.buffer.push(seq, req.clone());
                 ack_deadline.get_or_insert_with(|| {
                     tokio::time::Instant::now() + retry.ack_progress_timeout
                 });
@@ -1155,7 +1163,7 @@ mod tests {
         // `tx` stays alive across the call: upstream must look open, since a
         // closed upstream arms the (already bounded) half-close path instead.
         let mut state = StreamState {
-            buffer: RetryBuffer::new(retry.retry_max_buffer_size),
+            buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
             next_seq: 1,
             max_acked: 0,
             last_message_sent: false,
@@ -1358,7 +1366,7 @@ mod tests {
         // Upstream stays open but produces nothing; only the replay runs.
         let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
         let mut state = StreamState {
-            buffer: RetryBuffer::new(retry.retry_max_buffer_size),
+            buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
             next_seq: 101,
             max_acked: 0,
             last_message_sent: false,
@@ -1373,7 +1381,7 @@ mod tests {
                 seq,
                 &progress_event(128 * 1024),
             );
-            state.buffer.push(seq, req).unwrap();
+            state.buffer.push(seq, req);
         }
         let outcome = tokio::time::timeout(
             Duration::from_secs(30),

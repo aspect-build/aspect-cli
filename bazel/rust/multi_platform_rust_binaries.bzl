@@ -9,6 +9,18 @@ load("//bazel/release:hashes.bzl", "hashes")
 
 opt_filegroup, _ = with_cfg(native.filegroup).set("compilation_mode", "opt").build()
 
+# Rebuilds everything in the graph — including third-party crates such as
+# starlark — with debug assertions on. `rustc_flags` on a single `rust_binary`
+# only reaches that crate, so a flag set there would leave `debug_assert!` off
+# in every dependency, which is where most of the interesting checks live
+# (starlark's arena bounds checks in particular). A transition on the global
+# rules_rust setting is what applies through the dependency graph.
+debug_assertions_filegroup, _debug_assertions_cfg = (
+    with_cfg(native.filegroup)
+        .extend(Label("@rules_rust//rust/settings:extra_rustc_flags"), ["-Cdebug-assertions=y"])
+        .build()
+)
+
 TARGET_TRIPLES = [
     ("x86_64-unknown-linux-musl", "linux_x86_64_musl"),
     ("aarch64-unknown-linux-musl", "linux_aarch64_musl"),
@@ -19,7 +31,7 @@ TARGET_TRIPLES = [
 # Map a Rust naming scheme to a custom name.
 TARGET_NAMING_SCHEME = {}
 
-def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEME, target_triples = TARGET_TRIPLES, prefix = "", pkg_type = "zip", **kwargs):
+def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEME, target_triples = TARGET_TRIPLES, prefix = "", pkg_type = "zip", debug_assertions = False, **kwargs):
     """The multi_platform_rust_binaries macro creates a filegroup containing rust binaries that are ready for release.
 
     Args:
@@ -29,6 +41,9 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
         target_triples: Map of target tiples to the target platform to build for.
         prefix: An optional prefix added to the output rust binary file name.
         pkg_type: The packaging type that the {name}.packaged target outputs, can be one of 'zip' or 'tar'.
+        debug_assertions: Build every crate in the graph — dependencies
+            included — with `-Cdebug-assertions=y`. For a diagnostic variant of
+            a binary; see `debug_assertions_filegroup`.
         **kwargs: All other args, forwarded to the output filegroups.
     """
 
@@ -52,10 +67,19 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
             tags = ["manual"],
         )
 
+        bin_src = transition_build
+        if debug_assertions:
+            bin_src = "{}_{}_debug_assertions".format(bin, target_naming)
+            debug_assertions_filegroup(
+                name = bin_src,
+                srcs = [transition_build],
+                tags = ["manual"],
+            )
+
         bin_name = "{}{}-{}".format(prefix, bin, target_naming)
         copy_file(
             name = "{}_bin".format(bin_name),
-            src = transition_build,
+            src = bin_src,
             out = bin_name,
             tags = ["manual"],
         )

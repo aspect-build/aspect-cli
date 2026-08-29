@@ -216,6 +216,34 @@ pub struct Bazel<'v> {
     /// source of both command and startup flags for every Bazel invocation.
     #[allocative(skip)]
     pub active_rc: RefCell<Option<values::Value<'v>>>,
+    /// What an invocation needs to refuse to run on flags the task collected but
+    /// never claimed: the task's `ctx.args` store, its `args.passthrough()`
+    /// bucket names, and its kind for the message. Checking here rather than
+    /// only after the task returns is what makes a dropped flag cost
+    /// milliseconds instead of a whole build. See [`engine::passthrough`].
+    #[allocative(skip)]
+    pub claims: ClaimCheck<'v>,
+}
+
+/// The inputs to the pre-invocation claim check, carried on [`Bazel`] because
+/// that is where the task's calls arrive.
+#[derive(Debug)]
+pub struct ClaimCheck<'v> {
+    pub task_kind: String,
+    pub buckets: Vec<String>,
+    pub args: values::Value<'v>,
+}
+
+impl ClaimCheck<'_> {
+    /// Error unless every bucket holding collected flags has been claimed.
+    fn require_claimed(&self) -> anyhow::Result<()> {
+        crate::engine::passthrough::require_claimed(
+            &self.task_kind,
+            "run bazel",
+            &self.buckets,
+            self.args,
+        )
+    }
 }
 
 unsafe impl<'v> Trace<'v> for Bazel<'v> {
@@ -223,6 +251,7 @@ unsafe impl<'v> Trace<'v> for Bazel<'v> {
         if let Some(v) = self.active_rc.get_mut() {
             v.trace(tracer);
         }
+        self.claims.args.trace(tracer);
     }
 }
 
@@ -270,6 +299,23 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
+/// Bazel's `stderr` rendered as a trailing detail for a spawn-failure error,
+/// on its own line. Empty when Bazel wrote nothing, so a command that died
+/// without diagnostics still yields a clean exit-code message.
+///
+/// Bazel reuses a handful of exit codes across unrelated causes (`2` covers
+/// every command-line error — unknown startup option, unrecognized flag,
+/// unknown `info` key, running outside a workspace), so the code alone rarely
+/// identifies the failure.
+pub(crate) fn stderr_detail(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
+    }
+}
+
 /// The startup flags for an invocation: sourced from the active `RunCommand`
 /// (set by `use_rc`), or empty when none is active.
 fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
@@ -279,6 +325,26 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 }
 
 /// The active `RunCommand` set via `use_rc`, if any.
+/// Gate everything that reaches a Bazel server on the passthrough claim
+/// contract: a flag the task collected and never claimed would be silently
+/// absent from the command line we are about to run, so refuse here rather than
+/// after the build.
+///
+/// That includes the methods that only *talk to* a server rather than build —
+/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`,
+/// and `version`, whose `bazel info release` probe is memoized for the process
+/// and runs against the *default* server. An unclaimed startup option means the
+/// active rc names a different server than the user asked for, so probing or
+/// stopping the default one is worse than doing nothing.
+///
+/// A frozen `Bazel` (config-time) carries no task and so nothing to check.
+fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
+    match this.downcast_ref::<Bazel>() {
+        Some(bazel) => bazel.claims.require_claimed(),
+        None => Ok(()),
+    }
+}
+
 fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
@@ -500,6 +566,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
@@ -620,6 +687,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
@@ -690,6 +758,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<query::Query> {
+        require_claimed_flags(this)?;
         let extras = resolve_flags_for_running_bazel(&flags.items)?;
         let (startup, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
@@ -711,12 +780,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
-    /// Run `bazel info` and return all key/value pairs as a dict.
+    /// Run `bazel info` and return its key/value pairs as a dict.
     ///
-    /// Blocks until the command completes. Raises an error if Bazel exits
-    /// with a non-zero code.
+    /// Blocks until the command completes. Raises an error carrying Bazel's own
+    /// stderr if it exits non-zero.
+    ///
+    /// Runs under the active `RunCommand` (`use_rc`) or the per-call `rc=`,
+    /// replaying both its startup flags and its `info`-applicable command flags
+    /// exactly like `build` / `query`. Those startup flags carry
+    /// `--ignore_all_rc_files`, so the command flags are what put the rc's
+    /// options back — without them this would resolve flag-sensitive keys like
+    /// `output_path` under different flags than the build it describes.
     ///
     /// # Arguments
+    /// * `keys`: `info` keys to request (default: all). Narrowing to the keys
+    ///   actually needed keeps an unknown-key error from a Bazel version that
+    ///   dropped some unrelated key out of the picture. The result is keyed
+    ///   identically however many keys are requested.
+    /// * `rc`: run command to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
     ///
@@ -727,21 +808,34 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     info = ctx.bazel.info()
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
+    ///     only = ctx.bazel.info(keys = ["output_path"])
     /// ```
     fn info<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] keys: UnpackList<
+            values::StringValue<'v>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
     ) -> anyhow::Result<SmallMap<String, String>> {
-        let startup_flags = read_startup_flags(this)?;
+        require_claimed_flags(this)?;
+        let (startup_flags, command_flags) = match effective_rc(this, rc) {
+            Some(rc) => rc.resolve_for_command("info")?,
+            None => (read_startup_flags(this)?, Vec::new()),
+        };
+
+        let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 
         let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
+        cmd.args(&command_flags);
+        cmd.args(&requested);
         if let Some(dir) = directory.into_option() {
             cmd.current_dir(dir);
         }
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
         // Register with the live-bazel registry so OS-signal cancellation
         // can reach this `bazel info` even if the daemon is busy.
@@ -752,20 +846,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
         if !output.status.success() {
+            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
             anyhow::bail!(
-                "bazel info failed with exit code {:?}",
+                "bazel info failed with exit code {:?}{detail}",
                 output.status.code()
             );
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut map = SmallMap::new();
-        for line in stdout.lines() {
-            if let Some((key, value)) = line.split_once(": ") {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-        Ok(map)
+        Ok(info::parse_output(
+            &String::from_utf8_lossy(&output.stdout),
+            &requested,
+        ))
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -787,6 +878,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     ctx.bazel.shutdown()       # stop it before wiping that output base
     /// ```
     fn shutdown<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
 
         let mut cmd = bazel_command();
@@ -824,9 +916,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///         print("non-release or unknown Bazel")
     /// ```
     fn version<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = named, default = true)] strip: bool,
     ) -> anyhow::Result<NoneOr<String>> {
+        require_claimed_flags(this)?;
         Ok(match info::release_version() {
             Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
             Some(v) => NoneOr::Other(v.to_string()),
@@ -854,6 +947,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn health_check<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         Ok(health_check::run(&startup_flags))
     }
@@ -907,6 +1001,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn recover_poisoned_sandbox<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<sandbox_recovery::SandboxRecoveryResult> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         let Some(output_base) = sandbox_recovery::output_base_from_flags(&startup_flags) else {
             return Ok(sandbox_recovery::SandboxRecoveryResult::skipped());
@@ -1038,6 +1133,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = named, default = 5000)] force_kill_after_ms: i32,
     ) -> anyhow::Result<cancel::Cancellation> {
+        require_claimed_flags(this)?;
         let all_flags = read_startup_flags(this)?;
         let force_kill_after_ms = force_kill_after_ms.max(0) as u64;
 
@@ -1061,7 +1157,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// numbers. The BES protocol's per-stream dedup makes replay safe.
     ///
     /// # Arguments
-    /// * `uri` - BES endpoint. `grpcs://` is rewritten to `https://`.
+    /// * `uri` - BES endpoint, kept verbatim: it is what `sink.uri` reports and
+    ///   what user-facing logs name. `grpcs://` / `grpc://` are mapped to their
+    ///   HTTP equivalents at dial time (see `build_event_stream::client`), TLS
+    ///   following from the scheme.
     /// * `metadata` - Headers attached to every request.
     /// * `max_retries` - Max consecutive reconnect attempts without ack
     ///   progress before giving up (default `4`). An attempt during which the
@@ -1071,8 +1170,11 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     ///   non-fatal.
     /// * `retry_min_delay` - Base delay for exponential backoff
     ///   (default `"1s"`).
-    /// * `retry_max_buffer_size` - Cap on the in-flight unacked retry buffer
-    ///   (default `10000`). Exceeding it mid-stream is terminal.
+    /// * `retry_max_buffer_bytes` - Byte budget for the in-flight unacked
+    ///   replay buffer. Exceeding it evicts the oldest retained events, which
+    ///   costs replay coverage on a later reconnect but never fails the
+    ///   upload. Unset uses `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` if set,
+    ///   otherwise 256 MiB.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
@@ -1081,15 +1183,22 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         metadata: UnpackDictEntries<String, String>,
         #[starlark(require = named, default = 4)] max_retries: i32,
         #[starlark(require = named, default = "1s")] retry_min_delay: &str,
-        #[starlark(require = named, default = 10_000)] retry_max_buffer_size: i32,
+        #[starlark(require = named, default = NoneOr::None)] retry_max_buffer_bytes: NoneOr<i64>,
         #[starlark(require = named, default = "0s")] timeout: &str,
     ) -> anyhow::Result<build::BuildEventSink> {
         if max_retries < 0 {
             anyhow::bail!("max_retries must be >= 0, got {max_retries}");
         }
-        if retry_max_buffer_size <= 0 {
-            anyhow::bail!("retry_max_buffer_size must be > 0, got {retry_max_buffer_size}");
-        }
+        // Unset falls through to the env-aware default so a runner-level
+        // `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` applies to tasks that don't pin
+        // the knob; an explicit value always wins over the environment.
+        let retry_max_buffer_bytes = match retry_max_buffer_bytes {
+            NoneOr::Other(n) if n <= 0 => {
+                anyhow::bail!("retry_max_buffer_bytes must be > 0, got {n}");
+            }
+            NoneOr::Other(n) => n as usize,
+            NoneOr::None => sink::retry::default_retry_max_buffer_bytes(),
+        };
         let retry_min_delay = sink::retry::parse_duration(retry_min_delay)
             .map_err(|e| anyhow::anyhow!("retry_min_delay: {e}"))?;
         let timeout_dur =
@@ -1100,12 +1209,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             Some(timeout_dur)
         };
         Ok(build::BuildEventSink::new_grpc(
-            uri.replace("grpcs://", "https://"),
+            uri,
             HashMap::from_iter(metadata.entries),
             sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
                 retry_min_delay,
-                retry_max_buffer_size: retry_max_buffer_size as usize,
+                retry_max_buffer_bytes,
                 timeout,
                 ..Default::default()
             },
@@ -1125,6 +1234,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] tick_ms: NoneOr<i32>,
     ) -> anyhow::Result<build::BuildEventIter> {
         let kinds = match kinds {
             NoneOr::None => None,
@@ -1141,7 +1251,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 Some(set)
             }
         };
-        Ok(build::BuildEventIter::new(kinds))
+        let tick_ms = match tick_ms {
+            NoneOr::None => None,
+            NoneOr::Other(ms) if ms > 0 => Some(ms as u64),
+            NoneOr::Other(ms) => anyhow::bail!("tick_ms must be a positive integer; got {ms}"),
+        };
+        Ok(build::BuildEventIter::new(kinds, tick_ms))
     }
 }
 
@@ -1263,10 +1378,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use super::constraint_matches;
+    use super::{constraint_matches, stderr_detail};
 
     fn version(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn stderr_detail_is_a_trailing_line_when_present() {
+        assert_eq!(stderr_detail("ERROR: boom\n"), "\nERROR: boom");
+    }
+
+    #[test]
+    fn stderr_detail_is_empty_without_diagnostics() {
+        assert_eq!(stderr_detail(""), "");
+        assert_eq!(stderr_detail("  \n\t "), "");
     }
 
     #[test]

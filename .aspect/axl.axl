@@ -2,18 +2,19 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message")
-load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
-load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
-    "@aspect//private/lib/build_metadata.axl",
+    "@aspect//bazel/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
     "version_gte",
     "version_tuple",
 )
-load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
+load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warning", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset")
+load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
+load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
+load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
@@ -24,14 +25,15 @@ load(
 )
 load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand")
+load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand", "phases")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
 load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
-load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
 load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
 load("@std//base64.axl", "base64")
@@ -1942,7 +1944,7 @@ def test_delivery_collect_blocking_culprits(tc: int) -> int:
     return tc
 
 def test_build_metadata_lib(tc: int) -> int:
-    """Coverage for the pure helpers in lib/build_metadata.axl."""
+    """Coverage for the pure helpers in bazel/build_metadata.axl."""
 
     # detect_vcs_from_host
     cases = [
@@ -2635,6 +2637,46 @@ def test_lint_filters(tc: int) -> int:
 
     return tc
 
+def test_parse_patch_hunks(tc: int) -> int:
+    """Coverage for lint.parse_patch_hunks — hunk spans and the count clamp."""
+    patch = "\n".join([
+        "--- a/src/x.ts",
+        "+++ b/src/x.ts",
+        "@@ -1,2 +1,3 @@",
+        " ctx",
+        "+added one",
+        "+added two",
+    ])
+    hunks = parse_patch_hunks(patch)
+    tc = test_case(tc, len(hunks) == 1, "parse_patch_hunks: one hunk")
+    tc = test_case(tc, hunks[0]["file"] == "src/x.ts", "parse_patch_hunks: strips b/ prefix")
+    tc = test_case(tc, hunks[0]["start_line"] == 1, "parse_patch_hunks: start line")
+    tc = test_case(tc, hunks[0]["end_line"] == 3, "parse_patch_hunks: end line = start + count - 1")
+
+    # `,B` omitted means a single line.
+    single = parse_patch_hunks("--- a/y\n+++ b/y\n@@ -5 +7 @@\n+z")
+    tc = test_case(tc, len(single) == 1 and single[0]["start_line"] == 7, "parse_patch_hunks: implicit count start")
+    tc = test_case(tc, single[0]["end_line"] == 7, "parse_patch_hunks: implicit count spans one line")
+
+    # A declared count far larger than the patch body is clamped to the number
+    # of lines actually present. Callers expand hunks one entry per line, so an
+    # unclamped count from a truncated/malformed patch would allocate without
+    # bound.
+    huge = parse_patch_hunks("--- a/z\n+++ b/z\n@@ -1,1 +1,200000000 @@\n+only one line")
+    tc = test_case(tc, len(huge) == 1, "parse_patch_hunks: bogus count still yields a hunk")
+    span = huge[0]["end_line"] - huge[0]["start_line"] + 1
+    tc = test_case(tc, span <= 4, "parse_patch_hunks: clamps count to lines present (got %d)" % span)
+
+    # Non-numeric and non-positive counts are skipped outright.
+    tc = test_case(tc, parse_patch_hunks("--- a/q\n+++ b/q\n@@ -1,1 +x,y @@\n+a") == [], "parse_patch_hunks: non-numeric skipped")
+    tc = test_case(tc, parse_patch_hunks("--- a/q\n+++ b/q\n@@ -1,1 +1,0 @@\n+a") == [], "parse_patch_hunks: zero count skipped")
+
+    # No +++ header → nothing to attribute hunks to.
+    tc = test_case(tc, parse_patch_hunks("@@ -1,1 +1,5 @@\n+a") == [], "parse_patch_hunks: no file header → []")
+    tc = test_case(tc, parse_patch_hunks("") == [], "parse_patch_hunks: empty → []")
+
+    return tc
+
 def test_linter_error_message(tc: int) -> int:
     """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
     single = linter_error_message({"PMD": True}, "hard")
@@ -3233,6 +3275,12 @@ def test_sarif_lib(tc: int) -> int:
     """
 
     diags = parse_sarif_diagnostics(sarif_text)
+
+    # sarif_diagnostics() takes an already-decoded document and must agree with
+    # the string-parsing entry point, so callers that already hold the dict can
+    # skip a second parse.
+    tc = test_case(tc, sarif_diagnostics(parse_sarif(sarif_text)) == diags, "sarif_diagnostics: matches parse_sarif_diagnostics")
+    tc = test_case(tc, sarif_diagnostics({}) == [], "sarif_diagnostics: empty document → []")
     tc = test_case(tc, len(diags) == 2, "parse_sarif_diagnostics: 2 data")
     tc = test_case(tc, diags[0]["tool"] == "shellcheck", "parse_sarif_diagnostics: tool name")
     tc = test_case(tc, diags[0]["file"] == "scripts/build.sh", "parse_sarif_diagnostics: file path")
@@ -3579,6 +3627,394 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     ctx.std.fs.remove_dir_all(d)
     return tc
 
+def test_template_presets(tc: int) -> int:
+    """Covers `template_presets` and the `base` layer of `resolve_templates`.
+
+    The shipped `full` preset is empty, so the preset layer is the identity
+    function on every real invocation. These drive the layering with
+    test-local presets instead, which is the only way the four-level
+    precedence lattice gets real coverage while one preset is registered.
+    """
+
+    # `full` contributes nothing: that is what keeps output byte-identical.
+    tc = test_case(tc, template_presets.templates("full") == {}, "the full preset contributes no templates")
+    tc = test_case(tc, template_presets.DEFAULT == "full", "full is the default preset")
+    tc = test_case(tc, template_presets.DEFAULT in template_presets.NAMES, "the default preset is registered")
+    tc = test_case(tc, template_presets.NAMES == sorted(template_presets.NAMES), "preset names are sorted")
+
+    # base = None is exactly the pre-preset behavior.
+    cases = [
+        (None, "build", None),
+        ({}, "build", None),
+        ({"summary": "S"}, "build", {"summary": "S"}),
+        ({"summary": "S", "lint": {"details": "D"}}, "lint", {"summary": "S", "details": "D"}),
+        ({"summary": "S", "lint": {"details": "D"}}, "build", {"summary": "S"}),
+        ({"lint": {"summary": "L"}}, "build", None),
+    ]
+    for (templates, kind, want) in cases:
+        got = resolve_templates(templates, kind)
+        tc = test_case(tc, got == want, "resolve_templates(%r, %r) == %r" % (templates, kind, want))
+        tc = test_case(
+            tc,
+            resolve_templates(templates, kind, base = None) == got,
+            "base = None matches the single-layer call for %r" % (templates,),
+        )
+        tc = test_case(
+            tc,
+            resolve_templates(templates, kind, base = template_presets.templates("full")) == got,
+            "the full preset as base is a no-op for %r" % (templates,),
+        )
+
+    # The four-level lattice: preset flat < preset scoped < user flat < user scoped.
+    base = {"summary": "P-flat", "details": "P-details", "lint": {"summary": "P-scoped"}}
+    tc = test_case(
+        tc,
+        resolve_templates({}, "lint", base = base) == {"summary": "P-scoped", "details": "P-details"},
+        "a preset's per-kind block overlays its own flat keys",
+    )
+    tc = test_case(
+        tc,
+        resolve_templates({}, "build", base = base) == {"summary": "P-flat", "details": "P-details"},
+        "a preset's per-kind block does not leak to other kinds",
+    )
+
+    # The precedence inversion a naive merge would cause: the user's flat key
+    # must beat the preset's per-kind block, not the other way around.
+    tc = test_case(
+        tc,
+        resolve_templates({"summary": "U-flat"}, "lint", base = {"lint": {"summary": "P-scoped"}}) ==
+        {"summary": "U-flat"},
+        "a user flat key beats a preset per-kind block",
+    )
+    tc = test_case(
+        tc,
+        resolve_templates({"summary": "U-flat"}, "lint", base = base) ==
+        {"summary": "U-flat", "details": "P-details"},
+        "a user flat key beats a preset scoped key while unset slots still come from the preset",
+    )
+    tc = test_case(
+        tc,
+        resolve_templates({"lint": {"summary": "U-scoped"}}, "lint", base = base) ==
+        {"summary": "U-scoped", "details": "P-details"},
+        "a user per-kind block wins outright",
+    )
+    tc = test_case(
+        tc,
+        resolve_templates(None, "build", base = {"summary": "P"}) == {"summary": "P"},
+        "the preset applies when the user sets nothing",
+    )
+    tc = test_case(tc, resolve_templates(None, "build", base = {}) == None, "both layers empty resolves to None")
+
+    # A per-kind block that is not a dict is a config error. The two layers
+    # report separately so the message points at the layer actually at fault.
+    tc = test_case(
+        tc,
+        resolve_templates({"lint": {}}, "lint", base = {"lint": {}}) == None,
+        "empty per-kind blocks in both layers resolve to None",
+    )
+
+    # Registry validation. `_validation_errors` returns messages rather than
+    # calling fail(), so the rules that guard preset authors are testable.
+    ok = {"a": TemplatePreset(name = "a", description = "d", templates = {})}
+    tc = test_case(tc, template_presets.validation_errors(ok, "a") == [], "a valid registry reports no errors")
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(ok, "nope")) == 1,
+        "an unregistered default is an error",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "b", description = "d", templates = {})},
+            "a",
+        )) == 1,
+        "a preset whose key and name disagree is an error",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"body": "B", "summary": ""})},
+            "a",
+        )) == 1,
+        "an empty template is an error: it would yield the built-in it meant to replace",
+    )
+
+    # A preset may target a subset of the surfaces: `template_preset` is a
+    # per-feature arg, so a check-surfaces-only preset is a normal thing to
+    # write, and a comment feature selecting it just keeps the built-in body.
+    tc = test_case(
+        tc,
+        template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"summary": "S"})},
+            "a",
+        ) == [],
+        "a preset covering only the check surfaces is valid",
+    )
+    tc = test_case(
+        tc,
+        template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"body": "B"})},
+            "a",
+        ) == [],
+        "a preset covering only the comment surfaces is valid",
+    )
+
+    # A subset is fine; a slot no renderer reads is not. Without this a typo
+    # leaves the preset selectable and silently inert.
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"summray": "S"})},
+            "a",
+        )) == 1,
+        "a misspelled top-level slot is an error",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"lint": {"body": "B"}})},
+            "a",
+        )) == 1,
+        "\"body\" inside a per-kind block is an error — a comment covers every task",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"lint": {"summray": "S"}})},
+            "a",
+        )) == 1,
+        "a misspelled slot inside a per-kind block is an error",
+    )
+    for slot in ("title", "summary", "details"):
+        tc = test_case(
+            tc,
+            template_presets.validation_errors(
+                {"a": TemplatePreset(
+                    name = "a",
+                    description = "d",
+                    templates = {slot: "S", "lint": {slot: "S"}},
+                )},
+                "a",
+            ) == [],
+            "%r is a valid slot flat and per-kind" % slot,
+        )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(
+                name = "a",
+                description = "d",
+                templates = {"body": "B", "lnit": {"summary": "S"}},
+            )},
+            "a",
+        )) == 1,
+        "a per-kind block naming an unknown task kind is an error",
+    )
+    tc = test_case(
+        tc,
+        template_presets.validation_errors(
+            {"a": TemplatePreset(
+                name = "a",
+                description = "d",
+                templates = {"body": "B", "lint": {"summary": "S"}},
+            )},
+            "a",
+        ) == [],
+        "a per-kind block naming a real task kind is accepted",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(
+                name = "a",
+                description = "d",
+                templates = {"body": "B", "lint": "oops"},
+            )},
+            "a",
+        )) == 1,
+        "a task-kind key holding a string is an error, not a flat slot named after the kind",
+    )
+    for kind in TEMPLATE_SCOPE_KEYS:
+        tc = test_case(
+            tc,
+            template_presets.validation_errors(
+                {"a": TemplatePreset(
+                    name = "a",
+                    description = "d",
+                    templates = {"body": "B", kind: {"summary": "S"}},
+                )},
+                "a",
+            ) == [],
+            "%r is a valid preset scope key" % kind,
+        )
+
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "", templates = {})},
+            "a",
+        )) == 1,
+        "a preset with no description is an error: the description is user-visible in --help",
+    )
+
+    # The arg every surface feature declares. Its help text is generated from
+    # the registry (`args.Arg` is opaque to AXL, so that string is covered by
+    # the description rule above plus `aspect feature <name>`).
+    preset_args = template_presets.args()
+    tc = test_case(tc, list(preset_args.keys()) == ["template_preset"], "the args factory declares one arg")
+
+    return tc
+
+def test_denied_terminal_post_warning(tc: int) -> int:
+    """A terminal publish the server declines to post leaves the task's entry
+    frozen mid-run, which is otherwise invisible. The warning names the grant
+    holder when the server reports one, and stays sensible when it does not."""
+    with_holder = denied_terminal_post_warning("lint-gha", "123456")
+    tc = test_case(tc, "lint-gha" in with_holder, "the warning names the task")
+    tc = test_case(tc, "post grant held by run 123456" in with_holder, "the warning names the grant holder")
+
+    # The formatter is only useful if the field survives the response wrapper,
+    # which rebuilds the body rather than passing it through.
+    piped = github.contribute_result({
+        "state": {"entries": []},
+        "should_post": False,
+        "comment_id": "c1",
+        "post_grant_run": "987654",
+    })
+    tc = test_case(tc, piped.get("post_grant_run") == "987654", "the contribute wrapper preserves post_grant_run")
+    tc = test_case(
+        tc,
+        "post grant held by run 987654" in denied_terminal_post_warning("t", piped.get("post_grant_run", "")),
+        "a server-reported holder reaches the warning end to end",
+    )
+
+    # Older servers omit the field entirely.
+    older = github.contribute_result({"state": {}, "should_post": False, "comment_id": ""})
+    tc = test_case(tc, older.get("post_grant_run") == "", "an omitted post_grant_run reads as empty, not missing")
+
+    # The other silent path: a terminal contribution that never reached the API.
+    dropped = dropped_terminal_contribute_warning("build-gha", "503 upstream")
+    tc = test_case(tc, "build-gha" in dropped, "the dropped-contribute warning names the task")
+    tc = test_case(tc, "503 upstream" in dropped, "the dropped-contribute warning carries the error")
+    tc = test_case(
+        tc,
+        "unknown" in dropped_terminal_contribute_warning("build-gha", ""),
+        "an empty error still reads sensibly",
+    )
+
+    without = denied_terminal_post_warning("lint-gha", "")
+    tc = test_case(tc, "lint-gha" in without, "the warning names the task with no holder reported")
+    tc = test_case(tc, "post grant held by" not in without, "no dangling holder clause when the server reports none")
+    tc = test_case(tc, without.endswith("posts later"), "the message ends cleanly with no holder")
+    return tc
+
+def test_terminal_progress(tc: int) -> int:
+    """`ProgressStyles.short` drops the leading noun for surfaces that print
+    the task label beside the text — a PR-comment row reads
+    `**lint-gha** [lint] · complete (clean)`, not `… · Lint complete (clean)`.
+    Both forms come from one composer so they cannot describe different
+    outcomes."""
+    p = phases.terminal_progress("Lint", "complete", "clean")
+    tc = test_case(tc, p.body == "Lint complete (clean)", "body keeps the noun")
+    tc = test_case(tc, p.short == "complete (clean)", "short drops the noun")
+
+    bare = phases.terminal_progress("Gazelle", "aborted")
+    tc = test_case(tc, bare.body == "Gazelle aborted", "body with no detail")
+    tc = test_case(tc, bare.short == "aborted", "short with no detail")
+
+    # The detail is the part worth keeping; it must survive into both.
+    detailed = phases.terminal_progress("Bazel test", "complete", "28/28 passed · 27 cached")
+    tc = test_case(tc, "28/28 passed · 27 cached" in detailed.body, "body keeps the detail")
+    tc = test_case(tc, "28/28 passed · 27 cached" in detailed.short, "short keeps the detail")
+    tc = test_case(tc, not detailed.short.startswith("Bazel"), "short has no command lead")
+
+    # Unset is the documented fallback: surfaces read `body`.
+    tc = test_case(tc, phases.ProgressStyles(body = "x").short == "", "short defaults to empty")
+    return tc
+
+def test_result_cell_text(tc: int) -> int:
+    """The comment row prefers `short`, but a failure in a phase that is not the
+    task's own kind still says which phase — the short text names the outcome,
+    not where it happened."""
+
+    def entry(**kw):
+        base = {"status": "failed", "kind": "gazelle", "progress": {"body": "B", "short": "failed (3 out of date)"}}
+        base.update(kw)
+        return base
+
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "diff")) == "failed in diff · failed (3 out of date)",
+        "a phase unlike the task kind is kept",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "gazelle")) == "failed (3 out of date)",
+        "a phase equal to the task kind is dropped — the row already prints it",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "")) == "failed (3 out of date)",
+        "no phase recorded leaves the short text alone",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(status = "passed", failed_in_phase = "diff")) == "failed (3 out of date)",
+        "a non-failed status never gets a phase prefix",
+    )
+
+    # Without `short`, the long-form composition is unchanged.
+    tc = test_case(
+        tc,
+        result_cell_text({
+            "status": "failed",
+            "kind": "gazelle",
+            "failed_in_phase": "diff",
+            "progress": {"body": "Gazelle failed (3 out of date)"},
+        }) ==
+        "failed in diff · Gazelle failed (3 out of date)",
+        "the long form still composes the phase prefix",
+    )
+    return tc
+
+def test_results_subset_carries_progress(tc: int) -> int:
+    """`results_subset` is how both the GitHub and GitLab comment features turn
+    an update into an entry. It must carry the whole `ProgressStyles` through —
+    the GitLab path passed `None` here for its entire life, so MR rows rendered
+    no producer text at all."""
+    styles = phases.terminal_progress("Lint", "complete", "clean")
+    subset = results_subset(
+        {},
+        1000,
+        aspect_url = "",
+        bes_url = "",
+        check_run_url = "",
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress_styles = styles,
+        failed_in_phase = "",
+        start_time_ms = 0,
+    )
+    pg = subset.get("progress") or {}
+    tc = test_case(tc, pg.get("body") == "Lint complete (clean)", "the long form survives into the entry")
+    tc = test_case(tc, pg.get("short") == "complete (clean)", "the short form survives into the entry")
+
+    # `None` is legitimate for callers with no styles yet; it must not crash.
+    empty = results_subset(
+        {},
+        0,
+        aspect_url = "",
+        bes_url = "",
+        check_run_url = "",
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress_styles = None,
+        failed_in_phase = "",
+        start_time_ms = 0,
+    )
+    tc = test_case(tc, (empty.get("progress") or {}).get("short") == "", "no styles yields an empty short")
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -3647,6 +4083,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
+    tc = test_parse_patch_hunks(tc)
     tc = test_linter_error_message(tc)
     tc = test_fmt_elapsed(tc)
     tc = test_summary_title(tc)
@@ -3666,6 +4103,11 @@ def impl(ctx: TaskContext) -> int:
     tc = test_bazel_render_snippets(ctx, tc, temp_dir)
     tc = test_gitlab_token_cache(ctx, tc, temp_dir)
     tc = test_prompt_choice(tc)
+    tc = test_template_presets(tc)
+    tc = test_terminal_progress(tc)
+    tc = test_result_cell_text(tc)
+    tc = test_results_subset_carries_progress(tc)
+    tc = test_denied_terminal_post_warning(tc)
 
     print(tc, "tests passed")
     return 0
@@ -3756,6 +4198,7 @@ def test_gitlab_token_cache(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
 axl = task(
     group = ["tests"],
+    summary = "Run the AXL unit test suite defined in .aspect/axl.axl.",
     implementation = impl,
     args = {},
     # tips.TRAITS must be in the trait list because several tested

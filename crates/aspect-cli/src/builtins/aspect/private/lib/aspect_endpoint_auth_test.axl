@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token")
+load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_authority", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token", "same_bes_endpoint")
 
 def _eq(label, got, want):
     if got != want:
@@ -29,6 +29,69 @@ def _test_endpoint_host(_):
     _eq("userinfo stripped", endpoint_host("grpcs://user@bes.aspect.build"), "bes.aspect.build")
     _eq("userinfo + port", endpoint_host("grpcs://user:pw@bes.aspect.build:443/x"), "bes.aspect.build")
     _eq("uppercase lowered", endpoint_host("GRPCS://BES.ASPECT.BUILD"), "bes.aspect.build")
+    _eq("surrounding space ignored", endpoint_host("  grpcs://bes.aspect.build  "), "bes.aspect.build")
+
+def _test_endpoint_authority(_):
+    """Authority extraction keeps the port and fills in the scheme's default, so
+    the spellings of one endpoint all normalize alike."""
+    _eq("grpcs default port", endpoint_authority("grpcs://bes.aspect.build"), "bes.aspect.build:443")
+    _eq("grpcs explicit port", endpoint_authority("grpcs://bes.aspect.build:443"), "bes.aspect.build:443")
+    _eq("https default port", endpoint_authority("https://bes.aspect.build"), "bes.aspect.build:443")
+    _eq("grpc default port", endpoint_authority("grpc://bes.aspect.build"), "bes.aspect.build:80")
+    _eq("non-default port kept", endpoint_authority("grpcs://bes.aspect.build:8980"), "bes.aspect.build:8980")
+    _eq("bare host:port", endpoint_authority("bes.aspect.build:443"), "bes.aspect.build:443")
+    _eq("path stripped", endpoint_authority("grpcs://bes.aspect.build:443/x"), "bes.aspect.build:443")
+    _eq("userinfo stripped", endpoint_authority("grpcs://user:pw@bes.aspect.build"), "bes.aspect.build:443")
+    _eq("uppercase lowered", endpoint_authority("GRPCS://BES.Aspect.Build"), "bes.aspect.build:443")
+    _eq("surrounding space ignored", endpoint_authority("  grpcs://bes.aspect.build  "), "bes.aspect.build:443")
+
+    # Bazel documents `[SCHEME://]HOST[:PORT]` and assumes grpcs with no scheme,
+    # so a bare host takes :443 — otherwise `--bes_backend=bes.example.com`
+    # would miss a `grpcs://bes.example.com` sink and both would stream.
+    _eq("schemeless, portless", endpoint_authority("bes.aspect.build"), "bes.aspect.build:443")
+    _eq("unknown scheme, portless", endpoint_authority("unix://bes.aspect.build"), "bes.aspect.build")
+
+def _test_same_bes_endpoint(_):
+    """Two BES URIs match when they address the same host:port, however the
+    default port and scheme are spelled."""
+    _eq(
+        "implicit vs explicit :443",
+        same_bes_endpoint("grpcs://bes.acme.aspect.build", "grpcs://bes.acme.aspect.build:443"),
+        True,
+    )
+    _eq(
+        "scheme ignored at the same port",
+        same_bes_endpoint("grpc://bes.acme.aspect.build:443", "grpcs://bes.acme.aspect.build"),
+        True,
+    )
+    _eq(
+        "bare host:port vs scheme",
+        same_bes_endpoint("bes.acme.aspect.build:443", "grpcs://bes.acme.aspect.build"),
+        True,
+    )
+    _eq("case insensitive", same_bes_endpoint("GRPCS://BES.ACME.ASPECT.BUILD", "grpcs://bes.acme.aspect.build"), True)
+    _eq("path ignored", same_bes_endpoint("grpcs://bes.acme.aspect.build/x", "grpcs://bes.acme.aspect.build"), True)
+
+    # Bazel accepts a schemeless `--bes_backend` and assumes grpcs, so it must
+    # match the runner's `grpcs://` sink however the user spelled it.
+    _eq("schemeless bazel flag", same_bes_endpoint("grpcs://bes.acme.aspect.build", "bes.acme.aspect.build"), True)
+    _eq("schemeless both sides", same_bes_endpoint("bes.acme.aspect.build", "bes.acme.aspect.build:443"), True)
+    _eq(
+        "schemeless vs https sink",
+        same_bes_endpoint("https://bes.acme.aspect.build", "bes.acme.aspect.build"),
+        True,
+    )
+    _eq("schemeless, different host", same_bes_endpoint("grpcs://bes.a.aspect.build", "bes.b.aspect.build"), False)
+
+    _eq("different host", same_bes_endpoint("grpcs://bes.a.aspect.build", "grpcs://bes.b.aspect.build"), False)
+    _eq("different port", same_bes_endpoint("grpcs://bes.acme.aspect.build:8980", "grpcs://bes.acme.aspect.build"), False)
+
+    # grpc:// defaults to :80 and grpcs:// to :443, so these are genuinely
+    # different endpoints — not a duplicate to suppress.
+    _eq("differing default ports", same_bes_endpoint("grpc://bes.acme.aspect.build", "grpcs://bes.acme.aspect.build"), False)
+
+    _eq("empty never matches", same_bes_endpoint("", "grpcs://bes.acme.aspect.build"), False)
+    _eq("both empty", same_bes_endpoint("", ""), False)
 
 def _test_is_aspect_host(_):
     """A host is Aspect-owned iff a configured deployment claims it (via the
@@ -96,15 +159,18 @@ def _test_login_hint(_):
 
 def _test_impl(ctx):
     _test_endpoint_host(ctx)
+    _test_endpoint_authority(ctx)
+    _test_same_bes_endpoint(ctx)
     _test_is_aspect_host(ctx)
     _test_needs_aspect_token(ctx)
     _test_headers_have_auth(ctx)
     _test_credential_helper_covers_host(ctx)
     _test_login_hint(ctx)
-    print("aspect_endpoint_auth_test.axl: OK (6 sections)")
+    print("aspect_endpoint_auth_test.axl: OK (8 sections)")
     return 0
 
 aspect_endpoint_auth_tests = task(
+    summary = "Run the aspect endpoint auth AXL unit tests.",
     kind = "test-aspect-endpoint-auth",
     group = ["dev"],
     implementation = _test_impl,

@@ -61,7 +61,7 @@ pub fn run() -> anyhow::Result<()> {
     // passes (a global `--credential_helper=aspect` never sends a token to a
     // third-party host) and Bazel falls back to whatever it would otherwise use.
     let Some(deployment) = resolved.deployment else {
-        println!("{}", no_credential_response());
+        write_response(&no_credential_response())?;
         return Ok(());
     };
 
@@ -83,8 +83,22 @@ pub fn run() -> anyhow::Result<()> {
             )
         })?;
 
-    println!("{}", bearer_response(&token));
-    Ok(())
+    write_response(&bearer_response(&token))
+}
+
+/// Write the helper's JSON response to stdout.
+///
+/// Unlike console output, this is the protocol payload Bazel parses, so a
+/// failed write is a failed request: propagate it rather than exiting 0 on a
+/// response Bazel never received. (This is why `outln!` is wrong here — see
+/// `axl_runtime::out`.)
+fn write_response(response: &serde_json::Value) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{response}").context("writing the credential-helper response to stdout")?;
+    stdout
+        .flush()
+        .context("flushing the credential-helper response to stdout")
 }
 
 /// The empty response Bazel reads as "no credential from this helper", so it

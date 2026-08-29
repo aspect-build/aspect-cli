@@ -16,21 +16,20 @@ Usage:
     aspect lint --fix
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep", "sleep_iter")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "file_uri_to_path", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "file_uri_to_path", "now_ms", "process_event")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
+load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -124,16 +123,24 @@ def filter_hunks(diagnostics, changed_files):
         result.append(d)
     return result
 
-def _parse_patch_hunks(content):
+def parse_patch_hunks(content):
     """Extract the (file, line) span of every hunk in a unified diff.
 
     Returns `{file, start_line, end_line}` per hunk; `file` is the post-fix
     `+++ b/<path>` side (leading `b/` stripped), lines 1-based inclusive.
     Empty list when unparseable — callers treat that as "leave the patch alone".
+
+    A hunk's declared line count is clamped to the number of lines in the
+    patch, since no hunk can cover more than that. The count comes from the
+    `@@` header, and a malformed or truncated patch can declare a span far
+    larger than its body; callers expand each hunk to one entry per line, so
+    an unclamped count allocates proportional to the declared number.
     """
     hunks = []
     current_file = ""
-    for line in content.split("\n"):
+    lines = content.split("\n")
+    max_count = len(lines)
+    for line in lines:
         if line.startswith("+++ "):
             rest = line[4:]
             if rest.startswith("b/"):
@@ -157,7 +164,7 @@ def _parse_patch_hunks(content):
         if not (a_str.isdigit() and b_str.isdigit()):
             continue
         start = int(a_str)
-        count = int(b_str)
+        count = min(int(b_str), max_count)
         if count <= 0:
             continue
         hunks.append({
@@ -185,7 +192,7 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
         if content == None:
             warn(ctx.std, "Failed to read lint patch (skipping): %s" % patch_path)
             continue
-        hunks = _parse_patch_hunks(content)
+        hunks = parse_patch_hunks(content)
         if not hunks:
             kept.append(patch_path)
             continue
@@ -393,9 +400,9 @@ def _print_linters_run(ctx, tools_run):
     """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
 
@@ -407,9 +414,9 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     """
     if not relevant:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     label = "%sLint findings%s after %s%s%s (%d)" % (
         bold,
@@ -544,7 +551,7 @@ def _compact_text(status, data):
     bits = _sev_bits(e, w, i)
     if bits:
         return " · ".join(bits)
-    return ""
+    return phases.ProgressStyles()
 
 def _sev_bits(e, w, i):
     """Per-severity count bits in display order (error → warning → info), skipping zeros."""
@@ -557,22 +564,22 @@ def _sev_bits(e, w, i):
         bits.append("%d info" % i)
     return bits
 
-def _body_text(status, data):
+def _progress(status, data):
     """Narrative `progress.body` for the PR-comment 💬 line — wraps `_compact_text`
     with a status verb prefix (e.g. `Lint failed · 3 errors`). Terminal emits only.
     """
     compact = _compact_text(status, data)
     if status == "passed":
-        return "Lint complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "complete", compact)
     if status == "warning":
-        return "Lint complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "complete", compact)
     if status == "failed":
-        return "Lint failed" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "failed", compact)
     if status == "aborted":
-        return "Lint aborted"
+        return phases.terminal_progress("Lint", "aborted")
     return ""
 
-def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
+def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, expected_len = -1):
     """Read a lint output file, or None when its contents can't be read yet.
 
     Paths under the bb_clientd mount (bytestream:// URIs resolved by
@@ -585,25 +592,26 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     the file in the pending queue — retried each tick until the post-build
     drain budget warns and skips it.
 
+    `expected_len` is the file's authoritative byte length (BES `File.length`),
+    or -1 when unknown. Both read paths compare the bytes they actually read
+    against it and report a short read as not-yet-readable: a successful read
+    is not proof the contents are whole, because the file can be exposed before
+    its download finishes, and every consumer here (SARIF parse, patch hunks,
+    exit codes) silently misbehaves on truncated input rather than failing
+    loudly.
+
     Anything else is a plain local path — file:// URIs, or the output-tree
-    fallback for bytestream URIs on runners without bb_clientd — read
-    directly: local disk can't stall the way bb_clientd reads can, and the
-    direct path avoids a background probe thread per read. An
-    empty read of a file whose size is non-zero is a failed read, matching
-    the probe's contract.
+    fallback for bytestream URIs on runners without bb_clientd — read directly
+    via `read_to_string_if_complete`: local disk can't stall the way bb_clientd
+    reads can, so it needs no background probe, only the same length gate.
 
     Either way, None always means unreadable, never empty: a clean linter's
     empty `.out` reads as "".
     """
     root = bb_clientd_root(ctx)
     if root == None or not filepath.startswith(root):
-        if not ctx.std.fs.exists(filepath):
-            return None
-        content = ctx.std.fs.try_read_to_string(filepath)
-        if content == "" and ctx.std.fs.metadata(filepath).size > 0:
-            return None
-        return content
-    return ctx.std.fs.poll_read_to_string(filepath, timeout_ms)
+        return ctx.std.fs.read_to_string_if_complete(filepath, expected_len = expected_len)
+    return ctx.std.fs.poll_read_to_string(filepath, timeout_ms, expected_len = expected_len)
 
 def _probe_timeout_ms(ctx, pass_deadline_ms):
     """Per-read probe bound for one drain/event pass: the standard probe
@@ -626,20 +634,33 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     so the fail_on_linter_error path can report which tool failed.
     SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
     results equal a terminal pass and findings don't flicker as batches arrive.
+
+    Every read is gated on the file's BES-declared length so a
+    still-materializing blob is retried rather than parsed half-written.
     """
+    expected_len = bes_get(file, "length", -1) or -1
+
     if file.name.endswith(".out"):
-        out = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        out = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if out == None:
             return None
         ctx.std.io.stderr.write(out)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".report"):
-        report = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        report = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if report == None:
             return None
         if "sarif-" in report:
-            lint_accumulate(data, strategy.filter(parse_sarif_diagnostics(report), changed_files))
+            sarif = parse_sarif(report)
+            if not sarif:
+                # The read was complete (length-gated), so a document that
+                # still won't decode is malformed rather than in flight —
+                # retrying can't help. Name it instead of dropping its
+                # findings silently.
+                warn(ctx.std, "Ignoring unparseable SARIF report: %s" % filepath)
+                return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
+            lint_accumulate(data, strategy.filter(sarif_diagnostics(sarif), changed_files))
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
             return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
@@ -649,10 +670,10 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".patch"):
-        # Readability gate (content discarded): requeues the patch until the
-        # blob is materialized, since lint_patch hooks buffer the path and
-        # later re-read it with a plain read_to_string.
-        if _read_lint_file(ctx, filepath, probe_timeout_ms) == None:
+        # Readability gate (content discarded): requeues until the blob is
+        # whole, since lint_patch hooks buffer the path and re-read it later
+        # with a plain read_to_string that has no completeness check.
+        if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
         patches.append(filepath)
         for hook in lint_trait.lint_patch:
@@ -660,7 +681,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".exit_code"):
-        content = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        content = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if content == None:
             return None
         stripped = content.rstrip()
@@ -719,20 +740,18 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
-    ansi = color_enabled(ctx.std)
 
     # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
 
     data = lint_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # Base flags computed before setup_phase, which forwards them to setup_bazel_command.
+    # Base flags computed before phases.setup, which forwards them to bzl.setup_command.
     base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
     for aspect in ctx.args.aspects:
         base_flags.append("--aspects=" + aspect)
@@ -755,26 +774,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         base_flags.append("--output_groups=rules_lint_machine")
 
     # Pre-task setup phase (status surface, rc parse, health checks); returns
-    # resolved flags (a failed health check fails the task inside setup_phase).
-    rc = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
-    announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
+    # resolved flags (a failed health check fails the task inside phases.setup).
+    rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
     # `git diff <base> --unified=0`. Lives in lib/github.axl (format wants it too).
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Detecting changed files...",
             stream = "Detecting changed files",
         ),
         kind = "lint_results",
         data = data,
-        phase = Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
+        phase = phases.Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
     )
     detect_result = detect_changed_files(
         ctx,
@@ -802,7 +819,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in lint_trait.lint_start:
         hook(ctx)
 
-    bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
+    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
+    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 
@@ -810,17 +828,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         hook(ctx)
 
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running lint aspects...",
             stream = "Running lint aspects",
         ),
         kind = "lint_results",
         data = data,
-        phase = Phase(name = "lint", description = "Run lint aspects", emoji = "🔬"),
+        phase = phases.Phase(name = "lint", description = "Run lint aspects", emoji = "🔬"),
     )
 
     # After the phase line, so the streams are announced under the spawn they
@@ -846,11 +862,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Re-emit now that sink_invocation_id is known (Web UI link); status surfaces
     # only — empty `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running lint aspects...",
         ),
         kind = "lint_results",
@@ -938,11 +952,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # Flip to "failing" on mid-build action failure so the breakdown tags Lint.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
             heartbeat_status = _pick_status(data, had_failure = had_action_failure, terminal = False)
-            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+            ph.dispatch(phases.Update(
                 kind = "lint_results",
                 status = heartbeat_status,
                 data = data,
-                progress = ProgressStyles(),
+                progress = phases.ProgressStyles(),
             ))
             last_emit_ms = now_ms(ctx)
         if events.done:
@@ -1023,17 +1037,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not build_failed and fix_apply and scoped_patches:
         patches_label = pluralize(len(scoped_patches), "auto-fix patch", plural = "auto-fix patches")
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Applying %s..." % patches_label,
                 stream = "Applying " + patches_label,
             ),
             kind = "lint_results",
             data = data,
-            phase = Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
+            phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
@@ -1045,17 +1057,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # instead of Lint; without it the lint phase stays active so Lint is tagged.
     if not build_failed and lint_tools_run:
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Filtering diagnostics...",
                 stream = "Filtering diagnostics",
             ),
             kind = "lint_results",
             data = data,
-            phase = Phase(name = "filter", description = "Filter diagnostics", emoji = "🔎"),
+            phase = phases.Phase(name = "filter", description = "Filter diagnostics", emoji = "🔎"),
         )
 
     # diagnostics were already filtered per-batch as SARIF streamed in, so the
@@ -1129,12 +1139,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     task_path = task_cli_path(ctx.task)
     prefix = repro_prefix(ctx)
     if flavor_allows(ctx.args.repro_flavors, "lint-repro"):
-        data["repro_commands"].append(ReproFixCommand(
+        data["repro_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, repro_flags, targets),
             slug = "lint-repro",
         ))
     if data["lint"]["suggestions"] and flavor_allows(ctx.args.fix_flavors, "lint-fix"):
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, [("--fix", None)] + repro_flags, targets),
             slug = "lint-fix",
         ))
@@ -1144,13 +1154,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bookend = lint_conclusion(final_status, data)
 
     # Pre-hook with rich ReproFixInfo (exit_code/targets/extras) that the
-    # dispatch_task_update safety-net can't supply; these are skipped on dispatch.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "lint_results",
-        status = final_status,
+    # ph.dispatch safety-net can't supply; these are skipped on dispatch.
+    ph.suggest_fixes(
+        "lint_results",
+        final_status,
         exit_code = exit_code,
         targets = targets,
         extras = {
@@ -1159,15 +1166,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         },
     )
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "lint_results",
         status = final_status,
         final = True,
         conclusion = bookend,
         data = data,
-        progress = ProgressStyles(
-            body = _body_text(final_status, data),
-        ),
+        progress = _progress(final_status, data),
     ))
     print_repro_and_fix(ctx.std, data, final_status)
 
@@ -1178,10 +1183,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
 lint = task(
+    summary = "Lint targets using rules_lint aspects and report findings on the terminal or as code-review comments.",
     args = {
         "aspects": args.string_list(
             long = "aspect",
-            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--bazel-flag=--aspects=…` or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
+            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--aspects=…` (Bazel's own flag, forwarded) or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
         ),
         "fix": args.boolean(
             description = (
@@ -1224,12 +1230,11 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | bazel_flag_args("the lint build") | announce_bazel_args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the lint build") | bzl.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,
         LintTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

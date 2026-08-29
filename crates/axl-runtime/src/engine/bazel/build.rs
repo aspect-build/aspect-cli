@@ -1,3 +1,4 @@
+use crate::errln;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -7,6 +8,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use allocative::Allocative;
 use axl_types::stream::Writable;
@@ -42,6 +44,7 @@ use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::Subscriber;
+use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
@@ -426,8 +429,15 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
 #[derive(Clone)]
 struct IterConfig {
     /// `None` means no filter — every event yields. `Some(set)` keeps only
-    /// events whose payload tag is in the set.
+    /// events whose payload tag is in the set. Applied SEND-side at `bind`
+    /// time (see `BuildEventStream::subscribe_filtered`), so a filtered
+    /// iterator's buffer never holds events of other kinds.
     kinds: Option<Arc<HashSet<i32>>>,
+    /// When `Some(ms)`, blocking iteration (`for event in iter`) yields a
+    /// Starlark `None` after `ms` of silence instead of blocking forever, so
+    /// callers get a heartbeat tick even while Bazel is quiet. `None` blocks
+    /// until the next event or stream close (the historical behavior).
+    tick_ms: Option<u64>,
 }
 
 enum IterState {
@@ -467,22 +477,31 @@ impl std::fmt::Debug for IterState {
 }
 
 impl BuildEventIter {
-    pub fn new(kinds: Option<HashSet<i32>>) -> Self {
+    pub fn new(kinds: Option<HashSet<i32>>, tick_ms: Option<u64>) -> Self {
         Self {
             config: IterConfig {
                 kinds: kinds.map(Arc::new),
+                tick_ms,
             },
             state: Arc::new(Mutex::new(IterState::Pending)),
         }
     }
 
     /// Subscribe the iterator's receiver. Must run before bazel opens the
-    /// BEP FIFO so the early burst is buffered.
+    /// BEP FIFO so the early burst is buffered. The `kinds=` filter is
+    /// installed here as a send-side predicate, so the reader thread drops
+    /// unwanted kinds before they ever enter this iterator's buffer.
     fn bind(&self, stream: &BuildEventStream) -> anyhow::Result<()> {
         let mut state = self.state.lock().unwrap();
         match *state {
             IterState::Pending => {
-                let recv = stream.subscribe();
+                let filter: Option<SubscriberFilter<BuildEvent>> =
+                    self.config.kinds.clone().map(|kinds| {
+                        let f: SubscriberFilter<BuildEvent> =
+                            Arc::new(move |event: &BuildEvent| event_kind_in(event, &kinds));
+                        f
+                    });
+                let recv = stream.subscribe_filtered(filter);
                 *state = IterState::Live { recv };
                 Ok(())
             }
@@ -536,36 +555,48 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
     }
 
     unsafe fn iter_next(&self, _i: usize, heap: Heap<'v>) -> Option<Value<'v>> {
-        // Loop because `kinds=` may filter out events.
-        loop {
-            // Take recv out of the Mutex so we don't hold the lock across
-            // the blocking call.
-            let recv = {
-                let mut state = self.state.lock().unwrap();
-                match std::mem::replace(&mut *state, IterState::Pending) {
-                    IterState::Live { recv } => recv,
-                    other => {
-                        *state = other;
-                        return None;
-                    }
-                }
-            };
-
-            let result = recv.recv();
-            match result {
-                Ok(event) => {
-                    // Put recv back before deciding whether to filter or yield.
-                    *self.state.lock().unwrap() = IterState::Live { recv };
-                    if matches_kinds(&event, self.config.kinds.as_ref()) {
-                        return Some(event.alloc_value(heap));
-                    }
-                    // Otherwise loop and read the next event.
-                }
-                Err(_) => {
-                    *self.state.lock().unwrap() = IterState::Done;
+        // Take recv out of the Mutex so we don't hold the lock across the
+        // blocking call. Events are pre-filtered send-side (see `bind`), so
+        // whatever arrives is already a kind the caller asked for.
+        let recv = {
+            let mut state = self.state.lock().unwrap();
+            match std::mem::replace(&mut *state, IterState::Pending) {
+                IterState::Live { recv } => recv,
+                other => {
+                    *state = other;
                     return None;
                 }
             }
+        };
+
+        match self.config.tick_ms {
+            // Heartbeat mode: yield an event, or a Starlark `None` when the
+            // stream goes quiet for `ms`, so the caller's loop keeps ticking.
+            Some(ms) => match recv.recv_timeout(Duration::from_millis(ms)) {
+                Ok(event) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(event.alloc_value(heap))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(Value::new_none())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    *self.state.lock().unwrap() = IterState::Done;
+                    None
+                }
+            },
+            // Blocking mode: yield events until the stream closes.
+            None => match recv.recv() {
+                Ok(event) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(event.alloc_value(heap))
+                }
+                Err(_) => {
+                    *self.state.lock().unwrap() = IterState::Done;
+                    None
+                }
+            },
         }
     }
 
@@ -586,40 +617,32 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::None)
     }
 
-    /// Non-blocking pop. Returns `None` when empty or disconnected. Honors
-    /// the `kinds=` filter.
+    /// Non-blocking pop. Returns `None` when empty or disconnected. Events are
+    /// already `kinds=`-filtered send-side, so whatever is buffered is wanted.
     fn try_pop<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
         let iter = this
             .downcast_ref_err::<BuildEventIter>()
             .into_anyhow_result()?;
-        let kinds = iter.config.kinds.clone();
-        loop {
-            let mut state = iter.state.lock().unwrap();
-            let recv = match &*state {
-                IterState::Live { recv } => recv,
-                _ => return Ok(NoneOr::None),
-            };
-            match recv.try_recv() {
-                Ok(event) => {
-                    drop(state);
-                    if matches_kinds(&event, kinds.as_ref()) {
-                        return Ok(NoneOr::Other(event));
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(NoneOr::None),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    *state = IterState::Done;
-                    return Ok(NoneOr::None);
-                }
+        let mut state = iter.state.lock().unwrap();
+        let recv = match &*state {
+            IterState::Live { recv } => recv,
+            _ => return Ok(NoneOr::None),
+        };
+        match recv.try_recv() {
+            Ok(event) => Ok(NoneOr::Other(event)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(NoneOr::None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *state = IterState::Done;
+                Ok(NoneOr::None)
             }
         }
     }
 }
 
-fn matches_kinds(event: &BuildEvent, kinds: Option<&Arc<HashSet<i32>>>) -> bool {
-    let Some(kinds) = kinds else {
-        return true;
-    };
+/// True when `event`'s payload kind is in `kinds`. A payload-less event never
+/// matches a filter (there's no kind to test). Used to build the send-side
+/// subscriber filter in `BuildEventIter::bind`.
+fn event_kind_in(event: &BuildEvent, kinds: &HashSet<i32>) -> bool {
     let Some(payload) = event.payload.as_ref() else {
         return false;
     };
@@ -677,10 +700,10 @@ pub(super) fn announce_spawn(
 ) {
     let (grey, reset) = grey_style();
     if announce.version {
-        eprintln!("{grey}INFO: {}{reset}", version_line(version));
+        errln!("{grey}INFO: {}{reset}", version_line(version));
     }
     if announce.command {
-        eprintln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
+        errln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
     }
 }
 
@@ -941,7 +964,7 @@ impl Build {
         let sink_invocation_id: Option<String> = if !grpc_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
             if debug {
-                eprintln!(
+                errln!(
                     "BES sinks: spawning {} gRPC sink(s) sink_invocation_id={}",
                     grpc_sinks.len(),
                     invocation_id
@@ -959,7 +982,7 @@ impl Build {
                     .unwrap_or_else(|_| "<unset>".to_string());
                 let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
                     .unwrap_or_else(|_| "<unset>".to_string());
-                eprintln!(
+                errln!(
                     "BES sinks: 0 gRPC sinks configured (skipping spawn). \
                      ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
                      ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"
@@ -1180,6 +1203,50 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    /// A mistyped flag reaches Bazel, which rejects the command line and
+    /// exits without ever opening the BEP file. The build must report that
+    /// exit code instead of waiting forever on a writer that cannot come.
+    #[test]
+    fn a_rejected_command_line_does_not_hang_the_bes_reader() {
+        use std::time::Duration;
+        // Generous: the timeout is here to catch a hang, not to bound a
+        // healthy run, which finishes in well under a second.
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=rejects_command_line"],
+        build_events = [iter],
+        stderr = None,
+    )
+    events = 0
+    for _ in iter:
+        events += 1
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 2: return 2
+    if events != 0: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        match result {
+            None => panic!("timed out: a rejected command line hung the BES reader"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "expected an empty stream and bazel's exit code 2"
+            ),
+        }
+    }
+
     /// Regression for aspect-build/aspect-cli#1060: REMOTE_CACHE_EVICTED
     /// without a follow-up retry must not hang the BES reader.
     #[test]
@@ -1267,15 +1334,23 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// Omitting the knob is the path that defers to
+    /// `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES`, so it must stay valid.
     #[test]
-    fn grpc_rejects_zero_buffer_size() {
+    fn grpc_accepts_omitted_buffer_bytes() {
+        crate::axl_check!(r#"bazel.build_events.grpc(uri = "grpcs://bes.example.com")"#)
+            .expect("omitting retry_max_buffer_bytes should validate");
+    }
+
+    #[test]
+    fn grpc_rejects_zero_buffer_bytes() {
         let err = crate::axl_check!(
-            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_max_buffer_size = 0)"#
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_max_buffer_bytes = 0)"#
         )
         .expect_err("expected validation error")
         .to_string();
         assert!(
-            err.contains("retry_max_buffer_size") && err.contains("> 0"),
+            err.contains("retry_max_buffer_bytes") && err.contains("> 0"),
             "unexpected error: {err}"
         );
     }
@@ -1308,7 +1383,7 @@ Test = task(implementation = _impl)
     metadata = {"x-auth": "tok"},
     max_retries = 0,
     retry_min_delay = "500ms",
-    retry_max_buffer_size = 16,
+    retry_max_buffer_bytes = 1048576,
     timeout = "30s",
 )"#
         )

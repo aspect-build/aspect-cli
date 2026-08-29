@@ -148,3 +148,51 @@ jobs:
 
           echo "== Expect WARNING downgrade (exit 0) with --warn-unresolved-digest =="
           aspect delivery --task:name delivery-uncacheable-warn --warn-unresolved-digest $common
+  # Regression guard for the no-remote-exec deliverable whose digest resolved on
+  # the first run and silently vanished on every later one. Bazel propagates a
+  # target's tags into the actions an aspect registers on it, so
+  # //examples/deliverable:no_remote_exec_deliverable yields a DeliveryHash probe
+  # that may run LOCALLY. A probe that runs successfully lands in Bazel's local
+  # action cache, so the next checksum phase skips the spawn, issues no
+  # GetActionResult, and resolves no digest — dropping the target from delivery.
+  # Catching that takes TWO consecutive runs sharing one output base (the first
+  # always passes), which is why both run in a single job on one runner. No
+  # --warn-unresolved-digest here: an unresolved digest must hard-fail.
+  delivery-no-remote-exec-digest-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: no-remote-exec deliverable must resolve a digest on every run
+        run: |
+          set -uo pipefail
+          # --query scopes this to the fixture: config.axl's default delivery
+          # query takes precedence over positional targets. Two sequential runs
+          # under one --task:name would post duplicate check-runs, so suppress
+          # them — the job's own status is the signal.
+          common="--track-state=false --mode=always --dry-run --github-status-checks:enabled=false --query=//examples/deliverable:no_remote_exec_deliverable"
+
+          for run in 1 2; do
+            echo "== Run $run: expect a resolved digest =="
+            out="$(aspect delivery --task:name delivery-no-remote-exec $common 2>&1)" && code=0 || code=$?
+            echo "$out"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::run $run failed (exit $code): a no-remote-exec deliverable must resolve a change-detection digest"
+              exit 1
+            fi
+            # Exit 0 alone is not enough — assert the digest actually resolved
+            # rather than the phase being skipped for want of a remote cache.
+            echo "$out" | grep -q "Resolved digests for all" \
+              || { echo "::error::run $run resolved no digest for no_remote_exec_deliverable (local action cache likely served the DeliveryHash probe)"; exit 1; }
+          done

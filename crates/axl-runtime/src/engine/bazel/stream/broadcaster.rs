@@ -57,12 +57,10 @@
 //!
 //! When a [`Subscriber`] is dropped (either explicitly or because it went out
 //! of scope), the broadcaster automatically cleans up its sender on the next
-//! [`Broadcaster::send`] call. This happens because:
-//!
-//! 1. The subscriber's `Receiver` is dropped
-//! 2. The next `send()` attempts to send to all subscribers
-//! 3. Sending to a dropped receiver returns `Err`
-//! 4. Failed senders are removed from the subscriber list via `retain()`
+//! [`Broadcaster::send`] call. Each subscriber holds a liveness token whose
+//! `Weak` half lives in the subscriber list, so a dead subscriber is detected
+//! before its filter runs — a filtered subscriber that never matches another
+//! event is still pruned on the very next `send()`.
 //!
 //! This lazy cleanup approach is efficient - no explicit "unsubscribe" is needed,
 //! and cleanup happens naturally during normal operation.
@@ -181,19 +179,37 @@
 //! - The `close()` method immediately frees all sender resources
 
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+
+/// A per-subscriber send-side predicate. When present, `send` evaluates it
+/// against each event BEFORE cloning/enqueuing, so an event the subscriber
+/// doesn't want never enters its buffer (no clone, no memory). `None` means
+/// "every event". Shared (`Arc`) and thread-safe because `send` runs on the
+/// producer thread.
+pub type SubscriberFilter<T> = Arc<dyn Fn(&T) -> bool + Send + Sync>;
+
+/// A subscription's broadcaster-side half.
+struct Subscription<T> {
+    /// `Some` applies send-side so a filtered subscriber's buffer only ever
+    /// holds events it wants. Any back-pressure / drop policy beyond that is
+    /// the consumer's responsibility.
+    filter: Option<SubscriberFilter<T>>,
+
+    /// Plain unbounded sender; the broadcaster fire-and-forgets via `send`.
+    tx: mpsc::Sender<T>,
+
+    /// Upgradeable half of the [`Subscriber`]'s liveness token. Dead once the
+    /// subscriber is dropped, independently of whether `filter` accepts the
+    /// event currently being sent.
+    alive: Weak<()>,
+}
 
 /// Internal state shared between the broadcaster and its clones.
 ///
 /// Protected by a mutex to ensure thread-safe access.
-#[derive(Debug)]
 struct BroadcasterInner<T> {
-    /// Active subscriber senders. Each is a plain unbounded `mpsc::Sender`;
-    /// the broadcaster fire-and-forgets via `send` and prunes senders whose
-    /// receiver has been dropped. Any back-pressure / buffering / drop
-    /// policy is the consumer's responsibility — the broadcaster doesn't
-    /// know or care how a subscriber handles a slow consumer.
-    subscribers: Vec<mpsc::Sender<T>>,
+    /// Active subscriptions, pruned during `send` as subscribers die.
+    subscribers: Vec<Subscription<T>>,
 
     /// Whether the broadcaster has been explicitly closed.
     /// When true:
@@ -202,7 +218,45 @@ struct BroadcasterInner<T> {
     closed: bool,
 }
 
-pub type Subscriber<T> = mpsc::Receiver<T>;
+impl<T> std::fmt::Debug for BroadcasterInner<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BroadcasterInner")
+            .field("subscribers", &self.subscribers.len())
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+/// The consumer half of a subscription. Derefs to the underlying
+/// `mpsc::Receiver`, so `recv`, `recv_timeout` and `try_recv` are used as
+/// usual. Dropping it unsubscribes: the token it carries is what lets
+/// [`Broadcaster::send`] prune the subscription without having to enqueue an
+/// event first.
+pub struct Subscriber<T> {
+    rx: mpsc::Receiver<T>,
+    /// Held only for its strong count; the broadcaster watches the `Weak`.
+    _alive: Arc<()>,
+}
+
+impl<T> Subscriber<T> {
+    /// A subscriber attached to nothing: `recv` returns `Err` immediately.
+    pub fn disconnected() -> Self {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        Self {
+            rx,
+            _alive: Arc::new(()),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Subscriber<T> {
+    type Target = mpsc::Receiver<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rx
+    }
+}
 
 /// A thread-safe broadcaster that fans out events to multiple subscribers.
 ///
@@ -240,7 +294,7 @@ pub type Subscriber<T> = mpsc::Receiver<T>;
 /// // Subscribe and consume
 /// let sub = broadcaster.subscribe();
 /// for event in std::iter::from_fn(|| sub.recv().ok()) {
-///     println!("Received: {}", event);
+///     outln!("Received: {}", event);
 /// }
 /// ```
 #[derive(Debug)]
@@ -297,21 +351,36 @@ impl<T: Clone> Broadcaster<T> {
     ///
     /// broadcaster.send(3);
     /// ```
+    // Unfiltered convenience wrapper. Production subscribers go through
+    // `subscribe_filtered`; kept for tests and any consumer wanting every event.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn subscribe(&self) -> Subscriber<T> {
+        self.subscribe_filtered(None)
+    }
+
+    /// Like [`subscribe`](Self::subscribe), but only events for which `filter`
+    /// returns `true` are enqueued into this subscriber's buffer. The filter
+    /// runs send-side (on the producer thread), so filtered-out events are
+    /// never cloned or buffered for this subscriber — a subscriber that wants
+    /// two of twenty event kinds pays for two. `None` filter = every event.
+    pub fn subscribe_filtered(&self, filter: Option<SubscriberFilter<T>>) -> Subscriber<T> {
         let mut inner = self.inner.lock().unwrap();
 
         // If closed, return an immediately-disconnected channel.
         // This ensures subscribers created after close() don't block forever
         // waiting for events that will never come.
         if inner.closed {
-            let (tx, rx) = mpsc::channel();
-            drop(tx); // Drop sender immediately to disconnect the receiver
-            return rx;
+            return Subscriber::disconnected();
         }
 
         let (tx, rx) = mpsc::channel();
-        inner.subscribers.push(tx);
-        rx
+        let alive = Arc::new(());
+        inner.subscribers.push(Subscription {
+            filter,
+            tx,
+            alive: Arc::downgrade(&alive),
+        });
+        Subscriber { rx, _alive: alive }
     }
 
     /// Sends an event to all current subscribers.
@@ -353,11 +422,21 @@ impl<T: Clone> Broadcaster<T> {
     pub fn send(&self, event: T) {
         let mut inner = self.inner.lock().unwrap();
 
-        // Fire-and-forget into every subscriber. The unbounded `send` only
-        // fails when the receiver has been dropped; drop such subs.
-        inner
-            .subscribers
-            .retain(|tx| tx.send(event.clone()).is_ok());
+        // Fire-and-forget into every live subscriber. Liveness is checked
+        // first so a filtered subscriber is pruned as soon as it dies, even if
+        // no later event would have passed its filter. A live subscriber whose
+        // filter rejects this event is kept but skipped (no clone, no enqueue).
+        inner.subscribers.retain(|sub| {
+            if sub.alive.strong_count() == 0 {
+                return false;
+            }
+            if let Some(f) = &sub.filter {
+                if !f(&event) {
+                    return true;
+                }
+            }
+            sub.tx.send(event.clone()).is_ok()
+        });
     }
 
     /// Closes the broadcaster, disconnecting all subscribers.
@@ -430,6 +509,7 @@ impl<T: Clone> Default for Broadcaster<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outln;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::TryRecvError;
     use std::thread;
@@ -438,6 +518,59 @@ mod tests {
     /// Returns true when the channel has been disconnected (all senders dropped).
     fn is_disconnected<T>(rx: &mpsc::Receiver<T>) -> bool {
         matches!(rx.try_recv(), Err(TryRecvError::Disconnected))
+    }
+
+    #[test]
+    fn test_filtered_subscriber_only_buffers_matching_events() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        // Keep only even numbers.
+        let filter: SubscriberFilter<i32> = Arc::new(|n: &i32| n % 2 == 0);
+        let even_sub = broadcaster.subscribe_filtered(Some(filter));
+        let all_sub = broadcaster.subscribe(); // unfiltered peer
+
+        for i in 0..10 {
+            broadcaster.send(i);
+        }
+        broadcaster.close();
+
+        // The filtered subscriber's buffer never held the odd events — draining
+        // yields exactly the evens (queue depth = 5), proving the drop happened
+        // send-side, not on read.
+        let got: Vec<_> = std::iter::from_fn(|| even_sub.recv().ok()).collect();
+        assert_eq!(got, vec![0, 2, 4, 6, 8]);
+
+        // The unfiltered peer still sees everything.
+        let all: Vec<_> = std::iter::from_fn(|| all_sub.recv().ok()).collect();
+        assert_eq!(all, (0..10).collect::<Vec<_>>());
+    }
+
+    /// A dropped filtered subscriber must be pruned on the next `send`, not
+    /// only once an event happens to pass its filter — otherwise a drained
+    /// one-shot iterator keeps its predicate running for the rest of the build.
+    #[test]
+    fn test_dropped_filtered_subscriber_is_pruned_on_non_matching_event() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let seen = evaluations.clone();
+        // Matches only 0, so nothing after the first event would ever pass.
+        let filter: SubscriberFilter<i32> = Arc::new(move |n: &i32| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            *n == 0
+        });
+
+        {
+            let _sub = broadcaster.subscribe_filtered(Some(filter));
+            broadcaster.send(0);
+        }
+
+        // First post-drop send prunes; later sends never touch the filter.
+        broadcaster.send(1);
+        let after_prune = evaluations.load(Ordering::SeqCst);
+        broadcaster.send(2);
+        broadcaster.send(3);
+
+        assert_eq!(evaluations.load(Ordering::SeqCst), after_prune);
+        assert_eq!(broadcaster.inner.lock().unwrap().subscribers.len(), 0);
     }
 
     #[test]

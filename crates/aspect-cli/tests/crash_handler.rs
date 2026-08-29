@@ -106,3 +106,19 @@ fn opt_out_env_skips_the_report_but_not_the_crash() {
         out.status
     );
 }
+
+/// The allocator is built in secure mode and we register an error handler that
+/// aborts on any corruption code. mimalloc's own default handler reports a
+/// double free (`EAGAIN`) and then *continues*, which would let a corrupted
+/// heap run on to fail somewhere unrelated — so assert the abort actually
+/// happens and is reported.
+#[test]
+fn allocator_corruption_aborts_and_is_reported() {
+    let out = run_with_trigger("double-free", &[("MIMALLOC_SHOW_ERRORS", "1")]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("double free detected"),
+        "allocator did not report the double free: {stderr}"
+    );
+    assert_reported(&out, "SIGABRT", libc::SIGABRT);
+}

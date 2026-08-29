@@ -33,7 +33,7 @@ aspect_gazelle(
 # (`aspect build //tools/gazelle:gazelle_from_source_binary` or
 # `aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source`)
 # still works as long as the caller passes `--config=pure_go` /
-# `--bazel-flag=--config=pure_go`.
+# `--config=pure_go`.
 gazelle_binary(
     name = "gazelle_from_source_binary",
     languages = [

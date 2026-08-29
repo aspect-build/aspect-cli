@@ -14,10 +14,11 @@ load(
     "FIX_COMMANDS_BLOCK",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
-    "TIPS_BLOCK",
+    "SUMMARY_TEMPLATE",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "html_escape",
     "render_details_or_fallback",
@@ -189,7 +190,18 @@ def delivery_summary_title(data, status, target_pattern = "", task_kind = ""):
     display = emoji_for_status(status) + " " + (task_kind or "delivery")
     target = truncate_for_title(target_pattern or data.get("target_pattern", ""))
     base = display + ((" " + target) if target else "")
+    state = delivery_summary_title_state(data, status)
+    return base + (" · " + state if state else "")
 
+def delivery_summary_title_state(data, status):
+    """The verdict clause after `·` — "12 delivered", "2 failed, 10 delivered",
+    "Running...". Exposed as the `state` variable for a `title` template
+    override.
+
+    Returns "" when no outcomes are recorded and the task isn't passing, which
+    renders as a title with no verdict clause at all rather than a misleading
+    one.
+    """
     counts = data["delivery"].get("counts", {})
     ok = counts.get("ok", 0)
     skip = counts.get("skip", 0)
@@ -199,10 +211,10 @@ def delivery_summary_title(data, status, target_pattern = "", task_kind = ""):
     total = ok + skip + warn + fail + pending
 
     if status == "running" and total == 0:
-        return base + " · Running..."
+        return "Running..."
 
     if status == "failing" and total == 0:
-        return base + " · Failing..."
+        return "Failing..."
 
     if fail > 0:
         parts = [_plural(fail, "failed")]
@@ -210,7 +222,7 @@ def delivery_summary_title(data, status, target_pattern = "", task_kind = ""):
             parts.append(_plural(ok, "delivered"))
         if skip > 0:
             parts.append(_plural(skip, "skipped"))
-        return base + " · " + ", ".join(parts)
+        return ", ".join(parts)
 
     parts = []
     if ok > 0:
@@ -224,12 +236,12 @@ def delivery_summary_title(data, status, target_pattern = "", task_kind = ""):
 
     if not parts:
         if status == "passed":
-            return base + " · No targets"
-        return base
+            return "No targets"
+        return ""
 
     if status in ("running", "failing"):
-        return base + " · " + ", ".join(parts) + " so far"
-    return base + " · " + ", ".join(parts)
+        return ", ".join(parts) + " so far"
+    return ", ".join(parts)
 
 def conclusion(status, data):
     """Delivery task's terminal bookend conclusion. See
@@ -269,14 +281,7 @@ def _plural(count, singular, plural = None):
 
 # ─── Templates ────────────────────────────────────────────────────────────────
 
-_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
-{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
-{%- endfor %}{% endif %}
-{% if config_items %}
-:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
-:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
-
-_DETAILS_TEMPLATE = """{% if total == 0 %}### 🚀 No deliveries
+DETAILS_TEMPLATE = """{% if total == 0 %}### 🚀 No deliveries
 
 _No targets selected for delivery._{% else %}### 🚀 Delivery results
 
@@ -512,8 +517,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     details_data = dict(shared_data)
     details_data.update(_build_details_data(data, render_ctx, status))
 
-    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
-    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+    summary_tmpl = t.get("summary") or SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or DETAILS_TEMPLATE
 
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "delivery")
 
@@ -559,9 +564,11 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     if not target_pattern:
         target_pattern = data.get("target_pattern", "")
     return {
-        "title": delivery_summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            delivery_summary_title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),

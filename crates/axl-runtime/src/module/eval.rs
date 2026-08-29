@@ -280,6 +280,7 @@ impl ModEvaluator {
             let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
             Module::with_temp_heap(|module| {
                 let mut eval = Evaluator::new(&module);
+                eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
                 eval.extra_mut = Some(&mut r#mod);
                 eval.eval_module(ast, &self.globals)?;
                 Ok::<_, starlark::Error>(())

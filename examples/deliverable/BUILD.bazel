@@ -62,6 +62,22 @@ py_binary(
     tags = ["deliverable"],
 )
 
+# Deterministic deliverable tagged no-remote-exec. Bazel propagates a target's
+# tags into the actions an aspect registers on it, so this target's DeliveryHash
+# probe may run locally — and a probe that runs successfully would be served
+# from Bazel's local action cache on the next run, issue no remote lookup, and
+# resolve no digest. Catching that regression takes TWO consecutive delivery
+# runs in one output base (the first always succeeds), which the dogfood
+# delivery job does.
+custom_deliverable(
+    name = "no_remote_exec_deliverable",
+    data = [":delivery_payload"],
+    tags = [
+        "deliverable",
+        "no-remote-exec",
+    ],
+)
+
 # A genrule whose build action fails, emitting realistic stdout + stderr, for
 # exercising build-log upload (upload_build_logs) during the delivery task's
 # phase-1 build. `manual` keeps it out of `//...`; to test the case live, add

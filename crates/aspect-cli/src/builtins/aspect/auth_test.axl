@@ -1,5 +1,6 @@
 """Unit tests for the pure string builders in `auth.axl` (the `status`/`configure`
-detail rendering): `identity`, `login_command`, `capabilities`, `status_line`.
+detail rendering): `identity`, `login_command`, `capabilities`, `status_line`,
+`shadowed_warning`.
 
 A struct-based fake summary substitutes for a real `DeploymentSummary` (only the
 fields these helpers read are set). The `print`-driven `_print_deployment` /
@@ -9,7 +10,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "capabilities", "identity", "login_command", "status_line")
+load("@aspect//auth.axl", "identity", "login_command", "shadowed_warning", "status_line")
 
 def _eq(label, got, want):
     if got != want:
@@ -25,7 +26,8 @@ def _summary(
         status = "",
         cache = "",
         bes = "",
-        exec = ""):
+        exec = "",
+        results_url = ""):
     return struct(
         name = name,
         builtin = builtin,
@@ -36,6 +38,7 @@ def _summary(
         status = status,
         cache = cache,
         bes = bes,
+        results_url = results_url,
         exec = exec,
     )
 
@@ -48,11 +51,6 @@ def _test_identity(_):
 def _test_login_command(_):
     _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
     _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
-
-def _test_capabilities(_):
-    _eq("cache + bes", capabilities(_summary(cache = "c", bes = "b")), ["remote cache", "BES backend"])
-    _eq("cache + exec + bes order", capabilities(_summary(cache = "c", bes = "b", exec = "e")), ["remote cache", "remote execution", "BES backend"])
-    _eq("none", capabilities(_summary()), [])
 
 def _test_status_line(_):
     _eq(
@@ -71,10 +69,31 @@ def _test_status_line(_):
         "logged in",
     )
 
+def _shadowed(name = "aspect", path = "/home/u/.aspect/config.json", user_config = True):
+    return struct(name = name, path = path, user_config = user_config)
+
+def _test_shadowed_warning(_):
+    # The user's own config is fixable with `auth remove`.
+    user = shadowed_warning(_shadowed())
+    if "aspect auth remove aspect" not in user:
+        fail("user config warning should offer `auth remove`: %s" % user)
+    if "/home/u/.aspect/config.json" not in user:
+        fail("warning should name the file: %s" % user)
+
+    # A checked-in repo config is not editable by `auth remove` — say so instead,
+    # otherwise the advice would remove an unrelated user entry (or just error).
+    repo = shadowed_warning(_shadowed(path = "/repo/.aspect/config.json", user_config = False))
+    if "auth remove" in repo:
+        fail("repo config warning must not offer `auth remove`: %s" % repo)
+    if "/repo/.aspect/config.json" not in repo:
+        fail("repo warning should name the repo file: %s" % repo)
+    if "Rename or delete" not in repo:
+        fail("repo warning should say to edit the file: %s" % repo)
+
 _UNIT_TESTS = [
     _test_identity,
     _test_login_command,
-    _test_capabilities,
+    _test_shadowed_warning,
     _test_status_line,
 ]
 
@@ -85,6 +104,7 @@ def _test_impl(ctx):
     return 0
 
 auth_tests = task(
+    summary = "Run the auth AXL unit tests.",
     kind = "test-auth",
     group = ["dev"],
     implementation = _test_impl,

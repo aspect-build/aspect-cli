@@ -140,6 +140,7 @@ def _test_impl(ctx):
     return 0
 
 path_normalize_tests = task(
+    summary = "Run the path normalize AXL unit tests.",
     kind = "test-path-normalize",
     group = ["dev"],
     implementation = _test_impl,

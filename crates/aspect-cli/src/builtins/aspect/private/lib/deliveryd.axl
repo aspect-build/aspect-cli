@@ -14,6 +14,8 @@ version.
     dd.delete(digest)                  # after it failed
 """
 
+load("./text.axl", "format_bytes_iec")
+
 # Where an Aspect Workflows runner publishes the daemon's Unix socket.
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT"
 
@@ -74,23 +76,6 @@ Health = record(
     error = field(str, default = ""),
 )
 
-_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
-
-def _format_bytes(n: int) -> str:
-    """A coarse IEC size (`3.0 GiB`); tenths truncated, as `fmt_elapsed` does."""
-    if n < 1024:
-        return "{} B".format(n)
-
-    # Scaled by 10 throughout so the tenth survives integer division.
-    scaled = n * 10
-    unit = 0
-    for _ in range(len(_UNITS) - 1):
-        if scaled < 10240:
-            break
-        scaled = scaled // 1024
-        unit += 1
-    return "{}.{} {}".format(scaled // 10, scaled % 10, _UNITS[unit])
-
 def _format_pct(pct: float) -> str:
     tenths = int(pct * 10)
     return "{}.{}%".format(tenths // 10, tenths % 10)
@@ -103,9 +88,9 @@ def describe_storage(health: Health) -> str:
         return ""
     parts = []
     if s.max_bytes:
-        parts.append("{} / {} ({})".format(_format_bytes(s.used_bytes), _format_bytes(s.max_bytes), _format_pct(s.used_pct)))
+        parts.append("{} / {} ({})".format(format_bytes_iec(s.used_bytes), format_bytes_iec(s.max_bytes), _format_pct(s.used_pct)))
     elif s.used_bytes:
-        parts.append(_format_bytes(s.used_bytes) + " used")
+        parts.append(format_bytes_iec(s.used_bytes) + " used")
     if s.policy:
         parts.append(s.policy)
     parts.append("ping {}ms".format(s.ping_ms))

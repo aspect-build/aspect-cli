@@ -8,7 +8,7 @@
 
 use std::io::IsTerminal;
 
-use aspect_telemetry::cargo_pkg_short_version;
+use aspect_telemetry::{cargo_pkg_short_version, is_debug_build};
 
 use crate::ci::on_recognized_ci;
 
@@ -23,9 +23,31 @@ const DOCS_URL: &str = "https://aspect.build/docs/cli";
 /// The grey banner line for `version`, e.g.
 /// `Aspect CLI v1.2.3 — https://aspect.build/docs/cli`, wrapped in ANSI grey.
 ///
+/// A `-debug-` build is marked here too: it is slower and larger than the primary
+/// binary, so a run that unexpectedly used one should be obvious from its output.
+///
 /// No trailing newline — callers place it within their own layout.
 pub fn line(version: &str) -> String {
-    format!("{GREY}Aspect CLI v{version} — {DOCS_URL}{RESET}")
+    line_colored(version, true)
+}
+
+/// [`line`], with the grey wrapper applied only when `color` is set.
+///
+/// Call sites that print the banner themselves (rather than handing it to clap,
+/// which strips escapes off a non-terminal) pass the result of
+/// [`crate::color::stdout_supports_color`] so a piped run stays plain text.
+pub fn line_colored(version: &str, color: bool) -> String {
+    let debug = if is_debug_build() {
+        " (debug build)"
+    } else {
+        ""
+    };
+    let body = format!("Aspect CLI v{version}{debug} — {DOCS_URL}");
+    if color {
+        format!("{GREY}{body}{RESET}")
+    } else {
+        body
+    }
 }
 
 /// [`line`] resolving the version from workspace crate metadata. For call
@@ -63,8 +85,31 @@ mod tests {
     #[test]
     fn line_renders_grey_version_and_docs_url() {
         let s = line("9.9.9");
-        assert_eq!(s, format!("{GREY}Aspect CLI v9.9.9 — {DOCS_URL}{RESET}"));
+        // Tests build with debug assertions on, so the marker is expected here; the
+        // release binary renders the same line without it.
+        let debug = if is_debug_build() {
+            " (debug build)"
+        } else {
+            ""
+        };
+        assert_eq!(
+            s,
+            format!("{GREY}Aspect CLI v9.9.9{debug} — {DOCS_URL}{RESET}")
+        );
         assert!(s.starts_with(GREY) && s.ends_with(RESET));
+    }
+
+    #[test]
+    fn line_colored_drops_the_grey_wrapper_when_uncolored() {
+        let plain = line_colored("9.9.9", false);
+        assert!(!plain.contains('\x1b'), "no escapes when uncolored");
+        assert!(plain.starts_with("Aspect CLI v9.9.9"));
+        assert_eq!(line_colored("9.9.9", true), line("9.9.9"));
+    }
+
+    #[test]
+    fn line_marks_debug_builds() {
+        assert_eq!(line("9.9.9").contains("(debug build)"), is_debug_build());
     }
 
     #[test]

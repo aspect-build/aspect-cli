@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
 load("./lifecycle.axl", "ReproFixCommand")
 
 # Fake data builders
@@ -629,6 +629,7 @@ def _test_impl(ctx):
     return 0
 
 template_snapshot_tests = task(
+    summary = "Run the template snapshots AXL unit tests.",
     kind = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
@@ -731,6 +732,33 @@ def _test_failed_status_without_failure_bucket(ctx):
     _eq(
         "conclusion — failed verdict without failure bucket",
         conclusion("failed", data),
+        "Failed to build",
+    )
+
+def _test_run_exit_is_not_a_build_failure(ctx):
+    """`aspect run` builds a target and then executes it. A program that exits
+    non-zero after a clean build leaves no failure bucket, so without the run
+    marker the state falls through to "Failed to build" — reporting a build
+    failure for a build that worked."""
+    data = _make_unaffected_targets_built()
+    data["run"] = {"exit_code": 42}
+    _eq(
+        "compute_invocation_state — non-zero run exit is a run failure",
+        compute_invocation_state(data, "failed"),
+        "Run failed (exit 42)",
+    )
+    _eq(
+        "conclusion — non-zero run exit is a run failure",
+        conclusion("failed", data),
+        "Run failed (exit 42)",
+    )
+
+    # A clean run must not be mistaken for one.
+    zero = _make_unaffected_targets_built()
+    zero["run"] = {"exit_code": 0}
+    _eq(
+        "compute_invocation_state — run exit 0 keeps the build verdict",
+        compute_invocation_state(zero, "failed"),
         "Failed to build",
     )
 
@@ -1184,6 +1212,115 @@ def _test_aspect_web_ui_url(ctx):
     env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
     _eq("aspect_web_ui_url empty without base", aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}), "")
 
+def _test_aspect_web_ui_url_bazel_streamed(ctx):
+    """When the CLI sink was suppressed because Bazel uploads to the same Aspect
+    backend, no sink id is minted — the link keys on Bazel's invocation_id
+    instead, since Bazel is what the backend indexed the invocation under."""
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build")
+    bazel_streamed = {
+        "sink_invocation_id": "",
+        "bes_streamed_by_bazel": True,
+        "bazel": {"invocation_id": "bazel-uuid-1"},
+    }
+    _eq(
+        "falls back to bazel's invocation id",
+        aspect_web_ui_url(env, bazel_streamed),
+        "https://app.oss.aspect.build/bazel-uuid-1",
+    )
+
+    # Without the flag the sink id is the only key; a bare Bazel id would 404,
+    # so the link stays suppressed.
+    _eq(
+        "no fallback when the flag is unset",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "bazel": {"invocation_id": "bazel-uuid-1"}}),
+        "",
+    )
+    _eq(
+        "no fallback before build_started supplies the id",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "bes_streamed_by_bazel": True, "bazel": {}}),
+        "",
+    )
+
+    # A live sink still wins: its id is what that backend indexed.
+    _eq(
+        "sink id takes precedence",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "bes_streamed_by_bazel": True,
+            "bazel": {"invocation_id": "bazel-uuid-1"},
+        }),
+        "https://app.oss.aspect.build/sink-1",
+    )
+
+def _test_aspect_web_ui_url_discovered_base(ctx):
+    """Off a runner `ASPECT_WORKFLOWS_BES_RESULTS_URL` is unset, so the base falls back
+    to the viewer the `--remote` deployment advertised (`data["aspect_results_url"]`,
+    set by bazel_runner.axl). Still keyed on the sink id, which is what the Aspect
+    backend indexed the CLI-streamed invocation under."""
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
+    _eq(
+        "discovered base + sink id",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "aspect_results_url": "https://app.gcp.aspect.build/i",
+        }),
+        "https://app.gcp.aspect.build/i/sink-1",
+    )
+    _eq(
+        "discovered base still needs an invocation id",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "aspect_results_url": "https://app.gcp.aspect.build/i"}),
+        "",
+    )
+
+    # On a runner the env var is the deliberate local config and wins.
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build")
+    _eq(
+        "runner env base wins over the discovered one",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "aspect_results_url": "https://app.gcp.aspect.build/i",
+        }),
+        "https://app.oss.aspect.build/sink-1",
+    )
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
+
+def _test_build_started_preserves_aspect_results_url(ctx):
+    """The discovered base is task-owned like `sink_invocation_id`, so the
+    `build_started` reset must not drop it — otherwise the link vanishes mid-stream."""
+    data = init_data()
+    data["aspect_results_url"] = "https://app.gcp.aspect.build/i"
+    data["sink_invocation_id"] = "sink-1"
+    process_event(data, struct(
+        kind = "build_started",
+        payload = struct(uuid = "bazel-uuid-1", start_time_millis = 1),
+    ))
+    _eq("discovered base survives build_started", data["aspect_results_url"], "https://app.gcp.aspect.build/i")
+
+def _test_build_started_preserves_bazel_streamed(ctx):
+    """`process_event`'s build_started reset wipes top-level state for the new
+    stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
+    like `sink_invocation_id` it must survive — otherwise a retry silently drops
+    the Aspect link.
+
+    `bes_get` is a `getattr`, so a struct stands in for the BES event."""
+    data = init_data()
+    data["sink_invocation_id"] = "sink-1"
+    data["bes_streamed_by_bazel"] = True
+    process_event(data, struct(
+        kind = "build_started",
+        payload = struct(
+            uuid = "bazel-uuid-1",
+            build_tool_version = "9.0.1",
+            command = "build",
+            start_time_millis = 1000,
+        ),
+    ))
+    _eq("sink id preserved", data["sink_invocation_id"], "sink-1")
+    _eq("bazel-streamed flag preserved", data["bes_streamed_by_bazel"], True)
+    _eq("bazel invocation id captured", data["bazel"]["invocation_id"], "bazel-uuid-1")
+
 def _test_render_bes_url(ctx):
     """`render_bes_url` joins data['bazel'] bes_results_url + invocation_id,
     and returns "" when either half is missing."""
@@ -1256,15 +1393,61 @@ def _test_try_template_engines_return_ok_text_tuple(ctx):
     (jj_ok, _) = ctx.template.try_jinja2("{{ undefined_macro(x) }}", data = {})
     _eq("jinja2 undefined call not ok", jj_ok, False)
 
+def _test_results_kinds_locked(ctx):
+    """`RESULTS_KINDS` is the passed to the results event iterator as its `kinds=`
+    filter, so it MUST list every kind `process_event` consumes. Lock the set so
+    a new `process_event` branch (or a stray edit) can't silently drop events —
+    if you add/remove a consumed kind, update both `process_event` and this list."""
+    expected = [
+        "aborted",
+        "action_completed",
+        "build_finished",
+        "build_metadata",
+        "build_metrics",
+        "build_started",
+        "configuration",
+        "options_parsed",
+        "structured_command_line",
+        "target_completed",
+        "target_configured",
+        "test_result",
+        "test_summary",
+        "workspace_status",
+    ]
+    _eq("RESULTS_KINDS set", sorted(RESULTS_KINDS), expected)
+
+def _test_results_kinds_all_processed(ctx):
+    """Every kind in `RESULTS_KINDS` drives a real `process_event` branch — feed
+    a minimal event of each and confirm it's handled without error (missing
+    payload fields are tolerated via `bes_get`)."""
+    for kind in RESULTS_KINDS:
+        event = struct(
+            kind = kind,
+            id = struct(label = "//pkg:t", configuration = struct(id = "c1")),
+            payload = struct(),
+        )
+
+        # Returns a bool ("warrants a status update"); we only assert no crash.
+        result = process_event(init_data(), event)
+        if result != True and result != False:
+            fail("process_event(%s) returned non-bool: %r" % (kind, result))
+
 _UNIT_TESTS = [
+    _test_results_kinds_locked,
+    _test_results_kinds_all_processed,
     _test_try_template_engines_return_ok_text_tuple,
     _test_render_or_fallback_passthrough,
     _test_render_details_or_fallback_degrades,
     _test_render_summary_or_fallback_degrades,
     _test_status_maps_cover_every_terminal_status,
     _test_aspect_web_ui_url,
+    _test_aspect_web_ui_url_bazel_streamed,
+    _test_aspect_web_ui_url_discovered_base,
+    _test_build_started_preserves_aspect_results_url,
+    _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
+    _test_run_exit_is_not_a_build_failure,
     _test_failed_status_with_explicit_action_failure,
     _test_passed_status_returns_successful_build,
     _test_aborted_short_circuits,
@@ -1307,6 +1490,7 @@ def _unit_test_impl(ctx):
     return 0
 
 bazel_results_unit_tests = task(
+    summary = "Run the bazel results AXL unit tests.",
     kind = "test-bazel-results",
     group = ["dev"],
     implementation = _unit_test_impl,

@@ -6,11 +6,64 @@ mod helpers;
 mod trace;
 mod trace_buffer;
 
+/// Use mimalloc rather than the platform allocator.
+///
+/// The Linux release binaries are static-musl, whose mallocng is markedly
+/// slower than mimalloc under the allocation patterns this CLI produces —
+/// parsing tens of thousands of build events, and building large Starlark
+/// heaps — and takes a single global lock across every thread. mimalloc keeps
+/// per-thread free lists, so the BES/sink/probe threads stop contending with
+/// the Starlark thread on every allocation.
+///
+/// Built in mimalloc's secure mode (`MI_SECURE=4`): guard pages around
+/// metadata, encoded free lists, randomized placement, and double-free
+/// detection. That restores a property the platform allocator gave us for free
+/// — musl's mallocng validates a check byte on every allocation, so heap
+/// corruption aborted the process by itself, whereas a default mimalloc build
+/// performs no equivalent check and would let the same corruption pass
+/// silently. Costs roughly 7% on an allocation-heavy workload, with no change
+/// in binary size. See [`install_allocator_error_handler`], which makes any
+/// detection fatal rather than merely reported.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Abort the process when mimalloc detects heap corruption.
+///
+/// mimalloc's built-in handling is not sufficient on its own. It aborts only
+/// on `EFAULT` (corrupted metadata, corrupted thread-free list, and — in
+/// secure mode — a detected buffer overflow), while a double free
+/// (`EAGAIN`) or a free of an invalid pointer (`EINVAL`) is reported and then
+/// execution *continues*. Continuing on a corrupted heap is what makes this
+/// class of bug so hard to trace: the eventual crash lands somewhere
+/// unrelated, long after the write that caused it.
+///
+/// Registering our own handler makes every corruption code fatal at the point
+/// of detection. The resulting SIGABRT is caught by the crash handler, which
+/// prints the signal and a resolvable address.
+///
+/// Note that detection is separately silent unless `show_errors` is on, so the
+/// message explaining *what* was detected only appears when the process was
+/// launched with `MIMALLOC_SHOW_ERRORS=1`. The abort happens either way.
+fn install_allocator_error_handler() {
+    /// Codes that indicate heap corruption rather than a benign condition
+    /// (`ENOMEM`/`EOVERFLOW` are allocation failures, not corruption).
+    extern "C" fn on_error(code: std::ffi::c_int, _arg: *mut std::ffi::c_void) {
+        if matches!(code, libc::EFAULT | libc::EAGAIN | libc::EINVAL) {
+            std::process::abort();
+        }
+    }
+    // SAFETY: registering a global error callback; the callback only aborts.
+    unsafe { libmimalloc_sys::mi_register_error(Some(on_error), std::ptr::null_mut()) };
+}
+
+use axl_runtime::{errln, outln};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
+use aspect_telemetry::{
+    cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
+};
 use axl_runtime::bazel_live;
 use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
@@ -164,9 +217,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 modules: &modules,
             };
             let mut root_cmd = cmd.build(&cli_version)?;
+            // Finalize the surface (this is what injects `--help`) so routing
+            // sees every flag Clap knows, then let the selected task collect the
+            // flags Clap would reject — see `Cmd::route_unrecognized_flags`.
+            // Nothing to route means argv comes back verbatim, so a task that
+            // forwards nothing still gets Clap's parse error.
+            root_cmd.build();
             let mut cmd_for_help = root_cmd.clone();
+            let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
-            let matches = match root_cmd.try_get_matches_from_mut(std::env::args_os()) {
+            let matches = match root_cmd.try_get_matches_from_mut(argv) {
                 Ok(m) => m,
                 Err(err) => {
                     err.print().ok();
@@ -176,12 +236,19 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             match matches.subcommand_name() {
                 Some("version") => {
-                    println!("{}", cargo_pkg_short_version());
+                    outln!("{}", cargo_pkg_display_version());
                     return Ok(ExitCode::SUCCESS);
                 }
                 Some("help") => {
                     cmd_for_help.print_help()?;
                     return Ok(ExitCode::SUCCESS);
+                }
+                Some("describe") => {
+                    let task = matches
+                        .subcommand_matches("describe")
+                        .and_then(|m| m.get_one::<String>("task"))
+                        .map(String::as_str);
+                    return Ok(cmd.print_describe(&cli_version, task));
                 }
                 Some("feature") => {
                     let name = matches
@@ -215,7 +282,25 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // and logs to them before phase 4 starts emitting task traces.
             // No-op (and disables further OTel work for the rest of the run)
             // if no exporter was registered.
-            let exporters = mpe.drain_exporters();
+            let mut exporters = mpe.drain_exporters();
+            // The mcp task's stdout carries its JSON-RPC protocol stream, so
+            // a configured stdout telemetry sink would interleave with it and
+            // corrupt the session. Redirect such sinks to stderr for this
+            // task; every other configuration is untouched.
+            if dispatch.task_name == "mcp" {
+                use axl_runtime::engine::telemetry::{ExporterSpec, FileDestination};
+                for spec in &mut exporters {
+                    if let ExporterSpec::File(file) = spec {
+                        if file.destination == FileDestination::Stdout {
+                            errln!(
+                                "warning: a stdout telemetry exporter is configured, but `aspect \
+                                 mcp` owns stdout for the MCP protocol — redirecting it to stderr."
+                            );
+                            file.destination = FileDestination::Stderr;
+                        }
+                    }
+                }
+            }
             tokio::runtime::Handle::current().block_on(trace::install_late_exporters(exporters))?;
 
             // Phase 4: execute the selected task.
@@ -250,6 +335,7 @@ fn main() -> ExitCode {
     // Install first, before any other machinery, so fatal-signal reporting
     // covers everything after it (see the `crash_handler` module docs).
     crash_handler::install();
+    install_allocator_error_handler();
     crash_handler::trigger_test_crash();
 
     // Intercept the Bazel credential helper (`aspect get`) before the async
@@ -258,7 +344,7 @@ fn main() -> ExitCode {
         return match credential_helper::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("error: {err:?}");
+                errln!("error: {err:?}");
                 ExitCode::FAILURE
             }
         };
@@ -267,7 +353,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:?}");
+            errln!("error: {err:?}");
             ExitCode::FAILURE
         }
     }
@@ -434,7 +520,7 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
         }
     }
 
-    eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
+    errln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
     // Two graceful SIGINTs; the CI/off-CI split below decides what follows.
     // See `install_shutdown_handler` for the full rationale.
@@ -445,7 +531,7 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     if on_recognized_ci() {
         // Stop short of KillServerProcess and SIGKILL — let bazel finish its
         // own cleanup so a cancellation can't strand a poisoned sandbox.
-        eprintln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
+        errln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
         std::process::exit(exit_code);
     }
 
@@ -457,10 +543,26 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
 
     let killed = bazel_live::force_kill_all_remaining();
     if killed > 0 {
-        eprintln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
+        errln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
         tokio::time::sleep(POST_KILL_GRACE).await;
     }
 
-    eprintln!("aspect-cli: exiting with code {exit_code}");
+    errln!("aspect-cli: exiting with code {exit_code}");
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod print_macro_guard {
+    /// `println!` and friends panic on a failed write, which strands a task
+    /// mid-run when a pipeline reader leaves. See CLAUDE.md.
+    #[test]
+    fn no_panicking_print_macros() {
+        static SRC: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src");
+        let found = axl_runtime::out::panicking_print_macros(&SRC);
+        assert!(
+            found.is_empty(),
+            "use outln!/errln!/out! from axl_runtime::out instead (see CLAUDE.md):\n  {}",
+            found.join("\n  ")
+        );
+    }
 }

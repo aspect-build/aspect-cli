@@ -6,7 +6,7 @@ S3 error parsing, the session cache, test-result URL resolution, the
 sigv4 PUT arg builder, trace redaction, and JUnit skipped-marking.
 """
 
-load("./circleci.axl", "mark_testcases_skipped", "redact_curl_trace", "s3_extract_error_code", "s3_extract_error_message", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
+load("./circleci.axl", "aws_uri_encode", "mark_testcases_skipped", "redact_curl_trace", "s3_extract_error_code", "s3_extract_error_message", "s3_failure_is_retryable", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -118,6 +118,105 @@ def _test_cache_clear_empty_noop(_ctx):
     session_cache_clear(cache)
     _eq("clear on empty cache stays a miss", session_cache_get(cache), None)
 
+# aws_uri_encode — percent-encode an object key to match S3's canonical form
+
+def _test_uri_encode_unreserved_untouched(_ctx):
+    """`A-Za-z0-9-_.~` and the `/` separator are left exactly as they are."""
+    key = "test/shard_1/test.outputs/a-b_c.d~e/F9.log"
+    _eq("unreserved key unchanged", aws_uri_encode(key), key)
+
+def _test_uri_encode_at_sign(_ctx):
+    """The reported case: Bazel's `@failures.txt` undeclared output. `@` is a
+    sub-delim, so S3 canonicalizes it to `%40` while curl signs it raw."""
+    _eq(
+        "@ encoded",
+        aws_uri_encode("test/shard_4/test.outputs/@failures.txt"),
+        "test/shard_4/test.outputs/%40failures.txt",
+    )
+
+def _test_uri_encode_parens_and_brackets(_ctx):
+    """Cucumber screenshot names carry the scenario name: parens, brackets,
+    braces, and spaces all need escaping."""
+    _eq(
+        "parens/brackets/space encoded",
+        aws_uri_encode("[WFD] (date condition) GEQ.png"),
+        "%5BWFD%5D%20%28date%20condition%29%20GEQ.png",
+    )
+
+def _test_uri_encode_percent_is_escaped(_ctx):
+    """A literal percent sequence in the filename is escaped, not passed
+    through — otherwise S3 decodes `%7BSMOKE%7D` and stores `{SMOKE}`."""
+    _eq(
+        "% escaped to %25",
+        aws_uri_encode("1787166988273_%7BSMOKE%7D.png"),
+        "1787166988273_%257BSMOKE%257D.png",
+    )
+
+def _test_uri_encode_non_ascii_is_per_utf8_byte(_ctx):
+    """Non-ASCII is escaped byte by byte, as `UriEncode` specifies: `é` is
+    two UTF-8 bytes, `☃` three."""
+    _eq("2-byte codepoint", aws_uri_encode("café.log"), "caf%C3%A9.log")
+    _eq("3-byte codepoint", aws_uri_encode("☃.png"), "%E2%98%83.png")
+
+def _test_uri_encode_empty(_ctx):
+    _eq("empty key stays empty", aws_uri_encode(""), "")
+
+def _test_uri_encode_is_not_idempotent(_ctx):
+    """Encoding twice is *not* a no-op — the caller must encode exactly once,
+    which is why `_s3_object_url` owns the only call."""
+    _eq("double-encoding escapes the escape", aws_uri_encode(aws_uri_encode("@a")), "%2540a")
+
+# s3_failure_is_retryable — is another attempt with fresh creds worth it?
+
+def _test_retryable_expired_token(_ctx):
+    """The rotation case the retry loop exists for."""
+    body = "<Error><Code>ExpiredToken</Code></Error>"
+    if not s3_failure_is_retryable("400", body):
+        fail("ExpiredToken must be retryable")
+
+def _test_retryable_clock_skew(_ctx):
+    body = "<Error><Code>RequestTimeTooSkewed</Code></Error>"
+    if not s3_failure_is_retryable("403", body):
+        fail("RequestTimeTooSkewed must be retryable")
+
+def _test_not_retryable_signature_mismatch(_ctx):
+    """A key S3 rejects is rejected identically every time — retrying it just
+    re-mints credentials and multiplies the warning."""
+    body = "<Error><Code>SignatureDoesNotMatch</Code></Error>"
+    if s3_failure_is_retryable("403", body):
+        fail("SignatureDoesNotMatch must not be retryable")
+
+def _test_not_retryable_access_denied(_ctx):
+    body = "<Error><Code>AccessDenied</Code></Error>"
+    if s3_failure_is_retryable("403", body):
+        fail("AccessDenied must not be retryable")
+
+def _test_retryable_transport_error(_ctx):
+    """No HTTP response at all → the network, not the request."""
+    if not s3_failure_is_retryable("000", ""):
+        fail("transport failure must be retryable")
+
+def _test_retryable_interrupted_after_2xx(_ctx):
+    """`_run_s3_put` fails a PUT whose curl exit is nonzero even when S3
+    answered 2xx — an interrupted response transfer (`curl: (18) Partial
+    file`). The upload never completed, and the next attempt can still work."""
+    if not s3_failure_is_retryable("200", ""):
+        fail("a 2xx with a nonzero curl exit must be retryable")
+
+def _test_retryable_server_error(_ctx):
+    if not s3_failure_is_retryable("503", ""):
+        fail("5xx must be retryable")
+
+def _test_retryable_throttled(_ctx):
+    if not s3_failure_is_retryable("429", ""):
+        fail("429 must be retryable")
+
+def _test_not_retryable_unknown_4xx(_ctx):
+    """An unrecognized 4xx defaults to permanent — a request S3 refuses to
+    accept won't start working on attempt three."""
+    if s3_failure_is_retryable("400", "<Error><Code>InvalidTag</Code></Error>"):
+        fail("unknown 4xx must not be retryable")
+
 # test_results_object_url — resolve a test-result Key.location to a PUT URL
 
 def _test_object_url_relative_key(_ctx):
@@ -126,6 +225,15 @@ def _test_object_url_relative_key(_ctx):
         "relative key → virtual-hosted S3 URL",
         test_results_object_url("circleci-tasks-prod", "us-east-1", "storage/test-raw/a/b/0/0.tar.gz"),
         "https://circleci-tasks-prod.s3.us-east-1.amazonaws.com/storage/test-raw/a/b/0/0.tar.gz",
+    )
+
+def _test_object_url_encodes_the_key(_ctx):
+    """A relative key is percent-encoded on the way into the URL, so what we
+    sign matches what S3 canonicalizes."""
+    _eq(
+        "key encoded in the URL",
+        test_results_object_url("bkt", "us-east-1", "storage/test-raw/@a (1).tar.gz"),
+        "https://bkt.s3.us-east-1.amazonaws.com/storage/test-raw/%40a%20%281%29.tar.gz",
     )
 
 def _test_object_url_absolute_https_passthrough(_ctx):
@@ -310,6 +418,23 @@ _UNIT_TESTS = [
     _test_cache_put_none_cache_noop,
     _test_cache_clear,
     _test_cache_clear_empty_noop,
+    _test_uri_encode_unreserved_untouched,
+    _test_uri_encode_at_sign,
+    _test_uri_encode_parens_and_brackets,
+    _test_uri_encode_percent_is_escaped,
+    _test_uri_encode_non_ascii_is_per_utf8_byte,
+    _test_uri_encode_empty,
+    _test_uri_encode_is_not_idempotent,
+    _test_retryable_expired_token,
+    _test_retryable_clock_skew,
+    _test_not_retryable_signature_mismatch,
+    _test_not_retryable_access_denied,
+    _test_retryable_transport_error,
+    _test_retryable_interrupted_after_2xx,
+    _test_retryable_server_error,
+    _test_retryable_throttled,
+    _test_not_retryable_unknown_4xx,
+    _test_object_url_encodes_the_key,
 ]
 
 def _test_impl(ctx):
@@ -319,6 +444,7 @@ def _test_impl(ctx):
     return 0
 
 circleci_tests = task(
+    summary = "Run the circleci AXL unit tests.",
     kind = "test-circleci",
     group = ["dev"],
     implementation = _test_impl,

@@ -1,19 +1,19 @@
 load("@aspect//auth_test.axl", "auth_tests")
+load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
+load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
-load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
+load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
-load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
-load("@aspect//private/lib/bes_sinks_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -23,6 +23,7 @@ load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_t
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//private/lib/github_detect_test.axl", "github_detect_tests")
+load("@aspect//private/lib/github_features_test.axl", "github_features_tests")
 load("@aspect//private/lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//private/lib/gitlab_features_test.axl", "gitlab_features_tests")
 load("@aspect//private/lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
@@ -43,7 +44,7 @@ load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
-load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -52,6 +53,7 @@ def _user_task_impl(ctx: TaskContext) -> int:
 
 _user_task = task(
     kind = "user-task-added-by-config",
+    summary = "Test fixture: a user task added from config.axl rather than its own file.",
     group = ["user"],
     implementation = _user_task_impl,
     args = {},
@@ -230,7 +232,7 @@ def config(ctx: ConfigContext):
 
     # Customize repro/fix suggestions; order matters — rewrite first (aspect →
     # bazel buildifier), then drop vanilla-bazel alternates.
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
@@ -272,6 +274,10 @@ def config(ctx: ConfigContext):
     # GitLab features unit: state mapping + description truncation + marker shape.
     # Run with: aspect dev test-gitlab-features
     ctx.tasks.add(gitlab_features_tests)
+
+    # GitHub features unit: check-run conclusion mapping.
+    # Run with: aspect dev test-github-features
+    ctx.tasks.add(github_features_tests)
 
     # GitHub event detection smoke: PR/merge_group/push shapes for detect_changed_files.
     # Run with: aspect dev test-github-detect
@@ -362,9 +368,10 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
 
-    # bazel_runner.axl dispatch helpers: the bazel_attempt_end/build_end seam.
-    # Run with: aspect dev test-bazel-runner
-    ctx.tasks.add(bazel_runner_tests)
+    # bazel/invocation.axl: the bazel_attempt_end/build_end dispatch seam, plus
+    # target_patterns (when the `targets` default is suppressed).
+    # Run with: aspect dev test-bazel-invocation
+    ctx.tasks.add(invocation_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth
@@ -378,7 +385,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-deliveryd
     ctx.tasks.add(deliveryd_tests)
 
-    # bes_sinks.axl: the end-of-build BES upload summary line.
+    # bazel/build_events.axl: the end-of-build BES upload summary line.
     # Run with: aspect dev test-bes-sinks
     ctx.tasks.add(bes_sinks_tests)
 
@@ -413,6 +420,11 @@ def config(ctx: ConfigContext):
     # Buildkite annotations: snapshots the annotate body per kind × status.
     # Run with: aspect dev test-bk-annotation-snapshots
     ctx.tasks.add(bk_annotation_snapshot_tests)
+
+    # Template customization: `args.templates` overrides + the per-kind
+    # SUMMARY_TEMPLATE / DETAILS_TEMPLATE exports configs patch.
+    # Run with: aspect dev test-bk-annotation-templates
+    ctx.tasks.add(bk_annotation_template_tests)
 
     # GitHub PR comment: aggregate-status body across kinds/statuses/links/phases.
     # Run with: aspect dev test-pr-comment-snapshots
