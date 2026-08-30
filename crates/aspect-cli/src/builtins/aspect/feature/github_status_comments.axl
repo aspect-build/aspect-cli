@@ -212,18 +212,18 @@ Reproduce with:
 {% endif %}
 {% endmacro -%}
 {% if build_snippets %}
-## 💥 Build Failures
+## Build Failures
 {% for s in build_snippets %}{{ snippet_block(s) }}{% endfor %}
 {% endif -%}
 {% if test_snippets %}
-## ❌ Test Failures
+## Test Failures
 {% for s in test_snippets %}{{ snippet_block(s) }}{% endfor %}
 {% endif -%}
 {% if snippet_overflow_note %}
 {{ snippet_overflow_note }}
 {% endif %}
 {% if tip_rows %}
-## 💡 Tips
+## Tips
 {% for tip in tip_rows %}
 > {{ tip.severity_emoji }} **{{ tip.severity_label|upper }}: {{ tip.title }}**
 >
@@ -235,7 +235,7 @@ Reproduce with:
 
 {% endfor %}{% endif -%}
 {% if fix_rows %}
-## 🛠️ Fix
+## Fix
 {% for r in fix_rows %}{% if r.show_heading %}
 #### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
@@ -249,7 +249,7 @@ Reproduce with:
 """ + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% if repro_rows %}
-## 🔁 Reproduce
+## Reproduce
 {% for r in repro_rows %}{% if r.show_heading %}
 #### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
