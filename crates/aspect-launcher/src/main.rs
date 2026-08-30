@@ -130,6 +130,39 @@ impl ArtifactChoice {
     }
 }
 
+/// Whether a `github()` source names the repo the CDN mirrors.
+fn is_aspect_cli_repo(org: &str, repo: &str) -> bool {
+    org == config::ASPECT_CLI_ORG && repo == config::ASPECT_CLI_REPO
+}
+
+/// The Aspect release a preceding `github()` source resolved, so a following
+/// `http()` mirror requests that same release rather than re-deriving it.
+///
+/// An unpinned config resolves its version from the releases API; without this
+/// the mirror would substitute the launcher's own, older version and silently
+/// downgrade the CLI during the outage the mirror exists to cover.
+///
+/// Only recorded for [`ASPECT_CLI_REPO`]: we mirror our own releases and
+/// nothing else, so a custom `github(org/repo)` must not redirect a mirror at
+/// assets the CDN does not carry.
+struct MirroredRelease {
+    /// Version for `{version}`, without the tag's leading `v`.
+    version: String,
+    artifact: String,
+    /// Primary-binary name to retry with, carried from the resolved
+    /// [`ArtifactChoice`] so the mirror falls back the same way.
+    fallback: Option<String>,
+}
+
+impl From<&MirroredRelease> for ArtifactChoice {
+    fn from(m: &MirroredRelease) -> Self {
+        Self {
+            name: m.artifact.clone(),
+            fallback: m.fallback.clone(),
+        }
+    }
+}
+
 /// Direct download URL for a release asset. Also the cache key for the downloaded
 /// binary, so every caller must build it the same way.
 fn release_asset_url(org: &str, repo: &str, tag: &str, artifact: &str) -> String {
@@ -470,13 +503,22 @@ async fn configure_tool_task(
 
         let client = reqwest::Client::new();
 
+        let mut mirrored: Option<MirroredRelease> = None;
+
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
                     let fallback_version = cargo_pkg_short_version();
-                    let version = tool.version().unwrap_or(&fallback_version);
-                    let choice =
-                        ArtifactChoice::derived(&tool.name(), debug_cli_mode(tool.debug()));
+                    let debug = debug_cli_mode(tool.debug());
+                    // Follow the Aspect release an earlier github() source resolved;
+                    // otherwise derive from the pinned version and this launcher.
+                    let (version, choice) = match &mirrored {
+                        Some(m) => (m.version.as_str(), ArtifactChoice::from(m)),
+                        None => (
+                            tool.version().unwrap_or(&fallback_version),
+                            ArtifactChoice::derived(&tool.name(), debug),
+                        ),
+                    };
                     let mut attempt_url = replace_url_vars(url, version, &choice.name);
                     let mut result =
                         http_fetch(&client, &cache, &tool.name(), &attempt_url, headers).await?;
@@ -699,12 +741,32 @@ async fn configure_tool_task(
                                         ));
                                     }
                                 }
+                                // The API is unreachable, but a cached hint still names
+                                // the last resolved release; let the mirror try it
+                                // rather than fall back to the launcher's version.
+                                if is_aspect_cli_repo(org, repo)
+                                    && let Ok(hint) = fs::read_to_string(&hint_path)
+                                {
+                                    mirrored = Some(MirroredRelease {
+                                        version: hint.trim().trim_start_matches('v').to_owned(),
+                                        artifact: choice.name.clone(),
+                                        fallback: choice.fallback.clone(),
+                                    });
+                                }
                                 errs.push(failure);
                                 continue;
                             }
                         };
+                        // A chosen debug variant also matches a release carrying only
+                        // the primary binary; the download below falls back to it.
+                        let acceptable: Vec<&str> = std::iter::once(artifact.as_str())
+                            .chain(choice.fallback.as_deref())
+                            .collect();
                         let found = releases.into_iter().find(|r| {
-                            !r.prerelease && r.assets.iter().any(|a| a.name == *artifact)
+                            !r.prerelease
+                                && r.assets
+                                    .iter()
+                                    .any(|a| acceptable.contains(&a.name.as_str()))
                         });
                         let resolved = match found {
                             Some(release) => release.tag_name,
@@ -808,6 +870,13 @@ async fn configure_tool_task(
                     }
 
                     if let Some(e) = download_err {
+                        if is_aspect_cli_repo(org, repo) {
+                            mirrored = Some(MirroredRelease {
+                                version: resolved_tag.trim_start_matches('v').to_owned(),
+                                artifact: choice.name.clone(),
+                                fallback: choice.fallback.clone(),
+                            });
+                        }
                         errs.push(SourceFailure::new(direct_url.clone(), e));
                         continue;
                     }
@@ -1049,6 +1118,51 @@ mod tests {
             assert_eq!(choice.name, "custom-1.0.0");
             assert_eq!(choice.debug_fallback("v1.0.0"), None);
         }
+    }
+
+    #[test]
+    fn test_is_aspect_cli_repo_matches_only_the_mirrored_repo() {
+        assert!(is_aspect_cli_repo("aspect-build", "aspect-cli"));
+        assert!(!is_aspect_cli_repo("aspect-build", "my-cli"));
+        assert!(!is_aspect_cli_repo("my-org", "aspect-cli"));
+    }
+
+    /// A mirror follows the resolved release, so an unpinned config that
+    /// resolved a newer tag is not downgraded to the launcher's own version.
+    #[test]
+    fn test_mirrored_release_drives_the_url() {
+        use crate::config::CDN_MIRROR_URL;
+
+        let m = MirroredRelease {
+            version: "2026.35.9".to_owned(),
+            artifact: default_artifact("aspect-cli", false),
+            fallback: None,
+        };
+        let choice = ArtifactChoice::from(&m);
+        assert_eq!(
+            replace_url_vars(CDN_MIRROR_URL, &m.version, &choice.name),
+            format!(
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{}",
+                default_artifact("aspect-cli", false)
+            )
+        );
+    }
+
+    /// The debug fallback survives the hand-off, so a mirror recovers from a
+    /// release with no debug asset exactly as the github() source would.
+    #[test]
+    fn test_mirrored_release_carries_the_debug_fallback() {
+        let source = ArtifactChoice::derived("aspect-cli", true);
+        let m = MirroredRelease {
+            version: "2026.31.1".to_owned(),
+            artifact: source.name.clone(),
+            fallback: source.fallback.clone(),
+        };
+        let choice = ArtifactChoice::from(&m);
+        let (primary, _) = choice
+            .debug_fallback("2026.31.1")
+            .expect("fallback carried");
+        assert_eq!(primary, default_artifact("aspect-cli", false));
     }
 
     #[test]
@@ -1393,6 +1507,46 @@ mod tests {
         cache.touch_latest_tag(&hint);
         assert!(cache.latest_tag_is_fresh(&hint, std::time::Duration::from_secs(86400)));
         assert!(dest.exists());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// When the releases API is down, the cached hint names the release the last
+    /// successful run resolved. The mirror must reuse that version rather than
+    /// the launcher's own, which would silently downgrade an unpinned config.
+    #[test]
+    fn test_stale_hint_version_feeds_the_mirror_url() {
+        use crate::config::CDN_MIRROR_URL;
+
+        let tmp = tmp_cache_dir("hint-mirror");
+        let cache = make_cache(&tmp);
+
+        let hint = cache.latest_tag_path(
+            "aspect-cli",
+            "aspect-build",
+            "aspect-cli",
+            "aspect-cli-aarch64-apple-darwin",
+        );
+        std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+        std::fs::write(&hint, "v2026.35.9").unwrap();
+
+        // The hand-off the http() branch performs: hint tag -> mirrored version.
+        let recorded = std::fs::read_to_string(&hint).unwrap();
+        let choice = ArtifactChoice::derived("aspect-cli", false);
+        let m = MirroredRelease {
+            version: recorded.trim().trim_start_matches('v').to_owned(),
+            artifact: choice.name.clone(),
+            fallback: choice.fallback.clone(),
+        };
+        assert_eq!(m.version, "2026.35.9");
+        assert_ne!(m.version, cargo_pkg_short_version());
+        assert_eq!(
+            replace_url_vars(CDN_MIRROR_URL, &m.version, &ArtifactChoice::from(&m).name),
+            format!(
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{}",
+                default_artifact("aspect-cli", false)
+            )
+        );
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

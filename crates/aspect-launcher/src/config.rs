@@ -109,10 +109,17 @@ impl ToolSpec for AspectCliConfig {
     }
 }
 
-/// URL template for the Aspect-run CDN mirror of the GitHub releases.
+/// The repository the default sources download from. The CDN mirrors these
+/// releases and no others.
+pub const ASPECT_CLI_ORG: &str = "aspect-build";
+pub const ASPECT_CLI_REPO: &str = "aspect-cli";
+
+/// URL template for the Aspect-run CDN mirror of [`ASPECT_CLI_ORG`]/
+/// [`ASPECT_CLI_REPO`] releases.
 ///
-/// The launcher expands `{artifact}` to the same asset name the `github()`
-/// source would request, so the mirror tracks `debug = True` automatically.
+/// The launcher expands `{artifact}` to the same asset name the default
+/// `github()` source would request, so the mirror tracks `debug = True`
+/// automatically.
 pub const CDN_MIRROR_URL: &str = "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v{version}/{artifact}";
 
 /// The GitHub release, then the Aspect CDN mirror of the same assets, so a
@@ -120,8 +127,8 @@ pub const CDN_MIRROR_URL: &str = "https://cdn.aspect.build/github.com/aspect-bui
 fn default_cli_sources() -> Vec<ToolSource> {
     vec![
         ToolSource::GitHub {
-            org: "aspect-build".into(),
-            repo: "aspect-cli".into(),
+            org: ASPECT_CLI_ORG.into(),
+            repo: ASPECT_CLI_REPO.into(),
             tag: String::new(),
             artifact: String::new(),
         },

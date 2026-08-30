@@ -126,4 +126,10 @@ String values in `tag`, `artifact`, and `url` support `{variable}` placeholders 
 | `{target}` | `aarch64-apple-darwin` | Full platform target triple |
 | `{artifact}` | `aspect-cli-aarch64-apple-darwin` | Release asset name; `url` only. Carries the `-debug-` infix when a debug build is requested, so a mirror URL tracks `debug` automatically |
 
+An `http()` source listed after the default `github(org = "aspect-build", repo =
+"aspect-cli")` mirrors whatever that source resolved, so an unpinned config keeps
+the version it resolved from the releases API instead of falling back to the
+launcher's own. A `github()` source for any other repository does not feed a
+mirror, since the Aspect CDN carries only `aspect-build/aspect-cli` releases.
+
 These are the only supported placeholders. The file is not evaluated as Starlark; it is parsed as Starlark syntax but only string literals and function call structure are extracted.
