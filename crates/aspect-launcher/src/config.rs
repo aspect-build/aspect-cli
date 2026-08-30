@@ -57,6 +57,9 @@ pub struct AspectCliConfig {
     /// The pinned version string, or `None` if the version should be resolved
     /// by querying the releases API for the latest available release.
     version: Option<String>,
+    /// Whether to fetch the `-debug-` build variant instead of the primary
+    /// binary.
+    debug: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +87,8 @@ pub trait ToolSpec: Debug {
     /// at download time (e.g. by querying the GitHub releases API).
     fn version(&self) -> Option<&str>;
     fn sources(&self) -> &Vec<ToolSource>;
+    /// Whether the config asked for the `-debug-` build variant.
+    fn debug(&self) -> bool;
 }
 
 impl ToolSpec for AspectCliConfig {
@@ -98,21 +103,47 @@ impl ToolSpec for AspectCliConfig {
     fn version(&self) -> Option<&str> {
         self.version.as_deref()
     }
+
+    fn debug(&self) -> bool {
+        self.debug
+    }
 }
 
+/// The repository the default sources download from. The CDN mirrors these
+/// releases and no others.
+pub const ASPECT_CLI_ORG: &str = "aspect-build";
+pub const ASPECT_CLI_REPO: &str = "aspect-cli";
+
+/// URL template for the Aspect-run CDN mirror of [`ASPECT_CLI_ORG`]/
+/// [`ASPECT_CLI_REPO`] releases.
+///
+/// The launcher expands `{artifact}` to the same asset name the default
+/// `github()` source would request, so the mirror tracks `debug = True`
+/// automatically.
+pub const CDN_MIRROR_URL: &str = "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v{version}/{artifact}";
+
+/// The GitHub release, then the Aspect CDN mirror of the same assets, so a
+/// GitHub outage or rate limit costs a retry rather than the whole download.
 fn default_cli_sources() -> Vec<ToolSource> {
-    vec![ToolSource::GitHub {
-        org: "aspect-build".into(),
-        repo: "aspect-cli".into(),
-        tag: String::new(),
-        artifact: String::new(),
-    }]
+    vec![
+        ToolSource::GitHub {
+            org: ASPECT_CLI_ORG.into(),
+            repo: ASPECT_CLI_REPO.into(),
+            tag: String::new(),
+            artifact: String::new(),
+        },
+        ToolSource::Http {
+            url: CDN_MIRROR_URL.into(),
+            headers: HashMap::new(),
+        },
+    ]
 }
 
 fn default_aspect_cli_config() -> AspectCliConfig {
     AspectCliConfig {
         sources: default_cli_sources(),
         version: None,
+        debug: false,
     }
 }
 
@@ -127,6 +158,16 @@ fn extract_string_literal(expr: &AstExpr) -> Result<&str> {
     match &expr.node {
         Expr::Literal(AstLiteral::String(s)) => Ok(&s.node),
         _ => Err(miette!("expected string literal")),
+    }
+}
+
+/// Extract a boolean from an expression. Starlark parses `True`/`False` as
+/// identifiers rather than literals, so both are matched as such.
+fn extract_bool_literal(expr: &AstExpr) -> Result<bool> {
+    match &expr.node {
+        Expr::Identifier(id) if id.ident == "True" => Ok(true),
+        Expr::Identifier(id) if id.ident == "False" => Ok(false),
+        _ => Err(miette!("expected True or False")),
     }
 }
 
@@ -284,6 +325,7 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
 
     let mut version: Option<String> = None;
     let mut sources: Option<Vec<ToolSource>> = None;
+    let mut debug = false;
 
     for arg in &args.args {
         match &arg.node {
@@ -308,6 +350,10 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
                         return Err(miette!("'sources' must be a list"));
                     }
                 }
+                "debug" => {
+                    debug = extract_bool_literal(expr)
+                        .map_err(|_| miette!("'debug' must be True or False"))?;
+                }
                 other => {
                     return Err(miette!("unknown argument '{}' in version() call", other));
                 }
@@ -322,6 +368,7 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
         aspect_cli: AspectCliConfig {
             version,
             sources: sources.unwrap_or_else(default_cli_sources),
+            debug,
         },
     })
 }
@@ -518,7 +565,7 @@ version(
     fn test_parse_version_no_sources_uses_default() {
         let content = r#"version("1.0.0")"#;
         let config = parse_version_axl(content).unwrap();
-        assert_eq!(config.aspect_cli.sources().len(), 1);
+        assert_eq!(config.aspect_cli.sources().len(), 2);
         match &config.aspect_cli.sources()[0] {
             ToolSource::GitHub { org, repo, .. } => {
                 assert_eq!(org, "aspect-build");
@@ -526,6 +573,51 @@ version(
             }
             other => panic!("expected default GitHub source, got {:?}", other),
         }
+        match &config.aspect_cli.sources()[1] {
+            ToolSource::Http { url, headers } => {
+                assert_eq!(url, CDN_MIRROR_URL);
+                assert!(headers.is_empty());
+            }
+            other => panic!("expected default CDN mirror source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_debug_defaults_to_false() {
+        let config = parse_version_axl(r#"version("1.0.0")"#).unwrap();
+        assert!(!config.aspect_cli.debug());
+    }
+
+    #[test]
+    fn test_parse_version_debug_true() {
+        let config = parse_version_axl(r#"version("1.0.0", debug = True)"#).unwrap();
+        assert!(config.aspect_cli.debug());
+    }
+
+    #[test]
+    fn test_parse_version_debug_false_is_explicit() {
+        let config = parse_version_axl(r#"version("1.0.0", debug = False)"#).unwrap();
+        assert!(!config.aspect_cli.debug());
+    }
+
+    #[test]
+    fn test_parse_version_debug_alongside_sources() {
+        let content = r#"
+version(
+    "1.0.0",
+    debug = True,
+    sources = [github(org = "aspect-build", repo = "aspect-cli")],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        assert!(config.aspect_cli.debug());
+        assert_eq!(config.aspect_cli.sources().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_version_debug_non_bool_errors() {
+        let result = parse_version_axl(r#"version("1.0.0", debug = "yes")"#);
+        assert!(result.is_err(), "debug must reject a non-boolean");
     }
 
     #[test]
@@ -581,7 +673,8 @@ version(
     fn test_default_config() {
         let config = super::default_config();
         assert_eq!(config.aspect_cli.version(), None);
-        assert_eq!(config.aspect_cli.sources().len(), 1);
+        assert!(!config.aspect_cli.debug());
+        assert_eq!(config.aspect_cli.sources().len(), 2);
         assert!(matches!(
             &config.aspect_cli.sources()[0],
             ToolSource::GitHub {
@@ -589,6 +682,12 @@ version(
                 repo,
                 ..
             } if org == "aspect-build" && repo == "aspect-cli"
+        ));
+        // The CDN mirror is the fallback, so a GitHub outage degrades to a
+        // second attempt rather than a hard failure.
+        assert!(matches!(
+            &config.aspect_cli.sources()[1],
+            ToolSource::Http { url, .. } if url == CDN_MIRROR_URL
         ));
     }
 

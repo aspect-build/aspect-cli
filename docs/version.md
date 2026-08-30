@@ -10,9 +10,34 @@ Pin a specific version:
 version("2025.46.20")
 ```
 
-The launcher will download this version from the default GitHub release source.
+The launcher downloads this version from the default sources: the GitHub
+release, falling back to Aspect's CDN mirror of the same release assets if
+GitHub is unreachable or rate-limiting. No configuration is needed to get the
+fallback.
 
 If no `.aspect/version.axl` file exists, the launcher downloads the same version as itself.
+
+## Debug Builds
+
+Set `debug = True` to fetch the `-debug-` build variant published alongside each
+release. It is unstripped and built with debug assertions, so a crash report
+resolves to function and `file:line`, at the cost of size and speed. Use it when
+reproducing a crash for a bug report.
+
+```python
+version(
+    "2025.46.20",
+    debug = True,
+)
+```
+
+This applies to the default sources and to any `github()` source that does not
+name an explicit `artifact`. If a pinned release predates the debug variant, the
+launcher warns and falls back to the primary binary rather than failing.
+
+The `ASPECT_DEBUG_CLI` environment variable requests the same thing without
+editing a checked-in file. (It is distinct from `ASPECT_DEBUG`, which only turns
+on verbose launcher logging and never changes which binary is fetched.)
 
 ## Custom Sources
 
@@ -99,5 +124,12 @@ String values in `tag`, `artifact`, and `url` support `{variable}` placeholders 
 | `{os}` | `darwin`, `linux` | Operating system kernel name |
 | `{arch}` | `x86_64`, `aarch64` | CPU instruction set architecture |
 | `{target}` | `aarch64-apple-darwin` | Full platform target triple |
+| `{artifact}` | `aspect-cli-aarch64-apple-darwin` | Release asset name; `url` only. Carries the `-debug-` infix when a debug build is requested, so a mirror URL tracks `debug` automatically |
+
+An `http()` source listed after the default `github(org = "aspect-build", repo =
+"aspect-cli")` mirrors whatever that source resolved, so an unpinned config keeps
+the version it resolved from the releases API instead of falling back to the
+launcher's own. A `github()` source for any other repository does not feed a
+mirror, since the Aspect CDN carries only `aspect-build/aspect-cli` releases.
 
 These are the only supported placeholders. The file is not evaluated as Starlark; it is parsed as Starlark syntax but only string literals and function call structure are extracted.
