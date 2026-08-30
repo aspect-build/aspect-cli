@@ -40,10 +40,10 @@ fn replace_vars(s: &str, version: &str) -> String {
         .replace("{target}", LLVM_TRIPLE)
 }
 
-/// Like [`replace_vars`], plus `{artifact}` for URLs that mirror the GitHub
-/// release assets. `artifact` already carries the `-debug-` infix when the
-/// debug variant was requested, so a mirror URL follows it without needing its
-/// own debug placeholder.
+/// Like [`replace_vars`], plus `{artifact}` for URLs that mirror the release
+/// assets. `artifact` already carries the `-debug-` infix when the debug
+/// variant was requested, so a mirror URL tracks it with no debug placeholder
+/// of its own.
 fn replace_url_vars(s: &str, version: &str, artifact: &str) -> String {
     replace_vars(s, version).replace("{artifact}", artifact)
 }
@@ -55,21 +55,14 @@ fn debug_mode() -> bool {
     }
 }
 
-/// Whether to fetch the `-debug-` release variant instead of the primary binary.
+/// Whether to fetch the `-debug-` release variant instead of the primary binary,
+/// requested either by `debug = True` in `version()` (`config_debug`) or by the
+/// `ASPECT_DEBUG_CLI` environment variable.
 ///
 /// Separate from [`debug_mode`] on purpose: `ASPECT_DEBUG` requests verbose logging and
 /// is set routinely, so it must not also swap in a larger, slower binary.
-///
-/// `config_debug` carries `debug = True` from `version()`. The env var remains an
-/// override so a debug binary can be requested without editing a checked-in file.
 fn debug_cli_mode(config_debug: bool) -> bool {
-    if config_debug {
-        return true;
-    }
-    match var("ASPECT_DEBUG_CLI") {
-        Ok(val) => !val.is_empty(),
-        _ => false,
-    }
+    config_debug || var("ASPECT_DEBUG_CLI").is_ok_and(|val| !val.is_empty())
 }
 
 /// Default release asset name for a tool, e.g. `aspect-cli-x86_64-unknown-linux-musl`.
@@ -85,6 +78,55 @@ fn default_artifact(repo: &str, debug: bool) -> String {
         format!("{}-debug-{}", repo, LLVM_TRIPLE)
     } else {
         format!("{}-{}", repo, LLVM_TRIPLE)
+    }
+}
+
+/// The release asset a source should request, plus the primary-binary name to
+/// retry with when the debug variant was chosen.
+///
+/// Not every release publishes a `-debug-` asset, and a pinned tag is
+/// downloaded without consulting the asset list, so a missing one surfaces only
+/// as a failed download. [`Self::debug_fallback`] then names the primary binary,
+/// degrading a debug request to a working CLI instead of no CLI. An artifact
+/// named explicitly in config has no known counterpart, so it gets no fallback.
+struct ArtifactChoice {
+    name: String,
+    /// Set only when [`Self::name`] is a debug variant this resolver chose.
+    fallback: Option<String>,
+}
+
+impl ArtifactChoice {
+    /// The asset name this launcher derives for `repo`.
+    fn derived(repo: &str, debug: bool) -> Self {
+        Self {
+            name: default_artifact(repo, debug),
+            fallback: debug.then(|| default_artifact(repo, false)),
+        }
+    }
+
+    /// Resolve the asset name for `repo`, honoring an explicit `configured`
+    /// name (with `{var}` placeholders expanded) over the derived default.
+    fn resolve(repo: &str, configured: &str, version: &str, debug: bool) -> Self {
+        if configured.is_empty() {
+            return Self::derived(repo, debug);
+        }
+        Self {
+            name: replace_vars(configured, version),
+            fallback: None,
+        }
+    }
+
+    /// The primary-binary name to retry with, and the warning to print, after a
+    /// download of a chosen debug variant failed.
+    fn debug_fallback(&self, tag: &str) -> Option<(&str, String)> {
+        let primary = self.fallback.as_deref()?;
+        Some((
+            primary,
+            format!(
+                "{} is unavailable in {tag}; falling back to {primary}",
+                self.name
+            ),
+        ))
     }
 }
 
@@ -258,6 +300,42 @@ async fn download_with_retries(
     Err(last_err.expect("at least one attempt must have run"))
 }
 
+/// Fetch `url` into the launcher cache for `tool_name`, serving an existing
+/// cache entry without a request.
+///
+/// The outer `Result` is a local failure that aborts provisioning entirely (an
+/// unusable cache directory, a malformed request); the inner one is a download
+/// failure the caller can attribute to this URL and recover from by trying
+/// another source.
+async fn http_fetch(
+    client: &Client,
+    cache: &AspectCache,
+    tool_name: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<Result<PathBuf, Report>> {
+    let dest = cache.tool_path(tool_name, url);
+    if dest.exists() {
+        if debug_mode() {
+            eprintln!("{tool_name} found {url:?} in cache");
+        }
+        return Ok(Ok(dest));
+    }
+    fs::create_dir_all(dest.parent().unwrap()).into_diagnostic()?;
+    if debug_mode() {
+        eprintln!("{tool_name} downloading {url:?} to {dest:?}");
+    }
+    let req = client
+        .request(Method::GET, url)
+        .headers(headermap_from_hashmap(headers.iter()))
+        .build()
+        .into_diagnostic()?;
+    let msg = format!("downloading aspect cli from {url}");
+    Ok(_download_into_cache(client, &dest, req, &msg)
+        .await
+        .map(|()| dest))
+}
+
 /// A failed attempt to obtain a tool from one of its sources.
 struct SourceFailure {
     /// Human-readable identity of the source attempt, e.g. the download URL.
@@ -397,53 +475,41 @@ async fn configure_tool_task(
                 ToolSource::Http { url, headers } => {
                     let fallback_version = cargo_pkg_short_version();
                     let version = tool.version().unwrap_or(&fallback_version);
-                    let artifact = default_artifact(&tool.name(), debug_cli_mode(tool.debug()));
-                    let url = replace_url_vars(url, version, &artifact);
-                    let req_headers = headermap_from_hashmap(headers.iter());
-                    let req = client
-                        .request(Method::GET, &url)
-                        .headers(req_headers)
-                        .build()
-                        .into_diagnostic()?;
-                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
-                    let mut extra_envs = HashMap::new();
-                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_URL".to_string(), url.clone());
-                    if tool_dest_file.exists() {
-                        if debug_mode() {
-                            eprintln!(
-                                "{:} source {:?} found in cache {:?}",
-                                tool.name(),
-                                source,
-                                url
-                            );
-                        };
-                        return Ok((
-                            tool_dest_file,
-                            ASPECT_LAUNCHER_METHOD_HTTP.to_string(),
-                            extra_envs,
-                        ));
-                    }
-                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
-                    if debug_mode() {
-                        eprintln!(
-                            "{:} source {:?} downloading {:?} to {:?}",
-                            tool.name(),
-                            source,
-                            url,
-                            tool_dest_file
-                        );
-                    };
-                    let download_msg = format!("downloading aspect cli from {}", url);
-                    if let Err(e) =
-                        _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
+                    let choice =
+                        ArtifactChoice::derived(&tool.name(), debug_cli_mode(tool.debug()));
+                    let mut attempt_url = replace_url_vars(url, version, &choice.name);
+                    let mut result =
+                        http_fetch(&client, &cache, &tool.name(), &attempt_url, headers).await?;
+
+                    // Skipped when the URL has no {artifact}, since the retry would
+                    // repeat the same request.
+                    if result.is_err()
+                        && let Some((primary, warning)) = choice.debug_fallback(version)
                     {
-                        errs.push(SourceFailure::new(url.clone(), e));
-                        continue;
+                        let primary_url = replace_url_vars(url, version, primary);
+                        if primary_url != attempt_url {
+                            eprintln!("{warning}");
+                            attempt_url = primary_url;
+                            result =
+                                http_fetch(&client, &cache, &tool.name(), &attempt_url, headers)
+                                    .await?;
+                        }
+                    }
+
+                    let tool_dest_file = match result {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            errs.push(SourceFailure::new(attempt_url, e));
+                            continue;
+                        }
                     };
                     return Ok((
                         tool_dest_file,
                         ASPECT_LAUNCHER_METHOD_HTTP.to_string(),
-                        extra_envs,
+                        HashMap::from([(
+                            "ASPECT_LAUNCHER_ASPECT_CLI_URL".to_string(),
+                            attempt_url,
+                        )]),
                     ));
                 }
                 ToolSource::GitHub {
@@ -456,14 +522,13 @@ async fn configure_tool_task(
                     let pinned_version = tool.version();
                     let version_for_vars = pinned_version.unwrap_or(&fallback_version);
 
-                    // Gates the fallback below: only a name we chose has a known primary
-                    // counterpart to fall back to.
-                    let chose_debug_variant = artifact.is_empty() && debug_cli_mode(tool.debug());
-                    let artifact = if artifact.is_empty() {
-                        default_artifact(repo, chose_debug_variant)
-                    } else {
-                        replace_vars(artifact, version_for_vars)
-                    };
+                    let choice = ArtifactChoice::resolve(
+                        repo,
+                        artifact,
+                        version_for_vars,
+                        debug_cli_mode(tool.debug()),
+                    );
+                    let artifact = choice.name.clone();
 
                     // How long a resolved tag hint is considered fresh before we
                     // re-query the releases API to pick up newer versions.
@@ -714,19 +779,17 @@ async fn configure_tool_task(
                     .await
                     .err();
 
-                    // A pinned tag is resolved without consulting the asset list, so a
-                    // release that predates the `-debug-` variant only fails here. Serve
-                    // the primary binary rather than no CLI at all.
-                    if download_err.is_some() && chose_debug_variant {
-                        let primary = default_artifact(repo, false);
-                        eprintln!(
-                            "{artifact} is unavailable in {resolved_tag}; falling back to {primary}"
-                        );
-                        direct_url = release_asset_url(org, repo, &resolved_tag, &primary);
+                    if let Some((primary, warning)) = download_err
+                        .is_some()
+                        .then(|| choice.debug_fallback(&resolved_tag))
+                        .flatten()
+                    {
+                        eprintln!("{warning}");
+                        direct_url = release_asset_url(org, repo, &resolved_tag, primary);
                         tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
                         extra_envs.insert(
                             "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
-                            primary.clone(),
+                            primary.to_owned(),
                         );
                         download_err = if tool_dest_file.exists() {
                             None
@@ -737,7 +800,7 @@ async fn configure_tool_task(
                                 &client,
                                 &direct_url,
                                 &tool_dest_file,
-                                &download_msg(&primary),
+                                &download_msg(primary),
                             )
                             .await
                             .err()
@@ -962,6 +1025,33 @@ mod tests {
     }
 
     #[test]
+    fn test_artifact_choice_defaults_to_the_primary_binary() {
+        let choice = ArtifactChoice::resolve("aspect-cli", "", "1.0.0", false);
+        assert_eq!(choice.name, default_artifact("aspect-cli", false));
+        assert_eq!(choice.debug_fallback("v1.0.0"), None);
+    }
+
+    #[test]
+    fn test_artifact_choice_debug_falls_back_to_the_primary() {
+        let choice = ArtifactChoice::resolve("aspect-cli", "", "1.0.0", true);
+        assert_eq!(choice.name, default_artifact("aspect-cli", true));
+        let (primary, warning) = choice.debug_fallback("v1.0.0").expect("fallback");
+        assert_eq!(primary, default_artifact("aspect-cli", false));
+        assert!(warning.contains("unavailable in v1.0.0"), "{warning}");
+    }
+
+    /// A configured artifact has no known primary counterpart, so requesting a
+    /// debug build must not invent one.
+    #[test]
+    fn test_artifact_choice_configured_name_wins_and_has_no_fallback() {
+        for debug in [false, true] {
+            let choice = ArtifactChoice::resolve("aspect-cli", "custom-{version}", "1.0.0", debug);
+            assert_eq!(choice.name, "custom-1.0.0");
+            assert_eq!(choice.debug_fallback("v1.0.0"), None);
+        }
+    }
+
+    #[test]
     fn test_replace_url_vars_expands_artifact() {
         assert_eq!(
             replace_url_vars(
@@ -1001,6 +1091,36 @@ mod tests {
     fn test_debug_cli_mode_follows_the_config_flag() {
         // True regardless of the env var, which is only an additional opt-in.
         assert!(debug_cli_mode(true));
+    }
+
+    /// A url= without {artifact} names one fixed asset, so the debug retry would
+    /// repeat the same request; the branch guards on the URL actually changing.
+    #[test]
+    fn test_debug_fallback_url_is_unchanged_without_an_artifact_placeholder() {
+        let choice = ArtifactChoice::derived("aspect-cli", true);
+        let (primary, _) = choice.debug_fallback("v1.0.0").expect("fallback");
+        let url = "https://example.com/aspect-cli-{version}";
+        assert_eq!(
+            replace_url_vars(url, "1.0.0", &choice.name),
+            replace_url_vars(url, "1.0.0", primary)
+        );
+    }
+
+    /// The CDN mirror must reach the primary binary when a release published no
+    /// debug asset, matching the github() source rather than failing outright.
+    #[test]
+    fn test_cdn_mirror_debug_fallback_url_targets_the_primary() {
+        use crate::config::CDN_MIRROR_URL;
+
+        let choice = ArtifactChoice::resolve("aspect-cli", "", "2026.31.1", true);
+        let (primary, _) = choice.debug_fallback("2026.31.1").expect("fallback");
+        assert_eq!(
+            replace_url_vars(CDN_MIRROR_URL, "2026.31.1", primary),
+            format!(
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.31.1/{}",
+                default_artifact("aspect-cli", false)
+            )
+        );
     }
 
     #[test]

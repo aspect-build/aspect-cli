@@ -33,7 +33,7 @@ impl AspectCache {
         Ok(AspectCache::from(aspect_data_dir))
     }
 
-    pub fn tool_path(&self, tool_name: &String, tool_source: &String) -> PathBuf {
+    pub fn tool_path(&self, tool_name: &str, tool_source: &str) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(tool_name.as_bytes());
         hasher.update(tool_source.as_bytes());

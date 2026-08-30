@@ -58,7 +58,7 @@ pub struct AspectCliConfig {
     /// by querying the releases API for the latest available release.
     version: Option<String>,
     /// Whether to fetch the `-debug-` build variant instead of the primary
-    /// binary. Set by `debug = True` in `version()`.
+    /// binary.
     debug: bool,
 }
 
@@ -111,12 +111,12 @@ impl ToolSpec for AspectCliConfig {
 
 /// URL template for the Aspect-run CDN mirror of the GitHub releases.
 ///
-/// `{artifact}` is expanded by the launcher to the same asset name the GitHub
-/// source would request, so the mirror follows `debug = True` automatically.
+/// The launcher expands `{artifact}` to the same asset name the `github()`
+/// source would request, so the mirror tracks `debug = True` automatically.
 pub const CDN_MIRROR_URL: &str = "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v{version}/{artifact}";
 
-/// GitHub first, then the Aspect CDN mirror of the same release assets, so a
-/// GitHub outage or rate limit degrades to a slower path instead of a failure.
+/// The GitHub release, then the Aspect CDN mirror of the same assets, so a
+/// GitHub outage or rate limit costs a retry rather than the whole download.
 fn default_cli_sources() -> Vec<ToolSource> {
     vec![
         ToolSource::GitHub {
@@ -154,10 +154,8 @@ fn extract_string_literal(expr: &AstExpr) -> Result<&str> {
     }
 }
 
-/// Extract a boolean from an expression.
-///
-/// Starlark parses `True`/`False` as identifiers rather than literals, so both
-/// spellings are matched here.
+/// Extract a boolean from an expression. Starlark parses `True`/`False` as
+/// identifiers rather than literals, so both are matched as such.
 fn extract_bool_literal(expr: &AstExpr) -> Result<bool> {
     match &expr.node {
         Expr::Identifier(id) if id.ident == "True" => Ok(true),
