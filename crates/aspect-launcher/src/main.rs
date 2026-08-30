@@ -40,6 +40,14 @@ fn replace_vars(s: &str, version: &str) -> String {
         .replace("{target}", LLVM_TRIPLE)
 }
 
+/// Like [`replace_vars`], plus `{artifact}` for URLs that mirror the GitHub
+/// release assets. `artifact` already carries the `-debug-` infix when the
+/// debug variant was requested, so a mirror URL follows it without needing its
+/// own debug placeholder.
+fn replace_url_vars(s: &str, version: &str, artifact: &str) -> String {
+    replace_vars(s, version).replace("{artifact}", artifact)
+}
+
 fn debug_mode() -> bool {
     match var("ASPECT_DEBUG") {
         Ok(val) => !val.is_empty(),
@@ -51,7 +59,13 @@ fn debug_mode() -> bool {
 ///
 /// Separate from [`debug_mode`] on purpose: `ASPECT_DEBUG` requests verbose logging and
 /// is set routinely, so it must not also swap in a larger, slower binary.
-fn debug_cli_mode() -> bool {
+///
+/// `config_debug` carries `debug = True` from `version()`. The env var remains an
+/// override so a debug binary can be requested without editing a checked-in file.
+fn debug_cli_mode(config_debug: bool) -> bool {
+    if config_debug {
+        return true;
+    }
     match var("ASPECT_DEBUG_CLI") {
         Ok(val) => !val.is_empty(),
         _ => false,
@@ -383,7 +397,8 @@ async fn configure_tool_task(
                 ToolSource::Http { url, headers } => {
                     let fallback_version = cargo_pkg_short_version();
                     let version = tool.version().unwrap_or(&fallback_version);
-                    let url = replace_vars(url, version);
+                    let artifact = default_artifact(&tool.name(), debug_cli_mode(tool.debug()));
+                    let url = replace_url_vars(url, version, &artifact);
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
                         .request(Method::GET, &url)
@@ -443,7 +458,7 @@ async fn configure_tool_task(
 
                     // Gates the fallback below: only a name we chose has a known primary
                     // counterpart to fall back to.
-                    let chose_debug_variant = artifact.is_empty() && debug_cli_mode();
+                    let chose_debug_variant = artifact.is_empty() && debug_cli_mode(tool.debug());
                     let artifact = if artifact.is_empty() {
                         default_artifact(repo, chose_debug_variant)
                     } else {
@@ -944,6 +959,48 @@ mod tests {
     fn test_replace_vars_no_placeholders() {
         let result = replace_vars("plain-string", "1.0.0");
         assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_replace_url_vars_expands_artifact() {
+        assert_eq!(
+            replace_url_vars(
+                "https://cdn/{version}/{artifact}",
+                "1.2.3",
+                "aspect-cli-linux"
+            ),
+            "https://cdn/1.2.3/aspect-cli-linux"
+        );
+    }
+
+    /// The default CDN mirror must resolve to the same asset path the GitHub
+    /// source would request, for both the primary and the debug variant.
+    #[test]
+    fn test_cdn_mirror_url_matches_the_github_asset_path() {
+        use crate::config::CDN_MIRROR_URL;
+
+        let primary = default_artifact("aspect-cli", false);
+        assert_eq!(
+            replace_url_vars(CDN_MIRROR_URL, "2026.35.9", &primary),
+            format!(
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{primary}"
+            )
+        );
+
+        let debug = default_artifact("aspect-cli", true);
+        assert!(debug.contains("-debug-"));
+        assert_eq!(
+            replace_url_vars(CDN_MIRROR_URL, "2026.35.9", &debug),
+            format!(
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{debug}"
+            )
+        );
+    }
+
+    #[test]
+    fn test_debug_cli_mode_follows_the_config_flag() {
+        // True regardless of the env var, which is only an additional opt-in.
+        assert!(debug_cli_mode(true));
     }
 
     #[test]
