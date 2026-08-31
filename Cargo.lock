@@ -368,6 +368,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "hyperlocal",
+ "ibp",
  "include_dir",
  "keyring",
  "liquid",
@@ -1947,6 +1948,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "ibp"
+version = "0.0.0-dev"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

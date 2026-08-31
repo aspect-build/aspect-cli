@@ -24,6 +24,7 @@ rust_library(
         "//crates/build-event-stream",
         "//crates/fswatch",
         "//crates/galvanize",
+        "//crates/ibp",
         "@crates//:allocative",
         "@crates//:anyhow",
         "@crates//:arc-slice",

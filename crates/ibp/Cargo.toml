@@ -1,0 +1,15 @@
+[package]
+name = "ibp"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde_json = "1.0"
+thiserror = "2.0.17"
+tracing = "0.1.41"

@@ -67,7 +67,7 @@ def _notify_write(stdin, line: str) -> bool:
             break
     return False
 
-def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase, label: str):
+def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase, label: str, execution_log = False):
     """One `bazel build` of `target` with BES drained into `ph.data` and the
     runnable tracker `r`. Returns the BuildStatus."""
     bazel_trait = ctx.traits[BazelTrait]
@@ -100,6 +100,7 @@ def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, anno
         aspects = r.aspects,
         announce_version = announce_version,
         announce_command = announce_command,
+        execution_log = execution_log,
     )
 
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
@@ -136,7 +137,7 @@ def _stop_child(child: std.process.Child) -> None:
     child.kill()
     child.wait()
 
-def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool) -> struct | None:
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_env: dict = {}) -> struct | None:
     """Resolve the entrypoint and spawn the target; None when unresolvable.
 
     Returns `struct(child, stdin)`: `stdin` is the child's piped stdin when the
@@ -161,7 +162,7 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         forward_args,
         cwd = spawn_cwd,
         stdin = "piped" if notify else None,
-        env = {"IBAZEL_NOTIFY_CHANGES": "y"} if notify else {},
+        env = extra_env | ({"IBAZEL_NOTIFY_CHANGES": "y"} if notify else {}),
         # Its own process group: stops and restarts must catch the target's
         # whole tree (a wrapper's real server included), and the watch loop —
         # not the terminal — owns this child's lifecycle.
@@ -171,14 +172,63 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         child = child,
         stdin = child.stdin() if notify else None,
         structured = structured,
+        ep = entrypoint,
+    )
+
+def _merge_batch(merged: dict | None, batch) -> dict:
+    """Fold a watcher batch into the accumulator held while a change cycle is
+    outstanding or after a failed rebuild. Last kind per path wins; rescan is
+    sticky."""
+    if merged == None:
+        merged = {"paths": {}, "rescan": False}
+    for c in batch.changes:
+        merged["paths"][c.path] = c.kind
+    merged["rescan"] = merged["rescan"] or batch.rescan
+    return merged
+
+def _take_batch(merged: dict) -> struct:
+    return struct(
+        changes = [struct(path = p, kind = k) for p, k in merged["paths"].items()],
+        rescan = merged["rescan"],
     )
 
 def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
     """Watch loop: rebuild on each settled batch of workspace changes, then
-    either notify the running target over the ibazel stdin protocol (targets
-    tagged `ibazel_notify_changes`) or terminate and respawn it. Runs until
-    Ctrl-C (the OS shutdown handler SIGTERMs the child)."""
+    tell the running target — preferring the Incremental Build Protocol (a
+    connected client gets change cycles over its socket), then the ibazel
+    stdin protocol (targets tagged `ibazel_notify_changes`), then a terminate
+    and respawn. Batches arriving while a change cycle is outstanding are
+    merged and dispatched when it reaches a terminal state; a failed rebuild
+    keeps its batch for the next attempt. Runs until Ctrl-C (the OS shutdown
+    handler SIGTERMs the child)."""
     ws = watch.new(ctx)
+    srv = ctx.bazel.ibp_server()
+    ctx.defer(srv.exit, "aspect-cli shutting down")
+
+    def spawn():
+        return _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_env = srv.env())
+
+    def pick_scope(p) -> str | None:
+        if p == None or srv.state != "connected":
+            return None
+        if "sources" in srv.scopes:
+            return "sources"
+        return None
+
+    def reset_or_restart(p):
+        """The client's incremental state is stale or unknown: resynchronize
+        it (CYCLE_RESET on v2 with a fresh tracker baseline, a full fresh
+        cycle pre-v2), else terminate and respawn. Returns
+        (proc, pending_cycle); a non-None pending_cycle is a recovery cycle —
+        the caller restarts outright if the client fails that one too."""
+        scope = pick_scope(p)
+        if scope == "sources":
+            pc = srv.cycle_reset() if srv.has_reset else srv.cycle({}, scope = "sources", fresh = True)
+            if pc != None:
+                return p, pc
+        if p != None:
+            _stop_child(p.child)
+        return spawn(), None
 
     build_status = _build_once(
         ctx,
@@ -195,7 +245,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
     proc = None
     if build_status.success:
-        proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
+        proc = spawn()
     else:
         ph.update(
             "running",
@@ -204,7 +254,64 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         )
 
     cycle = 0
+    pending_cycle = None
+    merged = None
+    # Retained changes only dispatch once a new watcher event arrives —
+    # otherwise a failing build would rerun in a tight loop instead of
+    # pausing until the user edits again.
+    dirty = False
+    # Handshake count of the last connection seen; a replacement client can
+    # disconnect and reconnect within one tick (e.g. during _stop_child in a
+    # recovery restart), so connection identity — not a connected boolean —
+    # decides when a client owes its initialization cycle.
+    seen_generation = 0
+    needs_init = False
+    pending_recovery = False
     for _tick in sleep_iter(_WATCH_TICK_MS):
+        # A client completing its handshake blocks on the first cycle (e.g.
+        # js_run_devserver populates its sandbox from it), so a fresh
+        # connection owes one resynchronization cycle.
+        if srv.state == "connected" and srv.generation != seen_generation:
+            seen_generation = srv.generation
+            needs_init = True
+        if needs_init and proc != None and pending_cycle == None and srv.state == "connected":
+            needs_init = False
+            proc, pending_cycle = reset_or_restart(proc)
+            pending_recovery = pending_cycle != None
+            if pending_cycle != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Sent initial change cycle %d to %s (watching for changes)..." % (pending_cycle, target),
+                        stream = "Sent initial change cycle %d to %s" % (pending_cycle, target),
+                    ),
+                )
+
+        if pending_cycle != None:
+            cycle_state = srv.cycle_state(pending_cycle)
+            if cycle_state in ["completed", "failed", "aborted"]:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Target %s change cycle %d — watching for changes..." % (cycle_state, pending_cycle),
+                        stream = "Target %s change cycle %d" % (cycle_state, pending_cycle),
+                    ),
+                )
+                failed_recovery = pending_recovery and cycle_state != "completed"
+                pending_cycle = None
+                pending_recovery = False
+                if failed_recovery:
+                    # The resynchronization itself failed: the client is
+                    # beyond incremental repair, restart it.
+                    if proc != None:
+                        _stop_child(proc.child)
+                    proc = spawn()
+                elif cycle_state != "completed":
+                    # The client didn't apply that cycle; anything it covered
+                    # would otherwise be suppressed by our delta state.
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+
         if proc != None:
             status = proc.child.try_wait()
             if status != None:
@@ -217,14 +324,27 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 )
                 proc = None
 
-        batch = ws.try_pop()
-        if batch == None:
+        popped = ws.try_pop()
+        if popped != None:
+            merged = _merge_batch(merged, popped)
+            dirty = True
+        if merged == None or not dirty or pending_cycle != None:
             continue
+        batch = _take_batch(merged)
+        merged = None
+        dirty = False
+
+        # Scope is sampled before the build only to pick the notify transport;
+        # the dispatch decision below re-samples. The generation pins the
+        # connection this rebuild serves: a different one afterwards is a new
+        # client instance that owes an initialization cycle first.
+        scope = pick_scope(proc)
+        pre_generation = srv.generation
 
         # The notify path is only taken while every stdin write lands; a failed
         # write means the child closed its end, and the cycle falls back to a
         # restart.
-        notify = proc != None and proc.stdin != None
+        notify = scope == None and proc != None and proc.stdin != None
         if notify:
             notify = _notify_write(proc.stdin, "IBAZEL_BUILD_STARTED\n")
 
@@ -252,6 +372,11 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         # them would silently miss a rebuild.
 
         if not build_status.success:
+            # Keep the batch (without marking it dispatchable): the eventual
+            # successful rebuild must deliver these changes too, even if the
+            # fixing edit touches other files — but the retry itself waits
+            # for that edit.
+            merged = _merge_batch(merged, batch)
             if notify:
                 _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED FAILURE\n")
                 if proc.structured:
@@ -261,6 +386,44 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 phases.ProgressStyles(body = "Build failed — watching for changes..."),
                 kind = "bazel_results",
             )
+            continue
+
+        # Re-sample so a client that finished its handshake during the rebuild
+        # gets a cycle instead of a restart.
+        scope = pick_scope(proc)
+        same_client = scope != None and srv.generation == pre_generation
+
+        if scope != None and not same_client:
+            # The client connected during the rebuild and still owes its
+            # initialization cycle: deliver that first (next tick) and keep
+            # the batch for the dispatch after it.
+            merged = _merge_batch(merged, batch)
+            dirty = True
+            continue
+
+        if scope != None and notify:
+            # An IBP client connected between the STARTED line and now; close
+            # the ibazel pair before switching transports.
+            _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+
+        if scope != None:
+            if batch.rescan:
+                proc, pending_cycle = reset_or_restart(proc)
+                pending_recovery = pending_cycle != None
+            else:
+                sources = {c.path: (None if c.kind == "removed" else "source") for c in batch.changes}
+                pending_cycle = srv.cycle(sources)
+                if pending_cycle == None:
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+            if pending_cycle != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Sent change cycle %d to %s (watching for changes)..." % (pending_cycle, target),
+                        stream = "Sent change cycle %d to %s" % (pending_cycle, target),
+                    ),
+                )
             continue
 
         if notify:
@@ -279,7 +442,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
         if proc != None:
             _stop_child(proc.child)
-        proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
+        proc = spawn()
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     target = ctx.args.target[0]
