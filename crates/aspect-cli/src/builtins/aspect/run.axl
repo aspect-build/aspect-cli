@@ -14,6 +14,59 @@ load("./private/lib/watch.axl", "watch")
 
 _WATCH_TICK_MS = 100
 
+# Target tag opting into the ibazel notify protocol: instead of a restart, the
+# child is spawned with IBAZEL_NOTIFY_CHANGES=y and piped stdin, and each watch
+# cycle writes IBAZEL_BUILD_STARTED / IBAZEL_BUILD_COMPLETED <verdict> lines so
+# the process (e.g. a devserver) reloads in place.
+# https://github.com/bazelbuild/bazel-watcher#running-a-target
+_IBAZEL_TAG = "ibazel_notify_changes"
+
+# Additional tag for the versioned protocol: after the legacy completed line,
+# the child also receives `IBAZEL_EVENT {json}` describing the build and the
+# filesystem changes that triggered it.
+_IBAZEL_V1_TAG = "ibazel_notify_changes_v1"
+
+# Files whose change alters the build graph rather than a target's sources,
+# reported as kind "graph" in v1 events.
+_GRAPH_FILES = ["BUILD", "BUILD.bazel", "MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+
+def _v1_event(build_success: bool, batch) -> str:
+    changes = []
+    for c in batch.changes:
+        name = c.path.rsplit("/", 1)[-1]
+        kind = "graph" if name in _GRAPH_FILES or name.endswith(".bzl") else "source"
+        changes.append({"path": c.path, "kind": kind})
+    return "IBAZEL_EVENT " + json.encode({
+        "version": 1,
+        "type": "build_completed",
+        "success": build_success,
+        "changes": changes,
+    }) + "\n"
+
+def _notify_write(stdin, line: str) -> bool:
+    """Deliver one whole protocol frame over the child's nonblocking stdin.
+
+    try_write reports bytes accepted and may take a short prefix; a partial
+    frame corrupts the notify framing, so retry the unwritten suffix briefly
+    and report False on a closed or persistently full pipe. Frames are ASCII
+    (json.encode escapes non-ASCII), so character and byte offsets agree.
+    """
+    remaining = line
+    n = stdin.try_write(remaining)
+    if n >= len(remaining):
+        return True
+    if n > 0:
+        remaining = remaining[n:]
+    for tick in sleep_iter(10):
+        n = stdin.try_write(remaining)
+        if n >= len(remaining):
+            return True
+        if n > 0:
+            remaining = remaining[n:]
+        if tick >= 50:
+            break
+    return False
+
 def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase, label: str):
     """One `bazel build` of `target` with BES drained into `ph.data` and the
     runnable tracker `r`. Returns the BuildStatus."""
@@ -82,12 +135,17 @@ def _stop_child(child: std.process.Child) -> None:
     child.kill()
     child.wait()
 
-def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool) -> std.process.Child | None:
-    """Resolve the entrypoint and spawn the target; None when unresolvable."""
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool) -> struct | None:
+    """Resolve the entrypoint and spawn the target; None when unresolvable.
+
+    Returns `struct(child, stdin)`: `stdin` is the child's piped stdin when the
+    target opted into the ibazel notify protocol under `--watch`, else None."""
     entrypoint = r.determine_entrypoint(target)
     if entrypoint == None:
         error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
         return None
+    notify = watching and _IBAZEL_TAG in entrypoint.tags
+    structured = notify and _IBAZEL_V1_TAG in entrypoint.tags
     body = "Running %s (watching for changes)..." if watching else "Running %s..."
     ph.update(
         "running",
@@ -97,12 +155,24 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         ),
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
-    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd)
+    child = r.spawn(
+        entrypoint,
+        forward_args,
+        cwd = spawn_cwd,
+        stdin = "piped" if notify else None,
+        env = {"IBAZEL_NOTIFY_CHANGES": "y"} if notify else {},
+    )
+    return struct(
+        child = child,
+        stdin = child.stdin() if notify else None,
+        structured = structured,
+    )
 
 def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
-    """Restart-mode watch: rebuild on each settled batch of workspace changes,
-    then terminate and respawn the target. Runs until Ctrl-C (the OS shutdown
-    handler SIGTERMs the child)."""
+    """Watch loop: rebuild on each settled batch of workspace changes, then
+    either notify the running target over the ibazel stdin protocol (targets
+    tagged `ibazel_notify_changes`) or terminate and respawn it. Runs until
+    Ctrl-C (the OS shutdown handler SIGTERMs the child)."""
     ws = watch.new(ctx)
 
     build_status = _build_once(
@@ -118,9 +188,9 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         "Building %s" % target,
     )
 
-    child = None
+    proc = None
     if build_status.success:
-        child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
+        proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
     else:
         ph.update(
             "running",
@@ -130,8 +200,8 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
     cycle = 0
     for _tick in sleep_iter(_WATCH_TICK_MS):
-        if child != None:
-            status = child.try_wait()
+        if proc != None:
+            status = proc.child.try_wait()
             if status != None:
                 ph.update(
                     "running",
@@ -140,11 +210,18 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                         stream = "%s exited with code %s" % (target, status.code),
                     ),
                 )
-                child = None
+                proc = None
 
         batch = ws.try_pop()
         if batch == None:
             continue
+
+        # The notify path is only taken while every stdin write lands; a failed
+        # write means the child closed its end, and the cycle falls back to a
+        # restart.
+        notify = proc != None and proc.stdin != None
+        if notify:
+            notify = _notify_write(proc.stdin, "IBAZEL_BUILD_STARTED\n")
 
         cycle += 1
         ph.reset(init_data())
@@ -170,6 +247,10 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         # them would silently miss a rebuild.
 
         if not build_status.success:
+            if notify:
+                _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED FAILURE\n")
+                if proc.structured:
+                    _notify_write(proc.stdin, _v1_event(False, batch))
             ph.update(
                 "running",
                 phases.ProgressStyles(body = "Build failed — watching for changes..."),
@@ -177,9 +258,23 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             )
             continue
 
-        if child != None:
-            _stop_child(child)
-        child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
+        if notify:
+            delivered = _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+            if delivered and proc.structured:
+                delivered = _notify_write(proc.stdin, _v1_event(True, batch))
+            if delivered:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Notified %s (watching for changes)..." % target,
+                        stream = "Notified %s of completed build" % target,
+                    ),
+                )
+                continue
+
+        if proc != None:
+            _stop_child(proc.child)
+        proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     target = ctx.args.target[0]
@@ -245,11 +340,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not build_status.success:
         return _conclude("failed", build_status.code, conclusion("failed", ph.data))
 
-    child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = False)
-    if child == None:
+    proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = False)
+    if proc == None:
         return _conclude("failed", 1, "Could not determine the run entrypoint for %s" % target)
 
-    code = child.wait().code
+    code = proc.child.wait().code
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 
