@@ -67,6 +67,7 @@ axl-proto = { path = "../axl-proto" }
 starbuf-derive = { path = "../starbuf-derive" }
 build-event-stream = { path = "../build-event-stream" }
 fswatch = { path = "../fswatch" }
+ibp = { path = "../ibp" }
 galvanize = { path = "../galvanize" }
 
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
