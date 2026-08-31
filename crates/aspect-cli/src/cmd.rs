@@ -1437,7 +1437,9 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         // Only a passthrough carries one: which side of the task name it
         // collects unrecognized flags from.
         "position": arg.passthrough_position().map(|p| p.as_str()),
-        "description": description,
+        // `as_deref().map(...)` rather than a plain strip: the field is
+        // `Option<String>` and must stay null when absent, not become "".
+        "description": description.as_deref().map(color::strip_ansi),
     })
 }
 
@@ -1492,7 +1494,7 @@ fn describe_index(
             path.push(task.kind());
             json!({
                 "command": format!("aspect {}", path.join(" ")),
-                "summary": task.summary(),
+                "summary": color::strip_ansi(&task.summary()),
             })
         })
         .collect();
@@ -1561,8 +1563,8 @@ fn describe_json(
                 "command": format!("aspect {}", path.join(" ")),
                 "path": path,
                 "name": kind,
-                "summary": task.summary(),
-                "description": task.description(),
+                "summary": color::strip_ansi(&task.summary()),
+                "description": color::strip_ansi(&task.description()),
                 "defined_in": defined_in_label(task.path(), aspect_root, modules),
                 "args": args,
             })
@@ -1594,8 +1596,8 @@ fn describe_json(
                 .collect();
             Some(json!({
                 "name": feat.name(),
-                "summary": feat.summary(),
-                "description": feat.description(),
+                "summary": color::strip_ansi(&feat.summary()),
+                "description": color::strip_ansi(&feat.description()),
                 "defined_in": defined_in_label(feat.path(), aspect_root, modules),
                 "flags": flags,
             }))
@@ -2526,6 +2528,19 @@ mod tests {
         assert_eq!(by_name("targets")["type"], "positional");
         // A flag arg carries no cardinality.
         assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn describe_strips_ansi_from_prose() {
+        let mut task = stub_task("delivery", &[], SmallMap::new());
+        task.summary = "Currently \x1b[3monly\x1b[23m supported on runners.".to_owned();
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        assert_eq!(
+            doc["tasks"][0]["summary"],
+            "Currently only supported on runners."
+        );
     }
 
     #[test]
