@@ -12,8 +12,14 @@
 
 #![cfg(unix)]
 
+use std::os::fd::FromRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
+
+/// How long to wait for a spawned crash to land. Generous because the debug
+/// binary this suite spawns is large and unoptimized: ~2.5s just to reach
+/// `main` on a warm laptop, more on a loaded CI machine.
+const CRASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The CLI binary under test: `ASPECT_CLI_BIN` (Bazel) with a
 /// `CARGO_BIN_EXE_*` fallback (cargo). Plain `env!` would not compile under
@@ -126,10 +132,7 @@ fn opt_out_env_skips_the_report_but_not_the_crash() {
 /// must be self-contained (marker included), not just a partial tee.
 #[test]
 fn crash_log_env_captures_the_full_report() {
-    let dir = std::env::var("TEST_TMPDIR") // Bazel's per-test scratch dir
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let path = dir.join(format!("aspect-crash-{}.log", std::process::id()));
+    let path = scratch_dir().join(format!("aspect-crash-{}.log", std::process::id()));
     let path_str = path.to_str().unwrap();
 
     let out = run_with_trigger("segv", &[("ASPECT_CRASH_LOG", path_str)]);
@@ -153,6 +156,102 @@ fn crash_log_env_captures_the_full_report() {
 fn crash_log_env_absent_reports_to_stderr_only() {
     let out = run_with_trigger("segv", &[]);
     assert_reported(&out, "SIGSEGV", libc::SIGSEGV);
+}
+
+/// The crash log must be reachable when stderr *blocks*, not only when it loses
+/// data. A pipe whose reader has stopped draining and whose buffer is full
+/// makes `write(2)` on fd 2 block forever, so a handler that opened the log
+/// only after its first stderr write would never open it at all — the fallback
+/// gated behind the sink it exists to replace.
+///
+/// Asserts the file appears and names the signal, which requires the `open(2)`
+/// to precede every stderr write. The body legitimately may not be there: the
+/// handler writes the marker to stderr before the steps that can fault, so it
+/// is that write which wedges, and the process stays hung (hence the kill).
+#[test]
+fn crash_log_is_written_when_stderr_blocks() {
+    let path = scratch_dir().join(format!("aspect-crash-blocked-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    // A pipe nobody reads, pre-filled so the child's first stderr write blocks.
+    // Filling uses O_NONBLOCK on our own copy of the write end; the flag lives
+    // on the shared open file description, so it must be cleared before the
+    // spawn or the child would get EAGAIN instead of blocking.
+    let (read_fd, write_fd) = new_pipe();
+    set_nonblocking(write_fd, true);
+    let filler = [0u8; 4096];
+    loop {
+        // SAFETY: writing a valid buffer to a pipe fd this test owns.
+        let n = unsafe { libc::write(write_fd, filler.as_ptr().cast(), filler.len()) };
+        if n <= 0 {
+            break; // EAGAIN: the pipe buffer is full
+        }
+    }
+    set_nonblocking(write_fd, false);
+
+    let mut child = Command::new(cli_bin())
+        .env("ASPECT_INTERNAL_TEST_CRASH", "segv")
+        .env("ASPECT_CRASH_LOG", path.to_str().unwrap())
+        // SAFETY: `Stdio` takes ownership of the duplicate, leaving the
+        // test's own `write_fd` open (closed at the end of the test).
+        .stderr(unsafe { std::process::Stdio::from_raw_fd(libc::dup(write_fd)) })
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn aspect-cli");
+
+    let start = std::time::Instant::now();
+    while !path.exists() && start.elapsed() < CRASH_TIMEOUT {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // The child is wedged on the blocked stderr write by design; it will not
+    // exit on its own.
+    let _ = child.kill();
+    let _ = child.wait();
+    // SAFETY: fds this test opened and no longer uses.
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+
+    let log = std::fs::read_to_string(&path).expect(
+        "no crash log while stderr was blocked: the handler must open it before writing to stderr",
+    );
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        log.contains("fatal signal: SIGSEGV"),
+        "crash log missing the signal marker: {log}"
+    );
+}
+
+/// Bazel gives each test a private scratch dir; fall back to the system temp
+/// dir under plain `cargo test`.
+fn scratch_dir() -> std::path::PathBuf {
+    std::env::var("TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
+}
+
+/// A fresh `pipe(2)` as `(read, write)` raw fds.
+fn new_pipe() -> (libc::c_int, libc::c_int) {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a valid 2-element array for pipe(2) to fill.
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(rc, 0, "pipe(2) failed: {}", std::io::Error::last_os_error());
+    (fds[0], fds[1])
+}
+
+fn set_nonblocking(fd: libc::c_int, on: bool) {
+    // SAFETY: F_GETFL/F_SETFL on an fd this test owns.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        let flags = if on {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        libc::fcntl(fd, libc::F_SETFL, flags);
+    }
 }
 
 /// The allocator is built in secure mode and we register an error handler that

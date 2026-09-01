@@ -22,21 +22,39 @@
 //! Handlers run on the alternate signal stack (`SA_ONSTACK`) std installs per
 //! thread, so stack-overflow SIGSEGVs are reported rather than double-faulting.
 //!
-//! The handler's very first action is the raw `write(2)` of the signal marker:
-//! nothing that can fault or wedge — not the load-bias lookup
-//! (`dl_iterate_phdr`), not the crash-log open — runs before it. The
-//! re-entrancy guard means a fault anywhere inside the handler dies silently,
-//! so every step is ordered after the cheapest, safest write that still names
-//! the signal; a report that dies partway leaves the marker behind instead of
-//! nothing.
+//! `ASPECT_CRASH_LOG=<path>` appends a copy of the report to that file, in
+//! addition to stderr. Stderr on a CI runner is a pipe whose reader may stop
+//! draining the instant the process dies, so a report written microseconds
+//! before death can be lost to the harness's capture teardown; the file
+//! survives it and can be stored as a CI artifact. The path is captured at
+//! install time (reading the environment is not async-signal-safe); the handler
+//! `open(2)`s it and `fsync(2)`s it before the process dies.
 //!
-//! `ASPECT_CRASH_LOG=<path>` additionally appends a copy of the report to that
-//! file. Stderr on a CI runner is a pipe whose reader may stop draining the
-//! instant the process dies, so a report written microseconds before death can
-//! be lost to the harness's capture teardown; the file survives it and can be
-//! stored as a CI artifact. The path is captured at install time (reading the
-//! environment is not async-signal-safe); the handler `open(2)`s it lazily and
-//! `fsync(2)`s before re-raising.
+//! Write ordering is what makes both sinks trustworthy, and the two hazards
+//! pull in opposite directions:
+//!
+//! - A fault inside the handler re-enters the re-entrancy guard and dies with
+//!   *no* output. So the signal marker — the one line naming the crash — is
+//!   written before every step that can fault (`load_bias`'s
+//!   `dl_iterate_phdr`, the frame walk). A report that dies partway then still
+//!   leaves the marker behind instead of nothing.
+//! - A write to stderr can *block indefinitely* when stderr is a pipe whose
+//!   reader has stopped draining and whose buffer is full. So the crash log is
+//!   opened before any stderr write (`open(2)` cannot fault on the
+//!   pre-captured path) — otherwise the fallback would be gated behind the
+//!   sink it exists to replace — and each part reaches the file before it
+//!   reaches stderr: the marker first, then the whole body, `fsync`ed, before
+//!   stderr sees a byte of it.
+//!
+//! The two orderings meet at the marker, which goes to the file and then to
+//! stderr before either the faulting steps or the body. A blocked stderr
+//! therefore costs the body but not the file's record that the crash happened;
+//! a fault inside the handler costs the body on both sinks but leaves the
+//! marker on each.
+//!
+//! Point the path at a local filesystem: a wedged network or FUSE mount can
+//! make the `open(2)` itself hang, which is the one way arming the sink can
+//! cost the report.
 //!
 //! Resolving the report: release binaries are position-independent, so each
 //! code address is printed as `<runtime> (+<static offset>)` where the offset
@@ -238,19 +256,9 @@ mod unix {
         }
     }
 
-    /// Write `bytes` to stderr and, when the handler opened a crash log, to it
-    /// as well. Async-signal-safe.
-    fn write_report(bytes: &[u8]) {
-        write_fd(libc::STDERR_FILENO, bytes);
-        let log_fd = LOG_FD.load(Ordering::Relaxed);
-        if log_fd >= 0 {
-            write_fd(log_fd, bytes);
-        }
-    }
-
-    /// Open the `ASPECT_CRASH_LOG` file (append, create) and arm [`LOG_FD`] so
-    /// subsequent [`write_report`]s tee into it. No-op when the env var wasn't
-    /// set at install time or the open fails. `open(2)` is async-signal-safe.
+    /// Open the `ASPECT_CRASH_LOG` file (append, create) and arm [`LOG_FD`].
+    /// No-op when the env var wasn't set at install time or the open fails.
+    /// `open(2)` is async-signal-safe.
     fn open_crash_log() {
         let Some(Some(path)) = CRASH_LOG_PATH.get() else {
             return;
@@ -302,10 +310,10 @@ mod unix {
         &buf[i..]
     }
 
-    /// Write `value` as `0x`-prefixed hex to stderr. Async-signal-safe.
-    fn write_hex(value: usize) {
+    /// Write `value` as `0x`-prefixed hex to `fd`. Async-signal-safe.
+    fn write_hex(fd: libc::c_int, value: usize) {
         let mut buf = [0u8; 18];
-        write_report(format_hex(value, &mut buf));
+        write_fd(fd, format_hex(value, &mut buf));
     }
 
     /// The main executable's load bias (the runtime base a position-independent
@@ -345,34 +353,75 @@ mod unix {
         }
     }
 
-    /// Write a runtime code address as `<abs> (+<offset>)`, where `offset` is
-    /// `abs - bias` — the static offset that resolves against the on-disk
-    /// binary regardless of ASLR. When `bias` is 0 the offset equals `abs`.
-    fn write_addr(abs: usize, bias: usize) {
-        write_hex(abs);
-        write_report(b" (+");
-        write_hex(abs.wrapping_sub(bias));
-        write_report(b")");
+    /// Write a runtime code address to `fd` as `<abs> (+<offset>)`, where
+    /// `offset` is `abs - bias` — the static offset that resolves against the
+    /// on-disk binary regardless of ASLR. When `bias` is 0 the offset equals
+    /// `abs`.
+    fn write_addr(fd: libc::c_int, abs: usize, bias: usize) {
+        write_hex(fd, abs);
+        write_fd(fd, b" (+");
+        write_hex(fd, abs.wrapping_sub(bias));
+        write_fd(fd, b")");
     }
 
     /// Walk the current call stack and write each frame's instruction pointer
-    /// to stderr as `<abs> (+<offset>)` (see [`write_addr`]), one per line.
+    /// to `fd` as `<abs> (+<offset>)` (see [`write_addr`]), one per line.
     /// Signal-safe: it neither allocates nor symbolizes (both fault inside a
     /// signal handler on static-musl builds — the very case this handler exists
     /// for).
-    fn write_raw_backtrace(bias: usize) {
-        // SAFETY: single-shot within a dying process; `trace_unsynchronized`
-        // avoids the global lock `trace` takes (which could deadlock if the
-        // crash happened while that lock was held). The callback only writes
-        // to stderr.
+    fn write_raw_backtrace(fd: libc::c_int, bias: usize) {
+        // SAFETY: `trace_unsynchronized` avoids the global lock `trace` takes
+        // (which could deadlock if the crash happened while that lock was
+        // held). The callback only writes to `fd`. Called once per sink, and
+        // the walk is read-only, so repeating it is safe.
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
-                write_report(b"  ");
-                write_addr(frame.ip() as usize, bias);
-                write_report(b"\n");
+                write_fd(fd, b"  ");
+                write_addr(fd, frame.ip() as usize, bias);
+                write_fd(fd, b"\n");
                 true
             });
         }
+    }
+
+    /// Write the signal marker — the one line that identifies the crash — to
+    /// `fd`. Kept separate from [`write_body`] because it is the only part
+    /// written before anything that could fault (see the module docs).
+    fn write_marker(fd: libc::c_int, sig: libc::c_int) {
+        write_fd(fd, b"\naspect-cli: fatal signal: ");
+        write_fd(fd, signal_name(sig).as_bytes());
+    }
+
+    /// Write everything after the signal marker to `fd`: fault address, crash
+    /// pc, how to resolve the addresses, and the raw frame walk.
+    ///
+    /// Called once per sink rather than teeing each chunk, so the durable copy
+    /// of the body can be completed and synced before any of it goes to stderr
+    /// — a stderr write that blocks on a full pipe then cannot truncate the
+    /// file.
+    fn write_body(
+        fd: libc::c_int,
+        info: *mut libc::siginfo_t,
+        ctx: *mut libc::c_void,
+        bias: usize,
+    ) {
+        write_fd(fd, b"\nfault address: ");
+        write_hex(fd, fault_addr(info));
+        write_fd(fd, b"\ncrash pc: ");
+        write_addr(fd, crash_pc(ctx), bias);
+        write_fd(
+            fd,
+            b"\ncode addresses print as `<runtime> (+<static offset>)`; resolve the \
+              static offset against this binary:\n  \
+              `addr2line -fe aspect-cli <offset>`.\ncrash pc is the fault site; the \
+              frames below may be truncated to the handler frame on static-musl builds:\n",
+        );
+        write_raw_backtrace(fd, bias);
+        write_fd(
+            fd,
+            b"aspect-cli crashed; please report this at \
+              https://github.com/aspect-build/aspect-cli/issues including the output above.\n",
+        );
     }
 
     fn fault_addr(info: *mut libc::siginfo_t) -> usize {
@@ -447,43 +496,35 @@ mod unix {
             reset_and_reraise(sig);
         }
 
-        // Marker first, via nothing but write(2): every later step (the
-        // crash-log open, dl_iterate_phdr in load_bias, the frame walk) has
-        // some chance of faulting or wedging, and a fault here re-enters the
-        // HANDLING guard and dies with no output at all. Whatever else
-        // happens, the log names the signal.
-        write_report(b"\naspect-cli: fatal signal: ");
-        write_report(signal_name(sig).as_bytes());
-
-        // Arm the ASPECT_CRASH_LOG tee, then repeat the marker into it so the
-        // file is self-contained (write_report only tees what comes after).
+        // Arm the durable sink before touching stderr. `open(2)` on the path
+        // captured at install time neither allocates nor faults, while a write
+        // to stderr can block indefinitely on a pipe whose reader has stopped
+        // draining — and opening after that write would make the fallback
+        // depend on the very sink it exists to replace.
         open_crash_log();
         let log_fd = LOG_FD.load(Ordering::Relaxed);
-        if log_fd >= 0 {
-            write_fd(log_fd, b"\naspect-cli: fatal signal: ");
-            write_fd(log_fd, signal_name(sig).as_bytes());
-        }
 
-        write_report(b"\nfault address: ");
-        write_hex(fault_addr(info));
+        // Marker next, before anything that can fault: `load_bias`'s
+        // `dl_iterate_phdr` and the frame walk both can, and a fault re-enters
+        // the HANDLING guard and dies with no output at all. Durable sink
+        // first, so a stderr write that blocks still leaves the crash named in
+        // the file.
+        if log_fd >= 0 {
+            write_marker(log_fd, sig);
+        }
+        write_marker(libc::STDERR_FILENO, sig);
 
         let bias = load_bias();
 
-        write_report(b"\ncrash pc: ");
-        write_addr(crash_pc(ctx), bias);
-        write_report(
-            b"\ncode addresses print as `<runtime> (+<static offset>)`; resolve the \
-              static offset against this binary:\n  \
-              `addr2line -fe aspect-cli <offset>`.\ncrash pc is the fault site; the \
-              frames below may be truncated to the handler frame on static-musl builds:\n",
-        );
-        write_raw_backtrace(bias);
-        write_report(
-            b"aspect-cli crashed; please report this at \
-              https://github.com/aspect-build/aspect-cli/issues including the output above.\n",
-        );
+        // Complete and sync the durable copy before the first byte reaches
+        // stderr: if that write blocks forever, the file still holds the whole
+        // report.
+        if log_fd >= 0 {
+            write_body(log_fd, info, ctx, bias);
+            sync_crash_log();
+        }
+        write_body(libc::STDERR_FILENO, info, ctx, bias);
 
-        sync_crash_log();
         reset_and_reraise(sig);
     }
 
