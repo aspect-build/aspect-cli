@@ -58,8 +58,32 @@ pub struct AspectCliConfig {
     /// by querying the releases API for the latest available release.
     version: Option<String>,
     /// Whether to fetch the `-debug-` build variant instead of the primary
-    /// binary.
+    /// binary. Set by `version("…", debug = True)` or forced per-invocation by
+    /// [`DEBUG_BUILD_ENV`].
     debug: bool,
+}
+
+/// Environment variable that forces the `-debug-` build variant for a single
+/// invocation. Any non-empty value enables it, matching `ASPECT_DEBUG` (which
+/// is unrelated: it makes *this launcher* log verbosely, and does not change
+/// which binary is fetched).
+///
+/// Reproducing a crash usually means running the debug build for one CI job,
+/// which `version.axl` serves badly: that pin is committed, applies to every
+/// task and every developer on the repository, and has to be reverted
+/// afterwards. An environment variable scopes the switch to the job that
+/// needs it.
+///
+/// It can only turn the debug build *on*; a `version.axl` that already asks
+/// for it stays on regardless. Like `debug = True`, it selects the asset name
+/// this launcher derives, so a source naming an explicit `artifact` is
+/// unaffected — and a release without a `-debug-` asset falls back to the
+/// primary binary rather than failing.
+const DEBUG_BUILD_ENV: &str = "ASPECT_CLI_DEBUG_BUILD";
+
+/// Whether [`DEBUG_BUILD_ENV`] is set to a non-empty value.
+fn debug_build_forced() -> bool {
+    std::env::var_os(DEBUG_BUILD_ENV).is_some_and(|v| !v.is_empty())
 }
 
 #[derive(Debug, Clone)]
@@ -819,6 +843,79 @@ version(
             default_config().aspect_cli.version()
         );
     }
+
+    /// Run `func` with [`DEBUG_BUILD_ENV`] set to `value` (or removed for
+    /// `None`), restoring the previous value afterwards. The env is
+    /// process-global, so the cases that use it live in one `#[test]` rather
+    /// than racing each other across the harness's threads.
+    fn with_debug_build_env<R>(value: Option<&str>, func: impl FnOnce() -> R) -> R {
+        let previous = std::env::var_os(DEBUG_BUILD_ENV);
+        // SAFETY: the tests that touch this variable are serialized into a
+        // single test case, and nothing else in this binary reads the
+        // environment concurrently.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(DEBUG_BUILD_ENV, v),
+                None => std::env::remove_var(DEBUG_BUILD_ENV),
+            }
+        }
+        let result = func();
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var(DEBUG_BUILD_ENV, v),
+                None => std::env::remove_var(DEBUG_BUILD_ENV),
+            }
+        }
+        result
+    }
+
+    /// `ASPECT_CLI_DEBUG_BUILD` forces the debug variant for one invocation:
+    /// with no `version.axl` at all, over a config that never mentions
+    /// `debug`, and without disturbing a config that already asked for it.
+    /// Empty means unset, matching `ASPECT_DEBUG`.
+    #[test]
+    fn debug_build_env_forces_the_debug_variant() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let resolve = || resolve_config(root.path(), Some(home.path())).unwrap();
+
+        // Baseline: nothing set anywhere.
+        with_debug_build_env(None, || assert!(!resolve().aspect_cli.debug()));
+        // Forced on with no config file present.
+        with_debug_build_env(Some("1"), || assert!(resolve().aspect_cli.debug()));
+        // Empty is not "set" — the primary binary stays selected.
+        with_debug_build_env(Some(""), || assert!(!resolve().aspect_cli.debug()));
+
+        // Forced on over a version.axl that pins a version but says nothing
+        // about `debug` — the case a CI job hits without touching the repo.
+        fs::create_dir_all(root.path().join(".aspect")).unwrap();
+        fs::write(
+            root.path().join(AXL_VERSION_AXL_REL),
+            r#"version("2026.36.1")"#,
+        )
+        .unwrap();
+        with_debug_build_env(None, || {
+            let config = resolve();
+            assert!(!config.aspect_cli.debug());
+            assert_eq!(config.aspect_cli.version(), Some("2026.36.1"));
+        });
+        with_debug_build_env(Some("1"), || {
+            let config = resolve();
+            assert!(config.aspect_cli.debug());
+            // The pin is still honored; only the variant changed.
+            assert_eq!(config.aspect_cli.version(), Some("2026.36.1"));
+        });
+
+        // A config that already asks for the debug build is unaffected.
+        fs::write(
+            root.path().join(AXL_VERSION_AXL_REL),
+            r#"version("2026.36.1", debug = True)"#,
+        )
+        .unwrap();
+        with_debug_build_env(None, || assert!(resolve().aspect_cli.debug()));
+        with_debug_build_env(Some("1"), || assert!(resolve().aspect_cli.debug()));
+    }
 }
 
 /// Automatically determines the project root directory and loads the Aspect configuration.
@@ -869,17 +966,26 @@ pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
 /// 1. `.aspect/version.axl` under `root_dir`, if it exists.
 /// 2. `.aspect/version.axl` under `home_dir`, if a home dir is known and it exists.
 /// 3. [`default_config`].
+///
+/// [`DEBUG_BUILD_ENV`] is applied last, so it forces the debug build whichever
+/// of the three supplied the config — including the default, where there is no
+/// `version.axl` to carry a `debug = True`.
 fn resolve_config(root_dir: &Path, home_dir: Option<&Path>) -> Result<AspectLauncherConfig> {
     let version_axl = root_dir.join(AXL_VERSION_AXL_REL);
-    if version_axl.exists() {
-        return load_config(&version_axl);
-    }
+    let home_version_axl = home_dir
+        .map(|h| h.join(AXL_VERSION_AXL_REL))
+        .filter(|p| p.exists());
 
-    if let Some(home_version_axl) = home_dir.map(|h| h.join(AXL_VERSION_AXL_REL))
-        && home_version_axl.exists()
-    {
-        return load_config(&home_version_axl);
-    }
+    let mut config = if version_axl.exists() {
+        load_config(&version_axl)?
+    } else if let Some(home_version_axl) = home_version_axl {
+        load_config(&home_version_axl)?
+    } else {
+        default_config()
+    };
 
-    Ok(default_config())
+    if debug_build_forced() {
+        config.aspect_cli.debug = true;
+    }
+    Ok(config)
 }
