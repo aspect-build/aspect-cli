@@ -1580,6 +1580,139 @@ fn build_authorize_url(
     url
 }
 
+/// Whether `DISPLAY` names a display reached over the network rather than the
+/// machine's own console. SSH's X11 forwarding sets a display with a host in it
+/// (`localhost:10.0` — display numbers start at 10); the local console is a bare
+/// `:0`. The distinction is the whole point on a remote workstation whose image
+/// sets `DISPLAY=:0` for a virtual screen nobody is watching.
+fn is_forwarded_display(display: Option<&str>) -> bool {
+    display
+        .and_then(|display| display.split_once(':'))
+        .is_some_and(|(host, _)| !host.is_empty())
+}
+
+/// Whether this session has no browser of its own — an SSH login (including the
+/// tunnelled kind, e.g. `gcloud workstations ssh`) with no forwarded display.
+/// Launching a browser there either fails noisily or, worse, succeeds on the remote
+/// machine's own screen where nobody is looking; either way the loopback the
+/// browser is redirected to belongs to the wrong host.
+///
+/// Forwarded X11 is the one exception: a browser launched over it draws on the
+/// user's own screen *and* still reaches our loopback, so that session counts as
+/// local. Wayland has no equivalent forwarding, so a `WAYLAND_DISPLAY` under SSH
+/// is the remote compositor and earns no exception.
+fn is_remote_session(get: impl Fn(&str) -> Option<String>) -> bool {
+    let set = |key: &str| get(key).is_some_and(|value| !value.is_empty());
+    if !(set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY")) {
+        return false;
+    }
+    !is_forwarded_display(get("DISPLAY").as_deref())
+}
+
+/// Browser-launcher argv lists to try for this platform, most preferred first.
+///
+/// `$BROWSER` — the Unix convention: a colon-separated list of command lines, each
+/// with an optional `%s` where the URL goes — wins when set, since a user who set
+/// it has already answered the question. Behind it is the platform table every CLI
+/// that does this carries. `wslview` leads the Linux list unconditionally: it
+/// exists only under WSL (where `xdg-open` is present but opens nothing the user
+/// can see), and elsewhere it simply fails to spawn and costs a syscall.
+///
+/// Windows gets `rundll32` alone. It takes the URL as a single argument, whereas
+/// `cmd /c start` hands it back to `cmd.exe` to re-parse — and an OAuth authorize
+/// URL is nothing but `&`-separated parameters. `$BROWSER` is not a Windows
+/// convention and splitting a drive-lettered path on `:` mangles it, but the
+/// mangled program merely fails to spawn and the table behind it still runs.
+fn browser_launchers(browser_env: Option<&str>) -> Vec<Vec<String>> {
+    let mut candidates: Vec<Vec<String>> = Vec::new();
+    for entry in browser_env.unwrap_or_default().split(':') {
+        let argv: Vec<String> = entry.split_whitespace().map(str::to_string).collect();
+        if !argv.is_empty() {
+            candidates.push(argv);
+        }
+    }
+    let table: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["open"]]
+    } else if cfg!(target_os = "windows") {
+        &[&["rundll32.exe", "url.dll,FileProtocolHandler"]]
+    } else {
+        &[
+            &["wslview"],
+            &["xdg-open"],
+            &["gio", "open"],
+            &["gnome-open"],
+            &["kde-open"],
+            &["x-www-browser"],
+            // Debian's xdg-utils installs this as a symlink to xdg-open; on macOS
+            // it is the real thing. Harmless last resort elsewhere.
+            &["open"],
+        ]
+    };
+    candidates.extend(
+        table
+            .iter()
+            .map(|argv| argv.iter().map(|arg| arg.to_string()).collect()),
+    );
+    candidates
+}
+
+/// Run one launcher argv with `url` substituted for a `%s` placeholder (the
+/// `$BROWSER` convention) or appended when there is none, reporting whether it
+/// succeeded.
+///
+/// Output is discarded on purpose: a launcher that cannot find a browser says so
+/// on stderr, and `xdg-open`'s cascade of "www-browser: not found" lines is exactly
+/// what the caller replaces with one message that says what to do instead.
+fn spawn_launcher(argv: &[String], url: &str) -> bool {
+    let Some((program, rest)) = argv.split_first() else {
+        return false;
+    };
+    let mut command = std::process::Command::new(program);
+    let mut substituted = false;
+    for arg in rest {
+        if arg.contains("%s") {
+            command.arg(arg.replace("%s", url));
+            substituted = true;
+        } else {
+            command.arg(arg);
+        }
+    }
+    if !substituted {
+        command.arg(url);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // A missing launcher fails at spawn; one that ran but found no browser to
+    // launch (xdg-open on a machine with no desktop) reports it in the exit status.
+    matches!(command.status(), Ok(status) if status.success())
+}
+
+/// Try to open `url` in a browser here, reporting to the task which of the three
+/// situations it is in:
+///
+///   - `"opened"` — a browser was launched, so the OAuth redirect reaches this
+///     machine's loopback listener on its own and the task can just wait.
+///   - `"headless"` — not attempted, because this is an SSH session with no
+///     forwarded display.
+///   - `"no_browser"` — attempted, and no launcher on this platform worked.
+///
+/// The latter two both mean the user opens the URL somewhere else, where the
+/// loopback redirect cannot reach us and the code has to come back by hand.
+fn open_url_in_browser(url: &str) -> String {
+    if is_remote_session(|key| std::env::var(key).ok()) {
+        return "headless".to_string();
+    }
+    let browser_env = std::env::var("BROWSER").ok();
+    for argv in browser_launchers(browser_env.as_deref()) {
+        if spawn_launcher(&argv, url) {
+            return "opened".to_string();
+        }
+    }
+    "no_browser".to_string()
+}
+
 fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
     let port: u16 = 19556;
     let listener = block_on(TcpListener::bind(format!("127.0.0.1:{}", port))).map_err(|e| {
@@ -1603,6 +1736,10 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
     );
     Ok(AuthSession {
         url: authorize_url,
+        callback_port: port,
+        // The IdP redirects straight here, so the registered redirect is verbatim
+        // where the browser lands.
+        callback_url: redirect_uri.clone(),
         inner: Mutex::new(Some(AuthSessionInner {
             listener: Some(listener),
             code_verifier,
@@ -1643,6 +1780,13 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
     );
     Ok(AuthSession {
         url: authorize_url,
+        callback_port: port,
+        // Not the registered redirect: the endpoint's callback page reads the port
+        // out of `state` and forwards the browser on to this, query string intact
+        // (jwt-validator's envoy.yaml serves that page). Quoted to the user only so
+        // they recognize the address bar they are copying from — nothing depends on
+        // it matching, and the paste is parsed for a `code` wherever it came from.
+        callback_url: format!("http://127.0.0.1:{}/callback", port),
         inner: Mutex::new(Some(AuthSessionInner {
             listener: Some(listener),
             code_verifier,
@@ -1948,10 +2092,125 @@ struct AuthSessionInner {
     kind: SessionKind,
 }
 
+impl AuthSessionInner {
+    /// Exchange an authorization `code` for credentials — the half of a login that
+    /// is the same whether the code arrived on the loopback listener or was pasted
+    /// back by hand.
+    ///
+    /// `require_state` is true for the browser callback, whose `state` is always
+    /// the one we generated: its absence there means something other than our own
+    /// redirect hit the loopback. A hand-pasted code may legitimately arrive
+    /// without it (the user copied only the code), and the paste itself is the
+    /// user's intent, so the CSRF guard has nothing left to protect against —
+    /// validate the value when it is present either way.
+    async fn complete(
+        self,
+        code: String,
+        state: Option<String>,
+        require_state: bool,
+    ) -> anyhow::Result<CredentialsEntry> {
+        // The Aspect-cloud flow posts to the conventional token endpoint; the
+        // self-hosted flow resolves it via OIDC discovery and first validates
+        // the callback `state` (CSRF guard).
+        let token_url = match &self.kind {
+            SessionKind::Cloud => format!("{}/oauth/token", self.env.domain),
+            SessionKind::Endpoint { expected_state } => {
+                let matches = match state.as_deref() {
+                    Some(state) => state == expected_state.as_str(),
+                    None => !require_state,
+                };
+                if !matches {
+                    return Err(anyhow::anyhow!(
+                        "authentication failed: callback state did not match"
+                    ));
+                }
+                resolve_oidc_endpoints(&self.env.domain).await.token
+            }
+        };
+        let token_resp = exchange_code(
+            &token_url,
+            &self.env.client_id,
+            &self.redirect_uri,
+            &code,
+            &self.code_verifier,
+        )
+        .await?;
+        let refresh_token = token_resp.refresh_token.clone();
+        // Self-hosted edges validate the id_token; the cloud flow the
+        // access_token. Record which so refresh keeps minting the same kind.
+        let prefer_id_token = matches!(self.kind, SessionKind::Endpoint { .. });
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(prefer_id_token)?,
+            refresh_token,
+            Some(self.env.domain.clone()),
+            Some(self.env.client_id.clone()),
+            prefer_id_token,
+        )
+    }
+}
+
+/// Take the pending login out of `session`. `wait()` and `redeem()` are two ways
+/// to finish the same session, so either one consumes it.
+fn take_pending(session: &AuthSession) -> anyhow::Result<AuthSessionInner> {
+    let mut guard = session
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
+    guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))
+}
+
+/// Extract the OAuth `code` (and `state`, when it came along) from whatever the
+/// user pasted back: the browser's full address-bar URL, a bare query string, or
+/// the code on its own.
+///
+/// The `code=`/`error=` test — rather than merely looking for a `?` or `=` — keeps
+/// a bare authorization code that happens to carry base64 padding from being read
+/// as a query string and rejected for having no `code` parameter.
+fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>)> {
+    let pasted = pasted.trim();
+    if pasted.is_empty() {
+        return Err(anyhow::anyhow!("no authorization code entered"));
+    }
+    let is_callback = pasted.starts_with("http://")
+        || pasted.starts_with("https://")
+        || pasted.contains("code=")
+        || pasted.contains("error=");
+    if !is_callback {
+        return Ok((pasted.to_string(), None));
+    }
+    // `extract_query_param` splits on `?`; give a bare query string one to find.
+    let url = if pasted.contains('?') {
+        pasted.to_string()
+    } else {
+        format!("?{pasted}")
+    };
+    if let Some(error) = extract_query_param(&url, "error") {
+        let desc = extract_query_param(&url, "error_description").unwrap_or_default();
+        return Err(anyhow::anyhow!("authentication failed: {} {}", error, desc));
+    }
+    let code = extract_query_param(&url, "code").ok_or_else(|| {
+        anyhow::anyhow!(
+            "no `code` parameter in what was pasted — after authorizing, copy the \
+             browser's whole address, including everything after the `?`"
+        )
+    })?;
+    Ok((code, extract_query_param(&url, "state")))
+}
+
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<AuthSession>")]
 pub struct AuthSession {
     pub url: String,
+    /// The loopback port the OAuth callback ultimately lands on. Exposed so the
+    /// task can name it in the `ssh -L` hint.
+    pub callback_port: u16,
+    /// The loopback address the browser is left sitting on once the flow is done —
+    /// what the user reads the authorization code out of when the browser is on
+    /// another machine. Exposed so the task can quote it exactly rather than
+    /// approximately: the two flows do not agree on the spelling.
+    pub callback_url: String,
     #[allocative(skip)]
     inner: Mutex<Option<AuthSessionInner>>,
 }
@@ -1981,56 +2240,62 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthSession, url)
     }
 
+    /// The loopback port the OAuth redirect ends up on. Only this machine can
+    /// serve it, so a task that could not open a browser here names it in the
+    /// port-forwarding hint.
+    #[starlark(attribute)]
+    fn callback_port<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
+        Ok(this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?
+            .callback_port as i32)
+    }
+
+    /// The loopback address the browser is left on when the flow finishes — where
+    /// the user reads the code out of the address bar. The cloud flow lands on
+    /// `http://localhost:<port>/callback`; a self-hosted deployment's callback page
+    /// forwards to `http://127.0.0.1:<port>/callback`.
+    #[starlark(attribute)]
+    fn callback_url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, AuthSession, callback_url)
+    }
+
+    /// Wait for the browser to deliver the authorization code to the loopback
+    /// listener, then exchange it. Requires the browser to be on this machine (or
+    /// the port to be forwarded here); see `redeem` for the other case.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<AuthCredentials> {
         let session = this
             .downcast_ref_err::<AuthSession>()
             .into_anyhow_result()?;
-        let mut guard = session
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
-        let inner = guard.take().ok_or_else(|| {
-            anyhow::anyhow!("auth session already consumed (wait() called twice)")
-        })?;
+        let mut inner = take_pending(&session)?;
+        let listener = inner
+            .listener
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
         let entry = block_on(async move {
-            let listener = inner
-                .listener
-                .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
             let (code, state) = accept_callback(listener).await?;
-            // The Aspect-cloud flow posts to the conventional token endpoint; the
-            // self-hosted flow resolves it via OIDC discovery and first validates
-            // the callback `state` (CSRF guard).
-            let token_url = match &inner.kind {
-                SessionKind::Cloud => format!("{}/oauth/token", inner.env.domain),
-                SessionKind::Endpoint { expected_state } => {
-                    if state.as_deref() != Some(expected_state.as_str()) {
-                        return Err(anyhow::anyhow!(
-                            "authentication failed: callback state did not match"
-                        ));
-                    }
-                    resolve_oidc_endpoints(&inner.env.domain).await.token
-                }
-            };
-            let token_resp = exchange_code(
-                &token_url,
-                &inner.env.client_id,
-                &inner.redirect_uri,
-                &code,
-                &inner.code_verifier,
-            )
-            .await?;
-            let refresh_token = token_resp.refresh_token.clone();
-            // Self-hosted edges validate the id_token; the cloud flow the
-            // access_token. Record which so refresh keeps minting the same kind.
-            let prefer_id_token = matches!(inner.kind, SessionKind::Endpoint { .. });
-            CredentialsEntry::from_bearer(
-                token_resp.bearer(prefer_id_token)?,
-                refresh_token,
-                Some(inner.env.domain.clone()),
-                Some(inner.env.client_id.clone()),
-                prefer_id_token,
-            )
+            inner.complete(code, state, true).await
         })?;
+        Ok(AuthCredentials::from_entry(&entry))
+    }
+
+    /// Exchange an authorization code the user pasted back — the browser's full
+    /// callback URL, a bare query string, or the bare code.
+    ///
+    /// This is the login path for a browser that is not on this machine (an SSH
+    /// session, most often): the redirect resolves to *our* loopback, so the code
+    /// never reaches us and the browser's address bar is the only place left to
+    /// read it from. Drops the listener, since nothing will connect to it.
+    fn redeem<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] pasted: &str,
+    ) -> anyhow::Result<AuthCredentials> {
+        let session = this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?;
+        let inner = take_pending(&session)?;
+        let (code, state) = parse_pasted_callback(pasted)?;
+        let entry = block_on(inner.complete(code, state, false))?;
         Ok(AuthCredentials::from_entry(&entry))
     }
 }
@@ -2466,6 +2731,17 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn api_url<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<String> {
         Ok(resolve_api_url()?)
+    }
+
+    /// Try to open `url` in a browser on this machine. Returns `"opened"`,
+    /// `"headless"` (an SSH session with no forwarded display — not attempted), or
+    /// `"no_browser"` (no launcher on this platform worked). The last two tell the
+    /// caller the OAuth loopback redirect will land on the wrong machine.
+    fn open_browser<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] url: &str,
+    ) -> anyhow::Result<String> {
+        Ok(open_url_in_browser(url))
     }
 
     fn login<'v>(
@@ -4147,5 +4423,137 @@ mod tests {
             extract_query_param("/cb?code=first&code=second", "code"),
             Some("first".to_string())
         );
+    }
+
+    #[test]
+    fn parse_pasted_callback_reads_a_url_a_query_or_a_bare_code() {
+        // What the user actually copies out of the address bar.
+        assert_eq!(
+            parse_pasted_callback(
+                "  http://localhost:19556/callback?code=abc123&state=nonce.19556  "
+            )
+            .unwrap(),
+            ("abc123".to_string(), Some("nonce.19556".to_string()))
+        );
+        // A bare query string is given a `?` so the same extractor reads it.
+        assert_eq!(
+            parse_pasted_callback("code=abc123&state=xyz").unwrap(),
+            ("abc123".to_string(), Some("xyz".to_string()))
+        );
+        // Just the code, with no state to validate.
+        assert_eq!(
+            parse_pasted_callback("abc123").unwrap(),
+            ("abc123".to_string(), None)
+        );
+        // Base64 padding in a bare code must not make it look like a query string —
+        // it would otherwise be rejected for having no `code` parameter.
+        assert_eq!(
+            parse_pasted_callback("YWJjMTIz==").unwrap(),
+            ("YWJjMTIz==".to_string(), None)
+        );
+        // A url-encoded value survives the round trip.
+        assert_eq!(
+            parse_pasted_callback("https://x/cb?code=a%2Fb").unwrap().0,
+            "a/b".to_string()
+        );
+
+        // An authorize error the browser was redirected with is reported as one,
+        // rather than as a missing `code`.
+        let err = parse_pasted_callback(
+            "http://localhost:19556/callback?error=access_denied&error_description=nope",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("access_denied") && err.contains("nope"),
+            "{err}"
+        );
+
+        // A URL with no code at all, and an empty paste.
+        assert!(
+            parse_pasted_callback("http://localhost:19556/callback")
+                .unwrap_err()
+                .to_string()
+                .contains("no `code` parameter")
+        );
+        assert!(
+            parse_pasted_callback("   ")
+                .unwrap_err()
+                .to_string()
+                .contains("no authorization code")
+        );
+    }
+
+    #[test]
+    fn is_remote_session_spots_ssh_without_a_forwarded_display() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+
+        // A plain SSH login: no browser here, and our loopback is the wrong host's.
+        assert!(is_remote_session(env(&[(
+            "SSH_CONNECTION",
+            "10.0.0.1 22 10.0.0.2 22"
+        )])));
+        assert!(is_remote_session(env(&[("SSH_TTY", "/dev/pts/0")])));
+
+        // X11 forwarding: the browser draws on the user's screen and still reaches
+        // our loopback, so the session counts as local.
+        assert!(!is_remote_session(env(&[
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+            ("DISPLAY", "localhost:10.0"),
+        ])));
+
+        // The remote machine's *own* console is not an escape hatch — a browser on
+        // it opens in front of nobody. This is a Cloud Workstation over
+        // `gcloud workstations ssh`, whose image sets a virtual display.
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", ":0"),
+        ])));
+        // Nor is Wayland, which ssh cannot forward at all.
+        assert!(is_remote_session(env(&[
+            ("SSH_TTY", "/dev/pts/0"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+        ])));
+
+        // Not remote: a local terminal, and an empty variable is not a set one.
+        assert!(!is_remote_session(env(&[])));
+        assert!(!is_remote_session(env(&[("SSH_CONNECTION", "")])));
+        // A local desktop is not remote whatever its display looks like.
+        assert!(!is_remote_session(env(&[("DISPLAY", ":0")])));
+    }
+
+    #[test]
+    fn is_forwarded_display_needs_a_host_before_the_colon() {
+        assert!(is_forwarded_display(Some("localhost:10.0"))); // ssh -X
+        assert!(is_forwarded_display(Some("localhost:11")));
+        assert!(!is_forwarded_display(Some(":0"))); // the local console
+        assert!(!is_forwarded_display(Some(":0.0")));
+        assert!(!is_forwarded_display(None));
+        assert!(!is_forwarded_display(Some(""))); // no colon at all
+    }
+
+    #[test]
+    fn browser_launchers_prefers_the_user_s_browser_env() {
+        // $BROWSER is a colon-separated list of command lines; every entry is tried
+        // before the platform table, in the order the user wrote them.
+        let candidates = browser_launchers(Some("firefox %s:chromium"));
+        assert_eq!(candidates[0], vec!["firefox", "%s"]);
+        assert_eq!(candidates[1], vec!["chromium"]);
+        assert!(candidates.len() > 2, "the platform table follows");
+
+        // Empty entries (a trailing colon, or an unset-but-present variable) are
+        // dropped rather than spawning the empty program.
+        assert_eq!(browser_launchers(Some("")), browser_launchers(None));
+        assert_eq!(browser_launchers(Some(":::")), browser_launchers(None));
+
+        // The platform table is never empty, so a login always has something to try.
+        assert!(!browser_launchers(None).is_empty());
     }
 }

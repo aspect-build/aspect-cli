@@ -3,17 +3,68 @@ load("./private/lib/deployment_flags.axl", "REMOTE_DEFAULT_CAPS", "capability_la
 load("./private/lib/environment.axl", "error", "info", "warn")
 load("./private/lib/prompt.axl", "prompt_choice")
 
-def _run_browser_login(ctx: TaskContext, deployment: str):
-    """Open the deployment's authorize URL in a browser and wait for the callback,
-    returning the minted credentials. Prints the URL if a browser can't be opened."""
-    session = ctx.aspect.auth.login(deployment = deployment)
-    result = ctx.std.process.command("open").arg(session.url).spawn().wait()
-    if not result.success:
-        print("Open this URL to log in:")
-        print("  " + session.url)
-    else:
+def _open_login_url(ctx: TaskContext, session) -> bool:
+    """Get the user in front of the authorize URL, returning whether a browser was
+    opened *here* — which is what decides whether the OAuth redirect can reach the
+    loopback listener on its own.
+
+    `--no-browser` skips the attempt outright. Otherwise the runtime walks this
+    platform's openers ($BROWSER, then xdg-open/gio/... on Linux, `open` on macOS,
+    rundll32 on Windows) and reports "headless" without trying at all when this is
+    an SSH session with no forwarded display."""
+    status = "headless" if ctx.args.no_browser else ctx.aspect.auth.open_browser(session.url)
+    if status == "opened":
         print("Browser opened. Waiting for authentication...")
-    return session.wait()
+        # The escape hatch for the case detection cannot see: a remote session that
+        # looks local, where the browser just opened on a screen nobody is watching.
+        print("(Nothing opened, or it opened elsewhere? Ctrl-C and re-run with --no-browser.)")
+        return True
+    print("Open this URL in a browser to log in:")
+    print("")
+    print("  " + session.url)
+    print("")
+    return False
+
+def _redeem_pasted_code(ctx: TaskContext, session):
+    """Take the authorization code back by hand and exchange it, or None if nothing
+    was entered.
+
+    The path for a browser that is not on this machine — an SSH session, mostly.
+    The OAuth redirect resolves to a loopback address, which only *this* host
+    serves, so a browser on the user's laptop lands on a page that never loads and
+    the address bar is the only place the code can be read from.
+
+    No port-forwarding hint here on purpose: a self-hosted deployment binds a fresh
+    port every run, so `ssh -L` is only durable advice for the Aspect account flow
+    (fixed port 19556). It lives in --no-browser's help text, with that caveat."""
+    print("Authorizing sends the browser on to {}?code=...".format(session.callback_url))
+    print("— an address only this machine serves. If the browser is on another machine")
+    print("it will report \"refused to connect\": that is expected, and the address bar")
+    print("still holds the code. Copy the whole address and paste it below.")
+    print("")
+    ctx.std.io.stdout.write("Paste the callback URL (or just the code): ")
+    ctx.std.io.stdout.flush()
+    pasted = str(ctx.std.io.stdin.read(8192)).strip()
+    if not pasted:
+        return None
+    return session.redeem(pasted)
+
+def _run_browser_login(ctx: TaskContext, deployment: str):
+    """Authenticate the user in a browser and return the minted credentials, or None
+    when an interactive login was needed and the user entered nothing.
+
+    Happy path: open a browser here and wait for the OAuth callback on the loopback
+    listener. When there is no browser on this machine — or it lives at the other
+    end of an SSH session, where that loopback redirect resolves to the wrong host —
+    fall back to taking the code by hand. Off a TTY there is nothing to paste with,
+    so keep waiting on the listener instead: a forwarded port still delivers."""
+    session = ctx.aspect.auth.login(deployment = deployment)
+    if _open_login_url(ctx, session):
+        return session.wait()
+    if not ctx.std.io.stdin.is_tty:
+        print("Waiting for the callback on localhost:{}...".format(session.callback_port))
+        return session.wait()
+    return _redeem_pasted_code(ctx, session)
 
 # Width of the label column in a deployment's detail block so values align. Must
 # be wider than the longest label ("Results", 7) to leave a gap; a label >= this
@@ -124,6 +175,9 @@ def _login_impl(ctx: TaskContext) -> int:
         creds = ctx.aspect.auth.login(api_token = inp, deployment = deployment)
     else:
         creds = _run_browser_login(ctx, deployment)
+        if creds == None:
+            error(ctx.std, "No authorization code entered; not logged in.")
+            return 1
 
     # Persist under the deployment's own profile (so endpoint auth resolves it by
     # host) unless the user pinned an explicit --profile.
@@ -148,6 +202,10 @@ login = task(
         ),
         "deployment": args.string(
             description = "Log in to this configured Workflows deployment (see `aspect auth configure`) instead of your Aspect account. Selects which account/deployment to authenticate.",
+        ),
+        "no_browser": args.boolean(
+            default = False,
+            description = "Don't try to open a browser; print the URL and ask for the authorization code back. Use this when the browser is on another machine (e.g. over SSH), where the login callback would be redirected to the wrong host's localhost. Over SSH you can instead forward the callback port from your local machine — for your Aspect account that is the fixed `ssh -L 19556:localhost:19556 <host>`; a self-hosted deployment binds a fresh port each run, so paste the code.",
         ),
         "profile": args.string(
             description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for the Aspect account). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
@@ -222,6 +280,9 @@ def _configure_impl(ctx: TaskContext) -> int:
         print("(interactively, or with an API token via --with-api-token).")
         return 0
     creds = _run_browser_login(ctx, info.name)
+    if creds == None:
+        error(ctx.std, "No authorization code entered; the deployment is configured but not logged in.")
+        return 1
     ctx.aspect.auth.persist(creds, profile = info.name)
     print("")
     summary = ctx.aspect.auth.deployment_summary(info.name)
@@ -252,6 +313,10 @@ configure = task(
         "login": args.boolean(
             default = True,
             description = "Run the interactive login after configuring.",
+        ),
+        "no_browser": args.boolean(
+            default = False,
+            description = "Don't try to open a browser; print the URL and ask for the authorization code back. Use this when the browser is on another machine (e.g. over SSH), where the login callback would be redirected to the wrong host's localhost. Over SSH you can instead forward the callback port from your local machine — for your Aspect account that is the fixed `ssh -L 19556:localhost:19556 <host>`; a self-hosted deployment binds a fresh port each run, so paste the code.",
         ),
     },
 )
