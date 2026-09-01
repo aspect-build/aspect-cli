@@ -22,6 +22,22 @@
 //! Handlers run on the alternate signal stack (`SA_ONSTACK`) std installs per
 //! thread, so stack-overflow SIGSEGVs are reported rather than double-faulting.
 //!
+//! The handler's very first action is the raw `write(2)` of the signal marker:
+//! nothing that can fault or wedge — not the load-bias lookup
+//! (`dl_iterate_phdr`), not the crash-log open — runs before it. The
+//! re-entrancy guard means a fault anywhere inside the handler dies silently,
+//! so every step is ordered after the cheapest, safest write that still names
+//! the signal; a report that dies partway leaves the marker behind instead of
+//! nothing.
+//!
+//! `ASPECT_CRASH_LOG=<path>` additionally appends a copy of the report to that
+//! file. Stderr on a CI runner is a pipe whose reader may stop draining the
+//! instant the process dies, so a report written microseconds before death can
+//! be lost to the harness's capture teardown; the file survives it and can be
+//! stored as a CI artifact. The path is captured at install time (reading the
+//! environment is not async-signal-safe); the handler `open(2)`s it lazily and
+//! `fsync(2)`s before re-raising.
+//!
 //! Resolving the report: release binaries are position-independent, so each
 //! code address is printed as `<runtime> (+<static offset>)` where the offset
 //! already has the ASLR load bias removed. Release builds keep their symbols
@@ -54,11 +70,31 @@ pub fn trigger_test_crash() {
 
 #[cfg(unix)]
 mod unix {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::ffi::CString;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     /// Environment variable that, when set to any non-empty value, skips
     /// handler installation.
     const OPT_OUT_ENV: &str = "ASPECT_NO_CRASH_HANDLER";
+
+    /// Environment variable naming a file that receives a copy of the crash
+    /// report (appended), in addition to stderr. See the module docs for why
+    /// stderr alone can lose a report on CI.
+    const CRASH_LOG_ENV: &str = "ASPECT_CRASH_LOG";
+
+    /// NUL-terminated crash-log path, captured by [`install`]. Reading the
+    /// environment allocates and is not async-signal-safe, so the handler
+    /// only `open(2)`s this pre-captured path. `None` when unset, empty, or
+    /// unrepresentable as a C string.
+    static CRASH_LOG_PATH: OnceLock<Option<CString>> = OnceLock::new();
+
+    /// File descriptor of the opened crash log, set by the handler after a
+    /// successful `open(2)`; -1 while absent. A static rather than a local so
+    /// the shared write helpers can tee without threading an fd through every
+    /// call. Only the one thread that wins the [`HANDLING`] guard ever writes
+    /// it.
+    static LOG_FD: AtomicI32 = AtomicI32::new(-1);
 
     /// The signals we install handlers for, paired with the label printed in
     /// the crash report.
@@ -80,10 +116,22 @@ mod unix {
         std::env::var_os(OPT_OUT_ENV).is_some_and(|v| !v.is_empty())
     }
 
+    /// The crash-log path from the environment as a C string, or `None` when
+    /// unset, empty, or containing an interior NUL.
+    fn crash_log_path_from_env() -> Option<CString> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::env::var_os(CRASH_LOG_ENV)?;
+        if path.is_empty() {
+            return None;
+        }
+        CString::new(path.as_bytes()).ok()
+    }
+
     pub(super) fn install() {
         if opt_out() {
             return;
         }
+        let _ = CRASH_LOG_PATH.set(crash_log_path_from_env());
         let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) = handler;
         for &(sig, _) in FATAL_SIGNALS {
             // SAFETY: standard sigaction registration; `sa` is fully
@@ -139,14 +187,22 @@ mod unix {
                 // SAFETY: registering an atexit handler.
                 unsafe { libc::atexit(boom) };
             }
-            // Double free: the allocator detects it and our registered error
-            // handler turns it into an abort (mimalloc's default handler would
-            // report and continue). SAFETY: intentional, to exercise that path.
+            // Heap corruption: the allocator detects it and our registered
+            // error handler turns it into an abort (mimalloc's default handler
+            // would report and continue). Double-free detection is heuristic —
+            // the freed block must still look like a free-list entry, which
+            // varies by build and allocation history — so when it slips
+            // through, fall through to freeing a pointer that cannot belong to
+            // the allocator: that check is a segment-map lookup and detects
+            // deterministically. SAFETY: intentional corruption, to exercise
+            // that path in a process that is about to die.
             Ok("double-free") => unsafe {
                 let layout = std::alloc::Layout::from_size_align(64, 8).unwrap();
                 let p = std::alloc::alloc(layout);
                 std::alloc::dealloc(p, layout);
                 std::alloc::dealloc(p, layout);
+                let mut not_heap = [0u8; 64];
+                std::alloc::dealloc(not_heap.as_mut_ptr(), layout);
             },
             // Crash on a detached thread while the main thread is exiting —
             // the shape of a background reader still running at teardown.
@@ -169,22 +225,57 @@ mod unix {
             .unwrap_or("unknown fatal signal")
     }
 
-    /// Write `bytes` to stderr via `write(2)`, ignoring errors. Async-signal-safe.
-    fn write_stderr(bytes: &[u8]) {
+    /// Write `bytes` to `fd` via `write(2)`, ignoring errors. Async-signal-safe.
+    fn write_fd(fd: libc::c_int, bytes: &[u8]) {
         let mut off = 0;
         while off < bytes.len() {
-            // SAFETY: in-bounds pointer/length into `bytes`, written to fd 2.
-            let n = unsafe {
-                libc::write(
-                    libc::STDERR_FILENO,
-                    bytes[off..].as_ptr().cast(),
-                    bytes.len() - off,
-                )
-            };
+            // SAFETY: in-bounds pointer/length into `bytes`, written to `fd`.
+            let n = unsafe { libc::write(fd, bytes[off..].as_ptr().cast(), bytes.len() - off) };
             if n <= 0 {
                 return;
             }
             off += n as usize;
+        }
+    }
+
+    /// Write `bytes` to stderr and, when the handler opened a crash log, to it
+    /// as well. Async-signal-safe.
+    fn write_report(bytes: &[u8]) {
+        write_fd(libc::STDERR_FILENO, bytes);
+        let log_fd = LOG_FD.load(Ordering::Relaxed);
+        if log_fd >= 0 {
+            write_fd(log_fd, bytes);
+        }
+    }
+
+    /// Open the `ASPECT_CRASH_LOG` file (append, create) and arm [`LOG_FD`] so
+    /// subsequent [`write_report`]s tee into it. No-op when the env var wasn't
+    /// set at install time or the open fails. `open(2)` is async-signal-safe.
+    fn open_crash_log() {
+        let Some(Some(path)) = CRASH_LOG_PATH.get() else {
+            return;
+        };
+        // SAFETY: `path` is a valid NUL-terminated string captured at install.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                0o644 as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            LOG_FD.store(fd, Ordering::Relaxed);
+        }
+    }
+
+    /// Flush the crash log to disk before the process dies. `fsync(2)` is
+    /// async-signal-safe; without it a report appended microseconds before the
+    /// re-raise can be lost with the page cache on an abrupt runner teardown.
+    fn sync_crash_log() {
+        let log_fd = LOG_FD.load(Ordering::Relaxed);
+        if log_fd >= 0 {
+            // SAFETY: fsync on an fd this handler opened.
+            unsafe { libc::fsync(log_fd) };
         }
     }
 
@@ -214,7 +305,7 @@ mod unix {
     /// Write `value` as `0x`-prefixed hex to stderr. Async-signal-safe.
     fn write_hex(value: usize) {
         let mut buf = [0u8; 18];
-        write_stderr(format_hex(value, &mut buf));
+        write_report(format_hex(value, &mut buf));
     }
 
     /// The main executable's load bias (the runtime base a position-independent
@@ -259,9 +350,9 @@ mod unix {
     /// binary regardless of ASLR. When `bias` is 0 the offset equals `abs`.
     fn write_addr(abs: usize, bias: usize) {
         write_hex(abs);
-        write_stderr(b" (+");
+        write_report(b" (+");
         write_hex(abs.wrapping_sub(bias));
-        write_stderr(b")");
+        write_report(b")");
     }
 
     /// Walk the current call stack and write each frame's instruction pointer
@@ -276,9 +367,9 @@ mod unix {
         // to stderr.
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
-                write_stderr(b"  ");
+                write_report(b"  ");
                 write_addr(frame.ip() as usize, bias);
-                write_stderr(b"\n");
+                write_report(b"\n");
                 true
             });
         }
@@ -356,26 +447,43 @@ mod unix {
             reset_and_reraise(sig);
         }
 
+        // Marker first, via nothing but write(2): every later step (the
+        // crash-log open, dl_iterate_phdr in load_bias, the frame walk) has
+        // some chance of faulting or wedging, and a fault here re-enters the
+        // HANDLING guard and dies with no output at all. Whatever else
+        // happens, the log names the signal.
+        write_report(b"\naspect-cli: fatal signal: ");
+        write_report(signal_name(sig).as_bytes());
+
+        // Arm the ASPECT_CRASH_LOG tee, then repeat the marker into it so the
+        // file is self-contained (write_report only tees what comes after).
+        open_crash_log();
+        let log_fd = LOG_FD.load(Ordering::Relaxed);
+        if log_fd >= 0 {
+            write_fd(log_fd, b"\naspect-cli: fatal signal: ");
+            write_fd(log_fd, signal_name(sig).as_bytes());
+        }
+
+        write_report(b"\nfault address: ");
+        write_hex(fault_addr(info));
+
         let bias = load_bias();
 
-        write_stderr(b"\naspect-cli: fatal signal: ");
-        write_stderr(signal_name(sig).as_bytes());
-        write_stderr(b"\nfault address: ");
-        write_hex(fault_addr(info));
-        write_stderr(b"\ncrash pc: ");
+        write_report(b"\ncrash pc: ");
         write_addr(crash_pc(ctx), bias);
-        write_stderr(
+        write_report(
             b"\ncode addresses print as `<runtime> (+<static offset>)`; resolve the \
               static offset against this binary:\n  \
               `addr2line -fe aspect-cli <offset>`.\ncrash pc is the fault site; the \
               frames below may be truncated to the handler frame on static-musl builds:\n",
         );
         write_raw_backtrace(bias);
-        write_stderr(
+        write_report(
             b"aspect-cli crashed; please report this at \
               https://github.com/aspect-build/aspect-cli/issues including the output above.\n",
         );
 
+        sync_crash_log();
         reset_and_reraise(sig);
     }
 
@@ -420,6 +528,23 @@ mod unix {
                 std::env::set_var(OPT_OUT_ENV, "1");
                 assert!(opt_out());
                 std::env::remove_var(OPT_OUT_ENV);
+            }
+        }
+
+        #[test]
+        fn crash_log_path_requires_nonempty_nul_free_value() {
+            // SAFETY: single-threaded test; no other thread reads the env here.
+            unsafe {
+                std::env::remove_var(CRASH_LOG_ENV);
+                assert_eq!(crash_log_path_from_env(), None);
+                std::env::set_var(CRASH_LOG_ENV, "");
+                assert_eq!(crash_log_path_from_env(), None);
+                std::env::set_var(CRASH_LOG_ENV, "/tmp/aspect-crash.log");
+                assert_eq!(
+                    crash_log_path_from_env(),
+                    Some(CString::new("/tmp/aspect-crash.log").unwrap())
+                );
+                std::env::remove_var(CRASH_LOG_ENV);
             }
         }
     }

@@ -75,9 +75,8 @@ rust_test(
 
 # Integration tests spawn the built CLI. `rust_test(crate = ...)` covers only
 # unit tests inside `src/`, so without a target per file nothing under `tests/`
-# runs in CI, which has no `cargo test` step. `tests/crash_handler.rs` is still
-# uncovered: it resolves the binary through `env!("CARGO_BIN_EXE_…")`, which
-# does not exist in a Bazel build.
+# runs in CI, which has no `cargo test` step. Each resolves the binary through
+# `ASPECT_CLI_BIN` (with a `CARGO_BIN_EXE_…` fallback for cargo).
 rust_test(
     name = "broken_pipe_test",
     srcs = ["tests/broken_pipe.rs"],
@@ -85,6 +84,18 @@ rust_test(
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
+)
+
+rust_test(
+    name = "crash_handler_test",
+    srcs = ["tests/crash_handler.rs"],
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:libc",
+    ],
 )
 
 multi_platform_rust_binaries(
