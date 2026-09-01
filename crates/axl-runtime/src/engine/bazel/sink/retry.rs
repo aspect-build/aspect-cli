@@ -339,6 +339,12 @@ pub fn is_retryable(err: &ClientError) -> bool {
         // reset — all assumed transient.
         ClientError::Transport(_) => true,
         ClientError::InvalidEndpoint(_) => false,
+        // `Cancelled` and `Unknown` are how a GOAWAY reaches us: hyper cancels
+        // requests queued on a connection the server is retiring, and tonic maps
+        // an h2 protocol error carrying no gRPC status to `Unknown`. Neither
+        // request reached the application, so replaying it is safe. A local
+        // abort never lands here — it closes the upstream instead, which
+        // `drive_stream` reports as `UpstreamClosed`.
         ClientError::Status(status) => matches!(
             status.code(),
             Code::Unavailable
@@ -346,6 +352,8 @@ pub fn is_retryable(err: &ClientError) -> bool {
                 | Code::ResourceExhausted
                 | Code::Aborted
                 | Code::Internal
+                | Code::Cancelled
+                | Code::Unknown
         ),
     }
 }
@@ -696,13 +704,30 @@ mod tests {
 
     #[test]
     fn classifier_status_codes() {
-        let unavailable = ClientError::Status(tonic::Status::new(tonic::Code::Unavailable, "x"));
-        let unauth = ClientError::Status(tonic::Status::new(tonic::Code::Unauthenticated, "x"));
-        let internal = ClientError::Status(tonic::Status::new(tonic::Code::Internal, "x"));
-        let perm = ClientError::Status(tonic::Status::new(tonic::Code::PermissionDenied, "x"));
-        assert!(is_retryable(&unavailable));
-        assert!(is_retryable(&internal));
-        assert!(!is_retryable(&unauth));
-        assert!(!is_retryable(&perm));
+        // `Cancelled` and `Unknown` are the two a GOAWAY produces: a request
+        // hyper cancelled on a retiring connection, and an h2 protocol error
+        // tonic could not map to a gRPC status.
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Aborted,
+            tonic::Code::Internal,
+            tonic::Code::Cancelled,
+            tonic::Code::Unknown,
+        ] {
+            let err = ClientError::Status(tonic::Status::new(code, "x"));
+            assert!(is_retryable(&err), "{code:?} should be retryable");
+        }
+        for code in [
+            tonic::Code::Unauthenticated,
+            tonic::Code::PermissionDenied,
+            tonic::Code::InvalidArgument,
+        ] {
+            let err = ClientError::Status(tonic::Status::new(code, "x"));
+            assert!(!is_retryable(&err), "{code:?} should be terminal");
+        }
+        let bad_uri = "not a uri".parse::<hyper::Uri>().unwrap_err();
+        assert!(!is_retryable(&ClientError::InvalidEndpoint(bad_uri)));
     }
 }
