@@ -339,12 +339,8 @@ pub fn is_retryable(err: &ClientError) -> bool {
         // reset — all assumed transient.
         ClientError::Transport(_) => true,
         ClientError::InvalidEndpoint(_) => false,
-        // `Cancelled` and `Unknown` are how a GOAWAY reaches us: hyper cancels
-        // requests queued on a connection the server is retiring, and tonic maps
-        // an h2 protocol error carrying no gRPC status to `Unknown`. Neither
-        // request reached the application, so replaying it is safe. A local
-        // abort never lands here — it closes the upstream instead, which
-        // `drive_stream` reports as `UpstreamClosed`.
+        // GOAWAY can surface as `Cancelled` for queued requests or `Unknown` for
+        // unmapped h2 failures. BES retries are idempotent or sequence-number deduplicated.
         ClientError::Status(status) => matches!(
             status.code(),
             Code::Unavailable

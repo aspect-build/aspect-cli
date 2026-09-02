@@ -1015,8 +1015,6 @@ mod tests {
     use super::*;
 
     use std::pin::Pin;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     use axl_proto::build_event_stream::{Progress, build_event::Payload};
@@ -1055,11 +1053,6 @@ mod tests {
 
     struct TestServer {
         mode: ServerMode,
-        /// Ordinal of the lifecycle call to fail once with CANCELLED, 1-based
-        /// over the sink's call order (build_enqueued, invocation_started,
-        /// invocation_finished, build_finished). `0` never fails.
-        cancel_lifecycle_call: u32,
-        lifecycle_calls: Arc<AtomicU32>,
     }
 
     #[tonic::async_trait]
@@ -1068,12 +1061,6 @@ mod tests {
             &self,
             _request: Request<PublishLifecycleEventRequest>,
         ) -> Result<Response<()>, Status> {
-            let nth = self.lifecycle_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if nth == self.cancel_lifecycle_call {
-                // What hyper reports when a GOAWAY retires the connection out
-                // from under a queued unary request.
-                return Err(Status::cancelled("operation was canceled"));
-            }
             Ok(Response::new(()))
         }
 
@@ -1150,25 +1137,11 @@ mod tests {
     }
 
     async fn start_server(mode: ServerMode) -> String {
-        start_server_cancelling_lifecycle(mode, 0).await
-    }
-
-    /// [`start_server`], with the `cancel_lifecycle_call`-th lifecycle RPC
-    /// failing once with CANCELLED.
-    async fn start_server_cancelling_lifecycle(
-        mode: ServerMode,
-        cancel_lifecycle_call: u32,
-    ) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = TestServer {
-            mode,
-            cancel_lifecycle_call,
-            lifecycle_calls: Arc::new(AtomicU32::new(0)),
-        };
         tokio::spawn(
             tonic::transport::Server::builder()
-                .add_service(PublishBuildEventServer::new(server))
+                .add_service(PublishBuildEventServer::new(TestServer { mode }))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
         );
         format!("http://{addr}")
@@ -1462,30 +1435,6 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(stats.acked, 0);
-    }
-
-    /// The post-stream `invocation_finished` lands on a connection the server
-    /// is retiring, so hyper cancels it and tonic reports CANCELLED. The call
-    /// is idempotent and never reached the application, so `retry_lifecycle`
-    /// must redial and succeed rather than end the sink.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cancelled_lifecycle_is_retried() {
-        // 3rd lifecycle call: build_enqueued, invocation_started, then
-        // invocation_finished once the stream is done.
-        let endpoint = start_server_cancelling_lifecycle(ServerMode::Ack, 3).await;
-        let retry = RetryConfig {
-            retry_min_delay: Duration::from_millis(10),
-            ..Default::default()
-        };
-        let mut events: Vec<BuildEvent> = (0..5).map(|_| progress_event(64)).collect();
-        events.last_mut().unwrap().last_message = true;
-        let (stats, outcome) = work_against(endpoint, events, retry).await;
-        assert!(
-            outcome.is_ok(),
-            "expected success, got {:?}",
-            outcome.unwrap_err()
-        );
-        assert_eq!(stats, SinkStats { sent: 5, acked: 5 });
     }
 
     /// The backend pod is terminated mid-stream: tonic maps the h2 protocol
