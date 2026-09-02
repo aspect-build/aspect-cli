@@ -2,12 +2,14 @@
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
+load("@aspect//bazel/build_metadata.axl", "version_gte")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
+load("./private/lib/runfiles_delta.axl", "runfiles_delta")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/watch.axl", "watch")
@@ -179,7 +181,7 @@ def _take_batch(merged: dict) -> struct:
         rescan = merged["rescan"],
     )
 
-def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
+def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool, refresh):
     """Watch loop: rebuild on each settled batch of workspace changes, then
     tell the running target — preferring the Incremental Build Protocol (a
     connected client gets change cycles over its socket), then the ibazel
@@ -191,15 +193,31 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
     ws = watch.new(ctx)
     srv = ctx.bazel.ibp_server()
     ctx.defer(srv.exit, "aspect-cli shutting down")
+    delta = runfiles_delta.new(ctx)
+    execlog_dir = ctx.std.fs.mkdtemp(prefix = "aspect-watch-execlog")
+    ctx.defer(ctx.std.fs.remove_dir_all, execlog_dir)
+
+    # --execution_log_compact_file needs Bazel >= 7.1; without it, runfiles
+    # cycles still carry manifest and source-join changes, just not
+    # content-only changes of generated outputs.
+    bazel_version = ctx.bazel.version()
+    execlog_supported = bazel_version != None and version_gte(bazel_version, "7.1.0")
 
     def spawn():
-        return _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_env = srv.env())
+        p = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_env = srv.env())
+        if p != None:
+            # Diff the first cycle against the manifest this process actually
+            # sees, so a pre-first-cycle deletion isn't lost.
+            delta.baseline(p.ep)
+        return p
 
     def pick_scope(p) -> str | None:
         if p == None or srv.state != "connected":
             return None
         if "sources" in srv.scopes:
             return "sources"
+        if "runfiles" in srv.scopes:
+            return "runfiles"
         return None
 
     def reset_or_restart(p):
@@ -209,7 +227,20 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         (proc, pending_cycle); a non-None pending_cycle is a recovery cycle —
         the caller restarts outright if the client fails that one too."""
         scope = pick_scope(p)
-        if scope == "sources":
+        if scope == "runfiles":
+            if srv.has_reset:
+                # The client resyncs from disk; rebaseline so later deltas
+                # diff against the state it now holds.
+                delta.baseline(p.ep)
+                pc = srv.cycle_reset()
+            else:
+                # A pre-v2 client rebuilds its state from the cycle's sources
+                # list; empty sources would wipe it.
+                full = delta.full(p.ep)
+                pc = srv.cycle(full, scope = "runfiles", fresh = True) if full != None else None
+            if pc != None:
+                return p, pc
+        elif scope == "sources":
             pc = srv.cycle_reset() if srv.has_reset else srv.cycle({}, scope = "sources", fresh = True)
             if pc != None:
                 return p, pc
@@ -321,10 +352,11 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         merged = None
         dirty = False
 
-        # Scope is sampled before the build only to pick the notify transport;
-        # the dispatch decision below re-samples. The generation pins the
-        # connection this rebuild serves: a different one afterwards is a new
-        # client instance that owes an initialization cycle first.
+        # Scope is sampled before the build only to decide whether to capture
+        # an execution log; the dispatch decision below re-samples. The
+        # generation pins the connection this rebuild serves: a different one
+        # afterwards is a new client instance that owes an initialization
+        # cycle before any delta.
         scope = pick_scope(proc)
         pre_generation = srv.generation
 
@@ -336,6 +368,12 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             notify = _notify_write(proc.stdin, "IBAZEL_BUILD_STARTED\n")
 
         cycle += 1
+        # Reparse the rc so .bazelrc edits and refreshed endpoint auth apply
+        # to this rebuild rather than the startup snapshot.
+        flags, rc = refresh()
+        execlog_path = None
+        if scope == "runfiles" and execlog_supported:
+            execlog_path = execlog_dir + "/cycle_%d.binpb" % cycle
         ph.reset(init_data())
         build_status = _build_once(
             ctx,
@@ -352,6 +390,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 emoji = "🔨",
             ),
             "Rebuilding %s" % target,
+            execution_log = [bazel.execution_log.file(path = execlog_path)] if execlog_path != None else False,
         )
         # Deliberately no drain: bazel writes its outputs outside the
         # workspace (the ignore list covers the convenience symlinks), so
@@ -364,6 +403,8 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             # fixing edit touches other files — but the retry itself waits
             # for that edit.
             merged = _merge_batch(merged, batch)
+            if execlog_path != None and ctx.std.fs.exists(execlog_path):
+                ctx.std.fs.remove_file(execlog_path)
             if notify:
                 _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED FAILURE\n")
                 if proc.structured:
@@ -376,9 +417,19 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             continue
 
         # Re-sample so a client that finished its handshake during the rebuild
-        # gets a cycle instead of a restart.
+        # gets a cycle instead of a restart. Consume-then-delete the execution
+        # log on every path so a long watch can't accumulate logs. Without a
+        # log (pre-7.1 Bazel) the delta still carries manifest and source-join
+        # changes, just not content-only changes of generated outputs.
         scope = pick_scope(proc)
         same_client = scope != None and srv.generation == pre_generation
+        delta_sources = None
+        delta_computed = False
+        if scope == "runfiles" and same_client and proc != None and not batch.rescan:
+            delta_sources = delta.compute(proc.ep, execlog_path, batch.changes)
+            delta_computed = True
+        if execlog_path != None and ctx.std.fs.exists(execlog_path):
+            ctx.std.fs.remove_file(execlog_path)
 
         if scope != None and not same_client:
             # The client connected during the rebuild and still owes its
@@ -397,6 +448,25 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             if batch.rescan:
                 proc, pending_cycle = reset_or_restart(proc)
                 pending_recovery = pending_cycle != None
+            elif scope == "runfiles":
+                if not delta_computed or delta_sources == None:
+                    # No usable delta: the manifest is gone — delta state
+                    # is lost.
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+                elif not delta_sources:
+                    ph.update(
+                        "running",
+                        phases.ProgressStyles(body = "No runfiles changed — watching for changes..."),
+                    )
+                    continue
+                else:
+                    pending_cycle = srv.cycle(delta_sources, scope = "runfiles")
+                    if pending_cycle == None:
+                        # The connection dropped mid-dispatch; the client
+                        # never saw this cycle.
+                        proc, pending_cycle = reset_or_restart(proc)
+                        pending_recovery = pending_cycle != None
             else:
                 sources = {c.path: (None if c.kind == "removed" else "source") for c in batch.changes}
                 pending_cycle = srv.cycle(sources)
@@ -478,7 +548,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # The watch loop never concludes: it runs until Ctrl-C ends the process.
     if ctx.args.watch:
-        return _watch_loop(ctx, ph, r, target, forward_args, spawn_cwd, flags, rc, announce_version, announce_command)
+        def refresh():
+            fresh_rc = bzl.setup_command(ctx, "build")
+            return r.flags_for(fresh_rc) + bzl.rc_flags(ctx, fresh_rc, "build"), fresh_rc
+
+        return _watch_loop(ctx, ph, r, target, forward_args, spawn_cwd, flags, rc, announce_version, announce_command, refresh)
 
     build_status = _build_once(
         ctx,

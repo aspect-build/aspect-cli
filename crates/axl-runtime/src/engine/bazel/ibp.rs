@@ -148,8 +148,9 @@ pub(crate) fn ibp_server_methods(registry: &mut MethodsBuilder) {
                     NoneOr::Other(s) => match s.as_str() {
                         "source" => Ok(ibp::SourceState::Source),
                         "symlink" => Ok(ibp::SourceState::Symlink),
+                        "generated" => Ok(ibp::SourceState::Generated),
                         other => Err(anyhow::anyhow!(
-                            "invalid source state {other:?}: expected \"source\", \"symlink\", or None"
+                            "invalid source state {other:?}: expected \"source\", \"symlink\", \"generated\", or None"
                         )),
                     },
                 };
