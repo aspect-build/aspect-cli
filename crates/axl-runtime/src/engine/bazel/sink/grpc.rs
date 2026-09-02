@@ -1044,10 +1044,8 @@ mod tests {
         /// long-lived streams expecting the client to reconnect and
         /// resume from the last acked event.
         AckThenShed(u32),
-        /// Ack the first N requests of each connection, then end the
-        /// response stream with UNKNOWN — how tonic surfaces an h2
-        /// protocol error (no gRPC status on the wire) when the backend
-        /// pod is terminated mid-stream.
+        /// Ack the first N requests on each connection, then simulate tonic
+        /// mapping an h2 failure without a gRPC status to `Unknown`.
         AckThenUnknown(u32),
     }
 
