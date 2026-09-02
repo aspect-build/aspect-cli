@@ -1044,6 +1044,9 @@ mod tests {
         /// long-lived streams expecting the client to reconnect and
         /// resume from the last acked event.
         AckThenShed(u32),
+        /// Ack the first N requests on each connection, then simulate tonic
+        /// mapping an h2 failure without a gRPC status to `Unknown`.
+        AckThenUnknown(u32),
     }
 
     struct TestServer {
@@ -1098,7 +1101,14 @@ mod tests {
                     });
                     Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
                 }
-                ServerMode::AckThenShed(acks_per_stream) => {
+                ServerMode::AckThenShed(acks_per_stream)
+                | ServerMode::AckThenUnknown(acks_per_stream) => {
+                    let shed = match self.mode {
+                        ServerMode::AckThenUnknown(_) => Status::unknown(
+                            "h2 protocol error: error reading a body from connection",
+                        ),
+                        _ => Status::unavailable("stream shed by server"),
+                    };
                     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
                     tokio::spawn(async move {
                         let mut acked = 0;
@@ -1116,9 +1126,7 @@ mod tests {
                             }
                             acked += 1;
                         }
-                        let _ = ack_tx
-                            .send(Err(Status::unavailable("stream shed by server")))
-                            .await;
+                        let _ = ack_tx.send(Err(shed)).await;
                     });
                     Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
                 }
@@ -1425,6 +1433,34 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(stats.acked, 0);
+    }
+
+    /// The backend pod is terminated mid-stream: tonic maps the h2 protocol
+    /// error to UNKNOWN. The stream never reached the application beyond the
+    /// acked prefix, so the sink must reconnect and replay the rest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_mid_stream_reconnects_and_replays() {
+        let endpoint = start_server(ServerMode::AckThenUnknown(2)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(
+            stats,
+            SinkStats {
+                sent: 10,
+                acked: 10
+            }
+        );
     }
 
     #[test]
