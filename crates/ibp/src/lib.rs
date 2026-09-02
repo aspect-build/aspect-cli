@@ -67,11 +67,13 @@ impl Default for Caps {
     }
 }
 
-/// One entry in a CYCLE's `sources` map. `Deleted` serializes to `null`.
+/// One entry in a CYCLE's `sources` map. `Deleted` serializes to `null`;
+/// `Generated` (a changed build output, neither source nor symlink) to `{}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceState {
     Source,
     Symlink,
+    Generated,
     Deleted,
 }
 
@@ -199,6 +201,7 @@ impl IbpServer {
                     SourceState::Deleted => Value::Null,
                     SourceState::Source => json!({"is_source": true}),
                     SourceState::Symlink => json!({"is_symlink": true}),
+                    SourceState::Generated => json!({}),
                 };
                 (path.clone(), info)
             })

@@ -1,0 +1,184 @@
+"""Unit tests for lib/runfiles_delta.axl."""
+
+load("./runfiles_delta.axl", "runfiles_delta")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _change(path, kind = "modified"):
+    return struct(path = path, kind = kind)
+
+def _entry(kind, id = 0, **fields):
+    return struct(id = id, type = struct(_kind = kind, **fields))
+
+def _kind_of(t):
+    return t._kind
+
+def _compute(manifest, prev, source_changes, log, digests):
+    return runfiles_delta.testonly_compute(manifest, prev, source_changes, log, digests, entry_kind = _kind_of)
+
+def _file(path, hash):
+    return struct(path = path, digest = struct(hash = hash) if hash != None else None)
+
+_MANIFEST = """_main/app/main.py /ws/app/main.py
+_main/app/gen.js /ws/execroot/_main/bazel-out/k8-fastbuild/bin/app/gen.js
+_main/empty.txt
+"""
+
+def _manifest() -> dict:
+    return runfiles_delta.testonly_parse_manifest(_MANIFEST)
+
+def _test_parse_manifest(_ctx):
+    _eq("parse", _manifest(), {
+        "_main/app/main.py": "/ws/app/main.py",
+        "_main/app/gen.js": "/ws/execroot/_main/bazel-out/k8-fastbuild/bin/app/gen.js",
+        "_main/empty.txt": "",
+    })
+
+def _test_source_change_joins_to_rloc(_ctx):
+    changes = _compute(_manifest(), _manifest(), [_change("/ws/app/main.py")], [], {})
+    _eq("source join", changes, {"_main/app/main.py": "source"})
+
+def _test_removed_source_not_reported_as_source(_ctx):
+    changes = _compute(_manifest(), _manifest(), [_change("/ws/app/main.py", kind = "removed")], [], {})
+    _eq("removed source skipped", changes, {})
+
+def _test_manifest_deletion(_ctx):
+    prev = _manifest() | {"_main/app/old.py": "/ws/app/old.py"}
+    changes = _compute(_manifest(), prev, [], [], {})
+    _eq("deletion", changes, {"_main/app/old.py": None})
+
+def _test_generated_output_digest_tracking(_ctx):
+    log = [
+        _entry("file", id = 1, path = "bazel-out/k8-fastbuild/bin/app/gen.js", digest = struct(hash = "abc")),
+        _entry("spawn", id = 2, outputs = [struct(output_id = 1)]),
+    ]
+    digests = {}
+    changes = _compute(_manifest(), _manifest(), [], log, digests)
+    _eq("changed output", changes, {"_main/app/gen.js": "generated"})
+    _eq("digest recorded", digests, {"bazel-out/k8-fastbuild/bin/app/gen.js": "abc"})
+
+    # Same digest next cycle: no change reported.
+    changes = _compute(_manifest(), _manifest(), [], log, digests)
+    _eq("unchanged output skipped", changes, {})
+
+    # New digest: reported again.
+    log[0] = _entry("file", id = 1, path = "bazel-out/k8-fastbuild/bin/app/gen.js", digest = struct(hash = "def"))
+    changes = _compute(_manifest(), _manifest(), [], log, digests)
+    _eq("re-changed output", changes, {"_main/app/gen.js": "generated"})
+
+def _test_directory_outputs(_ctx):
+    manifest = {
+        "_main/dist/bundle.js": "/ws/execroot/_main/bazel-out/k8-fastbuild/bin/dist/bundle.js",
+        # A tree artifact mapped at the directory itself must also be seen.
+        "_main/dist": "/ws/execroot/_main/bazel-out/k8-fastbuild/bin/dist",
+    }
+    log = [
+        _entry("directory", id = 1, path = "bazel-out/k8-fastbuild/bin/dist", files = [_file("bundle.js", "a1")]),
+        _entry("spawn", id = 2, outputs = [struct(output_id = 1)]),
+    ]
+    changes = _compute(manifest, manifest, [], log, {})
+    _eq("directory output", changes, {
+        "_main/dist/bundle.js": "generated",
+        "_main/dist": "generated",
+    })
+
+def _test_symlink_action_output(_ctx):
+    manifest = {"_main/link.js": "/ws/execroot/_main/bazel-out/k8-fastbuild/bin/link.js"}
+    log = [_entry("symlink_action", output_path = "bazel-out/k8-fastbuild/bin/link.js")]
+    changes = _compute(manifest, manifest, [], log, {})
+    _eq("symlink action", changes, {"_main/link.js": "symlink"})
+
+def _test_output_not_in_runfiles_ignored(_ctx):
+    log = [
+        _entry("file", id = 1, path = "bazel-out/k8-fastbuild/bin/unrelated.o", digest = struct(hash = "zz")),
+        _entry("spawn", id = 2, outputs = [struct(output_id = 1)]),
+    ]
+    changes = _compute(_manifest(), _manifest(), [], log, {})
+    _eq("non-runfile output ignored", changes, {})
+
+def _test_manifest_addition_and_origin_change(_ctx):
+    prev = _manifest()
+    manifest = _manifest() | {
+        "_main/app/new.py": "/ws/app/new.py",
+        "_main/link": "python3",
+        "_main/app/gen2.js": "/ws/execroot/_main/bazel-out/k8-fastbuild/bin/app/gen2.js",
+    }
+    manifest["_main/app/main.py"] = "/ws/app/other_main.py"
+    changes = _compute(manifest, prev, [], [], {})
+    _eq("additions + origin change", changes, {
+        "_main/app/new.py": "source",
+        "_main/link": "symlink",
+        "_main/app/gen2.js": "generated",
+        "_main/app/main.py": "source",
+    })
+
+def _test_escaped_manifest_records(_ctx):
+    parsed = runfiles_delta.testonly_parse_manifest(
+        " _main/with\\sspace.txt /ws/with\\sspace.txt\n_main/plain.txt /ws/plain.txt\n",
+    )
+    _eq("escaped records", parsed, {
+        "_main/with space.txt": "/ws/with space.txt",
+        "_main/plain.txt": "/ws/plain.txt",
+    })
+
+def _test_aliased_origin_fans_out(_ctx):
+    manifest = {
+        "_main/app/main.py": "/ws/app/main.py",
+        "_main/alias/main.py": "/ws/app/main.py",
+    }
+    changes = _compute(manifest, manifest, [_change("/ws/app/main.py")], [], {})
+    _eq("alias fan-out", changes, {
+        "_main/app/main.py": "source",
+        "_main/alias/main.py": "source",
+    })
+
+def _test_spawn_output_oneof_fallback(_ctx):
+    # Real ExecLogEntry outputs surface the oneof as `o.type` (an int id).
+    log = [
+        _entry("file", id = 1, path = "bazel-out/k8-fastbuild/bin/app/gen.js", digest = struct(hash = "xyz")),
+        _entry("spawn", id = 2, outputs = [struct(type = 1)]),
+    ]
+    changes = _compute(_manifest(), _manifest(), [], log, {})
+    _eq("oneof output id", changes, {"_main/app/gen.js": "generated"})
+
+def _test_full_listing_classifies_everything(_ctx):
+    # full() is exercised through testonly_compute against an empty prev —
+    # the addition path classifies each entry the same way full() does.
+    changes = _compute(_manifest(), {}, [], [], {})
+    _eq("full listing", changes, {
+        "_main/app/main.py": "source",
+        "_main/app/gen.js": "generated",
+        "_main/empty.txt": "generated",
+    })
+
+_UNIT_TESTS = [
+    _test_full_listing_classifies_everything,
+    _test_parse_manifest,
+    _test_source_change_joins_to_rloc,
+    _test_removed_source_not_reported_as_source,
+    _test_manifest_deletion,
+    _test_manifest_addition_and_origin_change,
+    _test_escaped_manifest_records,
+    _test_aliased_origin_fans_out,
+    _test_spawn_output_oneof_fallback,
+    _test_generated_output_digest_tracking,
+    _test_directory_outputs,
+    _test_symlink_action_output,
+    _test_output_not_in_runfiles_ignored,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("runfiles_delta.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+runfiles_delta_tests = task(
+    summary = "Run the runfiles delta AXL unit tests.",
+    kind = "test-runfiles-delta",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
