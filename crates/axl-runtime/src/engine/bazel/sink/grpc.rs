@@ -18,6 +18,7 @@ use build_event_stream::{
     lifecycle,
 };
 
+use futures::FutureExt;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Streaming;
 
@@ -158,10 +159,12 @@ struct StreamState {
 }
 
 impl StreamState {
-    /// Apply a server ack: prune the replay buffer and advance `max_acked`.
-    fn record_ack(&mut self, seq: i64) {
+    /// Apply a server ack and report whether it advances `max_acked`.
+    fn record_ack(&mut self, seq: i64) -> bool {
+        let advanced = seq > self.max_acked;
         self.buffer.prune_until(seq);
         self.max_acked = self.max_acked.max(seq);
+        advanced
     }
 }
 
@@ -598,6 +601,28 @@ async fn drain_acks(
     }
 }
 
+enum ReplayResponseEnd {
+    Closed,
+    Status(tonic::Status),
+}
+
+fn drain_ready_replay_acks<S>(
+    response_stream: &mut S,
+    replayed_acks: &mut Vec<i64>,
+) -> Option<ReplayResponseEnd>
+where
+    S: futures::Stream<Item = Result<PublishBuildToolEventStreamResponse, tonic::Status>> + Unpin,
+{
+    loop {
+        match response_stream.next().now_or_never() {
+            None => return None,
+            Some(Some(Ok(resp))) => replayed_acks.push(resp.sequence_number),
+            Some(Some(Err(status))) => return Some(ReplayResponseEnd::Status(status)),
+            Some(None) => return Some(ReplayResponseEnd::Closed),
+        }
+    }
+}
+
 /// Drive a single bidi stream until it ends (cleanly or with error).
 ///
 /// Owns the request channel for this connection. Pulls events from
@@ -731,7 +756,12 @@ async fn drive_stream(
     // numbers. The server dedups via OrderedBuildEvent.sequence_number.
     // Skip the entry `preload_first_event` already sent — server would
     // dedup anyway, but resending wastes bytes.
+    // Acks are read as they land — leaving them unread through a long replay
+    // fills the connection window and trips `send_stall_timeout` — and applied
+    // once the loop releases its borrow of `state.buffer`.
+    let mut replayed_acks: Vec<i64> = Vec::new();
     let mut replay_failure = None;
+    let mut replay_response_end = None;
     for (seq, req) in state.buffer.iter() {
         if Some(*seq) == preloaded_seq {
             continue;
@@ -747,6 +777,32 @@ async fn drive_stream(
             replay_failure = Some(outcome);
             break;
         }
+        // Only what is already buffered — waiting would slow the replay.
+        if let Some(end) = drain_ready_replay_acks(&mut response_stream, &mut replayed_acks) {
+            replay_response_end = Some(end);
+            break;
+        }
+    }
+    for seq in replayed_acks {
+        state.record_ack(seq);
+    }
+    if let Some(end) = replay_response_end {
+        return match end {
+            ReplayResponseEnd::Closed if state.last_message_sent && state.buffer.is_empty() => {
+                DriveOutcome::Done
+            }
+            ReplayResponseEnd::Closed => DriveOutcome::Transient(ClientError::Status(
+                tonic::Status::unavailable("response stream closed prematurely during replay"),
+            )),
+            ReplayResponseEnd::Status(status) => {
+                let err = ClientError::Status(status);
+                if is_retryable(&err) {
+                    DriveOutcome::Transient(err)
+                } else {
+                    DriveOutcome::Fatal(err)
+                }
+            }
+        };
     }
     if let Some(outcome) = replay_failure {
         drain_acks(&mut response_stream, state).await;
@@ -841,9 +897,20 @@ async fn drive_stream(
             resp = response_stream.next() => {
                 match resp {
                     Some(Ok(r)) => {
-                        state.record_ack(r.sequence_number);
+                        let ack_advanced = state.record_ack(r.sequence_number);
                         ack_deadline = (!state.buffer.is_empty())
                             .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
+                        // Half-close budgets silence, not drain time: a build
+                        // can end with a large unacked backlog, and a flat
+                        // deadline would tear down a backend that is acking
+                        // fine, just not fast enough to finish inside it.
+                        if ack_advanced
+                            && half_close_deadline.is_some()
+                            && !state.buffer.is_empty()
+                        {
+                            half_close_deadline =
+                                Some(tokio::time::Instant::now() + retry.half_close_timeout);
+                        }
                         // Once we've sent last_message AND every event we
                         // sent has been ack'd, we're done — exit without
                         // waiting for the server to close the response
@@ -1153,6 +1220,40 @@ mod tests {
             })),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn replay_ack_drain_preserves_error() {
+        let ack = PublishBuildToolEventStreamResponse {
+            stream_id: None,
+            sequence_number: 1,
+        };
+        let mut responses =
+            futures::stream::iter([Ok(ack), Err(Status::permission_denied("denied"))]);
+        let mut acks = Vec::new();
+
+        let end = drain_ready_replay_acks(&mut responses, &mut acks);
+
+        assert_eq!(acks, [1]);
+        assert!(matches!(
+            end,
+            Some(ReplayResponseEnd::Status(status))
+                if status.code() == tonic::Code::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn record_ack_only_reports_advancing_sequences() {
+        let mut state = StreamState {
+            buffer: RetryBuffer::new(1),
+            next_seq: 1,
+            max_acked: 0,
+            last_message_sent: false,
+        };
+
+        assert!(state.record_ack(1));
+        assert!(!state.record_ack(1));
+        assert!(!state.record_ack(0));
     }
 
     /// Run `drive_stream` against a [`TestServer`] and return its outcome,
