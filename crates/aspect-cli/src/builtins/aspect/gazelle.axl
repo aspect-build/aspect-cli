@@ -619,8 +619,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not check_only:
         files_label = pluralize(len(affected), "file")
         status = _pick_status(data, had_failure = False, terminal = False)
-        phases.update(
-            ctx,
+        ph.update(
             status,
             phases.ProgressStyles(
                 body = "Applying gazelle patch... (%s)" % files_label,
