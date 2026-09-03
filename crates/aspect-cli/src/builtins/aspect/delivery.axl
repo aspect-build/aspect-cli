@@ -14,11 +14,12 @@ Up to three Bazel build phases plus a dispatch loop:
      a remote executor: use the user's `--remote_executor` if set, else an
      in-process dummy so a plain `--remote_cache` suffices — see
      `lib/remote_executor.axl`.
-  3. deliveryd record/query — record (label, digest) pairs, query per-prefix state.
+  3. deliveryd record/query — record (label, digest) pairs, query per-prefix
+     state. A v2 daemon needs no record step; `lib/deliveryd.axl` negotiates.
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints.
-  5. Dispatch — `bazel run` each pending target, then `deliveryd_deliver`
-     (or `deliveryd_delete_artifact` on failure).
+  5. Dispatch — `bazel run` each pending target, then `dd.deliver()`
+     (or `dd.delete()` on failure).
 
 
 Flags
@@ -158,13 +159,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
-load(
-    "./private/lib/deliveryd.axl",
-    deliveryd_delete_artifact = "delete_artifact",
-    deliveryd_deliver = "deliver",
-    deliveryd_query = "query",
-    deliveryd_record = "record",
-)
+load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "apply_output_base_suffix", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -258,12 +253,18 @@ def fmt_elapsed(secs):
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
 
-def _print_header(color, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
+def _print_header(color, dd, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
     print(ansi.style("Delivery:", ansi.BOLD, color))
     mode_str = mode + (" (dry-run)" if dry_run else "")
     print("  {}: {}".format(ansi.style("Mode", ansi.BOLD, color), mode_str))
     if track_state:
-        print("  {}: {}".format(ansi.style("State", ansi.BOLD, color), endpoint))
+        print("  {}: {} (API v{})".format(ansi.style("State", ansi.BOLD, color), endpoint, dd.version))
+
+        # The daemon's own storage stats, off the negotiation probe — a v1
+        # daemon reports none, so the line is dropped rather than shown empty.
+        storage = deliveryd.describe_storage(dd.status)
+        if storage:
+            print("  {}: {}".format(ansi.style("Storage", ansi.BOLD, color), storage))
     else:
         print("  {}: (untracked — --track-state=false)".format(ansi.style("State", ansi.BOLD, color)))
     print("  {}: {}".format(ansi.style("Host", ansi.BOLD, color), ci_host))
@@ -1146,10 +1147,10 @@ def _delivery_impl(ctx):
     preview_only = dry_run and not track_state
 
     # deliveryd state backend; Workflows runners expose its Unix socket here.
-    endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
+    endpoint = ctx.std.env.var(deliveryd.ENDPOINT_ENV)
     if not endpoint and track_state:
         _emit_final(ph, exit_code = 1)
-        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
+        fail("{} is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)".format(deliveryd.ENDPOINT_ENV))
 
     # commit-sha / build-url auto-detect from CI env. commit_sha is only
     # consumed under track_state, so fail only when both apply.
@@ -1180,6 +1181,23 @@ def _delivery_impl(ctx):
     # `<prefix>:<hash>` (the change-detection identity); the raw output_sha is
     # identical across salt namespaces, hiding the per-salt separation.
     data["delivery"]["prefix"] = prefix
+
+    # The state backend. Constructing it negotiates the deliveryd API version
+    # and probes reachability, so a dead daemon fails here rather than midway
+    # through the first record.
+    dd = None
+    if track_state:
+        dd = deliveryd.new(
+            ctx,
+            host = ci_host,
+            prefix = prefix,
+            commit = commit_sha,
+            signature = build_url,
+            endpoint = endpoint,
+        )
+        if not dd.status.ok:
+            error(ctx.std, "Delivery state backend is unavailable at {}: {}".format(dd.endpoint, dd.status.error))
+            return _emit_final(ph, exit_code = 1)
 
     # iter handles are created per attempt inside the retry loop. The
     # CLI-streamed `--bes-backend` sinks stream phase-1 events and are waited
@@ -1289,7 +1307,7 @@ def _delivery_impl(ctx):
         _emit_final(ph, exit_code = 1)
         fail(msg)
 
-    _print_header(color, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
+    _print_header(color, dd, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
 
     # `rc=` opts into the runinfo aspect so the deliverables spawned in phase 3
     # replay their `args` attribute + env the way `bazel run` does. The aspect
@@ -1353,7 +1371,7 @@ def _delivery_impl(ctx):
         )
         for label in targets:
             if label in output_shas:
-                deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
+                dd.record(label, output_shas[label])
 
     # Change detection: query deliveryd for prior-delivery state, filtered
     # below to changed targets. Skipped when --track-state=false (no endpoint)
@@ -1370,9 +1388,9 @@ def _delivery_impl(ctx):
             data = data,
             phase = phases.Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
         )
-        delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
+        delivered = dd.query(output_shas)
     else:
-        delivery_state = {}
+        delivered = {}
 
     # Phase 3: fused download + delivery. Bazel lands a target's outputs +
     # runfiles on disk before its `target_completed` fires (current-Bazel
@@ -1386,7 +1404,7 @@ def _delivery_impl(ctx):
             for label in targets
             if output_shas.get(label) and (
                 label in forced_targets or
-                not (delivery_state.get(label) and delivery_state.get(label).get("delivered"))
+                label not in delivered
             )
         ]
 
@@ -1422,7 +1440,6 @@ def _delivery_impl(ctx):
     for label in targets:
         # --mode=always behaves as if every target was --force-target'd.
         is_forced = label in forced_targets or mode == "always"
-        target_state = delivery_state.get(label)
         output_sha = output_shas.get(label)
 
         if not output_sha and phase_1_2_runs:
@@ -1453,9 +1470,9 @@ def _delivery_impl(ctx):
                 rows.append((label, "WARN", "warn", msg, "-", "-"))
                 delivery_add_result(data, label, "warn", message = msg, is_forced = is_forced)
             _fire_target_hook(data, delivery_trait, run_tracker, label)
-        elif not is_forced and target_state and target_state.get("delivered"):
+        elif not is_forced and label in delivered:
             skipped_count += 1
-            delivered_by = target_state.get("delivered_by") or "-"
+            delivered_by = delivered[label] or "-"
             rows.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
             delivery_add_result(
                 data,
@@ -1672,13 +1689,13 @@ def _delivery_impl(ctx):
                 forced_marker = " (FORCED)" if is_forced else ""
                 if exit_code == 0:
                     if track_state:
-                        deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
+                        dd.deliver(label, output_sha)
                     success_count += 1
                     rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
                     delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
                 else:
                     if track_state:
-                        deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
+                        dd.delete(output_sha)
                     failed_count += 1
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
                     delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)

@@ -60,6 +60,10 @@ const DEFAULT_HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// the read window to expire.
 const DEFAULT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The `QUERY` method (RFC 10008). Neither `http::Method` nor `reqwest::Method`
+/// carries a constant for it yet, so it is spelled out here.
+const QUERY_METHOD: &str = "QUERY";
+
 impl Http {
     pub fn new() -> Self {
         Self {
@@ -303,6 +307,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] url: values::StringValue,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
+        #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
     ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
@@ -311,6 +316,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             .into_iter()
             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
             .collect();
+
+        let body_kind = build_body_kind(data)?;
 
         match unix_socket.into_option() {
             Some(socket) => {
@@ -324,12 +331,14 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     };
                     let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
+                    let body_bytes = body_kind_to_bytes(body_kind).await?;
+
                     let mut req = hyper::Request::builder().method("DELETE").uri(uri);
                     for (key, value) in &headers_vec {
                         req = req.header(key.as_str(), value.as_str());
                     }
                     let req = req
-                        .body(Empty::<Bytes>::new())
+                        .body(Full::new(Bytes::from(body_bytes)))
                         .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
 
                     let res = client
@@ -370,6 +379,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     for (key, value) in &headers_vec {
                         req = req.header(key.as_str(), value.as_str());
                     }
+                    req = apply_body_kind(req, body_kind).await?;
                     let res = req.send().await?;
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
@@ -639,6 +649,101 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             }
         }
     }
+
+    /// `QUERY` (RFC 10008): a safe, idempotent read whose parameters travel in
+    /// the request body rather than the URI — for reads whose input is too
+    /// large or too structured for a query string.
+    fn query<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named)] url: values::StringValue,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        headers: UnpackDictEntries<values::StringValue, values::StringValue>,
+        #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let url_str = url.as_str().to_string();
+        let headers_vec: Vec<(String, String)> = headers
+            .entries
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
+
+        // reqwest has no `Client::query` builder (its `RequestBuilder::query`
+        // sets URI parameters), so the method is constructed explicitly.
+        let method = reqwest::Method::from_str(QUERY_METHOD)
+            .map_err(|e| anyhow::anyhow!("invalid http method: {}", e))?;
+
+        let body_kind = build_body_kind(data)?;
+
+        match unix_socket.into_option() {
+            Some(socket) => {
+                let fut = async move {
+                    let client = HyperClient::unix();
+                    let parsed = url::Url::parse(&url_str)
+                        .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
+
+                    let body_bytes = body_kind_to_bytes(body_kind).await?;
+
+                    let mut req = hyper::Request::builder().method(QUERY_METHOD).uri(uri);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let req = req
+                        .body(Full::new(Bytes::from(body_bytes)))
+                        .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
+
+                    let res = client
+                        .request(req)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+
+                    let status = res.status().as_u16();
+                    let resp_headers: Vec<(String, String)> = res
+                        .headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect();
+                    let body: Bytes = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+                        .to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+
+                    Ok(HttpResponse {
+                        status,
+                        headers: resp_headers,
+                        body,
+                    })
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+            None => {
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
+                let fut = async move {
+                    let mut req = client.request(method, &url_str);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    req = apply_body_kind(req, body_kind).await?;
+                    let res = req.send().await?;
+                    let response = HttpResponse::from_response(res).await?;
+                    Ok(response)
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+        }
+    }
 }
 
 /// Converts a Starlark `data` parameter value into a `BodyKind` synchronously.
@@ -808,5 +913,109 @@ pub(crate) fn http_response_methods(registry: &mut MethodsBuilder) {
 impl FutureAlloc for HttpResponse {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: Heap<'v>) -> values::Value<'v> {
         self.alloc_value(heap)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    fn find_header_end(bytes: &[u8]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn read_request(mut stream: std::os::unix::net::UnixStream) -> String {
+        let mut request = Vec::new();
+        let mut content_len = None;
+
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).expect("read request");
+            assert!(read > 0, "client closed before completing the request");
+            request.extend_from_slice(&chunk[..read]);
+
+            if let Some(header_end) = find_header_end(&request) {
+                let body_start = header_end + 4;
+                let expected = *content_len.get_or_insert_with(|| {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content-length"))
+                        })
+                        .unwrap_or(0)
+                });
+                if request.len() >= body_start + expected {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .expect("write response");
+                    return String::from_utf8(request).expect("HTTP request is UTF-8");
+                }
+            }
+        }
+    }
+
+    fn capture_unix_request(call: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("http.sock");
+        let listener = UnixListener::bind(&socket).expect("bind unix HTTP socket");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            read_request(stream)
+        });
+
+        let code = format!(
+            r#"
+def _impl(ctx):
+    response = ctx.http().{call}(
+        url = "http://localhost/delivery",
+        headers = {{"Content-Type": "application/json"}},
+        data = "{{\"host\":\"gh\",\"digest\":\"abc\"}}",
+        unix_socket = {socket:?},
+    ).block()
+    if response.status != 200 or response.body != "ok":
+        fail("unexpected response: {{}} {{}}".format(response.status, response.body))
+    return 0
+
+t = task(implementation = _impl)
+"#,
+            socket = socket.to_string_lossy(),
+        );
+        crate::test::eval(&code)
+            .run_task(0)
+            .expect("AXL HTTP request succeeds");
+        server.join().expect("server thread")
+    }
+
+    #[test]
+    fn query_sends_body_over_unix_socket() {
+        let request = capture_unix_request("query");
+        assert!(
+            request.starts_with("QUERY /delivery HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with("{\"host\":\"gh\",\"digest\":\"abc\"}"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn delete_sends_body_over_unix_socket() {
+        let request = capture_unix_request("delete");
+        assert!(
+            request.starts_with("DELETE /delivery HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with("{\"host\":\"gh\",\"digest\":\"abc\"}"),
+            "{request}"
+        );
     }
 }

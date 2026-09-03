@@ -1,6 +1,7 @@
 """Text-formatting utilities shared across the aspect-cli builtins.
 
 Currently:
+  - `format_bytes_iec(n)` — byte counts in IEC units, truncated to tenths.
   - `format_int_comma(n)` — thousands separators on integers.
   - `pluralize(count, singular, plural=None)` — `"N noun"` / `"N nouns"`
     with thousands-separated count.
@@ -12,6 +13,27 @@ All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
 domain (bazel results, lint results, etc.).
 """
+
+_IEC_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+
+def format_bytes_iec(n):
+    """Format bytes in IEC units (`1536` → `1.5 KiB`).
+
+    Values below 1 KiB stay as whole bytes. Larger values are truncated to one
+    decimal place so status output remains stable without float rounding.
+    """
+    if n < 1024:
+        return "{} B".format(n)
+
+    # Scaled by 10 throughout so the tenth survives integer division.
+    scaled = n * 10
+    unit = 0
+    for _ in range(len(_IEC_UNITS) - 1):
+        if scaled < 10240:
+            break
+        scaled = scaled // 1024
+        unit += 1
+    return "{}.{} {}".format(scaled // 10, scaled % 10, _IEC_UNITS[unit])
 
 def format_int_comma(n):
     """Format an integer with thousands separators: 12345 → "12,345"."""
