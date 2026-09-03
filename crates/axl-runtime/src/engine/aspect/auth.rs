@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -1147,6 +1147,20 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
     None
 }
 
+fn parse_callback_response(path: &str) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(error) = extract_query_param(path, "error") {
+        let description = extract_query_param(path, "error_description").unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "authentication failed: {} {}",
+            error,
+            description
+        ));
+    }
+    let code = extract_query_param(path, "code")
+        .ok_or_else(|| anyhow::anyhow!("OAuth callback has no `code` parameter"))?;
+    Ok((code, extract_query_param(path, "state")))
+}
+
 pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     Handle::current().block_on(fut)
 }
@@ -1312,12 +1326,7 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         .split_whitespace()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("malformed HTTP request line"))?;
-    let code = extract_query_param(path, "code").ok_or_else(|| {
-        let error = extract_query_param(path, "error").unwrap_or_else(|| "unknown".to_string());
-        let desc = extract_query_param(path, "error_description").unwrap_or_default();
-        anyhow::anyhow!("authentication failed: {} {}", error, desc)
-    })?;
-    let state = extract_query_param(path, "state");
+    let callback = parse_callback_response(path)?;
     let html = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1379,7 +1388,7 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         .write_all(response.as_bytes())
         .await
         .map_err(|e| anyhow::anyhow!("failed to write OAuth response: {}", e))?;
-    Ok((code, state))
+    Ok(callback)
 }
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
@@ -1578,6 +1587,97 @@ fn build_authorize_url(
         url.push_str(&format!("&state={}", urlencode(state)));
     }
     url
+}
+
+fn is_remote_session(get: impl Fn(&str) -> Option<String>) -> bool {
+    let set = |key: &str| get(key).is_some_and(|value| !value.is_empty());
+    if !(set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY")) {
+        return false;
+    }
+    let forwarded_display = get("DISPLAY").is_some_and(|display| {
+        let Some((host, display)) = display.rsplit_once(':') else {
+            return false;
+        };
+        let Some(number) = display
+            .split('.')
+            .next()
+            .and_then(|number| number.parse::<u16>().ok())
+        else {
+            return false;
+        };
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]") && number >= 10
+    });
+    !forwarded_display
+}
+
+fn browser_launchers() -> &'static [&'static [&'static str]] {
+    if cfg!(target_os = "macos") {
+        &[&["open"]]
+    } else if cfg!(target_os = "windows") {
+        // Avoid `cmd /c start`; it reparses `&` in OAuth URLs.
+        &[&["rundll32.exe", "url.dll,FileProtocolHandler"]]
+    } else {
+        &[
+            // WSL may provide `xdg-open` without a visible desktop.
+            &["wslview"],
+            &["xdg-open"],
+            &["gio", "open"],
+            &["gnome-open"],
+            &["kde-open"],
+            &["x-www-browser"],
+            // Debian may install `open` as an `xdg-open` alias.
+            &["open"],
+        ]
+    }
+}
+
+const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn launcher_started(mut child: std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = std::thread::Builder::new()
+                    .name("browser-launcher-reaper".to_string())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+                return true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn spawn_launcher(argv: &[&str], url: &str) -> bool {
+    let Some((program, rest)) = argv.split_first() else {
+        return false;
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(rest)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    launcher_started(child, LAUNCHER_PROBE_TIMEOUT)
+}
+
+fn launch_first(candidates: &[&[&str]], url: &str) -> bool {
+    candidates.iter().any(|argv| spawn_launcher(argv, url))
+}
+
+fn open_url_in_browser(url: &str) -> bool {
+    if is_remote_session(|key| std::env::var(key).ok()) {
+        return false;
+    }
+    launch_first(browser_launchers(), url)
 }
 
 fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
@@ -1948,6 +2048,92 @@ struct AuthSessionInner {
     kind: SessionKind,
 }
 
+impl AuthSessionInner {
+    /// With `require_state = false`, an omitted state is allowed but a supplied one
+    /// is still validated.
+    async fn complete(
+        self,
+        code: String,
+        state: Option<String>,
+        require_state: bool,
+    ) -> anyhow::Result<CredentialsEntry> {
+        let token_url = match &self.kind {
+            SessionKind::Cloud => format!("{}/oauth/token", self.env.domain),
+            SessionKind::Endpoint { expected_state } => {
+                if !callback_state_matches(expected_state, state.as_deref(), require_state) {
+                    return Err(anyhow::anyhow!(
+                        "authentication failed: callback state did not match"
+                    ));
+                }
+                resolve_oidc_endpoints(&self.env.domain).await.token
+            }
+        };
+        let token_resp = exchange_code(
+            &token_url,
+            &self.env.client_id,
+            &self.redirect_uri,
+            &code,
+            &self.code_verifier,
+        )
+        .await?;
+        let refresh_token = token_resp.refresh_token.clone();
+        // Self-hosted edges validate the id_token; the cloud flow the
+        // access_token. Record which so refresh keeps minting the same kind.
+        let prefer_id_token = matches!(self.kind, SessionKind::Endpoint { .. });
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(prefer_id_token)?,
+            refresh_token,
+            Some(self.env.domain.clone()),
+            Some(self.env.client_id.clone()),
+            prefer_id_token,
+        )
+    }
+}
+
+fn callback_state_matches(expected: &str, actual: Option<&str>, require_state: bool) -> bool {
+    actual.map_or(!require_state, |actual| actual == expected)
+}
+
+fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>)> {
+    let pasted = pasted.trim();
+    if pasted.is_empty() {
+        return Err(anyhow::anyhow!("no authorization code entered"));
+    }
+    if pasted.starts_with("http://") || pasted.starts_with("https://") {
+        parse_callback_response(pasted)
+    } else {
+        Ok((pasted.to_string(), None))
+    }
+}
+
+fn finish_auth_session(
+    session: &AuthSession,
+    pasted: Option<&str>,
+) -> anyhow::Result<AuthCredentials> {
+    let mut guard = session
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
+    let mut inner = guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
+    drop(guard);
+    let entry = if let Some(pasted) = pasted {
+        let (code, state) = parse_pasted_callback(pasted)?;
+        block_on(inner.complete(code, state, false))?
+    } else {
+        let listener = inner
+            .listener
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
+        block_on(async move {
+            let (code, state) = accept_callback(listener).await?;
+            inner.complete(code, state, true).await
+        })?
+    };
+    Ok(AuthCredentials::from_entry(&entry))
+}
+
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<AuthSession>")]
 pub struct AuthSession {
@@ -1981,57 +2167,22 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthSession, url)
     }
 
-    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<AuthCredentials> {
+    fn open_browser<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let session = this
             .downcast_ref_err::<AuthSession>()
             .into_anyhow_result()?;
-        let mut guard = session
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
-        let inner = guard.take().ok_or_else(|| {
-            anyhow::anyhow!("auth session already consumed (wait() called twice)")
-        })?;
-        let entry = block_on(async move {
-            let listener = inner
-                .listener
-                .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
-            let (code, state) = accept_callback(listener).await?;
-            // The Aspect-cloud flow posts to the conventional token endpoint; the
-            // self-hosted flow resolves it via OIDC discovery and first validates
-            // the callback `state` (CSRF guard).
-            let token_url = match &inner.kind {
-                SessionKind::Cloud => format!("{}/oauth/token", inner.env.domain),
-                SessionKind::Endpoint { expected_state } => {
-                    if state.as_deref() != Some(expected_state.as_str()) {
-                        return Err(anyhow::anyhow!(
-                            "authentication failed: callback state did not match"
-                        ));
-                    }
-                    resolve_oidc_endpoints(&inner.env.domain).await.token
-                }
-            };
-            let token_resp = exchange_code(
-                &token_url,
-                &inner.env.client_id,
-                &inner.redirect_uri,
-                &code,
-                &inner.code_verifier,
-            )
-            .await?;
-            let refresh_token = token_resp.refresh_token.clone();
-            // Self-hosted edges validate the id_token; the cloud flow the
-            // access_token. Record which so refresh keeps minting the same kind.
-            let prefer_id_token = matches!(inner.kind, SessionKind::Endpoint { .. });
-            CredentialsEntry::from_bearer(
-                token_resp.bearer(prefer_id_token)?,
-                refresh_token,
-                Some(inner.env.domain.clone()),
-                Some(inner.env.client_id.clone()),
-                prefer_id_token,
-            )
-        })?;
-        Ok(AuthCredentials::from_entry(&entry))
+        Ok(open_url_in_browser(&session.url))
+    }
+
+    /// Complete from pasted input when supplied; otherwise wait on the listener.
+    fn finish<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] pasted: Option<&str>,
+    ) -> anyhow::Result<AuthCredentials> {
+        let session = this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?;
+        finish_auth_session(session, pasted)
     }
 }
 
@@ -4147,5 +4298,220 @@ mod tests {
             extract_query_param("/cb?code=first&code=second", "code"),
             Some("first".to_string())
         );
+    }
+
+    #[test]
+    fn parse_pasted_callback_reads_a_url_or_an_opaque_code() {
+        for (input, code, state) in [
+            (
+                "  http://localhost:19556/callback?code=abc123&state=nonce.19556  ",
+                "abc123",
+                Some("nonce.19556"),
+            ),
+            ("abc123", "abc123", None),
+            ("YWJjMTIz==", "YWJjMTIz==", None),
+            ("opaque-code=value", "opaque-code=value", None),
+            ("error=opaque", "error=opaque", None),
+        ] {
+            assert_eq!(
+                parse_pasted_callback(input).unwrap(),
+                (code.to_string(), state.map(str::to_string))
+            );
+        }
+        assert_eq!(
+            parse_pasted_callback("https://x/cb?code=a%2Fb").unwrap().0,
+            "a/b"
+        );
+
+        // An authorize error the browser was redirected with is reported as one,
+        // rather than as a missing `code`.
+        let err = parse_pasted_callback(
+            "http://localhost:19556/callback?error=access_denied&error_description=nope",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("access_denied") && err.contains("nope"),
+            "{err}"
+        );
+
+        assert!(
+            parse_pasted_callback("http://localhost:19556/callback")
+                .unwrap_err()
+                .to_string()
+                .contains("no `code` parameter")
+        );
+        assert!(
+            parse_pasted_callback("   ")
+                .unwrap_err()
+                .to_string()
+                .contains("no authorization code")
+        );
+    }
+
+    #[test]
+    fn callback_state_policy_requires_listener_state_and_checks_pasted_state() {
+        assert!(callback_state_matches("expected", Some("expected"), true));
+        assert!(!callback_state_matches("expected", Some("wrong"), true));
+        assert!(!callback_state_matches("expected", None, true));
+        assert!(callback_state_matches("expected", None, false));
+        assert!(!callback_state_matches("expected", Some("wrong"), false));
+    }
+
+    #[test]
+    fn finish_auth_session_exchanges_a_pasted_code_once() {
+        use std::io::{Read, Write};
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let token = jwt_with_exp(None);
+        let response_token = token.clone();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = stream.read(&mut chunk).unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                if read == 0 || String::from_utf8_lossy(&request).contains("code_verifier=verifier")
+                {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /oauth/token HTTP/1.1"));
+            assert!(request.contains("code=auth-code"));
+            assert!(request.contains("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback"));
+            let body =
+                format!(r#"{{"access_token":"{response_token}","refresh_token":"refresh"}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let session = AuthSession {
+            url: "https://auth.example/authorize".to_string(),
+            inner: Mutex::new(Some(AuthSessionInner {
+                listener: None,
+                code_verifier: "verifier".to_string(),
+                redirect_uri: "http://localhost/callback".to_string(),
+                env: AuthEnv {
+                    domain: format!("http://{address}"),
+                    client_id: "client".to_string(),
+                    scopes: Vec::new(),
+                    authorize_params: BTreeMap::new(),
+                },
+                kind: SessionKind::Cloud,
+            })),
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+
+        let credentials = finish_auth_session(&session, Some("auth-code")).unwrap();
+        assert_eq!(credentials.access_token, token);
+        responder.join().unwrap();
+        assert!(
+            finish_auth_session(&session, Some("auth-code"))
+                .unwrap_err()
+                .to_string()
+                .contains("already consumed")
+        );
+    }
+
+    #[test]
+    fn is_remote_session_spots_ssh_without_a_forwarded_display() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+
+        assert!(is_remote_session(env(&[(
+            "SSH_CONNECTION",
+            "10.0.0.1 22 10.0.0.2 22"
+        )])));
+        assert!(is_remote_session(env(&[("SSH_TTY", "/dev/pts/0")])));
+
+        assert!(!is_remote_session(env(&[
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+            ("DISPLAY", "localhost:10.0"),
+        ])));
+        assert!(!is_remote_session(env(&[
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+            ("DISPLAY", "127.0.0.1:11"),
+        ])));
+
+        // A display on the remote host is not SSH-forwarded, even with a hostname.
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", ":0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "unix:0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "localhost:0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "workstation:10.0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_TTY", "/dev/pts/0"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+        ])));
+
+        assert!(!is_remote_session(env(&[])));
+        assert!(!is_remote_session(env(&[("SSH_CONNECTION", "")])));
+        assert!(!is_remote_session(env(&[("DISPLAY", ":0")])));
+    }
+
+    #[test]
+    fn browser_launchers_has_a_platform_default() {
+        assert!(!browser_launchers().is_empty());
+    }
+
+    #[test]
+    fn launcher_probe_does_not_wait_for_a_long_running_child() {
+        if std::env::var("ASPECT_LAUNCHER_TEST_CHILD").as_deref() == Ok("sleep") {
+            std::thread::sleep(Duration::from_millis(500));
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("launcher_probe_does_not_wait_for_a_long_running_child")
+            .env("ASPECT_LAUNCHER_TEST_CHILD", "sleep")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        assert!(launcher_started(child, Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_failures_fall_through() {
+        assert!(launch_first(
+            &[&["false"], &["true"]],
+            "https://example.com"
+        ));
+        assert!(!launch_first(
+            &[&["false"], &["aspect-no-such-browser-launcher"]],
+            "https://example.com"
+        ));
     }
 }
