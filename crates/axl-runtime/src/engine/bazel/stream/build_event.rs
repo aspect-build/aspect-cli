@@ -39,20 +39,10 @@ const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 /// than the microseconds between spawning the watchdog and the open it guards.
 const WRITER_RELEASE_OFFERS: u32 = 200;
 
-/// Adapts [`galvanize::Pipe`]'s three-valued read contract to the two-valued
-/// one `read_exact` accepts.
+/// Retries temporary FIFO EOFs below the length-delimited framing.
 ///
-/// `Pipe` distinguishes "no writer attached this instant, but another attempt
-/// may still open the FIFO" (`Ok(0)`) from end-of-stream (`BrokenPipe`).
-/// `read_exact` collapses the two: it reports `Ok(0)` as `UnexpectedEof`,
-/// which the read loop cannot tell from a truncated record, and which it
-/// cannot resume from either — `read_exact` leaves no way to know how much of
-/// the record it consumed first. Waiting here, below the framing, is what
-/// keeps the record boundaries intact across a writer reconnect.
-///
-/// `writer_pid` bounds the wait. Only the per-invocation client can answer
-/// whether another attempt is coming; the daemon holds the path open across
-/// invocations and so always looks like a writer on its way.
+/// A writer may reconnect part-way through a record. The invocation PID bounds
+/// the wait because the Bazel server can outlive the command.
 struct PendingWriterReader {
     inner: galvanize::Pipe,
     writer_pid: u32,
@@ -60,8 +50,7 @@ struct PendingWriterReader {
 
 impl Read for PendingWriterReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // A zero-length read is legitimately `Ok(0)`; waiting on it would never
-        // end.
+        // `Read` requires an empty buffer to return immediately.
         if buf.is_empty() {
             return Ok(0);
         }
@@ -639,22 +628,13 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Writer reconnect: Bazel closes the BEP file at the end of an attempt and
-    // reopens it for the next, so the FIFO reaches end-of-stream with the
-    // daemon still holding the path open.
+    // Writer reconnect
     //
-    // Both tests here pass this process as `server_pid`. The reader thread
-    // holds the FIFO's read end, so `is_path_open_for_pid` is true for the life
-    // of the test and every end-of-stream arrives as `Ok(0)` rather than
-    // `BrokenPipe` — the production race, a reopen landing between the read
-    // returning 0 and the procfs scan, made deterministic. `writer_pid` is a
-    // live process holding neither end, standing in for an invocation with
-    // another attempt still to come.
+    // Force reconnect gaps to surface as `Ok(0)`: this process owns the FIFO's
+    // read end, while a separate live PID represents the Bazel invocation.
     // -------------------------------------------------------------------------
 
-    /// A gap between attempts must not be read as the end of the stream.
-    /// Before `PendingWriterReader`, the `Ok(0)` reached `read_varint` and
-    /// failed the invocation with "failed to fill whole buffer".
+    /// Keeps the stream open when a writer reconnects between records.
     #[test]
     fn a_writer_reconnecting_between_records_keeps_the_stream_open() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
@@ -672,16 +652,14 @@ mod tests {
                 let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
                 f.write_all(&encode_event(&make_event(false))).unwrap();
                 drop(f);
-                // Many poll intervals, so the reader cannot pass by racing
-                // through the gap before it opens.
+                // Keep the writer disconnected for several polling intervals.
                 std::thread::sleep(Duration::from_millis(200));
                 let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
                 f.write_all(&encode_event(&make_event(true))).unwrap();
             });
 
-            // The writer is deliberately not joined: opening a FIFO's write
-            // end blocks until a reader has it open, so a reader that died
-            // would park its reopen and turn a clear failure into a timeout.
+            // Do not join: if the reader exits, the reconnect blocks in `open`,
+            // and the outer timeout must report the failure.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
             let _ = holder.kill();
@@ -694,10 +672,7 @@ mod tests {
         );
     }
 
-    /// The reconnect can land mid-record, which is why the wait belongs under
-    /// `read_exact` rather than in the read loop: resuming the loop after a
-    /// partially consumed record would desync the varint framing for the rest
-    /// of the build.
+    /// Preserves framing when a writer reconnects part-way through a record.
     #[test]
     fn a_record_split_across_a_writer_reconnect_is_not_desynced() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
@@ -713,8 +688,7 @@ mod tests {
             let path_w = path.clone();
             let _writer = std::thread::spawn(move || {
                 let record = encode_event(&make_event(true));
-                // Hold back the final byte so the reconnect falls inside the
-                // record, not on its boundary.
+                // Reconnect before the final byte so the gap occurs inside the record.
                 let split = record.len() - 1;
                 let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
                 f.write_all(&record[..split]).unwrap();
@@ -724,9 +698,8 @@ mod tests {
                 f.write_all(&record[split..]).unwrap();
             });
 
-            // The writer is deliberately not joined: opening a FIFO's write
-            // end blocks until a reader has it open, so a reader that died
-            // would park its reopen and turn a clear failure into a timeout.
+            // Do not join: if the reader exits, the reconnect blocks in `open`,
+            // and the outer timeout must report the failure.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
             let _ = holder.kill();
