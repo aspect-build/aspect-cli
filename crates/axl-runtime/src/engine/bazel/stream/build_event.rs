@@ -39,6 +39,35 @@ const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 /// than the microseconds between spawning the watchdog and the open it guards.
 const WRITER_RELEASE_OFFERS: u32 = 200;
 
+/// Retries temporary FIFO EOFs below the length-delimited framing.
+///
+/// A writer may reconnect part-way through a record. The invocation PID bounds
+/// the wait because the Bazel server can outlive the command.
+struct PendingWriterReader {
+    inner: galvanize::Pipe,
+    writer_pid: u32,
+}
+
+impl Read for PendingWriterReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // `Read` requires an empty buffer to return immediately.
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            match self.inner.read(buf)? {
+                0 => {
+                    if !galvanize::is_pid_alive(self.writer_pid) {
+                        return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
+                    }
+                    thread::sleep(WRITER_POLL_INTERVAL);
+                }
+                n => return Ok(n),
+            }
+        }
+    }
+}
+
 /// Release a reader parked in `Pipe::open` on `path` once `writer_pid` — the
 /// invocation expected to write there — is gone.
 ///
@@ -168,8 +197,13 @@ impl BuildEventStream {
             galvanize::Pipe::mkfifo(&path)?;
 
             let opened = spawn_open_watchdog(path.clone(), writer_pid);
-            let mut reader =
-                galvanize::Pipe::open(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
+            let mut reader = PendingWriterReader {
+                inner: galvanize::Pipe::open(
+                    path,
+                    galvanize::RetryPolicy::IfOpenForPid(server_pid),
+                )?,
+                writer_pid,
+            };
             opened.store(true, Ordering::Relaxed);
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
@@ -185,7 +219,7 @@ impl BuildEventStream {
             let read_event = |buf: &mut Vec<u8>,
                               reencode_buf: &mut Vec<u8>,
                               raw_out: &mut MultiWriter<BufWriter<File>>,
-                              reader: &mut galvanize::Pipe|
+                              reader: &mut PendingWriterReader|
              -> Result<BuildEvent, BuildEventStreamError> {
                 let (size, vbuf) = read_varint(reader)?;
                 if size > buf.len() {
@@ -591,6 +625,91 @@ mod tests {
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         assert_eq!(events.len(), 1);
         assert!(!events[0].last_message);
+    }
+
+    // -------------------------------------------------------------------------
+    // Writer reconnect
+    //
+    // Force reconnect gaps to surface as `Ok(0)`: this process owns the FIFO's
+    // read end, while a separate live PID represents the Bazel invocation.
+    // -------------------------------------------------------------------------
+
+    /// Keeps the stream open when a writer reconnects between records.
+    #[test]
+    fn a_writer_reconnecting_between_records_keeps_the_stream_open() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            let mut holder = spawn_pid_holder();
+
+            let mut stream =
+                BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
+                    .unwrap();
+            let sub = stream.subscribe();
+            wait_for_fifo(&path);
+
+            let path_w = path.clone();
+            let _writer = std::thread::spawn(move || {
+                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                f.write_all(&encode_event(&make_event(false))).unwrap();
+                drop(f);
+                // Keep the writer disconnected for several polling intervals.
+                std::thread::sleep(Duration::from_millis(200));
+                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                f.write_all(&encode_event(&make_event(true))).unwrap();
+            });
+
+            // Do not join: if the reader exits, the reconnect blocks in `open`,
+            // and the outer timeout must report the failure.
+            let joined = stream.join().map_err(|e| e.to_string());
+            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+            let _ = holder.kill();
+            (joined, events.len())
+        });
+        assert_eq!(
+            outcome,
+            Some((Ok(()), 2)),
+            "the gap between attempts must not end the stream"
+        );
+    }
+
+    /// Preserves framing when a writer reconnects part-way through a record.
+    #[test]
+    fn a_record_split_across_a_writer_reconnect_is_not_desynced() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            let mut holder = spawn_pid_holder();
+
+            let mut stream =
+                BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
+                    .unwrap();
+            let sub = stream.subscribe();
+            wait_for_fifo(&path);
+
+            let path_w = path.clone();
+            let _writer = std::thread::spawn(move || {
+                let record = encode_event(&make_event(true));
+                // Reconnect before the final byte so the gap occurs inside the record.
+                let split = record.len() - 1;
+                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                f.write_all(&record[..split]).unwrap();
+                drop(f);
+                std::thread::sleep(Duration::from_millis(200));
+                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                f.write_all(&record[split..]).unwrap();
+            });
+
+            // Do not join: if the reader exits, the reconnect blocks in `open`,
+            // and the outer timeout must report the failure.
+            let joined = stream.join().map_err(|e| e.to_string());
+            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+            let _ = holder.kill();
+            (joined, events.len(), events.first().map(|e| e.last_message))
+        });
+        assert_eq!(
+            outcome,
+            Some((Ok(()), 1, Some(true))),
+            "a record spanning a reconnect must be delivered whole"
+        );
     }
 
     // -------------------------------------------------------------------------
