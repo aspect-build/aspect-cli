@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -1580,27 +1580,14 @@ fn build_authorize_url(
     url
 }
 
-/// Whether `DISPLAY` names a display reached over the network rather than the
-/// machine's own console. SSH's X11 forwarding sets a display with a host in it
-/// (`localhost:10.0` — display numbers start at 10); the local console is a bare
-/// `:0`. The distinction is the whole point on a remote workstation whose image
-/// sets `DISPLAY=:0` for a virtual screen nobody is watching.
+/// Whether `DISPLAY` names an X11 display through a host.
 fn is_forwarded_display(display: Option<&str>) -> bool {
     display
         .and_then(|display| display.split_once(':'))
         .is_some_and(|(host, _)| !host.is_empty())
 }
 
-/// Whether this session has no browser of its own — an SSH login (including the
-/// tunnelled kind, e.g. `gcloud workstations ssh`) with no forwarded display.
-/// Launching a browser there either fails noisily or, worse, succeeds on the remote
-/// machine's own screen where nobody is looking; either way the loopback the
-/// browser is redirected to belongs to the wrong host.
-///
-/// Forwarded X11 is the one exception: a browser launched over it draws on the
-/// user's own screen *and* still reaches our loopback, so that session counts as
-/// local. Wayland has no equivalent forwarding, so a `WAYLAND_DISPLAY` under SSH
-/// is the remote compositor and earns no exception.
+/// Whether this is an SSH session without X11 forwarding.
 fn is_remote_session(get: impl Fn(&str) -> Option<String>) -> bool {
     let set = |key: &str| get(key).is_some_and(|value| !value.is_empty());
     if !(set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY")) {
@@ -1609,42 +1596,31 @@ fn is_remote_session(get: impl Fn(&str) -> Option<String>) -> bool {
     !is_forwarded_display(get("DISPLAY").as_deref())
 }
 
-/// Browser-launcher argv lists to try for this platform, most preferred first.
-///
-/// `$BROWSER` — the Unix convention: a colon-separated list of command lines, each
-/// with an optional `%s` where the URL goes — wins when set, since a user who set
-/// it has already answered the question. Behind it is the platform table every CLI
-/// that does this carries. `wslview` leads the Linux list unconditionally: it
-/// exists only under WSL (where `xdg-open` is present but opens nothing the user
-/// can see), and elsewhere it simply fails to spawn and costs a syscall.
-///
-/// Windows gets `rundll32` alone. It takes the URL as a single argument, whereas
-/// `cmd /c start` hands it back to `cmd.exe` to re-parse — and an OAuth authorize
-/// URL is nothing but `&`-separated parameters. `$BROWSER` is not a Windows
-/// convention and splitting a drive-lettered path on `:` mangles it, but the
-/// mangled program merely fails to spawn and the table behind it still runs.
+/// Browser candidates, with `$BROWSER` entries before platform defaults.
 fn browser_launchers(browser_env: Option<&str>) -> Vec<Vec<String>> {
     let mut candidates: Vec<Vec<String>> = Vec::new();
     for entry in browser_env.unwrap_or_default().split(':') {
-        let argv: Vec<String> = entry.split_whitespace().map(str::to_string).collect();
-        if !argv.is_empty() {
+        if let Ok(argv) = shell_words::split(entry)
+            && !argv.is_empty()
+        {
             candidates.push(argv);
         }
     }
     let table: &[&[&str]] = if cfg!(target_os = "macos") {
         &[&["open"]]
     } else if cfg!(target_os = "windows") {
+        // Avoid `cmd /c start`; it reparses `&` in OAuth URLs.
         &[&["rundll32.exe", "url.dll,FileProtocolHandler"]]
     } else {
         &[
+            // WSL may provide `xdg-open` without a visible desktop.
             &["wslview"],
             &["xdg-open"],
             &["gio", "open"],
             &["gnome-open"],
             &["kde-open"],
             &["x-www-browser"],
-            // Debian's xdg-utils installs this as a symlink to xdg-open; on macOS
-            // it is the real thing. Harmless last resort elsewhere.
+            // Debian may install `open` as an `xdg-open` alias.
             &["open"],
         ]
     };
@@ -1656,13 +1632,28 @@ fn browser_launchers(browser_env: Option<&str>) -> Vec<Vec<String>> {
     candidates
 }
 
-/// Run one launcher argv with `url` substituted for a `%s` placeholder (the
-/// `$BROWSER` convention) or appended when there is none, reporting whether it
-/// succeeded.
-///
-/// Output is discarded on purpose: a launcher that cannot find a browser says so
-/// on stderr, and `xdg-open`'s cascade of "www-browser: not found" lines is exactly
-/// what the caller replaces with one message that says what to do instead.
+const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn launcher_started(mut child: std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = std::thread::Builder::new()
+                    .name("browser-launcher-reaper".to_string())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+                return true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Run a launcher after substituting `%s`, or append the URL when absent.
 fn spawn_launcher(argv: &[String], url: &str) -> bool {
     let Some((program, rest)) = argv.split_first() else {
         return false;
@@ -1684,33 +1675,24 @@ fn spawn_launcher(argv: &[String], url: &str) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // A missing launcher fails at spawn; one that ran but found no browser to
-    // launch (xdg-open on a machine with no desktop) reports it in the exit status.
-    matches!(command.status(), Ok(status) if status.success())
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    launcher_started(child, LAUNCHER_PROBE_TIMEOUT)
 }
 
-/// Try to open `url` in a browser here, reporting to the task which of the three
-/// situations it is in:
-///
-///   - `"opened"` — a browser was launched, so the OAuth redirect reaches this
-///     machine's loopback listener on its own and the task can just wait.
-///   - `"headless"` — not attempted, because this is an SSH session with no
-///     forwarded display.
-///   - `"no_browser"` — attempted, and no launcher on this platform worked.
-///
-/// The latter two both mean the user opens the URL somewhere else, where the
-/// loopback redirect cannot reach us and the code has to come back by hand.
-fn open_url_in_browser(url: &str) -> String {
+/// Try to open `url` in a browser on this machine.
+fn open_url_in_browser(url: &str) -> bool {
     if is_remote_session(|key| std::env::var(key).ok()) {
-        return "headless".to_string();
+        return false;
     }
     let browser_env = std::env::var("BROWSER").ok();
     for argv in browser_launchers(browser_env.as_deref()) {
         if spawn_launcher(&argv, url) {
-            return "opened".to_string();
+            return true;
         }
     }
-    "no_browser".to_string()
+    false
 }
 
 fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
@@ -1737,8 +1719,6 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
     Ok(AuthSession {
         url: authorize_url,
         callback_port: port,
-        // The IdP redirects straight here, so the registered redirect is verbatim
-        // where the browser lands.
         callback_url: redirect_uri.clone(),
         inner: Mutex::new(Some(AuthSessionInner {
             listener: Some(listener),
@@ -1781,11 +1761,7 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
     Ok(AuthSession {
         url: authorize_url,
         callback_port: port,
-        // Not the registered redirect: the endpoint's callback page reads the port
-        // out of `state` and forwards the browser on to this, query string intact
-        // (jwt-validator's envoy.yaml serves that page). Quoted to the user only so
-        // they recognize the address bar they are copying from — nothing depends on
-        // it matching, and the paste is parsed for a `code` wherever it came from.
+        // The endpoint callback forwards its query here using the port in `state`.
         callback_url: format!("http://127.0.0.1:{}/callback", port),
         inner: Mutex::new(Some(AuthSessionInner {
             listener: Some(listener),
@@ -2093,33 +2069,19 @@ struct AuthSessionInner {
 }
 
 impl AuthSessionInner {
-    /// Exchange an authorization `code` for credentials — the half of a login that
-    /// is the same whether the code arrived on the loopback listener or was pasted
-    /// back by hand.
-    ///
-    /// `require_state` is true for the browser callback, whose `state` is always
-    /// the one we generated: its absence there means something other than our own
-    /// redirect hit the loopback. A hand-pasted code may legitimately arrive
-    /// without it (the user copied only the code), and the paste itself is the
-    /// user's intent, so the CSRF guard has nothing left to protect against —
-    /// validate the value when it is present either way.
+    /// Exchange a code received from the listener or pasted manually.
+    /// With `require_state = false`, an omitted state is allowed but a supplied one
+    /// is still validated.
     async fn complete(
         self,
         code: String,
         state: Option<String>,
         require_state: bool,
     ) -> anyhow::Result<CredentialsEntry> {
-        // The Aspect-cloud flow posts to the conventional token endpoint; the
-        // self-hosted flow resolves it via OIDC discovery and first validates
-        // the callback `state` (CSRF guard).
         let token_url = match &self.kind {
             SessionKind::Cloud => format!("{}/oauth/token", self.env.domain),
             SessionKind::Endpoint { expected_state } => {
-                let matches = match state.as_deref() {
-                    Some(state) => state == expected_state.as_str(),
-                    None => !require_state,
-                };
-                if !matches {
+                if !callback_state_matches(expected_state, state.as_deref(), require_state) {
                     return Err(anyhow::anyhow!(
                         "authentication failed: callback state did not match"
                     ));
@@ -2149,8 +2111,11 @@ impl AuthSessionInner {
     }
 }
 
-/// Take the pending login out of `session`. `wait()` and `redeem()` are two ways
-/// to finish the same session, so either one consumes it.
+fn callback_state_matches(expected: &str, actual: Option<&str>, require_state: bool) -> bool {
+    actual.map_or(!require_state, |actual| actual == expected)
+}
+
+/// Consume a pending session so only one completion path can run.
 fn take_pending(session: &AuthSession) -> anyhow::Result<AuthSessionInner> {
     let mut guard = session
         .inner
@@ -2161,18 +2126,13 @@ fn take_pending(session: &AuthSession) -> anyhow::Result<AuthSessionInner> {
         .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))
 }
 
-/// Extract the OAuth `code` (and `state`, when it came along) from whatever the
-/// user pasted back: the browser's full address-bar URL, a bare query string, or
-/// the code on its own.
-///
-/// The `code=`/`error=` test — rather than merely looking for a `?` or `=` — keeps
-/// a bare authorization code that happens to carry base64 padding from being read
-/// as a query string and rejected for having no `code` parameter.
+/// Parse a callback URL, query string, or bare authorization code.
 fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>)> {
     let pasted = pasted.trim();
     if pasted.is_empty() {
         return Err(anyhow::anyhow!("no authorization code entered"));
     }
+    // `=` alone does not imply a query string: bare codes may contain padding.
     let is_callback = pasted.starts_with("http://")
         || pasted.starts_with("https://")
         || pasted.contains("code=")
@@ -2203,13 +2163,9 @@ fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>
 #[display("<AuthSession>")]
 pub struct AuthSession {
     pub url: String,
-    /// The loopback port the OAuth callback ultimately lands on. Exposed so the
-    /// task can name it in the `ssh -L` hint.
+    /// Loopback port reported while waiting for a forwarded callback.
     pub callback_port: u16,
-    /// The loopback address the browser is left sitting on once the flow is done —
-    /// what the user reads the authorization code out of when the browser is on
-    /// another machine. Exposed so the task can quote it exactly rather than
-    /// approximately: the two flows do not agree on the spelling.
+    /// Loopback URL displayed by the manual callback flow.
     pub callback_url: String,
     #[allocative(skip)]
     inner: Mutex<Option<AuthSessionInner>>,
@@ -2240,9 +2196,6 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthSession, url)
     }
 
-    /// The loopback port the OAuth redirect ends up on. Only this machine can
-    /// serve it, so a task that could not open a browser here names it in the
-    /// port-forwarding hint.
     #[starlark(attribute)]
     fn callback_port<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
         Ok(this
@@ -2251,18 +2204,12 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
             .callback_port as i32)
     }
 
-    /// The loopback address the browser is left on when the flow finishes — where
-    /// the user reads the code out of the address bar. The cloud flow lands on
-    /// `http://localhost:<port>/callback`; a self-hosted deployment's callback page
-    /// forwards to `http://127.0.0.1:<port>/callback`.
     #[starlark(attribute)]
     fn callback_url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthSession, callback_url)
     }
 
-    /// Wait for the browser to deliver the authorization code to the loopback
-    /// listener, then exchange it. Requires the browser to be on this machine (or
-    /// the port to be forwarded here); see `redeem` for the other case.
+    /// Exchange an authorization code received by the loopback listener.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<AuthCredentials> {
         let session = this
             .downcast_ref_err::<AuthSession>()
@@ -2279,13 +2226,7 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
         Ok(AuthCredentials::from_entry(&entry))
     }
 
-    /// Exchange an authorization code the user pasted back — the browser's full
-    /// callback URL, a bare query string, or the bare code.
-    ///
-    /// This is the login path for a browser that is not on this machine (an SSH
-    /// session, most often): the redirect resolves to *our* loopback, so the code
-    /// never reaches us and the browser's address bar is the only place left to
-    /// read it from. Drops the listener, since nothing will connect to it.
+    /// Exchange a pasted callback URL, query string, or bare code.
     fn redeem<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] pasted: &str,
@@ -2733,14 +2674,11 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         Ok(resolve_api_url()?)
     }
 
-    /// Try to open `url` in a browser on this machine. Returns `"opened"`,
-    /// `"headless"` (an SSH session with no forwarded display — not attempted), or
-    /// `"no_browser"` (no launcher on this platform worked). The last two tell the
-    /// caller the OAuth loopback redirect will land on the wrong machine.
+    /// Try to open `url` in a browser on this machine.
     fn open_browser<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] url: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<bool> {
         Ok(open_url_in_browser(url))
     }
 
@@ -4485,6 +4423,15 @@ mod tests {
     }
 
     #[test]
+    fn callback_state_policy_requires_listener_state_and_checks_pasted_state() {
+        assert!(callback_state_matches("expected", Some("expected"), true));
+        assert!(!callback_state_matches("expected", Some("wrong"), true));
+        assert!(!callback_state_matches("expected", None, true));
+        assert!(callback_state_matches("expected", None, false));
+        assert!(!callback_state_matches("expected", Some("wrong"), false));
+    }
+
+    #[test]
     fn is_remote_session_spots_ssh_without_a_forwarded_display() {
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |key: &str| {
@@ -4555,5 +4502,36 @@ mod tests {
 
         // The platform table is never empty, so a login always has something to try.
         assert!(!browser_launchers(None).is_empty());
+    }
+
+    #[test]
+    fn browser_launchers_preserves_quoted_arguments() {
+        let candidates =
+            browser_launchers(Some("firefox --new-window \"%s\":sh -c 'open-browser %s'"));
+        assert_eq!(candidates[0], vec!["firefox", "--new-window", "%s"]);
+        assert_eq!(candidates[1], vec!["sh", "-c", "open-browser %s"]);
+    }
+
+    #[test]
+    fn launcher_probe_does_not_wait_for_a_long_running_child() {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("launcher_probe_test_child")
+            .env("ASPECT_LAUNCHER_TEST_CHILD", "sleep")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        assert!(launcher_started(child, Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    #[test]
+    fn launcher_probe_test_child() {
+        if std::env::var("ASPECT_LAUNCHER_TEST_CHILD").as_deref() == Ok("sleep") {
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 }

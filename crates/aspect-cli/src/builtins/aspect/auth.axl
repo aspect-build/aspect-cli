@@ -3,20 +3,11 @@ load("./private/lib/deployment_flags.axl", "REMOTE_DEFAULT_CAPS", "capability_la
 load("./private/lib/environment.axl", "error", "info", "warn")
 load("./private/lib/prompt.axl", "prompt_choice")
 
-def _open_login_url(ctx: TaskContext, session) -> bool:
-    """Get the user in front of the authorize URL, returning whether a browser was
-    opened *here* — which is what decides whether the OAuth redirect can reach the
-    loopback listener on its own.
-
-    `--no-browser` skips the attempt outright. Otherwise the runtime walks this
-    platform's openers ($BROWSER, then xdg-open/gio/... on Linux, `open` on macOS,
-    rundll32 on Windows) and reports "headless" without trying at all when this is
-    an SSH session with no forwarded display."""
-    status = "headless" if ctx.args.no_browser else ctx.aspect.auth.open_browser(session.url)
-    if status == "opened":
+def _open_login_url(ctx: TaskContext, session: aspect.auth.AuthSession) -> bool:
+    """Open the authorization URL locally, returning whether launch succeeded."""
+    opened = False if ctx.args.no_browser else ctx.aspect.auth.open_browser(session.url)
+    if opened:
         print("Browser opened. Waiting for authentication...")
-        # The escape hatch for the case detection cannot see: a remote session that
-        # looks local, where the browser just opened on a screen nobody is watching.
         print("(Nothing opened, or it opened elsewhere? Ctrl-C and re-run with --no-browser.)")
         return True
     print("Open this URL in a browser to log in:")
@@ -25,18 +16,8 @@ def _open_login_url(ctx: TaskContext, session) -> bool:
     print("")
     return False
 
-def _redeem_pasted_code(ctx: TaskContext, session):
-    """Take the authorization code back by hand and exchange it, or None if nothing
-    was entered.
-
-    The path for a browser that is not on this machine — an SSH session, mostly.
-    The OAuth redirect resolves to a loopback address, which only *this* host
-    serves, so a browser on the user's laptop lands on a page that never loads and
-    the address bar is the only place the code can be read from.
-
-    No port-forwarding hint here on purpose: a self-hosted deployment binds a fresh
-    port every run, so `ssh -L` is only durable advice for the Aspect account flow
-    (fixed port 19556). It lives in --no-browser's help text, with that caveat."""
+def _redeem_pasted_code(ctx: TaskContext, session: aspect.auth.AuthSession) -> aspect.auth.AuthCredentials | None:
+    """Exchange pasted callback input, returning None when it is empty."""
     print("Authorizing sends the browser on to {}?code=...".format(session.callback_url))
     print("— an address only this machine serves. If the browser is on another machine")
     print("it will report \"refused to connect\": that is expected, and the address bar")
@@ -49,18 +30,13 @@ def _redeem_pasted_code(ctx: TaskContext, session):
         return None
     return session.redeem(pasted)
 
-def _run_browser_login(ctx: TaskContext, deployment: str):
-    """Authenticate the user in a browser and return the minted credentials, or None
-    when an interactive login was needed and the user entered nothing.
-
-    Happy path: open a browser here and wait for the OAuth callback on the loopback
-    listener. When there is no browser on this machine — or it lives at the other
-    end of an SSH session, where that loopback redirect resolves to the wrong host —
-    fall back to taking the code by hand. Off a TTY there is nothing to paste with,
-    so keep waiting on the listener instead: a forwarded port still delivers."""
+def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCredentials | None:
+    """Authenticate through a local browser or pasted callback."""
     session = ctx.aspect.auth.login(deployment = deployment)
     if _open_login_url(ctx, session):
         return session.wait()
+    if ctx.args.no_browser:
+        return _redeem_pasted_code(ctx, session)
     if not ctx.std.io.stdin.is_tty:
         print("Waiting for the callback on localhost:{}...".format(session.callback_port))
         return session.wait()
@@ -205,7 +181,7 @@ login = task(
         ),
         "no_browser": args.boolean(
             default = False,
-            description = "Don't try to open a browser; print the URL and ask for the authorization code back. Use this when the browser is on another machine (e.g. over SSH), where the login callback would be redirected to the wrong host's localhost. Over SSH you can instead forward the callback port from your local machine — for your Aspect account that is the fixed `ssh -L 19556:localhost:19556 <host>`; a self-hosted deployment binds a fresh port each run, so paste the code.",
+            description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "profile": args.string(
             description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for the Aspect account). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
@@ -316,7 +292,7 @@ configure = task(
         ),
         "no_browser": args.boolean(
             default = False,
-            description = "Don't try to open a browser; print the URL and ask for the authorization code back. Use this when the browser is on another machine (e.g. over SSH), where the login callback would be redirected to the wrong host's localhost. Over SSH you can instead forward the callback port from your local machine — for your Aspect account that is the fixed `ssh -L 19556:localhost:19556 <host>`; a self-hosted deployment binds a fresh port each run, so paste the code.",
+            description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
     },
 )
