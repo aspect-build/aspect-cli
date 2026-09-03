@@ -59,7 +59,6 @@ rust_library(
         "@crates//:sha1",
         "@crates//:sha2",
         "@crates//:sha256",
-        "@crates//:shell-words",
         "@crates//:ssri",
         "@crates//:starlark",
         "@crates//:starlark_map",

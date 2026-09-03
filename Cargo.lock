@@ -384,7 +384,6 @@ dependencies = [
  "sha1",
  "sha2",
  "sha256",
- "shell-words",
  "ssri",
  "starbuf-derive",
  "starlark",

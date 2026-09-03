@@ -3,44 +3,31 @@ load("./private/lib/deployment_flags.axl", "REMOTE_DEFAULT_CAPS", "capability_la
 load("./private/lib/environment.axl", "error", "info", "warn")
 load("./private/lib/prompt.axl", "prompt_choice")
 
-def _open_login_url(ctx: TaskContext, session: aspect.auth.AuthSession) -> bool:
-    """Open the authorization URL locally, returning whether launch succeeded."""
-    opened = False if ctx.args.no_browser else ctx.aspect.auth.open_browser(session.url)
+def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCredentials | None:
+    session = ctx.aspect.auth.login(deployment = deployment)
+    opened = not ctx.args.no_browser and session.open_browser()
     if opened:
         print("Browser opened. Waiting for authentication...")
         print("(Nothing opened, or it opened elsewhere? Ctrl-C and re-run with --no-browser.)")
-        return True
+        return session.finish()
+
     print("Open this URL in a browser to log in:")
     print("")
     print("  " + session.url)
     print("")
-    return False
+    if not ctx.args.no_browser and not ctx.std.io.stdin.is_tty:
+        print("Waiting for the callback on localhost...")
+        return session.finish()
 
-def _redeem_pasted_code(ctx: TaskContext, session: aspect.auth.AuthSession) -> aspect.auth.AuthCredentials | None:
-    """Exchange pasted callback input, returning None when it is empty."""
-    print("Authorizing sends the browser on to {}?code=...".format(session.callback_url))
-    print("— an address only this machine serves. If the browser is on another machine")
-    print("it will report \"refused to connect\": that is expected, and the address bar")
-    print("still holds the code. Copy the whole address and paste it below.")
+    print("If the browser is on another machine, its localhost callback will fail.")
+    print("Copy the callback URL from the address bar and paste it below.")
     print("")
     ctx.std.io.stdout.write("Paste the callback URL (or just the code): ")
     ctx.std.io.stdout.flush()
     pasted = str(ctx.std.io.stdin.read(8192)).strip()
     if not pasted:
         return None
-    return session.redeem(pasted)
-
-def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCredentials | None:
-    """Authenticate through a local browser or pasted callback."""
-    session = ctx.aspect.auth.login(deployment = deployment)
-    if _open_login_url(ctx, session):
-        return session.wait()
-    if ctx.args.no_browser:
-        return _redeem_pasted_code(ctx, session)
-    if not ctx.std.io.stdin.is_tty:
-        print("Waiting for the callback on localhost:{}...".format(session.callback_port))
-        return session.wait()
-    return _redeem_pasted_code(ctx, session)
+    return session.finish(pasted)
 
 # Width of the label column in a deployment's detail block so values align. Must
 # be wider than the longest label ("Results", 7) to leave a gap; a label >= this
