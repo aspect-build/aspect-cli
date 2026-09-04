@@ -12,7 +12,7 @@ Run with:
   aspect dev test-helpers
 """
 
-load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
+load("@aspect//helpers.axl", "aspect_web_ui_url", "bb_clientd_root", "detect_build_url", "detect_ci_host", "file_uri_to_path", "render_bes_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -32,6 +32,18 @@ def _test_impl(ctx):
     # inputs are absent (full behavior in bazel_results_test).
     _eq("helpers: aspect_web_ui_url empty without inputs", aspect_web_ui_url(env, {}), "")
     _eq("helpers: render_bes_url empty without inputs", render_bes_url({"bazel": {}}), "")
+
+    # URI helpers resolve through the public facade. Detailed URI and
+    # environment behavior is covered by the bazel_results tests.
+    _eq("helpers: file URI", file_uri_to_path("file:///tmp/test.xml"), "/tmp/test.xml")
+    _eq(
+        "helpers: bytestream URI",
+        file_uri_to_path("bytestream://cache.example/blobs/abc123/42", "/mnt/bb_clientd"),
+        "/mnt/bb_clientd/cas/cache.example/blobs/sha256/file/abc123-42",
+    )
+    root = bb_clientd_root(ctx)
+    if root != None and type(root) != "string":
+        fail("helpers: bb_clientd_root returned %r" % root)
 
     print("helpers.axl facade: OK")
     return 0
