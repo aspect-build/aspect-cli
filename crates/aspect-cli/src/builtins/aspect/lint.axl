@@ -17,6 +17,7 @@ Usage:
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
+load("@aspect//bazel/invocation.axl", "target_patterns")
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
@@ -778,6 +779,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
     announce_version, announce_command = bzl.announce.resolve(ctx)
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
+    pattern_file = ctx.args.target_pattern_file
+    if pattern_file:
+        if not ctx.std.fs.exists(pattern_file):
+            fail("--target-pattern-file: file not found: " + pattern_file)
+        endpoint_auth_flags.append("--target_pattern_file=" + pattern_file)
+    targets = target_patterns(
+        ctx.args.is_explicit("targets"),
+        list(ctx.args.targets),
+        pattern_file,
+        rc,
+        "build",
+    )
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
@@ -851,7 +864,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_version = announce_version,
         announce_command = announce_command,
         flags = endpoint_auth_flags,
-        *ctx.args.targets
+        *targets
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns, so set it
@@ -1222,7 +1235,10 @@ lint = task(
         "merge_base": args.string(
             description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution and uses this SHA directly. Ignored on the GitHub PR Files API path.",
         ),
-        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
+        ),
         # TODO: Support - (list from stdin)
         "targets": args.positional(
             minimum = 0,
