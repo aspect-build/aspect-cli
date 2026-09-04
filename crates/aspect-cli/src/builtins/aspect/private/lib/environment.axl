@@ -605,17 +605,18 @@ def _gcp_debug_cli(runner: Runner) -> str:
             ' --format="value(jsonPayload.message)"' +
             " --freshness=30d | tac")
 
-def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
+def print_environment_info(std: std.Std, env: WorkflowsEnvironment, quiet: bool = False) -> None:
     """Print debug/diagnostic info about the runner environment.
 
     Caller must gate on `env.runner != None`; the body assumes runner-shaped
     state (the metadata only makes sense on a Workflows runner).
+    `quiet` hides the Buildkite section marker while keeping the diagnostics.
     """
     runner = env.runner
     if runner == None:
         return
 
-    if env.ci and env.ci.host == "buildkite":
+    if env.ci and env.ci.host == "buildkite" and not quiet:
         # `:rocket:` mirrors the status-surface "🚀 Workflows runner metadata"
         # so the same identifier appears on CLI logs and rendered checks.
         print("--- :rocket: Workflows runner metadata")

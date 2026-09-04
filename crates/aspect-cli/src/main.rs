@@ -270,6 +270,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 dispatch.task_id,
                 &dispatch.task_name,
                 dispatch.task_name_meaningful,
+                dispatch.quiet,
             )
             .map_err(anyhow::Error::from)?;
 
@@ -312,6 +313,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     dispatch.task_friendly_name.clone(),
                     dispatch.task_uuid.clone(),
                     dispatch.timing,
+                    dispatch.quiet,
                     |t, h| dispatch.task_args(t, h),
                 )
                 .map_err(anyhow::Error::from)?;

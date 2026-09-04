@@ -191,6 +191,11 @@ impl EvalBuilder {
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)
                 .map_err(anyhow::Error::from)?;
+            let quiet = mpe
+                .tasks()
+                .get(task_index)
+                .ok_or_else(|| anyhow!("task index {task_index} out of range"))?
+                .quiet();
             let exit = mpe
                 .execute_tasks_with_args(
                     task_index,
@@ -199,6 +204,7 @@ impl EvalBuilder {
                     None,
                     None,
                     crate::eval::TimingMode::default(),
+                    quiet,
                     |_t, heap| {
                         let args = Arguments::new();
                         for (name, values) in &self.string_list_args {

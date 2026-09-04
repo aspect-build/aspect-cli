@@ -46,7 +46,7 @@ def _workflows_impl(ctx: FeatureContext):
         # On a Workflows runner, register the runner-environment table and the
         # Bazel server health check as `health_check` hooks. `setup_phase` runs
         # them inside the Setup phase; each prints its own BK section marker.
-        hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
+        hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment, quiet = ctx.task.quiet))
         hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
         # Detect + repair stranded sandbox state (bazelbuild/bazel#23880) after
