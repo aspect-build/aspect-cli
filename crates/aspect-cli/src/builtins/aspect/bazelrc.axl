@@ -18,10 +18,11 @@ What it writes depends on where it runs:
   - On a Workflows runner: the full set — generic flags, the remote-cache
     endpoint (from env), and the runner-specific flags (repository cache,
     per-runner output paths, identity header, the Workflows-cache compression
-    gates, the server heap cap). The heap cap must match the `Workflows`
-    feature's `server_heap_percent`: `--host_jvm_args` is a server startup
-    option, so a plain `bazel` reading a different value than `aspect <task>`
-    injects would restart the shared server on every alternation.
+    gates, and the `performance_defaults` bundle). The bundle switch must match
+    the `Workflows` feature's `performance_defaults`: it carries a server
+    startup option, so a plain `bazel` reading different JVM arguments than
+    `aspect <task>` injects would restart the shared server on every
+    alternation.
   - On other CI, or with an explicit `--output`: only the generic flags (plus
     the remote-cache endpoint when its env vars are set) — nothing tied to a
     runner's mounts or identity. Useful when an Aspect remote cache / BES is
@@ -43,7 +44,6 @@ Only file output is supported — there is no stdout mode.
 load("@aspect//bazel/build_metadata.axl", "version_gte")
 load(
     "./private/lib/environment.axl",
-    "DEFAULT_SERVER_HEAP_PERCENT",
     "detect_ci",
     "error",
     "get_bazelrc_flags",
@@ -148,7 +148,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
         (startup_flags, build_flags) = get_bazelrc_flags(
             environment = environment,
             aspect_root_dir = ctx.std.env.aspect_root_dir(),
-            server_heap_percent = ctx.args.server_heap_percent,
+            performance_defaults = ctx.args.performance_defaults,
         )
         startup_flags = startup_flags_for_rc(startup_flags)
     else:
@@ -192,9 +192,9 @@ bazelrc = task(
             default = "",
             description = "Rc file to write. Defaults to `~/.bazelrc` (the first user rc Bazel loads). Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
         ),
-        "server_heap_percent": args.int(
-            default = DEFAULT_SERVER_HEAP_PERCENT,
-            description = "Percent of the runner's RAM the Bazel server JVM may use as heap, written as `startup --host_jvm_args=-XX:MaxRAMPercentage=N`. 0 omits it. Must match the `Workflows` feature's `server_heap_percent` (same default), or plain `bazel` and `aspect <task>` will restart the shared server on every alternation. Only written on a Workflows runner.",
+        "performance_defaults": args.boolean(
+            default = True,
+            description = "Include Aspect's performance defaults in the rc. Today: `startup --host_jvm_args=-XX:MaxRAMPercentage=40`, capping the Bazel server heap at 40% of RAM. Must match the `Workflows` feature's `performance_defaults` (same default), or plain `bazel` and `aspect <task>` will restart the shared server on every alternation. Only written on a Workflows runner.",
         ),
     },
 )

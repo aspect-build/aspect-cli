@@ -371,36 +371,50 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
 
     return build_flags
 
-# Default share of the runner's RAM (or cgroup limit) the Bazel server JVM may
-# use as heap. Bazel sets no heap flag of its own, so the server otherwise runs
-# on HotSpot's default of 25% — a quarter of an instance the job has to itself.
-# Kept conservative because Bazel's own `--local_resources=memory` default
-# (67% of RAM) assumes a small server; heap and local actions share the box.
-DEFAULT_SERVER_HEAP_PERCENT = 40
+# The `performance_defaults` bundle: Bazel flags the Workflows feature and
+# `aspect ci bazelrc` apply on a runner unless the repo switches them off. One
+# boolean rather than a knob per value, because every value here is already
+# overridable through Bazel itself (a repo's `.bazelrc`), so per-value args
+# would add surface without adding control. Two rules keep it safe to grow:
+#
+#   * Command flags are appended after the repo's flags (`extra_flags`), so on
+#     a Workflows runner they win. Startup flags keep the repo's `startup`
+#     section last: Bazel compares the server's JVM arguments in order, and the
+#     rc `aspect ci bazelrc` writes is read before the workspace rc, so any
+#     other order would make `aspect <task>` and plain `bazel` restart the
+#     shared server on every alternation.
+#   * A new startup entry restarts the Bazel server once on upgrade
+#     (`--host_jvm_args` is a server startup option), discarding the warm
+#     analysis cache that one time. Command flags cost nothing to add.
 
-_SERVER_HEAP_FLAG_PREFIX = "--host_jvm_args=-XX:MaxRAMPercentage="
+# Share of the runner's RAM (or cgroup limit) the Bazel server JVM may use as
+# heap. Bazel sets no heap flag of its own, so the server otherwise runs on
+# HotSpot's default of 25% — a quarter of an instance the job has to itself. On
+# silo's 16 GB runners that cap was binding: heap pinned within 100 MB of it for
+# a quarter of the build, 6% of wall time in GC (silo-gcp #61152 vs #61160).
+# Kept at 40% because Bazel's own `--local_resources=memory` default (67% of
+# RAM) assumes a small server; heap and local actions share the box.
+SERVER_HEAP_PERCENT = 40
 
-def server_heap_startup_flags(percent: int) -> list:
-    """The startup flag capping the Bazel server heap at `percent` of RAM, as a
-    list: `[--host_jvm_args=-XX:MaxRAMPercentage=N]`, or `[]` when `percent` is 0
-    (disabled). Fails on a value outside 0..100.
+def performance_defaults_startup_flags() -> list:
+    """The startup flags of the `performance_defaults` bundle.
 
-    `MaxRAMPercentage` rather than a computed `-Xmx`: the JVM already sizes
-    against the cgroup limit in a container, so no host probe is needed; the
-    flag text is the same on every machine, so it never differs between hosts
-    sharing a bazelrc; and HotSpot ignores it whenever `-Xmx` is set, so a
-    repo's own `startup --host_jvm_args=-Xmx…` wins with no collision handling.
+    `--host_jvm_args=-XX:MaxRAMPercentage=N` rather than a computed `-Xmx`: the
+    JVM already sizes against the cgroup limit in a container, so no host probe
+    is needed; the flag text is the same on every machine, so it never differs
+    between hosts sharing a bazelrc; and HotSpot ignores it whenever `-Xmx` is
+    set, so a repo's own `startup --host_jvm_args=-Xmx…` wins with no collision
+    handling. A repo can also set its own `MaxRAMPercentage`: Bazel accumulates
+    `--host_jvm_args` and the JVM takes the last, which is the repo's."""
+    return ["--host_jvm_args=-XX:MaxRAMPercentage=" + str(SERVER_HEAP_PERCENT)]
 
-    Any change to the value restarts the Bazel server on the next build
-    (`--host_jvm_args` is a server startup option), discarding the warm
-    analysis cache once."""
-    if percent < 0 or percent > 100:
-        fail("server_heap_percent must be between 0 and 100 (0 disables), got %d" % percent)
-    if percent == 0:
-        return []
-    return [_SERVER_HEAP_FLAG_PREFIX + str(percent)]
+def performance_defaults_build_flags() -> list:
+    """The command flags of the `performance_defaults` bundle. Appended after
+    the repo's own flags, so on a runner they take precedence. Empty today; the
+    bundle exists so the next entry is one line and no new arg."""
+    return []
 
-def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str, server_heap_percent: int = DEFAULT_SERVER_HEAP_PERCENT) -> (list, list):
+def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str, performance_defaults: bool = True) -> (list, list):
     """Generate the full bazelrc flag set for an Aspect Workflows runner.
 
     The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
@@ -416,8 +430,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str, s
         environment: WorkflowsEnvironment. Caller must have verified
                      `runner != None` (output_base/output_user_root come from it).
         aspect_root_dir: absolute path to the Aspect project root.
-        server_heap_percent: percent of RAM the Bazel server JVM may use as heap
-                     (see `server_heap_startup_flags`); 0 emits no heap flag.
+        performance_defaults: include the `performance_defaults` bundle (see
+                     `performance_defaults_startup_flags` / `_build_flags`).
 
     Returns:
         (startup_flags, build_flags): two lists; build_flags may contain
@@ -460,7 +474,9 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str, s
         startup_flags.append("--output_user_root=" + bazel_root + "/" + subdir)
         startup_flags.append("--output_base=" + output_root + "/" + subdir)
 
-    startup_flags.extend(server_heap_startup_flags(server_heap_percent))
+    if performance_defaults:
+        startup_flags.extend(performance_defaults_startup_flags())
+        build_flags.extend(performance_defaults_build_flags())
 
     return (startup_flags, build_flags)
 

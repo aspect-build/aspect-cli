@@ -2,7 +2,6 @@ load("@aspect//bazel/build_metadata.axl", "get_build_metadata_flags", "get_task_
 load("@aspect//bazel.axl", "BazelTrait")
 load(
     "../private/lib/environment.axl",
-    "DEFAULT_SERVER_HEAP_PERCENT",
     "apply_output_base_suffix",
     "color_enabled",
     "get_bazelrc_flags",
@@ -68,7 +67,7 @@ def _workflows_impl(ctx: FeatureContext):
         (startup_flags, build_flags) = get_bazelrc_flags(
             environment = environment,
             aspect_root_dir = ctx.std.env.aspect_root_dir(),
-            server_heap_percent = ctx.args.server_heap_percent,
+            performance_defaults = ctx.args.performance_defaults,
         )
 
         # Optionally move this task to its own Bazel server by suffixing the
@@ -187,22 +186,23 @@ Workflows = feature(
                           "ctx.features[Workflows].args.runner_output_base_suffix, or " +
                           "per task with --workflows:runner-output-base-suffix.",
         ),
-        "server_heap_percent": args.int(
-            default = DEFAULT_SERVER_HEAP_PERCENT,
-            description = "Percent of the runner's RAM (or cgroup limit) the " +
-                          "Bazel server JVM may use as heap, injected as " +
-                          "--host_jvm_args=-XX:MaxRAMPercentage=N. Bazel sets no " +
-                          "heap flag itself, so the server otherwise gets the JVM " +
-                          "default of 25%. 0 disables the injection. Ignored by the " +
-                          "JVM when the repo's .bazelrc sets -Xmx, so an explicit " +
-                          "heap always wins. Keep it below what local actions need: " +
-                          "Bazel's --local_resources=memory default is 67% of RAM. " +
-                          "Changing the value restarts the Bazel server once. Only " +
-                          "takes effect on Aspect Workflows runners; `aspect ci " +
-                          "bazelrc` has the same knob so plain `bazel` calls agree " +
-                          "and do not restart the server. Set per repo in config.axl " +
-                          "via ctx.features[Workflows].args.server_heap_percent, or " +
-                          "per task with --workflows:server-heap-percent.",
+        "performance_defaults": args.boolean(
+            default = True,
+            description = "Apply Aspect's performance defaults to Bazel on a " +
+                          "Workflows runner. Today the bundle caps the Bazel server " +
+                          "heap at 40% of the runner's RAM (or cgroup limit) via " +
+                          "--host_jvm_args=-XX:MaxRAMPercentage=40; Bazel sets no " +
+                          "heap flag itself, so the server otherwise runs on the JVM " +
+                          "default of 25%. Command flags in the bundle are appended " +
+                          "after the repo's, so they win; a -Xmx in the repo's " +
+                          ".bazelrc still wins over the percentage, by JVM rule. A " +
+                          "new startup entry in the bundle restarts the Bazel server " +
+                          "once on upgrade. `aspect ci bazelrc` has the same switch " +
+                          "so plain `bazel` calls in the job agree and do not restart " +
+                          "the shared server. Only takes effect on Aspect Workflows " +
+                          "runners. Opt out per repo in config.axl via " +
+                          "ctx.features[Workflows].args.performance_defaults = False, " +
+                          "or per task with --workflows:performance-defaults=false.",
         ),
         "upload_build_diagnostics": args.boolean(
             default = False,
