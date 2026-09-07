@@ -371,7 +371,36 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
 
     return build_flags
 
-def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
+# Default share of the runner's RAM (or cgroup limit) the Bazel server JVM may
+# use as heap. Bazel sets no heap flag of its own, so the server otherwise runs
+# on HotSpot's default of 25% — a quarter of an instance the job has to itself.
+# Kept conservative because Bazel's own `--local_resources=memory` default
+# (67% of RAM) assumes a small server; heap and local actions share the box.
+DEFAULT_SERVER_HEAP_PERCENT = 40
+
+_SERVER_HEAP_FLAG_PREFIX = "--host_jvm_args=-XX:MaxRAMPercentage="
+
+def server_heap_startup_flags(percent: int) -> list:
+    """The startup flag capping the Bazel server heap at `percent` of RAM, as a
+    list: `[--host_jvm_args=-XX:MaxRAMPercentage=N]`, or `[]` when `percent` is 0
+    (disabled). Fails on a value outside 0..100.
+
+    `MaxRAMPercentage` rather than a computed `-Xmx`: the JVM already sizes
+    against the cgroup limit in a container, so no host probe is needed; the
+    flag text is the same on every machine, so it never differs between hosts
+    sharing a bazelrc; and HotSpot ignores it whenever `-Xmx` is set, so a
+    repo's own `startup --host_jvm_args=-Xmx…` wins with no collision handling.
+
+    Any change to the value restarts the Bazel server on the next build
+    (`--host_jvm_args` is a server startup option), discarding the warm
+    analysis cache once."""
+    if percent < 0 or percent > 100:
+        fail("server_heap_percent must be between 0 and 100 (0 disables), got %d" % percent)
+    if percent == 0:
+        return []
+    return [_SERVER_HEAP_FLAG_PREFIX + str(percent)]
+
+def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str, server_heap_percent: int = DEFAULT_SERVER_HEAP_PERCENT) -> (list, list):
     """Generate the full bazelrc flag set for an Aspect Workflows runner.
 
     The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
@@ -387,6 +416,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
         environment: WorkflowsEnvironment. Caller must have verified
                      `runner != None` (output_base/output_user_root come from it).
         aspect_root_dir: absolute path to the Aspect project root.
+        server_heap_percent: percent of RAM the Bazel server JVM may use as heap
+                     (see `server_heap_startup_flags`); 0 emits no heap flag.
 
     Returns:
         (startup_flags, build_flags): two lists; build_flags may contain
@@ -428,6 +459,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     else:
         startup_flags.append("--output_user_root=" + bazel_root + "/" + subdir)
         startup_flags.append("--output_base=" + output_root + "/" + subdir)
+
+    startup_flags.extend(server_heap_startup_flags(server_heap_percent))
 
     return (startup_flags, build_flags)
 
