@@ -819,7 +819,12 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info()?;
+        // Probe with the invocation's own startup flags so the answer describes
+        // the server this command will talk to. A bare `bazel info` reads the rc
+        // files instead, which can name a different output base — or the same
+        // one with different options, in which case the invocation restarts the
+        // server and the pid returned here is dead before the build begins.
+        let (pid, version) = super::info::server_info_with_startup_flags(&startup_flags)?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -889,22 +894,17 @@ impl Build {
             }
         }
 
-        let mut execlog_stream = if execution_logs {
+        // The reader itself starts after `cmd.spawn()`, keyed on the child pid.
+        let execlog_out = if execution_logs {
             // If there is a CompactFile sink, let Bazel write directly to its path
             // so no separate temp file or tee step is needed for that copy.
-            let direct_path = if compact_paths.is_empty() {
-                None
+            let out = if compact_paths.is_empty() {
+                std::env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()))
             } else {
-                Some(std::path::PathBuf::from(compact_paths.remove(0)))
+                std::path::PathBuf::from(compact_paths.remove(0))
             };
-            let (out, stream) = ExecLogStream::spawn_with_file(
-                pid,
-                direct_path,
-                compact_paths,
-                !decoded_sinks.is_empty(),
-            )?;
             cmd.arg("--execution_log_compact_file").arg(&out);
-            Some(stream)
+            Some(out)
         } else {
             None
         };
@@ -928,6 +928,20 @@ impl Build {
         // CI cancellation. The guard is stored on `Self` and unregisters
         // when the `Build` is dropped (after `wait()`).
         let live_guard = super::live::register(child.id());
+
+        // Bazel closes the execlog in afterCommand, before the client exits, so
+        // the client pid bounds the stream. The server pid does not: bazel may
+        // have just replaced that server to apply this invocation's startup
+        // options.
+        let mut execlog_stream = match execlog_out {
+            Some(out) => Some(ExecLogStream::spawn_with_file(
+                out,
+                child.id(),
+                compact_paths,
+                !decoded_sinks.is_empty(),
+            )?),
+            None => None,
+        };
 
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
@@ -1119,41 +1133,50 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // that window would target an unrelated process.
         build.live_guard.borrow_mut().take();
 
-        // Wait for BES stream to complete.
-        // Note: We don't take() the stream here so that build_events() can still
-        // be called after wait() to get historical events.
+        let mut stream_errors: Vec<String> = vec![];
+
+        // Note: We don't take() the BES stream here so that build_events() can
+        // still be called after wait() to get historical events.
         if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
-            match event_stream.join() {
-                Ok(_) => {}
-                Err(err) => anyhow::bail!("build event stream thread error: {}", err),
+            if let Err(err) = event_stream.join() {
+                stream_errors.push(format!("build event stream thread error: {err}"));
             }
         }
-
-        // Wait for Workspace event stream to complete.
-        let workspace_event_stream = build.workspace_event_stream.take();
-        if let Some(workspace_event_stream) = workspace_event_stream {
-            match workspace_event_stream.join() {
-                Ok(_) => {}
-                Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
+        if let Some(stream) = build.workspace_event_stream.take() {
+            if let Err(err) = stream.join() {
+                stream_errors.push(format!("workspace event stream thread error: {err}"));
             }
-        };
-
-        // Wait for Execlog stream to complete.
-        let execlog_stream = build.execlog_stream.take();
-        if let Some(execlog_stream) = execlog_stream {
-            match execlog_stream.join() {
-                Ok(_) => {}
-                Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
+        }
+        if let Some(stream) = build.execlog_stream.take() {
+            if let Err(err) = stream.join() {
+                stream_errors.push(format!("execlog stream thread error: {err}"));
             }
-        };
+        }
 
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
 
-        Ok(BuildStatus {
+        let status = BuildStatus {
             success: result.success(),
             code: result.code(),
-        })
+        };
+        if stream_errors.is_empty() {
+            return Ok(status);
+        }
+        // When bazel itself failed, its exit code is the finding and a dead
+        // side stream is usually a consequence. Keep the code visible instead
+        // of replacing it with the stream error.
+        if !status.success {
+            for err in &stream_errors {
+                errln!("WARNING: {err} (bazel exited with code {:?})", status.code);
+            }
+            return Ok(status);
+        }
+        anyhow::bail!(
+            "bazel exited with code {:?} but a stream failed: {}",
+            status.code,
+            stream_errors.join("; ")
+        )
     }
 }
 

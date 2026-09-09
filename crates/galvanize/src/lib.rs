@@ -238,13 +238,15 @@ impl Read for Pipe {
     }
 }
 
-/// A regular file that streams its contents as the writer (identified by `pid`) appends to it.
+/// A regular file that streams its contents while the process `pid` is alive.
 ///
-/// Busy-polls for file existence at open time, then reads with the same retry logic as
-/// [`Pipe`] with [`RetryPolicy::IfOpenForPid`]: on EOF, checks whether the writer process
-/// still has the file open. Returns `BrokenPipe` when the writer closes the file.
+/// `pid` is whichever process's lifetime bounds the stream — not necessarily
+/// the one holding the file open. For a bazel execlog that is the client: the
+/// server writes the file but closes it before the client exits, and the
+/// server itself may be replaced mid-invocation. Busy-polls for file existence
+/// at open time; on EOF returns `Ok(0)` while `pid` is alive and `BrokenPipe`
+/// once it has exited.
 pub struct StreamingFile {
-    path: PathBuf,
     inner: File,
     pid: u32,
 }
@@ -252,7 +254,6 @@ pub struct StreamingFile {
 impl StreamingFile {
     /// Polls until `path` exists (10 ms sleep between checks), then opens it.
     /// Returns `BrokenPipe` immediately if `pid` exits before the file appears.
-    /// Path is canonicalized after open for accurate fd matching.
     pub fn open(path: PathBuf, pid: u32) -> io::Result<Self> {
         while !path.exists() {
             if !is_pid_alive(pid) {
@@ -264,21 +265,20 @@ impl StreamingFile {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let inner = File::open(&path)?;
-        let path = path.canonicalize()?;
-        Ok(Self { path, inner, pid })
+        Ok(Self { inner, pid })
     }
 }
 
 impl Read for StreamingFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.inner.read(buf) {
-            // Ok(0): at the current end of the file. If the writer still has it open,
-            // return Ok(0) to signal "no data yet, try again later". If the writer
-            // has closed the file, the stream is done — signal BrokenPipe.
+            // Ok(0): at the current end of the file. While `pid` lives more may
+            // arrive, so signal "no data yet, try again later". Once it has
+            // exited the file is complete — signal BrokenPipe.
             // Callers that cannot tolerate Ok(0) (e.g. a zstd Decoder) should wrap
             // this in a blocking retry adapter.
             Ok(0) => {
-                if is_path_open_for_pid(&self.path, self.pid)? {
+                if is_pid_alive(self.pid) {
                     Ok(0)
                 } else {
                     Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream"))
@@ -404,6 +404,78 @@ mod tests {
             b"beforeafter".to_vec(),
             "a poke beside a live writer must not truncate the stream"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A regular-file path of our own; the test decides when (or whether) it exists.
+    fn scratch_file() -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "galvanize-test-{}-{}.log",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// A live pid that holds nothing open: `StreamingFile` must key on the pid
+    /// alone, so the writer handle is deliberately closed in these tests.
+    fn spawn_pid_holder() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to spawn sleep")
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn true");
+        let pid = child.id();
+        child.wait().expect("failed to reap true");
+        pid
+    }
+
+    #[test]
+    fn streaming_file_gives_up_when_the_pid_dies_before_the_file_appears() {
+        let err = StreamingFile::open(scratch_file(), dead_pid())
+            .err()
+            .expect("must not open a file that never appears");
+        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn streaming_file_ends_on_pid_exit_not_on_the_writer_closing() {
+        use std::io::Write as _;
+
+        let path = scratch_file();
+        let mut holder = spawn_pid_holder();
+        std::fs::write(&path, b"abc").expect("write");
+
+        let mut file = StreamingFile::open(path.clone(), holder.id()).expect("open");
+        let mut buf = [0u8; 8];
+        assert_eq!(file.read(&mut buf).expect("read"), 3);
+        assert_eq!(
+            file.read(&mut buf).expect("eof while the pid lives"),
+            0,
+            "no process holds the file open, but the bounding pid is alive: not the end yet"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(b"de"))
+            .expect("append");
+        assert_eq!(file.read(&mut buf).expect("read appended bytes"), 2);
+
+        holder.kill().expect("kill");
+        holder.wait().expect("reap");
+        let err = file
+            .read(&mut buf)
+            .err()
+            .expect("end of stream once the pid is gone");
+        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -136,7 +136,11 @@ fn resolve_rc_version(
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(info::server_info().ok().and_then(|t| t.1));
+        return Ok(
+            info::server_info_with_startup_flags(&rc.invocation_startup_flags())
+                .ok()
+                .and_then(|t| t.1),
+        );
     }
     Ok(None)
 }
@@ -171,9 +175,10 @@ fn resolve_flags<'v>(
 /// (`build` / `test` / `query`) so they filter conditional flags identically.
 fn resolve_flags_for_running_bazel<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    startup_flags: &[String],
 ) -> anyhow::Result<Vec<String>> {
     let version = if items.iter().any(|f| f.is_right()) {
-        info::server_info()
+        info::server_info_with_startup_flags(startup_flags)
             .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
             .1
     } else {
@@ -379,14 +384,17 @@ fn resolve_invocation_flags<'v>(
     rc_param: NoneOr<values::Value<'v>>,
     flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let extras = resolve_flags_for_running_bazel(flags)?;
     match effective_rc(this, rc_param) {
         Some(rc) => {
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
-            cmd.extend(extras);
+            cmd.extend(resolve_flags_for_running_bazel(flags, &startup)?);
             Ok((cmd, startup))
         }
-        None => Ok((extras, read_startup_flags(this)?)),
+        None => {
+            let startup = read_startup_flags(this)?;
+            let extras = resolve_flags_for_running_bazel(flags, &startup)?;
+            Ok((extras, startup))
+        }
     }
 }
 
@@ -759,14 +767,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<query::Query> {
         require_claimed_flags(this)?;
-        let extras = resolve_flags_for_running_bazel(&flags.items)?;
         let (startup, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
                 let (startup, mut base) = rc.resolve_for_command("query")?;
-                base.extend(extras);
+                base.extend(resolve_flags_for_running_bazel(&flags.items, &startup)?);
                 (startup, base)
             }
-            None => (read_startup_flags(this)?, extras),
+            None => {
+                let startup = read_startup_flags(this)?;
+                let extras = resolve_flags_for_running_bazel(&flags.items, &startup)?;
+                (startup, extras)
+            }
         };
         query::run(
             &expr,
