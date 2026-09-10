@@ -124,6 +124,7 @@ def _login_impl(ctx: TaskContext) -> int:
         return 1
 
     deployment = ctx.args.deployment
+    browser_login = not ctx.args.with_token and not ctx.args.with_api_token
     if ctx.args.with_token:
         token = ctx.std.io.stdin.read_to_string().strip()
         if not token:
@@ -147,12 +148,47 @@ def _login_impl(ctx: TaskContext) -> int:
     profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
     ctx.aspect.auth.persist(creds, profile = profile)
     print("Logged in as " + creds.name + " (" + creds.email + ")")
+
+    # A bare interactive login also records the Aspect-hosted deployment, so
+    # --remote works without a separate `auth configure`. Skipped when the user
+    # targeted a specific deployment or pinned a --profile (both say where this
+    # credential belongs), and skipped for the stdin-token flows: those are the CI
+    # paths, where a discovery probe would add a network dependency to a login that
+    # otherwise needs none, and where the deployment is normally declared in the
+    # repo's own .aspect/config.json instead.
+    if browser_login and not deployment and not ctx.args.profile:
+        _configure_aspect_cloud(ctx, creds)
     return 0
+
+def _configure_aspect_cloud(ctx: TaskContext, creds):
+    """Record the Aspect-hosted deployment and file `creds` against it.
+
+    Best-effort by design — every failure path returns quietly, because this runs
+    after a login that already succeeded: an unreachable endpoint must not turn a
+    successful login into a failed command. The endpoint credential is the same
+    grant's id_token (what a cache/BES edge validates), so there is no second
+    browser round trip; a grant without one leaves the deployment configured but
+    unauthenticated, which `auth status` reports and `auth login --deployment`
+    fixes.
+    """
+    info = ctx.aspect.auth.configure_default()
+    if info.status != "ok" or not info.can_login:
+        return
+    endpoint_creds = creds.for_endpoint()
+    if endpoint_creds == None:
+        return
+    ctx.aspect.auth.persist(endpoint_creds, profile = info.name)
+    print("")
+    print("Configured deployment '" + info.name + "' for remote cache and BES.")
+    if info.is_default:
+        _print_default_usage_hint()
+    else:
+        print("Run `aspect auth use " + info.name + "` to make it the default deployment.")
 
 login = task(
     group = ["auth"],
     summary = "Log in to your Aspect account or a Workflows deployment",
-    description = "Authenticate via the browser (or a token on stdin) and store the credential. Targets your Aspect account by default (used for Aspect Cloud services such as the GitHub App API on CI); pass --deployment <name> to log in to a configured Workflows deployment instead.",
+    description = "Authenticate via the browser (or a token on stdin) and store the credential. Targets your Aspect account by default (used for Aspect Cloud services such as the GitHub App API on CI), and also records the Aspect-hosted deployment so `--remote` works straight away; pass --deployment <name> to log in to a configured Workflows deployment instead.",
     implementation = _login_impl,
     args = {
         "with_token": args.boolean(

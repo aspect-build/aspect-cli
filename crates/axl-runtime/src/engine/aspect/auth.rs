@@ -148,8 +148,27 @@ struct AuthEnv {
 /// configured deployment from taking its name.
 const DEFAULT_DEPLOYMENT_NAME: &str = "aspect";
 const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
-const DEFAULT_CLIENT_ID: &str = "771ff228-18a1-43f0-bc83-62c9df0d72ca";
+/// The account's PKCE client — the "Aspect Build" application client.
+///
+/// A constant rather than a discovered value: the account logs in to
+/// [`DEFAULT_API_URL`], and an account login must not depend on reaching another
+/// host. [`DEFAULT_ENDPOINT_HOST`] advertises this same client for the deployment
+/// it serves, so a discovered login and this one agree.
+const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
+
+/// The Aspect-hosted deployment the built-in account fronts: the remote cache and
+/// BES that Aspect Cloud serves. The account seed itself owns no endpoints (it
+/// addresses [`DEFAULT_API_URL`]), so a bare `aspect auth login` discovers this
+/// host and records it as an ordinary deployment — see [`configure_default`].
+/// That way a fresh install has a working `--remote` without anyone having to
+/// run `aspect auth configure remote.app.aspect.build` by hand.
+///
+/// The name is pinned rather than derived: [`deployment_name_from_host`] would
+/// yield the bare `app`, which reads as a generic word wherever a deployment is
+/// named (`auth status`, `--deployment`).
+const DEFAULT_ENDPOINT_HOST: &str = "remote.app.aspect.build";
+const DEFAULT_ENDPOINT_NAME: &str = "aspect-cloud";
 
 /// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
 /// sit under (`remote.<deployment>.aspect.build`).
@@ -856,6 +875,87 @@ fn save_user_deployment(deployment: Deployment) -> anyhow::Result<bool> {
     let is_default = upsert_deployment(&mut existing, deployment)?;
     write_user_config(existing)?;
     Ok(is_default)
+}
+
+/// Discover `host`'s deployment and record it in the user's `config.json`,
+/// returning the [`DeploymentInfo`] the `configure` task renders. Shared by
+/// [`Auth::configure`] (a host the user typed) and [`Auth::configure_default`]
+/// (the compiled-in Aspect-hosted endpoint).
+///
+/// The returned `status` distinguishes every outcome the caller reports:
+/// `"unreachable"` (transport failure, `reason` carries a terse cause),
+/// `"not_a_deployment"` (reached, but serves no `aspect_endpoints`),
+/// `"needs_issuer"` / `"issuer_not_advertised"` (the advertised servers come back
+/// in `auth_servers` so the caller can prompt from — or list — them), or `"ok"`.
+/// Only `"ok"` writes anything.
+///
+/// `name` overrides the host-derived deployment name, `issuer` selects among
+/// advertised authorization servers, and `make_default` forces the default crown;
+/// see [`Auth::configure`] for what each means to a user.
+fn configure_deployment(
+    host: &str,
+    name: Option<String>,
+    make_default: bool,
+    issuer: Option<String>,
+) -> anyhow::Result<DeploymentInfo> {
+    let host = endpoint_host_str(host);
+    // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
+    // Workflows deployment) so the task prints the right guidance rather than a
+    // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
+    // a deployment — probe_protected_resource requires it.
+    let mk = |status: &str, reason: String| DeploymentInfo {
+        status: status.to_string(),
+        reason,
+        name: String::new(),
+        can_login: false,
+        is_default: false,
+        hosts: Vec::new(),
+        auth_servers: Vec::new(),
+    };
+    let info = match block_on(probe_protected_resource(&host)) {
+        Discovery::Reachable(info) => info,
+        Discovery::Unreachable(reason) => return Ok(mk("unreachable", reason)),
+        Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
+    };
+    let name = name
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| deployment_name_from_host(&host));
+    let requested = issuer.filter(|s| !s.is_empty());
+    let candidates = info.auth_servers();
+    // Hand the advertised choices back so the task can prompt from them or list
+    // the valid values when `--issuer` names one that isn't advertised.
+    let with_candidates = |status: &str| DeploymentInfo {
+        status: status.to_string(),
+        reason: String::new(),
+        name: name.clone(),
+        can_login: false,
+        is_default: false,
+        hosts: Vec::new(),
+        auth_servers: candidates.iter().cloned().map(auth_server_info).collect(),
+    };
+    let selected = match resolve_auth_server(&candidates, requested.as_deref()) {
+        AuthServerChoice::Ambiguous => return Ok(with_candidates("needs_issuer")),
+        AuthServerChoice::NotAdvertised => return Ok(with_candidates("issuer_not_advertised")),
+        AuthServerChoice::Selected(s) => Some(s),
+        AuthServerChoice::None => None,
+    };
+    let mut deployment = deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
+    // `--default` forces this deployment to take the default crown (upsert
+    // then clears it on every other entry); without it, upsert only sets the
+    // default when none exists yet, so a second configure doesn't hijack it.
+    deployment.default = make_default;
+    let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
+    let hosts = deployment.hosts.clone();
+    let is_default = save_user_deployment(deployment)?;
+    Ok(DeploymentInfo {
+        status: "ok".to_string(),
+        reason: String::new(),
+        name,
+        can_login,
+        is_default,
+        hosts,
+        auth_servers: Vec::new(),
+    })
 }
 
 /// Drop the entry named `name` from a configured-deployment list (the file's
@@ -1937,6 +2037,12 @@ pub struct AuthCredentials {
     pub(crate) auth_domain: Option<String>,
     pub(crate) auth_client_id: Option<String>,
     pub(crate) prefer_id_token: bool,
+    /// The `id_token` from the same grant, kept beside the chosen bearer so one
+    /// browser flow can file both an account credential and an endpoint one (see
+    /// [`Self::for_endpoint`]). Empty for a login that never saw a token response
+    /// (`--with-token`) or whose grant omitted an id_token, and never persisted —
+    /// [`AuthCredentials::to_entry`] writes only the bearer in `access_token`.
+    pub(crate) id_token: String,
 }
 
 starlark_simple_value!(AuthCredentials);
@@ -1995,6 +2101,29 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
     }
+
+    /// The same login re-cast as an endpoint credential: the bearer becomes this
+    /// grant's `id_token`, which is what a deployment's cache/BES edge validates,
+    /// and `prefer_id_token` is set so a later refresh keeps minting one rather
+    /// than downgrading to the access_token.
+    ///
+    /// Lets a single browser flow serve both the Aspect account (access_token,
+    /// filed under the default profile) and the Aspect-hosted deployment
+    /// (id_token, filed under its own) — see the bare-login path in `auth.axl`.
+    /// Returns `None` when the grant issued no id_token, so the caller skips the
+    /// endpoint credential instead of persisting a bearer the edge would reject.
+    fn for_endpoint<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
+        Ok(match creds.endpoint_entry()? {
+            Some(entry) => heap.alloc(AuthCredentials::from_entry(&entry)),
+            None => values::Value::new_none(),
+        })
+    }
 }
 
 impl AuthCredentials {
@@ -2011,7 +2140,30 @@ impl AuthCredentials {
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
             prefer_id_token: entry.prefer_id_token,
+            // A stored entry keeps only its bearer; the id_token is transport-only
+            // and is attached by `finish_auth_session` when a grant supplied one.
+            id_token: String::new(),
         }
+    }
+
+    /// This login re-cast as an endpoint credential — the grant's `id_token` as the
+    /// bearer, `prefer_id_token` set so refresh keeps minting one. `None` when the
+    /// grant issued no id_token. Backs [`Self::for_endpoint`]; see it for why.
+    ///
+    /// The refresh token and issuer/client are carried over deliberately: it is the
+    /// same grant, so the endpoint credential renews on the same chain rather than
+    /// needing its own login.
+    fn endpoint_entry(&self) -> anyhow::Result<Option<CredentialsEntry>> {
+        if self.id_token.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(CredentialsEntry::from_bearer(
+            self.id_token.clone(),
+            self.refresh_token.clone(),
+            self.auth_domain.clone(),
+            self.auth_client_id.clone(),
+            true,
+        )?))
     }
 
     fn to_entry(&self) -> CredentialsEntry {
@@ -2051,12 +2203,17 @@ struct AuthSessionInner {
 impl AuthSessionInner {
     /// With `require_state = false`, an omitted state is allowed but a supplied one
     /// is still validated.
+    ///
+    /// Returns the credential for this session's own bearer, plus the grant's
+    /// `id_token` (empty when it issued none) so the caller can also file an
+    /// endpoint credential from the same exchange without a second browser round
+    /// trip — see [`AuthCredentials::for_endpoint`].
     async fn complete(
         self,
         code: String,
         state: Option<String>,
         require_state: bool,
-    ) -> anyhow::Result<CredentialsEntry> {
+    ) -> anyhow::Result<(CredentialsEntry, String)> {
         let token_url = match &self.kind {
             SessionKind::Cloud => format!("{}/oauth/token", self.env.domain),
             SessionKind::Endpoint { expected_state } => {
@@ -2077,16 +2234,18 @@ impl AuthSessionInner {
         )
         .await?;
         let refresh_token = token_resp.refresh_token.clone();
+        let id_token = token_resp.id_token.clone();
         // Self-hosted edges validate the id_token; the cloud flow the
         // access_token. Record which so refresh keeps minting the same kind.
         let prefer_id_token = matches!(self.kind, SessionKind::Endpoint { .. });
-        CredentialsEntry::from_bearer(
+        let entry = CredentialsEntry::from_bearer(
             token_resp.bearer(prefer_id_token)?,
             refresh_token,
             Some(self.env.domain.clone()),
             Some(self.env.client_id.clone()),
             prefer_id_token,
-        )
+        )?;
+        Ok((entry, id_token))
     }
 }
 
@@ -2118,7 +2277,7 @@ fn finish_auth_session(
         .take()
         .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
     drop(guard);
-    let entry = if let Some(pasted) = pasted {
+    let (entry, id_token) = if let Some(pasted) = pasted {
         let (code, state) = parse_pasted_callback(pasted)?;
         block_on(inner.complete(code, state, false))?
     } else {
@@ -2131,7 +2290,9 @@ fn finish_auth_session(
             inner.complete(code, state, true).await
         })?
     };
-    Ok(AuthCredentials::from_entry(&entry))
+    let mut creds = AuthCredentials::from_entry(&entry);
+    creds.id_token = id_token;
+    Ok(creds)
 }
 
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -2844,70 +3005,37 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] issuer: NoneOr<String>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let host = endpoint_host_str(host);
-        // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
-        // Workflows deployment) so the task prints the right guidance rather than a
-        // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
-        // a deployment — probe_protected_resource requires it.
-        let mk = |status: &str, reason: String| DeploymentInfo {
-            status: status.to_string(),
-            reason,
-            name: String::new(),
-            can_login: false,
-            is_default: false,
-            hosts: Vec::new(),
-            auth_servers: Vec::new(),
-        };
-        let info = match block_on(probe_protected_resource(&host)) {
-            Discovery::Reachable(info) => info,
-            Discovery::Unreachable(reason) => return Ok(heap.alloc(mk("unreachable", reason))),
-            Discovery::NotADeployment => {
-                return Ok(heap.alloc(mk("not_a_deployment", String::new())));
-            }
-        };
-        let name = name
-            .into_option()
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| deployment_name_from_host(&host));
-        let requested = issuer.into_option().filter(|s| !s.is_empty());
-        let candidates = info.auth_servers();
-        // Hand the advertised choices back so the task can prompt from them or list
-        // the valid values when `--issuer` names one that isn't advertised.
-        let with_candidates = |status: &str| DeploymentInfo {
-            status: status.to_string(),
-            reason: String::new(),
-            name: name.clone(),
-            can_login: false,
-            is_default: false,
-            hosts: Vec::new(),
-            auth_servers: candidates.iter().cloned().map(auth_server_info).collect(),
-        };
-        let selected = match resolve_auth_server(&candidates, requested.as_deref()) {
-            AuthServerChoice::Ambiguous => return Ok(heap.alloc(with_candidates("needs_issuer"))),
-            AuthServerChoice::NotAdvertised => {
-                return Ok(heap.alloc(with_candidates("issuer_not_advertised")));
-            }
-            AuthServerChoice::Selected(s) => Some(s),
-            AuthServerChoice::None => None,
-        };
-        let mut deployment =
-            deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
-        // `--default` forces this deployment to take the default crown (upsert
-        // then clears it on every other entry); without it, upsert only sets the
-        // default when none exists yet, so a second configure doesn't hijack it.
-        deployment.default = make_default;
-        let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
-        let hosts = deployment.hosts.clone();
-        let is_default = save_user_deployment(deployment)?;
-        Ok(heap.alloc(DeploymentInfo {
-            status: "ok".to_string(),
-            reason: String::new(),
-            name,
-            can_login,
-            is_default,
-            hosts,
-            auth_servers: Vec::new(),
-        }))
+        Ok(heap.alloc(configure_deployment(
+            host,
+            name.into_option(),
+            make_default,
+            issuer.into_option(),
+        )?))
+    }
+
+    /// Discover and record the Aspect-hosted deployment the built-in account
+    /// fronts ([`DEFAULT_ENDPOINT_HOST`] as [`DEFAULT_ENDPOINT_NAME`]), so a bare
+    /// `aspect auth login` leaves `--remote` working without a separate
+    /// `auth configure`. Returns the same [`DeploymentInfo`] shape as
+    /// [`Self::configure`]; the caller treats any non-`"ok"` status as "skip and
+    /// carry on", never as a login failure.
+    ///
+    /// The issuer is pinned to [`DEFAULT_ISSUER`] rather than taken from the
+    /// document: discovery here is not user-initiated (the host is compiled in,
+    /// not typed), so the endpoint may name the PKCE client to use but may not
+    /// redirect the account's login to a different authorization server. A
+    /// document advertising only some other issuer resolves to
+    /// `"issuer_not_advertised"` and records nothing.
+    fn configure_default<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        Ok(heap.alloc(configure_deployment(
+            DEFAULT_ENDPOINT_HOST,
+            Some(DEFAULT_ENDPOINT_NAME.to_string()),
+            false,
+            Some(DEFAULT_ISSUER.to_string()),
+        )?))
     }
 
     /// The Bazel-facing endpoints (`cache`/`bes`/`exec` hosts) advertised by the
@@ -3854,6 +3982,87 @@ mod tests {
             id_token: id_token.into(),
             refresh_token: String::new(),
         }
+    }
+
+    /// The auto-configured deployment must be upsertable: a [`RESERVED_NAMES`]
+    /// name would make every bare login's `configure_default` fail the reserved-name
+    /// check in `upsert_deployment`, silently losing the endpoint config.
+    #[test]
+    fn default_endpoint_name_is_not_reserved() {
+        assert!(!is_reserved_name(DEFAULT_ENDPOINT_NAME));
+        let mut existing = Vec::new();
+        assert!(upsert_deployment(&mut existing, dep(DEFAULT_ENDPOINT_NAME, false)).is_ok());
+    }
+
+    /// `configure_default` pins the issuer to the account's own rather than taking
+    /// whichever the endpoint advertises, so a compiled-in host can name the PKCE
+    /// client to use but cannot redirect the account's login elsewhere.
+    #[test]
+    fn configure_default_takes_the_client_id_but_pins_the_issuer() {
+        let doc = |issuer: &str, client_id: &str| ProtectedResource {
+            resource: format!("https://{DEFAULT_ENDPOINT_HOST}"),
+            aspect_authorization_servers: vec![AspectAuthServer {
+                issuer: issuer.to_string(),
+                client_id: client_id.to_string(),
+                scopes: vec!["openid".to_string()],
+                authorize_params: BTreeMap::new(),
+            }],
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: DEFAULT_ENDPOINT_HOST.to_string(),
+                bes: "bes.app.aspect.build".to_string(),
+                exec: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+        };
+
+        // The advertised client_id is adopted, which is what lets the client ID be
+        // rotated server-side without a CLI release.
+        let advertised = doc(DEFAULT_ISSUER, "new-client-id");
+        match resolve_auth_server(&advertised.auth_servers(), Some(DEFAULT_ISSUER)) {
+            AuthServerChoice::Selected(s) => assert_eq!(s.client_id, "new-client-id"),
+            _ => panic!("the account's own issuer should resolve"),
+        }
+
+        // An endpoint advertising some other issuer records nothing.
+        let hijacked = doc("https://auth.evil.example.com", "new-client-id");
+        assert!(matches!(
+            resolve_auth_server(&hijacked.auth_servers(), Some(DEFAULT_ISSUER)),
+            AuthServerChoice::NotAdvertised
+        ));
+    }
+
+    /// One browser grant files two credentials: the account keeps the access_token,
+    /// the endpoint gets the id_token on the same refresh chain.
+    #[test]
+    fn endpoint_entry_recasts_the_same_grant_onto_the_id_token() {
+        let entry = CredentialsEntry::from_bearer(
+            jwt_with_payload(r#"{"email":"a@b.c","name":"A","tenantId":"t"}"#),
+            "refresh-abc".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            false,
+        )
+        .unwrap();
+        let mut creds = AuthCredentials::from_entry(&entry);
+        creds.id_token = jwt_with_payload(r#"{"email":"a@b.c","name":"A","tenantId":"t"}"#);
+
+        let endpoint = creds.endpoint_entry().unwrap().expect("an id_token grant");
+        assert_eq!(endpoint.access_token, creds.id_token);
+        // Set so a later refresh keeps minting an id_token rather than downgrading
+        // to the access_token the edge would reject.
+        assert!(endpoint.prefer_id_token);
+        // Same grant, so it renews on the same chain instead of needing its own login.
+        assert_eq!(endpoint.refresh_token, "refresh-abc");
+        assert_eq!(endpoint.auth_client_id.as_deref(), Some(DEFAULT_CLIENT_ID));
+
+        // A grant with no id_token yields nothing rather than a bearer the edge
+        // would reject.
+        creds.id_token = String::new();
+        assert!(creds.endpoint_entry().unwrap().is_none());
     }
 
     #[test]
