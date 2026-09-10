@@ -14,7 +14,7 @@ Setup, once per developer:
   3. Register the server in the AI tool's MCP config, e.g. `.mcp.json`:
        {"mcpServers": {"aspect": {"command": "aspect", "args": ["mcp"]}}}
 
-The server targets the default configured deployment; add `--deployment <name>` to the args to pin one. For several deployments, register one entry per deployment (e.g. `aspect-staging`, `aspect-prod`) with distinct `--deployment` args. Requires the deployment to run Aspect Workflows 6.1+ with `webapp.web.api_enabled = true`; each tool call authenticates with the stored credential and refreshes it automatically.""",
+The server targets the default configured deployment; add `--deployment <name>` to the args to pin one. For several deployments, register one entry per deployment (e.g. `aspect-staging`, `aspect-prod`) with distinct `--deployment` args. Requires the deployment to run Aspect Workflows 6.0.30+ with `webapp.web.api_enabled = true`; each tool call authenticates with the stored credential and refreshes it automatically.""",
     implementation = _mcp_impl,
     args = {
         "deployment": args.string(

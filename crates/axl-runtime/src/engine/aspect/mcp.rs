@@ -9,7 +9,7 @@
 //!
 //! The API host comes from the deployment's advertised build-results viewer URL
 //! (`aspect_bes_results_url`, recorded by `aspect auth configure`). The REST
-//! API ships in Aspect Workflows 6.1 and is opt-in (`webapp.web.api_enabled`),
+//! API ships in Aspect Workflows 6.0.30 and is opt-in (`webapp.web.api_enabled`),
 //! and the CLI reaches customers before their deployments upgrade — so when the
 //! one startup probe (the RFC 9728 discovery document, the only unauthenticated
 //! path) finds no API, the server still starts and every tool returns the
@@ -58,7 +58,7 @@ const MAX_LIMIT: u64 = 100;
 fn api_unavailable_message(deployment: &str, api_origin: &str) -> String {
     format!(
         "The deployment '{deployment}' ({api_origin}) does not expose the REST API the MCP server \
-         needs. It requires Aspect Workflows 6.1 or later with `webapp.web.api_enabled = true` — \
+         needs. It requires Aspect Workflows 6.0.30 or later with `webapp.web.api_enabled = true` — \
          see {DOCS_URL}. Ask your Workflows operator to enable it."
     )
 }
