@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn gating_message_names_version_flag_and_docs() {
         let msg = api_unavailable_message("acme", "https://app.acme.example.com");
-        for needle in ["6.1", "webapp.web.api_enabled", DOCS_URL, "acme"] {
+        for needle in ["6.0.30", "webapp.web.api_enabled", DOCS_URL, "acme"] {
             assert!(msg.contains(needle), "missing {needle}: {msg}");
         }
     }
