@@ -163,19 +163,30 @@ def _login_impl(ctx: TaskContext) -> int:
 def _configure_aspect_cloud(ctx: TaskContext, creds):
     """Record the Aspect-hosted deployment and file `creds` against it.
 
-    Best-effort by design — every failure path returns quietly, because this runs
-    after a login that already succeeded: an unreachable endpoint must not turn a
-    successful login into a failed command. The endpoint credential is the same
-    grant's id_token (what a cache/BES edge validates), so there is no second
-    browser round trip; a grant without one leaves the deployment configured but
-    unauthenticated, which `auth status` reports and `auth login --deployment`
-    fixes.
+    Best-effort by design: this runs after a login that already succeeded, so an
+    endpoint we cannot reach or configure must never turn that into a failed
+    command. It returns without an error either way.
+
+    The endpoint credential is the same grant's id_token — what a cache/BES edge
+    validates — so there is no second browser round trip.
+
+    The two early returns are not equivalent, which is why only the second says
+    anything. Discovery failing leaves nothing behind. `for_endpoint` returning
+    None happens *after* the deployment is recorded, leaving it configured but
+    unauthenticated, so that one warns rather than letting `auth status` be the
+    only place it surfaces. That should not be reachable here — a credential
+    carries no id_token only when it came from a refresh grant (permitted to omit
+    one) or was read back from the store (which never keeps it), and this is
+    always a fresh authorization-code result — so the warning doubles as the
+    signal that something upstream changed.
     """
     info = ctx.aspect.auth.configure_default()
     if info.status != "ok" or not info.can_login:
         return
     endpoint_creds = creds.for_endpoint()
     if endpoint_creds == None:
+        warn(ctx.std, "Configured deployment '" + info.name + "' but could not authenticate it: the login returned no id_token.")
+        print("Run `aspect auth login --deployment " + info.name + "` to finish setting it up.")
         return
     ctx.aspect.auth.persist(endpoint_creds, profile = info.name)
     print("")
