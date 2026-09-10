@@ -723,7 +723,7 @@ def _new_upload_group():
         "label_urls": {},
     }
 
-def _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
+def _trace_summary(ctx, items, channels, skipped_files, attempts, bep_path, uploader_active):
     """Optional per-task debug summary printed when `trace.enabled`."""
     if not trace.enabled:
         return
@@ -731,8 +731,12 @@ def _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_pa
     trace.log("------------------------------------")
     trace.log("artifact upload debug summary:")
     trace.log("uploader: " + ("active" if uploader_active else "none"))
-    trace.log("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
-    trace.log("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
+
+    # Per attempt, because a retry moves each attempt's profile and exec log to
+    # its own path; the canonical ones no longer exist by this point.
+    for i, saved in enumerate(attempts):
+        for kind, path, _name in saved:
+            trace.log("%s (attempt %d): %s (exists=%s)" % (kind, i + 1, path, str(ctx.std.fs.exists(path))))
     trace.log("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
     for channel in channels:
         trace.log(channel.basename + " entries: " + str(len(channel.entries)))
@@ -839,6 +843,37 @@ def _artifact_upload_impl(ctx: FeatureContext):
     if upload_bep:
         bazel_trait.build_event_sinks.append(bazel.build_events.file(path = bep_path))
 
+    # Bazel writes these two itself from the flags above, to one path that every
+    # retry attempt reuses, so attempt N+1 truncates attempt N's file. The
+    # attempt worth analysing is precisely the one that failed, and it is the
+    # one lost. `bep_path` is not here: the CLI owns that sink, not Bazel.
+    retained = []
+    if upload_profile:
+        retained.append(("profile", profile_path, "profile.gz"))
+    if upload_exec_log:
+        retained.append(("execlog", execlog_path, "execlog.zstd"))
+
+    # One entry per completed attempt, each a list of (kind, path, name).
+    attempts = []
+
+    def _retain_attempt(ctx, _exit_code) -> None:
+        """Move this attempt's Bazel-written files aside before the next one
+        truncates them. Fires from `bazel_attempt_end`, after `wait()` returns
+        and before the retry decision, so the file is complete and closed."""
+        saved = []
+        for kind, src, name in retained:
+            if not ctx.std.fs.exists(src):
+                continue
+
+            # Same directory, so the rename cannot cross filesystems.
+            dest = "%s/%s.attempt-%d.%s" % (tmpdir, uuid, len(attempts) + 1, name)
+            ctx.std.fs.rename(src, dest)
+            saved.append((kind, dest, name))
+        attempts.append(saved)
+
+    if retained:
+        bazel_trait.bazel_attempt_end.append(_retain_attempt)
+
     # One `_LogChannel` per collected-log stream (test logs, build logs). Each
     # owns an entry list + upload group so they batch, flush, and roll-replace
     # independently through the same per-CI strategies.
@@ -903,6 +938,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
             _flush(ctx, channel, final = False)
 
     def _on_build_end(ctx, exit_code):
+        # A bazel driver that dispatches no attempt-end hook leaves `attempts`
+        # empty, so fall back to reading the un-moved canonical paths.
+        completed = attempts if attempts else [retained]
+
         if not is_local:
             reason = uploader.check(ctx)
             if reason:
@@ -915,19 +954,24 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 # removed on success AND failure (no retry, so a leftover
                 # file just leaks a potentially-sensitive artifact).
                 singletons = []
-                if upload_profile:
-                    singletons.append(("profile", profile_path, "profile.gz"))
                 if upload_bep:
                     singletons.append(("bep", bep_path, "bep.binpb"))
-                if upload_exec_log:
-                    singletons.append(("execlog", execlog_path, "execlog.zstd"))
+
+                # The last attempt keeps the canonical artifact name, so a task
+                # that never retried uploads exactly what it always did; the
+                # earlier ones are numbered rather than dropped.
+                for i, saved in enumerate(completed):
+                    is_last = i == len(completed) - 1
+                    for kind, src, name in saved:
+                        singletons.append((kind, src, name if is_last else "attempt-%d.%s" % (i + 1, name)))
+
                 for kind, src, filename in singletons:
                     if not ctx.std.fs.exists(src):
                         continue
                     _upload_file(ctx, kind, filename, src)
                     ctx.std.fs.remove_file(src)
 
-        _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, not is_local)
+        _trace_summary(ctx, items, channels, skipped_files, completed, bep_path, not is_local)
 
         # Reap channel scratch unconditionally — even when check() skipped the
         # upload, build events may have already staged log files.
