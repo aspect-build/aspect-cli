@@ -170,6 +170,36 @@ const DEFAULT_API_URL: &str = "https://api.aspect.build";
 /// is folded back into the seed on load — see [`overlay_config_sources`].
 const DEFAULT_ENDPOINT_HOST: &str = "remote.app.aspect.build";
 
+/// The hosts Aspect Cloud serves itself. `configure` records their endpoints on
+/// the built-in account rather than deriving a deployment name from the host, so
+/// `aspect auth configure remote.app.aspect.build` lands in the same place as a
+/// bare login instead of creating an `app` deployment beside the account.
+///
+/// An allowlist rather than "anything on [`DEFAULT_ISSUER`]": the issuer is the
+/// right *safety* check (see [`configure_deployment`]) but too broad an identity
+/// one — a future Aspect-hosted deployment sharing that issuer would silently
+/// absorb into the account. An explicit `--name` still wins, so a second entry
+/// for these hosts stays possible when someone wants one.
+const ACCOUNT_HOSTS: &[&str] = &[
+    "api.aspect.build",
+    "app.aspect.build",
+    "remote.aspect.build",
+    "cache.aspect.build",
+    "exec.aspect.build",
+];
+
+/// Everything under the Aspect Cloud deployment's own domain (`remote.app…`,
+/// `bes.app…`), which [`ACCOUNT_HOSTS`] covers only at the apex.
+const ACCOUNT_HOST_SUFFIX: &str = ".app.aspect.build";
+
+/// Whether `host` is served by Aspect Cloud itself — see [`ACCOUNT_HOSTS`].
+/// `host` is already normalized by [`endpoint_host_str`]; the trailing dot of an
+/// absolute FQDN is stripped so `app.aspect.build.` still matches.
+fn is_account_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ACCOUNT_HOSTS.contains(&host.as_str()) || host.ends_with(ACCOUNT_HOST_SUFFIX)
+}
+
 /// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
 /// sit under (`remote.<deployment>.aspect.build`).
 /// [`deployment_name_from_host`] strips it so an Aspect-hosted endpoint yields a
@@ -945,9 +975,22 @@ fn configure_deployment(
     };
     // Only a name the caller typed can claim the account; a derived one that
     // happens to collide is refused by `upsert_deployment`.
+    // The account is claimed either by naming it or by configuring a host Aspect
+    // Cloud serves. A derived name that merely collides (`remote.aspect.aspect.build`
+    // → `aspect`) is not the account and is refused by `upsert_deployment`, so
+    // nobody extends their account by accident.
     let explicit_name = name.filter(|n| !n.is_empty());
-    let explicit_account = explicit_name.as_deref() == Some(DEFAULT_DEPLOYMENT_NAME);
-    let name = explicit_name.unwrap_or_else(|| deployment_name_from_host(&host));
+    let explicit_account = match explicit_name.as_deref() {
+        Some(name) => name == DEFAULT_DEPLOYMENT_NAME,
+        None => is_account_host(&host),
+    };
+    let name = explicit_name.unwrap_or_else(|| {
+        if explicit_account {
+            DEFAULT_DEPLOYMENT_NAME.to_string()
+        } else {
+            deployment_name_from_host(&host)
+        }
+    });
     // Endpoints recorded under the account's own name are folded into the seed and
     // reached with the account's own credential, so only a deployment on the
     // account's issuer may claim them: `hosts` is the auth gate, and a host on some
@@ -3416,7 +3459,10 @@ mod tests {
     fn login_profile_keys_on_the_account_flag_not_hosts() {
         // The built-in account → the default profile, with or without endpoints
         // (see `the_account_keeps_the_default_profile_once_it_has_endpoints`).
-        assert_eq!(login_profile_for(&default_deployment()), DEFAULT_PROFILE);
+        assert_eq!(
+            login_profile_for(&default_deployment()),
+            resolve_profile(None)
+        );
         // Any configured deployment → its own name, hosts or not: it is a
         // separate identity, so it never shares the account's slot.
         let mut hostless = dep("acme", false);
@@ -4032,6 +4078,42 @@ mod tests {
         }
     }
 
+    /// Aspect Cloud's own hosts resolve to the account; everything else derives a
+    /// deployment name from the host as before. An explicit `--name` still wins,
+    /// so a separate entry for these hosts stays possible.
+    #[test]
+    fn aspect_cloud_hosts_resolve_to_the_account() {
+        for host in [
+            "api.aspect.build",
+            "app.aspect.build",
+            "remote.aspect.build",
+            "cache.aspect.build",
+            "exec.aspect.build",
+            // Everything under the Aspect Cloud deployment's own domain.
+            "remote.app.aspect.build",
+            "bes.app.aspect.build",
+            // Case and an absolute FQDN's trailing dot are tolerated.
+            "BES.App.Aspect.Build.",
+        ] {
+            assert!(is_account_host(host), "{host} should belong to the account");
+        }
+
+        for host in [
+            // Another Aspect-hosted deployment is its own thing.
+            "remote.silo-aws.aspect.build",
+            "bes.gcp.awd-gha-test-dev.aspect.build",
+            // Self-hosted, and a lookalike that must not match the suffix.
+            "remote.acme.example.com",
+            "app.aspect.build.evil.com",
+            "notapp.aspect.build",
+        ] {
+            assert!(
+                !is_account_host(host),
+                "{host} should be its own deployment"
+            );
+        }
+    }
+
     /// The account's own name is writable when the caller asks for it by name —
     /// that entry enriches the seed rather than shadowing it, which is what
     /// `configure --name aspect` is for. A name that merely derives to it is still
@@ -4100,7 +4182,10 @@ mod tests {
     fn the_account_keeps_the_default_profile_once_it_has_endpoints() {
         let mut seed = default_deployment();
         seed.hosts = vec!["remote.app.aspect.build".to_string()];
-        assert_eq!(login_profile_for(&seed), DEFAULT_PROFILE);
+        // Compared against `resolve_profile`, not the literal: a sibling test sets
+        // $ASPECT_AUTH_PROFILE, and the invariant is that the account files under
+        // whatever the default profile resolves to.
+        assert_eq!(login_profile_for(&seed), resolve_profile(None));
 
         let mut configured = dep("acme", false);
         configured.hosts = vec!["remote.acme.example.com".to_string()];
