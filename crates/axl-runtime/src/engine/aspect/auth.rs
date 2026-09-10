@@ -164,11 +164,11 @@ const DEFAULT_API_URL: &str = "https://api.aspect.build";
 /// That way a fresh install has a working `--remote` without anyone having to
 /// run `aspect auth configure remote.app.aspect.build` by hand.
 ///
-/// The name is pinned rather than derived: [`deployment_name_from_host`] would
-/// yield the bare `app`, which reads as a generic word wherever a deployment is
-/// named (`auth status`, `--deployment`).
+/// It is recorded under the account's own name, not a second one: the account
+/// and the Aspect-hosted cache/BES are one deployment, so `auth status` shows a
+/// single Aspect entry and `--remote` needs no `--deployment`. The written entry
+/// is folded back into the seed on load — see [`overlay_config_sources`].
 const DEFAULT_ENDPOINT_HOST: &str = "remote.app.aspect.build";
-const DEFAULT_ENDPOINT_NAME: &str = "aspect-cloud";
 
 /// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
 /// sit under (`remote.<deployment>.aspect.build`).
@@ -313,6 +313,22 @@ fn overlay_config_sources(
     let mut shadowed: Vec<ShadowedDeployment> = Vec::new();
     for source in sources {
         for entry in source.entries {
+            if entry.name == DEFAULT_DEPLOYMENT_NAME {
+                // Not a shadow but an enrichment: the Aspect account and the
+                // Aspect-hosted cache/BES are one deployment, so an entry under
+                // the account's own name contributes the endpoints the seed
+                // cannot know (see `configure_default`, which writes it).
+                //
+                // Only the endpoint fields are taken. Identity — issuer,
+                // client_id, api_url — stays the seed's, so a hand-edited config
+                // can extend the account but can never redirect its login, which
+                // is the part of the old shadowing guard that mattered.
+                if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
+                    seed.hosts = entry.hosts;
+                    seed.endpoints = entry.endpoints;
+                }
+                continue;
+            }
             if is_reserved_name(&entry.name) {
                 tracing::warn!(
                     "ignoring deployment {:?} from {}: the name is reserved for the \
@@ -826,8 +842,13 @@ fn deployment_from_discovery(
 fn upsert_deployment(
     existing: &mut Vec<Deployment>,
     mut deployment: Deployment,
+    for_account: bool,
 ) -> anyhow::Result<bool> {
-    if is_reserved_name(&deployment.name) {
+    // The account's own name is writable only by `configure_default`, whose entry
+    // is folded back into the seed rather than shadowing it. Every user-facing
+    // path is still refused it, and `default` stays refused to both.
+    let account_entry = for_account && deployment.name == DEFAULT_DEPLOYMENT_NAME;
+    if !account_entry && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
     let replacing_default = existing
@@ -870,9 +891,9 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
 /// via [`upsert_deployment`]. Returns whether the written record is the default.
-fn save_user_deployment(deployment: Deployment) -> anyhow::Result<bool> {
+fn save_user_deployment(deployment: Deployment, for_account: bool) -> anyhow::Result<bool> {
     let mut existing = load_config_file(&config_path()?)?;
-    let is_default = upsert_deployment(&mut existing, deployment)?;
+    let is_default = upsert_deployment(&mut existing, deployment, for_account)?;
     write_user_config(existing)?;
     Ok(is_default)
 }
@@ -897,6 +918,7 @@ fn configure_deployment(
     name: Option<String>,
     make_default: bool,
     issuer: Option<String>,
+    for_account: bool,
 ) -> anyhow::Result<DeploymentInfo> {
     let host = endpoint_host_str(host);
     // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
@@ -946,7 +968,7 @@ fn configure_deployment(
     deployment.default = make_default;
     let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
     let hosts = deployment.hosts.clone();
-    let is_default = save_user_deployment(deployment)?;
+    let is_default = save_user_deployment(deployment, for_account)?;
     Ok(DeploymentInfo {
         status: "ok".to_string(),
         reason: String::new(),
@@ -2814,17 +2836,19 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
-        // Browser-based OAuth flow. A self-hosted deployment (one that advertises
-        // endpoint hosts) uses the endpoint-callback flow: the endpoint forwards
-        // the browser to this loopback, so its redirect is the endpoint's own
-        // /oauth2/callback and the callback port travels in the OAuth `state`. The
-        // built-in Aspect account carries no hosts and registers a
-        // loopback redirect directly with the IdP. Keying on `hosts` rather than
-        // the name keeps the seed on the cloud flow even if a `config.json` entry
-        // overrides it by name.
+        // Browser-based OAuth flow. A configured deployment uses the
+        // endpoint-callback flow: the endpoint forwards the browser to this
+        // loopback, so its redirect is the endpoint's own /oauth2/callback and the
+        // callback port travels in the OAuth `state`. The built-in Aspect account
+        // registers a loopback redirect directly with the IdP instead.
+        //
+        // Keyed on `builtin`, not on whether hosts are present: the account now
+        // carries the Aspect-hosted cache/BES too (see `configure_default`), and it
+        // still logs in the cloud way. A configured deployment with no hosts has no
+        // endpoint to bounce through, so it falls back to the cloud flow.
         let session = match selected.hosts.first() {
-            Some(host) => build_endpoint_session(env, host)?,
-            None => build_cloud_session(env)?,
+            Some(host) if !selected.builtin => build_endpoint_session(env, host)?,
+            _ => build_cloud_session(env)?,
         };
         Ok(heap.alloc(session))
     }
@@ -3010,6 +3034,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             name.into_option(),
             make_default,
             issuer.into_option(),
+            false,
         )?))
     }
 
@@ -3032,9 +3057,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         Ok(heap.alloc(configure_deployment(
             DEFAULT_ENDPOINT_HOST,
-            Some(DEFAULT_ENDPOINT_NAME.to_string()),
+            Some(DEFAULT_DEPLOYMENT_NAME.to_string()),
             false,
             Some(DEFAULT_ISSUER.to_string()),
+            true,
         )?))
     }
 
@@ -3096,18 +3122,19 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 }
 
 /// The credentials profile a login against `selected` persists under: a
-/// self-hosted deployment (one with its own endpoint hosts) stores under its
-/// name so [`Auth::deployment_for_host`] later resolves the same profile for its
-/// endpoints; the built-in Aspect account (no hosts) stores under the
-/// resolved default profile.
+/// configured deployment stores under its name, so
+/// [`Auth::deployment_for_host`] later resolves the same profile for its
+/// endpoints; the built-in Aspect account stores under the resolved default
+/// profile.
 ///
-/// Keyed on `hosts` rather than the `builtin` flag, to stay in lockstep with the
-/// cloud/endpoint flow split in [`Auth::login`] — which needs a host to build the
-/// endpoint callback, so it is a capability question, not an identity one. A
-/// hand-written deployment with no endpoints therefore files under the default
-/// profile, matching the cloud flow it logs in through.
+/// Keyed on `builtin`, an identity question, because the account now carries the
+/// Aspect-hosted cache/BES itself (see [`configure_default`]) and would otherwise
+/// file its own login away from the default profile that every Aspect-cloud
+/// caller reads. Its endpoints are still reachable: the bare-login path files a
+/// second credential under the account's *name* for them, which is what
+/// [`Auth::deployment_for_host`] resolves.
 fn login_profile_for(selected: &Deployment) -> String {
-    if selected.hosts.is_empty() {
+    if selected.builtin {
         resolve_profile(None)
     } else {
         selected.name.clone()
@@ -3368,15 +3395,15 @@ mod tests {
     }
 
     #[test]
-    fn login_profile_keys_on_hosts_not_name() {
-        // The built-in account (no hosts) → the default profile.
+    fn login_profile_keys_on_the_account_flag_not_hosts() {
+        // The built-in account → the default profile, with or without endpoints
+        // (see `the_account_keeps_the_default_profile_once_it_has_endpoints`).
         assert_eq!(login_profile_for(&default_deployment()), DEFAULT_PROFILE);
-        // A hostless configured entry logs in through the same cloud flow, so it
-        // files under the same profile.
+        // Any configured deployment → its own name, hosts or not: it is a
+        // separate identity, so it never shares the account's slot.
         let mut hostless = dep("acme", false);
         hostless.hosts = Vec::new();
-        assert_eq!(login_profile_for(&hostless), DEFAULT_PROFILE);
-        // A self-hosted deployment (has hosts) → its own name.
+        assert_eq!(login_profile_for(&hostless), "acme");
         assert_eq!(login_profile_for(&dep("acme", true)), "acme");
 
         // Why `default` is reserved: a deployment files under its own name, so one
@@ -3450,7 +3477,7 @@ mod tests {
             let name = deployment_name_from_host(host);
             assert_eq!(name, want);
             assert!(is_reserved_name(&name));
-            assert!(upsert_deployment(&mut vec![], dep(&name, false)).is_err());
+            assert!(upsert_deployment(&mut vec![], dep(&name, false), false).is_err());
         }
     }
 
@@ -3466,7 +3493,7 @@ mod tests {
 
         for name in RESERVED_NAMES {
             let mut existing = vec![dep("acme", true)];
-            let err = upsert_deployment(&mut existing, dep(name, false)).unwrap_err();
+            let err = upsert_deployment(&mut existing, dep(name, false), false).unwrap_err();
             assert!(
                 err.to_string().contains("reserved"),
                 "unexpected error for {name:?}: {err}"
@@ -3492,9 +3519,11 @@ mod tests {
         assert!(seed.builtin);
     }
 
-    /// A `config.json` entry that took the account's name must not replace the
-    /// built-in account on load — that is what made the account vanish from
-    /// `auth status` with the deployment rendered in its place.
+    /// A `config.json` entry under a reserved name must not replace the built-in
+    /// account on load — that is what made the account vanish from `auth status`
+    /// with the deployment rendered in its place. `default` is the remaining such
+    /// name; an entry under the account's own name merges instead, covered by
+    /// `an_account_named_entry_merges_into_the_seed`.
     #[test]
     fn config_json_entry_cannot_shadow_the_account() {
         let dir = tempfile::tempdir().unwrap();
@@ -3504,7 +3533,7 @@ mod tests {
             r#"{"deployments":[
                 {"name":"silo-gcp","issuer":"https://silo-gcp.auth.aspect.build",
                  "client_id":"test-client","hosts":["remote.silo-gcp.aspect.build"]},
-                {"name":"aspect","issuer":"https://silo-gcp.auth.aspect.build",
+                {"name":"default","issuer":"https://silo-gcp.auth.aspect.build",
                  "client_id":"test-client","hosts":["remote.aspect.foo.com"],
                  "endpoints":{"cache":"remote.aspect.foo.com"}}
             ]}"#,
@@ -3517,15 +3546,15 @@ mod tests {
 
         // The ignored entry is reported so `auth status` can explain the absence.
         assert_eq!(shadowed.len(), 1);
-        assert_eq!(shadowed[0].name, "aspect");
+        assert_eq!(shadowed[0].name, "default");
 
         // Exactly one account, carrying the seed's own issuer and no hosts.
         let accounts: Vec<_> = merged.iter().filter(|d| d.builtin).collect();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].issuer.as_deref(), Some(DEFAULT_ISSUER));
         assert!(accounts[0].hosts.is_empty());
-        // The impostor is dropped rather than silently taking the account's place.
-        assert!(!merged.iter().any(|d| !d.builtin && d.name == "aspect"));
+        // The impostor is dropped rather than silently taking the account's slot.
+        assert!(!merged.iter().any(|d| d.name == "default"));
         // A legitimate deployment sharing that issuer is unaffected.
         assert!(merged.iter().any(|d| d.name == "silo-gcp"));
     }
@@ -3538,34 +3567,35 @@ mod tests {
         // A repo-config entry is checked in: `auth remove` only edits the user
         // file, so the advice must point at the repo path instead.
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
             src(USER, vec![dep("acme", false)], true),
         ]);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "aspect");
+        assert_eq!(found[0].name, DEFAULT_PROFILE);
         assert!(!found[0].user_config);
         assert_eq!(found[0].path, REPO);
 
         // A user-config entry is removable.
-        let (_, found) = overlay_config_sources(vec![src(USER, vec![dep("aspect", false)], true)]);
+        let (_, found) =
+            overlay_config_sources(vec![src(USER, vec![dep(DEFAULT_PROFILE, false)], true)]);
         assert_eq!(found.len(), 1);
         assert!(found[0].user_config);
 
         // Declared in both files → reported once, against the first (repo).
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
-            src(USER, vec![dep("aspect", false)], true),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
+            src(USER, vec![dep(DEFAULT_PROFILE, false)], true),
         ]);
         assert_eq!(found.len(), 1);
         assert!(!found[0].user_config);
 
-        // Both reserved names, from different files, are each reported.
+        // The account's own name is never reported from either file: it merges
+        // into the seed rather than shadowing it.
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
-            src(USER, vec![dep("default", false)], true),
+            src(REPO, vec![dep(DEFAULT_DEPLOYMENT_NAME, false)], false),
+            src(USER, vec![dep(DEFAULT_DEPLOYMENT_NAME, false)], true),
         ]);
-        assert_eq!(found.len(), 2);
-        assert!(!found[0].user_config && found[1].user_config);
+        assert!(found.is_empty());
     }
 
     #[test]
@@ -3984,14 +4014,76 @@ mod tests {
         }
     }
 
-    /// The auto-configured deployment must be upsertable: a [`RESERVED_NAMES`]
-    /// name would make every bare login's `configure_default` fail the reserved-name
-    /// check in `upsert_deployment`, silently losing the endpoint config.
+    /// Only `configure_default` may write under the account's own name. A
+    /// user-facing `configure` is still refused it — two entries called `aspect`
+    /// would make `--deployment aspect` ambiguous — and `default` stays refused to
+    /// both, since it is a credential-store key rather than the account.
     #[test]
-    fn default_endpoint_name_is_not_reserved() {
-        assert!(!is_reserved_name(DEFAULT_ENDPOINT_NAME));
-        let mut existing = Vec::new();
-        assert!(upsert_deployment(&mut existing, dep(DEFAULT_ENDPOINT_NAME, false)).is_ok());
+    fn the_account_name_is_writable_only_for_the_account() {
+        assert!(
+            upsert_deployment(&mut Vec::new(), dep(DEFAULT_DEPLOYMENT_NAME, false), true).is_ok()
+        );
+        assert!(
+            upsert_deployment(&mut Vec::new(), dep(DEFAULT_DEPLOYMENT_NAME, false), false).is_err()
+        );
+        assert!(upsert_deployment(&mut Vec::new(), dep(DEFAULT_PROFILE, false), true).is_err());
+    }
+
+    /// The entry `configure_default` writes enriches the seed rather than
+    /// shadowing it: the account keeps its identity and gains the endpoints, so
+    /// `auth status` shows one Aspect entry and `--remote` resolves it.
+    #[test]
+    fn an_account_named_entry_merges_into_the_seed() {
+        let mut entry = dep(DEFAULT_DEPLOYMENT_NAME, false);
+        entry.hosts = vec!["remote.app.aspect.build".to_string()];
+        entry.endpoints = Endpoints {
+            cache: "remote.app.aspect.build".to_string(),
+            bes: "bes.app.aspect.build".to_string(),
+            exec: String::new(),
+            results_url: String::new(),
+        };
+        // A hand-edited file could also carry identity fields; they must not win.
+        entry.issuer = Some("https://auth.evil.example.com".to_string());
+        entry.client_id = Some("hijacked".to_string());
+
+        let (merged, shadowed) = overlay_config_sources(vec![ConfigSource {
+            path: PathBuf::from("/tmp/config.json"),
+            entries: vec![entry],
+            user: true,
+        }]);
+
+        // One Aspect entry, not two, and it is still the seed.
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|d| d.name == DEFAULT_DEPLOYMENT_NAME)
+                .count(),
+            1
+        );
+        assert!(shadowed.is_empty());
+        let seed = merged.iter().find(|d| d.builtin).unwrap();
+        assert_eq!(seed.endpoints.cache, "remote.app.aspect.build");
+        assert_eq!(seed.endpoints.bes, "bes.app.aspect.build");
+        // Identity stays the seed's — the file may extend the account, never
+        // redirect its login.
+        assert_eq!(seed.issuer.as_deref(), Some(DEFAULT_ISSUER));
+        assert_eq!(seed.client_id.as_deref(), Some(DEFAULT_CLIENT_ID));
+        assert_eq!(seed.api_url.as_deref(), Some(DEFAULT_API_URL));
+    }
+
+    /// The account keeps the cloud loopback flow and the default credential
+    /// profile after it gains endpoints — both key on `builtin`, not on whether
+    /// hosts are present, or the account would file its login away from the
+    /// profile every Aspect-cloud caller reads.
+    #[test]
+    fn the_account_keeps_the_default_profile_once_it_has_endpoints() {
+        let mut seed = default_deployment();
+        seed.hosts = vec!["remote.app.aspect.build".to_string()];
+        assert_eq!(login_profile_for(&seed), DEFAULT_PROFILE);
+
+        let mut configured = dep("acme", false);
+        configured.hosts = vec!["remote.acme.example.com".to_string()];
+        assert_eq!(login_profile_for(&configured), "acme");
     }
 
     /// `configure_default` pins the issuer to the account's own rather than taking
@@ -4220,7 +4312,7 @@ mod tests {
         let mut existing = vec![dep("acme", true), dep("emca", false)];
         let mut incoming = dep("acme", false);
         incoming.issuer = Some("https://acme.auth.aspect.build/v2".to_string());
-        assert!(upsert_deployment(&mut existing, incoming).unwrap());
+        assert!(upsert_deployment(&mut existing, incoming, false).unwrap());
         let acme = existing.iter().find(|d| d.name == "acme").unwrap();
         assert!(acme.default, "re-configured current default stays default");
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
@@ -4230,16 +4322,16 @@ mod tests {
     fn upsert_first_entry_and_explicit_default() {
         // First configured entry becomes default even without claiming it.
         let mut existing: Vec<Deployment> = vec![];
-        assert!(upsert_deployment(&mut existing, dep("acme", false)).unwrap());
+        assert!(upsert_deployment(&mut existing, dep("acme", false), false).unwrap());
 
         // A later entry claiming default steals it from the previous one.
-        assert!(upsert_deployment(&mut existing, dep("emca", true)).unwrap());
+        assert!(upsert_deployment(&mut existing, dep("emca", true), false).unwrap());
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
         assert!(!existing.iter().find(|d| d.name == "acme").unwrap().default);
 
         // A later non-default entry does not disturb the existing default.
-        assert!(!upsert_deployment(&mut existing, dep("third", false)).unwrap());
+        assert!(!upsert_deployment(&mut existing, dep("third", false), false).unwrap());
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
     }
 

@@ -34,7 +34,8 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
 # width would collide with its value.
 _LABEL_WIDTH = 8
 
-# What the built-in Aspect account login grants (it has no build endpoints).
+# What the built-in Aspect account login grants. Shown only before its build
+# endpoints have been discovered — after that the endpoints themselves say more.
 _ACCOUNT_GRANTS = "Aspect Cloud services (e.g. the GitHub App API on CI)"
 
 def identity(d) -> str:
@@ -68,9 +69,12 @@ def status_line(d) -> str:
     return line + (", " + d.status if d.status else "")
 
 def _print_deployment(d, header = True):
-    """Print one entry's aligned detail table (Status, Issuer, and either the
-    build endpoints for a deployment or a Grants line for the built-in Aspect
-    account). Shared by `auth status` and `configure`.
+    """Print one entry's aligned detail table (Status, Issuer, and the build
+    endpoints it serves). Shared by `auth status` and `configure`.
+
+    The Aspect account carries endpoints too, once a login has discovered them,
+    and renders them the same way; the Grants line stands in only while it has
+    none — a fresh install that has not logged in yet.
 
     With `header`, leads with a `●/○ <name>` line (the ● default marker applies
     only to deployments — it selects which one build/test target). The Aspect
@@ -87,12 +91,14 @@ def _print_deployment(d, header = True):
     _row("Status", status_line(d))
     if d.issuer:
         _row("Issuer", d.issuer)
-    if d.builtin:
-        # The Aspect account has no build endpoints; say what it's for instead.
+    # Short column headers of their own, not the prose `capability_labels` names.
+    endpoints = [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]
+    if d.builtin and not [v for (_, v) in endpoints if v]:
+        # The account before its first login, when nothing has discovered the
+        # Aspect-hosted endpoints yet. Say what it grants instead of nothing.
         _row("Grants", _ACCOUNT_GRANTS)
     else:
-        # Short column headers of their own, not the prose `capability_labels` names.
-        for (kind, value) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]:
+        for (kind, value) in endpoints:
             if value:
                 _row(kind, value)
 
@@ -190,7 +196,7 @@ def _configure_aspect_cloud(ctx: TaskContext, creds):
         return
     ctx.aspect.auth.persist(endpoint_creds, profile = info.name)
     print("")
-    print("Configured deployment '" + info.name + "' for remote cache and BES.")
+    print("Configured remote cache and BES for your Aspect account.")
     if info.is_default:
         _print_default_usage_hint()
     else:
