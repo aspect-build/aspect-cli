@@ -96,7 +96,8 @@ TaskUpdate = record(
     # True iff this update crossed a phase boundary (set when `phase.name`
     # differs from the prior `current_phase().name`). Cold-start swarm
     # surfaces (GHSC, GithubStatusComments) gate phase emits on a debounce
-    # separate from the heartbeat throttle. Same trigger as the BK section header.
+    # separate from the heartbeat throttle. Preserved when quiet mode suppresses
+    # the corresponding BK section header.
     phase_change = field(bool, default = False),
     # True iff the producer's final emit. Lets surfaces distinguish live from
     # terminal even when status can't (e.g. `warning`).
@@ -784,12 +785,13 @@ def _update(ctx, status, progress, kind = "", data = None, priority = True, phas
             display_name = phase.display_name,
         )
         if phase.name != prev_phase:
-            _emit_bk_phase_section(ctx, phase, progress_styles)
-            bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
             phase_change = True
+            if not ctx.task.quiet:
+                _emit_bk_phase_section(ctx, phase, progress_styles)
+                bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
 
     cli_text = progress_styles.stream
-    if cli_text:
+    if cli_text and not ctx.task.quiet:
         # Phase entries lead with a styled `<emoji> <Title>` + a leading
         # blank line to break up the `→` stream; mid-phase is plain `→ <text>`.
         if phase != None:

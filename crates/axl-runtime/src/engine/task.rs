@@ -50,6 +50,8 @@ pub trait TaskLike<'v> {
     /// The task kind — the command being run (e.g. `build`, `test`, `lint`),
     /// derived from the snake_case export variable (or the `kind=` kwarg).
     fn kind(&self) -> String;
+    /// Whether Aspect's generic informational task UI is suppressed by default.
+    fn quiet(&self) -> bool;
     /// Absolute path to the .axl file the task was defined in.
     fn path(&self) -> &PathBuf;
     /// `Arguments` value carrying config.axl overrides for this task.
@@ -135,6 +137,7 @@ pub struct Task<'v> {
     pub(super) friendly_kind: RefCell<String>,
     pub(super) group: Vec<String>,
     pub(super) kind: RefCell<String>,
+    pub(super) quiet: bool,
     pub(super) traits: Vec<values::Value<'v>>,
     pub(super) path: PathBuf,
     /// Mutable override store for `ctx.tasks["k"].args.foo = ...`.
@@ -202,6 +205,7 @@ impl<'v> Task<'v> {
             friendly_kind: RefCell::new(frozen.friendly_kind.clone()),
             group: frozen.group.clone(),
             kind: RefCell::new(frozen.kind.clone()),
+            quiet: frozen.quiet,
             traits,
             path: frozen.path.clone(),
             overrides,
@@ -227,6 +231,9 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
     fn kind(&self) -> String {
         self.kind.borrow().clone()
+    }
+    fn quiet(&self) -> bool {
+        self.quiet
     }
     fn path(&self) -> &PathBuf {
         &self.path
@@ -307,6 +314,7 @@ impl<'v> values::Freeze for Task<'v> {
             friendly_kind: self.friendly_kind.into_inner(),
             group: self.group,
             kind: self.kind.into_inner(),
+            quiet: self.quiet,
             traits: frozen_traits?,
             path: self.path,
             overrides: self.overrides.freeze(freezer)?,
@@ -325,6 +333,7 @@ pub struct FrozenTask {
     pub(super) friendly_kind: String,
     pub(super) group: Vec<String>,
     pub(super) kind: String,
+    pub(super) quiet: bool,
     pub(super) traits: Vec<values::FrozenValue>,
     pub(super) path: PathBuf,
     pub(super) overrides: values::FrozenValue,
@@ -385,6 +394,9 @@ impl<'v> TaskLike<'v> for FrozenTask {
     }
     fn kind(&self) -> String {
         self.kind.clone()
+    }
+    fn quiet(&self) -> bool {
+        self.quiet
     }
     fn path(&self) -> &PathBuf {
         &self.path
@@ -458,7 +470,7 @@ fn resolve_task_metadata(
 
 /// Build a fresh `Task<'v>` that aliases `base`. The alias shares the base's
 /// `implementation` callable and `traits` vector and inherits nothing else —
-/// `kind`, `group`, `summary`, `description`, and `friendly_kind` come from
+/// `kind`, `group`, `summary`, `description`, `friendly_kind`, and `quiet` come from
 /// the alias's own kwargs. An empty `kind` defers naming to `export_as`.
 ///
 /// `defaults` may overlay new defaults onto any arg present on `base`; see
@@ -471,6 +483,7 @@ fn build_alias<'v>(
     friendly_kind: String,
     group: Vec<String>,
     kind: String,
+    quiet: bool,
     eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<Task<'v>> {
     let friendly_kind = resolve_task_metadata("task.alias", &kind, &group, friendly_kind)?;
@@ -511,6 +524,7 @@ fn build_alias<'v>(
         friendly_kind: RefCell::new(friendly_kind),
         group,
         kind: RefCell::new(kind),
+        quiet,
         traits: base.trait_values(),
         path: Env::current_script_path(eval)?,
         overrides,
@@ -542,6 +556,7 @@ fn task_methods(builder: &mut MethodsBuilder) {
     /// - `args.trailing_var_args` carries no default in the schema and cannot
     ///   be overridden via `defaults`.
     /// - Aliases cannot add args beyond the base. Use `task()` if you need to.
+    /// - `quiet` defaults to `False` independently of the base task.
     ///
     /// ## Example
     ///
@@ -567,6 +582,7 @@ fn task_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = String::new())] friendly_kind: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] kind: String,
+        #[starlark(require = named, default = false)] quiet: bool,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
         let base = try_as_task(this).ok_or_else(|| {
@@ -583,6 +599,7 @@ fn task_methods(builder: &mut MethodsBuilder) {
             friendly_kind,
             group.items,
             kind,
+            quiet,
             eval,
         )
     }
@@ -619,6 +636,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// - `summary` — one-liner shown in the task list; falls back to `"<name> task defined in <file>"`.
     /// - `description` — extended prose shown in `--help` (replaces summary in that view).
     /// - `friendly_kind` — Title Case label for help section headings; auto-derived from the kind.
+    /// - `quiet` — suppress Aspect's generic informational terminal UI while preserving task output,
+    ///   diagnostics, lifecycle events, and integrations. Defaults to `False`.
+    ///   `--task:quiet[=true|false]` overrides this default for an invocation;
+    ///   the implementation reads the resolved value as `ctx.task.quiet`.
     ///
     /// ## Aliases
     ///
@@ -656,6 +677,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] friendly_kind: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] kind: String,
+        #[starlark(require = named, default = false)] quiet: bool,
         #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
@@ -721,6 +743,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             friendly_kind: RefCell::new(friendly_kind),
             group: group.items,
             kind: RefCell::new(kind),
+            quiet,
             traits: all_traits,
             path: Env::current_script_path(eval)?,
             overrides,
@@ -764,6 +787,56 @@ aliased = base.alias()
         .run_task(1)
         .expect("run_task");
         assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn task_quiet_defaults_false_and_accepts_true() {
+        eval_snippet("base = task(implementation = _impl)").with_value("base", |value| {
+            assert!(!super::try_as_task(value).unwrap().quiet());
+        });
+        eval_snippet("base = task(implementation = _impl, quiet = True)")
+            .with_value("base", |value| {
+                assert!(super::try_as_task(value).unwrap().quiet())
+            });
+    }
+
+    #[test]
+    fn task_execution_resolves_quiet_metadata() {
+        for quiet in ["False", "True"] {
+            let code = format!(
+                r#"
+def _impl(ctx):
+    if ctx.task.quiet != {quiet}:
+        fail("quiet metadata did not reach TaskInfo")
+    return 0
+
+check = task(implementation = _impl, quiet = {quiet})
+"#
+            );
+            assert_eq!(crate::test::eval(&code).run_task(0).unwrap(), Some(0));
+        }
+    }
+
+    #[test]
+    fn alias_quiet_does_not_mutate_base_task() {
+        eval_snippet(
+            r#"
+base = task(implementation = _impl)
+aliased = base.alias(quiet = True)
+"#,
+        )
+        .with_value("base", |value| {
+            assert!(!super::try_as_task(value).unwrap().quiet())
+        });
+        eval_snippet(
+            r#"
+base = task(implementation = _impl)
+aliased = base.alias(quiet = True)
+"#,
+        )
+        .with_value("aliased", |value| {
+            assert!(super::try_as_task(value).unwrap().quiet())
+        });
     }
 
     #[test]

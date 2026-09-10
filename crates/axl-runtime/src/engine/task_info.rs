@@ -208,6 +208,8 @@ pub struct TaskInfo {
     pub name: String,
     pub friendly_name: String,
     pub task_id: String,
+    /// Whether generic terminal progress rendering is suppressed for this invocation.
+    pub quiet: bool,
 
     #[allocative(skip)]
     pub started_at: Instant,
@@ -228,6 +230,7 @@ impl TaskInfo {
         name: String,
         friendly_name: String,
         task_id: String,
+        quiet: bool,
     ) -> Self {
         Self {
             kind,
@@ -236,6 +239,7 @@ impl TaskInfo {
             name,
             friendly_name,
             task_id,
+            quiet,
             started_at: Instant::now(),
             phases: RefCell::new(Vec::new()),
             current_phase: RefCell::new(None),
@@ -348,6 +352,15 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<TaskInfo>()
             .ok_or_else(|| anyhow::anyhow!("id: receiver is not a TaskInfo"))?;
         Ok(info.task_id.clone())
+    }
+
+    /// Whether Aspect's generic informational task UI is suppressed.
+    #[starlark(attribute)]
+    fn quiet<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let info = this
+            .downcast_ref::<TaskInfo>()
+            .ok_or_else(|| anyhow::anyhow!("quiet: receiver is not a TaskInfo"))?;
+        Ok(info.quiet)
     }
 
     /// Task wall time so far in milliseconds (now - task spawn).
