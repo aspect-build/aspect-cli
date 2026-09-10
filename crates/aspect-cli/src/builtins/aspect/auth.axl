@@ -166,6 +166,22 @@ def _login_impl(ctx: TaskContext) -> int:
         _configure_aspect_cloud(ctx, creds)
     return 0
 
+def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
+    """File the grant's id_token under `name`, the credential a deployment's
+    cache/BES edges validate. The caller has already filed the access_token under
+    its own profile — for the Aspect account that is the default profile, which
+    every Aspect Cloud caller reads, so the two live side by side.
+
+    Returns False when the grant carried no id_token, leaving the deployment
+    configured but unauthenticated; callers say so rather than leaving
+    `auth status` to reveal it.
+    """
+    endpoint_creds = creds.for_endpoint()
+    if endpoint_creds == None:
+        return False
+    ctx.aspect.auth.persist(endpoint_creds, profile = name)
+    return True
+
 def _configure_aspect_cloud(ctx: TaskContext, creds):
     """Record the Aspect-hosted deployment and file `creds` against it.
 
@@ -189,12 +205,10 @@ def _configure_aspect_cloud(ctx: TaskContext, creds):
     info = ctx.aspect.auth.configure_default()
     if info.status != "ok" or not info.can_login:
         return
-    endpoint_creds = creds.for_endpoint()
-    if endpoint_creds == None:
-        warn(ctx.std, "Configured deployment '" + info.name + "' but could not authenticate it: the login returned no id_token.")
-        print("Run `aspect auth login --deployment " + info.name + "` to finish setting it up.")
+    if not _persist_endpoint_login(ctx, creds, info.name):
+        warn(ctx.std, "Configured remote cache and BES but could not authenticate them: the login returned no id_token.")
+        print("Run `aspect auth login` again to finish setting them up.")
         return
-    ctx.aspect.auth.persist(endpoint_creds, profile = info.name)
     print("")
     print("Configured remote cache and BES for your Aspect account.")
     if info.is_default:
@@ -256,7 +270,9 @@ def _discover_deployment(ctx, host):
             error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
             return None
         if info.status == "issuer_not_advertised":
-            error(ctx.std, "'" + issuer + "' is not one of the authorization servers this deployment advertises.")
+            # `reason` is the issuer actually looked for — for `--name aspect` that
+            # is the account's own, pinned rather than taken from `--issuer`.
+            error(ctx.std, "'" + (info.reason or issuer) + "' is not one of the authorization servers this deployment advertises.")
             error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
             return None
         chosen = prompt_choice(
@@ -283,7 +299,14 @@ def _configure_impl(ctx: TaskContext) -> int:
     if info == None:
         return 1
 
-    print("Configured deployment '" + info.name + "'.")
+    # `--name aspect` attaches the endpoints to the Aspect account rather than
+    # recording a deployment beside it, so say which happened.
+    account = ctx.aspect.auth.deployment_summary(info.name)
+    is_account = account != None and account.builtin
+    if is_account:
+        print("Configured remote cache and BES for your Aspect account.")
+    else:
+        print("Configured deployment '" + info.name + "'.")
     if not info.can_login:
         print("")
         print("This deployment does not advertise its login config, so the CLI")
@@ -292,18 +315,37 @@ def _configure_impl(ctx: TaskContext) -> int:
         return 1
     if not ctx.args.login:
         print("")
-        print("Run `aspect auth login --deployment " + info.name + "` to authenticate")
+        if is_account:
+            print("Run `aspect auth login` to authenticate")
+        else:
+            print("Run `aspect auth login --deployment " + info.name + "` to authenticate")
         print("(interactively, or with an API token via --with-api-token).")
         return 0
     creds = _run_browser_login(ctx, info.name)
     if creds == None:
         error(ctx.std, "No authorization code entered; the deployment is configured but not logged in.")
         return 1
-    ctx.aspect.auth.persist(creds, profile = info.name)
+    if is_account:
+        # Filed the way a bare login files them: the access_token under the default
+        # profile for Aspect Cloud, the same grant's id_token under the account's
+        # name for its edges.
+        ctx.aspect.auth.persist(creds, profile = ctx.aspect.auth.login_profile())
+        if not _persist_endpoint_login(ctx, creds, info.name):
+            warn(ctx.std, "Configured the endpoints but could not authenticate them: the login returned no id_token.")
+            return 1
+    else:
+        ctx.aspect.auth.persist(creds, profile = info.name)
+
     print("")
     summary = ctx.aspect.auth.deployment_summary(info.name)
-    if summary != None:
-        _print_deployment(summary)
+    if summary == None:
+        return 0
+    # The account is its own thing, not one of a list, so it needs no name line and
+    # is reached by `--remote` alone rather than `--deployment`.
+    _print_deployment(summary, header = not is_account)
+    if is_account:
+        _print_default_usage_hint()
+    else:
         _print_configured_usage_hint(summary)
     return 0
 

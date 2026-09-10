@@ -842,13 +842,18 @@ fn deployment_from_discovery(
 fn upsert_deployment(
     existing: &mut Vec<Deployment>,
     mut deployment: Deployment,
-    for_account: bool,
+    explicit_account: bool,
 ) -> anyhow::Result<bool> {
-    // The account's own name is writable only by `configure_default`, whose entry
-    // is folded back into the seed rather than shadowing it. Every user-facing
-    // path is still refused it, and `default` stays refused to both.
-    let account_entry = for_account && deployment.name == DEFAULT_DEPLOYMENT_NAME;
-    if !account_entry && is_reserved_name(&deployment.name) {
+    // `default` is a credential-store key, never a deployment name: an entry under
+    // it would share the account's credential slot, so it is refused outright.
+    //
+    // The account's own name is writable, but only when the caller asked for it by
+    // name: such an entry enriches the seed (see `overlay_config_sources`), which
+    // is what `configure --name aspect` is for. A name that merely *derives* to it
+    // — `remote.aspect.aspect.build` — is an accident, and is still refused so the
+    // user picks a real one rather than silently extending their account.
+    let permitted = explicit_account && deployment.name == DEFAULT_DEPLOYMENT_NAME;
+    if !permitted && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
     let replacing_default = existing
@@ -891,9 +896,9 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
 /// via [`upsert_deployment`]. Returns whether the written record is the default.
-fn save_user_deployment(deployment: Deployment, for_account: bool) -> anyhow::Result<bool> {
+fn save_user_deployment(deployment: Deployment, explicit_account: bool) -> anyhow::Result<bool> {
     let mut existing = load_config_file(&config_path()?)?;
-    let is_default = upsert_deployment(&mut existing, deployment, for_account)?;
+    let is_default = upsert_deployment(&mut existing, deployment, explicit_account)?;
     write_user_config(existing)?;
     Ok(is_default)
 }
@@ -918,7 +923,6 @@ fn configure_deployment(
     name: Option<String>,
     make_default: bool,
     issuer: Option<String>,
-    for_account: bool,
 ) -> anyhow::Result<DeploymentInfo> {
     let host = endpoint_host_str(host);
     // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
@@ -939,16 +943,32 @@ fn configure_deployment(
         Discovery::Unreachable(reason) => return Ok(mk("unreachable", reason)),
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
-    let name = name
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| deployment_name_from_host(&host));
-    let requested = issuer.filter(|s| !s.is_empty());
+    // Only a name the caller typed can claim the account; a derived one that
+    // happens to collide is refused by `upsert_deployment`.
+    let explicit_name = name.filter(|n| !n.is_empty());
+    let explicit_account = explicit_name.as_deref() == Some(DEFAULT_DEPLOYMENT_NAME);
+    let name = explicit_name.unwrap_or_else(|| deployment_name_from_host(&host));
+    // Endpoints recorded under the account's own name are folded into the seed and
+    // reached with the account's own credential, so only a deployment on the
+    // account's issuer may claim them: `hosts` is the auth gate, and a host on some
+    // other issuer would be handed the account's bearer. Pinning here — rather than
+    // refusing the name outright — is what lets `configure --name aspect` do
+    // exactly what a bare login's discovery does. A host that does not advertise
+    // this issuer comes back `issuer_not_advertised` and records nothing.
+    let requested = if explicit_account {
+        Some(DEFAULT_ISSUER.to_string())
+    } else {
+        issuer.filter(|s| !s.is_empty())
+    };
     let candidates = info.auth_servers();
     // Hand the advertised choices back so the task can prompt from them or list
     // the valid values when `--issuer` names one that isn't advertised.
+    // `reason` carries the issuer actually looked for, which is not always the one
+    // the user typed: the account's is pinned (above), so an empty `--issuer` would
+    // otherwise be reported back as `''`.
     let with_candidates = |status: &str| DeploymentInfo {
         status: status.to_string(),
-        reason: String::new(),
+        reason: requested.clone().unwrap_or_default(),
         name: name.clone(),
         can_login: false,
         is_default: false,
@@ -968,7 +988,7 @@ fn configure_deployment(
     deployment.default = make_default;
     let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
     let hosts = deployment.hosts.clone();
-    let is_default = save_user_deployment(deployment, for_account)?;
+    let is_default = save_user_deployment(deployment, explicit_account)?;
     Ok(DeploymentInfo {
         status: "ok".to_string(),
         reason: String::new(),
@@ -3034,7 +3054,6 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             name.into_option(),
             make_default,
             issuer.into_option(),
-            false,
         )?))
     }
 
@@ -3060,7 +3079,6 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             Some(DEFAULT_DEPLOYMENT_NAME.to_string()),
             false,
             Some(DEFAULT_ISSUER.to_string()),
-            true,
         )?))
     }
 
@@ -4014,18 +4032,21 @@ mod tests {
         }
     }
 
-    /// Only `configure_default` may write under the account's own name. A
-    /// user-facing `configure` is still refused it — two entries called `aspect`
-    /// would make `--deployment aspect` ambiguous — and `default` stays refused to
-    /// both, since it is a credential-store key rather than the account.
+    /// The account's own name is writable when the caller asks for it by name —
+    /// that entry enriches the seed rather than shadowing it, which is what
+    /// `configure --name aspect` is for. A name that merely derives to it is still
+    /// refused, and `default` is refused either way: it is a credential-store key,
+    /// so an entry under it would share the account's slot.
+    ///
+    /// What keeps the account safe is not this check but the issuer pin in
+    /// `configure_deployment` — see
+    /// `the_account_only_absorbs_endpoints_on_its_own_issuer`.
     #[test]
-    fn the_account_name_is_writable_only_for_the_account() {
-        assert!(
-            upsert_deployment(&mut Vec::new(), dep(DEFAULT_DEPLOYMENT_NAME, false), true).is_ok()
-        );
-        assert!(
-            upsert_deployment(&mut Vec::new(), dep(DEFAULT_DEPLOYMENT_NAME, false), false).is_err()
-        );
+    fn the_account_name_is_writable_only_when_asked_for_by_name() {
+        let account = || dep(DEFAULT_DEPLOYMENT_NAME, false);
+        assert!(upsert_deployment(&mut Vec::new(), account(), true).is_ok());
+        assert!(upsert_deployment(&mut Vec::new(), account(), false).is_err());
+        // The credential slot is refused however it is asked for.
         assert!(upsert_deployment(&mut Vec::new(), dep(DEFAULT_PROFILE, false), true).is_err());
     }
 
@@ -4086,11 +4107,13 @@ mod tests {
         assert_eq!(login_profile_for(&configured), "acme");
     }
 
-    /// `configure_default` pins the issuer to the account's own rather than taking
-    /// whichever the endpoint advertises, so a compiled-in host can name the PKCE
-    /// client to use but cannot redirect the account's login elsewhere.
+    /// Anything recorded under the account's name — a bare login's discovery or
+    /// an explicit `configure --name aspect` — takes the endpoint's PKCE client
+    /// but not its issuer. `hosts` is the auth gate, so a host on a different
+    /// issuer would be handed the account's own bearer; pinning keeps the account
+    /// absorbing endpoints only from deployments that share its issuer.
     #[test]
-    fn configure_default_takes_the_client_id_but_pins_the_issuer() {
+    fn the_account_only_absorbs_endpoints_on_its_own_issuer() {
         let doc = |issuer: &str, client_id: &str| ProtectedResource {
             resource: format!("https://{DEFAULT_ENDPOINT_HOST}"),
             aspect_authorization_servers: vec![AspectAuthServer {
@@ -4119,7 +4142,8 @@ mod tests {
             _ => panic!("the account's own issuer should resolve"),
         }
 
-        // An endpoint advertising some other issuer records nothing.
+        // A host on some other issuer records nothing, so it can never be handed
+        // the account's credential.
         let hijacked = doc("https://auth.evil.example.com", "new-client-id");
         assert!(matches!(
             resolve_auth_server(&hijacked.auth_servers(), Some(DEFAULT_ISSUER)),
