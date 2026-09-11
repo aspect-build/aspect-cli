@@ -102,15 +102,32 @@ def _print_deployment(d, header = True):
             if value:
                 _row(kind, value)
 
-def _print_default_usage_hint():
-    """The `auth status` footer: how --remote wires the *default* deployment, how to
-    add remote execution (never implied), and how to target another deployment.
-    Always the full text (independent of how many deployments are configured).
-    Leads with a blank line to set it apart."""
+def _print_default_usage_hint(summary, others: int = 0):
+    """How `--remote` wires the default deployment, naming only what that deployment
+    actually offers. `summary` is the default's own entry; `others` is how many
+    other deployments are configured. Leads with a blank line to set it apart.
+
+    Both extras are conditional because the unconditional version told users to
+    enable remote execution on deployments that serve none, and to pick among
+    deployments when there was only one. Advice for a capability a deployment does
+    not have is worse than no advice — it reads as a supported option that silently
+    does nothing."""
     print("")
     print("Pass --remote to a task (e.g. `aspect build --remote`) to use the default")
-    print("deployment's remote cache and BES backend. Add --remote=exec for remote execution.")
-    print("Add --deployment <name> to target a specific deployment instead of the default.")
+    print("deployment's " + join_and(capability_labels(summary, only = REMOTE_DEFAULT_CAPS)) + ".")
+    if summary.exec:
+        print("Remote execution is opt-in: use --remote=exec to enable it.")
+    if others:
+        print("Add --deployment <name> to target a specific deployment instead of the default.")
+
+def _print_account_usage_hint(ctx: TaskContext):
+    """The `--remote` hint for the Aspect account, read from the recorded entries so
+    it names the endpoints the account actually has and mentions `--deployment` only
+    when there is another deployment to name."""
+    entries = ctx.aspect.auth.list()
+    account = [d for d in entries if d.builtin]
+    if account:
+        _print_default_usage_hint(account[0], len([d for d in entries if not d.builtin]))
 
 def _print_configured_usage_hint(summary):
     """Post-configure hint naming the just-configured deployment and the remote
@@ -220,7 +237,7 @@ def _file_account_endpoints(ctx: TaskContext, creds, info):
     print("")
     print("Configured remote cache and BES for your Aspect account.")
     if info.is_default:
-        _print_default_usage_hint()
+        _print_account_usage_hint(ctx)
     else:
         print("Run `aspect auth use " + info.name + "` to make it the default deployment.")
 
@@ -352,7 +369,7 @@ def _configure_impl(ctx: TaskContext) -> int:
     # is reached by `--remote` alone rather than `--deployment`.
     _print_deployment(summary, header = not is_account)
     if is_account:
-        _print_default_usage_hint()
+        _print_account_usage_hint(ctx)
     else:
         _print_configured_usage_hint(summary)
     return 0
@@ -489,7 +506,8 @@ def _status_impl(ctx: TaskContext) -> int:
             _print_deployment(d)
         print("")
         print("● = default. Switch with `aspect auth use <name>`.")
-        _print_default_usage_hint()
+        default = ([d for d in deployments if d.default] + account)[0]
+        _print_default_usage_hint(default, len(deployments))
     else:
         print("No Workflows deployments configured.")
         print("Run `aspect auth configure <host>` to add one.")
