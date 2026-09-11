@@ -211,12 +211,18 @@ const ACCOUNT_HOSTS: &[&str] = &[
     "remote.aspect.build",
 ];
 
-/// The regional aliases of those same endpoints (`bes.us.aspect.build`,
-/// `cache.us.aspect.build`, …). They answer with the global names in their
-/// discovery document, but a user may well configure the host they were given, so
-/// the whole region resolves to the account. A suffix rather than an enumeration
-/// because a new region is a DNS change, not a CLI release.
-const ACCOUNT_HOST_SUFFIXES: &[&str] = &[".us.aspect.build"];
+/// The regional aliases of those same endpoints — `bes.us.aspect.build`,
+/// `api.eu.aspect.build`, and so on. They answer with the global names in their
+/// discovery document, but a user may well configure the host they were handed,
+/// so every service under a region resolves to the account.
+///
+/// Matched as a suffix so this covers each service in a region without naming the
+/// cross product, but the regions themselves are enumerated: an unknown
+/// `<service>.<anything>.aspect.build` is far more likely to be another
+/// Aspect-hosted deployment than a new region, and absorbing one of those into
+/// the account is the failure this allowlist exists to prevent. A genuinely new
+/// region is a one-line change here.
+const ACCOUNT_HOST_SUFFIXES: &[&str] = &[".us.aspect.build", ".eu.aspect.build"];
 
 /// Whether `host` is served by Aspect Cloud itself — see [`ACCOUNT_HOSTS`].
 /// `host` is already normalized by [`endpoint_host_str`]; the trailing dot of an
@@ -4129,12 +4135,21 @@ mod tests {
             // deployment on the day it does.
             "exec.aspect.build",
             "remote.aspect.build",
-            // The regional aliases of those same endpoints.
+            // Every service under every region, including ones not yet serving.
+            "api.us.aspect.build",
+            "app.us.aspect.build",
             "bes.us.aspect.build",
             "cache.us.aspect.build",
-            "app.us.aspect.build",
+            "exec.us.aspect.build",
+            "remote.us.aspect.build",
+            "api.eu.aspect.build",
+            "app.eu.aspect.build",
+            "bes.eu.aspect.build",
+            "cache.eu.aspect.build",
+            "exec.eu.aspect.build",
+            "remote.eu.aspect.build",
             // Case and an absolute FQDN's trailing dot are tolerated.
-            "Cache.US.Aspect.Build.",
+            "Cache.EU.Aspect.Build.",
         ] {
             assert!(is_account_host(host), "{host} should belong to the account");
         }
@@ -4147,6 +4162,9 @@ mod tests {
             "remote.acme.example.com",
             "cache.us.aspect.build.evil.com",
             "notcache.aspect.build",
+            // An unenumerated region is not assumed to be one: far likelier to be
+            // another Aspect-hosted deployment than a new Aspect Cloud region.
+            "cache.ap.aspect.build",
         ] {
             assert!(
                 !is_account_host(host),
