@@ -1,5 +1,5 @@
 """Unit tests for the pure string builders in `auth.axl` (the `status`/`configure`
-detail rendering): `identity`, `login_command`, `capabilities`, `status_line`,
+detail rendering): `identity`, `login_command`, `login_target_label`, `capabilities`, `status_line`,
 `shadowed_warning`.
 
 A struct-based fake summary substitutes for a real `DeploymentSummary` (only the
@@ -10,7 +10,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "identity", "login_command", "shadowed_warning", "status_line")
+load("@aspect//auth.axl", "identity", "login_command", "login_target_label", "shadowed_warning", "status_line")
 
 def _eq(label, got, want):
     if got != want:
@@ -51,6 +51,22 @@ def _test_identity(_):
 def _test_login_command(_):
     _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
     _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
+
+def _test_login_target_label(_):
+    _eq("bare login → Aspect Cloud", login_target_label("", False), "Aspect Cloud")
+    # `--deployment aspect` names the built-in entry, which is still Aspect Cloud.
+    _eq("named account → Aspect Cloud", login_target_label("aspect", True), "Aspect Cloud")
+    _eq(
+        "deployment → quoted, after the noun",
+        login_target_label("acme", False),
+        "Aspect Workflows deployment 'acme'",
+    )
+    # A dotted name is exactly why the name trails the noun rather than leading it.
+    _eq(
+        "dotted name stays readable",
+        login_target_label("gcp.awd-gha-test-staging", False),
+        "Aspect Workflows deployment 'gcp.awd-gha-test-staging'",
+    )
 
 def _test_status_line(_):
     _eq(
@@ -93,6 +109,7 @@ def _test_shadowed_warning(_):
 _UNIT_TESTS = [
     _test_identity,
     _test_login_command,
+    _test_login_target_label,
     _test_shadowed_warning,
     _test_status_line,
 ]

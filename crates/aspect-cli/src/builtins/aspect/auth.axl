@@ -201,45 +201,44 @@ def _login_impl(ctx: TaskContext) -> int:
     # host) unless the user pinned an explicit --profile.
     profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
     ctx.aspect.auth.persist(creds, profile = profile)
-    # Set apart from whatever the browser flow printed while it waited.
-    print("")
-    print("Logged in to " + _login_target(ctx, deployment) + " as " + creds.name + " (" + creds.email + ")")
-
-    if account_info != None:
-        _file_account_endpoints(ctx, creds, account_info)
-    _print_login_usage_hint(ctx, deployment)
+    endpoints_filed = _file_account_endpoints(ctx, creds, account_info)
+    _print_login_summary(ctx, deployment, creds)
+    _print_account_followups(ctx, account_info, endpoints_filed)
     return 0
 
-def _login_target(ctx: TaskContext, deployment: str) -> str:
-    """What a login just authenticated against, named as the user knows it: Aspect
-    Cloud, or `Aspect Workflows deployment '<name>'`. A bare login targets Aspect
-    Cloud, and `--deployment` may name it explicitly.
+def login_target_label(deployment: str, builtin: bool) -> str:
+    """How to name what a login targeted: Aspect Cloud, or
+    `Aspect Workflows deployment '<name>'`.
 
     The name is quoted and trails the noun so it reads as a sentence — names run
     from `acme` to `gcp.awd-gha-test-staging`, and a bare one in front of the noun
     turns into a run-on."""
-    if not deployment:
-        return "Aspect Cloud"
-    named = [d for d in ctx.aspect.auth.list() if d.name == deployment]
-    if named and named[0].builtin:
+    if not deployment or builtin:
         return "Aspect Cloud"
     return "Aspect Workflows deployment '" + deployment + "'"
 
-def _print_login_usage_hint(ctx: TaskContext, deployment: str):
-    """What the login just made available, and the flag that uses it. Silent when
-    the target serves no build endpoints — there is nothing to offer, and the
-    stdin-token flows reach here having configured nothing."""
+def _print_login_summary(ctx: TaskContext, deployment: str, creds):
+    """Announce a login: what it authenticated against, then what that makes
+    available and the flag that uses it.
+
+    Reads the recorded entries once, so the target is named and its capabilities
+    listed from the same snapshot. Says nothing beyond the identity line when the
+    target serves no build endpoints — which is every stdin-token login, since
+    those configure nothing."""
     entries = ctx.aspect.auth.list()
-    if not deployment:
-        _print_account_usage_hint(ctx)
+    matched = [d for d in entries if d.name == deployment] if deployment else [d for d in entries if d.builtin]
+    target = matched[0] if matched else None
+    builtin = target != None and target.builtin
+
+    print("")
+    print("Logged in to " + login_target_label(deployment, builtin) + " as " + creds.name + " (" + creds.email + ")")
+
+    if target == None:
         return
-    named = [d for d in entries if d.name == deployment]
-    if not named:
-        return
-    if named[0].builtin:
-        _print_account_usage_hint(ctx)
-    elif capability_labels(named[0], only = REMOTE_DEFAULT_CAPS):
-        _print_configured_usage_hint(named[0])
+    if builtin:
+        _print_default_usage_hint(target, len([d for d in entries if not d.builtin]))
+    elif capability_labels(target, only = REMOTE_DEFAULT_CAPS):
+        _print_configured_usage_hint(target)
 
 def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
     """File the grant's id_token under `name`, the credential a deployment's
@@ -257,33 +256,38 @@ def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
     ctx.aspect.auth.persist(endpoint_creds, profile = name)
     return True
 
-def _file_account_endpoints(ctx: TaskContext, creds, info):
+def _file_account_endpoints(ctx: TaskContext, creds, info) -> bool:
     """File `creds` against the Aspect Cloud endpoints `info` recorded.
 
-    Best-effort by design: this runs after a login that already succeeded, so an
-    endpoint we could not reach or configure must never turn that into a failed
-    command. It returns without an error either way. What the login made available
-    is announced by `_print_login_usage_hint`, not here.
+    Prints nothing, so the login's summary stays in one place — see
+    `_print_account_followups` for what is said about the outcome.
 
-    The endpoint credential is the same grant's id_token — what a cache/BES edge
-    validates — so there is no second browser round trip.
-
-    Only the `for_endpoint` failure says anything. Discovery failing leaves nothing
-    behind, whereas that one happens *after* the endpoints are recorded, leaving
-    them configured but unauthenticated — which `auth status` would otherwise be
-    the only place to notice. It should not be reachable: a credential carries no
-    id_token only when it came from a refresh grant (permitted to omit one) or was
-    read back from the store (which never keeps it), and this is always a fresh
-    authorization-code result. So the warning doubles as the signal that something
-    upstream changed.
+    The endpoint credential is the same grant's id_token, what a cache/BES edge
+    validates, so there is no second browser round trip. Returns False only when
+    those endpoints were recorded but the grant carried no id_token to authenticate
+    them with; `info` describing no usable endpoints is not a failure, just nothing
+    to do.
     """
-    if info.status != "ok" or not info.can_login:
+    if info == None or info.status != "ok" or not info.can_login:
+        return True
+    return _persist_endpoint_login(ctx, creds, info.name)
+
+def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
+    """Anything still needed after an Aspect Cloud login, printed below its summary.
+
+    An unfiled endpoint credential leaves the endpoints recorded but unauthenticated
+    — which `auth status` would otherwise be the only place to notice. It should not
+    happen: a credential carries no id_token only when it came from a refresh grant
+    (permitted to omit one) or was read back from the store (which never keeps it),
+    and this is always a fresh authorization-code result. So the warning doubles as
+    the signal that something upstream changed.
+    """
+    if info == None or info.status != "ok" or not info.can_login:
         return
-    if not _persist_endpoint_login(ctx, creds, info.name):
-        warn(ctx.std, "Configured remote cache and BES but could not authenticate them: the login returned no id_token.")
+    if not endpoints_filed:
+        warn(ctx.std, "Recorded the remote cache and BES but could not authenticate them: the login returned no id_token.")
         print("Run `aspect auth login` again to finish setting them up.")
-        return
-    if not info.is_default:
+    elif not info.is_default:
         print("")
         print("Run `aspect auth use " + info.name + "` to make it the default deployment.")
 

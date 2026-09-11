@@ -159,12 +159,11 @@ struct AuthEnv {
     authorize_params: BTreeMap<String, String>,
 }
 
-/// The built-in Aspect production deployment, seeded so a fresh install can
-/// `aspect auth login` with no `configure` step. It backs Aspect Cloud services
-/// (not a Bazel remote cache/BES/exec), so it owns no endpoint hosts and `hosts`
-/// is left empty. `config.json` entries add to this seed but cannot replace it:
-/// the seed is identified by its `builtin` flag, and [`RESERVED_NAMES`] keeps a
-/// configured deployment from taking its name.
+/// Aspect Cloud, seeded so a fresh install can `aspect auth login` with no
+/// `configure` step. The seed states the identity — issuer, PKCE client, API —
+/// and discovery fills in the endpoints it cannot know; a `config.json` entry
+/// under this name is folded in rather than replacing it, so the account can be
+/// extended but never redirected. See [`overlay_config_sources`].
 const DEFAULT_DEPLOYMENT_NAME: &str = "aspect";
 const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 /// The account's PKCE client — the "Aspect Build" application client.
@@ -175,8 +174,6 @@ const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 /// release. This stands in until then — a first login on a fresh machine, or an
 /// endpoint that could not be reached — which is why an account login never
 /// depends on reaching another host.
-///
-/// Both clients are accepted, so the two disagreeing costs nothing.
 const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
@@ -193,15 +190,12 @@ const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/call
 /// `aspect auth configure` by hand — see [`configure_default`].
 ///
 /// The API rather than a cache/BES edge: every Aspect Cloud resource advertises
-/// the same capability map, so any of them would do, but this one is the account's
-/// own ([`DEFAULT_API_URL`]) and so is the resource least likely to move. The
-/// edges have already been renamed once — `remote.app.aspect.build` served this
-/// role until the endpoints flattened out from under `app.aspect.build`.
+/// the same capability map, so any would serve, but this one is the account's own
+/// ([`DEFAULT_API_URL`]) and so is the least likely to be renamed out from under
+/// the CLI — which the edges have been.
 ///
-/// What it discovers is recorded under the account's own name, not a second one:
-/// the account and the Aspect Cloud endpoints are one deployment, so `auth status`
-/// shows a single Aspect entry and `--remote` needs no `--deployment`. The written
-/// entry is folded back into the seed on load — see [`overlay_config_sources`].
+/// What it finds is recorded under the account's own name, not a second one, so
+/// `auth status` shows a single entry and `--remote` needs no `--deployment`.
 const DEFAULT_DISCOVERY_HOST: &str = "api.aspect.build";
 
 /// The hosts Aspect Cloud serves itself. `configure` records their endpoints on
@@ -397,49 +391,8 @@ fn overlay_config_sources(
     for source in sources {
         for entry in source.entries {
             if entry.name == DEFAULT_DEPLOYMENT_NAME {
-                // Not a shadow but an enrichment: Aspect Cloud and the
-                // Aspect-hosted cache/BES are one deployment, so an entry under
-                // the account's own name contributes the endpoints the seed
-                // cannot know (see `configure_default`, which writes it).
-                //
-                // The issuer and `api_url` stay the seed's, so a hand-edited config
-                // can extend the account but can never redirect its login — the
-                // part of the old shadowing guard that mattered.
-                //
-                // The PKCE client is adopted, gated on the entry naming the
-                // account's own issuer. That gate is the whole safety argument: a
-                // client is only ever exercised against the issuer it was
-                // discovered from, so taking one from a document on
-                // [`DEFAULT_ISSUER`] cannot send a login anywhere new. What it buys
-                // is rotation without a release — change the advertised client and
-                // the next login follows it, with [`DEFAULT_CLIENT_ID`] standing in
-                // whenever discovery has not run or the endpoint was unreachable.
-                //
-                // Scopes and authorize_params are deliberately not adopted: the
-                // seed states its own ([`DEFAULT_LOGIN_SCOPES`]), and widening the
-                // adopted set is a separate decision from rotating the client.
                 if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
-                    let on_account_issuer = entry
-                        .issuer
-                        .as_deref()
-                        .is_some_and(|issuer| issuers_match(issuer, DEFAULT_ISSUER));
-                    let discovered_client = entry
-                        .client_id
-                        .filter(|client_id| !client_id.is_empty() && on_account_issuer);
-                    if let Some(client_id) = discovered_client {
-                        seed.client_id = Some(client_id);
-                    }
-                    // Same gate, same reason: the relay page is named by the
-                    // deployment, and the account relays through Aspect Cloud's
-                    // like any other. Only a document on the account's own issuer
-                    // may name it.
-                    if on_account_issuer {
-                        if let Some(uri) = entry.login_redirect_uri.filter(|u| !u.is_empty()) {
-                            seed.login_redirect_uri = Some(uri);
-                        }
-                    }
-                    seed.hosts = entry.hosts;
-                    seed.endpoints = entry.endpoints;
+                    merge_into_seed(seed, entry);
                 }
                 continue;
             }
@@ -470,6 +423,44 @@ fn overlay_config_sources(
     }
     reconcile_seed_default(&mut merged);
     (merged, shadowed)
+}
+
+/// Fold a `config.json` entry under the account's own name into the seed.
+///
+/// An enrichment, not a shadow: Aspect Cloud's endpoints are discovered rather
+/// than compiled in, so `configure_default` records them under that name and this
+/// puts them back on the entry they belong to.
+///
+/// The endpoints are taken unconditionally. The PKCE client and login redirect are
+/// taken only from an entry naming the account's own issuer, which is the whole
+/// safety argument: each is only ever exercised against the issuer it was
+/// discovered from, so one taken from a document on [`DEFAULT_ISSUER`] cannot send
+/// a login anywhere new. What that buys is rotation without a CLI release.
+///
+/// The issuer and `api_url` are never taken, so a hand-edited config can extend
+/// the account but cannot redirect its login. Neither are scopes or
+/// `authorize_params`: the seed states its own, and widening the adopted set is a
+/// separate decision from rotating the client.
+fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
+    if entry
+        .issuer
+        .as_deref()
+        .is_some_and(|issuer| issuers_match(issuer, DEFAULT_ISSUER))
+    {
+        if let Some(client_id) = non_empty(entry.client_id) {
+            seed.client_id = Some(client_id);
+        }
+        if let Some(uri) = non_empty(entry.login_redirect_uri) {
+            seed.login_redirect_uri = Some(uri);
+        }
+    }
+    seed.hosts = entry.hosts;
+    seed.endpoints = entry.endpoints;
+}
+
+/// `value` unless it is empty, so an advertised-but-blank field reads as absent.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
 }
 
 /// The seed is re-created `default = true` on every load, but a configured
@@ -970,8 +961,7 @@ fn deployment_from_discovery(
         client_id: selected.map(|s| s.client_id.clone()),
         api_url: None,
         hosts,
-        login_redirect_uri: Some(info.aspect_login_redirect_uri.clone())
-            .filter(|uri| !uri.is_empty()),
+        login_redirect_uri: non_empty(Some(info.aspect_login_redirect_uri.clone())),
         scopes: selected.map(|s| s.scopes.clone()).unwrap_or_default(),
         authorize_params: selected
             .map(|s| s.authorize_params.clone())
@@ -2052,13 +2042,9 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
 /// and the derived URI used instead — the same rule [`resolve_oidc_endpoints`]
 /// applies to a discovered token endpoint, and for the same reason.
 fn login_redirect_uri(selected: &Deployment) -> Option<String> {
-    let advertised = selected
-        .login_redirect_uri
-        .as_deref()
-        .filter(|uri| !uri.is_empty());
-    if let Some(uri) = advertised {
-        if is_https(uri) {
-            return Some(uri.to_string());
+    if let Some(uri) = non_empty(selected.login_redirect_uri.clone()) {
+        if is_https(&uri) {
+            return Some(uri);
         }
         tracing::warn!(
             "ignoring the login redirect advertised by deployment {:?}: {:?} is not https",
@@ -3098,24 +3084,13 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
-        // Browser-based OAuth flow. A configured deployment uses the
-        // endpoint-callback flow: the endpoint forwards the browser to this
-        // loopback, so its redirect is the endpoint's own /oauth2/callback and the
-        // callback port travels in the OAuth `state`. The built-in Aspect Cloud entry
-        // registers a loopback redirect directly with the IdP instead.
+        // Relay whenever there is somewhere to relay through; the loopback flow is
+        // the bootstrap for a deployment with neither an advertised redirect nor an
+        // endpoint to derive one from.
         //
-        // Keyed on `builtin`, not on whether hosts are present: the account now
-        // carries the Aspect-hosted cache/BES too (see `configure_default`), and it
-        // still logs in the cloud way. A configured deployment with nowhere to
-        // bounce through falls back to the cloud flow.
-        // Relay whenever the deployment has somewhere to relay through — the
-        // account included, now that Aspect Cloud serves the page. The loopback
-        // flow remains the bootstrap: a first login on a fresh install has
-        // discovered nothing yet, so there is no relay to use.
-        //
-        // The bearer is decided separately. A deployment's cache/BES edges validate
-        // the id_token; the account addresses an API that validates the
-        // access_token, and its edges are served the id_token filed alongside it.
+        // The bearer is a separate question: a deployment's cache/BES edges
+        // validate the id_token, while the account addresses an API that validates
+        // the access_token and has the id_token filed alongside it.
         let session = match login_redirect_uri(&selected) {
             Some(redirect_uri) => build_endpoint_session(env, redirect_uri, !selected.builtin)?,
             None => build_cloud_session(env)?,
@@ -4346,7 +4321,7 @@ mod tests {
     /// The account relays like any deployment once it knows where to, but keeps
     /// the access_token as its bearer — it addresses an API that validates that
     /// one, while a deployment's cache/BES edges validate the id_token. Which
-    /// token is kept is no longer implied by how the browser came back.
+    /// token is kept is independent of how the browser came back.
     #[test]
     fn the_account_relays_but_keeps_the_access_token() {
         let mut seed = default_deployment();
