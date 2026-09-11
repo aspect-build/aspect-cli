@@ -423,6 +423,15 @@ fn overlay_config_sources(
                     if let Some(client_id) = discovered_client {
                         seed.client_id = Some(client_id);
                     }
+                    // Same gate, same reason: the relay page is named by the
+                    // deployment, and the account relays through Aspect Cloud's
+                    // like any other. Only a document on the account's own issuer
+                    // may name it.
+                    if on_account_issuer {
+                        if let Some(uri) = entry.login_redirect_uri.filter(|u| !u.is_empty()) {
+                            seed.login_redirect_uri = Some(uri);
+                        }
+                    }
                     seed.hosts = entry.hosts;
                     seed.endpoints = entry.endpoints;
                 }
@@ -1982,7 +1991,9 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
             code_verifier,
             redirect_uri,
             env,
-            kind: SessionKind::Cloud,
+            kind: SessionKind::Loopback,
+            // The account's own API validates the access_token.
+            prefer_id_token: false,
         })),
     })
 }
@@ -2053,7 +2064,11 @@ fn callback_host(selected: &Deployment) -> Option<String> {
 /// `host` is the deployment's machine edge, picked by [`callback_host`] — not
 /// necessarily the host the user configured, which may serve nothing at that path.
 /// It must be registered as an allowed redirect with the deployment's IdP.
-fn build_endpoint_session(env: AuthEnv, redirect_uri: String) -> anyhow::Result<AuthSession> {
+fn build_endpoint_session(
+    env: AuthEnv,
+    redirect_uri: String,
+    prefer_id_token: bool,
+) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
     let port = listener
@@ -2081,9 +2096,10 @@ fn build_endpoint_session(env: AuthEnv, redirect_uri: String) -> anyhow::Result<
             code_verifier,
             redirect_uri,
             env,
-            kind: SessionKind::Endpoint {
+            kind: SessionKind::Relay {
                 expected_state: state,
             },
+            prefer_id_token,
         })),
     })
 }
@@ -2414,15 +2430,21 @@ impl AuthCredentials {
 }
 
 /// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
+/// How the browser gets back to this CLI — and only that. Which token becomes the
+/// bearer is a separate question, answered per deployment by
+/// [`AuthSessionInner::prefer_id_token`]: the Aspect account relays like any
+/// deployment but still keeps the `access_token`, because it addresses an API that
+/// validates that one.
 enum SessionKind {
-    /// Aspect-cloud: loopback redirect registered directly with the IdP; the
-    /// bearer is the OAuth `access_token`.
-    Cloud,
-    /// A configured (self-hosted) deployment: the redirect is the endpoint's own
-    /// `/oauth2/callback` (which forwards the browser to this loopback), the
-    /// authorization/token endpoints come from OIDC discovery, and the bearer is
-    /// the OIDC `id_token`. `state` is validated against the value we generated.
-    Endpoint { expected_state: String },
+    /// The redirect is this CLI's own loopback, registered directly with the IdP.
+    /// The browser lands on the listener itself, so there is no `state` to
+    /// round-trip. The bootstrap path: it needs nothing discovered.
+    Loopback,
+    /// The redirect is a relay page that forwards the browser on to this CLI's
+    /// loopback listener, with the port carried in `state` — validated on return
+    /// against the value we generated. The authorization/token endpoints come from
+    /// OIDC discovery.
+    Relay { expected_state: String },
 }
 
 struct AuthSessionInner {
@@ -2431,6 +2453,12 @@ struct AuthSessionInner {
     redirect_uri: String,
     env: AuthEnv,
     kind: SessionKind,
+    /// Whether this login's bearer is the OIDC `id_token` rather than the
+    /// `access_token`. A property of what the credential will be *sent to*, not of
+    /// how the browser came back: a deployment's cache/BES edges validate the
+    /// id_token, while the Aspect account addresses an API that validates the
+    /// access_token — and both may reach the IdP through the same relay.
+    prefer_id_token: bool,
 }
 
 impl AuthSessionInner {
@@ -2448,8 +2476,8 @@ impl AuthSessionInner {
         require_state: bool,
     ) -> anyhow::Result<(CredentialsEntry, String)> {
         let token_url = match &self.kind {
-            SessionKind::Cloud => format!("{}/oauth/token", self.env.domain),
-            SessionKind::Endpoint { expected_state } => {
+            SessionKind::Loopback => format!("{}/oauth/token", self.env.domain),
+            SessionKind::Relay { expected_state } => {
                 if !callback_state_matches(expected_state, state.as_deref(), require_state) {
                     return Err(anyhow::anyhow!(
                         "authentication failed: callback state did not match"
@@ -2468,9 +2496,9 @@ impl AuthSessionInner {
         .await?;
         let refresh_token = token_resp.refresh_token.clone();
         let id_token = token_resp.id_token.clone();
-        // Self-hosted edges validate the id_token; the cloud flow the
-        // access_token. Record which so refresh keeps minting the same kind.
-        let prefer_id_token = matches!(self.kind, SessionKind::Endpoint { .. });
+        // Recorded so refresh keeps minting the same kind rather than downgrading
+        // to whatever the grant happens to return.
+        let prefer_id_token = self.prefer_id_token;
         let entry = CredentialsEntry::from_bearer(
             token_resp.bearer(prefer_id_token)?,
             refresh_token,
@@ -3057,9 +3085,17 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // carries the Aspect-hosted cache/BES too (see `configure_default`), and it
         // still logs in the cloud way. A configured deployment with nowhere to
         // bounce through falls back to the cloud flow.
+        // Relay whenever the deployment has somewhere to relay through — the
+        // account included, now that Aspect Cloud serves the page. The loopback
+        // flow remains the bootstrap: a first login on a fresh install has
+        // discovered nothing yet, so there is no relay to use.
+        //
+        // The bearer is decided separately. A deployment's cache/BES edges validate
+        // the id_token; the account addresses an API that validates the
+        // access_token, and its edges are served the id_token filed alongside it.
         let session = match login_redirect_uri(&selected) {
-            Some(redirect_uri) if !selected.builtin => build_endpoint_session(env, redirect_uri)?,
-            _ => build_cloud_session(env)?,
+            Some(redirect_uri) => build_endpoint_session(env, redirect_uri, !selected.builtin)?,
+            None => build_cloud_session(env)?,
         };
         Ok(heap.alloc(session))
     }
@@ -4284,6 +4320,51 @@ mod tests {
         }
     }
 
+    /// The account relays like any deployment once it knows where to, but keeps
+    /// the access_token as its bearer — it addresses an API that validates that
+    /// one, while a deployment's cache/BES edges validate the id_token. Which
+    /// token is kept is no longer implied by how the browser came back.
+    #[test]
+    fn the_account_relays_but_keeps_the_access_token() {
+        let mut seed = default_deployment();
+        // Nothing discovered yet: the bootstrap login has no relay to use.
+        assert_eq!(login_redirect_uri(&seed), None);
+
+        seed.login_redirect_uri = Some("https://app.aspect.build/auth/cli/callback".to_string());
+        assert_eq!(
+            login_redirect_uri(&seed).as_deref(),
+            Some("https://app.aspect.build/auth/cli/callback")
+        );
+        // `builtin` alone decides the bearer, independently of the relay.
+        assert!(seed.builtin);
+    }
+
+    /// The relay page is named by the deployment, so the account takes it from a
+    /// document on its own issuer and refuses one from anywhere else — the gate
+    /// that already guards the adopted client.
+    #[test]
+    fn the_account_adopts_a_relay_only_from_its_own_issuer() {
+        let seed_redirect = |issuer: &str| {
+            let mut e = dep(DEFAULT_DEPLOYMENT_NAME, false);
+            e.issuer = Some(issuer.to_string());
+            e.login_redirect_uri = Some("https://app.aspect.build/auth/cli/callback".to_string());
+            let (merged, _) = overlay_config_sources(vec![ConfigSource {
+                path: PathBuf::from("/tmp/config.json"),
+                entries: vec![e],
+                user: true,
+            }]);
+            merged
+                .into_iter()
+                .find(|d| d.builtin)
+                .and_then(|d| d.login_redirect_uri)
+        };
+        assert_eq!(
+            seed_redirect(DEFAULT_ISSUER).as_deref(),
+            Some("https://app.aspect.build/auth/cli/callback")
+        );
+        assert_eq!(seed_redirect("https://auth.evil.example.com"), None);
+    }
+
     /// The live Aspect Cloud document, parsed as served. Guards the field names
     /// against a rename on either side.
     #[test]
@@ -5256,7 +5337,8 @@ mod tests {
                     scopes: Vec::new(),
                     authorize_params: BTreeMap::new(),
                 },
-                kind: SessionKind::Cloud,
+                kind: SessionKind::Loopback,
+                prefer_id_token: false,
             })),
         };
         let runtime = tokio::runtime::Builder::new_multi_thread()
