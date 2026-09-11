@@ -119,6 +119,18 @@ impl Endpoints {
             && self.exec.is_empty()
             && self.results_url.is_empty()
     }
+
+    /// Whether this advertises somewhere Bazel can actually talk to, which is
+    /// what makes a resource a *deployment* rather than merely an Aspect service.
+    ///
+    /// Distinct from [`Self::is_empty`], which also counts `results_url`: the
+    /// build-result viewer advertises one alongside no cache or BES at all
+    /// (`app.aspect.build` serves exactly that), and treating it as a deployment
+    /// would record an entry that cannot serve a build — and, under the account's
+    /// own name, would replace the endpoints that can.
+    fn serves_build_endpoints(&self) -> bool {
+        !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -152,52 +164,62 @@ const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 ///
 /// A constant rather than a discovered value: the account logs in to
 /// [`DEFAULT_API_URL`], and an account login must not depend on reaching another
-/// host. [`DEFAULT_ENDPOINT_HOST`] advertises this same client for the deployment
+/// host. [`DEFAULT_DISCOVERY_HOST`] advertises this same client for the deployment
 /// it serves, so a discovered login and this one agree.
 const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
-/// The Aspect-hosted deployment the built-in account fronts: the remote cache and
-/// BES that Aspect Cloud serves. The account seed itself owns no endpoints (it
-/// addresses [`DEFAULT_API_URL`]), so a bare `aspect auth login` discovers this
-/// host and records it as an ordinary deployment — see [`configure_default`].
-/// That way a fresh install has a working `--remote` without anyone having to
-/// run `aspect auth configure remote.app.aspect.build` by hand.
+/// The host a bare `aspect auth login` probes to discover the Aspect Cloud
+/// endpoints, so a fresh install has a working `--remote` without anyone running
+/// `aspect auth configure` by hand — see [`configure_default`].
 ///
-/// It is recorded under the account's own name, not a second one: the account
-/// and the Aspect-hosted cache/BES are one deployment, so `auth status` shows a
-/// single Aspect entry and `--remote` needs no `--deployment`. The written entry
-/// is folded back into the seed on load — see [`overlay_config_sources`].
-const DEFAULT_ENDPOINT_HOST: &str = "remote.app.aspect.build";
+/// The API rather than a cache/BES edge: every Aspect Cloud resource advertises
+/// the same capability map, so any of them would do, but this one is the account's
+/// own ([`DEFAULT_API_URL`]) and so is the resource least likely to move. The
+/// edges have already been renamed once — `remote.app.aspect.build` served this
+/// role until the endpoints flattened out from under `app.aspect.build`.
+///
+/// What it discovers is recorded under the account's own name, not a second one:
+/// the account and the Aspect Cloud endpoints are one deployment, so `auth status`
+/// shows a single Aspect entry and `--remote` needs no `--deployment`. The written
+/// entry is folded back into the seed on load — see [`overlay_config_sources`].
+const DEFAULT_DISCOVERY_HOST: &str = "api.aspect.build";
 
 /// The hosts Aspect Cloud serves itself. `configure` records their endpoints on
 /// the built-in account rather than deriving a deployment name from the host, so
-/// `aspect auth configure remote.app.aspect.build` lands in the same place as a
-/// bare login instead of creating an `app` deployment beside the account.
+/// `aspect auth configure cache.aspect.build` lands in the same place as a bare
+/// login instead of creating a `cache` deployment beside the account.
 ///
 /// An allowlist rather than "anything on [`DEFAULT_ISSUER`]": the issuer is the
 /// right *safety* check (see [`configure_deployment`]) but too broad an identity
 /// one — a future Aspect-hosted deployment sharing that issuer would silently
 /// absorb into the account. An explicit `--name` still wins, so a second entry
 /// for these hosts stays possible when someone wants one.
+///
+/// `exec` is listed ahead of serving any traffic: naming it costs nothing, and a
+/// host absent from this list becomes a stray deployment the day it ships.
 const ACCOUNT_HOSTS: &[&str] = &[
     "api.aspect.build",
     "app.aspect.build",
-    "remote.aspect.build",
+    "bes.aspect.build",
     "cache.aspect.build",
     "exec.aspect.build",
 ];
 
-/// Everything under the Aspect Cloud deployment's own domain (`remote.app…`,
-/// `bes.app…`), which [`ACCOUNT_HOSTS`] covers only at the apex.
-const ACCOUNT_HOST_SUFFIX: &str = ".app.aspect.build";
+/// The regional aliases of those same endpoints (`bes.us.aspect.build`,
+/// `cache.us.aspect.build`, …). They answer with the global names in their
+/// discovery document, but a user may well configure the host they were given, so
+/// the whole region resolves to the account. A suffix rather than an enumeration
+/// because a new region is a DNS change, not a CLI release.
+const ACCOUNT_HOST_SUFFIXES: &[&str] = &[".us.aspect.build"];
 
 /// Whether `host` is served by Aspect Cloud itself — see [`ACCOUNT_HOSTS`].
 /// `host` is already normalized by [`endpoint_host_str`]; the trailing dot of an
 /// absolute FQDN is stripped so `app.aspect.build.` still matches.
 fn is_account_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    ACCOUNT_HOSTS.contains(&host.as_str()) || host.ends_with(ACCOUNT_HOST_SUFFIX)
+    ACCOUNT_HOSTS.contains(&host.as_str())
+        || ACCOUNT_HOST_SUFFIXES.iter().any(|s| host.ends_with(s))
 }
 
 /// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
@@ -652,6 +674,13 @@ impl ProtectedResource {
         if !nested.is_empty() {
             return nested;
         }
+        // Both halves are required for PKCE, so the flat shape is filtered on the
+        // client too — a document that lists an issuer but no `client_id` (the
+        // build-result viewer's) would otherwise yield a server whose empty client
+        // reads as "can log in" right up until the authorize call.
+        if self.client_id.is_empty() {
+            return Vec::new();
+        }
         self.authorization_servers
             .iter()
             .filter(|s| !s.is_empty())
@@ -748,7 +777,9 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         return Discovery::NotADeployment;
     }
     match resp.json::<ProtectedResource>().await {
-        Ok(info) if !info.aspect_endpoints.is_empty() => Discovery::Reachable(Box::new(info)),
+        Ok(info) if info.aspect_endpoints.serves_build_endpoints() => {
+            Discovery::Reachable(Box::new(info))
+        }
         _ => Discovery::NotADeployment,
     }
 }
@@ -3101,7 +3132,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Discover and record the Aspect-hosted deployment the built-in account
-    /// fronts ([`DEFAULT_ENDPOINT_HOST`] as [`DEFAULT_ENDPOINT_NAME`]), so a bare
+    /// fronts ([`DEFAULT_DISCOVERY_HOST`] as [`DEFAULT_ENDPOINT_NAME`]), so a bare
     /// `aspect auth login` leaves `--remote` working without a separate
     /// `auth configure`. Returns the same [`DeploymentInfo`] shape as
     /// [`Self::configure`]; the caller treats any non-`"ok"` status as "skip and
@@ -3118,7 +3149,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         Ok(heap.alloc(configure_deployment(
-            DEFAULT_ENDPOINT_HOST,
+            DEFAULT_DISCOVERY_HOST,
             Some(DEFAULT_DEPLOYMENT_NAME.to_string()),
             false,
             Some(DEFAULT_ISSUER.to_string()),
@@ -4086,14 +4117,15 @@ mod tests {
         for host in [
             "api.aspect.build",
             "app.aspect.build",
-            "remote.aspect.build",
+            "bes.aspect.build",
             "cache.aspect.build",
             "exec.aspect.build",
-            // Everything under the Aspect Cloud deployment's own domain.
-            "remote.app.aspect.build",
-            "bes.app.aspect.build",
+            // The regional aliases of those same endpoints.
+            "bes.us.aspect.build",
+            "cache.us.aspect.build",
+            "app.us.aspect.build",
             // Case and an absolute FQDN's trailing dot are tolerated.
-            "BES.App.Aspect.Build.",
+            "Cache.US.Aspect.Build.",
         ] {
             assert!(is_account_host(host), "{host} should belong to the account");
         }
@@ -4102,16 +4134,59 @@ mod tests {
             // Another Aspect-hosted deployment is its own thing.
             "remote.silo-aws.aspect.build",
             "bes.gcp.awd-gha-test-dev.aspect.build",
-            // Self-hosted, and a lookalike that must not match the suffix.
+            // Self-hosted, and lookalikes that must not match a suffix.
             "remote.acme.example.com",
-            "app.aspect.build.evil.com",
-            "notapp.aspect.build",
+            "cache.us.aspect.build.evil.com",
+            "notcache.aspect.build",
         ] {
             assert!(
                 !is_account_host(host),
                 "{host} should be its own deployment"
             );
         }
+    }
+
+    /// A resource advertising only a build-result viewer is not a deployment.
+    /// `app.aspect.build` serves that shape — a `results_url` and an issuer, with
+    /// no cache, no BES and no `client_id`. Recording it under the account's name
+    /// would replace the endpoints that do serve builds with ones that cannot,
+    /// behind a client that can never complete a login.
+    ///
+    /// Defence in depth: the document is silo's to get right, and these two guards
+    /// mean a malformed one is refused rather than half-adopted.
+    #[test]
+    fn a_results_viewer_is_not_a_deployment() {
+        let viewer = ProtectedResource {
+            resource: "https://app.aspect.build/api/v1".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: vec![DEFAULT_ISSUER.to_string()],
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: String::new(),
+                bes: String::new(),
+                exec: String::new(),
+                results_url: "https://app.aspect.build".to_string(),
+            },
+            aspect_bes_results_url: String::new(),
+        };
+        assert!(!viewer.aspect_endpoints.serves_build_endpoints());
+        // An issuer with no client is no login target.
+        assert!(viewer.auth_servers().is_empty());
+
+        // A real edge advertises somewhere Bazel can talk to, and a client.
+        let edge = ProtectedResource {
+            aspect_endpoints: Endpoints {
+                cache: "cache.aspect.build".to_string(),
+                bes: "bes.aspect.build".to_string(),
+                exec: String::new(),
+                results_url: String::new(),
+            },
+            client_id: "client".to_string(),
+            ..viewer
+        };
+        assert!(edge.aspect_endpoints.serves_build_endpoints());
+        assert_eq!(edge.auth_servers().len(), 1);
     }
 
     /// The account's own name is writable when the caller asks for it by name —
@@ -4200,7 +4275,7 @@ mod tests {
     #[test]
     fn the_account_only_absorbs_endpoints_on_its_own_issuer() {
         let doc = |issuer: &str, client_id: &str| ProtectedResource {
-            resource: format!("https://{DEFAULT_ENDPOINT_HOST}"),
+            resource: format!("https://{DEFAULT_DISCOVERY_HOST}"),
             aspect_authorization_servers: vec![AspectAuthServer {
                 issuer: issuer.to_string(),
                 client_id: client_id.to_string(),
@@ -4211,7 +4286,7 @@ mod tests {
             client_id: String::new(),
             scopes_supported: Vec::new(),
             aspect_endpoints: Endpoints {
-                cache: DEFAULT_ENDPOINT_HOST.to_string(),
+                cache: DEFAULT_DISCOVERY_HOST.to_string(),
                 bes: "bes.app.aspect.build".to_string(),
                 exec: String::new(),
                 results_url: String::new(),
