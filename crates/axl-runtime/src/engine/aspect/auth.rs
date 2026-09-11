@@ -77,6 +77,13 @@ pub(crate) struct Deployment {
     /// `aspect_endpoints` map, so a discovered deployment always has this.
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
     pub(crate) endpoints: Endpoints,
+    /// The `redirect_uri` this deployment's login sends the IdP to, exactly as it
+    /// advertised it. Absent for a deployment whose document predates the field
+    /// (and for the built-in account, which registers a loopback redirect with the
+    /// IdP directly and never bounces through an edge) — see
+    /// [`login_redirect_uri`], which derives one in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_redirect_uri: Option<String>,
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
@@ -274,6 +281,9 @@ fn default_deployment() -> Deployment {
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
         hosts: Vec::new(),
+        // None: the account registers its loopback redirect with the IdP directly
+        // rather than bouncing through an edge, so it never uses this.
+        login_redirect_uri: None,
         // The same set a deployment gets when it advertises nothing: this seed is
         // not discovered from anywhere, so it states what that fallback would give
         // it rather than keeping a second list to drift from. `offline_access`
@@ -686,6 +696,15 @@ struct ProtectedResource {
     /// a bare host; omitted by a deployment with no web UI.
     #[serde(default)]
     aspect_bes_results_url: String,
+    /// The `redirect_uri` this deployment's CLI login must send the IdP to — the
+    /// page that relays the authorization code back to the CLI's loopback
+    /// listener. A full URI rather than a host: which path serves the relay is the
+    /// deployment's business, not something the CLI should be encoding.
+    ///
+    /// Empty from a document written before the field existed, which
+    /// [`login_redirect_uri`] derives a URI for instead.
+    #[serde(default)]
+    aspect_login_redirect_uri: String,
 }
 
 impl ProtectedResource {
@@ -919,6 +938,8 @@ fn deployment_from_discovery(
         client_id: selected.map(|s| s.client_id.clone()),
         api_url: None,
         hosts,
+        login_redirect_uri: Some(info.aspect_login_redirect_uri.clone())
+            .filter(|uri| !uri.is_empty()),
         scopes: selected.map(|s| s.scopes.clone()).unwrap_or_default(),
         authorize_params: selected
             .map(|s| s.authorize_params.clone())
@@ -1982,6 +2003,38 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
 ///
 /// Deliberately separate from `hosts`, which answers a different question — which
 /// endpoints the login JWT is attached to — and stays as discovered.
+/// The `redirect_uri` a configured deployment's login sends the IdP to.
+///
+/// The deployment's own advertised value when it has one: which host and path
+/// serve the relay is its business, and encoding a guess here is what forces a CLI
+/// release every time a deployment moves the page.
+///
+/// Derived from a machine edge otherwise, for a document written before the field
+/// existed — see [`callback_host`]. That fallback is the only reason the cache/BES
+/// preference still exists.
+///
+/// An advertised URI must be `https`. It is where the authorization code is
+/// delivered, and the document is server-controlled, so a plaintext one is refused
+/// and the derived URI used instead — the same rule [`resolve_oidc_endpoints`]
+/// applies to a discovered token endpoint, and for the same reason.
+fn login_redirect_uri(selected: &Deployment) -> Option<String> {
+    let advertised = selected
+        .login_redirect_uri
+        .as_deref()
+        .filter(|uri| !uri.is_empty());
+    if let Some(uri) = advertised {
+        if is_https(uri) {
+            return Some(uri.to_string());
+        }
+        tracing::warn!(
+            "ignoring the login redirect advertised by deployment {:?}: {:?} is not https",
+            selected.name,
+            uri
+        );
+    }
+    callback_host(selected).map(|host| format!("https://{host}/oauth2/callback"))
+}
+
 fn callback_host(selected: &Deployment) -> Option<String> {
     [&selected.endpoints.cache, &selected.endpoints.bes]
         .into_iter()
@@ -2000,7 +2053,7 @@ fn callback_host(selected: &Deployment) -> Option<String> {
 /// `host` is the deployment's machine edge, picked by [`callback_host`] — not
 /// necessarily the host the user configured, which may serve nothing at that path.
 /// It must be registered as an allowed redirect with the deployment's IdP.
-fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSession> {
+fn build_endpoint_session(env: AuthEnv, redirect_uri: String) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
     let port = listener
@@ -2008,7 +2061,6 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
         .map_err(|e| anyhow::anyhow!("failed to read the login callback port: {}", e))?
         .port();
 
-    let redirect_uri = format!("https://{}/oauth2/callback", host);
     let code_verifier = generate_code_verifier();
     let code_challenge = generate_code_challenge(&code_verifier);
     let state = login_state(&generate_code_verifier(), port);
@@ -3005,8 +3057,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // carries the Aspect-hosted cache/BES too (see `configure_default`), and it
         // still logs in the cloud way. A configured deployment with nowhere to
         // bounce through falls back to the cloud flow.
-        let session = match callback_host(&selected) {
-            Some(host) if !selected.builtin => build_endpoint_session(env, &host)?,
+        let session = match login_redirect_uri(&selected) {
+            Some(redirect_uri) if !selected.builtin => build_endpoint_session(env, redirect_uri)?,
             _ => build_cloud_session(env)?,
         };
         Ok(heap.alloc(session))
@@ -3461,6 +3513,7 @@ mod tests {
             scopes: Vec::new(),
             authorize_params: BTreeMap::new(),
             endpoints: Endpoints::default(),
+            login_redirect_uri: None,
         }
     }
 
@@ -3870,6 +3923,7 @@ mod tests {
                 ..Default::default()
             },
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
         }
     }
 
@@ -3946,6 +4000,7 @@ mod tests {
                 results_url: String::new(),
             },
             aspect_bes_results_url: "https://app.acme.aspect.build/i/".to_string(),
+            aspect_login_redirect_uri: String::new(),
         };
         let d = configure_from(&advertised, None);
         assert_eq!(d.issuer.as_deref(), Some("https://acme.auth.aspect.build"));
@@ -3998,6 +4053,7 @@ mod tests {
             },
             // A deployment with no web UI omits it entirely.
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
         };
         let d = configure_from(&bare, None);
         assert!(d.issuer.is_none() && d.client_id.is_none());
@@ -4147,6 +4203,7 @@ mod tests {
             issuer: Some("https://acme.auth.aspect.build/".to_string()),
             client_id: Some("abc".to_string()),
             api_url: None,
+            login_redirect_uri: None,
             hosts: vec![],
             scopes: vec![],
             endpoints: Endpoints::default(),
@@ -4227,6 +4284,110 @@ mod tests {
         }
     }
 
+    /// A deployment's own advertised redirect wins over anything the CLI would
+    /// derive: which host and path serve the relay is the deployment's business,
+    /// and guessing is what forces a release every time one moves.
+    #[test]
+    fn an_advertised_login_redirect_is_used_verbatim() {
+        let mut d = dep("acme", false);
+        d.hosts = vec!["app.example".to_string()];
+        d.endpoints = Endpoints {
+            cache: "cache.example".to_string(),
+            bes: "bes.example".to_string(),
+            exec: String::new(),
+            results_url: String::new(),
+        };
+
+        // Advertised: used as given, path and all, in preference to the edge the
+        // fallback would have picked.
+        d.login_redirect_uri = Some("https://app.example/cli/callback".to_string());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://app.example/cli/callback")
+        );
+
+        // Absent: derived exactly as before the field existed.
+        d.login_redirect_uri = None;
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+        // An empty string is an absent field, not an override.
+        d.login_redirect_uri = Some(String::new());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+
+        // The authorization code lands at this URI and the document is
+        // server-controlled, so a plaintext one is refused and the derived URI
+        // stands — the rule `resolve_oidc_endpoints` applies to a token endpoint.
+        d.login_redirect_uri = Some("http://app.example/cli/callback".to_string());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+    }
+
+    /// The advertised URI survives the round trip through `config.json`, so a
+    /// login long after `configure` still bounces where the deployment asked.
+    #[test]
+    fn an_advertised_login_redirect_round_trips_through_the_config_file() {
+        let doc = ProtectedResource {
+            resource: "https://cache.acme.example".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: vec!["https://acme.auth.example".to_string()],
+            client_id: "abc".to_string(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: "cache.acme.example".to_string(),
+                bes: "bes.acme.example".to_string(),
+                exec: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: "https://app.acme.example/cli/callback".to_string(),
+        };
+        let server = doc.auth_servers().into_iter().next();
+        let recorded = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example",
+            &doc,
+            server.as_ref(),
+        );
+        assert_eq!(
+            recorded.login_redirect_uri.as_deref(),
+            Some("https://app.acme.example/cli/callback")
+        );
+
+        let json = serde_json::to_string(&recorded).unwrap();
+        let reloaded: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            login_redirect_uri(&reloaded).as_deref(),
+            Some("https://app.acme.example/cli/callback")
+        );
+
+        // A document without the field writes no key at all, and still derives.
+        let older = ProtectedResource {
+            aspect_login_redirect_uri: String::new(),
+            ..doc
+        };
+        let recorded = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example",
+            &older,
+            server.as_ref(),
+        );
+        assert!(recorded.login_redirect_uri.is_none());
+        let json = serde_json::to_string(&recorded).unwrap();
+        assert!(!json.contains("login_redirect_uri"));
+        let reloaded: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            login_redirect_uri(&reloaded).as_deref(),
+            Some("https://cache.acme.example/oauth2/callback")
+        );
+    }
+
     /// A login bounces through the deployment's machine edge, not necessarily the
     /// host it was configured from: only the cache/BES edges serve the
     /// `/oauth2/callback` relay page. Prefer the cache, then the BES.
@@ -4300,6 +4461,7 @@ mod tests {
                 results_url: "https://app.aspect.build".to_string(),
             },
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
         };
         assert!(!viewer.aspect_endpoints.serves_build_endpoints());
         // An issuer with no client is no login target.
@@ -4473,6 +4635,7 @@ mod tests {
                 results_url: String::new(),
             },
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
         };
 
         // The advertised client_id is adopted, which is what lets the client ID be
