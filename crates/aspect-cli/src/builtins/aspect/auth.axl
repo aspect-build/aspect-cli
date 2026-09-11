@@ -201,6 +201,8 @@ def _login_impl(ctx: TaskContext) -> int:
     # host) unless the user pinned an explicit --profile.
     profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
     ctx.aspect.auth.persist(creds, profile = profile)
+    # Set apart from whatever the browser flow printed while it waited.
+    print("")
     print("Logged in to " + _login_target(ctx, deployment) + " as " + creds.name + " (" + creds.email + ")")
 
     if account_info != None:
