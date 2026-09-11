@@ -196,14 +196,19 @@ const DEFAULT_DISCOVERY_HOST: &str = "api.aspect.build";
 /// absorb into the account. An explicit `--name` still wins, so a second entry
 /// for these hosts stays possible when someone wants one.
 ///
-/// `exec` is listed ahead of serving any traffic: naming it costs nothing, and a
-/// host absent from this list becomes a stray deployment the day it ships.
+/// `exec` and `remote` are listed ahead of resolving anywhere: `exec` arrives with
+/// remote execution, and `remote` may return as a single multiplexed endpoint.
+/// Naming them costs nothing — configuring a host that does not resolve fails as
+/// unreachable either way — while a host *missing* from this list becomes a stray
+/// deployment beside the account the day it ships. Do not prune them for looking
+/// dead.
 const ACCOUNT_HOSTS: &[&str] = &[
     "api.aspect.build",
     "app.aspect.build",
     "bes.aspect.build",
     "cache.aspect.build",
     "exec.aspect.build",
+    "remote.aspect.build",
 ];
 
 /// The regional aliases of those same endpoints (`bes.us.aspect.build`,
@@ -4119,7 +4124,11 @@ mod tests {
             "app.aspect.build",
             "bes.aspect.build",
             "cache.aspect.build",
+            // Not resolving yet: `exec` ships with remote execution, `remote` may
+            // return as a multiplexed endpoint. Listed so neither becomes a stray
+            // deployment on the day it does.
             "exec.aspect.build",
+            "remote.aspect.build",
             // The regional aliases of those same endpoints.
             "bes.us.aspect.build",
             "cache.us.aspect.build",
