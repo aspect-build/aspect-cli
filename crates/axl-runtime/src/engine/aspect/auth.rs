@@ -35,8 +35,8 @@ pub(crate) struct Deployment {
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "is_false")]
     default: bool,
-    /// Whether this is the built-in Aspect account rather than a configured
-    /// Workflows deployment. Set only by [`default_deployment`]; `#[serde(skip)]`
+    /// Whether this is the built-in Aspect Cloud entry rather than a configured
+    /// Aspect Workflows deployment. Set only by [`default_deployment`]; `#[serde(skip)]`
     /// keeps a hand-edited `config.json` from claiming account status and keeps the
     /// flag out of the written file.
     ///
@@ -50,7 +50,7 @@ pub(crate) struct Deployment {
     client_id: Option<String>,
     /// Aspect-cloud API base (`ctx.aspect.auth.api_url`), used by Aspect-cloud
     /// features (GitHub/GitLab token exchange, status comments, budget). Present
-    /// only for the built-in Aspect account; self-hosted deployments don't run
+    /// only for the built-in Aspect Cloud entry; self-hosted deployments don't run
     /// these endpoints, so it is absent for configured deployments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_url: Option<String>,
@@ -87,7 +87,7 @@ pub(crate) struct Deployment {
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
-/// and the set [`default_deployment`] states for the built-in Aspect account.
+/// and the set [`default_deployment`] states for the built-in Aspect Cloud entry.
 /// A deployment that advertises its own set is authoritative and this does not
 /// apply to it. `offline_access` requests a refresh token so the credential renews
 /// without re-login; a provider that gates one differently (Google) advertises the
@@ -259,7 +259,7 @@ fn is_account_host(host: &str) -> bool {
 const ASPECT_DOMAIN_SUFFIX: &str = ".aspect.build";
 
 /// Names a configured deployment may not take, because each would shadow the
-/// built-in Aspect account: [`DEFAULT_DEPLOYMENT_NAME`] is the account's own
+/// built-in Aspect Cloud entry: [`DEFAULT_DEPLOYMENT_NAME`] is the account's own
 /// name, and [`DEFAULT_PROFILE`] is the credential profile the account files
 /// under (a deployment's credential is stored under its name, so a deployment
 /// named `default` would share the account's slot).
@@ -275,7 +275,7 @@ fn is_reserved_name(name: &str) -> bool {
 /// remedy is an explicit name, so the message asks for one.
 fn reserved_name_error(name: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "deployment name {name:?} is reserved for the built-in Aspect account\n\n\
+        "deployment name {name:?} is reserved for the built-in Aspect Cloud entry\n\n\
          Pass --deployment <name> to `aspect auth configure` with a different name."
     )
 }
@@ -397,7 +397,7 @@ fn overlay_config_sources(
     for source in sources {
         for entry in source.entries {
             if entry.name == DEFAULT_DEPLOYMENT_NAME {
-                // Not a shadow but an enrichment: the Aspect account and the
+                // Not a shadow but an enrichment: Aspect Cloud and the
                 // Aspect-hosted cache/BES are one deployment, so an entry under
                 // the account's own name contributes the endpoints the seed
                 // cannot know (see `configure_default`, which writes it).
@@ -446,7 +446,7 @@ fn overlay_config_sources(
             if is_reserved_name(&entry.name) {
                 tracing::warn!(
                     "ignoring deployment {:?} from {}: the name is reserved for the \
-                     built-in Aspect account",
+                     built-in Aspect Cloud entry",
                     entry.name,
                     source.path.display()
                 );
@@ -527,7 +527,7 @@ pub(crate) fn select_deployment(
 /// Selection for the `auth login`/`logout` commands, which target the Aspect
 /// *account* by default rather than the default *deployment*: an explicit
 /// `name` picks that deployment (erroring if unknown); an empty `name` resolves
-/// the built-in Aspect account (the seed). The default-deployment concept (set by
+/// the built-in Aspect Cloud entry (the seed). The default-deployment concept (set by
 /// `auth use`) governs builds (`--remote`), not the account login — so a
 /// bare `auth login` always means the account, never a configured default.
 fn select_account_or_deployment(
@@ -1077,7 +1077,7 @@ fn configure_deployment(
 ) -> anyhow::Result<DeploymentInfo> {
     let host = endpoint_host_str(host);
     // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
-    // Workflows deployment) so the task prints the right guidance rather than a
+    // Aspect Workflows deployment) so the task prints the right guidance rather than a
     // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
     // a deployment — probe_protected_resource requires it.
     let mk = |status: &str, reason: String| DeploymentInfo {
@@ -2262,7 +2262,7 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
 
 /// Resolve the current access token (JWT) for `profile` (already resolved, e.g.
 /// via [`resolve_profile`]). For the default profile an explicit
-/// `ASPECT_API_TOKEN` (exchanged against the Aspect account issuer) takes
+/// `ASPECT_API_TOKEN` (exchanged against Aspect Cloud issuer) takes
 /// precedence over stored credentials; other profiles always use their stored
 /// credential. Auto-refreshes an expired-but-refreshable token (persisting the
 /// refresh). Returns `None` when no credential exists for the profile, and errors
@@ -2271,7 +2271,7 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
 /// one a server will 401. Requires a Tokio runtime (the refresh path blocks on
 /// async HTTP).
 pub fn resolve_access_token(profile: &str) -> anyhow::Result<Option<String>> {
-    // ASPECT_API_TOKEN is exchanged against the default (Aspect account) issuer,
+    // ASPECT_API_TOKEN is exchanged against the default (Aspect Cloud) issuer,
     // so it only stands in for the default profile — a self-hosted deployment's
     // profile must use its own stored credential, not the account token.
     if profile == DEFAULT_PROFILE {
@@ -2379,7 +2379,7 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
     /// and `prefer_id_token` is set so a later refresh keeps minting one rather
     /// than downgrading to the access_token.
     ///
-    /// Lets a single browser flow serve both the Aspect account (access_token,
+    /// Lets a single browser flow serve both Aspect Cloud (access_token,
     /// filed under the default profile) and the Aspect-hosted deployment
     /// (id_token, filed under its own) — see the bare-login path in `auth.axl`.
     /// Returns `None` when the grant issued no id_token, so the caller skips the
@@ -2455,7 +2455,7 @@ impl AuthCredentials {
 /// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
 /// How the browser gets back to this CLI — and only that. Which token becomes the
 /// bearer is a separate question, answered per deployment by
-/// [`AuthSessionInner::prefer_id_token`]: the Aspect account relays like any
+/// [`AuthSessionInner::prefer_id_token`]: Aspect Cloud relays like any
 /// deployment but still keeps the `access_token`, because it addresses an API that
 /// validates that one.
 enum SessionKind {
@@ -2479,7 +2479,7 @@ struct AuthSessionInner {
     /// Whether this login's bearer is the OIDC `id_token` rather than the
     /// `access_token`. A property of what the credential will be *sent to*, not of
     /// how the browser came back: a deployment's cache/BES edges validate the
-    /// id_token, while the Aspect account addresses an API that validates the
+    /// id_token, while Aspect Cloud addresses an API that validates the
     /// access_token — and both may reach the IdP through the same relay.
     prefer_id_token: bool,
 }
@@ -2876,7 +2876,7 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect account
+/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect Cloud entry
 /// (`builtin`) plus every configured deployment, each tagged with whether it is
 /// the default and whether a credential is stored under its profile. The account
 /// is always included (the `auth status` task renders it in its own section, logged
@@ -3101,7 +3101,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // Browser-based OAuth flow. A configured deployment uses the
         // endpoint-callback flow: the endpoint forwards the browser to this
         // loopback, so its redirect is the endpoint's own /oauth2/callback and the
-        // callback port travels in the OAuth `state`. The built-in Aspect account
+        // callback port travels in the OAuth `state`. The built-in Aspect Cloud entry
         // registers a loopback redirect directly with the IdP instead.
         //
         // Keyed on `builtin`, not on whether hosts are present: the account now
@@ -3189,7 +3189,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The `config.json` deployments ignored for claiming a name reserved by the
-    /// built-in Aspect account, as [`ShadowedDeployment`] rows, so `auth status`
+    /// built-in Aspect Cloud entry, as [`ShadowedDeployment`] rows, so `auth status`
     /// can name them (and the file to fix) rather than let them vanish silently.
     fn shadowed<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -3213,7 +3213,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Make `deployment` the default (used when a command runs with no explicit
-    /// `--deployment`). Selecting the built-in Aspect account is expressed as
+    /// `--deployment`). Selecting the built-in Aspect Cloud entry is expressed as
     /// clearing every configured default. Errors if `deployment` names no
     /// configured deployment.
     fn set_default<'v>(
@@ -3226,7 +3226,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Forget a configured deployment: drop its `~/.aspect/config.json` entry and
-    /// its stored credential. Errors on the built-in Aspect account or an
+    /// its stored credential. Errors on the built-in Aspect Cloud entry or an
     /// unknown name.
     fn remove<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -3245,7 +3245,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let profile = resolve_profile(profile.into_option().as_deref());
         // Prefer an explicit ASPECT_API_TOKEN over stored credentials, but only for
-        // the default profile: the token is exchanged against the Aspect account
+        // the default profile: the token is exchanged against Aspect Cloud
         // issuer, so it can't stand in for a self-hosted deployment's profile.
         if profile == DEFAULT_PROFILE {
             if let Some(entry) = credentials_from_api_token_env()? {
@@ -3375,7 +3375,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// The credentials profile a login against `deployment` should persist under,
     /// so it matches what [`Self::deployment_for_host`] later resolves for that
     /// deployment's endpoints. A configured deployment (one with its own hosts)
-    /// stores under its name; the built-in Aspect account — whose endpoints go
+    /// stores under its name; the built-in Aspect Cloud entry — whose endpoints go
     /// through the default profile — stores under the resolved default profile.
     fn login_profile<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -3392,7 +3392,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 /// The credentials profile a login against `selected` persists under: a
 /// configured deployment stores under its name, so
 /// [`Auth::deployment_for_host`] later resolves the same profile for its
-/// endpoints; the built-in Aspect account stores under the resolved default
+/// endpoints; the built-in Aspect Cloud entry stores under the resolved default
 /// profile.
 ///
 /// Keyed on `builtin`, an identity question, because the account now carries the
@@ -3621,7 +3621,7 @@ mod tests {
     #[test]
     fn select_account_or_deployment_defaults_to_the_account_not_the_default_deployment() {
         // Even with a configured deployment marked default (the build default),
-        // a bare auth login/logout targets the Aspect account (the seed) — the
+        // a bare auth login/logout targets Aspect Cloud (the seed) — the
         // default-deployment concept governs builds, not the account.
         let mut ds = vec![default_deployment(), dep("acme", true)];
         ds[0].default = false;

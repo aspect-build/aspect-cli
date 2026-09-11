@@ -34,8 +34,8 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
 # width would collide with its value.
 _LABEL_WIDTH = 8
 
-# What the built-in Aspect account login grants. Shown only before its build
-# endpoints have been discovered — after that the endpoints themselves say more.
+# What an Aspect Cloud login grants before its build endpoints are known. Shown
+# only until discovery records them — after that the endpoints themselves say more.
 _ACCOUNT_GRANTS = "Aspect Cloud services (e.g. the GitHub App API on CI)"
 
 def identity(d) -> str:
@@ -52,12 +52,12 @@ def login_command(d) -> str:
 
 def shadowed_warning(s) -> str:
     """The warning for a `config.json` deployment ignored for taking a name the
-    Aspect account reserves, naming the file that declares it.
+    Aspect Cloud reserves, naming the file that declares it.
 
     The remedy depends on that file: `auth remove` only edits the user's config,
     so a checked-in repo config is told to edit the entry directly."""
     fix = "Run `aspect auth remove {}`".format(s.name) if s.user_config else "Rename or delete that entry in {}".format(s.path)
-    return "Ignored the deployment named '{}' in {} — that name is reserved for the Aspect account. {}, then re-run `aspect auth configure <host>` to re-add it.".format(s.name, s.path, fix)
+    return "Ignored the deployment named '{}' in {} — that name is reserved for Aspect Cloud. {}, then re-run `aspect auth configure <host>` to re-add it.".format(s.name, s.path, fix)
 
 def status_line(d) -> str:
     """The Status row value for a summary: the logged-in identity + token status,
@@ -72,7 +72,7 @@ def _print_deployment(d, header = True):
     """Print one entry's aligned detail table (Status, Issuer, and the build
     endpoints it serves). Shared by `auth status` and `configure`.
 
-    The Aspect account carries endpoints too, once a login has discovered them,
+    The Aspect Cloud carries endpoints too, once a login has discovered them,
     and renders them the same way; the Grants line stands in only while it has
     none — a fresh install that has not logged in yet.
 
@@ -121,7 +121,7 @@ def _print_default_usage_hint(summary, others: int = 0):
         print("Add --deployment <name> to target a specific deployment instead of the default.")
 
 def _print_account_usage_hint(ctx: TaskContext):
-    """The `--remote` hint for the Aspect account, read from the recorded entries so
+    """The `--remote` hint for Aspect Cloud, read from the recorded entries so
     it names the endpoints the account actually has and mentions `--deployment` only
     when there is another deployment to name."""
     entries = ctx.aspect.auth.list()
@@ -195,7 +195,7 @@ def _login_impl(ctx: TaskContext) -> int:
 def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
     """File the grant's id_token under `name`, the credential a deployment's
     cache/BES edges validate. The caller has already filed the access_token under
-    its own profile — for the Aspect account that is the default profile, which
+    its own profile — for Aspect Cloud that is the default profile, which
     every Aspect Cloud caller reads, so the two live side by side.
 
     Returns False when the grant carried no id_token, leaving the deployment
@@ -235,7 +235,7 @@ def _file_account_endpoints(ctx: TaskContext, creds, info):
         print("Run `aspect auth login` again to finish setting them up.")
         return
     print("")
-    print("Configured remote cache and BES for your Aspect account.")
+    print("Configured remote cache and BES for Aspect Cloud.")
     if info.is_default:
         _print_account_usage_hint(ctx)
     else:
@@ -243,8 +243,8 @@ def _file_account_endpoints(ctx: TaskContext, creds, info):
 
 login = task(
     group = ["auth"],
-    summary = "Log in to your Aspect account or a Workflows deployment",
-    description = "Authenticate via the browser (or a token on stdin) and store the credential. Targets your Aspect account by default (used for Aspect Cloud services such as the GitHub App API on CI), and also records the Aspect-hosted deployment so `--remote` works straight away; pass --deployment <name> to log in to a configured Workflows deployment instead.",
+    summary = "Log in to Aspect Cloud or an Aspect Workflows deployment",
+    description = "Authenticate via the browser (or a token on stdin) and store the credential. Targets Aspect Cloud by default, recording its remote cache and BES so `--remote` works straight away; pass --deployment <name> to log in to a configured Aspect Workflows deployment instead.",
     implementation = _login_impl,
     args = {
         "with_token": args.boolean(
@@ -256,14 +256,14 @@ login = task(
             description = "Log in with an 'id:secret' API token read from stdin instead of the browser flow.",
         ),
         "deployment": args.string(
-            description = "Log in to this configured Workflows deployment (see `aspect auth configure`) instead of your Aspect account. Selects which account/deployment to authenticate.",
+            description = "Log in to this configured Aspect Workflows deployment (see `aspect auth configure`) instead of Aspect Cloud. Selects which account/deployment to authenticate.",
         ),
         "no_browser": args.boolean(
             default = False,
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "profile": args.string(
-            description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for the Aspect account). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
+            description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for Aspect Cloud). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
         ),
     },
 )
@@ -324,12 +324,12 @@ def _configure_impl(ctx: TaskContext) -> int:
     if info == None:
         return 1
 
-    # `--name aspect` attaches the endpoints to the Aspect account rather than
+    # `--name aspect` attaches the endpoints to Aspect Cloud rather than
     # recording a deployment beside it, so say which happened.
     account = ctx.aspect.auth.deployment_summary(info.name)
     is_account = account != None and account.builtin
     if is_account:
-        print("Configured remote cache and BES for your Aspect account.")
+        print("Configured remote cache and BES for Aspect Cloud.")
     else:
         print("Configured deployment '" + info.name + "'.")
     if not info.can_login:
@@ -415,16 +415,16 @@ def _logout_impl(ctx: TaskContext) -> int:
 
 logout = task(
     group = ["auth"],
-    summary = "Log out of your Aspect account or a Workflows deployment",
-    description = "Clear a stored credential: the effective default (your Aspect account, or the default deployment) unless --deployment <name> is given, or --all to clear every credential. A configured deployment stays configured; use `aspect auth remove` to forget it entirely.",
+    summary = "Log out of Aspect Cloud or an Aspect Workflows deployment",
+    description = "Clear a stored credential: the effective default (Aspect Cloud, or the default deployment) unless --deployment <name> is given, or --all to clear every credential. A configured deployment stays configured; use `aspect auth remove` to forget it entirely.",
     implementation = _logout_impl,
     args = {
         "deployment": args.string(
-            description = "Log out of this configured Workflows deployment instead of the effective default. Logging out of the current default deployment also clears the default (no fall-through to another).",
+            description = "Log out of this configured Aspect Workflows deployment instead of the effective default. Logging out of the current default deployment also clears the default (no fall-through to another).",
         ),
         "all": args.boolean(
             default = False,
-            description = "Log out everywhere — clear every stored credential (your Aspect account and all deployments).",
+            description = "Log out everywhere — clear every stored credential (Aspect Cloud and all deployments).",
         ),
         "profile": args.string(
             description = "Advanced: the exact credential store key to clear, overriding the one derived from --deployment. See `aspect auth login --help`.",
@@ -494,13 +494,13 @@ def _status_impl(ctx: TaskContext) -> int:
     for s in ignored:
         warn(ctx.std, shadowed_warning(s))
 
-    print("Aspect account:")
+    print("Aspect Cloud:")
     for d in account:
         _print_deployment(d, header = False)
 
     print("")
     if deployments:
-        print("Workflows deployments:")
+        print("Aspect Workflows deployments:")
         for d in deployments:
             print("")
             _print_deployment(d)
@@ -509,14 +509,14 @@ def _status_impl(ctx: TaskContext) -> int:
         default = ([d for d in deployments if d.default] + account)[0]
         _print_default_usage_hint(default, len(deployments))
     else:
-        print("No Workflows deployments configured.")
+        print("No Aspect Workflows deployments configured.")
         print("Run `aspect auth configure <host>` to add one.")
     return 0
 
 status = task(
     group = ["auth"],
-    summary = "Show your Aspect account and deployment login status",
-    description = "Show your Aspect account and every configured Workflows deployment — the identity and token status of each, the default deployment (●), and how to log in to any that are logged out.",
+    summary = "Show login status for Aspect Cloud and your deployments",
+    description = "Show Aspect Cloud and every configured Aspect Workflows deployment — the identity and token status of each, the default deployment (●), and how to log in to any that are logged out.",
     implementation = _status_impl,
     args = {
         "output": args.string(
@@ -537,7 +537,7 @@ def _use_impl(ctx: TaskContext) -> int:
 
 use = task(
     group = ["auth"],
-    summary = "Set the default Workflows deployment",
+    summary = "Set the default Aspect Workflows deployment",
     description = "Make a configured deployment the default, so build/test (and `--deployment`-aware commands) target it — e.g. `aspect build --remote` — without naming it each time.",
     implementation = _use_impl,
     args = {
