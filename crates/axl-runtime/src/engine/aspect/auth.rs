@@ -1966,12 +1966,40 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
     })
 }
 
+/// The host whose `/oauth2/callback` relays a configured deployment's login back
+/// to this CLI's loopback listener — see [`build_endpoint_session`].
+///
+/// Only the machine edges serve that relay page: it ships with the jwt-validator
+/// that fronts the remote cache and the BES. On a deployment's web UI host the
+/// same path is oauth2-proxy's own redemption endpoint, and on its API host there
+/// is nothing there at all — so a deployment configured from one of those has to
+/// bounce through an edge that does have it. Prefer the advertised cache, then the
+/// BES.
+///
+/// Falls back to the host the user configured for a deployment that advertised no
+/// endpoints map: an older discovery document, or a hand-written `config.json`
+/// entry. Those predate the relay's move and are the case this preserves.
+///
+/// Deliberately separate from `hosts`, which answers a different question — which
+/// endpoints the login JWT is attached to — and stays as discovered.
+fn callback_host(selected: &Deployment) -> Option<String> {
+    [&selected.endpoints.cache, &selected.endpoints.bes]
+        .into_iter()
+        .chain(selected.hosts.first())
+        .map(|host| endpoint_host_str(host))
+        .find(|host| !host.is_empty())
+}
+
 /// Build a configured (self-hosted) deployment's browser session. The redirect is
-/// the endpoint's own `https://<host>/oauth2/callback`, which forwards the browser
-/// to this CLI's loopback listener; an OS-assigned port is bound up front and
-/// carried to the endpoint in `state = "<nonce>.<port>"` so the callback page can
-/// forward to it. The authorize endpoint is resolved via OIDC discovery, and the
-/// bearer is the OIDC `id_token`.
+/// `https://<host>/oauth2/callback`, which forwards the browser to this CLI's
+/// loopback listener; an OS-assigned port is bound up front and carried to the
+/// endpoint in `state = "<nonce>.<port>"` so the callback page can forward to it.
+/// The authorize endpoint is resolved via OIDC discovery, and the bearer is the
+/// OIDC `id_token`.
+///
+/// `host` is the deployment's machine edge, picked by [`callback_host`] — not
+/// necessarily the host the user configured, which may serve nothing at that path.
+/// It must be registered as an allowed redirect with the deployment's IdP.
 fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
@@ -2975,10 +3003,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         //
         // Keyed on `builtin`, not on whether hosts are present: the account now
         // carries the Aspect-hosted cache/BES too (see `configure_default`), and it
-        // still logs in the cloud way. A configured deployment with no hosts has no
-        // endpoint to bounce through, so it falls back to the cloud flow.
-        let session = match selected.hosts.first() {
-            Some(host) if !selected.builtin => build_endpoint_session(env, host)?,
+        // still logs in the cloud way. A configured deployment with nowhere to
+        // bounce through falls back to the cloud flow.
+        let session = match callback_host(&selected) {
+            Some(host) if !selected.builtin => build_endpoint_session(env, &host)?,
             _ => build_cloud_session(env)?,
         };
         Ok(heap.alloc(session))
@@ -4197,6 +4225,56 @@ mod tests {
                 "{host} should be its own deployment"
             );
         }
+    }
+
+    /// A login bounces through the deployment's machine edge, not necessarily the
+    /// host it was configured from: only the cache/BES edges serve the
+    /// `/oauth2/callback` relay page. Prefer the cache, then the BES.
+    #[test]
+    fn the_login_callback_goes_to_a_machine_edge() {
+        let with_endpoints = |cache: &str, bes: &str, configured: &str| {
+            let mut d = dep("acme", false);
+            d.hosts = vec![configured.to_string()];
+            d.endpoints = Endpoints {
+                cache: cache.to_string(),
+                bes: bes.to_string(),
+                exec: String::new(),
+                results_url: String::new(),
+            };
+            d
+        };
+
+        // Configured from the web UI host → the callback still goes to the cache.
+        assert_eq!(
+            callback_host(&with_endpoints(
+                "cache.example",
+                "bes.example",
+                "app.example"
+            ))
+            .as_deref(),
+            Some("cache.example")
+        );
+        // No cache advertised → the BES serves the relay too.
+        assert_eq!(
+            callback_host(&with_endpoints("", "bes.example", "app.example")).as_deref(),
+            Some("bes.example")
+        );
+        // No endpoints map at all — an older discovery document or a hand-written
+        // entry — keeps the previous behaviour of using the configured host.
+        let mut bare = dep("acme", false);
+        bare.hosts = vec!["remote.example".to_string()];
+        bare.endpoints = Endpoints::default();
+        assert_eq!(callback_host(&bare).as_deref(), Some("remote.example"));
+
+        // Nothing to bounce through at all: the caller falls back to the cloud flow.
+        let mut empty = dep("acme", false);
+        empty.hosts = Vec::new();
+        empty.endpoints = Endpoints::default();
+        assert_eq!(callback_host(&empty), None);
+
+        // A hand-written entry may carry a URL rather than a bare host.
+        let urlish = with_endpoints("https://cache.example/path", "", "app.example");
+        assert_eq!(callback_host(&urlish).as_deref(), Some("cache.example"));
     }
 
     /// A resource advertising only a build-result viewer is not a deployment.
