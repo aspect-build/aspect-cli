@@ -131,6 +131,15 @@ def _login_impl(ctx: TaskContext) -> int:
 
     deployment = ctx.args.deployment
     browser_login = not ctx.args.with_token and not ctx.args.with_api_token
+    # A bare interactive login also records the Aspect-hosted deployment, so
+    # --remote works without a separate `auth configure`. Skipped when the user
+    # targeted a specific deployment or pinned a --profile (both say where this
+    # credential belongs), and skipped for the stdin-token flows: those are the CI
+    # paths, where a discovery probe would add a network round trip to a login that
+    # makes none, and where the deployment is normally declared in the repo's own
+    # .aspect/config.json instead.
+    account_login = browser_login and not deployment and not ctx.args.profile
+    account_info = None
     if ctx.args.with_token:
         token = ctx.std.io.stdin.read_to_string().strip()
         if not token:
@@ -144,6 +153,13 @@ def _login_impl(ctx: TaskContext) -> int:
             return 1
         creds = ctx.aspect.auth.login(api_token = inp, deployment = deployment)
     else:
+        # Discover before authenticating, not after: the login reads the account's
+        # relay URI and PKCE client, so discovering afterwards would use a stale
+        # value for this login and only correct the next one. A login already talks
+        # to the network, so this is one more request rather than a new dependency,
+        # and a failed probe simply leaves the seeded values in place.
+        if account_login:
+            account_info = ctx.aspect.auth.configure_default()
         creds = _run_browser_login(ctx, deployment)
         if creds == None:
             error(ctx.std, "No authorization code entered; not logged in.")
@@ -155,15 +171,8 @@ def _login_impl(ctx: TaskContext) -> int:
     ctx.aspect.auth.persist(creds, profile = profile)
     print("Logged in as " + creds.name + " (" + creds.email + ")")
 
-    # A bare interactive login also records the Aspect-hosted deployment, so
-    # --remote works without a separate `auth configure`. Skipped when the user
-    # targeted a specific deployment or pinned a --profile (both say where this
-    # credential belongs), and skipped for the stdin-token flows: those are the CI
-    # paths, where a discovery probe would add a network dependency to a login that
-    # otherwise needs none, and where the deployment is normally declared in the
-    # repo's own .aspect/config.json instead.
-    if browser_login and not deployment and not ctx.args.profile:
-        _configure_aspect_cloud(ctx, creds)
+    if account_info != None:
+        _file_account_endpoints(ctx, creds, account_info)
     return 0
 
 def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
@@ -182,8 +191,8 @@ def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
     ctx.aspect.auth.persist(endpoint_creds, profile = name)
     return True
 
-def _configure_aspect_cloud(ctx: TaskContext, creds):
-    """Record the Aspect-hosted deployment and file `creds` against it.
+def _file_account_endpoints(ctx: TaskContext, creds, info):
+    """File `creds` against the Aspect-hosted endpoints `info` recorded.
 
     Best-effort by design: this runs after a login that already succeeded, so an
     endpoint we cannot reach or configure must never turn that into a failed
@@ -202,7 +211,6 @@ def _configure_aspect_cloud(ctx: TaskContext, creds):
     always a fresh authorization-code result — so the warning doubles as the
     signal that something upstream changed.
     """
-    info = ctx.aspect.auth.configure_default()
     if info.status != "ok" or not info.can_login:
         return
     if not _persist_endpoint_login(ctx, creds, info.name):

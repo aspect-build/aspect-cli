@@ -180,6 +180,14 @@ const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
+/// Where Aspect Cloud relays a CLI login back to the loopback listener.
+///
+/// The same role [`DEFAULT_CLIENT_ID`] plays: discovery supplies the current value
+/// and overrides this, but the seed states one so a login never depends on having
+/// discovered anything. Without it the only fallback is the loopback redirect,
+/// which is the registration this exists to let the IdP eventually drop.
+const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/callback";
+
 /// The host a bare `aspect auth login` probes to discover the Aspect Cloud
 /// endpoints, so a fresh install has a working `--remote` without anyone running
 /// `aspect auth configure` by hand — see [`configure_default`].
@@ -281,9 +289,7 @@ fn default_deployment() -> Deployment {
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
         hosts: Vec::new(),
-        // None: the account registers its loopback redirect with the IdP directly
-        // rather than bouncing through an edge, so it never uses this.
-        login_redirect_uri: None,
+        login_redirect_uri: Some(DEFAULT_LOGIN_REDIRECT_URI.to_string()),
         // The same set a deployment gets when it advertises nothing: this seed is
         // not discovered from anywhere, so it states what that fallback would give
         // it rather than keeping a second list to drift from. `offline_access`
@@ -620,6 +626,23 @@ fn resolve_aspect_env() -> anyhow::Result<AuthEnv> {
     resolve_auth_env(None)
 }
 
+/// How long a discovery fetch may take before the CLI gives up and uses what it
+/// already has. Both fetches sit in front of an interactive login, and both have a
+/// working fallback, so a slow answer is worth less than a prompt one: without a
+/// bound, a black-holed host does not fail fast — it stalls on the OS connect
+/// timeout, which is minutes on macOS.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A client for the discovery fetches, bounded by [`DISCOVERY_TIMEOUT`]. Falls
+/// back to an unbounded client if one cannot be built, which cannot happen for a
+/// timeout-only config.
+fn discovery_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
 /// Path of the discovery document a deployment serves (RFC 9728, OAuth 2.0
 /// Protected Resource Metadata). Both the remote-cache and BES edges serve it.
 const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
@@ -832,7 +855,7 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         host.trim_end_matches('/'),
         PROTECTED_RESOURCE_PATH
     );
-    let resp = match reqwest::Client::new().get(&url).send().await {
+    let resp = match discovery_client().get(&url).send().await {
         Ok(resp) => resp,
         // A transport-level failure (DNS, connect, TLS, timeout): can't tell
         // whether it's a deployment, so report unreachable with a terse reason.
@@ -1783,7 +1806,7 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
         authorization_endpoint: String,
         token_endpoint: String,
     }
-    let discovered = reqwest::Client::new()
+    let discovered = discovery_client()
         .get(format!("{issuer}/.well-known/openid-configuration"))
         .send()
         .await
@@ -4327,13 +4350,16 @@ mod tests {
     #[test]
     fn the_account_relays_but_keeps_the_access_token() {
         let mut seed = default_deployment();
-        // Nothing discovered yet: the bootstrap login has no relay to use.
-        assert_eq!(login_redirect_uri(&seed), None);
-
-        seed.login_redirect_uri = Some("https://app.aspect.build/auth/cli/callback".to_string());
+        // Seeded, so even a first login relays — no probe, nothing discovered.
         assert_eq!(
             login_redirect_uri(&seed).as_deref(),
-            Some("https://app.aspect.build/auth/cli/callback")
+            Some(DEFAULT_LOGIN_REDIRECT_URI)
+        );
+        // Discovery overrides it, exactly as it overrides the seeded client.
+        seed.login_redirect_uri = Some("https://app.aspect.build/moved".to_string());
+        assert_eq!(
+            login_redirect_uri(&seed).as_deref(),
+            Some("https://app.aspect.build/moved")
         );
         // `builtin` alone decides the bearer, independently of the relay.
         assert!(seed.builtin);
@@ -4362,7 +4388,11 @@ mod tests {
             seed_redirect(DEFAULT_ISSUER).as_deref(),
             Some("https://app.aspect.build/auth/cli/callback")
         );
-        assert_eq!(seed_redirect("https://auth.evil.example.com"), None);
+        // A foreign issuer may not name the relay: the seeded one stands.
+        assert_eq!(
+            seed_redirect("https://auth.evil.example.com").as_deref(),
+            Some(DEFAULT_LOGIN_REDIRECT_URI)
+        );
     }
 
     /// The live Aspect Cloud document, parsed as served. Guards the field names
