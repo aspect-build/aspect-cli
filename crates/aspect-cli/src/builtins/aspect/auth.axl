@@ -212,14 +212,18 @@ def _login_impl(ctx: TaskContext) -> int:
 
 def _login_target(ctx: TaskContext, deployment: str) -> str:
     """What a login just authenticated against, named as the user knows it: Aspect
-    Cloud, or a named Aspect Workflows deployment. A bare login targets Aspect
-    Cloud, and `--deployment` may name it explicitly."""
+    Cloud, or `Aspect Workflows deployment '<name>'`. A bare login targets Aspect
+    Cloud, and `--deployment` may name it explicitly.
+
+    The name is quoted and trails the noun so it reads as a sentence — names run
+    from `acme` to `gcp.awd-gha-test-staging`, and a bare one in front of the noun
+    turns into a run-on."""
     if not deployment:
         return "Aspect Cloud"
     named = [d for d in ctx.aspect.auth.list() if d.name == deployment]
     if named and named[0].builtin:
         return "Aspect Cloud"
-    return deployment + " Aspect Workflows deployment"
+    return "Aspect Workflows deployment '" + deployment + "'"
 
 def _print_login_usage_hint(ctx: TaskContext, deployment: str):
     """What the login just made available, and the flag that uses it. Silent when
