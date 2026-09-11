@@ -728,6 +728,11 @@ struct ProtectedResource {
     /// [`login_redirect_uri`] derives a URI for instead.
     #[serde(default)]
     aspect_login_redirect_uri: String,
+    /// What this deployment calls itself (RFC 9728). Used as its name in
+    /// `config.json`, `auth status` and `--deployment`, in preference to one
+    /// derived from the host — see [`configure_deployment`].
+    #[serde(default)]
+    resource_name: String,
 }
 
 impl ProtectedResource {
@@ -913,6 +918,64 @@ fn deployment_name_from_host(host: &str) -> String {
     name.trim_matches('.').to_string()
 }
 
+/// The name to record a discovered deployment under, and whether that name claims
+/// the account.
+///
+/// In precedence: the name the user typed, then the account when the host is one
+/// Aspect Cloud serves, then the name the deployment advertises
+/// ([`advertised_name`]), then one derived from the host.
+///
+/// The account is claimed only by naming it or by configuring an Aspect Cloud host.
+/// A name that merely *derives* to it (`remote.aspect.aspect.build` → `aspect`) is
+/// not the account and is refused by [`upsert_deployment`], so nobody extends their
+/// account by accident.
+fn resolve_deployment_name(
+    explicit: Option<String>,
+    host: &str,
+    info: &ProtectedResource,
+) -> (String, bool) {
+    let explicit = explicit.filter(|name| !name.is_empty());
+    let account = match explicit.as_deref() {
+        Some(name) => name == DEFAULT_DEPLOYMENT_NAME,
+        None => is_account_host(host),
+    };
+    let name = explicit
+        .or_else(|| account.then(|| DEFAULT_DEPLOYMENT_NAME.to_string()))
+        .or_else(|| advertised_name(info))
+        .unwrap_or_else(|| deployment_name_from_host(host));
+    (name, account)
+}
+
+/// The name a deployment gives itself, when it gives one the CLI can use.
+///
+/// A deployment naming itself beats a name derived from DNS, which is why
+/// `resource_name` is read at all: `app.aws.awd-cci-test-dev.aspect.build` derives
+/// the unlovely `aws.awd-cci-test-dev`, and only the deployment knows better.
+///
+/// Refused when it would take a [`RESERVED_NAMES`] name. Those are the CLI's own —
+/// the account, and the credential slot every deployment files under — and a
+/// document is in no position to claim either. The derived name is used instead
+/// rather than failing the command, since the user did not ask for this name and
+/// cannot correct it; `--name` remains the override.
+///
+/// RFC 9728 calls this a display name. It is used as an identifier here, so a
+/// deployment advertising one should keep it to something a user can retype after
+/// `--deployment`.
+fn advertised_name(info: &ProtectedResource) -> Option<String> {
+    let name = info.resource_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if is_reserved_name(name) {
+        tracing::warn!(
+            "ignoring the name advertised by this deployment: {:?} is reserved",
+            name
+        );
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// Build a [`Deployment`] record from a discovered [`ProtectedResource`] and the
 /// `selected` authorization server the deployment logs in against (chosen by the
 /// caller from [`ProtectedResource::auth_servers`]; `None` when the endpoint
@@ -1084,24 +1147,7 @@ fn configure_deployment(
         Discovery::Unreachable(reason) => return Ok(mk("unreachable", reason)),
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
-    // Only a name the caller typed can claim the account; a derived one that
-    // happens to collide is refused by `upsert_deployment`.
-    // The account is claimed either by naming it or by configuring a host Aspect
-    // Cloud serves. A derived name that merely collides (`remote.aspect.aspect.build`
-    // → `aspect`) is not the account and is refused by `upsert_deployment`, so
-    // nobody extends their account by accident.
-    let explicit_name = name.filter(|n| !n.is_empty());
-    let explicit_account = match explicit_name.as_deref() {
-        Some(name) => name == DEFAULT_DEPLOYMENT_NAME,
-        None => is_account_host(&host),
-    };
-    let name = explicit_name.unwrap_or_else(|| {
-        if explicit_account {
-            DEFAULT_DEPLOYMENT_NAME.to_string()
-        } else {
-            deployment_name_from_host(&host)
-        }
-    });
+    let (name, explicit_account) = resolve_deployment_name(name, &host, &info);
     // Endpoints recorded under the account's own name are folded into the seed and
     // reached with the account's own credential, so only a deployment on the
     // account's issuer may claim them: `hosts` is the auth gate, and a host on some
@@ -3958,6 +4004,7 @@ mod tests {
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         }
     }
 
@@ -4035,6 +4082,7 @@ mod tests {
             },
             aspect_bes_results_url: "https://app.acme.aspect.build/i/".to_string(),
             aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
         let d = configure_from(&advertised, None);
         assert_eq!(d.issuer.as_deref(), Some("https://acme.auth.aspect.build"));
@@ -4088,6 +4136,7 @@ mod tests {
             // A deployment with no web UI omits it entirely.
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
         let d = configure_from(&bare, None);
         assert!(d.issuer.is_none() && d.client_id.is_none());
@@ -4370,6 +4419,93 @@ mod tests {
         );
     }
 
+    /// A deployment naming itself beats a name derived from DNS, but never beats a
+    /// name the user typed, never claims the account, and never takes a name the
+    /// CLI reserves for itself.
+    #[test]
+    fn a_deployment_may_name_itself() {
+        let doc = |resource_name: &str| ProtectedResource {
+            resource: "https://remote.aws.awd-cci-test-dev.aspect.build".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: "remote.aws.awd-cci-test-dev.aspect.build".to_string(),
+                bes: String::new(),
+                exec: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: resource_name.to_string(),
+        };
+
+        assert_eq!(
+            advertised_name(&doc("cci-test")).as_deref(),
+            Some("cci-test")
+        );
+        // Surrounding whitespace is not a name.
+        assert_eq!(
+            advertised_name(&doc("  cci-test  ")).as_deref(),
+            Some("cci-test")
+        );
+        assert_eq!(advertised_name(&doc("   ")), None);
+        assert_eq!(advertised_name(&doc("")), None);
+        // The CLI's own names are not a deployment's to take: `aspect` is the
+        // account, `default` the credential slot every deployment files under.
+        assert_eq!(advertised_name(&doc(DEFAULT_DEPLOYMENT_NAME)), None);
+        assert_eq!(advertised_name(&doc(DEFAULT_PROFILE)), None);
+    }
+
+    /// The whole precedence, in order.
+    #[test]
+    fn a_typed_name_beats_an_advertised_one_beats_the_host() {
+        let named = |resource_name: &str| ProtectedResource {
+            resource: String::new(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints::default(),
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: resource_name.to_string(),
+        };
+        let host = "remote.aws.awd-cci-test-dev.aspect.build";
+
+        // Typed wins over everything.
+        assert_eq!(
+            resolve_deployment_name(Some("mine".to_string()), host, &named("theirs")),
+            ("mine".to_string(), false)
+        );
+        // Advertised beats the host.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named("cci-test")),
+            ("cci-test".to_string(), false)
+        );
+        // Nothing advertised → derived from the host, as before.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named("")),
+            ("aws.awd-cci-test-dev".to_string(), false)
+        );
+        // An Aspect Cloud host is the account, whatever it calls itself.
+        assert_eq!(
+            resolve_deployment_name(None, "cache.aspect.build", &named("Aspect Cloud")),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), true)
+        );
+        // Typing the account's name claims it.
+        assert_eq!(
+            resolve_deployment_name(Some(DEFAULT_DEPLOYMENT_NAME.to_string()), host, &named("x")),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), true)
+        );
+        // A document may not claim the account by naming it.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named(DEFAULT_DEPLOYMENT_NAME)),
+            ("aws.awd-cci-test-dev".to_string(), false)
+        );
+    }
+
     /// The live Aspect Cloud document, parsed as served. Guards the field names
     /// against a rename on either side.
     #[test]
@@ -4456,6 +4592,7 @@ mod tests {
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: "https://app.acme.example/cli/callback".to_string(),
+            resource_name: String::new(),
         };
         let server = doc.auth_servers().into_iter().next();
         let recorded = deployment_from_discovery(
@@ -4571,6 +4708,7 @@ mod tests {
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
         assert!(!viewer.aspect_endpoints.serves_build_endpoints());
         // An issuer with no client is no login target.
@@ -4745,6 +4883,7 @@ mod tests {
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
 
         // The advertised client_id is adopted, which is what lets the client ID be
