@@ -952,28 +952,39 @@ fn resolve_deployment_name(
 /// `resource_name` is read at all: `app.aws.awd-cci-test-dev.aspect.build` derives
 /// the unlovely `aws.awd-cci-test-dev`, and only the deployment knows better.
 ///
-/// Refused when it would take a [`RESERVED_NAMES`] name. Those are the CLI's own —
-/// the account, and the credential slot every deployment files under — and a
-/// document is in no position to claim either. The derived name is used instead
-/// rather than failing the command, since the user did not ask for this name and
-/// cannot correct it; `--name` remains the override.
+/// Refused when it is not `^[a-z][a-z0-9-]*$`, or would take a [`RESERVED_NAMES`]
+/// name. The charset is what a deployment is allowed to advertise — RFC 9728 calls
+/// this a display name, but it is used here as an identifier, so it has to survive
+/// being retyped after `--deployment`. The reserved names are the CLI's own: the
+/// account, and the credential slot every deployment files under.
 ///
-/// RFC 9728 calls this a display name. It is used as an identifier here, so a
-/// deployment advertising one should keep it to something a user can retype after
-/// `--deployment`.
+/// Either way the derived name is used rather than failing the command, since the
+/// user did not ask for this name and cannot correct it. `--name` is the override.
 fn advertised_name(info: &ProtectedResource) -> Option<String> {
     let name = info.resource_name.trim();
     if name.is_empty() {
         return None;
     }
-    if is_reserved_name(name) {
-        tracing::warn!(
-            "ignoring the name advertised by this deployment: {:?} is reserved",
-            name
-        );
-        return None;
-    }
-    Some(name.to_string())
+    let refusal = if !is_advertisable_name(name) {
+        "not lowercase letters, digits and hyphens starting with a letter"
+    } else if is_reserved_name(name) {
+        "reserved by the CLI"
+    } else {
+        return Some(name.to_string());
+    };
+    tracing::warn!("ignoring the name this deployment advertises, {name:?}: {refusal}");
+    None
+}
+
+/// Whether `name` is one a deployment may advertise: `^[a-z][a-z0-9-]*$`.
+///
+/// Narrow on purpose, and matched by the charts and Terraform modules that set it,
+/// so a bad name fails at render rather than at login. A name derived from a host
+/// is not held to this — it is dotted by construction, and nobody chose it.
+fn is_advertisable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Build a [`Deployment`] record from a discovered [`ProtectedResource`] and the
@@ -4456,6 +4467,24 @@ mod tests {
         // account, `default` the credential slot every deployment files under.
         assert_eq!(advertised_name(&doc(DEFAULT_DEPLOYMENT_NAME)), None);
         assert_eq!(advertised_name(&doc(DEFAULT_PROFILE)), None);
+
+        // `^[a-z][a-z0-9-]*$` — what the charts and Terraform modules enforce, so a
+        // name reaching the CLI outside it means something upstream went wrong.
+        for ok in ["acme2", "a", "cci-test", "aspect-cloud"] {
+            assert_eq!(advertised_name(&doc(ok)).as_deref(), Some(ok), "{ok}");
+        }
+        for bad in [
+            "Acme",      // uppercase
+            "2acme",     // leading digit
+            "-acme",     // leading hyphen
+            "acme.dev",  // dotted, as a derived name would be
+            "acme prod", // a display name, not an identifier
+            "acme_prod",
+            "acmé",
+            "--deployment",
+        ] {
+            assert_eq!(advertised_name(&doc(bad)), None, "{bad}");
+        }
     }
 
     /// The whole precedence, in order.
@@ -4506,26 +4535,55 @@ mod tests {
         );
     }
 
-    /// The live Aspect Cloud document, parsed as served. Guards the field names
-    /// against a rename on either side.
+    /// The Aspect Cloud document as served, verbatim. Pins the CLI against the
+    /// shape silo publishes: no flat `client_id` or `scopes_supported`, a `resource`
+    /// matching the origin, and every field the CLI depends on behind `aspect_`.
     #[test]
-    fn parses_the_advertised_login_redirect_from_discovery_json() {
+    fn parses_the_aspect_cloud_document_as_served() {
         let doc = r#"{
-            "resource": "https://api.aspect.build",
-            "authorization_servers": ["https://auth.aspect.build"],
-            "client_id": "efcf21f7",
+            "aspect_authorization_servers": [
+                {
+                    "client_id": "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44",
+                    "issuer": "https://auth.aspect.build",
+                    "scopes": ["openid", "profile", "email", "offline_access"]
+                }
+            ],
+            "aspect_bes_results_url": "https://app.aspect.build/i/",
             "aspect_endpoints": {
                 "api": "api.aspect.build",
                 "bes": "bes.aspect.build",
                 "cache": "cache.aspect.build"
             },
-            "aspect_bes_results_url": "https://app.aspect.build/i/",
-            "aspect_login_redirect_uri": "https://app.aspect.build/auth/cli/callback"
+            "aspect_login_redirect_uri": "https://app.aspect.build/auth/cli/callback",
+            "authorization_servers": ["https://auth.aspect.build"],
+            "bearer_methods_supported": ["header"],
+            "resource": "https://bes.aspect.build",
+            "resource_name": "aspect-cloud"
         }"#;
         let parsed: ProtectedResource = serde_json::from_str(doc).unwrap();
+
+        // The nested form carries the login config; the flat fields are gone, and
+        // the fallback that reads them is never reached while it is present.
+        assert_eq!(parsed.client_id, "");
+        assert!(parsed.scopes_supported.is_empty());
+        let servers = parsed.auth_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].client_id, DEFAULT_CLIENT_ID);
+        assert_eq!(servers[0].issuer, DEFAULT_ISSUER);
+
         assert_eq!(
             parsed.aspect_login_redirect_uri,
             "https://app.aspect.build/auth/cli/callback"
+        );
+        assert!(parsed.aspect_endpoints.serves_build_endpoints());
+
+        // Aspect Cloud calls itself `aspect-cloud`, but its hosts resolve to the
+        // account, whose name is structural — the built-in flag is the identity,
+        // not the name, so the advertised one is not applied there.
+        assert_eq!(advertised_name(&parsed).as_deref(), Some("aspect-cloud"));
+        assert_eq!(
+            resolve_deployment_name(None, "bes.aspect.build", &parsed),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), true)
         );
     }
 
