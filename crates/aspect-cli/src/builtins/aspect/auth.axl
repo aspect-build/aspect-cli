@@ -107,16 +107,31 @@ def _print_default_usage_hint(summary, others: int = 0):
     actually offers. `summary` is the default's own entry; `others` is how many
     other deployments are configured. Leads with a blank line to set it apart.
 
-    Both extras are conditional because the unconditional version told users to
-    enable remote execution on deployments that serve none, and to pick among
-    deployments when there was only one. Advice for a capability a deployment does
-    not have is worse than no advice — it reads as a supported option that silently
-    does nothing."""
+    Everything here is conditional on what the user actually has. The
+    unconditional version told them to enable remote execution on deployments that
+    serve none, and to pick among deployments when there was only one — advice for
+    a capability or a choice that does not exist is worse than none, because it
+    reads as a supported option that silently does nothing.
+
+    The subject is named rather than called "the default deployment": someone whose
+    only deployment is Aspect Cloud has no default to reason about, and the word
+    sends them looking for the alternatives it implies."""
+    caps = capability_labels(summary, only = REMOTE_DEFAULT_CAPS)
+    if not caps and not others:
+        # Nothing to say: the default serves no `--remote` capability and there is
+        # no other deployment to point at.
+        return
     print("")
-    print("Pass --remote to a task (e.g. `aspect build --remote`) to use the default")
-    print("deployment's " + join_and(capability_labels(summary, only = REMOTE_DEFAULT_CAPS)) + ".")
-    if summary.exec:
-        print("Remote execution is opt-in: use --remote=exec to enable it.")
+    if caps:
+        subject = "Aspect Cloud's" if summary.builtin else "the default deployment's"
+        print("Pass --remote to a task (e.g. `aspect build --remote`) to use")
+        print(subject + " " + join_and(caps) + ".")
+        if summary.exec:
+            print("Remote execution is opt-in: use --remote=exec to enable it.")
+    else:
+        # Reachable before Aspect Cloud has been configured, when a deployment was
+        # added first: `--remote` against the default would wire nothing.
+        print("The default deployment serves no remote cache or BES backend.")
     if others:
         print("Add --deployment <name> to target a specific deployment instead of the default.")
 
