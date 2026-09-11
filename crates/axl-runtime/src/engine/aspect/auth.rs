@@ -4284,6 +4284,29 @@ mod tests {
         }
     }
 
+    /// The live Aspect Cloud document, parsed as served. Guards the field names
+    /// against a rename on either side.
+    #[test]
+    fn parses_the_advertised_login_redirect_from_discovery_json() {
+        let doc = r#"{
+            "resource": "https://api.aspect.build",
+            "authorization_servers": ["https://auth.aspect.build"],
+            "client_id": "efcf21f7",
+            "aspect_endpoints": {
+                "api": "api.aspect.build",
+                "bes": "bes.aspect.build",
+                "cache": "cache.aspect.build"
+            },
+            "aspect_bes_results_url": "https://app.aspect.build/i/",
+            "aspect_login_redirect_uri": "https://app.aspect.build/auth/cli/callback"
+        }"#;
+        let parsed: ProtectedResource = serde_json::from_str(doc).unwrap();
+        assert_eq!(
+            parsed.aspect_login_redirect_uri,
+            "https://app.aspect.build/auth/cli/callback"
+        );
+    }
+
     /// A deployment's own advertised redirect wins over anything the CLI would
     /// derive: which host and path serve the relay is the deployment's business,
     /// and guessing is what forces a release every time one moves.
