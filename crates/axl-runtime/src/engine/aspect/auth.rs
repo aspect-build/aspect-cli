@@ -162,10 +162,14 @@ const DEFAULT_DEPLOYMENT_NAME: &str = "aspect";
 const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 /// The account's PKCE client — the "Aspect Build" application client.
 ///
-/// A constant rather than a discovered value: the account logs in to
-/// [`DEFAULT_API_URL`], and an account login must not depend on reaching another
-/// host. [`DEFAULT_DISCOVERY_HOST`] advertises this same client for the deployment
-/// it serves, so a discovered login and this one agree.
+/// The fallback rather than the source of truth: once discovery has run, the
+/// client advertised by [`DEFAULT_DISCOVERY_HOST`] is adopted instead (see
+/// [`overlay_config_sources`]), so the deployed value can rotate without a CLI
+/// release. This stands in until then — a first login on a fresh machine, or an
+/// endpoint that could not be reached — which is why an account login never
+/// depends on reaching another host.
+///
+/// Both clients are accepted, so the two disagreeing costs nothing.
 const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
@@ -382,11 +386,33 @@ fn overlay_config_sources(
                 // the account's own name contributes the endpoints the seed
                 // cannot know (see `configure_default`, which writes it).
                 //
-                // Only the endpoint fields are taken. Identity — issuer,
-                // client_id, api_url — stays the seed's, so a hand-edited config
-                // can extend the account but can never redirect its login, which
-                // is the part of the old shadowing guard that mattered.
+                // The issuer and `api_url` stay the seed's, so a hand-edited config
+                // can extend the account but can never redirect its login — the
+                // part of the old shadowing guard that mattered.
+                //
+                // The PKCE client is adopted, gated on the entry naming the
+                // account's own issuer. That gate is the whole safety argument: a
+                // client is only ever exercised against the issuer it was
+                // discovered from, so taking one from a document on
+                // [`DEFAULT_ISSUER`] cannot send a login anywhere new. What it buys
+                // is rotation without a release — change the advertised client and
+                // the next login follows it, with [`DEFAULT_CLIENT_ID`] standing in
+                // whenever discovery has not run or the endpoint was unreachable.
+                //
+                // Scopes and authorize_params are deliberately not adopted: the
+                // seed states its own ([`DEFAULT_LOGIN_SCOPES`]), and widening the
+                // adopted set is a separate decision from rotating the client.
                 if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
+                    let on_account_issuer = entry
+                        .issuer
+                        .as_deref()
+                        .is_some_and(|issuer| issuers_match(issuer, DEFAULT_ISSUER));
+                    let discovered_client = entry
+                        .client_id
+                        .filter(|client_id| !client_id.is_empty() && on_account_issuer);
+                    if let Some(client_id) = discovered_client {
+                        seed.client_id = Some(client_id);
+                    }
                     seed.hosts = entry.hosts;
                     seed.endpoints = entry.endpoints;
                 }
@@ -4269,11 +4295,61 @@ mod tests {
         let seed = merged.iter().find(|d| d.builtin).unwrap();
         assert_eq!(seed.endpoints.cache, "remote.app.aspect.build");
         assert_eq!(seed.endpoints.bes, "bes.app.aspect.build");
-        // Identity stays the seed's — the file may extend the account, never
-        // redirect its login.
+        // The issuer stays the seed's — the file may extend the account, never
+        // redirect its login — and a client offered alongside a foreign issuer is
+        // refused with it.
         assert_eq!(seed.issuer.as_deref(), Some(DEFAULT_ISSUER));
         assert_eq!(seed.client_id.as_deref(), Some(DEFAULT_CLIENT_ID));
         assert_eq!(seed.api_url.as_deref(), Some(DEFAULT_API_URL));
+    }
+
+    /// A client discovered from the account's own issuer *is* adopted, which is
+    /// what lets the deployed client rotate without a CLI release. The compiled-in
+    /// one is the fallback for before discovery has run.
+    #[test]
+    fn the_account_adopts_a_client_discovered_on_its_own_issuer() {
+        let entry_with = |issuer: &str, client_id: &str| {
+            let mut e = dep(DEFAULT_DEPLOYMENT_NAME, false);
+            e.issuer = Some(issuer.to_string());
+            e.client_id = Some(client_id.to_string());
+            e
+        };
+        let seed_client = |entry: Deployment| {
+            let (merged, _) = overlay_config_sources(vec![ConfigSource {
+                path: PathBuf::from("/tmp/config.json"),
+                entries: vec![entry],
+                user: true,
+            }]);
+            merged
+                .into_iter()
+                .find(|d| d.builtin)
+                .and_then(|d| d.client_id)
+                .unwrap()
+        };
+
+        // Same issuer → the advertised client wins.
+        assert_eq!(
+            seed_client(entry_with(DEFAULT_ISSUER, "rotated-client")),
+            "rotated-client"
+        );
+        // Trailing slash and case still name the same issuer.
+        assert_eq!(
+            seed_client(entry_with("HTTPS://Auth.Aspect.Build/", "rotated-client")),
+            "rotated-client"
+        );
+        // Another issuer → refused; the compiled-in client stands.
+        assert_eq!(
+            seed_client(entry_with(
+                "https://auth.evil.example.com",
+                "rotated-client"
+            )),
+            DEFAULT_CLIENT_ID
+        );
+        // An empty client is not an override.
+        assert_eq!(
+            seed_client(entry_with(DEFAULT_ISSUER, "")),
+            DEFAULT_CLIENT_ID
+        );
     }
 
     /// The account keeps the cloud loopback flow and the default credential
