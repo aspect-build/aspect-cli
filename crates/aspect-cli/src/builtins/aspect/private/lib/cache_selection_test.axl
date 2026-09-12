@@ -1,0 +1,118 @@
+"""Cache selection contracts, including real Bazel loading without actions."""
+
+load("./cache_selection.axl", "select_tests", "selected_tests")
+
+def _eq(name, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (name, got, want))
+
+def _events(labels):
+    return [
+        {"expanded": {}, "children": [{"targetConfigured": {"label": t}} for t in labels]},
+        {"finished": {"exitCode": {"code": 4}}},
+    ] + [{"id": {"targetConfigured": {"label": t}}, "aborted": {"reason": "NO_ANALYZE"}} for t in labels] + [{"lastMessage": True}]
+
+def _parser_tests():
+    good = _events(["//:b", "//:a"])
+    _eq("selected labels", selected_tests(good, 4), ["//:a", "//:b"])
+    _eq("empty scope", selected_tests(_events([]), 4), [])
+    for code in [0, 1, 2, 3, 8, 130]:
+        _eq("unexpected process exit", selected_tests(good, code), None)
+    _eq("no events", selected_tests([], 4), None)
+    _eq("missing terminal event", selected_tests(good[:-1], 4), None)
+    _eq("missing expansion", selected_tests(good[1:], 4), None)
+    _eq("missing finish", selected_tests(good[:1] + good[2:], 4), None)
+    _eq("missing target abort", selected_tests(good[:2] + good[3:], 4), None)
+    _eq("duplicate expansion", selected_tests(good[:1] + good, 4), None)
+    _eq("duplicate finish", selected_tests(good[:2] + good[1:], 4), None)
+    _eq("trailing events", selected_tests(good + [{}], 4), None)
+    for reason in ["LOADING_FAILURE", "INTERNAL", "USER_INTERRUPTED", "ANALYSIS_FAILURE"]:
+        bad = {"aborted": {"reason": reason}}
+        _eq("abort " + reason, selected_tests(good[:-1] + [bad, good[-1]], 4), None)
+    _eq("partial expansion", selected_tests([
+        {"expanded": {}, "children": [{"pattern": {"pattern": ["//missing/..."]}}]},
+    ] + good[1:], 4), None)
+
+def _impl(ctx: TaskContext) -> int:
+    _parser_tests()
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-selection-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    workspace = root + "/workspace"
+    ctx.std.fs.create_dir_all(workspace + "/personal")
+    ctx.std.fs.write(workspace + "/MODULE.bazel", "module(name = 'selection_fixture')\n")
+    ctx.std.fs.write(workspace + "/WORKSPACE", "")
+    ctx.std.fs.write(workspace + "/defs.bzl", """
+def _impl(ctx):
+    fail("selection must never analyze targets")
+fixture_test = rule(implementation = _impl, test = True)
+""")
+    ctx.std.fs.write(workspace + "/BUILD", """
+load(":defs.bzl", "fixture_test")
+fixture_test(name = "ci", size = "small", timeout = "short")
+fixture_test(name = "skip", tags = ["noci"], size = "large", timeout = "long")
+fixture_test(name = "manual", tags = ["manual"])
+fixture_test(name = "name+equals=x", tags = ["manual"])
+filegroup(name = "shared")
+test_suite(name = "suite", tests = [":ci", ":skip"], tags = ["manual"])
+""")
+    ctx.std.fs.write(workspace + "/personal/BUILD", """
+load("//:defs.bzl", "fixture_test")
+fixture_test(name = "private_test")
+""")
+    startup = ["--batch", "--output_base=" + root + "/output"]
+    ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = startup))
+    cases = [
+        ("positive", ["//:ci"], [], ["//:ci"]),
+        ("default wildcard", ["//..."], [], ["//:ci", "//:skip", "//personal:private_test"]),
+        ("negative", ["//...", "-//personal/..."], [], ["//:ci", "//:skip"]),
+        ("reinclude", ["//...", "-//personal/...", "//personal:private_test"], [], ["//:ci", "//:skip", "//personal:private_test"]),
+        ("only negative", ["-//personal/..."], [], []),
+        ("empty", ["//...", "-//..."], [], []),
+        ("non-test", ["//:shared"], [], []),
+        ("relative", [":ci"], [], ["//:ci"]),
+        ("duplicate", ["//:ci", "//:ci"], [], ["//:ci"]),
+        ("unusual label", ["//:name+equals=x"], [], ["//:name+equals=x"]),
+        ("explicit manual", ["//:manual"], [], ["//:manual"]),
+        ("suite", ["//:suite"], [], ["//:ci", "//:skip"]),
+        ("tag filter", ["//..."], ["--test_tag_filters=-noci"], ["//:ci", "//personal:private_test"]),
+        ("suite filter", ["//:suite"], ["--test_tag_filters=-noci"], ["//:ci"]),
+        ("explicit filtered", ["//:skip"], ["--test_tag_filters=-noci"], []),
+        ("positive tag", ["//..."], ["--test_tag_filters=noci"], ["//:skip"]),
+        ("two-token flag", ["//..."], ["--test_tag_filters", "-noci"], ["//:ci", "//personal:private_test"]),
+        ("size filter", ["//:suite"], ["--test_size_filters=small"], ["//:ci"]),
+        ("timeout filter", ["//:suite"], ["--test_timeout_filters=short"], ["//:ci"]),
+        ("language filter", ["//..."], ["--test_lang_filters=-fixture"], []),
+        ("build filters do not filter tests", ["//:skip"], ["--build_tag_filters=-noci"], ["//:skip"]),
+        ("selection does not upload BEP files", ["//:ci"], ["--remote_cache=grpc://127.0.0.1:1"], ["//:ci"]),
+        ("override nobuild", ["//:ci"], ["--nobuild"], ["//:ci"]),
+        ("bad pattern", ["//missing/..."], [], None),
+        ("partial loading failure", ["//:ci", "//missing/..."], ["--keep_going"], None),
+        ("unknown flag", ["//:ci"], ["--definitely_not_a_flag"], None),
+    ]
+    for name, patterns, flags, want in cases:
+        rc = ctx.bazel.new_rc(startup_flags = startup, flags = flags)
+        _eq(name, select_tests(ctx, patterns, rc, directory = workspace), want)
+    ctx.std.fs.create_dir_all(root + "/external")
+    ctx.std.fs.write(root + "/external/MODULE.bazel", "module(name = 'selection_external')\n")
+    ctx.std.fs.write(root + "/external/defs.bzl", ctx.std.fs.read_to_string(workspace + "/defs.bzl"))
+    ctx.std.fs.write(root + "/external/BUILD", "load(':defs.bzl', 'fixture_test')\nfixture_test(name = 'remote_test')\n")
+    ctx.std.fs.write(workspace + "/MODULE.bazel", "module(name = 'selection_fixture')\nbazel_dep(name = 'selection_external', version = '1.0')\nlocal_path_override(module_name = 'selection_external', path = '../external')\n")
+    rc = ctx.bazel.new_rc(startup_flags = startup)
+    _eq("external pattern", select_tests(ctx, ["@selection_external//..."], rc, directory = workspace), ["@selection_external//:remote_test"])
+    ctx.std.fs.write(workspace + "/patterns", "//...\n-//personal/...\n")
+    rc = ctx.bazel.new_rc(startup_flags = startup, flags = ["--target_pattern_file=" + workspace + "/patterns", "--test_tag_filters=-noci"])
+    _eq("pattern file", select_tests(ctx, [], rc, directory = workspace), ["//:ci"])
+    _eq("pattern file conflict", select_tests(ctx, ["//:ci"], rc, directory = workspace), None)
+    ctx.std.fs.write(workspace + "/.bazelrc", "build --test_tag_filters=noci\nquery --output=label_kind\ntest --test_tag_filters=-noci\ntest:ci --config=inner\ntest:inner --test_size_filters=small\n")
+    rc = ctx.bazel.parse_rc(root = workspace, startup_flags = startup + ["--nosystem_rc", "--nohome_rc"], flags = ["--config=ci"])
+    _eq("test RC and nested config", select_tests(ctx, ["//:suite"], rc, directory = workspace), ["//:ci"])
+    print("cache_selection: parser checks and %d real Bazel cases passed" % (len(cases) + 4))
+    return 0
+
+cache_selection_tests = task(
+    summary = "Verify cache-diff selection against real Bazel loading semantics.",
+    kind = "test-cache-selection",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)

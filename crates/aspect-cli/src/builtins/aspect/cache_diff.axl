@@ -60,10 +60,12 @@ both sides or neither). The probe resolves flags from the same rc/config as
 `aspect test`/`build`, so they align by default.
 """
 
+load("@aspect//bazel/invocation.axl", "target_patterns")
 load("@aspect//bazel.axl", "BazelTrait", bzl = "bazel")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
 load("./private/lib/ansi.axl", "ansi")
+load("./private/lib/cache_selection.axl", "select_tests")
 load("./private/lib/environment.axl", "color_enabled", "warn")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/runnable.axl", "apparent_label")
@@ -131,6 +133,7 @@ def _invalidate_action_nodes(ctx: TaskContext, rc, endpoint_auth_flags: list, an
     err_path = "/tmp/aspect-cache-diff-invalidate-{}.log".format(ctx.task.name)
     flags = endpoint_auth_flags + [
         "--experimental_remote_require_cached",
+        "--target_pattern_file=",  # the anchor is explicit, even with a pattern-file scope
         "--remote_default_exec_properties=" + _SALT_SENTINEL + "=1",
         "--keep_going",
         "--remote_download_outputs=minimal",
@@ -241,9 +244,11 @@ def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_
     returned on a hard build failure (a real broken target, not a cache miss)."""
     err_path = "/tmp/aspect-cache-diff-build-{}.log".format(ctx.task.name)
     _t = time.monotonic()
+    pattern_file = rc.flag_value("--target_pattern_file", command = "test")
+    pattern_flags = ["--target_pattern_file=" + pattern_file] if pattern_file else []
     status = ctx.bazel.build(
         rc = rc,
-        flags = endpoint_auth_flags + ["--remote_upload_local_results", "--keep_going"],
+        flags = endpoint_auth_flags + pattern_flags + ["--remote_upload_local_results", "--keep_going"],
         stdout = None,
         stderr = ctx.std.fs.create(err_path),
         announce_version = announce_version,
@@ -311,7 +316,7 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
             continue
         cause = {"target": e.label, "mnemonic": e.mnemonic}
         _tq = time.monotonic()
-        dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(e.label), rc = rc)]
+        dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(json.encode(e.label)), rc = rc)]
         rdeps_secs += time.monotonic() - _tq
         for label in dep_tests:
             if label in test_set:
@@ -338,7 +343,6 @@ def _emit_json(ctx: TaskContext, mode: str, test_targets: list, affected: list, 
 def _impl(ctx: TaskContext) -> int:
     color = color_enabled(ctx.std)
     patterns = list(ctx.args.targets)
-    union = " + ".join(patterns)
     mode = ctx.args.mode
     timing = {}  # seconds per phase — split bazel work vs our analysis at the end
 
@@ -354,6 +358,7 @@ def _impl(ctx: TaskContext) -> int:
     # `--nokeep_state_after_build --nouse_action_cache` (see `_run_probe`), so it
     # needs no separate or wiped base.
     rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+    patterns = target_patterns(ctx.args.is_explicit("targets"), patterns, "", rc, "test")
 
     # Explicit, up-front requirement: no remote cache → nothing to diff against.
     if not rc.flag_value("--remote_cache", command = "test") and not rc.flag_value("--remote_executor", command = "test"):
@@ -365,14 +370,15 @@ def _impl(ctx: TaskContext) -> int:
     # the probe and pre-build below both hit it.
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "test")
 
-    # Enumerate + reverse-dep under the same resolved flags as the probe/build,
-    # so a `--config`/`--bazel-flag` that changes package loading or the test set
-    # can't make the queries see a different graph than the probe.
+    # Bazel owns ordered patterns, suite expansion, and test filters. Query's
+    # tests() does not have the same selection semantics as `bazel test`.
     _t = time.monotonic()
-    test_targets = sorted([apparent_label(t.name) for t in ctx.bazel.query("tests(%s)" % union, rc = rc)])
+    test_targets = select_tests(ctx, patterns, rc, endpoint_auth_flags = endpoint_auth_flags)
     timing["enumerate"] = time.monotonic() - _t
+    if test_targets == None:
+        return 1
     if not test_targets:
-        _err(ctx, "No test targets in scope for: " + union)
+        _err(ctx, "No test targets in scope for: " + " ".join(patterns))
         return 0
 
     _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.BOLD, color))
@@ -519,7 +525,8 @@ diff = task(
             description = (
                 "Bazel target patterns scoping the affected set (e.g. " +
                 "`//services/...`). Defaults to `//...` — every test in the " +
-                "workspace. Intersected with `tests(<patterns>)`."
+                "workspace. Uses Bazel test filters. Separate negative patterns " +
+                "from flags with `--` (e.g. `-- //... -//personal/...`)."
             ),
         ),
     } | bzl.flags.args("the cache-diff probe") | bzl.announce.args("the cache-diff probe"),

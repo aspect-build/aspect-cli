@@ -1,0 +1,81 @@
+"""Resolve cache-diff test scope through Bazel's test loading phase."""
+
+load("./runnable.axl", "apparent_label")
+
+def selected_tests(events: list, exit_code: int) -> list[str] | None:
+    """Accept only a complete, successful loading-only test selection."""
+
+    # With analysis disabled, `test` exits NO_TESTS_FOUND even when loading
+    # selected tests. Never treat that exit code alone as successful selection.
+    if exit_code != 4:
+        return None
+    labels = {}
+    aborted = {}
+    expansions = 0
+    finished = False
+    complete = False
+    for event in events:
+        if complete:
+            return None
+        complete = event.get("lastMessage", False)
+        if "expanded" in event:
+            expansions += 1
+            for child in event.get("children", []):
+                if "targetConfigured" not in child:
+                    return None
+                labels[child["targetConfigured"]["label"]] = None
+        if "aborted" in event:
+            label = event.get("id", {}).get("targetConfigured", {}).get("label")
+            if event["aborted"].get("reason") != "NO_ANALYZE" or not label:
+                return None
+            aborted[label] = None
+        if "finished" in event:
+            if finished or event["finished"].get("exitCode", {}).get("code") != 4:
+                return None
+            finished = True
+    if not complete or not finished or expansions != 1 or labels != aborted:
+        return None
+    return sorted({apparent_label(label): None for label in labels})
+
+def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | None = None, endpoint_auth_flags: list = []) -> list[str] | None:
+    """Load the original patterns with test-command RC and filtering semantics."""
+    work = ctx.std.fs.mkdtemp(prefix = "aspect-cache-selection-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    event_path = work + "/events.json"
+    error_path = work + "/stderr"
+    status = ctx.bazel.test(
+        rc = rc,
+        directory = directory,
+        # --build overrides a user's --nobuild (which changes test's exit
+        # code). --noanalyze still prevents analysis and all build/test actions.
+        flags = endpoint_auth_flags + [
+            "--build",
+            "--noanalyze",
+            "--build_tests_only",
+            "--nokeep_going",
+            "--build_event_json_file=" + event_path,
+            # Keep this private log local; uploading its referenced files would
+            # contact the cache even for an empty selection.
+            "--nobuild_event_json_file_path_conversion",
+        ],
+        build_events = False,
+        stdout = None,
+        stderr = ctx.std.fs.create(error_path),
+        announce_version = False,
+        announce_command = False,
+        *patterns
+    ).wait()
+    events = []
+    if ctx.std.fs.exists(event_path):
+        for line in ctx.std.fs.read_to_string(event_path).splitlines():
+            if line:
+                event = json.try_decode(line, None)
+                if type(event) != "dict":
+                    events = []
+                    break
+                events.append(event)
+    tests = selected_tests(events, status.code)
+    if tests == None:
+        ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (exit {}).\n".format(status.code))
+        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))
+    return tests
