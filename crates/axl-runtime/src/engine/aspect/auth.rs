@@ -78,10 +78,10 @@ pub(crate) struct Deployment {
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
     pub(crate) endpoints: Endpoints,
     /// The `redirect_uri` this deployment's login sends the IdP to, exactly as it
-    /// advertised it. Absent for a deployment whose document predates the field
-    /// (and for the built-in account, which registers a loopback redirect with the
-    /// IdP directly and never bounces through an edge) — see
-    /// [`login_redirect_uri`], which derives one in that case.
+    /// advertised it. Absent for a deployment whose document predates the field —
+    /// see [`login_redirect_uri`], which derives one in that case. The built-in
+    /// Aspect Cloud seed states [`DEFAULT_LOGIN_REDIRECT_URI`] rather than leaving
+    /// this empty, so a first login has somewhere to relay through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login_redirect_uri: Option<String>,
 }
@@ -172,8 +172,9 @@ const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 /// client advertised by [`DEFAULT_DISCOVERY_HOST`] is adopted instead (see
 /// [`overlay_config_sources`]), so the deployed value can rotate without a CLI
 /// release. This stands in until then — a first login on a fresh machine, or an
-/// endpoint that could not be reached — which is why an account login never
-/// depends on reaching another host.
+/// endpoint that could not be reached — which is why a login never depends on the
+/// discovery fetch having succeeded. It still reaches the issuer, as every OAuth
+/// login must.
 const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
@@ -181,8 +182,8 @@ const DEFAULT_API_URL: &str = "https://api.aspect.build";
 ///
 /// The same role [`DEFAULT_CLIENT_ID`] plays: discovery supplies the current value
 /// and overrides this, but the seed states one so a login never depends on having
-/// discovered anything. Without it the only fallback is the loopback redirect,
-/// which is the registration this exists to let the IdP eventually drop.
+/// discovered anything. Without it a first login on a fresh install would have
+/// nowhere to relay through and fail outright.
 const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/callback";
 
 /// The host a bare `aspect auth login` probes to discover the Aspect Cloud
@@ -1893,19 +1894,19 @@ fn oidc_endpoints_fallback(issuer: &str) -> OidcEndpoints {
     }
 }
 
-/// The OAuth `state` for a self-hosted login: `"<nonce>.<port>"`. The nonce is
-/// the CSRF guard (validated verbatim on callback); the port suffix tells the
-/// endpoint's callback page which loopback port to forward to. The nonce is
-/// base64url so it never contains the dot separator.
+/// The OAuth `state` for a login: `"<nonce>.<port>"`. The nonce is the CSRF guard
+/// (validated verbatim on callback); the port suffix tells the deployment's relay
+/// page which loopback port to forward to. The nonce is base64url so it never
+/// contains the dot separator.
 fn login_state(nonce: &str, port: u16) -> String {
     format!("{nonce}.{port}")
 }
 
 /// Build an OAuth Authorization-Code + PKCE authorize URL. Every value is
-/// url-encoded; `scope` is space-joined; `state` is appended when present (the
-/// self-hosted flow uses it, the cloud flow does not). `authorize_endpoint` may
-/// already carry a query (OIDC discovery can return one), so the parameter
-/// separator is chosen accordingly.
+/// url-encoded; `scope` is space-joined; `state` is appended when present — every
+/// login flow supplies one; it stays optional so the encoding can be tested
+/// without it. `authorize_endpoint` may already carry a query (OIDC discovery can
+/// return one), so the parameter separator is chosen accordingly.
 ///
 /// `authorize_params` carries the deployment-advertised parameters that have no scope
 /// equivalent (see [`Deployment::authorize_params`]), appended before `state` so
@@ -2033,43 +2034,8 @@ fn open_url_in_browser(url: &str) -> bool {
     launch_first(browser_launchers(), url)
 }
 
-fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
-    let port: u16 = 19556;
-    let listener = block_on(TcpListener::bind(format!("127.0.0.1:{}", port))).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to bind localhost:{} — is another login in progress? ({})",
-            port,
-            e
-        )
-    })?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
-    let code_verifier = generate_code_verifier();
-    let code_challenge = generate_code_challenge(&code_verifier);
-    let authorize_url = build_authorize_url(
-        &format!("{}/oauth/authorize", env.domain),
-        &env.client_id,
-        &redirect_uri,
-        &env.scopes,
-        &code_challenge,
-        None,
-        &env.authorize_params,
-    );
-    Ok(AuthSession {
-        url: authorize_url,
-        inner: Mutex::new(Some(AuthSessionInner {
-            listener: Some(listener),
-            code_verifier,
-            redirect_uri,
-            env,
-            kind: SessionKind::Loopback,
-            // The account's own API validates the access_token.
-            prefer_id_token: false,
-        })),
-    })
-}
-
-/// The host whose `/oauth2/callback` relays a configured deployment's login back
-/// to this CLI's loopback listener — see [`build_endpoint_session`].
+/// The host whose `/oauth2/callback` relays a deployment's login back to this
+/// CLI's loopback listener — see [`build_login_session`].
 ///
 /// Only the machine edges serve that relay page: it ships with the jwt-validator
 /// that fronts the remote cache and the BES. On a deployment's web UI host the
@@ -2120,17 +2086,20 @@ fn callback_host(selected: &Deployment) -> Option<String> {
         .find(|host| !host.is_empty())
 }
 
-/// Build a configured (self-hosted) deployment's browser session. The redirect is
-/// `https://<host>/oauth2/callback`, which forwards the browser to this CLI's
-/// loopback listener; an OS-assigned port is bound up front and carried to the
-/// endpoint in `state = "<nonce>.<port>"` so the callback page can forward to it.
-/// The authorize endpoint is resolved via OIDC discovery, and the bearer is the
-/// OIDC `id_token`.
+/// Build a deployment's browser login session — Aspect Cloud and a self-hosted
+/// deployment alike. The browser is sent to `redirect_uri`, a relay page that
+/// forwards it on to this CLI's loopback listener; an OS-assigned port is bound up
+/// front and carried to the relay in `state = "<nonce>.<port>"` so it knows where
+/// to forward. The authorize endpoint is resolved via OIDC discovery.
 ///
-/// `host` is the deployment's machine edge, picked by [`callback_host`] — not
-/// necessarily the host the user configured, which may serve nothing at that path.
-/// It must be registered as an allowed redirect with the deployment's IdP.
-fn build_endpoint_session(
+/// `redirect_uri` comes from [`login_redirect_uri`] — the deployment's own
+/// advertised value, or one derived from a machine edge. It must be registered as
+/// an allowed redirect with the deployment's IdP.
+///
+/// `prefer_id_token` selects which of the grant's tokens becomes the bearer, which
+/// is a property of what the credential is sent to rather than of this flow — see
+/// [`AuthSessionInner::prefer_id_token`].
+fn build_login_session(
     env: AuthEnv,
     redirect_uri: String,
     prefer_id_token: bool,
@@ -2162,9 +2131,7 @@ fn build_endpoint_session(
             code_verifier,
             redirect_uri,
             env,
-            kind: SessionKind::Relay {
-                expected_state: state,
-            },
+            expected_state: state,
             prefer_id_token,
         })),
     })
@@ -2496,29 +2463,16 @@ impl AuthCredentials {
 }
 
 /// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
-/// How the browser gets back to this CLI — and only that. Which token becomes the
-/// bearer is a separate question, answered per deployment by
-/// [`AuthSessionInner::prefer_id_token`]: Aspect Cloud relays like any
-/// deployment but still keeps the `access_token`, because it addresses an API that
-/// validates that one.
-enum SessionKind {
-    /// The redirect is this CLI's own loopback, registered directly with the IdP.
-    /// The browser lands on the listener itself, so there is no `state` to
-    /// round-trip. The bootstrap path: it needs nothing discovered.
-    Loopback,
-    /// The redirect is a relay page that forwards the browser on to this CLI's
-    /// loopback listener, with the port carried in `state` — validated on return
-    /// against the value we generated. The authorization/token endpoints come from
-    /// OIDC discovery.
-    Relay { expected_state: String },
-}
-
 struct AuthSessionInner {
     listener: Option<TcpListener>,
     code_verifier: String,
     redirect_uri: String,
     env: AuthEnv,
-    kind: SessionKind,
+    /// The `state` nonce this login generated, echoed back by the relay page and
+    /// validated verbatim on the callback — the CSRF guard. Every login relays, so
+    /// there is always one; see [`login_state`] for the port suffix the relay
+    /// reads.
+    expected_state: String,
     /// Whether this login's bearer is the OIDC `id_token` rather than the
     /// `access_token`. A property of what the credential will be *sent to*, not of
     /// how the browser came back: a deployment's cache/BES edges validate the
@@ -2541,17 +2495,12 @@ impl AuthSessionInner {
         state: Option<String>,
         require_state: bool,
     ) -> anyhow::Result<(CredentialsEntry, String)> {
-        let token_url = match &self.kind {
-            SessionKind::Loopback => format!("{}/oauth/token", self.env.domain),
-            SessionKind::Relay { expected_state } => {
-                if !callback_state_matches(expected_state, state.as_deref(), require_state) {
-                    return Err(anyhow::anyhow!(
-                        "authentication failed: callback state did not match"
-                    ));
-                }
-                resolve_oidc_endpoints(&self.env.domain).await.token
-            }
-        };
+        if !callback_state_matches(&self.expected_state, state.as_deref(), require_state) {
+            return Err(anyhow::anyhow!(
+                "authentication failed: callback state did not match"
+            ));
+        }
+        let token_url = resolve_oidc_endpoints(&self.env.domain).await.token;
         let token_resp = exchange_code(
             &token_url,
             &self.env.client_id,
@@ -3141,17 +3090,17 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
-        // Relay whenever there is somewhere to relay through; the loopback flow is
-        // the bootstrap for a deployment with neither an advertised redirect nor an
-        // endpoint to derive one from.
-        //
-        // The bearer is a separate question: a deployment's cache/BES edges
-        // validate the id_token, while the account addresses an API that validates
-        // the access_token and has the id_token filed alongside it.
-        let session = match login_redirect_uri(&selected) {
-            Some(redirect_uri) => build_endpoint_session(env, redirect_uri, !selected.builtin)?,
-            None => build_cloud_session(env)?,
-        };
+        // The bearer is a separate question from the flow: a deployment's cache/BES
+        // edges validate the id_token, while Aspect Cloud addresses an API that
+        // validates the access_token and has the id_token filed alongside it.
+        let redirect_uri = login_redirect_uri(&selected).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deployment {:?} advertises no login redirect URI and serves no endpoint to \
+                 derive one from — re-run `aspect auth configure <host>` to refresh it",
+                selected.name
+            )
+        })?;
+        let session = build_login_session(env, redirect_uri, !selected.builtin)?;
         Ok(heap.alloc(session))
     }
 
@@ -4897,10 +4846,9 @@ mod tests {
         );
     }
 
-    /// The account keeps the cloud loopback flow and the default credential
-    /// profile after it gains endpoints — both key on `builtin`, not on whether
-    /// hosts are present, or the account would file its login away from the
-    /// profile every Aspect-cloud caller reads.
+    /// The account keeps the default credential profile after it gains endpoints —
+    /// that keys on `builtin`, not on whether hosts are present, or the account
+    /// would file its login away from the profile every Aspect-cloud caller reads.
     #[test]
     fn the_account_keeps_the_default_profile_once_it_has_endpoints() {
         let mut seed = default_deployment();
@@ -5056,20 +5004,22 @@ mod tests {
     fn build_authorize_url_encodes_params_and_handles_query_and_state() {
         let scopes = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // No prior query → `?` separator; no state; scopes space-joined+encoded.
-        let cloud = build_authorize_url(
+        let plain = build_authorize_url(
             "https://auth.aspect.build/oauth/authorize",
             "client-1",
-            "http://localhost:19556/callback",
+            "https://app.aspect.build/auth/cli/callback",
             &scopes(&["openid", "profile", "email"]),
             "chal",
             None,
             &BTreeMap::new(),
         );
-        assert!(cloud.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
-        assert!(cloud.contains("redirect_uri=http%3A%2F%2Flocalhost%3A19556%2Fcallback"));
-        assert!(cloud.contains("scope=openid%20profile%20email"));
-        assert!(cloud.contains("code_challenge_method=S256"));
-        assert!(!cloud.contains("state="));
+        assert!(plain.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
+        assert!(
+            plain.contains("redirect_uri=https%3A%2F%2Fapp.aspect.build%2Fauth%2Fcli%2Fcallback")
+        );
+        assert!(plain.contains("scope=openid%20profile%20email"));
+        assert!(plain.contains("code_challenge_method=S256"));
+        assert!(!plain.contains("state="));
 
         // Discovery endpoint that already has a query → `&` separator; state appended.
         let with_state = build_authorize_url(
@@ -5439,9 +5389,9 @@ mod tests {
     fn parse_pasted_callback_reads_a_url_or_an_opaque_code() {
         for (input, code, state) in [
             (
-                "  http://localhost:19556/callback?code=abc123&state=nonce.19556  ",
+                "  http://localhost:54321/callback?code=abc123&state=nonce.54321  ",
                 "abc123",
-                Some("nonce.19556"),
+                Some("nonce.54321"),
             ),
             ("abc123", "abc123", None),
             ("YWJjMTIz==", "YWJjMTIz==", None),
@@ -5461,7 +5411,7 @@ mod tests {
         // An authorize error the browser was redirected with is reported as one,
         // rather than as a missing `code`.
         let err = parse_pasted_callback(
-            "http://localhost:19556/callback?error=access_denied&error_description=nope",
+            "http://localhost:54321/callback?error=access_denied&error_description=nope",
         )
         .unwrap_err()
         .to_string();
@@ -5471,7 +5421,7 @@ mod tests {
         );
 
         assert!(
-            parse_pasted_callback("http://localhost:19556/callback")
+            parse_pasted_callback("http://localhost:54321/callback")
                 .unwrap_err()
                 .to_string()
                 .contains("no `code` parameter")
@@ -5502,6 +5452,25 @@ mod tests {
         let token = jwt_with_exp(None);
         let response_token = token.clone();
         let responder = std::thread::spawn(move || {
+            // Two requests: the token exchange resolves the endpoint through OIDC
+            // discovery first. 404 that, so the conventional `/oauth/token` this
+            // server answers is what gets posted to — the fallback a self-hosted
+            // issuer serving no discovery document takes.
+            let (mut stream, _) = server.accept().unwrap();
+            let mut discovery = [0; 1024];
+            let read = stream.read(&mut discovery).unwrap();
+            let discovery = String::from_utf8_lossy(&discovery[..read]).to_string();
+            assert!(
+                discovery.starts_with("GET /.well-known/openid-configuration HTTP/1.1"),
+                "{discovery}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            drop(stream);
+
             let (mut stream, _) = server.accept().unwrap();
             let mut request = Vec::new();
             loop {
@@ -5539,7 +5508,9 @@ mod tests {
                     scopes: Vec::new(),
                     authorize_params: BTreeMap::new(),
                 },
-                kind: SessionKind::Loopback,
+                // A pasted code carries no state, which `require_state = false`
+                // allows; the nonce still has to be here for the flow to build.
+                expected_state: "nonce.54321".to_string(),
                 prefer_id_token: false,
             })),
         };
