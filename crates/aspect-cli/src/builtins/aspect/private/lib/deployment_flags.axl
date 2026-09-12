@@ -56,8 +56,8 @@ Failures:
     `none` combined with anything else.
   - `--deployment` with no `--remote` (nothing to wire).
   - `--remote` with no deployment to draw from — no `--deployment` and no default
-    Workflows deployment configured (the target resolves to the built-in Aspect
-    account, which has no endpoints).
+    Aspect Workflows deployment configured (the target resolves to Aspect Cloud
+    before discovery has recorded its endpoints).
   - A capability the user *named* that the deployment doesn't advertise (e.g.
     `--remote=exec` against a deployment with no remote execution). A defaulted
     capability is skipped silently instead: bare `--remote` means "use what this
@@ -283,11 +283,11 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
 
     # --remote needs a deployment to draw endpoints from. With no --deployment the
     # target is the current default; if that resolves to something with no
-    # endpoints (the built-in Aspect account — i.e. no default deployment is
+    # endpoints (the built-in Aspect Cloud entry — i.e. no default deployment is
     # configured), fail clearly rather than blaming a capability.
     advertises_none = not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
     if advertises_none and not ctx.args.deployment:
-        fail("--remote requires a Workflows deployment, but no default is set. " +
+        fail("--remote requires an Aspect Workflows deployment, but no default is set. " +
              "Run `aspect auth configure <host>` to add one. " +
              "If you already have deployments (see `aspect auth status`), set a default with " +
              "`aspect auth use <name>` or pass an explicit --deployment <name>.")
