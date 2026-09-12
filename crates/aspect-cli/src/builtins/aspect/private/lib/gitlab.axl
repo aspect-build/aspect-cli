@@ -446,7 +446,7 @@ def _set_auth_reason(_reason, kind, msg):
         _reason["reason"] = msg
 
 def _classify_missing_credentials(ctx):
-    """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
+    """Return `(kind, msg)` for `ctx.aspect.auth.credentials(deployment = ctx.aspect.auth.aspect_cloud_deployment)` returning
     None. The kind discriminates the CI case (where setting
     `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`)."""
     setup_url = "https://aspect.build/docs/cli/authentication"
@@ -465,7 +465,7 @@ def _classify_missing_credentials(ctx):
     return kind, msg + ". Setup guide: " + setup_url
 
 def _missing_credentials_reason(ctx):
-    """Human-readable explanation for `ctx.aspect.auth.credentials()`
+    """Human-readable explanation for `ctx.aspect.auth.credentials(deployment = ctx.aspect.auth.aspect_cloud_deployment)`
     returning None, tailored to the environment the CLI is running in."""
     _, msg = _classify_missing_credentials(ctx)
     return msg
@@ -487,7 +487,10 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         _set_auth_reason(_reason, _AUTH_KIND_NO_PROJECT_PATH, "project_path not provided")
         return None
 
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = ctx.aspect.auth.credentials(
+        deployment = ctx.aspect.auth.aspect_cloud_deployment,
+        profile = profile,
+    )
     if not creds:
         kind, msg = _classify_missing_credentials(ctx)
         _set_auth_reason(_reason, kind, msg)
@@ -499,7 +502,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
                 msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
                 fail(msg)
 
-    url = ctx.aspect.auth.api_url + "/gitlab/token"
+    url = ctx.aspect.auth.aspect_cloud_api_url + "/gitlab/token"
     if roles:
         url = url + "?roles=" + ",".join(roles)
 

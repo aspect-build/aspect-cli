@@ -92,6 +92,13 @@ def _print_deployment(d, header = True):
     if d.issuer and not d.builtin:
         _row("Issuer", d.issuer)
 
+    # Only for a deployment: Aspect Cloud's is the documented `ASPECT_API_TOKEN`,
+    # while a deployment's is derived from its name, so this is the one place that
+    # answers "which variable do I set on CI for this one" without the reader
+    # having to reproduce the normalization.
+    if not d.builtin:
+        _row("Token", d.api_token_env)
+
     # Short column headers of their own, not the prose `capability_labels` names.
     for (kind, value) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]:
         if value:
@@ -195,8 +202,7 @@ def _login_impl(ctx: TaskContext) -> int:
 
     # Persist under the deployment's own profile (so endpoint auth resolves it by
     # host) unless the user pinned an explicit --profile.
-    profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
-    ctx.aspect.auth.persist(creds, profile = profile)
+    ctx.aspect.auth.persist(creds, deployment = deployment, profile = ctx.args.profile)
     _print_login_summary(ctx, deployment, creds)
     _print_account_followups(ctx, account_info)
     return 0
@@ -365,9 +371,7 @@ def _configure_impl(ctx: TaskContext) -> int:
         error(ctx.std, "No authorization code entered; the deployment is configured but not logged in.")
         return 1
 
-    # Filed under the deployment's own profile, which for Aspect Cloud is the
-    # default one rather than its name — `login_profile` owns that distinction.
-    ctx.aspect.auth.persist(creds, profile = ctx.aspect.auth.login_profile(deployment = info.name))
+    ctx.aspect.auth.persist(creds, deployment = info.name, profile = ctx.args.profile)
 
     print("")
     summary = ctx.aspect.auth.deployment_summary(info.name)
@@ -459,6 +463,9 @@ def _entry_json(d) -> dict:
         "email": d.email,
         "issuer": d.issuer,
         "login_command": login_command(d),
+        # So a CI generator can emit the right variable per deployment without
+        # reproducing the name normalization.
+        "api_token_env": d.api_token_env,
     }
     if not d.builtin:
         doc["cache"] = d.cache

@@ -172,18 +172,13 @@ def resolve_aspect_bearer(ctx, what: str, uri: str = "") -> str:
     Callers gate on `needs_aspect_token`, so `uri` is always a host a configured
     deployment owns; `deployment_for_host` resolves its name.
 
-    A deployment's name is not always its credential-store key — Aspect Cloud is
-    named `aspect` but files under the default profile — so the key comes from
-    `login_profile`, which is the one place that mapping lives.
-
     Returns `"Bearer <jwt>"`, or `""` if the user is not authenticated (never
     logged in, or an expired session that cannot be refreshed). In the
     unauthenticated case a warning is printed; the caller proceeds without auth.
     """
     deployment = ctx.aspect.auth.deployment_for_host(endpoint_host(uri)) if uri else None
 
-    profile = ctx.aspect.auth.login_profile(deployment = deployment) if deployment else None
-    creds = ctx.aspect.auth.credentials(profile = profile, required = False)
+    creds = ctx.aspect.auth.credentials(deployment = deployment, required = False)
     if creds == None or not creds.access_token:
         warn(ctx.std, _NOT_AUTHENTICATED_MSG % (what, login_hint(deployment)))
         return ""
