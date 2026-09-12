@@ -34,10 +34,6 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
 # width would collide with its value.
 _LABEL_WIDTH = 8
 
-# What an Aspect Cloud login grants before its build endpoints are known. Shown
-# only until discovery records them — after that the endpoints themselves say more.
-_ACCOUNT_GRANTS = "Aspect Cloud services (e.g. the GitHub App API on CI)"
-
 def identity(d) -> str:
     """The logged-in identity for a summary: `Name <email>`, or just one of them,
     or "" when neither is known."""
@@ -72,9 +68,9 @@ def _print_deployment(d, header = True):
     """Print one entry's aligned detail table (Status, Issuer, and the build
     endpoints it serves). Shared by `auth status` and `configure`.
 
-    Aspect Cloud carries endpoints too, once a login has discovered them, and
-    renders them the same way; the Grants line stands in only while it has none —
-    a fresh install that has not logged in yet.
+    Aspect Cloud renders the same way as any deployment, once a login has
+    discovered its endpoints. Before that it has none to show, and the Status row
+    carries the only thing worth acting on.
 
     With `header`, leads with a `●/○ <name>` line (the ● default marker applies
     only to deployments — it selects which one build/test target). Aspect Cloud
@@ -89,19 +85,17 @@ def _print_deployment(d, header = True):
         print("    " + label + (" " * pad if pad > 0 else " ") + value)
 
     _row("Status", status_line(d))
-    if d.issuer:
+
+    # Only for a deployment, whose issuer is worth knowing because it varies — its
+    # own FrontEgg environment, or a customer's IdP. Aspect Cloud's is fixed, so
+    # naming it says nothing the heading did not.
+    if d.issuer and not d.builtin:
         _row("Issuer", d.issuer)
 
     # Short column headers of their own, not the prose `capability_labels` names.
-    endpoints = [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]
-    if d.builtin and not [v for (_, v) in endpoints if v]:
-        # The account before its first login, when nothing has discovered the
-        # Aspect-hosted endpoints yet. Say what it grants instead of nothing.
-        _row("Grants", _ACCOUNT_GRANTS)
-    else:
-        for (kind, value) in endpoints:
-            if value:
-                _row(kind, value)
+    for (kind, value) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]:
+        if value:
+            _row(kind, value)
 
 def _print_default_usage_hint(summary, others: int = 0):
     """How `--remote` wires the default deployment, naming only what that deployment
@@ -553,7 +547,7 @@ def _status_impl(ctx: TaskContext) -> int:
 
     print("")
     if deployments:
-        print("Aspect Workflows deployments:")
+        print("Single-tenant Aspect Workflows deployments:")
         for d in deployments:
             print("")
             _print_deployment(d)
@@ -562,7 +556,7 @@ def _status_impl(ctx: TaskContext) -> int:
         default = ([d for d in deployments if d.default] + account)[0]
         _print_default_usage_hint(default, len(deployments))
     else:
-        print("No Aspect Workflows deployments configured.")
+        print("No single-tenant Aspect Workflows deployments configured.")
         print("Run `aspect auth configure <host>` to add one.")
     return 0
 
