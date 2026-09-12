@@ -46,12 +46,12 @@ def identity(d) -> str:
     return d.display_name or d.email
 
 def login_command(d) -> str:
-    """The `aspect auth login` command that authenticates `d`: bare for the Aspect
-    account, `--deployment <name>` for a deployment."""
+    """The `aspect auth login` command that authenticates `d`: bare for Aspect
+    Cloud, `--deployment <name>` for a deployment."""
     return login_hint(None if d.builtin else d.name)
 
 def shadowed_warning(s) -> str:
-    """The warning for a `config.json` deployment ignored for taking a name the
+    """The warning for a `config.json` deployment ignored for taking a name
     Aspect Cloud reserves, naming the file that declares it.
 
     The remedy depends on that file: `auth remove` only edits the user's config,
@@ -72,14 +72,14 @@ def _print_deployment(d, header = True):
     """Print one entry's aligned detail table (Status, Issuer, and the build
     endpoints it serves). Shared by `auth status` and `configure`.
 
-    The Aspect Cloud carries endpoints too, once a login has discovered them,
-    and renders them the same way; the Grants line stands in only while it has
-    none — a fresh install that has not logged in yet.
+    Aspect Cloud carries endpoints too, once a login has discovered them, and
+    renders them the same way; the Grants line stands in only while it has none —
+    a fresh install that has not logged in yet.
 
     With `header`, leads with a `●/○ <name>` line (the ● default marker applies
-    only to deployments — it selects which one build/test target). The Aspect
-    account is a list of one under its own section header, so `auth status`
-    passes `header = False` to drop the redundant name line."""
+    only to deployments — it selects which one build/test target). Aspect Cloud
+    is a list of one under its own section header, so `auth status` passes
+    `header = False` to drop the redundant name line."""
     if header:
         is_default = d.default and not d.builtin
         print(("● " if is_default else "○ ") + d.name + (" (default)" if is_default else ""))
@@ -91,6 +91,7 @@ def _print_deployment(d, header = True):
     _row("Status", status_line(d))
     if d.issuer:
         _row("Issuer", d.issuer)
+
     # Short column headers of their own, not the prose `capability_labels` names.
     endpoints = [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]
     if d.builtin and not [v for (_, v) in endpoints if v]:
@@ -163,6 +164,7 @@ def _login_impl(ctx: TaskContext) -> int:
 
     deployment = ctx.args.deployment
     browser_login = not ctx.args.with_token and not ctx.args.with_api_token
+
     # A bare interactive login also records the Aspect-hosted deployment, so
     # --remote works without a separate `auth configure`. Skipped when the user
     # targeted a specific deployment or pinned a --profile (both say where this
@@ -415,6 +417,7 @@ def _configure_impl(ctx: TaskContext) -> int:
     summary = ctx.aspect.auth.deployment_summary(info.name)
     if summary == None:
         return 0
+
     # The account is its own thing, not one of a list, so it needs no name line and
     # is reached by `--remote` alone rather than `--deployment`.
     _print_deployment(summary, header = not is_account)

@@ -54,6 +54,7 @@ def _test_login_command(_):
 
 def _test_login_target_label(_):
     _eq("bare login → Aspect Cloud", login_target_label("", False), "Aspect Cloud")
+
     # `--deployment aspect` names the built-in entry, which is still Aspect Cloud.
     _eq("named account → Aspect Cloud", login_target_label("aspect", True), "Aspect Cloud")
     _eq(
@@ -61,6 +62,7 @@ def _test_login_target_label(_):
         login_target_label("acme", False),
         "Aspect Workflows deployment 'acme'",
     )
+
     # A dotted name is exactly why the name trails the noun rather than leading it.
     _eq(
         "dotted name stays readable",
