@@ -15,7 +15,9 @@ mod wasm;
 /// Re-exported for the credential helper: resolve the effective credentials
 /// profile, and resolve the current Aspect access token (JWT) for a profile,
 /// auto-refreshing if needed.
-pub use aspect::auth::{UriProfile, profile_for_uri, resolve_access_token, resolve_profile};
+pub use aspect::auth::{
+    UriProfile, login_hint, profile_for_uri, resolve_access_token, resolve_profile,
+};
 
 pub mod feature;
 pub mod grpc;

@@ -537,28 +537,30 @@ fn select_account_or_deployment(
     }
 }
 
-/// The name of the configured deployment that owns `host` — an exact or
-/// dot-anchored suffix match against any deployment's `hosts`. Returns `None`
-/// when no configured deployment claims the host. Used so endpoint auth attaches
-/// the token of the deployment serving a given cache/BES endpoint, whichever
-/// profile it was logged in under.
-fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<String> {
+/// The configured deployment that owns `host` — an exact or dot-anchored suffix
+/// match against any deployment's `hosts`. `None` when no configured deployment
+/// claims it. Endpoint auth uses this to attach the token of the deployment
+/// serving a given cache/BES endpoint; ask [`login_profile_for`] for the profile
+/// that token is filed under, which is not always the deployment's name.
+fn deployment_for_host<'a>(deployments: &'a [Deployment], host: &str) -> Option<&'a Deployment> {
     // Normalize a trailing dot so an absolute FQDN (`host.example.com.`) still
     // matches its configured host.
     let host = host.trim_end_matches('.').to_lowercase();
-    deployments
-        .iter()
-        .find(|d| {
-            d.hosts.iter().any(|h| {
-                let h = h
-                    .trim()
-                    .trim_start_matches('.')
-                    .trim_end_matches('.')
-                    .to_lowercase();
-                !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
-            })
+    deployments.iter().find(|d| {
+        d.hosts.iter().any(|h| {
+            let h = h
+                .trim()
+                .trim_start_matches('.')
+                .trim_end_matches('.')
+                .to_lowercase();
+            !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
         })
-        .map(|d| d.name.clone())
+    })
+}
+
+/// The name of the deployment owning `host` — see [`deployment_for_host`].
+fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<String> {
+    deployment_for_host(deployments, host).map(|d| d.name.clone())
 }
 
 /// Resolve the issuer + client_id for a login / api-token / refresh flow against
@@ -2192,7 +2194,7 @@ fn merged_refresh_token(prior: &str, fresh: &str) -> String {
 /// deployment stores under its name, so the profile is the deployment name and
 /// gets an explicit `--deployment`; the default profile (the built-in Aspect
 /// deployment, or a `$ASPECT_AUTH_PROFILE`) gets a bare `login`.
-pub(crate) fn login_hint(profile: &str) -> String {
+pub fn login_hint(profile: &str) -> String {
     if profile == DEFAULT_PROFILE {
         "aspect auth login".to_string()
     } else {
@@ -2251,27 +2253,43 @@ pub fn resolve_profile(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
 }
 
-/// Which configured deployment owns the endpoint `uri`, for the credential helper:
-/// the `host` parsed from the URI and the `deployment` (name = credential profile)
-/// that claims it, or `None` when no configured deployment does. The helper emits
-/// a credential only when a deployment owns the host, so it self-scopes by the URI
-/// Bazel passes — a global `--credential_helper=aspect` never sends a token to an
-/// unclaimed (e.g. third-party) host.
+/// Which configured deployment owns the endpoint `uri`, for the credential helper.
+/// `deployment` is `None` when no configured deployment claims the host: the helper
+/// emits a credential only when one does, so it self-scopes by the URI Bazel passes
+/// — a global `--credential_helper=aspect` never sends a token to an unclaimed
+/// (e.g. third-party) host.
 pub struct UriProfile {
     pub host: String,
+    /// The owning deployment's name — what the user calls it.
     pub deployment: Option<String>,
+    /// The credential-store key its login is filed under. Not always the name: see
+    /// [`login_profile_for`]. `None` exactly when `deployment` is.
+    pub profile: Option<String>,
+    /// Whether the owner is the built-in Aspect Cloud entry, so a caller can name
+    /// it the way the user knows it rather than by its config name.
+    pub builtin: bool,
 }
 
 /// Resolve the [`UriProfile`] for a credential-helper request, so a Bazel request
 /// for a configured deployment's cache/BES gets *that* deployment's token.
 pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
     let host = endpoint_host_str(uri);
-    let deployment = if host.is_empty() {
-        None
-    } else {
-        deployment_name_for_host(&load_deployments()?, &host)
-    };
-    Ok(UriProfile { host, deployment })
+    if host.is_empty() {
+        return Ok(UriProfile {
+            host,
+            deployment: None,
+            profile: None,
+            builtin: false,
+        });
+    }
+    let deployments = load_deployments()?;
+    let owner = deployment_for_host(&deployments, &host);
+    Ok(UriProfile {
+        host,
+        deployment: owner.map(|d| d.name.clone()),
+        profile: owner.map(login_profile_for),
+        builtin: owner.is_some_and(|d| d.builtin),
+    })
 }
 
 /// Resolve the current access token (JWT) for `profile` (already resolved, e.g.
@@ -2279,8 +2297,8 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
 /// `ASPECT_API_TOKEN` (exchanged against Aspect Cloud issuer) takes
 /// precedence over stored credentials; other profiles always use their stored
 /// credential. Auto-refreshes an expired-but-refreshable token, persisting the
-/// refresh — for this profile, and for any sibling on the same refresh chain (see
-/// [`carry_rotated_refresh_token`]). Returns `None` when no credential exists for the profile, and errors
+/// refresh. Each stored credential is its own grant now, so a rotated refresh token
+/// concerns only the profile being refreshed. Returns `None` when no credential exists for the profile, and errors
 /// when the stored token is expired and cannot be refreshed: it never returns a
 /// known-expired token, so a consumer (e.g. the credential helper) does not emit
 /// one a server will 401. Requires a Tokio runtime (the refresh path blocks on
@@ -2305,45 +2323,8 @@ pub fn resolve_access_token(profile: &str) -> anyhow::Result<Option<String>> {
             let refreshed = block_on(refresh_access_token(&entry))
                 .map_err(|_| anyhow::anyhow!(session_expired_message(profile)))?;
             map.insert(profile.to_string(), refreshed.clone());
-            carry_rotated_refresh_token(
-                &mut map,
-                profile,
-                &entry.refresh_token,
-                &refreshed.refresh_token,
-            );
             save_all_credentials(&map)?;
             Ok(Some(refreshed.access_token))
-        }
-    }
-}
-
-/// Hand a rotated refresh token to every other entry that was on the same chain.
-///
-/// One browser grant can file more than one credential — Aspect Cloud keeps the
-/// access_token under the default profile and the same grant's id_token under its
-/// deployment name — and those copies share a refresh token. An issuer that rotates
-/// on refresh invalidates the predecessor, so without this the sibling that
-/// refreshed second would be told its session expired and the user would be sent
-/// back through a browser login it did not need.
-///
-/// Only the refresh token moves. Each entry keeps its own bearer and its own
-/// `prefer_id_token`, and refreshes itself onto the shared chain when its own token
-/// comes due.
-///
-/// A no-op when the issuer returned no new token (`fresh` empty, or unchanged) or
-/// when there was no prior one to match against.
-fn carry_rotated_refresh_token(
-    map: &mut HashMap<String, CredentialsEntry>,
-    refreshed_profile: &str,
-    prior: &str,
-    fresh: &str,
-) {
-    if prior.is_empty() || fresh.is_empty() || prior == fresh {
-        return;
-    }
-    for (name, entry) in map.iter_mut() {
-        if name != refreshed_profile && entry.refresh_token == prior {
-            entry.refresh_token = fresh.to_string();
         }
     }
 }
@@ -2361,12 +2342,6 @@ pub struct AuthCredentials {
     pub(crate) auth_domain: Option<String>,
     pub(crate) auth_client_id: Option<String>,
     pub(crate) prefer_id_token: bool,
-    /// The `id_token` from the same grant, kept beside the chosen bearer so one
-    /// browser flow can file both an account credential and an endpoint one (see
-    /// [`Self::for_endpoint`]). Empty for a login that never saw a token response
-    /// (`--with-token`) or whose grant omitted an id_token, and never persisted —
-    /// [`AuthCredentials::to_entry`] writes only the bearer in `access_token`.
-    pub(crate) id_token: String,
 }
 
 starlark_simple_value!(AuthCredentials);
@@ -2425,29 +2400,6 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
     }
-
-    /// The same login re-cast as an endpoint credential: the bearer becomes this
-    /// grant's `id_token`, which is what a deployment's cache/BES edge validates,
-    /// and `prefer_id_token` is set so a later refresh keeps minting one rather
-    /// than downgrading to the access_token.
-    ///
-    /// Lets a single browser flow serve both Aspect Cloud (access_token,
-    /// filed under the default profile) and the Aspect-hosted deployment
-    /// (id_token, filed under its own) — see the bare-login path in `auth.axl`.
-    /// Returns `None` when the grant issued no id_token, so the caller skips the
-    /// endpoint credential instead of persisting a bearer the edge would reject.
-    fn for_endpoint<'v>(
-        this: values::Value<'v>,
-        heap: values::Heap<'v>,
-    ) -> anyhow::Result<values::Value<'v>> {
-        let creds = this
-            .downcast_ref_err::<AuthCredentials>()
-            .into_anyhow_result()?;
-        Ok(match creds.endpoint_entry()? {
-            Some(entry) => heap.alloc(AuthCredentials::from_entry(&entry)),
-            None => values::Value::new_none(),
-        })
-    }
 }
 
 impl AuthCredentials {
@@ -2464,32 +2416,7 @@ impl AuthCredentials {
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
             prefer_id_token: entry.prefer_id_token,
-            // A stored entry keeps only its bearer; the id_token is transport-only
-            // and is attached by `finish_auth_session` when a grant supplied one.
-            id_token: String::new(),
         }
-    }
-
-    /// This login re-cast as an endpoint credential — the grant's `id_token` as the
-    /// bearer, `prefer_id_token` set so refresh keeps minting one. `None` when the
-    /// grant issued no id_token. Backs [`Self::for_endpoint`]; see it for why.
-    ///
-    /// The refresh token and issuer/client are carried over deliberately: it is the
-    /// same grant, so the endpoint credential renews on the same chain rather than
-    /// needing its own login. Sharing the chain is what
-    /// [`carry_rotated_refresh_token`] exists to keep working across a rotating
-    /// issuer.
-    fn endpoint_entry(&self) -> anyhow::Result<Option<CredentialsEntry>> {
-        if self.id_token.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(CredentialsEntry::from_bearer(
-            self.id_token.clone(),
-            self.refresh_token.clone(),
-            self.auth_domain.clone(),
-            self.auth_client_id.clone(),
-            true,
-        )?))
     }
 
     fn to_entry(&self) -> CredentialsEntry {
@@ -2529,16 +2456,15 @@ impl AuthSessionInner {
     /// With `require_state = false`, an omitted state is allowed but a supplied one
     /// is still validated.
     ///
-    /// Returns the credential for this session's own bearer, plus the grant's
-    /// `id_token` (empty when it issued none) so the caller can also file an
-    /// endpoint credential from the same exchange without a second browser round
-    /// trip — see [`AuthCredentials::for_endpoint`].
+    /// Returns the credential for this session's bearer — the `id_token` for a
+    /// self-hosted deployment, the `access_token` for Aspect Cloud, per
+    /// `prefer_id_token`. One grant, one credential.
     async fn complete(
         self,
         code: String,
         state: Option<String>,
         require_state: bool,
-    ) -> anyhow::Result<(CredentialsEntry, String)> {
+    ) -> anyhow::Result<CredentialsEntry> {
         if !callback_state_matches(&self.expected_state, state.as_deref(), require_state) {
             return Err(anyhow::anyhow!(
                 "authentication failed: callback state did not match"
@@ -2554,18 +2480,16 @@ impl AuthSessionInner {
         )
         .await?;
         let refresh_token = token_resp.refresh_token.clone();
-        let id_token = token_resp.id_token.clone();
         // Recorded so refresh keeps minting the same kind rather than downgrading
         // to whatever the grant happens to return.
         let prefer_id_token = self.prefer_id_token;
-        let entry = CredentialsEntry::from_bearer(
+        CredentialsEntry::from_bearer(
             token_resp.bearer(prefer_id_token)?,
             refresh_token,
             Some(self.env.domain.clone()),
             Some(self.env.client_id.clone()),
             prefer_id_token,
-        )?;
-        Ok((entry, id_token))
+        )
     }
 }
 
@@ -2597,7 +2521,7 @@ fn finish_auth_session(
         .take()
         .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
     drop(guard);
-    let (entry, id_token) = if let Some(pasted) = pasted {
+    let entry = if let Some(pasted) = pasted {
         let (code, state) = parse_pasted_callback(pasted)?;
         block_on(inner.complete(code, state, false))?
     } else {
@@ -2610,9 +2534,7 @@ fn finish_auth_session(
             inner.complete(code, state, true).await
         })?
     };
-    let mut creds = AuthCredentials::from_entry(&entry);
-    creds.id_token = id_token;
-    Ok(creds)
+    Ok(AuthCredentials::from_entry(&entry))
 }
 
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -3430,18 +3352,18 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// The credentials profile a login against `selected` persists under: a
-/// configured deployment stores under its name, so
-/// [`Auth::deployment_for_host`] later resolves the same profile for its
-/// endpoints; the built-in Aspect Cloud entry stores under the resolved default
-/// profile.
+/// The credentials profile a login against `selected` persists under: a configured
+/// deployment stores under its name; the built-in Aspect Cloud entry stores under
+/// the resolved default profile, which every Aspect Cloud caller reads and which
+/// `$ASPECT_API_TOKEN` stands in for on CI.
 ///
-/// Keyed on `builtin`, an identity question, because the account now carries the
-/// Aspect-hosted cache/BES itself (see [`configure_default`]) and would otherwise
-/// file its own login away from the default profile that every Aspect-cloud
-/// caller reads. Its endpoints are still reachable: the bare-login path files a
-/// second credential under the account's *name* for them, which is what
-/// [`Auth::deployment_for_host`] resolves.
+/// Keyed on `builtin`, an identity question, not on whether the entry has hosts —
+/// Aspect Cloud carries its own cache/BES now (see [`configure_default`]) and would
+/// otherwise file its login away from that profile.
+///
+/// This is the one place the name/profile distinction lives. Everything resolving a
+/// credential for an endpoint goes through it rather than assuming a deployment's
+/// name is its profile — see [`profile_for_uri`] and the AXL `resolve_aspect_bearer`.
 fn login_profile_for(selected: &Deployment) -> String {
     if selected.builtin {
         resolve_profile(None)
@@ -3553,13 +3475,23 @@ mod tests {
         assert!(can_refresh(&e));
     }
 
+    /// Serializes every test that reads or writes `$ASPECT_AUTH_PROFILE`. The
+    /// process env is global and cargo runs tests on parallel threads, so without
+    /// this a reader intermittently observes the writer's value mid-flight — two
+    /// calls inside one assertion can even straddle the change. Poison is ignored:
+    /// one failing test should not cascade into the others.
+    static PROFILE_ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    fn profile_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        PROFILE_ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn resolve_profile_prefers_explicit_then_env_then_default() {
         // An explicit, non-empty profile always wins, regardless of the env.
         assert_eq!(resolve_profile(Some("ci")), "ci");
 
-        // This test mutates the process env, so it must run serially with any
-        // other PROFILE_ENV reader; it is currently the only one.
+        let _guard = profile_env_guard();
         let saved = std::env::var(PROFILE_ENV).ok();
 
         // SAFETY: single-threaded test body; restored before returning.
@@ -4911,11 +4843,12 @@ mod tests {
     /// would file its login away from the profile every Aspect-cloud caller reads.
     #[test]
     fn the_account_keeps_the_default_profile_once_it_has_endpoints() {
+        let _guard = profile_env_guard();
         let mut seed = default_deployment();
         seed.hosts = vec!["remote.app.aspect.build".to_string()];
-        // Compared against `resolve_profile`, not the literal: a sibling test sets
-        // $ASPECT_AUTH_PROFILE, and the invariant is that the account files under
-        // whatever the default profile resolves to.
+        // Compared against `resolve_profile`, not the literal: the invariant is that
+        // the account files under whatever the default profile resolves to, and a
+        // sibling test sets $ASPECT_AUTH_PROFILE (hence the guard above).
         assert_eq!(login_profile_for(&seed), resolve_profile(None));
 
         let mut configured = dep("acme", false);
@@ -4969,78 +4902,30 @@ mod tests {
         ));
     }
 
-    /// A rotating issuer invalidates the predecessor, so the profile that refreshes
-    /// first has to hand the new token to the sibling filed from the same grant —
-    /// or that sibling reports an expired session and demands a needless re-login.
+    /// The invariant every endpoint-credential lookup rests on: a host resolves to
+    /// the *profile* its deployment's login is filed under, which is not the
+    /// deployment's name for Aspect Cloud. Getting this wrong sends a build to an
+    /// Aspect Cloud endpoint with no credential at all.
     #[test]
-    fn a_rotated_refresh_token_reaches_every_profile_on_the_same_chain() {
-        let entry = |refresh: &str| CredentialsEntry {
-            access_token: "token".to_string(),
-            refresh_token: refresh.to_string(),
-            email: "a@b.c".to_string(),
-            name: "A".to_string(),
-            tenant_id: "t".to_string(),
-            auth_domain: Some(DEFAULT_ISSUER.to_string()),
-            auth_client_id: Some(DEFAULT_CLIENT_ID.to_string()),
-            prefer_id_token: false,
-        };
-        let mut map = HashMap::from([
-            (DEFAULT_PROFILE.to_string(), entry("r2")),
-            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("r1")),
-            // A separate login, so a coincidental refresh is not its business.
-            ("acme".to_string(), entry("other")),
-        ]);
-        carry_rotated_refresh_token(&mut map, DEFAULT_PROFILE, "r1", "r2");
-        assert_eq!(map[DEFAULT_DEPLOYMENT_NAME].refresh_token, "r2");
-        assert_eq!(map["acme"].refresh_token, "other");
+    fn an_endpoint_resolves_to_its_deployments_profile_not_its_name() {
+        let _guard = profile_env_guard();
+        let mut seed = default_deployment();
+        seed.endpoints.cache = "cache.aspect.build".to_string();
+        seed.hosts = vec!["cache.aspect.build".to_string()];
+        let deployments = vec![seed, dep("acme", false)];
 
-        // An issuer that does not rotate returns the same token: nothing to carry,
-        // and nothing else may be touched.
-        let mut unchanged = HashMap::from([
-            (DEFAULT_PROFILE.to_string(), entry("r1")),
-            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("r1")),
-        ]);
-        carry_rotated_refresh_token(&mut unchanged, DEFAULT_PROFILE, "r1", "r1");
-        assert_eq!(unchanged[DEFAULT_DEPLOYMENT_NAME].refresh_token, "r1");
+        let cloud = deployment_for_host(&deployments, "cache.aspect.build").expect("owned");
+        assert_eq!(cloud.name, DEFAULT_DEPLOYMENT_NAME);
+        // Compared against `resolve_profile`, not the literal: whatever the default
+        // profile resolves to is where the account files.
+        assert_eq!(login_profile_for(cloud), resolve_profile(None));
+        assert_ne!(login_profile_for(cloud), cloud.name);
 
-        // An entry with no refresh token of its own is not on anyone's chain, so an
-        // empty prior must not sweep it up.
-        let mut empty = HashMap::from([
-            (DEFAULT_PROFILE.to_string(), entry("")),
-            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("")),
-        ]);
-        carry_rotated_refresh_token(&mut empty, DEFAULT_PROFILE, "", "fresh");
-        assert_eq!(empty[DEFAULT_DEPLOYMENT_NAME].refresh_token, "");
-    }
+        // A self-hosted deployment's name *is* its profile.
+        let acme = deployment_for_host(&deployments, "remote.acme.aspect.build").expect("owned");
+        assert_eq!(login_profile_for(acme), "acme");
 
-    /// One browser grant files two credentials: the account keeps the access_token,
-    /// the endpoint gets the id_token on the same refresh chain.
-    #[test]
-    fn endpoint_entry_recasts_the_same_grant_onto_the_id_token() {
-        let entry = CredentialsEntry::from_bearer(
-            jwt_with_payload(r#"{"email":"a@b.c","name":"A","tenantId":"t"}"#),
-            "refresh-abc".to_string(),
-            Some(DEFAULT_ISSUER.to_string()),
-            Some(DEFAULT_CLIENT_ID.to_string()),
-            false,
-        )
-        .unwrap();
-        let mut creds = AuthCredentials::from_entry(&entry);
-        creds.id_token = jwt_with_payload(r#"{"email":"a@b.c","name":"A","tenantId":"t"}"#);
-
-        let endpoint = creds.endpoint_entry().unwrap().expect("an id_token grant");
-        assert_eq!(endpoint.access_token, creds.id_token);
-        // Set so a later refresh keeps minting an id_token rather than downgrading
-        // to the access_token the edge would reject.
-        assert!(endpoint.prefer_id_token);
-        // Same grant, so it renews on the same chain instead of needing its own login.
-        assert_eq!(endpoint.refresh_token, "refresh-abc");
-        assert_eq!(endpoint.auth_client_id.as_deref(), Some(DEFAULT_CLIENT_ID));
-
-        // A grant with no id_token yields nothing rather than a bearer the edge
-        // would reject.
-        creds.id_token = String::new();
-        assert!(creds.endpoint_entry().unwrap().is_none());
+        assert!(deployment_for_host(&deployments, "cache.example.com").is_none());
     }
 
     #[test]

@@ -197,9 +197,8 @@ def _login_impl(ctx: TaskContext) -> int:
     # host) unless the user pinned an explicit --profile.
     profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
     ctx.aspect.auth.persist(creds, profile = profile)
-    endpoints_filed = _file_account_endpoints(ctx, creds, account_info)
     _print_login_summary(ctx, deployment, creds)
-    _print_account_followups(ctx, account_info, endpoints_filed)
+    _print_account_followups(ctx, account_info)
     return 0
 
 def login_target_label(deployment: str, builtin: bool) -> str:
@@ -236,52 +235,13 @@ def _print_login_summary(ctx: TaskContext, deployment: str, creds):
     elif capability_labels(target, only = REMOTE_DEFAULT_CAPS):
         _print_configured_usage_hint(target)
 
-def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
-    """File the grant's id_token under `name`, the credential a deployment's
-    cache/BES edges validate. The caller has already filed the access_token under
-    its own profile — for Aspect Cloud that is the default profile, which
-    every Aspect Cloud caller reads, so the two live side by side.
-
-    Returns False when the grant carried no id_token, leaving the deployment
-    configured but unauthenticated; callers say so rather than leaving
-    `auth status` to reveal it.
-    """
-    endpoint_creds = creds.for_endpoint()
-    if endpoint_creds == None:
-        return False
-    ctx.aspect.auth.persist(endpoint_creds, profile = name)
-    return True
-
-def _file_account_endpoints(ctx: TaskContext, creds, info) -> bool:
-    """File `creds` against the Aspect Cloud endpoints `info` recorded.
-
-    Prints nothing, so the login's summary stays in one place — see
-    `_print_account_followups` for what is said about the outcome.
-
-    The endpoint credential is the same grant's id_token, what a cache/BES edge
-    validates, so there is no second browser round trip. Returns False only when
-    those endpoints were recorded but the grant carried no id_token to authenticate
-    them with; `info` describing no usable endpoints is not a failure, just nothing
-    to do.
-    """
-    if info == None or info.status != "ok" or not info.can_login:
-        return True
-    return _persist_endpoint_login(ctx, creds, info.name)
-
-def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
+def _print_account_followups(ctx: TaskContext, info):
     """Anything still needed after an Aspect Cloud login, printed below its summary.
 
-    An unfiled endpoint credential leaves the endpoints recorded but unauthenticated
-    — which `auth status` would otherwise be the only place to notice. It should not
-    happen: a credential carries no id_token only when it came from a refresh grant
-    (permitted to omit one) or was read back from the store (which never keeps it),
-    and this is always a fresh authorization-code result. So the warning doubles as
-    the signal that something upstream changed.
-
-    `not_recorded` is the other side of that: the login worked but the endpoints
-    could not be written down, so `--remote` would fail later with nothing pointing
-    back here. Every other non-`ok` status means the probe found nothing worth
-    recording, which is not the user's problem and says nothing.
+    `not_recorded` means the login worked but the endpoints could not be written
+    down, so `--remote` would fail later with nothing pointing back here. Every
+    other non-`ok` status means the probe found nothing worth recording, which is
+    not the user's problem and says nothing.
     """
     if info == None:
         return
@@ -291,10 +251,7 @@ def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
         return
     if info.status != "ok" or not info.can_login:
         return
-    if not endpoints_filed:
-        warn(ctx.std, "Recorded the remote cache and BES but could not authenticate them: the login returned no id_token.")
-        print("Run `aspect auth login` again to finish setting them up.")
-    elif not info.is_default:
+    if not info.is_default:
         print("")
         print("Run `aspect auth use " + info.name + "` to make it the default deployment.")
 
@@ -407,16 +364,10 @@ def _configure_impl(ctx: TaskContext) -> int:
     if creds == None:
         error(ctx.std, "No authorization code entered; the deployment is configured but not logged in.")
         return 1
-    if is_account:
-        # Filed the way a bare login files them: the access_token under the default
-        # profile for Aspect Cloud, the same grant's id_token under the account's
-        # name for its edges.
-        ctx.aspect.auth.persist(creds, profile = ctx.aspect.auth.login_profile())
-        if not _persist_endpoint_login(ctx, creds, info.name):
-            warn(ctx.std, "Configured the endpoints but could not authenticate them: the login returned no id_token.")
-            return 1
-    else:
-        ctx.aspect.auth.persist(creds, profile = info.name)
+
+    # Filed under the deployment's own profile, which for Aspect Cloud is the
+    # default one rather than its name — `login_profile` owns that distinction.
+    ctx.aspect.auth.persist(creds, profile = ctx.aspect.auth.login_profile(deployment = info.name))
 
     print("")
     summary = ctx.aspect.auth.deployment_summary(info.name)
