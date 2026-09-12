@@ -2058,7 +2058,7 @@ fn open_url_in_browser(url: &str) -> bool {
 ///
 /// Derived from a machine edge otherwise, for a document written before the field
 /// existed — see [`callback_host`]. That fallback is the only reason the cache/BES
-/// preference still exists.
+/// preference still exists, and it is why the path below is the old one.
 ///
 /// An advertised URI must be `https`. It is where the authorization code is
 /// delivered, and the document is server-controlled, so a plaintext one is refused
@@ -2075,6 +2075,10 @@ fn login_redirect_uri(selected: &Deployment) -> Option<String> {
             uri
         );
     }
+    // `/oauth2/callback`, not the current `/auth/cli/callback`: this branch is only
+    // reached for a deployment running a version of Aspect Workflows that advertises
+    // no redirect URI, and those serve the relay at the old path. A version that
+    // advertises one has already been taken above, at whatever path it names.
     callback_host(selected).map(|host| format!("https://{host}/oauth2/callback"))
 }
 
