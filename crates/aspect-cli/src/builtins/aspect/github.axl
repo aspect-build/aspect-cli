@@ -1,3 +1,4 @@
+load("./private/lib/aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_url")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/github.axl", "github")
 
@@ -11,10 +12,7 @@ def _token_impl(ctx: TaskContext) -> int:
         error(ctx.std, "Repo must be in owner/repo format (e.g. my-org/my-repo).")
         return 1
 
-    creds = ctx.aspect.auth.credentials(
-        deployment = ctx.aspect.auth.aspect_cloud_deployment,
-        profile = ctx.args.profile,
-    )
+    creds = aspect_cloud_credentials(ctx, profile = ctx.args.profile)
     if creds == None:
         error(ctx.std, github.missing_credentials_reason(ctx))
         return 1
@@ -27,7 +25,7 @@ def _token_impl(ctx: TaskContext) -> int:
 
     body = json.encode({"owner": owner, "repo": repo_name})
 
-    url = ctx.aspect.auth.aspect_cloud_api_url + "/github/token"
+    url = aspect_cloud_url(ctx, "/github/token")
     if ctx.args.roles:
         url = url + "?roles=" + ",".join(ctx.args.roles)
 

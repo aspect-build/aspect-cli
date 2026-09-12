@@ -1,0 +1,32 @@
+"""Addressing the Aspect Cloud API.
+
+`api.aspect.build` serves routes that exist nowhere else: the GitHub and GitLab
+App token exchanges, status-comment contribution, status-check registration, and
+the budget query. They are Aspect Cloud's, not a deployment's — a self-hosted
+deployment has no equivalent — so they must be addressed with Aspect Cloud's URL
+*and* authenticated with Aspect Cloud's credential, whichever deployment happens
+to be the default.
+
+Those two go together, which is why they live together here: taking the URL from
+one deployment and the credential from another sends a request the server rejects,
+and the failure looks like a login problem rather than a routing one.
+
+A route a deployment serves itself is the other case, and does not belong here —
+it uses `ctx.aspect.auth.deployment_api_url(deployment = …)`, which resolves that
+deployment's own advertised `api` and errors rather than falling back here.
+"""
+
+def aspect_cloud_url(ctx, path: str) -> str:
+    """Aspect Cloud's API base with `path` appended (`"/github/token"`)."""
+    return ctx.aspect.auth.aspect_cloud_api_url + path
+
+def aspect_cloud_credentials(ctx, profile = None, required: bool = True):
+    """Aspect Cloud's credential, or `None` when the profile holds none.
+
+    `profile` is the identity to read it from, defaulting to the resolved one
+    (`--profile`, then `$ASPECT_AUTH_PROFILE`, then `default`)."""
+    return ctx.aspect.auth.credentials(
+        deployment = ctx.aspect.auth.aspect_cloud_deployment,
+        profile = profile,
+        required = required,
+    )

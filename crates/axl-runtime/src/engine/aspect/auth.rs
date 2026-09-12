@@ -136,11 +136,11 @@ impl Endpoints {
     /// Whether this advertises somewhere Bazel can actually talk to, which is
     /// what makes a resource a *deployment* rather than merely an Aspect service.
     ///
-    /// Distinct from [`Self::is_empty`], which also counts `results_url`: the
-    /// build-result viewer advertises one alongside no cache or BES at all
-    /// (`app.aspect.build` serves exactly that), and treating it as a deployment
-    /// would record an entry that cannot serve a build — and, under Aspect Cloud's
-    /// own name, would replace the endpoints that can.
+    /// Deliberately narrower than [`Self::is_empty`], which counts `results_url`
+    /// and `api` as well. Both are served alongside no cache or BES at all
+    /// (`app.aspect.build` serves exactly that), and treating such a resource as a
+    /// deployment would record an entry that cannot serve a build — and, under
+    /// Aspect Cloud's own name, would replace the endpoints that can.
     fn serves_build_endpoints(&self) -> bool {
         !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
     }
@@ -634,13 +634,10 @@ fn resolve_auth_env(name: Option<&str>) -> anyhow::Result<AuthEnv> {
 /// `api_url`, then the compiled-in default, so the host can move without a CLI
 /// release.
 fn resolve_aspect_cloud_api_url() -> anyhow::Result<String> {
-    let deployments = load_deployments()?;
-    let cloud = deployments.iter().find(|d| d.builtin);
-    Ok(cloud
-        .map(|d| &d.endpoints.api)
-        .filter(|api| !api.is_empty())
-        .map(|api| format!("https://{api}"))
-        .or_else(|| cloud.and_then(|d| d.api_url.clone()))
+    Ok(load_deployments()?
+        .iter()
+        .find(|d| d.builtin)
+        .and_then(deployment_api_base)
         .unwrap_or_else(|| DEFAULT_API_URL.to_string()))
 }
 
@@ -654,16 +651,22 @@ fn resolve_aspect_cloud_api_url() -> anyhow::Result<String> {
 fn resolve_deployment_api_url(name: Option<&str>) -> anyhow::Result<String> {
     let deployments = load_deployments()?;
     let selected = select_deployment(&deployments, name)?;
-    if !selected.endpoints.api.is_empty() {
-        return Ok(format!("https://{}", selected.endpoints.api));
+    deployment_api_base(&selected)
+        .ok_or_else(|| anyhow::anyhow!("deployment {:?} advertises no API endpoint", selected.name))
+}
+
+/// A deployment's own API base: the `api` endpoint it advertises, else the
+/// `api_url` recorded for it. `None` when it has neither, which is every
+/// deployment but Aspect Cloud today.
+///
+/// The two callers differ only in what they do with that `None` — Aspect Cloud
+/// falls back to the compiled-in default, a named deployment errors — which is the
+/// whole distinction between them.
+fn deployment_api_base(deployment: &Deployment) -> Option<String> {
+    if !deployment.endpoints.api.is_empty() {
+        return Some(format!("https://{}", deployment.endpoints.api));
     }
-    if let Some(url) = selected.api_url.clone() {
-        return Ok(url);
-    }
-    Err(anyhow::anyhow!(
-        "deployment {:?} advertises no API endpoint",
-        selected.name
-    ))
+    deployment.api_url.clone()
 }
 
 fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
@@ -4067,6 +4070,31 @@ mod tests {
         assert!(!remove_credential(&mut all, "bob", "acme"));
         assert!(!remove_credential(&mut all, "susan", "acme"));
         assert!(all.contains_key("susan"));
+    }
+
+    /// A deployment's API comes from what it advertises, so the host can move
+    /// without a CLI release. The recorded `api_url` stands in for a document that
+    /// predates the `api` endpoint.
+    #[test]
+    fn a_deployments_api_base_prefers_what_it_advertises() {
+        let mut cloud = aspect_cloud_deployment();
+        // The seed carries `api_url`; with nothing advertised that is what is used.
+        assert_eq!(
+            deployment_api_base(&cloud).as_deref(),
+            Some(DEFAULT_API_URL)
+        );
+
+        // An advertised endpoint wins, and is given a scheme — `aspect_endpoints`
+        // carries bare hosts.
+        cloud.endpoints.api = "api.eu.aspect.build".to_string();
+        assert_eq!(
+            deployment_api_base(&cloud).as_deref(),
+            Some("https://api.eu.aspect.build")
+        );
+
+        // A deployment advertising neither has no API, which the named lookup
+        // reports rather than silently addressing Aspect Cloud's.
+        assert_eq!(deployment_api_base(&dep("acme", false)), None);
     }
 
     #[test]

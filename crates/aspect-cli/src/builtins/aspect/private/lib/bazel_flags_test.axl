@@ -5,6 +5,7 @@ Run with:
 """
 
 load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta")
+load("./auth_fakes.axl", "fake_auth")
 load("./deployment_flags.axl", "deployment_auth_flags")
 
 def _eq(label, got, want):
@@ -408,11 +409,7 @@ def _fake_auth_ctx(access_token = "", owned_hosts = []):
             io = struct(stdout = struct(is_tty = False)),
             env = struct(var = lambda name: None),
         ),
-        aspect = struct(auth = struct(
-            deployment_for_host = lambda host: owned.get(host),
-            aspect_cloud_deployment = "aspect-cloud",
-            credentials = lambda deployment = None, profile = None, required = True: creds,
-        )),
+        aspect = struct(auth = fake_auth(credentials = creds, owned_hosts = owned)),
     )
 
 _TOK = "fake-access-token"
