@@ -2278,8 +2278,9 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
 /// via [`resolve_profile`]). For the default profile an explicit
 /// `ASPECT_API_TOKEN` (exchanged against Aspect Cloud issuer) takes
 /// precedence over stored credentials; other profiles always use their stored
-/// credential. Auto-refreshes an expired-but-refreshable token (persisting the
-/// refresh). Returns `None` when no credential exists for the profile, and errors
+/// credential. Auto-refreshes an expired-but-refreshable token, persisting the
+/// refresh — for this profile, and for any sibling on the same refresh chain (see
+/// [`carry_rotated_refresh_token`]). Returns `None` when no credential exists for the profile, and errors
 /// when the stored token is expired and cannot be refreshed: it never returns a
 /// known-expired token, so a consumer (e.g. the credential helper) does not emit
 /// one a server will 401. Requires a Tokio runtime (the refresh path blocks on
@@ -2304,8 +2305,45 @@ pub fn resolve_access_token(profile: &str) -> anyhow::Result<Option<String>> {
             let refreshed = block_on(refresh_access_token(&entry))
                 .map_err(|_| anyhow::anyhow!(session_expired_message(profile)))?;
             map.insert(profile.to_string(), refreshed.clone());
+            carry_rotated_refresh_token(
+                &mut map,
+                profile,
+                &entry.refresh_token,
+                &refreshed.refresh_token,
+            );
             save_all_credentials(&map)?;
             Ok(Some(refreshed.access_token))
+        }
+    }
+}
+
+/// Hand a rotated refresh token to every other entry that was on the same chain.
+///
+/// One browser grant can file more than one credential — Aspect Cloud keeps the
+/// access_token under the default profile and the same grant's id_token under its
+/// deployment name — and those copies share a refresh token. An issuer that rotates
+/// on refresh invalidates the predecessor, so without this the sibling that
+/// refreshed second would be told its session expired and the user would be sent
+/// back through a browser login it did not need.
+///
+/// Only the refresh token moves. Each entry keeps its own bearer and its own
+/// `prefer_id_token`, and refreshes itself onto the shared chain when its own token
+/// comes due.
+///
+/// A no-op when the issuer returned no new token (`fresh` empty, or unchanged) or
+/// when there was no prior one to match against.
+fn carry_rotated_refresh_token(
+    map: &mut HashMap<String, CredentialsEntry>,
+    refreshed_profile: &str,
+    prior: &str,
+    fresh: &str,
+) {
+    if prior.is_empty() || fresh.is_empty() || prior == fresh {
+        return;
+    }
+    for (name, entry) in map.iter_mut() {
+        if name != refreshed_profile && entry.refresh_token == prior {
+            entry.refresh_token = fresh.to_string();
         }
     }
 }
@@ -2438,7 +2476,9 @@ impl AuthCredentials {
     ///
     /// The refresh token and issuer/client are carried over deliberately: it is the
     /// same grant, so the endpoint credential renews on the same chain rather than
-    /// needing its own login.
+    /// needing its own login. Sharing the chain is what
+    /// [`carry_rotated_refresh_token`] exists to keep working across a rotating
+    /// issuer.
     fn endpoint_entry(&self) -> anyhow::Result<Option<CredentialsEntry>> {
         if self.id_token.is_empty() {
             return Ok(None);
@@ -3292,12 +3332,18 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         )?))
     }
 
-    /// Discover and record the Aspect-hosted deployment the built-in account
-    /// fronts ([`DEFAULT_DISCOVERY_HOST`] as [`DEFAULT_ENDPOINT_NAME`]), so a bare
+    /// Discover and record the Aspect Cloud endpoints the built-in entry fronts
+    /// ([`DEFAULT_DISCOVERY_HOST`] under [`DEFAULT_DEPLOYMENT_NAME`]), so a bare
     /// `aspect auth login` leaves `--remote` working without a separate
     /// `auth configure`. Returns the same [`DeploymentInfo`] shape as
     /// [`Self::configure`]; the caller treats any non-`"ok"` status as "skip and
     /// carry on", never as a login failure.
+    ///
+    /// Never fails, unlike [`Self::configure`]. This step is not what the user
+    /// asked for — they asked to log in — so an unwritable `config.json` must cost
+    /// them the endpoints, not the login. A failure comes back as
+    /// `"not_recorded"` carrying the reason, which the caller reports below the
+    /// login summary.
     ///
     /// The issuer is pinned to [`DEFAULT_ISSUER`] rather than taken from the
     /// document: discovery here is not user-initiated (the host is compiled in,
@@ -3309,12 +3355,22 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
-        Ok(heap.alloc(configure_deployment(
+        let info = configure_deployment(
             DEFAULT_DISCOVERY_HOST,
             Some(DEFAULT_DEPLOYMENT_NAME.to_string()),
             false,
             Some(DEFAULT_ISSUER.to_string()),
-        )?))
+        )
+        .unwrap_or_else(|e| DeploymentInfo {
+            status: "not_recorded".to_string(),
+            reason: e.to_string(),
+            name: DEFAULT_DEPLOYMENT_NAME.to_string(),
+            can_login: false,
+            is_default: false,
+            hosts: Vec::new(),
+            auth_servers: Vec::new(),
+        });
+        Ok(heap.alloc(info))
     }
 
     /// The Bazel-facing endpoints (`cache`/`bes`/`exec` hosts) advertised by the
@@ -4911,6 +4967,50 @@ mod tests {
             resolve_auth_server(&hijacked.auth_servers(), Some(DEFAULT_ISSUER)),
             AuthServerChoice::NotAdvertised
         ));
+    }
+
+    /// A rotating issuer invalidates the predecessor, so the profile that refreshes
+    /// first has to hand the new token to the sibling filed from the same grant —
+    /// or that sibling reports an expired session and demands a needless re-login.
+    #[test]
+    fn a_rotated_refresh_token_reaches_every_profile_on_the_same_chain() {
+        let entry = |refresh: &str| CredentialsEntry {
+            access_token: "token".to_string(),
+            refresh_token: refresh.to_string(),
+            email: "a@b.c".to_string(),
+            name: "A".to_string(),
+            tenant_id: "t".to_string(),
+            auth_domain: Some(DEFAULT_ISSUER.to_string()),
+            auth_client_id: Some(DEFAULT_CLIENT_ID.to_string()),
+            prefer_id_token: false,
+        };
+        let mut map = HashMap::from([
+            (DEFAULT_PROFILE.to_string(), entry("r2")),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("r1")),
+            // A separate login, so a coincidental refresh is not its business.
+            ("acme".to_string(), entry("other")),
+        ]);
+        carry_rotated_refresh_token(&mut map, DEFAULT_PROFILE, "r1", "r2");
+        assert_eq!(map[DEFAULT_DEPLOYMENT_NAME].refresh_token, "r2");
+        assert_eq!(map["acme"].refresh_token, "other");
+
+        // An issuer that does not rotate returns the same token: nothing to carry,
+        // and nothing else may be touched.
+        let mut unchanged = HashMap::from([
+            (DEFAULT_PROFILE.to_string(), entry("r1")),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("r1")),
+        ]);
+        carry_rotated_refresh_token(&mut unchanged, DEFAULT_PROFILE, "r1", "r1");
+        assert_eq!(unchanged[DEFAULT_DEPLOYMENT_NAME].refresh_token, "r1");
+
+        // An entry with no refresh token of its own is not on anyone's chain, so an
+        // empty prior must not sweep it up.
+        let mut empty = HashMap::from([
+            (DEFAULT_PROFILE.to_string(), entry("")),
+            (DEFAULT_DEPLOYMENT_NAME.to_string(), entry("")),
+        ]);
+        carry_rotated_refresh_token(&mut empty, DEFAULT_PROFILE, "", "fresh");
+        assert_eq!(empty[DEFAULT_DEPLOYMENT_NAME].refresh_token, "");
     }
 
     /// One browser grant files two credentials: the account keeps the access_token,

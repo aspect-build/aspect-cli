@@ -277,8 +277,19 @@ def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
     (permitted to omit one) or was read back from the store (which never keeps it),
     and this is always a fresh authorization-code result. So the warning doubles as
     the signal that something upstream changed.
+
+    `not_recorded` is the other side of that: the login worked but the endpoints
+    could not be written down, so `--remote` would fail later with nothing pointing
+    back here. Every other non-`ok` status means the probe found nothing worth
+    recording, which is not the user's problem and says nothing.
     """
-    if info == None or info.status != "ok" or not info.can_login:
+    if info == None:
+        return
+    if info.status == "not_recorded":
+        warn(ctx.std, "Logged in, but could not record Aspect Cloud's endpoints: " + info.reason)
+        print("`--remote` will not work until that is fixed; then run `aspect auth configure app.aspect.build`.")
+        return
+    if info.status != "ok" or not info.can_login:
         return
     if not endpoints_filed:
         warn(ctx.std, "Recorded the remote cache and BES but could not authenticate them: the login returned no id_token.")
