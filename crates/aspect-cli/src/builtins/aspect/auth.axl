@@ -309,7 +309,7 @@ def _discover_deployment(ctx, host):
             error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
             return None
         if info.status == "issuer_not_advertised":
-            # `reason` is the issuer actually looked for — for `--name aspect` that
+            # `reason` is the issuer actually looked for — for `--name aspect-cloud` that
             # is the account's own, pinned rather than taken from `--issuer`.
             error(ctx.std, "'" + (info.reason or issuer) + "' is not one of the authorization servers this deployment advertises.")
             error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
@@ -338,7 +338,7 @@ def _configure_impl(ctx: TaskContext) -> int:
     if info == None:
         return 1
 
-    # `--name aspect` attaches the endpoints to Aspect Cloud rather than
+    # `--name aspect-cloud` attaches the endpoints to Aspect Cloud rather than
     # recording a deployment beside it, so say which happened.
     account = ctx.aspect.auth.deployment_summary(info.name)
     is_account = account != None and account.builtin
