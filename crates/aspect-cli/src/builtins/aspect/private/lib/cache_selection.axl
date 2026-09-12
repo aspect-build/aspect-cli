@@ -79,3 +79,32 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
         ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (exit {}).\n".format(status.code))
         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))
     return tests
+
+# These options select tests/patterns, not the dependency graph queried during
+# attribution. CLI-supplied options otherwise reach every RC command verbatim.
+_SELECTION_FLAGS = [
+    "--test_tag_filters",
+    "--test_size_filters",
+    "--test_timeout_filters",
+    "--test_lang_filters",
+    "--test_filter",
+    "--target_pattern_file",
+]
+
+def attribution_flags(flags: list) -> list:
+    result = []
+    skip_value = False
+    for flag in flags:
+        if skip_value:
+            skip_value = False
+            continue
+        value = flag[0] if type(flag) == "tuple" else flag
+        if value.split("=", 1)[0] in _SELECTION_FLAGS:
+            skip_value = "=" not in value
+        else:
+            result.append(flag)
+    return result
+
+def attribution_rc(ctx: TaskContext, rc):
+    _, flags = rc.expand_all(command = "query")
+    return ctx.bazel.new_rc(startup_flags = rc.startup_flags(), flags = attribution_flags(flags))

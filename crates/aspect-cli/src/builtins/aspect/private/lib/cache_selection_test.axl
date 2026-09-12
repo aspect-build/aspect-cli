@@ -1,6 +1,6 @@
 """Cache selection contracts, including real Bazel loading without actions."""
 
-load("./cache_selection.axl", "select_tests", "selected_tests")
+load("./cache_selection.axl", "attribution_flags", "select_tests", "selected_tests")
 
 def _eq(name, got, want):
     if got != want:
@@ -35,6 +35,20 @@ def _parser_tests():
 
 def _impl(ctx: TaskContext) -> int:
     _parser_tests()
+    _eq("attribution keeps graph flags", attribution_flags([
+        "--define=foo=bar",
+        "--test_tag_filters",
+        "-noci",
+        "--test_size_filters=small",
+        "--target_pattern_file=/tmp/patterns",
+        "--test_filter=selected_case",
+        "--test_timeout_filters",
+        "short",
+        "--test_lang_filters=go",
+        "--keep_going",
+    ]), ["--define=foo=bar", "--keep_going"])
+    _eq("versioned selection flag", attribution_flags([("--test_tag_filters=-noci", ">=7")]), [])
+    _eq("common overrides remain Bazel-owned", attribution_flags(["--default_override=0:common=--test_tag_filters=-noci"]), ["--default_override=0:common=--test_tag_filters=-noci"])
     root = ctx.std.fs.mkdtemp(prefix = "aspect-selection-test-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
     workspace = root + "/workspace"

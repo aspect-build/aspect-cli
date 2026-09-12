@@ -401,6 +401,17 @@ jobs:
         if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
         working-directory: ${{ runner.temp }}/proj
         run: aspect build --task:name init-${{ matrix.preset }} -- //...
+  cache-diff-integration:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - name: Verify cache hits, misses, and exclusions
+        run: python3 tools/cache-diff-integration.py --aspect "$(command -v aspect)"
   # `aspect cache diff` probes the remote cache with --experimental_remote_require_cached
   # to list the test targets affected by this commit — running nothing. It needs
   # cache access, so (like build/test) it runs on a self-hosted aspect-workflows
