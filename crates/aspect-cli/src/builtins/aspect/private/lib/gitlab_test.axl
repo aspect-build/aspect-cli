@@ -201,7 +201,10 @@ def _test_impl(ctx):
     def _ctx_no_creds(env_vars):
         return struct(
             std = struct(env = struct(var = lambda name: env_vars.get(name, ""))),
-            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+            aspect = struct(auth = struct(
+                aspect_cloud_deployment = "aspect-cloud",
+                credentials = lambda deployment = None, profile = None: None,
+            )),
         )
 
     # Missing project_path short-circuits before touching creds.

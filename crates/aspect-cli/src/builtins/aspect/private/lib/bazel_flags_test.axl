@@ -410,7 +410,8 @@ def _fake_auth_ctx(access_token = "", owned_hosts = []):
         ),
         aspect = struct(auth = struct(
             deployment_for_host = lambda host: owned.get(host),
-            credentials = lambda profile = None, required = True: creds,
+            aspect_cloud_deployment = "aspect-cloud",
+            credentials = lambda deployment = None, profile = None, required = True: creds,
         )),
     )
 

@@ -794,7 +794,10 @@ def _test_aspect_api_token_tip_gate(ctx):
         # `_authenticate` short-circuits before any HTTP call.
         return struct(
             std = struct(env = struct(var = lambda name: env_vars.get(name, ""))),
-            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+            aspect = struct(auth = struct(
+                aspect_cloud_deployment = "aspect-cloud",
+                credentials = lambda deployment = None, profile = None: None,
+            )),
             traits = ctx.traits,
         )
 

@@ -297,6 +297,13 @@ fn names_aspect_cloud(name: &str) -> bool {
     name == ASPECT_CLOUD_DEPLOYMENT_NAME || name == ASPECT_CLOUD_DEPLOYMENT_ALIAS
 }
 
+/// Whether `name`, as a user typed it, addresses `deployment`. Its own name, plus
+/// the alias for Aspect Cloud — which no configured deployment can take, so this
+/// cannot resolve two.
+fn names_deployment(deployment: &Deployment, name: &str) -> bool {
+    deployment.name == name || (deployment.builtin && names_aspect_cloud(name))
+}
+
 fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
@@ -525,13 +532,18 @@ fn repo_config_path() -> Option<PathBuf> {
     Some(PathBuf::from(root).join(".aspect").join("config.json"))
 }
 
-/// Select a deployment by name, or the default when `name` is `None`. An
-/// explicit name must match a configured deployment. With no name, the entry
-/// marked `default` wins (the first configured deployment claims `default` when
-/// written, so a single configured deployment is the default), falling back to
-/// the built-in seed. The default flag is the single source of truth —
-/// configuring a deployment does not implicitly hijack selection away from an
-/// explicit default.
+/// Select a deployment by name, or the default when `name` is `None`.
+///
+/// An explicit name must name a deployment: its own, or — for Aspect Cloud —
+/// [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`]. Every path that takes a `--deployment` comes
+/// through here, so the alias works for `--remote` and `deployment_endpoints` as
+/// well as the `auth` commands.
+///
+/// With no name, the entry marked `default` wins (the first configured deployment
+/// claims `default` when written, so a single configured deployment is the
+/// default), falling back to Aspect Cloud. The default flag is the single source of
+/// truth — configuring a deployment does not implicitly hijack selection away from
+/// an explicit default.
 pub(crate) fn select_deployment(
     deployments: &[Deployment],
     name: Option<&str>,
@@ -539,7 +551,7 @@ pub(crate) fn select_deployment(
     if let Some(name) = name.filter(|n| !n.is_empty()) {
         return deployments
             .iter()
-            .find(|d| d.name == name)
+            .find(|d| names_deployment(d, name))
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -580,8 +592,7 @@ fn select_aspect_cloud_or_deployment(
 /// The configured deployment that owns `host` — an exact or dot-anchored suffix
 /// match against any deployment's `hosts`. `None` when no configured deployment
 /// claims it. Endpoint auth uses this to attach the token of the deployment
-/// serving a given cache/BES endpoint; ask [`login_profile_for`] for the profile
-/// that token is filed under, which is not always the deployment's name.
+/// serving a given cache/BES endpoint.
 fn deployment_for_host<'a>(deployments: &'a [Deployment], host: &str) -> Option<&'a Deployment> {
     // Normalize a trailing dot so an absolute FQDN (`host.example.com.`) still
     // matches its configured host.
@@ -3831,6 +3842,36 @@ mod tests {
             "acme"
         );
         assert!(select_deployment(&deployments, Some("nope")).is_err());
+    }
+
+    /// The alias reaches Aspect Cloud everywhere a deployment is named, not just in
+    /// the `auth` commands: `select_deployment` is the one gate `--remote`,
+    /// `deployment_endpoints` and `credentials` all come through, so an alias that
+    /// worked only in `auth use` would fail a build with "unknown deployment".
+    #[test]
+    fn select_deployment_accepts_the_aspect_cloud_alias() {
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
+        for name in [ASPECT_CLOUD_DEPLOYMENT_NAME, ASPECT_CLOUD_DEPLOYMENT_ALIAS] {
+            let selected = select_deployment(&deployments, Some(name)).unwrap();
+            assert!(selected.builtin, "{name} should select Aspect Cloud");
+            // Resolved to the canonical entry, so a caller never sees the alias as
+            // a credential key or in output.
+            assert_eq!(selected.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        }
+
+        // The alias is Aspect Cloud's alone: it does not make some other
+        // deployment reachable under two names.
+        assert_eq!(
+            select_deployment(&deployments, Some("acme")).unwrap().name,
+            "acme"
+        );
+        assert!(select_deployment(&deployments, Some("nope")).is_err());
+
+        // And the `auth` commands' selection funnels through the same gate.
+        let via_auth =
+            select_aspect_cloud_or_deployment(&deployments, Some(ASPECT_CLOUD_DEPLOYMENT_ALIAS))
+                .unwrap();
+        assert_eq!(via_auth.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
     }
 
     #[test]
