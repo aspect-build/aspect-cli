@@ -37,7 +37,7 @@ pub(crate) struct Deployment {
     default: bool,
     /// Whether this is the built-in Aspect Cloud entry rather than a configured
     /// Aspect Workflows deployment. Set only by [`aspect_cloud_deployment`]; `#[serde(skip)]`
-    /// keeps a hand-edited `config.json` from claiming account status and keeps the
+    /// keeps a hand-edited `config.json` from claiming Aspect Cloud status and keeps the
     /// flag out of the written file.
     ///
     /// Account identity is this flag, never the name, so a deployment that happens
@@ -48,7 +48,7 @@ pub(crate) struct Deployment {
     issuer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
-    /// Aspect-cloud API base (`ctx.aspect.auth.api_url`), used by Aspect-cloud
+    /// Aspect Cloud API base (`ctx.aspect.auth.api_url`), used by Aspect Cloud
     /// features (GitHub/GitLab token exchange, status comments, budget). Present
     /// only for the built-in Aspect Cloud entry; self-hosted deployments don't run
     /// these endpoints, so it is absent for configured deployments.
@@ -139,7 +139,7 @@ impl Endpoints {
     /// Distinct from [`Self::is_empty`], which also counts `results_url`: the
     /// build-result viewer advertises one alongside no cache or BES at all
     /// (`app.aspect.build` serves exactly that), and treating it as a deployment
-    /// would record an entry that cannot serve a build — and, under the account's
+    /// would record an entry that cannot serve a build — and, under Aspect Cloud's
     /// own name, would replace the endpoints that can.
     fn serves_build_endpoints(&self) -> bool {
         !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
@@ -168,12 +168,12 @@ struct AuthEnv {
 /// Aspect Cloud, seeded so a fresh install can `aspect auth login` with no
 /// `configure` step. The seed states the identity — issuer, PKCE client, API —
 /// and discovery fills in the endpoints it cannot know; a `config.json` entry
-/// under this name is folded in rather than replacing it, so the account can be
+/// under this name is folded in rather than replacing it, so Aspect Cloud can be
 /// extended but never redirected. See [`overlay_config_sources`].
 /// What Aspect Cloud calls itself — the name `auth status` shows, `--deployment`
 /// takes, and every Aspect Cloud edge advertises as RFC 9728 `resource_name`.
 ///
-/// Deliberately not "default" anything: [`RESERVED_DEFAULT_NAME`] is the credential slot,
+/// Deliberately not "default" anything: [`DEFAULT_PROFILE`] is the credential slot,
 /// and `Deployment::default` is which deployment `--remote` targets, which
 /// `auth use` can point at a configured one instead. Aspect Cloud is neither by
 /// definition.
@@ -217,32 +217,32 @@ const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/call
 /// `aspect auth configure` by hand — see [`configure_default`].
 ///
 /// The API rather than a cache/BES edge: every Aspect Cloud resource advertises
-/// the same capability map, so any would serve, but this one is the account's own
+/// the same capability map, so any would serve, but this one is Aspect Cloud's own
 /// ([`DEFAULT_API_URL`]) and so is the least likely to be renamed out from under
 /// the CLI — which the edges have been.
 ///
-/// What it finds is recorded under the account's own name, not a second one, so
+/// What it finds is recorded under Aspect Cloud's own name, not a second one, so
 /// `auth status` shows a single entry and `--remote` needs no `--deployment`.
 const DEFAULT_DISCOVERY_HOST: &str = "api.aspect.build";
 
 /// The hosts Aspect Cloud serves itself. `configure` records their endpoints on
-/// the built-in account rather than deriving a deployment name from the host, so
+/// the built-in Aspect Cloud entry rather than deriving a deployment name from the host, so
 /// `aspect auth configure cache.aspect.build` lands in the same place as a bare
-/// login instead of creating a `cache` deployment beside the account.
+/// login instead of creating a `cache` deployment beside Aspect Cloud.
 ///
 /// An allowlist rather than "anything on [`DEFAULT_ISSUER`]": the issuer is the
 /// right *safety* check (see [`configure_deployment`]) but too broad an identity
-/// one — a future Aspect-hosted deployment sharing that issuer would silently
-/// absorb into the account. An explicit `--name` still wins, so a second entry
+/// one — a future Aspect Cloud deployment sharing that issuer would silently
+/// absorb into Aspect Cloud. An explicit `--name` still wins, so a second entry
 /// for these hosts stays possible when someone wants one.
 ///
 /// `exec` and `remote` are listed ahead of resolving anywhere: `exec` arrives with
 /// remote execution, and `remote` may return as a single multiplexed endpoint.
 /// Naming them costs nothing — configuring a host that does not resolve fails as
 /// unreachable either way — while a host *missing* from this list becomes a stray
-/// deployment beside the account the day it ships. Do not prune them for looking
+/// deployment beside Aspect Cloud the day it ships. Do not prune them for looking
 /// dead.
-const ACCOUNT_HOSTS: &[&str] = &[
+const ASPECT_CLOUD_HOSTS: &[&str] = &[
     "api.aspect.build",
     "app.aspect.build",
     "bes.aspect.build",
@@ -254,45 +254,46 @@ const ACCOUNT_HOSTS: &[&str] = &[
 /// The regional aliases of those same endpoints — `bes.us.aspect.build`,
 /// `api.eu.aspect.build`, and so on. They answer with the global names in their
 /// discovery document, but a user may well configure the host they were handed,
-/// so every service under a region resolves to the account.
+/// so every service under a region resolves to Aspect Cloud.
 ///
 /// Matched as a suffix so this covers each service in a region without naming the
 /// cross product, but the regions themselves are enumerated: an unknown
 /// `<service>.<anything>.aspect.build` is far more likely to be another
-/// Aspect-hosted deployment than a new region, and absorbing one of those into
-/// the account is the failure this allowlist exists to prevent. A genuinely new
+/// Aspect Cloud deployment than a new region, and absorbing one of those into
+/// Aspect Cloud is the failure this allowlist exists to prevent. A genuinely new
 /// region is a one-line change here.
-const ACCOUNT_HOST_SUFFIXES: &[&str] = &[".us.aspect.build", ".eu.aspect.build"];
+const ASPECT_CLOUD_HOST_SUFFIXES: &[&str] = &[".us.aspect.build", ".eu.aspect.build"];
 
-/// Whether `host` is served by Aspect Cloud itself — see [`ACCOUNT_HOSTS`].
+/// Whether `host` is served by Aspect Cloud itself — see [`ASPECT_CLOUD_HOSTS`].
 /// `host` is already normalized by [`endpoint_host_str`]; the trailing dot of an
 /// absolute FQDN is stripped so `app.aspect.build.` still matches.
-fn is_account_host(host: &str) -> bool {
+fn is_aspect_cloud_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    ACCOUNT_HOSTS.contains(&host.as_str())
-        || ACCOUNT_HOST_SUFFIXES.iter().any(|s| host.ends_with(s))
+    ASPECT_CLOUD_HOSTS.contains(&host.as_str())
+        || ASPECT_CLOUD_HOST_SUFFIXES.iter().any(|s| host.ends_with(s))
 }
 
-/// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
+/// The dot-anchored suffix for Aspect's own domain, which Aspect Cloud endpoints
 /// sit under (`remote.<deployment>.aspect.build`).
-/// [`deployment_name_from_host`] strips it so an Aspect-hosted endpoint yields a
+/// [`deployment_name_from_host`] strips it so an Aspect Cloud endpoint yields a
 /// bare deployment name, while a self-hosted one keeps its full domain.
 const ASPECT_DOMAIN_SUFFIX: &str = ".aspect.build";
 
-/// Names a configured deployment may not take, because each would shadow the
-/// built-in Aspect Cloud entry: [`ASPECT_CLOUD_DEPLOYMENT_NAME`] is the account's own
-/// name, and [`RESERVED_DEFAULT_NAME`] is the credential profile the account files
-/// under (a deployment's credential is stored under its name, so a deployment
-/// named `default` would share the account's slot).
+/// Names a configured deployment may not take. The first two are Aspect Cloud's
+/// own ([`ASPECT_CLOUD_DEPLOYMENT_NAME`] and [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`]), so
+/// an entry under either would shadow it. [`DEFAULT_PROFILE`] is the profile a
+/// login lands in when none is named, and the word `auth use` uses for the default
+/// deployment, so a deployment called `default` would read ambiguously against
+/// both.
 const RESERVED_NAMES: &[&str] = &[
     ASPECT_CLOUD_DEPLOYMENT_NAME,
     ASPECT_CLOUD_DEPLOYMENT_ALIAS,
-    RESERVED_DEFAULT_NAME,
+    DEFAULT_PROFILE,
 ];
 
 /// Whether `name` addresses the built-in Aspect Cloud entry — its own name, or its
 /// [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`].
-fn names_the_account(name: &str) -> bool {
+fn names_aspect_cloud(name: &str) -> bool {
     name == ASPECT_CLOUD_DEPLOYMENT_NAME || name == ASPECT_CLOUD_DEPLOYMENT_ALIAS
 }
 
@@ -302,7 +303,7 @@ fn is_reserved_name(name: &str) -> bool {
 
 /// The error for a configured deployment claiming a [`RESERVED_NAMES`] entry,
 /// whether the name came from an explicit `--deployment` or was derived from an
-/// Aspect-hosted endpoint (see [`deployment_name_from_host`]). Either way the
+/// Aspect Cloud endpoint (see [`deployment_name_from_host`]). Either way the
 /// remedy is an explicit name, so the message asks for one.
 fn reserved_name_error(name: &str) -> anyhow::Error {
     anyhow::anyhow!(
@@ -399,8 +400,8 @@ fn config_sources() -> anyhow::Result<Vec<ConfigSource>> {
 /// Overlay is by `name` (a later entry replaces an earlier one), so a user can
 /// override a repo-declared deployment. The seed is the exception — an entry
 /// claiming a [`RESERVED_NAMES`] name is skipped rather than allowed to replace
-/// it, since shadowing the account is silent and confusing (`auth status` would
-/// render the impostor in the account's section).
+/// it, since shadowing Aspect Cloud is silent and confusing (`auth status` would
+/// render the impostor in Aspect Cloud's section).
 ///
 /// Skipping rather than erroring keeps a config that already holds such an entry
 /// usable: erroring would fail *every* auth command, including the `auth remove`
@@ -430,7 +431,7 @@ fn overlay_config_sources(
     let mut shadowed: Vec<ShadowedDeployment> = Vec::new();
     for source in sources {
         for entry in source.entries {
-            if names_the_account(&entry.name) {
+            if names_aspect_cloud(&entry.name) {
                 if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
                     merge_into_seed(seed, entry);
                 }
@@ -465,20 +466,20 @@ fn overlay_config_sources(
     (merged, shadowed)
 }
 
-/// Fold a `config.json` entry under the account's own name into the seed.
+/// Fold a `config.json` entry under Aspect Cloud's own name into the seed.
 ///
 /// An enrichment, not a shadow: Aspect Cloud's endpoints are discovered rather
 /// than compiled in, so `configure_default` records them under that name and this
 /// puts them back on the entry they belong to.
 ///
 /// The endpoints are taken unconditionally. The PKCE client and login redirect are
-/// taken only from an entry naming the account's own issuer, which is the whole
+/// taken only from an entry naming Aspect Cloud's own issuer, which is the whole
 /// safety argument: each is only ever exercised against the issuer it was
 /// discovered from, so one taken from a document on [`DEFAULT_ISSUER`] cannot send
 /// a login anywhere new. What that buys is rotation without a CLI release.
 ///
 /// The issuer and `api_url` are never taken, so a hand-edited config can extend
-/// the account but cannot redirect its login. Neither are scopes or
+/// Aspect Cloud but cannot redirect its login. Neither are scopes or
 /// `authorize_params`: the seed states its own, and widening the adopted set is a
 /// separate decision from rotating the client.
 fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
@@ -559,9 +560,9 @@ pub(crate) fn select_deployment(
 /// *account* by default rather than the default *deployment*: an explicit
 /// `name` picks that deployment (erroring if unknown); an empty `name` resolves
 /// the built-in Aspect Cloud entry (the seed). The default-deployment concept (set by
-/// `auth use`) governs builds (`--remote`), not the account login — so a
-/// bare `auth login` always means the account, never a configured default.
-fn select_account_or_deployment(
+/// `auth use`) governs builds (`--remote`), not the Aspect Cloud login — so a
+/// bare `auth login` always means Aspect Cloud, never a configured default.
+fn select_aspect_cloud_or_deployment(
     deployments: &[Deployment],
     name: Option<&str>,
 ) -> anyhow::Result<Deployment> {
@@ -961,9 +962,9 @@ fn transport_error_reason(e: &reqwest::Error) -> String {
 /// Only Aspect's own domain is stripped, because only there does the remainder
 /// name the deployment; a self-hosted host keeps its full domain, which reads
 /// unambiguously and can never collide with [`RESERVED_NAMES`]
-/// (`remote.aspect.foo.com` → `aspect.foo.com`, not the account's `aspect`).
+/// (`remote.aspect.foo.com` → `aspect.foo.com`, not Aspect Cloud's `aspect`).
 ///
-/// An Aspect-hosted host still can collide — `remote.aspect.aspect.build` →
+/// An Aspect Cloud host still can collide — `remote.aspect.aspect.build` →
 /// `aspect` — so this does not itself guarantee a usable name;
 /// [`upsert_deployment`] rejects a reserved one.
 ///
@@ -988,16 +989,16 @@ fn deployment_name_from_host(host: &str) -> String {
 }
 
 /// The name to record a discovered deployment under, and whether that name claims
-/// the account.
+/// Aspect Cloud.
 ///
-/// In precedence: the name the user typed, then the account when the host is one
+/// In precedence: the name the user typed, then Aspect Cloud when the host is one
 /// Aspect Cloud serves, then the name the deployment advertises
 /// ([`advertised_name`]), then one derived from the host.
 ///
-/// The account is claimed only by naming it or by configuring an Aspect Cloud host.
-/// A name that merely *derives* to it (`remote.aspect.aspect.build` → `aspect`) is
-/// not the account and is refused by [`upsert_deployment`], so nobody extends their
-/// account by accident.
+/// Aspect Cloud is claimed only by naming it or by configuring one of its hosts. A
+/// name that merely *derives* to it (`remote.aspect-cloud.aspect.build` →
+/// `aspect-cloud`) is refused by [`upsert_deployment`], so nobody extends Aspect
+/// Cloud by accident.
 fn resolve_deployment_name(
     explicit: Option<String>,
     host: &str,
@@ -1005,11 +1006,11 @@ fn resolve_deployment_name(
 ) -> (String, bool) {
     let explicit = explicit.filter(|name| !name.is_empty());
     let account = match explicit.as_deref() {
-        Some(name) => names_the_account(name),
-        None => is_account_host(host),
+        Some(name) => names_aspect_cloud(name),
+        None => is_aspect_cloud_host(host),
     };
     let name = explicit
-        .filter(|name| !names_the_account(name))
+        .filter(|name| !names_aspect_cloud(name))
         .or_else(|| account.then(|| ASPECT_CLOUD_DEPLOYMENT_NAME.to_string()))
         .or_else(|| advertised_name(info))
         .unwrap_or_else(|| deployment_name_from_host(host));
@@ -1128,10 +1129,10 @@ fn deployment_from_discovery(
 fn upsert_deployment(
     existing: &mut Vec<Deployment>,
     mut deployment: Deployment,
-    explicit_account: bool,
+    explicit_aspect_cloud: bool,
 ) -> anyhow::Result<bool> {
     // `default` is a credential-store key, never a deployment name: an entry under
-    // it would share the account's credential slot, so it is refused outright.
+    // it would share Aspect Cloud's credential slot, so it is refused outright.
     //
     // The account's own name is writable, but only when the caller asked for it by
     // name: such an entry enriches the seed (see `overlay_config_sources`), which
@@ -1139,7 +1140,7 @@ fn upsert_deployment(
     // to it — `remote.aspect-cloud.aspect.build` — is an accident, and is still
     // refused so the user picks a real one rather than silently extending their
     // account.
-    let permitted = explicit_account && deployment.name == ASPECT_CLOUD_DEPLOYMENT_NAME;
+    let permitted = explicit_aspect_cloud && deployment.name == ASPECT_CLOUD_DEPLOYMENT_NAME;
     if !permitted && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
@@ -1183,9 +1184,12 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
 /// via [`upsert_deployment`]. Returns whether the written record is the default.
-fn save_user_deployment(deployment: Deployment, explicit_account: bool) -> anyhow::Result<bool> {
+fn save_user_deployment(
+    deployment: Deployment,
+    explicit_aspect_cloud: bool,
+) -> anyhow::Result<bool> {
     let mut existing = load_config_file(&config_path()?)?;
-    let is_default = upsert_deployment(&mut existing, deployment, explicit_account)?;
+    let is_default = upsert_deployment(&mut existing, deployment, explicit_aspect_cloud)?;
     write_user_config(existing)?;
     Ok(is_default)
 }
@@ -1193,7 +1197,7 @@ fn save_user_deployment(deployment: Deployment, explicit_account: bool) -> anyho
 /// Discover `host`'s deployment and record it in the user's `config.json`,
 /// returning the [`DeploymentInfo`] the `configure` task renders. Shared by
 /// [`Auth::configure`] (a host the user typed) and [`Auth::configure_default`]
-/// (the compiled-in Aspect-hosted endpoint).
+/// (the compiled-in Aspect Cloud endpoint).
 ///
 /// The returned `status` distinguishes every outcome the caller reports:
 /// `"unreachable"` (transport failure, `reason` carries a terse cause),
@@ -1230,15 +1234,15 @@ fn configure_deployment(
         Discovery::Unreachable(reason) => return Ok(mk("unreachable", reason)),
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
-    let (name, explicit_account) = resolve_deployment_name(name, &host, &info);
-    // Endpoints recorded under the account's own name are folded into the seed and
-    // reached with the account's own credential, so only a deployment on the
+    let (name, explicit_aspect_cloud) = resolve_deployment_name(name, &host, &info);
+    // Endpoints recorded under Aspect Cloud's own name are folded into the seed and
+    // reached with Aspect Cloud's own credential, so only a deployment on the
     // account's issuer may claim them: `hosts` is the auth gate, and a host on some
-    // other issuer would be handed the account's bearer. Pinning here — rather than
+    // other issuer would be handed Aspect Cloud's bearer. Pinning here — rather than
     // refusing the name outright — is what lets `configure --name aspect` do
     // exactly what a bare login's discovery does. A host that does not advertise
     // this issuer comes back `issuer_not_advertised` and records nothing.
-    let requested = if explicit_account {
+    let requested = if explicit_aspect_cloud {
         Some(DEFAULT_ISSUER.to_string())
     } else {
         issuer.filter(|s| !s.is_empty())
@@ -1247,7 +1251,7 @@ fn configure_deployment(
     // Hand the advertised choices back so the task can prompt from them or list
     // the valid values when `--issuer` names one that isn't advertised.
     // `reason` carries the issuer actually looked for, which is not always the one
-    // the user typed: the account's is pinned (above), so an empty `--issuer` would
+    // the user typed: Aspect Cloud's is pinned (above), so an empty `--issuer` would
     // otherwise be reported back as `''`.
     let with_candidates = |status: &str| DeploymentInfo {
         status: status.to_string(),
@@ -1271,7 +1275,7 @@ fn configure_deployment(
     deployment.default = make_default;
     let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
     let hosts = deployment.hosts.clone();
-    let is_default = save_user_deployment(deployment, explicit_account)?;
+    let is_default = save_user_deployment(deployment, explicit_aspect_cloud)?;
     Ok(DeploymentInfo {
         status: "ok".to_string(),
         reason: String::new(),
@@ -1286,7 +1290,7 @@ fn configure_deployment(
 /// Drop the entry named `name` from a configured-deployment list (the file's
 /// contents, which never include the seed).
 ///
-/// A [`RESERVED_NAMES`] name means the built-in account — and is refused — *unless*
+/// A [`RESERVED_NAMES`] name means the built-in Aspect Cloud entry — and is refused — *unless*
 /// the file really holds an entry under it, which is how a shadowed `config.json`
 /// is cleaned up.
 fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result<()> {
@@ -1327,12 +1331,12 @@ fn set_default_deployment(name: Option<&str>) -> anyhow::Result<()> {
 /// account", expressed as the absence of a configured default.
 ///
 /// That one name is the sentinel, *not* all of [`RESERVED_NAMES`]. `default` is
-/// reserved from being configured but is not the account, so `auth use default`
+/// reserved from being configured but is not Aspect Cloud, so `auth use default`
 /// must fail the unknown-deployment check rather than clear every default and
-/// quietly send `--remote` back to the account.
+/// quietly send `--remote` back to Aspect Cloud.
 fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyhow::Result<()> {
-    // Selecting the built-in account (or None) means "no configured default".
-    let target = name.filter(|n| !names_the_account(n));
+    // Selecting the built-in Aspect Cloud entry (or None) means "no configured default".
+    let target = name.filter(|n| !names_aspect_cloud(n));
     if let Some(target) = target {
         if !deployments.iter().any(|d| d.name == target) {
             return Err(anyhow::anyhow!(
@@ -1348,11 +1352,11 @@ fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyh
 }
 
 /// Forget a configured deployment: drop its `~/.aspect/config.json` entry and its
-/// stored credential. Errors on an unknown name. The built-in account isn't in the
+/// stored credential. Errors on an unknown name. The built-in Aspect Cloud entry isn't in the
 /// file, so it can't be removed — but a *file entry* under a reserved name can be,
 /// which is the only way to clear one (the loader skips such entries). When the
 /// removed deployment was the default, the file simply has no default afterward
-/// (selection falls back to the account).
+/// (selection falls back to Aspect Cloud).
 fn remove_deployment(name: &str) -> anyhow::Result<()> {
     let mut existing = load_config_file(&config_path()?)?;
     apply_remove(&mut existing, name)?;
@@ -1385,7 +1389,7 @@ struct CredentialsEntry {
     auth_client_id: Option<String>,
     // True when this session's bearer is the OIDC id_token (the self-hosted
     // endpoint flow), so a subsequent refresh keeps minting an id_token rather
-    // than downgrading to the access_token. Absent/false for the Aspect-cloud
+    // than downgrading to the access_token. Absent/false for the Aspect Cloud
     // flow (access_token bearer). Defaulted so entries written before this field
     // existed load as cloud sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1454,34 +1458,53 @@ fn load_credential(profile: &str, deployment: &str) -> anyhow::Result<Option<Cre
         .cloned())
 }
 
-/// File `entry` for `deployment` under `profile`, leaving every other profile and
-/// every other deployment in this one untouched.
+/// Put `entry` at `(profile, deployment)`, leaving every other profile and every
+/// other deployment in this one untouched. Split from [`store_credential`] so the
+/// nesting is testable without a credential store behind it.
+fn insert_credential(
+    all: &mut AllCredentials,
+    profile: &str,
+    deployment: &str,
+    entry: CredentialsEntry,
+) {
+    all.entry(profile.to_string())
+        .or_default()
+        .insert(deployment.to_string(), entry);
+}
+
+/// Drop `(profile, deployment)`, and the profile itself once it holds nothing — an
+/// empty profile is indistinguishable from an absent one, and leaving the husk
+/// would have a profile with no logins show up wherever profiles are listed.
+/// Returns whether anything was removed.
+fn remove_credential(all: &mut AllCredentials, profile: &str, deployment: &str) -> bool {
+    let Some(entries) = all.get_mut(profile) else {
+        return false;
+    };
+    if entries.remove(deployment).is_none() {
+        return false;
+    }
+    if entries.is_empty() {
+        all.remove(profile);
+    }
+    true
+}
+
+/// File `entry` for `deployment` under `profile`.
 fn store_credential(
     profile: &str,
     deployment: &str,
     entry: CredentialsEntry,
 ) -> anyhow::Result<()> {
     let mut all = load_all_credentials()?;
-    all.entry(profile.to_string())
-        .or_default()
-        .insert(deployment.to_string(), entry);
+    insert_credential(&mut all, profile, deployment, entry);
     save_all_credentials(&all)
 }
 
-/// Drop one deployment's credential from `profile`, and the profile itself once it
-/// holds nothing — an empty profile is indistinguishable from an absent one, and
-/// leaving the husk would have `auth status` list a profile with no logins.
-/// Returns whether anything was removed.
+/// Clear `profile`'s credential for `deployment`. Returns whether there was one.
 fn forget_credential(profile: &str, deployment: &str) -> anyhow::Result<bool> {
     let mut all = load_all_credentials()?;
-    let Some(entries) = all.get_mut(profile) else {
+    if !remove_credential(&mut all, profile, deployment) {
         return Ok(false);
-    };
-    if entries.remove(deployment).is_none() {
-        return Ok(false);
-    }
-    if entries.is_empty() {
-        all.remove(profile);
     }
     save_all_credentials(&all)?;
     Ok(true)
@@ -1940,7 +1963,7 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
 /// `id_token` when present (self-hosted edges validate the OIDC id_token), else
-/// the `access_token` (the Aspect-cloud flow).
+/// the `access_token` (the Aspect Cloud flow).
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(default)]
@@ -1957,7 +1980,7 @@ impl TokenResponse {
     /// id_token and error if the grant omitted it, rather than silently returning
     /// the access_token: a refresh grant that drops the id_token (permitted by RFC
     /// 6749 §5.1) would otherwise downgrade a working session to a bearer the edge
-    /// rejects with 401. When not preferring the id_token (the Aspect-cloud flow,
+    /// rejects with 401. When not preferring the id_token (the Aspect Cloud flow,
     /// which validates the access_token), return the access_token, falling back to
     /// the id_token only if the access_token is absent.
     fn bearer(self, prefer_id_token: bool) -> anyhow::Result<String> {
@@ -2380,16 +2403,13 @@ fn merged_refresh_token(prior: &str, fresh: &str) -> String {
     }
 }
 
-/// The `aspect auth login` invocation that re-authenticates `profile`, naming
-/// the deployment so the hint doesn't assume the default. A self-hosted
-/// deployment stores under its name, so the profile is the deployment name and
-/// gets an explicit `--deployment`; the default profile (the built-in Aspect
-/// deployment, or a `$ASPECT_AUTH_PROFILE`) gets a bare `login`.
-pub fn login_hint(profile: &str) -> String {
-    if profile == ASPECT_CLOUD_DEPLOYMENT_NAME {
+/// The `aspect auth login` invocation that re-authenticates `deployment`. Aspect
+/// Cloud is what a bare `login` targets; anything else needs naming.
+pub fn login_hint(deployment: &str) -> String {
+    if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
         "aspect auth login".to_string()
     } else {
-        format!("aspect auth login --deployment {profile}")
+        format!("aspect auth login --deployment {deployment}")
     }
 }
 
@@ -2422,32 +2442,34 @@ fn classify_token(entry: &CredentialsEntry) -> TokenAction {
     }
 }
 
-/// Environment variable naming the credentials profile to use when no explicit
-/// profile is given. The single selector shared by the `auth` tasks and the
-/// Bazel credential helper (which has no way to pass a flag), so one
-/// `export ASPECT_AUTH_PROFILE=...` drives both.
+/// Environment variable naming the profile to use when `--profile` is not given.
+/// The single selector shared by the `auth` tasks and the Bazel credential helper
+/// (which has no way to pass a flag), so one `export ASPECT_AUTH_PROFILE=...`
+/// drives both.
 pub const PROFILE_ENV: &str = "ASPECT_AUTH_PROFILE";
 
-/// Reserved as a deployment name: it is the word `auth use` and `auth status` use
-/// for *which* deployment `--remote` targets, so a deployment actually called
-/// `default` would make `aspect auth use default` ambiguous.
-const RESERVED_DEFAULT_NAME: &str = "default";
+/// The profile holding a login when none is named.
+///
+/// Also reserved as a deployment name: it is the word `auth use` and `auth status`
+/// use for *which* deployment `--remote` targets, so a deployment actually called
+/// `default` would be ambiguous against both this and `aspect auth use default`.
+const DEFAULT_PROFILE: &str = "default";
 
-/// Resolve the effective credential-store key: an explicit (non-empty) value wins,
-/// then [`PROFILE_ENV`] (non-empty), then Aspect Cloud's own name. An empty
+/// Resolve the profile — the identity a credential is filed under. An explicit
+/// (non-empty) value wins, then [`PROFILE_ENV`], then [`DEFAULT_PROFILE`]. An empty
 /// `explicit` is treated as absent (the `auth` tasks pass `""` when `--profile` is
 /// omitted), so it still falls through to the env var.
 ///
-/// The final fallback is Aspect Cloud because that is what "no deployment named"
-/// means everywhere else in the CLI. A caller that knows its deployment passes the
-/// name instead — see [`login_profile_for`].
+/// This is one of the credential store's two axes and answers *who*; the other is
+/// the deployment, which answers *what you are talking to* — see
+/// [`login_profile_for`] and [`AllCredentials`].
 pub fn resolve_profile(explicit: Option<&str>) -> String {
     let non_empty = |s: String| (!s.is_empty()).then_some(s);
     explicit
         .map(str::to_owned)
         .and_then(non_empty)
         .or_else(|| std::env::var(PROFILE_ENV).ok().and_then(non_empty))
-        .unwrap_or_else(|| ASPECT_CLOUD_DEPLOYMENT_NAME.to_owned())
+        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
 }
 
 /// Which configured deployment owns the endpoint `uri`, for the credential helper.
@@ -3036,10 +3058,27 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
 /// (`builtin`) plus every configured deployment, each tagged with whether it is
 /// the default and whether a credential is stored under its profile. The account
 /// is always included (the `auth status` task renders it in its own section, logged
-/// in or not); when no configured deployment is the default, the account is the
+/// in or not); when no configured deployment is the default, Aspect Cloud is the
 /// effective default (matching [`select_deployment`]).
-fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
+/// Everything [`summarize_deployment`] needs, read once: the configured
+/// deployments, the selected profile's credentials, and whether any configured
+/// deployment claims the default (which decides whether Aspect Cloud shows as it).
+///
+/// The credentials are the selected profile's alone — a login held by another
+/// identity is not one this shell can use, so reporting it as logged in would be a
+/// lie.
+fn summary_inputs() -> anyhow::Result<(Vec<Deployment>, ProfileCredentials, bool)> {
     let deployments = load_deployments()?;
+    let creds = load_profile_credentials(&resolve_profile(None))?;
+    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
+    Ok((deployments, creds, any_configured_default))
+}
+
+fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
+    let (deployments, creds, any_configured_default) = summary_inputs()?;
+    // Reported here rather than at load: `auth status` is where a user is looking
+    // at their deployments, so it is where a clash between two of them is
+    // actionable.
     for (var, names) in api_token_env_collisions(&deployments) {
         tracing::warn!(
             "deployments {} share the API-token variable {var}; rename one so each \
@@ -3047,8 +3086,6 @@ fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
             names.join(", ")
         );
     }
-    let creds = load_profile_credentials(&resolve_profile(None))?;
-    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
     Ok(deployments
         .iter()
         .map(|d| summarize_deployment(d, &creds, any_configured_default))
@@ -3103,9 +3140,7 @@ fn summarize_deployment(
 /// such deployment is configured. Used by `configure` to render the recorded
 /// deployment with the same detail as `list`.
 fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary>> {
-    let deployments = load_deployments()?;
-    let creds = load_profile_credentials(&resolve_profile(None))?;
-    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
+    let (deployments, creds, any_configured_default) = summary_inputs()?;
     Ok(deployments
         .iter()
         .find(|d| d.name == name)
@@ -3259,7 +3294,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
-        let selected = select_account_or_deployment(&deployments, deployment)?;
+        let selected = select_aspect_cloud_or_deployment(&deployments, deployment)?;
         let env = auth_env_from(&selected)?;
 
         if let Some(token) = token {
@@ -3318,7 +3353,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         let profile = resolve_profile(profile.into_option().as_deref());
         let deployments = load_deployments()?;
         let selected =
-            select_account_or_deployment(&deployments, deployment.into_option().as_deref())?;
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
         store_credential(&profile, &selected.name, creds.to_entry())?;
         Ok(values::Value::new_none())
     }
@@ -3350,7 +3385,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         }
         let deployments = load_deployments()?;
         let selected =
-            select_account_or_deployment(&deployments, deployment.into_option().as_deref())?;
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
         let profile = resolve_profile(profile.into_option().as_deref());
         forget_credential(&profile, &selected.name)?;
         // If the logged-out deployment was the current default, clear the default
@@ -3512,7 +3547,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// The issuer is pinned to [`DEFAULT_ISSUER`] rather than taken from the
     /// document: discovery here is not user-initiated (the host is compiled in,
     /// not typed), so the endpoint may name the PKCE client to use but may not
-    /// redirect the account's login to a different authorization server. A
+    /// redirect Aspect Cloud's login to a different authorization server. A
     /// document advertising only some other issuer resolves to
     /// `"issuer_not_advertised"` and records nothing.
     fn configure_default<'v>(
@@ -3577,11 +3612,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// The credentials profile a login against `deployment` should persist under,
-    /// so it matches what [`Self::deployment_for_host`] later resolves for that
-    /// deployment's endpoints. A configured deployment (one with its own hosts)
-    /// stores under its name; the built-in Aspect Cloud entry — whose endpoints go
-    /// through the default profile — stores under the resolved default profile.
+    /// The key a login against `deployment` is filed under within a profile: its
+    /// canonical name, so an alias resolves to the name
+    /// [`Self::deployment_for_host`] later hands back for its endpoints.
     fn login_profile<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -3589,26 +3622,20 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
         let selected =
-            select_account_or_deployment(&deployments, deployment.into_option().as_deref())?;
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
         Ok(heap.alloc(login_profile_for(&selected)))
     }
 }
 
-/// The credential-store key a login against `selected` persists under, and the one
-/// its endpoints are later read from: the deployment's own name, Aspect Cloud
+/// The key a login against `selected` is filed under *within* a profile, and the
+/// one its endpoints are read back from: the deployment's own name, Aspect Cloud
 /// included. So `deployment_for_host` hands back a key that needs no translation.
 ///
-/// [`PROFILE_ENV`] overrides it, which is what keeps a second identity for the same
-/// deployment usable: `--profile` steers the `auth` tasks, but the Bazel credential
-/// helper takes no flags, so the env var is the only thing that can steer both. It
-/// applies to whichever deployment is being addressed, so exporting it while using
-/// two deployments points both at one key — which is why it is an override to reach
-/// for deliberately, not a default.
+/// Which profile holds it is the other axis, chosen by `--profile` or
+/// [`PROFILE_ENV`] — see [`resolve_profile`]. Keeping them separate is what lets
+/// one profile hold a credential for every deployment at once.
 fn login_profile_for(selected: &Deployment) -> String {
-    std::env::var(PROFILE_ENV)
-        .ok()
-        .and_then(|v| (!v.is_empty()).then_some(v))
-        .unwrap_or_else(|| selected.name.clone())
+    selected.name.clone()
 }
 
 /// Extract a bare host from a possibly-URL argument (`https://h/p` → `h`), so
@@ -3741,11 +3768,10 @@ mod tests {
         // An explicit profile still overrides the env.
         assert_eq!(resolve_profile(Some("explicit")), "explicit");
 
-        // With the env unset, everything falls through to Aspect Cloud — which is
-        // what "no deployment named" means everywhere else in the CLI.
+        // With the env unset, everything falls through to the default profile.
         unsafe { std::env::remove_var(PROFILE_ENV) };
-        assert_eq!(resolve_profile(None), ASPECT_CLOUD_DEPLOYMENT_NAME);
-        assert_eq!(resolve_profile(Some("")), ASPECT_CLOUD_DEPLOYMENT_NAME);
+        assert_eq!(resolve_profile(None), DEFAULT_PROFILE);
+        assert_eq!(resolve_profile(Some("")), DEFAULT_PROFILE);
 
         match saved {
             Some(v) => unsafe { std::env::set_var(PROFILE_ENV, v) },
@@ -3832,25 +3858,25 @@ mod tests {
     }
 
     #[test]
-    fn select_account_or_deployment_defaults_to_the_account_not_the_default_deployment() {
+    fn select_aspect_cloud_or_deployment_defaults_to_the_account_not_the_default_deployment() {
         // Even with a configured deployment marked default (the build default),
         // a bare auth login/logout targets Aspect Cloud (the seed) — the
-        // default-deployment concept governs builds, not the account.
+        // default-deployment concept governs builds, not Aspect Cloud.
         let mut ds = vec![aspect_cloud_deployment(), dep("acme", true)];
         ds[0].default = false;
         assert_eq!(
-            select_account_or_deployment(&ds, None).unwrap().name,
+            select_aspect_cloud_or_deployment(&ds, None).unwrap().name,
             ASPECT_CLOUD_DEPLOYMENT_NAME
         );
         // An explicit name still picks that deployment.
         assert_eq!(
-            select_account_or_deployment(&ds, Some("acme"))
+            select_aspect_cloud_or_deployment(&ds, Some("acme"))
                 .unwrap()
                 .name,
             "acme"
         );
         // Unknown name errors.
-        assert!(select_account_or_deployment(&ds, Some("nope")).is_err());
+        assert!(select_aspect_cloud_or_deployment(&ds, Some("nope")).is_err());
     }
 
     #[test]
@@ -3919,6 +3945,89 @@ mod tests {
         );
     }
 
+    fn cred(email: &str) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"email":"{email}","name":"U"}}"#)),
+            "refresh".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            false,
+        )
+        .unwrap()
+    }
+
+    /// A profile holds one credential per deployment, and profiles do not see each
+    /// other. This is the whole point of the two axes: `--profile bob` covers every
+    /// deployment bob uses, and switching to susan switches all of them at once.
+    #[test]
+    fn a_profile_holds_one_credential_per_deployment() {
+        let mut all = AllCredentials::new();
+        insert_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("bob@x.io"),
+        );
+        insert_credential(&mut all, "bob", "acme", cred("bob@acme.io"));
+        insert_credential(
+            &mut all,
+            "susan",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("susan@x.io"),
+        );
+
+        assert_eq!(all["bob"].len(), 2);
+        assert_eq!(all["bob"][ASPECT_CLOUD_DEPLOYMENT_NAME].email, "bob@x.io");
+        assert_eq!(all["bob"]["acme"].email, "bob@acme.io");
+        // Same deployment, different identity: separate credentials.
+        assert_eq!(
+            all["susan"][ASPECT_CLOUD_DEPLOYMENT_NAME].email,
+            "susan@x.io"
+        );
+        assert!(!all["susan"].contains_key("acme"));
+
+        // Re-filing one deployment leaves its siblings alone.
+        insert_credential(&mut all, "bob", "acme", cred("bob2@acme.io"));
+        assert_eq!(all["bob"]["acme"].email, "bob2@acme.io");
+        assert_eq!(all["bob"][ASPECT_CLOUD_DEPLOYMENT_NAME].email, "bob@x.io");
+    }
+
+    /// Logging out is one deployment in one profile. The profile goes only once it
+    /// is empty, since a profile holding nothing is not a profile.
+    #[test]
+    fn removing_a_credential_leaves_siblings_and_prunes_an_empty_profile() {
+        let mut all = AllCredentials::new();
+        insert_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("bob@x.io"),
+        );
+        insert_credential(&mut all, "bob", "acme", cred("bob@acme.io"));
+        insert_credential(
+            &mut all,
+            "susan",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("susan@x.io"),
+        );
+
+        assert!(remove_credential(&mut all, "bob", "acme"));
+        assert_eq!(all["bob"].len(), 1, "the sibling survives");
+        assert!(all.contains_key("susan"), "another identity is untouched");
+
+        assert!(remove_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        ));
+        assert!(!all.contains_key("bob"), "the emptied profile is pruned");
+
+        // Removing what is not there reports so rather than writing.
+        assert!(!remove_credential(&mut all, "bob", "acme"));
+        assert!(!remove_credential(&mut all, "susan", "acme"));
+        assert!(all.contains_key("susan"));
+    }
+
     #[test]
     fn oidc_endpoints_fallback_uses_conventional_paths() {
         let e = oidc_endpoints_fallback("https://acme.auth.aspect.build");
@@ -3929,34 +4038,35 @@ mod tests {
         assert_eq!(e.token, "https://acme.auth.aspect.build/oauth/token");
     }
 
+    /// Every deployment files under its own name, Aspect Cloud included and with or
+    /// without hosts. Nothing keys on `builtin`, so no deployment can end up
+    /// sharing another's credential.
     #[test]
-    fn login_profile_keys_on_the_account_flag_not_hosts() {
-        // The built-in account → the default profile, with or without endpoints
-        // (see `the_account_keeps_the_default_profile_once_it_has_endpoints`).
+    fn every_deployment_files_under_its_own_name() {
+        let _guard = profile_env_guard();
         assert_eq!(
             login_profile_for(&aspect_cloud_deployment()),
-            resolve_profile(None)
+            ASPECT_CLOUD_DEPLOYMENT_NAME
         );
-        // Any configured deployment → its own name, hosts or not: it is a
-        // separate identity, so it never shares the account's slot.
+        let mut with_hosts = aspect_cloud_deployment();
+        with_hosts.hosts = vec!["remote.app.aspect.build".to_string()];
+        assert_eq!(login_profile_for(&with_hosts), ASPECT_CLOUD_DEPLOYMENT_NAME);
+
         let mut hostless = dep("acme", false);
         hostless.hosts = Vec::new();
         assert_eq!(login_profile_for(&hostless), "acme");
         assert_eq!(login_profile_for(&dep("acme", true)), "acme");
 
-        // Why `default` is reserved: a deployment files under its own name, so one
-        // named `default` would share the account's credential slot.
-        assert_eq!(
-            login_profile_for(&dep(RESERVED_DEFAULT_NAME, true)),
-            RESERVED_DEFAULT_NAME
-        );
-        assert!(is_reserved_name(RESERVED_DEFAULT_NAME));
+        // Why `default` is reserved as a deployment name: it names the profile a
+        // login lands in when none is given, so a deployment called `default` would
+        // read ambiguously wherever either appears.
+        assert!(is_reserved_name(DEFAULT_PROFILE));
     }
 
     #[test]
     fn deployment_name_from_host_strips_service_label_and_aspect_domain() {
         for (host, want) in [
-            // Aspect-hosted: the service label and `.aspect.build` both go, so
+            // Aspect Cloud: the service label and `.aspect.build` both go, so
             // the deployment segment is left bare.
             ("remote.acme.aspect.build", "acme"),
             ("bes.acme.aspect.build", "acme"),
@@ -3968,7 +4078,7 @@ mod tests {
             // domain itself names it.
             ("remote.aspect.build", "aspect.build"),
             // Self-hosted: only the service label goes; the domain is kept, which
-            // is what keeps these names distinct from the built-in account.
+            // is what keeps these names distinct from the built-in Aspect Cloud entry.
             ("remote.foo.bar.com", "foo.bar.com"),
             ("cache.app.corp.io", "app.corp.io"),
             ("cache.team.acme.co.uk", "team.acme.co.uk"),
@@ -4015,7 +4125,7 @@ mod tests {
             ),
             // The alias is reserved too, so a host cannot derive its way onto it.
             ("remote.aspect.aspect.build", ASPECT_CLOUD_DEPLOYMENT_ALIAS),
-            ("remote.default.aspect.build", RESERVED_DEFAULT_NAME),
+            ("remote.default.aspect.build", DEFAULT_PROFILE),
         ] {
             let name = deployment_name_from_host(host);
             assert_eq!(name, want);
@@ -4035,7 +4145,7 @@ mod tests {
         // take neither — as is the credential slot every deployment files under.
         assert!(RESERVED_NAMES.contains(&ASPECT_CLOUD_DEPLOYMENT_NAME));
         assert!(RESERVED_NAMES.contains(&ASPECT_CLOUD_DEPLOYMENT_ALIAS));
-        assert!(RESERVED_NAMES.contains(&RESERVED_DEFAULT_NAME));
+        assert!(RESERVED_NAMES.contains(&DEFAULT_PROFILE));
         assert_eq!(RESERVED_NAMES, ["aspect-cloud", "aspect", "default"]);
 
         for name in RESERVED_NAMES {
@@ -4058,7 +4168,7 @@ mod tests {
         assert!(aspect_cloud_deployment().builtin);
         assert!(!dep("aspect", false).builtin);
 
-        // ...so it is never mistaken for the account in a summary.
+        // ...so it is never mistaken for Aspect Cloud in a summary.
         let creds = HashMap::new();
         let impostor = summarize_deployment(&dep("aspect", false), &creds, false);
         assert!(!impostor.builtin);
@@ -4067,9 +4177,9 @@ mod tests {
     }
 
     /// A `config.json` entry under a reserved name must not replace the built-in
-    /// account on load — that is what made the account vanish from `auth status`
+    /// account on load — that is what made Aspect Cloud vanish from `auth status`
     /// with the deployment rendered in its place. `default` is the remaining such
-    /// name; an entry under the account's own name merges instead, covered by
+    /// name; an entry under Aspect Cloud's own name merges instead, covered by
     /// `an_account_named_entry_merges_into_the_seed`.
     #[test]
     fn config_json_entry_cannot_shadow_the_account() {
@@ -4100,7 +4210,7 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].issuer.as_deref(), Some(DEFAULT_ISSUER));
         assert!(accounts[0].hosts.is_empty());
-        // The impostor is dropped rather than silently taking the account's slot.
+        // The impostor is dropped rather than silently taking Aspect Cloud's slot.
         assert!(!merged.iter().any(|d| d.name == "default"));
         // A legitimate deployment sharing that issuer is unaffected.
         assert!(merged.iter().any(|d| d.name == "silo-gcp"));
@@ -4114,27 +4224,24 @@ mod tests {
         // A repo-config entry is checked in: `auth remove` only edits the user
         // file, so the advice must point at the repo path instead.
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep(RESERVED_DEFAULT_NAME, false)], false),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
             src(USER, vec![dep("acme", false)], true),
         ]);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, RESERVED_DEFAULT_NAME);
+        assert_eq!(found[0].name, DEFAULT_PROFILE);
         assert!(!found[0].user_config);
         assert_eq!(found[0].path, REPO);
 
         // A user-config entry is removable.
-        let (_, found) = overlay_config_sources(vec![src(
-            USER,
-            vec![dep(RESERVED_DEFAULT_NAME, false)],
-            true,
-        )]);
+        let (_, found) =
+            overlay_config_sources(vec![src(USER, vec![dep(DEFAULT_PROFILE, false)], true)]);
         assert_eq!(found.len(), 1);
         assert!(found[0].user_config);
 
         // Declared in both files → reported once, against the first (repo).
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep(RESERVED_DEFAULT_NAME, false)], false),
-            src(USER, vec![dep(RESERVED_DEFAULT_NAME, false)], true),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
+            src(USER, vec![dep(DEFAULT_PROFILE, false)], true),
         ]);
         assert_eq!(found.len(), 1);
         assert!(!found[0].user_config);
@@ -4179,7 +4286,7 @@ mod tests {
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].name, "acme");
 
-        // The same name with no file entry means the built-in account — refused.
+        // The same name with no file entry means the built-in Aspect Cloud entry — refused.
         let mut ds = vec![dep("acme", true)];
         let err = apply_remove(&mut ds, "aspect").unwrap_err();
         assert!(err.to_string().contains("cannot be removed"), "{err}");
@@ -4573,7 +4680,7 @@ mod tests {
         }
     }
 
-    /// Aspect Cloud's own hosts resolve to the account; everything else derives a
+    /// Aspect Cloud's own hosts resolve to Aspect Cloud; everything else derives a
     /// deployment name from the host as before. An explicit `--name` still wins,
     /// so a separate entry for these hosts stays possible.
     #[test]
@@ -4604,11 +4711,14 @@ mod tests {
             // Case and an absolute FQDN's trailing dot are tolerated.
             "Cache.EU.Aspect.Build.",
         ] {
-            assert!(is_account_host(host), "{host} should belong to the account");
+            assert!(
+                is_aspect_cloud_host(host),
+                "{host} should belong to Aspect Cloud"
+            );
         }
 
         for host in [
-            // Another Aspect-hosted deployment is its own thing.
+            // Another Aspect Cloud deployment is its own thing.
             "remote.silo-aws.aspect.build",
             "bes.gcp.awd-gha-test-dev.aspect.build",
             // Self-hosted, and lookalikes that must not match a suffix.
@@ -4616,11 +4726,11 @@ mod tests {
             "cache.us.aspect.build.evil.com",
             "notcache.aspect.build",
             // An unenumerated region is not assumed to be one: far likelier to be
-            // another Aspect-hosted deployment than a new Aspect Cloud region.
+            // another Aspect Cloud deployment than a new Aspect Cloud region.
             "cache.ap.aspect.build",
         ] {
             assert!(
-                !is_account_host(host),
+                !is_aspect_cloud_host(host),
                 "{host} should be its own deployment"
             );
         }
@@ -4648,7 +4758,7 @@ mod tests {
         assert!(seed.builtin);
     }
 
-    /// The relay page is named by the deployment, so the account takes it from a
+    /// The relay page is named by the deployment, so Aspect Cloud takes it from a
     /// document on its own issuer and refuses one from anywhere else — the gate
     /// that already guards the adopted client.
     #[test]
@@ -4679,7 +4789,7 @@ mod tests {
     }
 
     /// A deployment naming itself beats a name derived from DNS, but never beats a
-    /// name the user typed, never claims the account, and never takes a name the
+    /// name the user typed, never claims Aspect Cloud, and never takes a name the
     /// CLI reserves for itself.
     #[test]
     fn a_deployment_may_name_itself() {
@@ -4716,10 +4826,10 @@ mod tests {
         // Aspect Cloud and `aspect` its alias, `default` the credential slot every
         // deployment files under. Aspect Cloud
         // advertises its own name, but its hosts never reach here — they resolve to
-        // the account first; see `parses_the_aspect_cloud_document_as_served`.
+        // Aspect Cloud first; see `parses_the_aspect_cloud_document_as_served`.
         assert_eq!(advertised_name(&doc(ASPECT_CLOUD_DEPLOYMENT_NAME)), None);
         assert_eq!(advertised_name(&doc(ASPECT_CLOUD_DEPLOYMENT_ALIAS)), None);
-        assert_eq!(advertised_name(&doc(RESERVED_DEFAULT_NAME)), None);
+        assert_eq!(advertised_name(&doc(DEFAULT_PROFILE)), None);
 
         // `^[a-z][a-z0-9-]*$` — what the charts and Terraform modules enforce, so a
         // name reaching the CLI outside it means something upstream went wrong.
@@ -4771,12 +4881,12 @@ mod tests {
             resolve_deployment_name(None, host, &named("")),
             ("aws.awd-cci-test-dev".to_string(), false)
         );
-        // An Aspect Cloud host is the account, whatever it calls itself.
+        // An Aspect Cloud host is Aspect Cloud, whatever it calls itself.
         assert_eq!(
             resolve_deployment_name(None, "cache.aspect.build", &named("Aspect Cloud")),
             (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
         );
-        // Typing the account's name claims it.
+        // Typing Aspect Cloud's name claims it.
         assert_eq!(
             resolve_deployment_name(
                 Some(ASPECT_CLOUD_DEPLOYMENT_NAME.to_string()),
@@ -4785,7 +4895,7 @@ mod tests {
             ),
             (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
         );
-        // A document may not claim the account by naming it.
+        // A document may not claim Aspect Cloud by naming it.
         assert_eq!(
             resolve_deployment_name(None, host, &named(ASPECT_CLOUD_DEPLOYMENT_NAME)),
             ("aws.awd-cci-test-dev".to_string(), false)
@@ -4837,7 +4947,7 @@ mod tests {
         // Aspect Cloud calls itself what the CLI now calls it, so the served
         // document and `ASPECT_CLOUD_DEPLOYMENT_NAME` agree.
         assert_eq!(parsed.resource_name, ASPECT_CLOUD_DEPLOYMENT_NAME);
-        // Its hosts resolve to the account without consulting the advertised name —
+        // Its hosts resolve to Aspect Cloud without consulting the advertised name —
         // identity is the `builtin` flag, not the string — and the name is reserved,
         // so a host that is *not* Aspect Cloud's cannot claim it either.
         assert_eq!(advertised_name(&parsed), None);
@@ -4869,9 +4979,9 @@ mod tests {
         // Absorbing is not shadowing, so nothing is reported against the file.
         assert!(shadowed.is_empty());
 
-        // The alias addresses the account too, so an explicit one resolves to the
+        // The alias addresses Aspect Cloud too, so an explicit one resolves to the
         // canonical entry rather than recording a stray deployment.
-        assert!(names_the_account(ASPECT_CLOUD_DEPLOYMENT_ALIAS));
+        assert!(names_aspect_cloud(ASPECT_CLOUD_DEPLOYMENT_ALIAS));
     }
 
     /// A deployment's own advertised redirect wins over anything the CLI would
@@ -5034,7 +5144,7 @@ mod tests {
 
     /// A resource advertising only a build-result viewer is not a deployment.
     /// `app.aspect.build` serves that shape — a `results_url` and an issuer, with
-    /// no cache, no BES and no `client_id`. Recording it under the account's name
+    /// no cache, no BES and no `client_id`. Recording it under Aspect Cloud's name
     /// would replace the endpoints that do serve builds with ones that cannot,
     /// behind a client that can never complete a login.
     ///
@@ -5083,9 +5193,9 @@ mod tests {
     /// that entry enriches the seed rather than shadowing it, which is what
     /// `configure --name aspect` is for. A name that merely derives to it is still
     /// refused, and `default` is refused either way: it is a credential-store key,
-    /// so an entry under it would share the account's slot.
+    /// so an entry under it would share Aspect Cloud's slot.
     ///
-    /// What keeps the account safe is not this check but the issuer pin in
+    /// What keeps Aspect Cloud safe is not this check but the issuer pin in
     /// `configure_deployment` — see
     /// `the_account_only_absorbs_endpoints_on_its_own_issuer`.
     #[test]
@@ -5094,13 +5204,11 @@ mod tests {
         assert!(upsert_deployment(&mut Vec::new(), account(), true).is_ok());
         assert!(upsert_deployment(&mut Vec::new(), account(), false).is_err());
         // The credential slot is refused however it is asked for.
-        assert!(
-            upsert_deployment(&mut Vec::new(), dep(RESERVED_DEFAULT_NAME, false), true).is_err()
-        );
+        assert!(upsert_deployment(&mut Vec::new(), dep(DEFAULT_PROFILE, false), true).is_err());
     }
 
     /// The entry `configure_default` writes enriches the seed rather than
-    /// shadowing it: the account keeps its identity and gains the endpoints, so
+    /// shadowing it: Aspect Cloud keeps its identity and gains the endpoints, so
     /// `auth status` shows one Aspect entry and `--remote` resolves it.
     #[test]
     fn an_account_named_entry_merges_into_the_seed() {
@@ -5135,7 +5243,7 @@ mod tests {
         let seed = merged.iter().find(|d| d.builtin).unwrap();
         assert_eq!(seed.endpoints.cache, "remote.app.aspect.build");
         assert_eq!(seed.endpoints.bes, "bes.app.aspect.build");
-        // The issuer stays the seed's — the file may extend the account, never
+        // The issuer stays the seed's — the file may extend Aspect Cloud, never
         // redirect its login — and a client offered alongside a foreign issuer is
         // refused with it.
         assert_eq!(seed.issuer.as_deref(), Some(DEFAULT_ISSUER));
@@ -5143,7 +5251,7 @@ mod tests {
         assert_eq!(seed.api_url.as_deref(), Some(DEFAULT_API_URL));
     }
 
-    /// A client discovered from the account's own issuer *is* adopted, which is
+    /// A client discovered from Aspect Cloud's own issuer *is* adopted, which is
     /// what lets the deployed client rotate without a CLI release. The compiled-in
     /// one is the fallback for before discovery has run.
     #[test]
@@ -5192,28 +5300,10 @@ mod tests {
         );
     }
 
-    /// The account keeps the default credential profile after it gains endpoints —
-    /// that keys on `builtin`, not on whether hosts are present, or the account
-    /// would file its login away from the profile every Aspect-cloud caller reads.
-    #[test]
-    fn the_account_keeps_the_default_profile_once_it_has_endpoints() {
-        let _guard = profile_env_guard();
-        let mut seed = aspect_cloud_deployment();
-        seed.hosts = vec!["remote.app.aspect.build".to_string()];
-        // Compared against `resolve_profile`, not the literal: the invariant is that
-        // the account files under whatever the default profile resolves to, and a
-        // sibling test sets $ASPECT_AUTH_PROFILE (hence the guard above).
-        assert_eq!(login_profile_for(&seed), resolve_profile(None));
-
-        let mut configured = dep("acme", false);
-        configured.hosts = vec!["remote.acme.example.com".to_string()];
-        assert_eq!(login_profile_for(&configured), "acme");
-    }
-
-    /// Anything recorded under the account's name — a bare login's discovery or
+    /// Anything recorded under Aspect Cloud's name — a bare login's discovery or
     /// an explicit `configure --name aspect` — takes the endpoint's PKCE client
     /// but not its issuer. `hosts` is the auth gate, so a host on a different
-    /// issuer would be handed the account's own bearer; pinning keeps the account
+    /// issuer would be handed Aspect Cloud's own bearer; pinning keeps Aspect Cloud
     /// absorbing endpoints only from deployments that share its issuer.
     #[test]
     fn the_account_only_absorbs_endpoints_on_its_own_issuer() {
@@ -5245,11 +5335,11 @@ mod tests {
         let advertised = doc(DEFAULT_ISSUER, "new-client-id");
         match resolve_auth_server(&advertised.auth_servers(), Some(DEFAULT_ISSUER)) {
             AuthServerChoice::Selected(s) => assert_eq!(s.client_id, "new-client-id"),
-            _ => panic!("the account's own issuer should resolve"),
+            _ => panic!("Aspect Cloud's own issuer should resolve"),
         }
 
         // A host on some other issuer records nothing, so it can never be handed
-        // the account's credential.
+        // Aspect Cloud's credential.
         let hijacked = doc("https://auth.evil.example.com", "new-client-id");
         assert!(matches!(
             resolve_auth_server(&hijacked.auth_servers(), Some(DEFAULT_ISSUER)),
@@ -5291,7 +5381,7 @@ mod tests {
             login_profile_for(&aspect_cloud_deployment()),
             ASPECT_CLOUD_DEPLOYMENT_NAME
         );
-        // And a self-hosted deployment's key is not it, so the account token can
+        // And a self-hosted deployment's key is not it, so Aspect Cloud token can
         // never be handed to a deployment on another issuer.
         assert_ne!(
             login_profile_for(&dep("acme", false)),
@@ -5299,32 +5389,28 @@ mod tests {
         );
     }
 
-    /// `$ASPECT_AUTH_PROFILE` has to steer where a login is filed *and* where the
-    /// credential helper reads it back, because the helper takes no flags. Both go
-    /// through `login_profile_for`, so one override covers both.
+    /// The store's two axes stay independent: `$ASPECT_AUTH_PROFILE` chooses the
+    /// profile and never the key within it. Crossing them would have one identity's
+    /// credential answer for another deployment.
+    ///
+    /// An env var rather than a flag because the Bazel credential helper takes no
+    /// flags, so it is the only thing that can steer the CLI and the helper alike.
     #[test]
-    fn the_profile_env_overrides_the_key_a_deployment_files_under() {
+    fn the_profile_env_chooses_the_profile_not_the_deployment_key() {
         let _guard = profile_env_guard();
         let saved = std::env::var(PROFILE_ENV).ok();
 
         // SAFETY: single-threaded test body, guarded above, restored before return.
-        unsafe { std::env::set_var(PROFILE_ENV, "second-identity") };
-        assert_eq!(
-            login_profile_for(&aspect_cloud_deployment()),
-            "second-identity"
-        );
-        assert_eq!(login_profile_for(&dep("acme", false)), "second-identity");
-
-        // Empty reads as unset, so an exported-but-blank var does not send every
-        // login to a key named "".
-        unsafe { std::env::set_var(PROFILE_ENV, "") };
+        unsafe { std::env::set_var(PROFILE_ENV, "bob") };
+        assert_eq!(resolve_profile(None), "bob");
+        // The key a deployment files under is unmoved by it.
         assert_eq!(
             login_profile_for(&aspect_cloud_deployment()),
             ASPECT_CLOUD_DEPLOYMENT_NAME
         );
-
-        unsafe { std::env::remove_var(PROFILE_ENV) };
         assert_eq!(login_profile_for(&dep("acme", false)), "acme");
+        // An explicit `--profile` still wins over the env.
+        assert_eq!(resolve_profile(Some("susan")), "susan");
 
         match saved {
             Some(v) => unsafe { std::env::set_var(PROFILE_ENV, v) },
@@ -5334,7 +5420,7 @@ mod tests {
 
     #[test]
     fn cloud_bearer_prefers_access_token_then_id_token() {
-        // The Aspect-cloud flow (prefer_id_token = false) validates the
+        // The Aspect Cloud flow (prefer_id_token = false) validates the
         // access_token, falling back to the id_token only if absent.
         assert_eq!(token_response("acc", "idt").bearer(false).unwrap(), "acc");
         assert_eq!(token_response("", "idt").bearer(false).unwrap(), "idt");
@@ -5552,9 +5638,9 @@ mod tests {
         // `default` is reserved from being *configured*, but it is not the
         // account — so `auth use default` must error like any unknown name
         // rather than silently clear every default (which would send `--remote`
-        // back to the account while reporting success).
+        // back to Aspect Cloud while reporting success).
         ds[0].default = true;
-        let err = apply_set_default(&mut ds, Some(RESERVED_DEFAULT_NAME)).unwrap_err();
+        let err = apply_set_default(&mut ds, Some(DEFAULT_PROFILE)).unwrap_err();
         assert!(err.to_string().contains("unknown deployment"), "{err}");
         assert!(ds[0].default, "`use default` must not clear the default");
     }

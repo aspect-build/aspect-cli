@@ -1,5 +1,10 @@
-//! Persistent credential storage for `aspect auth`: a `{ profile: entry }` map
-//! held in one of two backends behind [`CredentialStore`].
+//! Persistent credential storage for `aspect auth`: a `{ profile: T }` map held in
+//! one of two backends behind [`CredentialStore`].
+//!
+//! Generic in `T`, and deliberately incurious about it — `auth` stores a map of
+//! its own (a credential per deployment) as the value, which this never has to
+//! know. What it owns is backend selection, whole-map read/write, and the
+//! tolerance rules below.
 //!
 //! - **keyring** — the OS secret service (macOS Keychain, Linux Secret Service,
 //!   Windows Credential Manager), holding the whole map as one entry. The default
@@ -114,8 +119,8 @@ fn keyring_available() -> bool {
     keyring_entry().is_ok()
 }
 
-/// Parse a stored `{ profile: entry }` blob, treating an unparseable one (a
-/// legacy/corrupt layout) as "no credentials" rather than an error, so the user
+/// Parse a stored `{ profile: T }` blob, treating an unparseable one (a corrupt or
+/// differently-shaped layout) as "no credentials" rather than an error, so the user
 /// re-runs `aspect auth login` instead of every command hard-failing. Shared by
 /// both backends so the tolerance is identical.
 fn parse_stored_map<T: DeserializeOwned>(raw: &str) -> HashMap<String, T> {
