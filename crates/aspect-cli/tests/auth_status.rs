@@ -88,10 +88,13 @@ fn auth_status_renders_a_logged_out_store() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (_, rendered) = assert_ok(&auth_status(dir.path(), &[]), "auth status");
 
-    // Aspect Cloud is always listed, logged in or not.
+    // Aspect Cloud is always listed, logged in or not, and always carries the
+    // marker saying whether `--remote` targets it. That marker is drawn by the
+    // section heading rather than by `_print_deployment`, so nothing else here
+    // would notice it going missing.
     assert!(
-        rendered.contains("Aspect Cloud"),
-        "expected Aspect Cloud in:\n{rendered}"
+        rendered.contains("● Aspect Cloud") || rendered.contains("○ Aspect Cloud"),
+        "expected a marked Aspect Cloud heading in:\n{rendered}"
     );
     // The rows that read the attributes this test exists to guard.
     assert!(

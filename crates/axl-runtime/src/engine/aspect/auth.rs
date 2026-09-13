@@ -1141,6 +1141,11 @@ fn deployment_from_discovery(
 /// The one exception is re-configuring the deployment that already holds it, which
 /// keeps it rather than demoting it as a side effect of a refresh.
 ///
+/// An entry naming Aspect Cloud neither holds the default nor withholds it: it is
+/// folded into the built-in seed on load, so its `default` flag is never read, and
+/// Aspect Cloud is what `--remote` targets whenever no configured deployment
+/// claims it.
+///
 /// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
 /// here — derived names and an explicit `--deployment` alike — so this is the one
 /// place the check has to live.
@@ -1162,11 +1167,8 @@ fn upsert_deployment(
     if !permitted && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
-    // An entry naming Aspect Cloud is folded into the built-in seed on load — under
-    // either of its names — so only one is worth keeping, and the `default` flag on
-    // it is never read. Writing one collapses any other, and answers the
-    // default question the way the loader will: Aspect Cloud is what `--remote`
-    // targets whenever no *configured* deployment claims it.
+    // Such an entry folds into the seed on load under either of its names, so keep
+    // one and drop the flag the loader ignores.
     if names_aspect_cloud(&deployment.name) {
         existing.retain(|d| !names_aspect_cloud(&d.name));
         deployment.default = false;
@@ -4226,11 +4228,7 @@ mod tests {
     /// the user to `auth use` something that already is.
     #[test]
     fn an_aspect_cloud_entry_does_not_hold_or_withhold_the_default() {
-        let cloud = || {
-            let mut d = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
-            d.builtin = false; // as written to config.json — `builtin` never persists
-            d
-        };
+        let cloud = || dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
 
         // Nothing configured claims the default, so Aspect Cloud is what
         // `--remote` targets, whatever flag a previous entry left behind.
@@ -5724,7 +5722,7 @@ mod tests {
     /// Configuring never moves the default; only `--default` does. Aspect Cloud is
     /// a working default from the first login, so a deployment taking over on
     /// `configure` would change what every `--remote` build talks to without the
-    /// user asking — and it read as arbitrary, since only the *first* one could.
+    /// user asking.
     #[test]
     fn configuring_a_deployment_does_not_take_the_default() {
         let mut existing: Vec<Deployment> = vec![];
@@ -5734,8 +5732,8 @@ mod tests {
         );
         assert!(existing.iter().all(|d| !d.default));
 
-        // The second behaves the same as the first, which is the consistency this
-        // buys: previously one stole the default and the other could not.
+        // The second behaves exactly as the first: nothing about the default
+        // depends on the order deployments were configured in.
         assert!(!upsert_deployment(&mut existing, dep("emca", false), false).unwrap());
         assert!(existing.iter().all(|d| !d.default));
 

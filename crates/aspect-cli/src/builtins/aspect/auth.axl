@@ -108,12 +108,7 @@ def aspect_cloud_heading(d, has_deployments: bool) -> str:
     Its marker rides here because `_print_deployment` draws no header for Aspect
     Cloud — its name is this heading. Without it nothing on screen is marked in the
     common case where Aspect Cloud is the default, and the legend names a glyph
-    that never appears.
-
-    Always glyphed, including when it is the only deployment — it is the default
-    then by definition, and a heading that sometimes carries a glyph and sometimes
-    does not is harder to scan than one that always does. Only the `(default)`
-    wording waits for a second entry to contrast with."""
+    that never appears."""
     return default_marker_line("Aspect Cloud", d.default, note_default = has_deployments)
 
 def _print_deployment(d, header = True, show_use = False):
@@ -148,10 +143,6 @@ def _print_deployment(d, header = True, show_use = False):
         for option in options[1:]:
             _row("", option)
 
-    # Aspect Cloud only, and only when it is not already the default. Every other
-    # entry prints its own name in its header line, so the legend's
-    # `aspect auth use <name>` is something the reader can act on; Aspect Cloud's
-    # header is its product name, and `aspect-cloud` appears nowhere else on screen.
     if show_use:
         _row("Default", "run `" + use_command(d) + "` to make this the default")
 
@@ -580,9 +571,6 @@ def _status_impl(ctx: TaskContext) -> int:
 
     for d in aspect_cloud:
         print(aspect_cloud_heading(d, bool(deployments)))
-
-        # Only when something else holds the default, which cannot happen without a
-        # configured deployment to hold it.
         _print_deployment(d, header = False, show_use = not d.default)
 
     print("")

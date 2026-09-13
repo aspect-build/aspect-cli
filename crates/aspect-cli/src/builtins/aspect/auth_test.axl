@@ -1,10 +1,11 @@
-"""Unit tests for the pure string builders in `auth.axl` (the `status`/`configure`
-detail rendering): `identity`, `login_command`, `login_target_label`, `capabilities`, `status_line`,
-`shadowed_warning`.
+"""Unit tests for the pure string builders in `auth.axl` — every line
+`auth status` and `auth configure` render, built where it can be asserted on
+rather than printed.
 
 A struct-based fake summary substitutes for a real `DeploymentSummary` (only the
 fields these helpers read are set). The `print`-driven `_print_deployment` /
-usage-hint functions and the fail() paths are exercised end-to-end, not here.
+usage-hint functions and the fail() paths are exercised end-to-end, not here:
+`crates/aspect-cli/tests/auth_status.rs` runs the real command.
 
 Run with:
   aspect dev test-auth
@@ -200,9 +201,9 @@ _UNIT_TESTS = [
     _test_login_command,
     _test_login_options,
     _test_login_target_label,
-    _test_use_command,
     _test_shadowed_warning,
     _test_status_line,
+    _test_use_command,
 ]
 
 def _test_impl(ctx):
