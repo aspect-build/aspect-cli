@@ -7,6 +7,7 @@ credentials are needed. All fixtures, cache entries and servers are temporary.
 """
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -35,33 +36,86 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def download_cache(binary, target):
+    if target not in CACHE_SHA256:
+        raise RuntimeError(f"unsupported cache integration platform: {target}")
+    url = f"https://github.com/buchgr/bazel-remote/releases/download/v{CACHE_VERSION}/bazel-remote-{CACHE_VERSION}-{target}"
+    for attempt in range(3):
+        try:
+            # urlopen uses the standard HTTP(S)_PROXY / NO_PROXY environment.
+            with urllib.request.urlopen(url, timeout=60) as response:
+                content = response.read()
+            break
+        except OSError:
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+    if hashlib.sha256(content).hexdigest() != CACHE_SHA256[target]:
+        raise RuntimeError("cache binary checksum mismatch")
+    binary.write_bytes(content)
+    binary.chmod(0o700)
+
+
+def stop_cache(server):
+    server.terminate()
+    try:
+        server.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server.kill()
+        server.wait()
+
+
+def start_cache(binary, root, env, log):
+    for attempt in range(3):
+        http_port, grpc_port = free_port(), free_port()
+        while grpc_port == http_port:
+            grpc_port = free_port()
+        log.seek(0)
+        log.truncate()
+        server = subprocess.Popen([str(binary), "--dir", str(root / "cache"), "--max_size", "1",
+                                   "--http_address", f"127.0.0.1:{http_port}",
+                                   "--grpc_address", f"127.0.0.1:{grpc_port}"], env=env, stdout=log, stderr=subprocess.STDOUT)
+        for _ in range(100):
+            if server.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/status", timeout=1):
+                    return server, http_port, grpc_port
+            except OSError:
+                time.sleep(0.1)
+        stop_cache(server)
+        log.seek(0)
+        message = log.read()
+        # Port reservation cannot be handed to bazel-remote. Retry a bind race
+        # with fresh ports; holding sockets through Popen would prevent its bind.
+        if "address already in use" not in message.lower() or attempt == 2:
+            raise RuntimeError("cache server did not become ready: " + message)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--aspect", required=True)
     parser.add_argument("--bazel", default="bazel")
+    parser.add_argument("--bazel-version", default="9.2.0")
     args = parser.parse_args()
     aspect = str(Path(shutil.which(args.aspect) or args.aspect).resolve())
     bazel = str(Path(shutil.which(args.bazel) or args.bazel).resolve())
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="cache-diff-integration-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="cache-diff-integration-") as tmp, ExitStack() as cleanup:
         root = Path(tmp)
         arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
         target = f"{platform.system().lower()}-{arch}"
         binary = root / "bazel-remote"
-        url = f"https://github.com/buchgr/bazel-remote/releases/download/v{CACHE_VERSION}/bazel-remote-{CACHE_VERSION}-{target}"
-        with urllib.request.urlopen(url, timeout=60) as response:
-            content = response.read()
-        assert hashlib.sha256(content).hexdigest() == CACHE_SHA256[target], "cache binary checksum mismatch"
-        binary.write_bytes(content)
-        binary.chmod(0o700)
-        http_port, grpc_port = free_port(), free_port()
-        while grpc_port == http_port:
-            grpc_port = free_port()
+        download_cache(binary, target)
         env = {k: v for k, v in os.environ.items() if k != "CI" and not k.startswith(("BAZEL_REMOTE_", "ASPECT_", "GITHUB_", "BUILDKITE_"))}
         env["BAZEL_REAL"] = bazel
+        env["USE_BAZEL_VERSION"] = args.bazel_version
+        log = cleanup.enter_context((root / "server.log").open("w+"))
+        server, http_port, grpc_port = start_cache(binary, root, env, log)
+        cleanup.callback(stop_cache, server)
         workspace = root / "workspace"
         workspace.mkdir()
-        (workspace / ".bazelversion").write_text("9.2.0\n")
+        (workspace / ".bazelversion").write_text(args.bazel_version + "\n")
         (workspace / "MODULE.bazel").write_text('module(name = "cache_fixture")\n')
         (workspace / "MODULE.aspect").write_text("")
         (workspace / "shared.in").write_text("baseline\n")
@@ -99,7 +153,7 @@ fixture_test(name = "excluded", data = ["//:shared"])
         startup = [ f"--output_base={root / 'output'}", "--host_jvm_args=-Xmx512m"]
         flags = [f"--remote_cache=grpc://127.0.0.1:{grpc_port}", "--remote_upload_local_results",
                  "--jobs=2", "--local_test_jobs=2", "--remote_timeout=15", "--remote_retries=0",
-                 f"--sandbox_writable_path={markers}", "--lockfile_mode=off", "--bes_backend="]
+                 f"--sandbox_writable_path={markers}", "--lockfile_mode=off", "--bes_backend=", "--test_env=FOO=1"]
         (workspace / ".bazelrc").write_text("".join(f"startup {f}\n" for f in startup) + "".join(f"build {f}\n" for f in flags))
         timings = {}
 
@@ -115,9 +169,11 @@ fixture_test(name = "excluded", data = ["//:shared"])
             path = markers / kind
             return len(path.read_text().splitlines()) if path.exists() else 0
 
-        def probe(name, mode="overreport", patterns=None, expected=None, total=3):
+        def probe(name, mode="overreport", patterns=None, expected=None, total=3, extra_flags=None):
             before_tests, before_builds = count("test"), count("build")
-            result = run(name, [aspect, "cache", "diff", "--bazel-startup-flag=--nosystem_rc", "--bazel-startup-flag=--nohome_rc", f"--mode={mode}", "--output=json", "--test_tag_filters=-noci", "--"] + (patterns or ["//...", "-//personal/..."]))
+            result = run(name, [aspect, "cache", "diff", "--bazel-startup-flag=--nosystem_rc", "--bazel-startup-flag=--nohome_rc", f"--mode={mode}", "--output=json", "--test_tag_filters=-noci"] + (extra_flags or []) + ["--"] + (patterns or ["//...", "-//personal/..."]))
+            if "--announce-bazel-command=true" in (extra_flags or []):
+                assert "--noanalyze" in result.stderr, result.stderr
             doc = json.loads(result.stdout)
             got = {row["label"] for row in doc["affected"]}
             assert got == set(expected or []), (name, doc)
@@ -127,53 +183,45 @@ fixture_test(name = "excluded", data = ["//:shared"])
                 assert count("build") == before_builds, f"{name}: probe executed a build action"
             return doc
 
-        with (root / "server.log").open("w+") as log:
-            server = subprocess.Popen([str(binary), "--dir", str(root / "cache"), "--max_size", "1",
-                                       "--http_address", f"127.0.0.1:{http_port}",
-                                       "--grpc_address", f"127.0.0.1:{grpc_port}"], env=env, stdout=log, stderr=subprocess.STDOUT)
-            try:
-                for _ in range(100):
-                    try:
-                        with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/status", timeout=1):
-                            break
-                    except OSError:
-                        if server.poll() is not None:
-                            log.seek(0)
-                            raise AssertionError(log.read())
-                        time.sleep(0.1)
-                else:
-                    raise AssertionError("cache server did not become ready")
-                run("seed", [bazel, "--nosystem_rc", "--nohome_rc", "test", "//..."])
-                assert count("test") == 5, "baseline did not execute every fixture test"
-                assert count("build") == 1, "baseline did not build the shared dependency"
-                probe("warm_hits")
-                (workspace / "shared.in").write_text("changed\n")
-                doc = probe("dependency_miss", expected=["//:a", "//:b"])
-                assert all(any(c["target"] == "//:shared" for c in row["caused_by"]) for row in doc["affected"]), doc
-                probe("suite_miss", patterns=["//:suite", "//:unrelated"], expected=["//:a", "//:b"])
-                probe("reinclude_miss", patterns=["//...", "-//personal/...", "//personal:excluded"],
-                      expected=["//:a", "//:b", "//personal:excluded"], total=4)
-                probe("precise_miss", mode="precise", expected=["//:a", "//:b"])
-                assert count("build") == 2, "precise mode did not build the changed dependency"
-                run("refresh_baseline", [bazel, "--nosystem_rc", "--nohome_rc", "test", "//..."])
-                probe("warm_hits_after_change")
-                before = count("test")
-                result = run("empty_scope", [aspect, "cache", "diff", "--bazel-startup-flag=--nosystem_rc", "--bazel-startup-flag=--nohome_rc", "--exec=exit 99", "--", "//...", "-//..."])
-                assert not result.stdout and count("test") == before
-                with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/status", timeout=5) as response:
-                    status = json.load(response)
-                print(json.dumps({"timings": timings, "total_seconds": round(time.monotonic() - started, 3),
-                                  "cache_bytes": status["CurrSize"], "cache_files": status["NumFiles"]}, indent=2), flush=True)
-            finally:
-                try:
-                    subprocess.run([bazel, "--nosystem_rc", "--nohome_rc", "shutdown"], cwd=workspace, env=env, capture_output=True, timeout=30)
-                finally:
-                    server.terminate()
-                    try:
-                        server.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        server.kill()
-                        server.wait()
+        try:
+            version = run("bazel_version", [bazel, "--version"])
+            assert version.stdout.strip() == f"bazel {args.bazel_version}", version.stdout + version.stderr
+            run("seed", [bazel, "--nosystem_rc", "--nohome_rc", "test", "//..."])
+            assert count("test") == 5, "baseline did not execute every fixture test"
+            assert count("build") == 1, "baseline did not build the shared dependency"
+            probe("warm_hits")
+            with (workspace / ".bazelrc").open("a") as rc:
+                rc.write("build:selection_only --test_env=FOO=1\n")
+            probe("build_only_config_warm_hits", extra_flags=["--config=selection_only"])
+            probe("announced_selection", extra_flags=["--announce-bazel-command=true"])
+            (workspace / "shared.in").write_text("changed\n")
+            doc = probe("dependency_miss", expected=["//:a", "//:b"])
+            assert all(any(c["target"] == "//:shared" for c in row["caused_by"]) for row in doc["affected"]), doc
+            probe("command_specific_flags_miss", expected=["//:a", "//:b"], extra_flags=[
+                "--test_env", "FOO=1", "--runs_per_test=1", "--build_tests_only",
+                "--remote_download_outputs=minimal", f"--remote_cache=grpc://127.0.0.1:{grpc_port}",
+            ])
+            probe("suite_miss", patterns=["//:suite", "//:unrelated"], expected=["//:a", "//:b"])
+            probe("reinclude_miss", patterns=["//...", "-//personal/...", "//personal:excluded"],
+                  expected=["//:a", "//:b", "//personal:excluded"], total=4)
+            probe("precise_miss", mode="precise", expected=["//:a", "//:b"])
+            assert count("build") == 2, "precise mode did not build the changed dependency"
+            run("refresh_baseline", [bazel, "--nosystem_rc", "--nohome_rc", "test", "//..."])
+            probe("warm_hits_after_change")
+            before = count("test")
+            result = run("empty_scope", [aspect, "cache", "diff", "--bazel-startup-flag=--nosystem_rc", "--bazel-startup-flag=--nohome_rc", "--exec=exit 99", "--", "//...", "-//..."])
+            assert not result.stdout and count("test") == before
+            pattern_file = workspace / "empty-patterns"
+            pattern_file.write_text("//...\n-//...\n")
+            result = run("empty_pattern_file", [aspect, "cache", "diff", "--bazel-startup-flag=--nosystem_rc", "--bazel-startup-flag=--nohome_rc", f"--target_pattern_file={pattern_file}", "--exec=exit 99"])
+            assert not result.stdout and count("test") == before
+            assert f"--target_pattern_file={pattern_file}" in result.stderr
+            with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/status", timeout=5) as response:
+                status = json.load(response)
+            print(json.dumps({"timings": timings, "total_seconds": round(time.monotonic() - started, 3),
+                              "cache_bytes": status["CurrSize"], "cache_files": status["NumFiles"]}, indent=2), flush=True)
+        finally:
+            subprocess.run([bazel, "--nosystem_rc", "--nohome_rc", "shutdown"], cwd=workspace, env=env, capture_output=True, timeout=30)
 
 
 if __name__ == "__main__":

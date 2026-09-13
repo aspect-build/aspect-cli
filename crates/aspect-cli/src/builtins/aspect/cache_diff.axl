@@ -8,6 +8,10 @@ miss, so the probe runs no actions. The gRPC log records one `GetActionResult`
 per action Bazel probed; a miss anywhere in a test's transitive closure trips at
 that action (the *frontier*), and the affected tests are attributed from there.
 
+Selection follows Bazel test patterns and filters (Bazel 7+). Wildcards exclude
+manual-tagged tests; explicit manual targets remain selectable. Negative
+patterns are processed in order and must follow `--`.
+
 Output contract (built for pipes):
 
   - stdout — the affected test labels, one per line, nothing else. Pipe it:
@@ -291,7 +295,7 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
     time (`timing["attribute"]`) from our own bookkeeping (`timing["classify"]`)."""
     _t_all = time.monotonic()
     test_set = {t: None for t in test_targets}
-    query_rc = attribution_rc(ctx, rc)
+    query_rc = None
 
     # Frontier misses, de-duplicated by label (first mnemonic wins).
     missed = []
@@ -317,6 +321,8 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
             continue
         cause = {"target": e.label, "mnemonic": e.mnemonic}
         _tq = time.monotonic()
+        if query_rc == None:
+            query_rc = attribution_rc(ctx, rc)
         dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(json.encode(e.label)), rc = query_rc)]
         rdeps_secs += time.monotonic() - _tq
         for label in dep_tests:
@@ -354,10 +360,9 @@ def _impl(ctx: TaskContext) -> int:
     flags = list(bazel_trait.base_flags) + bzl.flags.resolve(ctx)
     announce_version, announce_command = bzl.announce.resolve(ctx)
 
-    # One run command for the queries, the precise pre-build, and the probe — all
-    # on the default output base. The probe forces fresh remote lookups via
-    # `--nokeep_state_after_build --nouse_action_cache` (see `_run_probe`), so it
-    # needs no separate or wiped base.
+    # Share the RC and default output base across selection, precise prebuild,
+    # and probe. The salt-delete pass refreshes action execution without
+    # discarding analysis; --nouse_action_cache bypasses persistent action hits.
     rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
     patterns = target_patterns(ctx.args.is_explicit("targets"), patterns, "", rc, "test")
 
@@ -374,12 +379,13 @@ def _impl(ctx: TaskContext) -> int:
     # Bazel owns ordered patterns, suite expansion, and test filters. Query's
     # tests() does not have the same selection semantics as `bazel test`.
     _t = time.monotonic()
-    test_targets = select_tests(ctx, patterns, rc, endpoint_auth_flags = endpoint_auth_flags)
+    test_targets = select_tests(ctx, patterns, rc, endpoint_auth_flags = endpoint_auth_flags, announce_version = announce_version, announce_command = announce_command)
     timing["enumerate"] = time.monotonic() - _t
     if test_targets == None:
         return 1
     if not test_targets:
-        _err(ctx, "No test targets in scope for: " + " ".join(patterns))
+        scope = " ".join(patterns) if patterns else "--target_pattern_file=" + (rc.flag_value("--target_pattern_file", command = "test") or "")
+        _err(ctx, "No test targets in scope for: " + scope)
         return 0
 
     _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.BOLD, color))
@@ -465,6 +471,9 @@ diff = task(
         "action results must already be uploaded (e.g. `bazel test //... " +
         "--remote_upload_local_results`). Against a sparse cache the result " +
         "over-reports.\n\n" +
+        "Selection follows Bazel test patterns and filters (Bazel 7+). Wildcards " +
+        "exclude manual-tagged tests; explicit manual targets remain selectable. " +
+        "Pass negative patterns after `--`.\n\n" +
         "Output: affected labels stream to stdout (one per line, pipeable: " +
         "`aspect cache diff | xargs bazel test`); progress, per-target reasons, " +
         "and the summary go to stderr. Pass --exec=\"<cmd>\" to run `<cmd> " +

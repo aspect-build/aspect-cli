@@ -1,6 +1,6 @@
 """Cache selection contracts, including real Bazel loading without actions."""
 
-load("./cache_selection.axl", "attribution_flags", "attribution_rc", "select_tests", "selected_tests")
+load("./cache_selection.axl", "attribution_rc", "select_tests", "testonly_attribution_flags", "testonly_selected_tests")
 
 def _eq(name, got, want):
     if got != want:
@@ -14,48 +14,59 @@ def _events(labels):
 
 def _parser_tests():
     good = _events(["//:b", "//:a"])
-    _eq("selected labels", selected_tests(good, 4), ["//:a", "//:b"])
-    _eq("empty scope", selected_tests(_events([]), 4), [])
+    _eq("selected labels", testonly_selected_tests(good, 4), ["//:a", "//:b"])
+    success = [good[0], {"finished": {"exitCode": {"code": 0}}}] + good[2:]
+    _eq("successful loading exit", testonly_selected_tests(success, 0), ["//:a", "//:b"])
+    _eq("empty scope", testonly_selected_tests(_events([]), 4), [])
     for code in [0, 1, 2, 3, 8, 130]:
-        _eq("unexpected process exit", selected_tests(good, code), None)
-    _eq("no events", selected_tests([], 4), None)
-    _eq("missing terminal event", selected_tests(good[:-1], 4), None)
-    _eq("missing expansion", selected_tests(good[1:], 4), None)
-    _eq("missing finish", selected_tests(good[:1] + good[2:], 4), None)
-    _eq("missing target abort", selected_tests(good[:2] + good[3:], 4), None)
-    _eq("duplicate expansion", selected_tests(good[:1] + good, 4), None)
-    _eq("duplicate finish", selected_tests(good[:2] + good[1:], 4), None)
-    _eq("trailing events", selected_tests(good + [{}], 4), None)
+        _eq("unexpected process exit", testonly_selected_tests(good, code), None)
+    _eq("no events", testonly_selected_tests([], 4), None)
+    _eq("missing terminal event", testonly_selected_tests(good[:-1], 4), None)
+    _eq("missing expansion", testonly_selected_tests(good[1:], 4), None)
+    _eq("missing finish", testonly_selected_tests(good[:1] + good[2:], 4), None)
+    _eq("missing target abort", testonly_selected_tests(good[:2] + good[3:], 4), None)
+    _eq("duplicate expansion", testonly_selected_tests(good[:1] + good, 4), None)
+    _eq("duplicate finish", testonly_selected_tests(good[:2] + good[1:], 4), None)
+    _eq("trailing events", testonly_selected_tests(good + [{}], 4), None)
     for reason in ["LOADING_FAILURE", "INTERNAL", "USER_INTERRUPTED", "ANALYSIS_FAILURE"]:
         bad = {"aborted": {"reason": reason}}
-        _eq("abort " + reason, selected_tests(good[:-1] + [bad, good[-1]], 4), None)
-    _eq("partial expansion", selected_tests([
+        _eq("abort " + reason, testonly_selected_tests(good[:-1] + [bad, good[-1]], 4), None)
+    _eq("partial expansion", testonly_selected_tests([
         {"expanded": {}, "children": [{"pattern": {"pattern": ["//missing/..."]}}]},
     ] + good[1:], 4), None)
 
 def _impl(ctx: TaskContext) -> int:
     _parser_tests()
-    _eq("attribution keeps graph flags", attribution_flags([
-        "--define=foo=bar",
-        "--test_tag_filters",
-        "-noci",
-        "--test_size_filters=small",
-        "--target_pattern_file=/tmp/patterns",
-        "--test_filter=selected_case",
-        "--test_timeout_filters",
-        "short",
-        "--test_lang_filters=go",
-        "--keep_going",
-    ]), ["--define=foo=bar", "--keep_going"])
-    _eq("versioned selection flag", attribution_flags([("--test_tag_filters=-noci", ">=7")]), [])
-    _eq("common overrides remain Bazel-owned", attribution_flags(["--default_override=0:common=--test_tag_filters=-noci"]), ["--default_override=0:common=--test_tag_filters=-noci"])
+    _eq("command-inapplicable flags use common", testonly_attribution_flags([
+        "--test_env=FOO=1",
+        "--runs_per_test=2",
+        "--build_tests_only",
+        "--remote_download_outputs=minimal",
+        "--remote_cache=grpc://127.0.0.1:1",
+    ]), ["--default_override=0:common=" + flag for flag in [
+        "--test_env=FOO=1",
+        "--runs_per_test=2",
+        "--build_tests_only",
+        "--remote_download_outputs=minimal",
+        "--remote_cache=grpc://127.0.0.1:1",
+    ]])
+    _eq("do not consume a following flag", testonly_attribution_flags(["--test_filter", "--keep_going"]), [
+        "--default_override=0:common=--test_filter",
+        "--default_override=0:common=--keep_going",
+    ])
+    _eq("two-token and negative values", testonly_attribution_flags(["--test_env", "FOO=1", "--test_tag_filters", "-noci", "--keep_going"]), [
+        "--default_override=0:common=--test_env=FOO=1",
+        "--default_override=0:common=--test_tag_filters=-noci",
+        "--default_override=0:common=--keep_going",
+    ])
+    _eq("common overrides remain Bazel-owned", testonly_attribution_flags(["--default_override=0:common=--test_tag_filters=-noci"]), ["--default_override=0:common=--test_tag_filters=-noci"])
     versioned = ctx.bazel.new_rc(version = "7.4.0", flags = [
         ("--define=old_graph=yes", "<8"),
         ("--define=new_graph=yes", ">=8"),
         ("--test_tag_filters=-noci", "<8"),
     ])
     _, query_flags = attribution_rc(ctx, versioned).expand_all(command = "query")
-    _eq("attribution preserves resolved version conditions", query_flags, ["--define=old_graph=yes"])
+    _eq("attribution preserves resolved version conditions", query_flags, ["--default_override=0:common=--define=old_graph=yes", "--default_override=0:common=--test_tag_filters=-noci"])
     root = ctx.std.fs.mkdtemp(prefix = "aspect-selection-test-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
     workspace = root + "/workspace"
@@ -81,6 +92,7 @@ fixture_test(name = "private_test")
     startup = ["--batch", "--output_base=" + root + "/output"]
     ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = startup))
     cases = [
+        ("BES disabled for loading", ["//:ci"], ["--bes_backend=grpc://127.0.0.1:1", "--bes_timeout=1s"], ["//:ci"]),
         ("positive", ["//:ci"], [], ["//:ci"]),
         ("default wildcard", ["//..."], [], ["//:ci", "//:skip", "//personal:private_test"]),
         ("negative", ["//...", "-//personal/..."], [], ["//:ci", "//:skip"]),
