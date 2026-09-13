@@ -181,33 +181,27 @@ impl ExecLogStream {
 
     /// Spawn the execlog reader thread for a regular file.
     ///
-    /// `pid` is the Bazel server process ID, used to detect when Bazel has finished
-    /// writing the file. `out_path` is the file Bazel will write
-    /// `--execution_log_compact_file` to. Pass `Some(path)` to reuse an existing sink
-    /// path (e.g. a `CompactFile` sink so Bazel writes directly to the caller's
-    /// destination without a tee step). Pass `None` to have a UUID-named temp file
-    /// created automatically.
+    /// `path` is the file Bazel was given as `--execution_log_compact_file`.
+    /// `writer_pid` is the bazel client pid of the invocation writing it: the
+    /// server closes the log before the client exits, so the client's exit is
+    /// the end-of-stream signal. Call this after the client has been spawned.
     ///
     /// The thread streams the file as Bazel writes it using [`galvanize::StreamingFile`],
-    /// which busy-polls for file existence at open time and retries reads while Bazel
-    /// holds the file open. It self-terminates when Bazel closes the file.
+    /// which busy-polls for file existence at open time and retries reads while the
+    /// client is alive.
     pub fn spawn_with_file(
-        pid: u32,
-        out_path: Option<PathBuf>,
+        path: PathBuf,
+        writer_pid: u32,
         compact_sink_paths: Vec<String>,
         has_file_sinks: bool,
-    ) -> io::Result<(PathBuf, Self)> {
-        let out = out_path.unwrap_or_else(|| {
-            env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()))
-        });
+    ) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
-        let path = out.clone();
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
             buf.resize(10, 0);
 
-            let out_raw = galvanize::StreamingFile::open(path.clone(), pid)?;
+            let out_raw = galvanize::StreamingFile::open(path, writer_pid)?;
             let writers = compact_sink_paths
                 .iter()
                 .map(|p| Ok(BufWriter::new(File::create(p)?)))
@@ -262,14 +256,11 @@ impl ExecLogStream {
             }
         });
 
-        Ok((
-            out,
-            Self {
-                handle,
-                recv: Some(recv),
-                file_sink_handles: vec![],
-            },
-        ))
+        Ok(Self {
+            handle,
+            recv: Some(recv),
+            file_sink_handles: vec![],
+        })
     }
 
     pub fn receiver(&self) -> Receiver<ExecLogEntry> {
