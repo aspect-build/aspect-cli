@@ -1,28 +1,16 @@
-//! A refusal raised through `TaskExit` ends the task without a traceback.
+//! A refusal a Rust builtin raises through `TaskExit` ends the task with its
+//! message and no traceback.
 //!
-//! `aspect auth use <unknown>` is the motivating case: the `unknown deployment`
-//! message is complete on its own, and the `Traceback (most recent call last)`
-//! block the evaluator used to print around it was noise. The path only reads
-//! the user's deployment config, so the developer's own `~/.aspect/config.json`
-//! is left alone; the credential store is redirected regardless so the test can
-//! never reach a keyring.
+//! `aspect auth use <unknown>` exercises the path end to end: the runtime
+//! prints the `unknown deployment` refusal as an `ERROR:` line and exits 1.
+//! The command only reads the deployment config before refusing, so the
+//! developer's own `~/.aspect/config.json` is left alone; the credential store
+//! is redirected regardless so the test can never reach a keyring.
 
+mod common;
+
+use common::aspect_cli;
 use std::process::Command;
-
-/// Locate the CLI under test: `ASPECT_CLI_BIN` under Bazel, cargo's
-/// `CARGO_BIN_EXE_*` otherwise (`option_env!` because the cargo variable does
-/// not exist in a Bazel build).
-fn aspect_cli() -> String {
-    match std::env::var("ASPECT_CLI_BIN") {
-        Ok(p) => std::fs::canonicalize(&p)
-            .unwrap_or_else(|e| panic!("ASPECT_CLI_BIN={p:?} not found: {e}"))
-            .to_string_lossy()
-            .into_owned(),
-        Err(_) => option_env!("CARGO_BIN_EXE_aspect-cli")
-            .expect("set ASPECT_CLI_BIN or run under cargo")
-            .to_string(),
-    }
-}
 
 #[test]
 fn unknown_deployment_is_reported_without_a_traceback() {

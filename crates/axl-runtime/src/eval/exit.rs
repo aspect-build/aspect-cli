@@ -1,17 +1,17 @@
 //! The error a task raises to end early with a message and no traceback.
 //!
-//! Two producers, one consumer. AXL calls `ctx.std.process.exit(code, message)`;
-//! a Rust builtin refusing a request returns [`TaskExit::error`] as its
-//! `anyhow::Error`. Both unwind through the evaluator like any other error, so
-//! `ctx.defer` callbacks still run, and both reach
-//! `MultiPhaseEval::execute_tasks_with_args` (or the CLI's top-level error arm,
-//! for a feature or config impl) as a `starlark::Error` wrapping this type. The
-//! consumer downcasts, prints the message, and uses the code as the task's exit
-//! code, the same path `return code` from `_impl` takes. `ASPECT_DEBUG` restores
-//! the traceback after the message.
+//! Two producers: AXL calls `ctx.std.process.exit(code, message)`, and a Rust
+//! builtin refusing a request returns [`TaskExit::error`] as its
+//! `anyhow::Error`. Either unwinds through the evaluator like any other error,
+//! so `ctx.defer` callbacks still run, and arrives wrapped in a
+//! `starlark::Error`. Two consumers downcast it: the task runner in
+//! `MultiPhaseEval::execute_tasks_with_args`, which reports it exactly like a
+//! returned `TaskConclusion` with the same code and message, and the CLI's
+//! top-level error arm, for an exit raised from a feature or config impl.
+//! Neither prints a traceback unless `ASPECT_DEBUG` is set.
 //!
 //! The downcast finds `TaskExit` only at the root of the anyhow chain; a
-//! `.context(...)` wrapper hides it and the error renders as a traceback again.
+//! `.context(...)` wrapper hides it and the error renders as a traceback.
 //! The code is `NonZeroU8` on purpose: an early *success* would skip the hooks
 //! the task body had yet to invoke while reporting a clean run, so exiting is
 //! for refusals and `return 0` at the top of `_impl` remains the way to succeed
@@ -24,6 +24,7 @@ use crate::diag;
 use crate::errln;
 use crate::eval::EvalError;
 
+/// A task ending early: the exit code it wants and, optionally, why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskExit {
     pub code: NonZeroU8,
@@ -40,12 +41,13 @@ impl TaskExit {
         Self::new(NonZeroU8::MIN, Some(message.into()))
     }
 
-    /// The exit carried by a native builtin's error, if that is what `err` is.
+    /// The exit carried by `err`, if that is what it is. `Native` is how a
+    /// builtin's error arrives; `Other` is how [`EvalError`] re-wraps one.
     pub fn from_starlark(err: &starlark::Error) -> Option<&TaskExit> {
         match err.kind() {
-            starlark::ErrorKind::Native(e)
-            | starlark::ErrorKind::Other(e)
-            | starlark::ErrorKind::Fail(e) => e.downcast_ref::<TaskExit>(),
+            starlark::ErrorKind::Native(e) | starlark::ErrorKind::Other(e) => {
+                e.downcast_ref::<TaskExit>()
+            }
             _ => None,
         }
     }
@@ -53,12 +55,13 @@ impl TaskExit {
     pub fn from_eval_error(err: &EvalError) -> Option<&TaskExit> {
         match err {
             EvalError::StarlarkError(e) => Self::from_starlark(e),
-            EvalError::UnknownError(e) => e.downcast_ref::<TaskExit>(),
+            EvalError::UnknownError(e) => Self::from_anyhow(e),
             _ => None,
         }
     }
 
-    /// Search an `anyhow` chain, including an [`EvalError`] link, for an exit.
+    /// Search an `anyhow` chain for an exit, following [`EvalError`] links
+    /// however deeply the phases have wrapped one another.
     pub fn from_anyhow(err: &anyhow::Error) -> Option<&TaskExit> {
         if let Some(exit) = err.downcast_ref::<TaskExit>() {
             return Some(exit);
@@ -177,6 +180,28 @@ t = task(implementation = _impl)
             TaskExit::from_anyhow(&context).map(|e| e.code.get()),
             Some(1)
         );
+    }
+
+    /// A feature impl runs before the task runner is involved, so its exit
+    /// reaches the caller as the eval error the CLI's top-level arm inspects.
+    #[test]
+    fn exit_from_a_feature_impl_is_found_in_the_eval_error() {
+        let err = crate::test::eval(
+            r#"
+def _feature(ctx):
+    ctx.std.process.exit(4, "not here")
+
+def _impl(ctx):
+    return 0
+
+Guard = feature(implementation = _feature)
+t = task(implementation = _impl)
+"#,
+        )
+        .with_features(&["Guard"])
+        .run_task(0)
+        .expect_err("a feature impl exit is an error to the task runner");
+        assert_eq!(TaskExit::from_anyhow(&err).map(|e| e.code.get()), Some(4));
     }
 
     #[test]

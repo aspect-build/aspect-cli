@@ -92,5 +92,5 @@ deployment, a missing login), return `axl_runtime::TaskExit::error(msg)` as
 the error instead: the task runner prints the message as an `ERROR:` line, no
 traceback, and exits with code 1. `TaskExit::new(code, message)` picks another
 non-zero code. Keep it at the root of the error, not under `.context(...)`,
-or the downcast misses it and the traceback is back. `ASPECT_DEBUG=1` shows the
-traceback after the message for anyone debugging.
+or the downcast misses it and the error renders as a traceback. `ASPECT_DEBUG=1`
+prints the traceback after the message for anyone debugging.

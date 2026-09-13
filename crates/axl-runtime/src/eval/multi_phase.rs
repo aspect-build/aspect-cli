@@ -432,10 +432,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Phase 3: run enabled feature implementations.
     ///
-    /// Must be called after `eval_config` so that config files have had the opportunity
-    /// to enable or disable features. `args_builder` builds the fully-merged `Arguments`
-    /// for each feature (callers handle CLI/override/default precedence). Features whose
-    /// resolved `enabled` is `False` are skipped.
+    /// Must be called after [`Self::execute_configs`] so that config files have had
+    /// the opportunity to enable or disable features. `args_builder` builds the
+    /// fully-merged `Arguments` for each feature (callers handle CLI/override/default
+    /// precedence). Features whose resolved `enabled` is `False` are skipped.
+    ///
+    /// A failing feature impl propagates as its own `starlark::Error` under a
+    /// `Feature implementation failed` context, so a [`TaskExit`] raised inside it
+    /// is still found by [`TaskExit::from_anyhow`].
     #[tracing::instrument(name = "execute.features", skip_all)]
     pub fn execute_features_with_args(
         &mut self,
@@ -445,7 +449,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let trait_map_value = self.trait_map_value.ok_or_else(|| {
             EvalError::UnknownError(anyhow!(
-                "eval_config() must be called before execute_features_with_args()"
+                "execute_configs() must be called before execute_features_with_args()"
             ))
         })?;
 
@@ -472,7 +476,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             eval.extra = Some(&self.loader.env);
             eval.eval_function(feature.implementation(), &[fctx], &[])
                 .map_err(|e| {
-                    EvalError::UnknownError(anyhow!("Feature implementation failed: {:?}", e))
+                    EvalError::UnknownError(
+                        anyhow::Error::from(EvalError::StarlarkError(e))
+                            .context("Feature implementation failed"),
+                    )
                 })?;
         }
 
@@ -816,7 +823,7 @@ impl<'a> Verdict<'a> {
 
 /// What `_impl` left behind, whichever way it ended: a return value or a
 /// [`TaskExit`]. One shape for everything the runtime does afterwards.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Outcome {
     exit_code: Option<u8>,
     flagged: bool,
@@ -836,16 +843,20 @@ impl Outcome {
         }
     }
 
-    /// Print `message`, if any, with a severity matching the verdict:
-    /// `ERROR:` on a non-zero exit, `WARNING:` when flagged, plain otherwise.
-    fn report_message(&self) {
-        let Some(message) = &self.message else {
-            return;
-        };
+    /// The severity `message` is printed with, following the verdict the
+    /// bookend will show: `ERROR` for a failure, `WARNING` when flagged,
+    /// `INFO` for a clean pass.
+    fn severity(&self) -> diag::Severity {
         match self.exit_code {
-            Some(code) if code != 0 => diag::error(message),
-            _ if self.flagged => diag::warn(message),
-            _ => errln!("{message}"),
+            Some(code) if code != 0 => diag::Severity::Error,
+            _ if self.flagged => diag::Severity::Warning,
+            _ => diag::Severity::Info,
+        }
+    }
+
+    fn report_message(&self) {
+        if let Some(message) = &self.message {
+            diag::emit(self.severity(), message);
         }
     }
 }
@@ -1128,6 +1139,44 @@ mod tests {
     use crate::module::Mod;
     use starlark::values::ValueLike;
     use std::time::Duration;
+
+    use super::Outcome;
+    use crate::diag::Severity;
+    use crate::eval::TaskExit;
+    use std::num::NonZeroU8;
+
+    fn outcome(exit_code: Option<u8>, flagged: bool) -> Outcome {
+        Outcome {
+            exit_code,
+            flagged,
+            text: String::new(),
+            message: Some("why".to_string()),
+        }
+    }
+
+    #[test]
+    fn message_severity_follows_the_verdict() {
+        assert_eq!(outcome(Some(1), false).severity(), Severity::Error);
+        // Failure dominates the flag, as it does on the bookend.
+        assert_eq!(outcome(Some(1), true).severity(), Severity::Error);
+        assert_eq!(outcome(Some(0), true).severity(), Severity::Warning);
+        assert_eq!(outcome(Some(0), false).severity(), Severity::Info);
+        assert_eq!(outcome(None, false).severity(), Severity::Info);
+    }
+
+    #[test]
+    fn an_exit_becomes_a_failed_outcome_with_its_message() {
+        let exit = TaskExit::new(NonZeroU8::new(3).unwrap(), Some("stop".to_string()));
+        assert_eq!(
+            Outcome::from_exit(&exit),
+            Outcome {
+                exit_code: Some(3),
+                flagged: false,
+                text: String::new(),
+                message: Some("stop".to_string()),
+            }
+        );
+    }
 
     /// A task declaring an `args.passthrough()` bucket promises to act on what
     /// the CLI routes into it. These four pin the whole contract: the task gets

@@ -15,27 +15,10 @@
 //! job, where it can be checked without a subprocess. This asserts the command
 //! completes, which is the part only an end-to-end run can tell us.
 
-use std::process::Command;
+mod common;
 
-/// Locate the CLI under test.
-///
-/// Bazel sets `ASPECT_CLI_BIN` from the `rust_test` rule's `env` via
-/// `$(rootpath :aspect-cli)`, relative to the runfiles root that is a Bazel-run
-/// test's cwd. Under cargo, `CARGO_BIN_EXE_*` points at the binary cargo already
-/// built for this test.
-fn aspect_cli() -> String {
-    match std::env::var("ASPECT_CLI_BIN") {
-        Ok(p) => std::fs::canonicalize(&p)
-            .unwrap_or_else(|e| panic!("ASPECT_CLI_BIN={p:?} not found: {e}"))
-            .to_string_lossy()
-            .into_owned(),
-        // `option_env!`, not `env!`: the cargo variable does not exist in a Bazel
-        // build, and `env!` would fail to compile there.
-        Err(_) => option_env!("CARGO_BIN_EXE_aspect-cli")
-            .expect("set ASPECT_CLI_BIN or run under cargo")
-            .to_string(),
-    }
-}
+use common::aspect_cli;
+use std::process::Command;
 
 /// Run `auth status` against an empty credential store.
 ///

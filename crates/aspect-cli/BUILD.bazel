@@ -76,10 +76,14 @@ rust_test(
 # Integration tests spawn the built CLI. `rust_test(crate = ...)` covers only
 # unit tests inside `src/`, so without a target per file nothing under `tests/`
 # runs in CI, which has no `cargo test` step. Each resolves the binary through
-# `ASPECT_CLI_BIN` (with a `CARGO_BIN_EXE_…` fallback for cargo).
+# `ASPECT_CLI_BIN` (with a `CARGO_BIN_EXE_…` fallback for cargo) via the shared
+# `tests/common/mod.rs`.
+INTEGRATION_TEST_COMMON_SRCS = ["tests/common/mod.rs"]
+
 rust_test(
     name = "broken_pipe_test",
-    srcs = ["tests/broken_pipe.rs"],
+    srcs = ["tests/broken_pipe.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/broken_pipe.rs",
     data = [":aspect-cli"],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
@@ -88,7 +92,8 @@ rust_test(
 
 rust_test(
     name = "crash_handler_test",
-    srcs = ["tests/crash_handler.rs"],
+    srcs = ["tests/crash_handler.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/crash_handler.rs",
     data = [":aspect-cli"],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
@@ -100,7 +105,8 @@ rust_test(
 
 rust_test(
     name = "auth_status_test",
-    srcs = ["tests/auth_status.rs"],
+    srcs = ["tests/auth_status.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/auth_status.rs",
     data = [":aspect-cli"],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
@@ -113,7 +119,8 @@ rust_test(
 
 rust_test(
     name = "task_exit_test",
-    srcs = ["tests/task_exit.rs"],
+    srcs = ["tests/task_exit.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/task_exit.rs",
     data = [":aspect-cli"],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",

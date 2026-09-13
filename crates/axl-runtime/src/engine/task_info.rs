@@ -491,7 +491,7 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
 ///                  on non-zero exit (failure dominates).
 /// - `message`    — why the task ended, printed on its own line before
 ///                  the bookend: `ERROR:` on a non-zero exit, `WARNING:`
-///                  when flagged, plain otherwise. The same rendering
+///                  when flagged, `INFO:` otherwise. The same rendering
 ///                  `ctx.std.process.exit(code, message)` gets, so a
 ///                  refusal reads the same whether `_impl` returns it or
 ///                  a nested helper raises it.
@@ -567,7 +567,7 @@ pub fn register_globals(globals: &mut starlark::environment::GlobalsBuilder) {
     /// conclusion text (rendered as `· <text>` on the bookend), optional
     /// `flagged` flag (passing-with-warning), and an optional `message`
     /// saying why the task ended, printed before the bookend as an
-    /// `ERROR:` line on a non-zero exit (`WARNING:` when flagged, plain
+    /// `ERROR:` line on a non-zero exit (`WARNING:` when flagged, `INFO:`
     /// otherwise). `return TaskConclusion(exit_code = 1, message = ...)`
     /// renders exactly like `ctx.std.process.exit(1, ...)`.
     ///
@@ -645,7 +645,12 @@ Test = task(implementation = _impl)
         let exit = crate::test::eval(
             r#"
 def _impl(ctx):
-    return TaskConclusion(exit_code = 1, message = "Provide a target.")
+    conclusion = TaskConclusion(exit_code = 1, message = "Provide a target.")
+    if conclusion.message != "Provide a target.":
+        fail("message attribute did not round-trip")
+    if TaskConclusion(exit_code = 0).message != None:
+        fail("message should default to None")
+    return conclusion
 
 Test = task(implementation = _impl)
 "#,

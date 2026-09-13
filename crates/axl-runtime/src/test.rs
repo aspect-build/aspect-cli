@@ -36,6 +36,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         code: code.to_string(),
         with_loader: false,
         with_fake_bazel: false,
+        features: vec![],
         string_list_args: vec![],
     }
 }
@@ -44,6 +45,7 @@ pub struct EvalBuilder {
     code: String,
     with_loader: bool,
     with_fake_bazel: bool,
+    features: Vec<String>,
     string_list_args: Vec<(String, Vec<String>)>,
 }
 
@@ -52,6 +54,15 @@ impl EvalBuilder {
     /// is used as the synthetic repo root.
     pub fn with_loader(mut self) -> Self {
         self.with_loader = true;
+        self
+    }
+
+    /// Register the snippet's `feature(...)` exports named in `symbols`, as a
+    /// `use_feature` in MODULE.aspect would, and run Phase 2 and Phase 3 in
+    /// [`EvalBuilder::run_task`] with no config files and empty feature
+    /// `Arguments`, so those implementations execute before the task does.
+    pub fn with_features(mut self, symbols: &[&str]) -> Self {
+        self.features = symbols.iter().map(|s| s.to_string()).collect();
         self
     }
 
@@ -155,8 +166,9 @@ impl EvalBuilder {
     }
 
     /// Drive `MultiPhaseEval` Phase 1 (discover tasks) + Phase 4 (execute).
-    /// Phase 2 (configs) and Phase 3 (features) are skipped — the snippet must
-    /// be self-contained. Task `idx` runs with empty `Arguments` unless
+    /// Phase 2 (configs) and Phase 3 (features) are skipped unless
+    /// [`EvalBuilder::with_features`] opted in — the snippet must be
+    /// self-contained. Task `idx` runs with empty `Arguments` unless
     /// [`EvalBuilder::with_string_list_args`] seeded some.
     ///
     /// Snippets that call `ctx.bazel.build` should opt in via
@@ -175,11 +187,16 @@ impl EvalBuilder {
 
         ModuleEnv::with(|env| -> anyhow::Result<Option<u8>> {
             let modules: Vec<Mod> = vec![];
-            let root_mod = Mod::new(
+            let mut root_mod = Mod::new(
                 tmp.path().to_path_buf(),
                 "_root".to_string(),
                 tmp.path().to_path_buf(),
             );
+            for symbol in &self.features {
+                root_mod
+                    .features
+                    .push((script_path.clone(), symbol.clone()));
+            }
             let loader = Loader::new(
                 "test".to_string(),
                 tmp.path().to_path_buf(),
@@ -191,6 +208,11 @@ impl EvalBuilder {
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)
                 .map_err(anyhow::Error::from)?;
+            if !self.features.is_empty() {
+                mpe.execute_configs(&[]).map_err(anyhow::Error::from)?;
+                mpe.execute_features_with_args(|_f, _h| Arguments::new())
+                    .map_err(anyhow::Error::from)?;
+            }
             let exit = mpe
                 .execute_tasks_with_args(
                     task_index,
