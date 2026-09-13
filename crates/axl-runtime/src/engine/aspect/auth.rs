@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 
 use super::credential_store::CredentialStore;
+use crate::eval::TaskExit;
 
 /// A deployment the CLI can authenticate against: the built-in Aspect
 /// deployment or a configured self-hosted one. `configure` discovers these from a
@@ -552,10 +553,11 @@ pub(crate) fn select_deployment(
             .find(|d| names_deployment(d, name))
             .cloned()
             .ok_or_else(|| {
-                anyhow::anyhow!(
+                TaskExit::error(format!(
                     "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
                     name
-                )
+                ))
+                .into()
             });
     }
     deployments
@@ -1337,16 +1339,17 @@ fn configure_deployment(
 /// is cleaned up.
 fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result<()> {
     if is_reserved_name(name) && !deployments.iter().any(|d| d.name == name) {
-        return Err(anyhow::anyhow!(
-            "the built-in {name:?} account cannot be removed"
-        ));
+        return Err(
+            TaskExit::error(format!("the built-in {name:?} account cannot be removed")).into(),
+        );
     }
     let before = deployments.len();
     deployments.retain(|d| d.name != name);
     if deployments.len() == before {
-        return Err(anyhow::anyhow!(
+        return Err(TaskExit::error(format!(
             "unknown deployment: {name:?}\n\nRun `aspect auth status` to see configured deployments."
-        ));
+        ))
+        .into());
     }
     Ok(())
 }
@@ -1381,10 +1384,11 @@ fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyh
     let target = name.filter(|n| !names_aspect_cloud(n));
     if let Some(target) = target {
         if !deployments.iter().any(|d| d.name == target) {
-            return Err(anyhow::anyhow!(
+            return Err(TaskExit::error(format!(
                 "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
                 target
-            ));
+            ))
+            .into());
         }
     }
     for d in deployments.iter_mut() {

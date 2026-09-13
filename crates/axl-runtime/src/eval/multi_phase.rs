@@ -27,6 +27,7 @@ use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
 use crate::engine::r#trait::extract_trait_type_id;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
+use crate::eval::exit::TaskExit;
 use crate::eval::load::AxlLoader;
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
@@ -483,6 +484,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// The index refers to the position in `self.tasks()` (same Vec returned to
     /// the CLI when building the command tree). `args_builder` returns the
     /// fully-merged `Arguments` (callers handle CLI/override/default precedence).
+    ///
+    /// Returns the task's exit code: what `_impl` returned, or the code of a
+    /// [`TaskExit`] it raised, which is reported without a traceback. Any other
+    /// error propagates.
     #[tracing::instrument(
         name = "execute.task",
         skip_all,
@@ -596,8 +601,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
         run_deferred(context, &mut eval);
-        let ret = impl_result?;
-        let (exit_code, flagged, conclusion) = unpack_task_return(ret);
+        let (exit_code, flagged, conclusion) = match impl_result {
+            Ok(ret) => unpack_task_return(ret),
+            // `ctx.std.process.exit` and a builtin's `TaskExit` end the task
+            // like `return code`: the message, no traceback.
+            Err(e) => match TaskExit::from_starlark(&e) {
+                Some(exit) => {
+                    exit.report(&e);
+                    (Some(exit.code.get()), false, String::new())
+                }
+                None => return Err(e.into()),
+            },
+        };
 
         // The task has had its chance to act on the flags the CLI could not
         // attribute to a declared arg.
@@ -608,7 +623,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // A task that concluded with its own non-zero code has the more
             // informative story, so it keeps it; only an otherwise-successful
             // run fails over dropped flags. A hard error never reaches here at
-            // all (`impl_result?` above), so a real failure is never masked.
+            // all (propagated from `impl_result` above), and an early exit
+            // arrives with its own non-zero code, so a real failure is never
+            // masked.
             let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
             for (bucket, flags) in &unclaimed {
                 let message = passthrough::message(&task_kind, "return", bucket, flags);

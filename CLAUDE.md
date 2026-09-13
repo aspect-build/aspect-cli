@@ -82,3 +82,15 @@ Two things to know when adding tests here:
   `cargo test` step. Resolve the binary through `ASPECT_CLI_BIN` (set by the
   rule's `env`) with an `option_env!("CARGO_BIN_EXE_…")` fallback for cargo;
   plain `env!` will not compile under Bazel.
+
+## Refusals from Rust builtins
+
+A `#[starlark_module]` fn that returns a plain `anyhow::Error` renders in the
+terminal with the AXL traceback and an annotated source snippet. That is right
+for a bug. For an expected refusal whose message is the whole story (an unknown
+deployment, a missing login), return `axl_runtime::TaskExit::error(msg)` as
+the error instead: the task runner prints the message as an `ERROR:` line, no
+traceback, and exits with code 1. `TaskExit::new(code, message)` picks another
+non-zero code. Keep it at the root of the error, not under `.context(...)`,
+or the downcast misses it and the traceback is back. `ASPECT_DEBUG=1` shows the
+traceback after the message for anyone debugging.

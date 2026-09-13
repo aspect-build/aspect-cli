@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::num::NonZeroU8;
 use std::process;
 use std::process::Stdio;
 
@@ -26,8 +27,10 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
+use starlark::values::typing::StarlarkNever;
 
 use super::stream;
+use crate::eval::TaskExit;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Process>")]
@@ -70,6 +73,29 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     /// being in scope.
     fn id<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<i32> {
         Ok(process::id() as i32)
+    }
+
+    /// End the task with a non-zero exit `code` (default 1) and, optionally,
+    /// a `message` printed as a red `ERROR:` line, with no traceback. Use it
+    /// for an expected refusal whose message says it all, from however deep
+    /// in the call stack the refusal is discovered; keep `fail()` for bugs,
+    /// where the traceback helps. `ASPECT_DEBUG=1` prints the traceback after
+    /// the message anyway.
+    ///
+    /// The exit unwinds through every caller like an error: `ctx.defer`
+    /// callbacks still run, but hooks the task body had yet to invoke do not.
+    /// That is why `code` 0 is rejected; to succeed early, `return 0` from the
+    /// task's implementation instead.
+    fn exit<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(default = 1)] code: i32,
+        #[starlark(default = NoneOr::None)] message: NoneOr<&'v str>,
+    ) -> anyhow::Result<StarlarkNever> {
+        let code = u8::try_from(code)
+            .ok()
+            .and_then(NonZeroU8::new)
+            .ok_or_else(|| anyhow!("exit code must be 1..=255, got {code}"))?;
+        Err(TaskExit::new(code, message.into_option().map(str::to_owned)).into())
     }
 }
 

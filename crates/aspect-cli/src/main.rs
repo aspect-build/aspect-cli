@@ -56,7 +56,7 @@ fn install_allocator_error_handler() {
     unsafe { libmimalloc_sys::mi_register_error(Some(on_error), std::ptr::null_mut()) };
 }
 
-use axl_runtime::{errln, outln};
+use axl_runtime::{TaskExit, errln, outln};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -353,6 +353,12 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
+            // An exit raised from a feature or config impl never reaches the
+            // task runner, so it is recognized here instead.
+            if let Some(exit) = TaskExit::from_anyhow(&err) {
+                exit.report(&err);
+                return ExitCode::from(exit.code.get());
+            }
             errln!("error: {err:?}");
             ExitCode::FAILURE
         }

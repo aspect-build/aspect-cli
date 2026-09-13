@@ -111,6 +111,18 @@ rust_test(
     ],
 )
 
+rust_test(
+    name = "task_exit_test",
+    srcs = ["tests/task_exit.rs"],
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
 multi_platform_rust_binaries(
     name = "bins",
     tags = ["no-macos"],
