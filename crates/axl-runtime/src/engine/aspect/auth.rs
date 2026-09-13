@@ -539,11 +539,9 @@ fn repo_config_path() -> Option<PathBuf> {
 /// through here, so the alias works for `--remote` and `deployment_endpoints` as
 /// well as the `auth` commands.
 ///
-/// With no name, the entry marked `default` wins (the first configured deployment
-/// claims `default` when written, so a single configured deployment is the
-/// default), falling back to Aspect Cloud. The default flag is the single source of
-/// truth — configuring a deployment does not implicitly hijack selection away from
-/// an explicit default.
+/// With no name, the entry marked `default` wins, falling back to Aspect Cloud —
+/// which is therefore the default until `aspect auth use` or `configure --default`
+/// moves it. Configuring a deployment never does.
 pub(crate) fn select_deployment(
     deployments: &[Deployment],
     name: Option<&str>,
@@ -1130,12 +1128,18 @@ fn deployment_from_discovery(
     }
 }
 
-/// Insert or replace `deployment` in `existing` (by name), keeping exactly one
-/// entry marked `default`. A deployment becomes the default when it explicitly
-/// claims it, when it is the first configured entry, or when it replaces the
-/// entry that was already the default (so re-running `configure` on the current
-/// default does not silently clear it). Returns whether the written record is
-/// the effective default.
+/// Insert or replace `deployment` in `existing` (by name), keeping at most one
+/// entry marked `default`. Returns whether the written record is the effective
+/// default.
+///
+/// Configuring a deployment never moves the default. Aspect Cloud serves a cache
+/// and a BES of its own, so it is a working default from the first login, and a
+/// newly configured deployment silently taking over would change what every
+/// `--remote` build talks to. `--default` here and `aspect auth use` are the ways
+/// to move it, and both are the user saying so.
+///
+/// The one exception is re-configuring the deployment that already holds it, which
+/// keeps it rather than demoting it as a side effect of a refresh.
 ///
 /// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
 /// here — derived names and an explicit `--deployment` alike — so this is the one
@@ -1171,14 +1175,12 @@ fn upsert_deployment(
         return Ok(!claimed);
     }
 
-    let replacing_default = existing
+    // Re-configuring the current default keeps it: losing it to a refresh would be
+    // a side effect nobody asked for.
+    if existing
         .iter()
-        .any(|d| d.name == deployment.name && d.default);
-    // Aspect Cloud's entry cannot hold the crown, so it cannot withhold it either.
-    let none_default = !existing
-        .iter()
-        .any(|d| d.default && !names_aspect_cloud(&d.name));
-    if none_default || replacing_default {
+        .any(|d| d.name == deployment.name && d.default)
+    {
         deployment.default = true;
     }
     if deployment.default {
@@ -3902,8 +3904,7 @@ mod tests {
             ASPECT_CLOUD_DEPLOYMENT_NAME
         );
 
-        // The entry marked default wins (upsert makes the first configured entry
-        // default, so a single configured deployment is selected here).
+        // The entry marked default wins.
         let mut one = vec![aspect_cloud_deployment(), dep("acme", true)];
         one[0].default = false;
         assert_eq!(select_deployment(&one, None).unwrap().name, "acme");
@@ -4263,13 +4264,13 @@ mod tests {
         );
     }
 
-    /// The first configured deployment claims the default. Aspect Cloud already
-    /// having an entry must not make it look claimed, or nothing would ever become
-    /// the default and `--remote` would silently stay on Aspect Cloud.
+    /// `--default` reaches past Aspect Cloud's entry. That entry never holds the
+    /// flag, so it must not look like a holder either — otherwise the deployment
+    /// asking for the default would be refused it.
     #[test]
-    fn the_first_configured_deployment_claims_the_default_past_aspect_cloud() {
+    fn an_explicit_default_reaches_past_aspect_clouds_entry() {
         let mut existing = vec![dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false)];
-        assert!(upsert_deployment(&mut existing, dep("acme", false), false).unwrap());
+        assert!(upsert_deployment(&mut existing, dep("acme", true), false).unwrap());
         assert!(existing.iter().find(|d| d.name == "acme").unwrap().default);
     }
 
@@ -5720,19 +5721,30 @@ mod tests {
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
     }
 
+    /// Configuring never moves the default; only `--default` does. Aspect Cloud is
+    /// a working default from the first login, so a deployment taking over on
+    /// `configure` would change what every `--remote` build talks to without the
+    /// user asking — and it read as arbitrary, since only the *first* one could.
     #[test]
-    fn upsert_first_entry_and_explicit_default() {
-        // First configured entry becomes default even without claiming it.
+    fn configuring_a_deployment_does_not_take_the_default() {
         let mut existing: Vec<Deployment> = vec![];
-        assert!(upsert_deployment(&mut existing, dep("acme", false), false).unwrap());
+        assert!(
+            !upsert_deployment(&mut existing, dep("acme", false), false).unwrap(),
+            "the first configured deployment leaves the default with Aspect Cloud"
+        );
+        assert!(existing.iter().all(|d| !d.default));
 
-        // A later entry claiming default steals it from the previous one.
+        // The second behaves the same as the first, which is the consistency this
+        // buys: previously one stole the default and the other could not.
+        assert!(!upsert_deployment(&mut existing, dep("emca", false), false).unwrap());
+        assert!(existing.iter().all(|d| !d.default));
+
+        // `--default` is the user saying so, and takes it from whoever holds it.
         assert!(upsert_deployment(&mut existing, dep("emca", true), false).unwrap());
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
-        assert!(!existing.iter().find(|d| d.name == "acme").unwrap().default);
 
-        // A later non-default entry does not disturb the existing default.
+        // A later plain configure leaves that alone.
         assert!(!upsert_deployment(&mut existing, dep("third", false), false).unwrap());
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
     }

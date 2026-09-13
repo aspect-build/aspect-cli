@@ -10,7 +10,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "aspect_cloud_heading", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line", "use_command")
+load("@aspect//auth.axl", "aspect_cloud_heading", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line", "use_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -119,27 +119,47 @@ def _test_login_options(_):
         if "ASPECT_API_TOKEN" in option and "$ASPECT_API_TOKEN" not in option:
             fail("the variable must be marked with $: %s" % option)
 
+def _test_default_marker_line(_):
+    # The shape every entry shares, Aspect Cloud included: glyph first, so the
+    # column reads straight down a mixed list.
+    _eq("default", default_marker_line("acme", True), "● acme (default)")
+    _eq("not default", default_marker_line("acme", False), "○ acme")
+
+    # The glyph is unconditional; only the wording waits for something to contrast
+    # with. A lone entry is the default trivially, and saying so sends the reader
+    # looking for the alternative it implies.
+    _eq(
+        "default, unnoted",
+        default_marker_line("acme", True, note_default = False),
+        "● acme",
+    )
+    _eq(
+        "not default, unnoted",
+        default_marker_line("acme", False, note_default = False),
+        "○ acme",
+    )
+
 def _test_aspect_cloud_heading(_):
     cloud = _summary(builtin = True, name = "aspect-cloud")
     default_cloud = _summary(builtin = True, name = "aspect-cloud", default = True)
 
-    # Nothing else `--remote` could target, so the marker would be a distinction
-    # without a difference — and the legend that explains it is not printed either.
-    _eq("alone → plain heading", aspect_cloud_heading(default_cloud, False), "Aspect Cloud:")
-    _eq("alone, not default → plain heading", aspect_cloud_heading(cloud, False), "Aspect Cloud:")
+    # `_print_deployment` draws no header for Aspect Cloud — its name is this
+    # heading — so without this nothing on screen carries the marker the legend
+    # names, in the common case where Aspect Cloud is the default.
+    _eq("default", aspect_cloud_heading(default_cloud, True), "● Aspect Cloud (default)")
+    _eq("not default", aspect_cloud_heading(cloud, True), "○ Aspect Cloud")
 
-    # With a deployment present the choice is real, so the state is shown. This is
-    # the line that was missing: `_print_deployment` draws no `●/○` for Aspect
-    # Cloud, so without it nothing on screen carried the marker the legend names.
+    # The only deployment there is: still glyphed, since that column is what a
+    # reader scans, but not called the default — there is nothing it could be the
+    # default over.
+    _eq("alone", aspect_cloud_heading(default_cloud, False), "● Aspect Cloud")
+
+    # The heading is the product name, not the deployment name that `auth use`
+    # takes — which is why the `Default` row spells the command out.
     _eq(
-        "with deployments, default → marked",
-        aspect_cloud_heading(default_cloud, True),
-        "Aspect Cloud ● (default)",
-    )
-    _eq(
-        "with deployments, not default → hollow",
-        aspect_cloud_heading(cloud, True),
-        "Aspect Cloud ○",
+        "named for the product, whatever the entry is called",
+        aspect_cloud_heading(_summary(builtin = True, name = "aspect", default = True), True),
+        "● Aspect Cloud (default)",
     )
 
 def _test_use_command(_):
@@ -175,6 +195,7 @@ def _test_shadowed_warning(_):
 
 _UNIT_TESTS = [
     _test_aspect_cloud_heading,
+    _test_default_marker_line,
     _test_identity,
     _test_login_command,
     _test_login_options,
