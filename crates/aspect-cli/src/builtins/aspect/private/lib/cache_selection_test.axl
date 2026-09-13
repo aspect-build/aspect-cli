@@ -1,6 +1,6 @@
 """Cache selection contracts, including real Bazel loading without actions."""
 
-load("./cache_selection.axl", "attribution_flags", "select_tests", "selected_tests")
+load("./cache_selection.axl", "attribution_flags", "attribution_rc", "select_tests", "selected_tests")
 
 def _eq(name, got, want):
     if got != want:
@@ -49,6 +49,13 @@ def _impl(ctx: TaskContext) -> int:
     ]), ["--define=foo=bar", "--keep_going"])
     _eq("versioned selection flag", attribution_flags([("--test_tag_filters=-noci", ">=7")]), [])
     _eq("common overrides remain Bazel-owned", attribution_flags(["--default_override=0:common=--test_tag_filters=-noci"]), ["--default_override=0:common=--test_tag_filters=-noci"])
+    versioned = ctx.bazel.new_rc(version = "7.4.0", flags = [
+        ("--define=old_graph=yes", "<8"),
+        ("--define=new_graph=yes", ">=8"),
+        ("--test_tag_filters=-noci", "<8"),
+    ])
+    _, query_flags = attribution_rc(ctx, versioned).expand_all(command = "query")
+    _eq("attribution preserves resolved version conditions", query_flags, ["--define=old_graph=yes"])
     root = ctx.std.fs.mkdtemp(prefix = "aspect-selection-test-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
     workspace = root + "/workspace"
