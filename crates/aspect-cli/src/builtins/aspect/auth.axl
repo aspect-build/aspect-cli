@@ -85,7 +85,33 @@ def login_options(d) -> list[str]:
         "or set $" + d.api_token_env,
     ]
 
-def _print_deployment(d, header = True):
+def use_command(d) -> str:
+    """The `aspect auth use` command that makes `d` what `--remote` targets."""
+    return "aspect auth use " + d.name
+
+def default_marker_line(label: str, is_default: bool, note_default: bool = True) -> str:
+    """The `●/○ <label>` line marking whether `--remote` targets this entry.
+
+    One builder for Aspect Cloud's section heading and for each deployment's
+    header, so the glyph and its position cannot drift between them — that column
+    is what a reader scans down.
+
+    `note_default` spells out `(default)` beside a filled glyph. Drop it where
+    there is nothing to contrast with: a lone entry is the default trivially, and
+    saying so sends the reader looking for the alternative it implies."""
+    return ("● " if is_default else "○ ") + label + (" (default)" if is_default and note_default else "")
+
+def aspect_cloud_heading(d, has_deployments: bool) -> str:
+    """The heading over Aspect Cloud's block, in the same shape as a deployment's
+    header line.
+
+    Its marker rides here because `_print_deployment` draws no header for Aspect
+    Cloud — its name is this heading. Without it nothing on screen is marked in the
+    common case where Aspect Cloud is the default, and the legend names a glyph
+    that never appears."""
+    return default_marker_line("Aspect Cloud", d.default, note_default = has_deployments)
+
+def _print_deployment(d, header = True, show_use = False):
     """Print one entry's aligned detail table (Status, Issuer, and the build
     endpoints it serves). Shared by `auth status` and `configure`.
 
@@ -93,13 +119,15 @@ def _print_deployment(d, header = True):
     discovered its endpoints. Before that it has none to show, and the Status row
     carries the only thing worth acting on.
 
-    With `header`, leads with a `●/○ <name>` line (the ● default marker applies
-    only to deployments — it selects which one build/test target). Aspect Cloud
-    is a list of one under its own section header, so `auth status` passes
-    `header = False` to drop the redundant name line."""
+    With `header`, leads with the `●/○ <name>` line (see `default_marker_line`).
+    Aspect Cloud is a list of one under its own section heading, so `auth status`
+    passes `header = False` and marks that heading instead.
+
+    `show_use` adds the `aspect auth use` command as a row. For Aspect Cloud
+    only: its name is the one not printed anywhere else, so the legend's
+    `aspect auth use <name>` would otherwise be unresolvable for it."""
     if header:
-        is_default = d.default and not d.builtin
-        print(("● " if is_default else "○ ") + d.name + (" (default)" if is_default else ""))
+        print(default_marker_line(d.name, d.default))
 
     def _row(label, value):
         pad = _LABEL_WIDTH - len(label)
@@ -114,6 +142,9 @@ def _print_deployment(d, header = True):
         _row("Log in", options[0])
         for option in options[1:]:
             _row("", option)
+
+    if show_use:
+        _row("Default", "run `" + use_command(d) + "` to make this the default")
 
     # Only for a deployment, whose issuer is worth knowing because it varies — its
     # own FrontEgg environment, or a customer's IdP. Aspect Cloud's is fixed, so
@@ -425,7 +456,7 @@ configure = task(
         ),
         "default": args.boolean(
             default = False,
-            description = "Make this the default deployment (what build/test target without an explicit --deployment), taking over from any current default. Without it, a deployment becomes the default only when none is set yet.",
+            description = "Make this what `--remote` targets without an explicit --deployment, taking over from whatever holds it now. Without this, configuring a deployment never moves the default \u2014 it stays with Aspect Cloud until you run `aspect auth use <name>`.",
         ),
         "issuer": args.string(
             description = "Authorization server issuer to log in against, for deployments that advertise more than one (e.g. https://auth.acme.example.com). Required when running non-interactively; on a TTY you are prompted to choose. Fails if the deployment does not advertise it.",
@@ -538,9 +569,9 @@ def _status_impl(ctx: TaskContext) -> int:
     for s in ignored:
         warn(ctx.std, shadowed_warning(s))
 
-    print("Aspect Cloud:")
     for d in aspect_cloud:
-        _print_deployment(d, header = False)
+        print(aspect_cloud_heading(d, bool(deployments)))
+        _print_deployment(d, header = False, show_use = not d.default)
 
     print("")
     if deployments:
@@ -549,7 +580,7 @@ def _status_impl(ctx: TaskContext) -> int:
             print("")
             _print_deployment(d)
         print("")
-        print("● = default. Switch with `aspect auth use <name>`.")
+        print("● = what `--remote` uses by default. Switch with `aspect auth use <name>`.")
         default = ([d for d in deployments if d.default] + aspect_cloud)[0]
         _print_default_usage_hint(default, len(deployments))
     else:
