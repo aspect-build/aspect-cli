@@ -407,10 +407,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         task_index: usize,
         task_name: &str,
         task_name_meaningful: bool,
+        quiet: bool,
     ) -> Result<(), EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
+        if quiet {
+            return Ok(());
+        }
         let (verb_seq, reset) = running_verb_color();
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
@@ -502,6 +506,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         task_friendly_name: Option<String>,
         task_id: Option<String>,
         timing: TimingMode,
+        quiet: bool,
         args_builder: impl FnOnce(&dyn TaskLike<'v>, Heap<'v>) -> Arguments<'v>,
     ) -> Result<Option<u8>, EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
@@ -532,6 +537,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_name.clone(),
             task_friendly_name,
             task_id,
+            quiet,
         );
 
         // The opening `→ 🎬 Running …` (or BK `--- :aspect: Running …`)
@@ -644,6 +650,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
 
         let failed = matches!(exit_code, Some(code) if code != 0);
+        if quiet {
+            return Ok(exit_code);
+        }
         let breakdown = render_phase_breakdown(&phases, timing, failed);
         let timing_segment = render_timing_segment(timing, elapsed);
         let conclusion_suffix = if conclusion.is_empty() {

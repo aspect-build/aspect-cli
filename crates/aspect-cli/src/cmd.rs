@@ -91,6 +91,7 @@ pub struct Dispatch {
     pub task_friendly_name: Option<String>,
     pub task_uuid: Option<String>,
     pub timing: TimingMode,
+    pub quiet: bool,
     matches: ArgMatches,
 }
 
@@ -159,6 +160,17 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .global(true)
                     .value_parser(parse_task_uuid)
                     .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
+            )
+            .arg(
+                ClapArg::new("task:quiet")
+                    .long("task:quiet")
+                    .value_name("BOOL")
+                    .global(true)
+                    .value_parser(value_parser!(bool))
+                    .num_args(0..=1)
+                    .require_equals(true)
+                    .default_missing_value("true")
+                    .help("Suppress Aspect's informational task UI while preserving task output."),
             )
             .arg(
                 ClapArg::new("task:timing-summary")
@@ -271,6 +283,10 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .get_one::<TimingMode>("task:timing-summary")
             .copied()
             .unwrap_or_default();
+        let quiet = leaf
+            .get_one::<bool>("task:quiet")
+            .copied()
+            .unwrap_or_else(|| self.tasks[task_id].quiet());
         Ok(Dispatch {
             task_id,
             task_name,
@@ -278,6 +294,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
             task_friendly_name,
             task_uuid,
             timing,
+            quiet,
             matches,
         })
     }
@@ -1563,6 +1580,7 @@ fn describe_json(
                 "name": kind,
                 "summary": task.summary(),
                 "description": task.description(),
+                "quiet": task.quiet(),
                 "defined_in": defined_in_label(task.path(), aspect_root, modules),
                 "args": args,
             })
@@ -2114,6 +2132,7 @@ mod tests {
         args: SmallMap<String, Arg>,
         path: PathBuf,
         summary: String,
+        quiet: bool,
     }
 
     impl<'v> TaskLike<'v> for StubTask {
@@ -2134,6 +2153,9 @@ mod tests {
         }
         fn kind(&self) -> String {
             self.name.clone()
+        }
+        fn quiet(&self) -> bool {
+            self.quiet
         }
         fn path(&self) -> &PathBuf {
             &self.path
@@ -2160,6 +2182,7 @@ mod tests {
             args,
             path: PathBuf::from("/repo/tasks/test.axl"),
             summary: format!("Stub {name} task."),
+            quiet: false,
         }
     }
 
@@ -2507,6 +2530,7 @@ mod tests {
         // The command string is the whole point: an agent copies it verbatim.
         assert_eq!(t["command"], "aspect auth login");
         assert_eq!(t["path"], serde_json::json!(["auth", "login"]));
+        assert_eq!(t["quiet"], serde_json::json!(false));
         assert_eq!(doc["aspect_cli_version"], "1.2.3");
 
         let by_name = |n: &str| {
@@ -2871,6 +2895,40 @@ mod tests {
         assert_eq!(parse(&["aspect", "greet"]).unwrap(), TimingMode::Detailed);
         // Invalid level is rejected by the value parser at parse time.
         assert!(parse(&["aspect", "greet", "--task:timing-summary=verbose"]).is_err());
+    }
+
+    #[test]
+    fn dispatch_resolves_quiet_default_and_cli_overrides() {
+        let mut quiet_task = stub_task("test", &[], SmallMap::new());
+        quiet_task.quiet = true;
+        let cmd = Cmd {
+            tasks: vec![&quiet_task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let quiet = |args: &[&str]| {
+            let matches = root.clone().try_get_matches_from(args).expect("parse ok");
+            cmd.dispatch(matches).expect("dispatch ok").quiet
+        };
+
+        assert!(quiet(&["aspect", "test"]));
+        assert!(!quiet(&["aspect", "test", "--task:quiet=false"]));
+
+        let normal_task = stub_task("test", &[], SmallMap::new());
+        let normal_cmd = Cmd {
+            tasks: vec![&normal_task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let matches = normal_cmd
+            .build("0.0.0")
+            .expect("build ok")
+            .try_get_matches_from(["aspect", "--task:quiet", "test"])
+            .expect("parse ok");
+        assert!(normal_cmd.dispatch(matches).expect("dispatch ok").quiet);
     }
 
     // ── Override merge (no heap path: no overrides applied) ────────────────

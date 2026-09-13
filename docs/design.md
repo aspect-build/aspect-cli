@@ -52,7 +52,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
 - `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
-- `ctx.task` — task metadata (kind, friendly_kind, name, friendly_name, group, id)
+- `ctx.task` — task metadata (kind, friendly_kind, name, friendly_name, group, id, quiet)
 
 Task execution is inherently non-deterministic. It interacts with the outside world — building code, fetching URLs, writing files, running processes. The determinism guarantee applies only to evaluation; execution is where real work happens.
 
@@ -110,6 +110,35 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 | `summary` | Task list and `--help` header | One line. Falls back to `"<name> task defined in <file>"`. |
 | `description` | `--help` header only | Extended prose. Replaces `summary` in `--help` when set. |
 | `friendly_kind` | Help section headings | Title Case. Auto-derived from the kind (`axl-add` → `Axl Add`). |
+
+#### Quiet mode
+
+Set `quiet = True` on `task(...)` to hide Aspect's task header, progress lines, and completion summary. It defaults to `False`. Aliases accept `quiet` too: `some_task.alias(quiet = True)` sets the alias's default and leaves the base task unchanged. Each alias defaults to `False`, even when its base task is quiet.
+
+For example, add a test alias in `.aspect/check.axl`:
+
+```python
+load("@aspect//test.axl", _test = "test")
+
+check = _test.alias(
+    summary = "Run tests in quiet mode.",
+    quiet = True,
+)
+```
+
+An explicit `--task:quiet` flag always beats the task default. The flag works before or after the task name:
+
+```shell
+aspect test --task:quiet //...
+aspect --task:quiet test //...
+aspect check --task:quiet=false //...
+```
+
+`--task:quiet` on its own means `--task:quiet=true`; use `=` when passing `true` or `false` explicitly. The implementation reads the value as `ctx.task.quiet`, after CLI overrides. `aspect describe` includes each task's `quiet` default.
+
+Quiet mode hides the banner, task header, progress lines, Buildkite log section markers, and completion summary, including its conclusion text and timing breakdown. `--task:timing-summary` has no effect while quiet mode is on.
+
+Task and subprocess output, warnings and errors, exit codes, and `ctx.defer(...)` cleanup stay the same. Lifecycle hooks receive every update, including phase changes and the final conclusion, so CI status updates and phase tracking work as usual. Task implementations and feature hooks can read `ctx.task.quiet` to hide their own progress output; ordinary writes to stdout and stderr are kept.
 
 #### CLI arguments
 
