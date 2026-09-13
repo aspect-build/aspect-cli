@@ -10,7 +10,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line")
+load("@aspect//auth.axl", "aspect_cloud_heading", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line", "use_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -119,6 +119,39 @@ def _test_login_options(_):
         if "ASPECT_API_TOKEN" in option and "$ASPECT_API_TOKEN" not in option:
             fail("the variable must be marked with $: %s" % option)
 
+def _test_aspect_cloud_heading(_):
+    cloud = _summary(builtin = True, name = "aspect-cloud")
+    default_cloud = _summary(builtin = True, name = "aspect-cloud", default = True)
+
+    # Nothing else `--remote` could target, so the marker would be a distinction
+    # without a difference — and the legend that explains it is not printed either.
+    _eq("alone → plain heading", aspect_cloud_heading(default_cloud, False), "Aspect Cloud:")
+    _eq("alone, not default → plain heading", aspect_cloud_heading(cloud, False), "Aspect Cloud:")
+
+    # With a deployment present the choice is real, so the state is shown. This is
+    # the line that was missing: `_print_deployment` draws no `●/○` for Aspect
+    # Cloud, so without it nothing on screen carried the marker the legend names.
+    _eq(
+        "with deployments, default → marked",
+        aspect_cloud_heading(default_cloud, True),
+        "Aspect Cloud ● (default)",
+    )
+    _eq(
+        "with deployments, not default → hollow",
+        aspect_cloud_heading(cloud, True),
+        "Aspect Cloud ○",
+    )
+
+def _test_use_command(_):
+    # The name `auth use` takes, which for Aspect Cloud appears nowhere else on
+    # screen — its heading is the product name.
+    _eq(
+        "Aspect Cloud",
+        use_command(_summary(builtin = True, name = "aspect-cloud")),
+        "aspect auth use aspect-cloud",
+    )
+    _eq("deployment", use_command(_summary(name = "gcp.acme")), "aspect auth use gcp.acme")
+
 def _shadowed(name = "aspect", path = "/home/u/.aspect/config.json", user_config = True):
     return struct(name = name, path = path, user_config = user_config)
 
@@ -141,10 +174,12 @@ def _test_shadowed_warning(_):
         fail("repo warning should say to edit the file: %s" % repo)
 
 _UNIT_TESTS = [
+    _test_aspect_cloud_heading,
     _test_identity,
     _test_login_command,
     _test_login_options,
     _test_login_target_label,
+    _test_use_command,
     _test_shadowed_warning,
     _test_status_line,
 ]

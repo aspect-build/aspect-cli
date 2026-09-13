@@ -1158,10 +1158,26 @@ fn upsert_deployment(
     if !permitted && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
+    // An entry naming Aspect Cloud is folded into the built-in seed on load — under
+    // either of its names — so only one is worth keeping, and the `default` flag on
+    // it is never read. Writing one collapses any other, and answers the
+    // default question the way the loader will: Aspect Cloud is what `--remote`
+    // targets whenever no *configured* deployment claims it.
+    if names_aspect_cloud(&deployment.name) {
+        existing.retain(|d| !names_aspect_cloud(&d.name));
+        deployment.default = false;
+        let claimed = existing.iter().any(|d| d.default);
+        existing.push(deployment);
+        return Ok(!claimed);
+    }
+
     let replacing_default = existing
         .iter()
         .any(|d| d.name == deployment.name && d.default);
-    let none_default = !existing.iter().any(|d| d.default);
+    // Aspect Cloud's entry cannot hold the crown, so it cannot withhold it either.
+    let none_default = !existing
+        .iter()
+        .any(|d| d.default && !names_aspect_cloud(&d.name));
     if none_default || replacing_default {
         deployment.default = true;
     }
@@ -4201,6 +4217,60 @@ mod tests {
             assert!(is_reserved_name(&name));
             assert!(upsert_deployment(&mut vec![], dep(&name, false), false).is_err());
         }
+    }
+
+    /// An Aspect Cloud entry is folded into the seed on load, under either of its
+    /// names, so `upsert` must answer the default question the way the loader will
+    /// — otherwise a bare login reports Aspect Cloud as not-the-default and tells
+    /// the user to `auth use` something that already is.
+    #[test]
+    fn an_aspect_cloud_entry_does_not_hold_or_withhold_the_default() {
+        let cloud = || {
+            let mut d = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+            d.builtin = false; // as written to config.json — `builtin` never persists
+            d
+        };
+
+        // Nothing configured claims the default, so Aspect Cloud is what
+        // `--remote` targets, whatever flag a previous entry left behind.
+        let mut stale = vec![dep(ASPECT_CLOUD_DEPLOYMENT_ALIAS, true)];
+        assert!(
+            upsert_deployment(&mut stale, cloud(), true).unwrap(),
+            "a stale Aspect Cloud entry must not withhold the default"
+        );
+
+        // And it collapses: one entry for Aspect Cloud, under its own name.
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+
+        // A configured deployment does hold it, and Aspect Cloud does not take it.
+        let mut claimed = vec![dep("acme", true)];
+        assert!(
+            !upsert_deployment(&mut claimed, cloud(), true).unwrap(),
+            "a configured default outranks Aspect Cloud"
+        );
+        assert!(
+            claimed.iter().find(|d| d.name == "acme").unwrap().default,
+            "and keeps it"
+        );
+        assert!(
+            !claimed
+                .iter()
+                .find(|d| d.name == ASPECT_CLOUD_DEPLOYMENT_NAME)
+                .unwrap()
+                .default,
+            "Aspect Cloud's entry never carries the flag — the loader ignores it"
+        );
+    }
+
+    /// The first configured deployment claims the default. Aspect Cloud already
+    /// having an entry must not make it look claimed, or nothing would ever become
+    /// the default and `--remote` would silently stay on Aspect Cloud.
+    #[test]
+    fn the_first_configured_deployment_claims_the_default_past_aspect_cloud() {
+        let mut existing = vec![dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false)];
+        assert!(upsert_deployment(&mut existing, dep("acme", false), false).unwrap());
+        assert!(existing.iter().find(|d| d.name == "acme").unwrap().default);
     }
 
     #[test]
