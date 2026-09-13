@@ -60,8 +60,7 @@ def _impl(ctx):
     fail("selection must never analyze targets")
 fixture_test = rule(implementation = _impl, test = True)
 """)
-    ctx.std.fs.write(workspace + "/BUILD", """
-load(":defs.bzl", "fixture_test")
+    ctx.std.fs.write(workspace + "/BUILD", """load(":defs.bzl", "fixture_test")
 fixture_test(name = "ci", size = "small", timeout = "short")
 fixture_test(name = "skip", tags = ["noci"], size = "large", timeout = "long")
 fixture_test(name = "manual", tags = ["manual"])
@@ -69,8 +68,7 @@ fixture_test(name = "name+equals=x", tags = ["manual"])
 filegroup(name = "shared")
 test_suite(name = "suite", tests = [":ci", ":skip"], tags = ["manual"])
 """)
-    ctx.std.fs.write(workspace + "/personal/BUILD", """
-load("//:defs.bzl", "fixture_test")
+    ctx.std.fs.write(workspace + "/personal/BUILD", """load("//:defs.bzl", "fixture_test")
 fixture_test(name = "private_test")
 """)
     startup = ["--batch", "--output_base=" + root + "/output"]
