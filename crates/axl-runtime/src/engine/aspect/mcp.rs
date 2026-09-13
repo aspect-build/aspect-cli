@@ -560,9 +560,11 @@ impl BuildResultsServer {
             return Ok(cached.clone());
         }
         let deployment = self.deployment.clone();
-        let resolved = tokio::task::spawn_blocking(move || auth::resolve_access_token(&deployment))
-            .await
-            .map_err(|e| format!("token resolution failed: {e}"))?;
+        let profile = auth::resolve_profile(None);
+        let resolved =
+            tokio::task::spawn_blocking(move || auth::resolve_access_token(&profile, &deployment))
+                .await
+                .map_err(|e| format!("token resolution failed: {e}"))?;
         match resolved {
             Ok(Some(token)) => {
                 *self.token_cache.lock().expect("token cache lock") = Some(token.clone());

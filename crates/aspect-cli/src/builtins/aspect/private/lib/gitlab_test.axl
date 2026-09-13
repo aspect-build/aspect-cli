@@ -10,6 +10,7 @@ Run with:
   aspect dev test-gitlab-client
 """
 
+load("./auth_fakes.axl", "fake_auth")
 load("./gitlab.axl", "gitlab")
 
 def _eq(label, got, want):
@@ -201,7 +202,7 @@ def _test_impl(ctx):
     def _ctx_no_creds(env_vars):
         return struct(
             std = struct(env = struct(var = lambda name: env_vars.get(name, ""))),
-            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+            aspect = struct(auth = fake_auth()),
         )
 
     # Missing project_path short-circuits before touching creds.

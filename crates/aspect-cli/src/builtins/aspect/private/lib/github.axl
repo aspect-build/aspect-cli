@@ -13,6 +13,7 @@ HTTP failure contract (every helper below):
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_url")
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
@@ -386,7 +387,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         _set_auth_reason(_reason, _AUTH_KIND_NO_OWNER_REPO, "owner/repo not provided")
         return None
 
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         kind, msg = _classify_missing_credentials(ctx)
         _set_auth_reason(_reason, kind, msg)
@@ -400,7 +401,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
                 fail(msg)
 
-    url = ctx.aspect.auth.api_url + "/github/token"
+    url = aspect_cloud_url(ctx, "/github/token")
     if roles:
         url = url + "?roles=" + ",".join(roles)
 
@@ -507,13 +508,13 @@ def _status_comment_contribute(ctx, request, profile = None):
     raises — transport errors and non-2xx responses come back as
     `success=False` so the caller can fall back to local coordination.
     """
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         _, msg = _classify_missing_credentials(ctx)
         return {"success": False, "error": msg, "status": 0}
 
     resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/status-comments/contribute",
+        url = aspect_cloud_url(ctx, "/status-comments/contribute"),
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
@@ -558,11 +559,11 @@ def _status_check_register(ctx, request, profile = None):
     `{"success": bool, "status": int}`. A miss just widens the sweep's job; the
     caller never blocks on it.
     """
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         return {"success": False, "status": 0}
 
-    url = ctx.aspect.auth.api_url + "/status-checks/register"
+    url = aspect_cloud_url(ctx, "/status-checks/register")
     headers = {
         "Authorization": "Bearer " + creds.access_token,
         "Content-Type": "application/json",
@@ -647,12 +648,12 @@ def _post_budget(ctx, request):
     installation_proof, remaining, reset}` + optional `limit` (the proof comes
     from the token mint; see the server's RequestSchema). Never raises — a
     failure just leaves the prior budget/cadence in place."""
-    creds = ctx.aspect.auth.credentials()
+    creds = aspect_cloud_credentials(ctx)
     if not creds:
         return
 
     resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/github/budget",
+        url = aspect_cloud_url(ctx, "/github/budget"),
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",

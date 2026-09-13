@@ -98,6 +98,19 @@ rust_test(
     ],
 )
 
+rust_test(
+    name = "auth_status_test",
+    srcs = ["tests/auth_status.rs"],
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
 multi_platform_rust_binaries(
     name = "bins",
     tags = ["no-macos"],

@@ -178,8 +178,7 @@ def resolve_aspect_bearer(ctx, what: str, uri: str = "") -> str:
     """
     deployment = ctx.aspect.auth.deployment_for_host(endpoint_host(uri)) if uri else None
 
-    # The deployment name is also its credential-store key (the `profile`).
-    creds = ctx.aspect.auth.credentials(profile = deployment, required = False)
+    creds = ctx.aspect.auth.credentials(deployment = deployment, required = False)
     if creds == None or not creds.access_token:
         warn(ctx.std, _NOT_AUTHENTICATED_MSG % (what, login_hint(deployment)))
         return ""

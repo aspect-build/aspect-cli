@@ -10,7 +10,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "identity", "login_command", "login_target_label", "shadowed_warning", "status_line")
+load("@aspect//auth.axl", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line")
 
 def _eq(label, got, want):
     if got != want:
@@ -27,7 +27,8 @@ def _summary(
         cache = "",
         bes = "",
         exec = "",
-        results_url = ""):
+        results_url = "",
+        api_token_env = "ASPECT_API_TOKEN_GCP"):
     return struct(
         name = name,
         builtin = builtin,
@@ -39,6 +40,7 @@ def _summary(
         cache = cache,
         bes = bes,
         results_url = results_url,
+        api_token_env = api_token_env,
         exec = exec,
     )
 
@@ -71,11 +73,9 @@ def _test_login_target_label(_):
     )
 
 def _test_status_line(_):
-    _eq(
-        "logged out → login hint",
-        status_line(_summary(name = "gcp")),
-        "logged out (run `aspect auth login --deployment gcp`)",
-    )
+    # Bare: what to do about it is the `Log in` row's job, which has room for all
+    # three ways rather than one of them in a parenthetical.
+    _eq("logged out → bare", status_line(_summary(name = "gcp")), "logged out")
     _eq(
         "logged in with identity + expiry",
         status_line(_summary(logged_in = True, display_name = "Greg", email = "g@x.io", status = "expires in 2h")),
@@ -86,6 +86,38 @@ def _test_status_line(_):
         status_line(_summary(logged_in = True)),
         "logged in",
     )
+
+def _test_login_options(_):
+    # All three ways, so a reader on CI is not left thinking the browser flow is
+    # the only one. The env var is named in full because its name is derived from
+    # the deployment's — the one thing here a reader cannot work out.
+    _eq(
+        "deployment → command, stdin flag, its own variable",
+        login_options(_summary(name = "gcp.acme", api_token_env = "ASPECT_API_TOKEN_GCP_ACME")),
+        [
+            "run `aspect auth login --deployment gcp.acme`,",
+            "or add --with-api-token to read an API token from stdin,",
+            "or set $ASPECT_API_TOKEN_GCP_ACME",
+        ],
+    )
+
+    # Aspect Cloud gets the same treatment: a bare login, and the unsuffixed
+    # variable every installation needs anyway.
+    _eq(
+        "Aspect Cloud → bare login and the unsuffixed variable",
+        login_options(_summary(builtin = True, name = "aspect-cloud", api_token_env = "ASPECT_API_TOKEN")),
+        [
+            "run `aspect auth login`,",
+            "or add --with-api-token to read an API token from stdin,",
+            "or set $ASPECT_API_TOKEN",
+        ],
+    )
+
+    # The `$` is load-bearing: without it the name reads as the token itself,
+    # which is what sent this row back for a rewrite.
+    for option in login_options(_summary()):
+        if "ASPECT_API_TOKEN" in option and "$ASPECT_API_TOKEN" not in option:
+            fail("the variable must be marked with $: %s" % option)
 
 def _shadowed(name = "aspect", path = "/home/u/.aspect/config.json", user_config = True):
     return struct(name = name, path = path, user_config = user_config)
@@ -111,6 +143,7 @@ def _test_shadowed_warning(_):
 _UNIT_TESTS = [
     _test_identity,
     _test_login_command,
+    _test_login_options,
     _test_login_target_label,
     _test_shadowed_warning,
     _test_status_line,

@@ -18,7 +18,7 @@
 //! name; a user task cannot shadow it.
 
 use anyhow::Context;
-use axl_runtime::engine::{profile_for_uri, resolve_access_token};
+use axl_runtime::engine::{login_hint, profile_for_uri, resolve_access_token, resolve_profile};
 
 /// The credential-helper command, as the spec passes it (`argv[1]`). Also the
 /// reserved top-level command name the CLI guards in `cmd`.
@@ -69,17 +69,29 @@ pub fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("building the credential-helper runtime")?;
-    // A configured deployment stores its credential under its own name. Resolve on
-    // a blocking worker so the runtime's `block_on` keeps driving the reactor while
+    // The helper takes no flags, so $ASPECT_AUTH_PROFILE is the only way to point
+    // it at an identity other than the default one. Resolve on a blocking worker so
+    // the runtime's `block_on` keeps driving the reactor while
     // `resolve_access_token`'s inner refresh `block_on` runs.
-    let profile = deployment.clone();
+    let profile = resolve_profile(None);
+    let target = deployment.clone();
     let token = runtime
-        .block_on(async move { tokio::task::spawn_blocking(move || resolve_access_token(&profile)).await })
+        .block_on(async move {
+            tokio::task::spawn_blocking(move || resolve_access_token(&profile, &target)).await
+        })
         .context("running the credential-helper token resolution")?
         .context("resolving the Aspect access token")?
         .with_context(|| {
+            // Named the way the user knows it, and given the command that actually
+            // re-authenticates it.
+            let named = if resolved.builtin {
+                "Aspect Cloud".to_string()
+            } else {
+                format!("the Aspect Workflows deployment '{deployment}'")
+            };
             format!(
-                "not logged in to the Aspect Workflows deployment '{deployment}'; run `aspect auth login --deployment {deployment}`"
+                "not logged in to {named}; run `{}`",
+                login_hint(&deployment)
             )
         })?;
 

@@ -57,12 +57,33 @@ def shadowed_warning(s) -> str:
 
 def status_line(d) -> str:
     """The Status row value for a summary: the logged-in identity + token status,
-    or a logged-out note pointing at how to log in."""
+    or a bare `logged out`.
+
+    What to do about being logged out is the `Log in` row's job (see
+    `login_options`), which has room for all of the ways rather than one of them
+    in a parenthetical."""
     if not d.logged_in:
-        return "logged out (run `" + login_command(d) + "`)"
+        return "logged out"
     who = identity(d)
     line = "logged in" + (" as " + who if who else "")
     return line + (", " + d.status if d.status else "")
+
+def login_options(d) -> list[str]:
+    """The ways to authenticate `d`, one per line, for the `Log in` row.
+
+    Three, because they suit different places: the browser flow for a person at a
+    terminal, an API token piped in for a script that has one to hand, and an API
+    token in an environment variable for CI or any other unattended run.
+
+    The variable is named in full rather than described, since its name is derived
+    from the deployment's and is the one thing here a reader cannot work out (see
+    `api_token_env`). The `$` marks it as a variable to set, so the name does not
+    read as the token itself."""
+    return [
+        "run `" + login_command(d) + "`,",
+        "or add --with-api-token to read an API token from stdin,",
+        "or set $" + d.api_token_env,
+    ]
 
 def _print_deployment(d, header = True):
     """Print one entry's aligned detail table (Status, Issuer, and the build
@@ -85,6 +106,14 @@ def _print_deployment(d, header = True):
         print("    " + label + (" " * pad if pad > 0 else " ") + value)
 
     _row("Status", status_line(d))
+
+    # Only when logged out, which is the only time it is worth acting on. The first
+    # option takes the label; the rest align under it as continuation lines.
+    if not d.logged_in:
+        options = login_options(d)
+        _row("Log in", options[0])
+        for option in options[1:]:
+            _row("", option)
 
     # Only for a deployment, whose issuer is worth knowing because it varies — its
     # own FrontEgg environment, or a customer's IdP. Aspect Cloud's is fixed, so
@@ -130,14 +159,14 @@ def _print_default_usage_hint(summary, others: int = 0):
     if others:
         print("Add --deployment <name> to target a specific deployment instead of the default.")
 
-def _print_account_usage_hint(ctx: TaskContext):
+def _print_aspect_cloud_usage_hint(ctx: TaskContext):
     """The `--remote` hint for Aspect Cloud, read from the recorded entries so
-    it names the endpoints the account actually has and mentions `--deployment` only
+    it names the endpoints Aspect Cloud actually has and mentions `--deployment` only
     when there is another deployment to name."""
     entries = ctx.aspect.auth.list()
-    account = [d for d in entries if d.builtin]
-    if account:
-        _print_default_usage_hint(account[0], len([d for d in entries if not d.builtin]))
+    aspect_cloud = [d for d in entries if d.builtin]
+    if aspect_cloud:
+        _print_default_usage_hint(aspect_cloud[0], len([d for d in entries if not d.builtin]))
 
 def _print_configured_usage_hint(summary):
     """Post-configure hint naming the just-configured deployment and the remote
@@ -159,15 +188,17 @@ def _login_impl(ctx: TaskContext) -> int:
     deployment = ctx.args.deployment
     browser_login = not ctx.args.with_token and not ctx.args.with_api_token
 
-    # A bare interactive login also records the Aspect-hosted deployment, so
+    # A bare interactive login also records the Aspect Cloud deployment, so
     # --remote works without a separate `auth configure`. Skipped when the user
-    # targeted a specific deployment or pinned a --profile (both say where this
-    # credential belongs), and skipped for the stdin-token flows: those are the CI
-    # paths, where a discovery probe would add a network round trip to a login that
-    # makes none, and where the deployment is normally declared in the repo's own
+    # named a deployment, and for the stdin-token flows: those are the CI paths,
+    # where a discovery probe would add a network round trip to a login that makes
+    # none, and where the deployment is normally declared in the repo's own
     # .aspect/config.json instead.
-    account_login = browser_login and not deployment and not ctx.args.profile
-    account_info = None
+    #
+    # Not skipped for --profile: that names who is logging in, and a second
+    # identity wants the same endpoints recorded as the first.
+    aspect_cloud_login = browser_login and not deployment
+    aspect_cloud_info = None
     if ctx.args.with_token:
         token = ctx.std.io.stdin.read_to_string().strip()
         if not token:
@@ -181,13 +212,13 @@ def _login_impl(ctx: TaskContext) -> int:
             return 1
         creds = ctx.aspect.auth.login(api_token = inp, deployment = deployment)
     else:
-        # Discover before authenticating, not after: the login reads the account's
+        # Discover before authenticating, not after: the login reads Aspect Cloud's
         # relay URI and PKCE client, so discovering afterwards would use a stale
         # value for this login and only correct the next one. A login already talks
         # to the network, so this is one more request rather than a new dependency,
         # and a failed probe simply leaves the seeded values in place.
-        if account_login:
-            account_info = ctx.aspect.auth.configure_default()
+        if aspect_cloud_login:
+            aspect_cloud_info = ctx.aspect.auth.configure_default()
         creds = _run_browser_login(ctx, deployment)
         if creds == None:
             error(ctx.std, "No authorization code entered; not logged in.")
@@ -195,11 +226,9 @@ def _login_impl(ctx: TaskContext) -> int:
 
     # Persist under the deployment's own profile (so endpoint auth resolves it by
     # host) unless the user pinned an explicit --profile.
-    profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
-    ctx.aspect.auth.persist(creds, profile = profile)
-    endpoints_filed = _file_account_endpoints(ctx, creds, account_info)
+    ctx.aspect.auth.persist(creds, deployment = deployment, profile = ctx.args.profile)
     _print_login_summary(ctx, deployment, creds)
-    _print_account_followups(ctx, account_info, endpoints_filed)
+    _print_aspect_cloud_followups(ctx, aspect_cloud_info)
     return 0
 
 def login_target_label(deployment: str, builtin: bool) -> str:
@@ -236,52 +265,13 @@ def _print_login_summary(ctx: TaskContext, deployment: str, creds):
     elif capability_labels(target, only = REMOTE_DEFAULT_CAPS):
         _print_configured_usage_hint(target)
 
-def _persist_endpoint_login(ctx: TaskContext, creds, name: str) -> bool:
-    """File the grant's id_token under `name`, the credential a deployment's
-    cache/BES edges validate. The caller has already filed the access_token under
-    its own profile — for Aspect Cloud that is the default profile, which
-    every Aspect Cloud caller reads, so the two live side by side.
-
-    Returns False when the grant carried no id_token, leaving the deployment
-    configured but unauthenticated; callers say so rather than leaving
-    `auth status` to reveal it.
-    """
-    endpoint_creds = creds.for_endpoint()
-    if endpoint_creds == None:
-        return False
-    ctx.aspect.auth.persist(endpoint_creds, profile = name)
-    return True
-
-def _file_account_endpoints(ctx: TaskContext, creds, info) -> bool:
-    """File `creds` against the Aspect Cloud endpoints `info` recorded.
-
-    Prints nothing, so the login's summary stays in one place — see
-    `_print_account_followups` for what is said about the outcome.
-
-    The endpoint credential is the same grant's id_token, what a cache/BES edge
-    validates, so there is no second browser round trip. Returns False only when
-    those endpoints were recorded but the grant carried no id_token to authenticate
-    them with; `info` describing no usable endpoints is not a failure, just nothing
-    to do.
-    """
-    if info == None or info.status != "ok" or not info.can_login:
-        return True
-    return _persist_endpoint_login(ctx, creds, info.name)
-
-def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
+def _print_aspect_cloud_followups(ctx: TaskContext, info):
     """Anything still needed after an Aspect Cloud login, printed below its summary.
 
-    An unfiled endpoint credential leaves the endpoints recorded but unauthenticated
-    — which `auth status` would otherwise be the only place to notice. It should not
-    happen: a credential carries no id_token only when it came from a refresh grant
-    (permitted to omit one) or was read back from the store (which never keeps it),
-    and this is always a fresh authorization-code result. So the warning doubles as
-    the signal that something upstream changed.
-
-    `not_recorded` is the other side of that: the login worked but the endpoints
-    could not be written down, so `--remote` would fail later with nothing pointing
-    back here. Every other non-`ok` status means the probe found nothing worth
-    recording, which is not the user's problem and says nothing.
+    `not_recorded` means the login worked but the endpoints could not be written
+    down, so `--remote` would fail later with nothing pointing back here. Every
+    other non-`ok` status means the probe found nothing worth recording, which is
+    not the user's problem and says nothing.
     """
     if info == None:
         return
@@ -291,10 +281,7 @@ def _print_account_followups(ctx: TaskContext, info, endpoints_filed: bool):
         return
     if info.status != "ok" or not info.can_login:
         return
-    if not endpoints_filed:
-        warn(ctx.std, "Recorded the remote cache and BES but could not authenticate them: the login returned no id_token.")
-        print("Run `aspect auth login` again to finish setting them up.")
-    elif not info.is_default:
+    if not info.is_default:
         print("")
         print("Run `aspect auth use " + info.name + "` to make it the default deployment.")
 
@@ -313,14 +300,14 @@ login = task(
             description = "Log in with an 'id:secret' API token read from stdin instead of the browser flow.",
         ),
         "deployment": args.string(
-            description = "Log in to this configured Aspect Workflows deployment (see `aspect auth configure`) instead of Aspect Cloud. Selects which account/deployment to authenticate.",
+            description = "Log in to this configured Aspect Workflows deployment (see `aspect auth configure`) instead of Aspect Cloud. Selects which deployment to authenticate against.",
         ),
         "no_browser": args.boolean(
             default = False,
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "profile": args.string(
-            description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for Aspect Cloud). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
+            description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",
         ),
     },
 )
@@ -352,8 +339,8 @@ def _discover_deployment(ctx, host):
             error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
             return None
         if info.status == "issuer_not_advertised":
-            # `reason` is the issuer actually looked for — for `--name aspect` that
-            # is the account's own, pinned rather than taken from `--issuer`.
+            # `reason` is the issuer actually looked for — for `--name aspect-cloud` that
+            # is Aspect Cloud's own, pinned rather than taken from `--issuer`.
             error(ctx.std, "'" + (info.reason or issuer) + "' is not one of the authorization servers this deployment advertises.")
             error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
             return None
@@ -381,11 +368,11 @@ def _configure_impl(ctx: TaskContext) -> int:
     if info == None:
         return 1
 
-    # `--name aspect` attaches the endpoints to Aspect Cloud rather than
+    # `--name aspect-cloud` attaches the endpoints to Aspect Cloud rather than
     # recording a deployment beside it, so say which happened.
-    account = ctx.aspect.auth.deployment_summary(info.name)
-    is_account = account != None and account.builtin
-    if is_account:
+    recorded = ctx.aspect.auth.deployment_summary(info.name)
+    is_aspect_cloud = recorded != None and recorded.builtin
+    if is_aspect_cloud:
         print("Configured remote cache and BES for Aspect Cloud.")
     else:
         print("Configured deployment '" + info.name + "'.")
@@ -397,7 +384,7 @@ def _configure_impl(ctx: TaskContext) -> int:
         return 1
     if not ctx.args.login:
         print("")
-        if is_account:
+        if is_aspect_cloud:
             print("Run `aspect auth login` to authenticate")
         else:
             print("Run `aspect auth login --deployment " + info.name + "` to authenticate")
@@ -407,27 +394,19 @@ def _configure_impl(ctx: TaskContext) -> int:
     if creds == None:
         error(ctx.std, "No authorization code entered; the deployment is configured but not logged in.")
         return 1
-    if is_account:
-        # Filed the way a bare login files them: the access_token under the default
-        # profile for Aspect Cloud, the same grant's id_token under the account's
-        # name for its edges.
-        ctx.aspect.auth.persist(creds, profile = ctx.aspect.auth.login_profile())
-        if not _persist_endpoint_login(ctx, creds, info.name):
-            warn(ctx.std, "Configured the endpoints but could not authenticate them: the login returned no id_token.")
-            return 1
-    else:
-        ctx.aspect.auth.persist(creds, profile = info.name)
+
+    ctx.aspect.auth.persist(creds, deployment = info.name, profile = ctx.args.profile)
 
     print("")
     summary = ctx.aspect.auth.deployment_summary(info.name)
     if summary == None:
         return 0
 
-    # The account is its own thing, not one of a list, so it needs no name line and
+    # Aspect Cloud is its own thing, not one of a list, so it needs no name line and
     # is reached by `--remote` alone rather than `--deployment`.
-    _print_deployment(summary, header = not is_account)
-    if is_account:
-        _print_account_usage_hint(ctx)
+    _print_deployment(summary, header = not is_aspect_cloud)
+    if is_aspect_cloud:
+        _print_aspect_cloud_usage_hint(ctx)
     else:
         _print_configured_usage_hint(summary)
     return 0
@@ -459,6 +438,9 @@ configure = task(
             default = False,
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
+        "profile": args.string(
+            description = "The identity to file the login under, defaulting to \"default\". Same meaning as `aspect auth login --profile`; applies only when --login runs.",
+        ),
     },
 )
 
@@ -482,10 +464,10 @@ logout = task(
         ),
         "all": args.boolean(
             default = False,
-            description = "Log out everywhere — clear every stored credential (Aspect Cloud and all deployments).",
+            description = "Log out everywhere — clear every stored credential, for every deployment and every profile.",
         ),
         "profile": args.string(
-            description = "Advanced: the exact credential store key to clear, overriding the one derived from --deployment. See `aspect auth login --help`.",
+            description = "The identity to log out, defaulting to \"default\". Clears only this profile's credential for the deployment; other profiles keep theirs. See `aspect auth login --help`.",
         ),
     },
 )
@@ -508,6 +490,9 @@ def _entry_json(d) -> dict:
         "email": d.email,
         "issuer": d.issuer,
         "login_command": login_command(d),
+        # So a CI generator can emit the right variable per deployment without
+        # reproducing the name normalization.
+        "api_token_env": d.api_token_env,
     }
     if not d.builtin:
         doc["cache"] = d.cache
@@ -532,15 +517,16 @@ def _status_impl(ctx: TaskContext) -> int:
     entries = ctx.aspect.auth.list()
     ignored = ctx.aspect.auth.shadowed()
 
-    # The built-in Aspect *account* (no build endpoints) vs. the configured
-    # Workflows *deployments* are two different things — show them apart.
-    account = [d for d in entries if d.builtin]
+    # Aspect Cloud is multi-tenant and every installation has it; the configured
+    # ones are single-tenant and particular to this user — show them apart.
+    # The `account` JSON key is the released name for the first of those.
+    aspect_cloud = [d for d in entries if d.builtin]
     deployments = [d for d in entries if not d.builtin]
 
     if ctx.args.output == "json":
         default_names = [d.name for d in deployments if d.default]
         doc = {
-            "account": [_entry_json(d) for d in account],
+            "account": [_entry_json(d) for d in aspect_cloud],
             "deployments": [_entry_json(d) for d in deployments],
             "default_deployment": default_names[0] if default_names else None,
             "ignored": [_ignored_json(s) for s in ignored],
@@ -553,7 +539,7 @@ def _status_impl(ctx: TaskContext) -> int:
         warn(ctx.std, shadowed_warning(s))
 
     print("Aspect Cloud:")
-    for d in account:
+    for d in aspect_cloud:
         _print_deployment(d, header = False)
 
     print("")
@@ -564,7 +550,7 @@ def _status_impl(ctx: TaskContext) -> int:
             _print_deployment(d)
         print("")
         print("● = default. Switch with `aspect auth use <name>`.")
-        default = ([d for d in deployments if d.default] + account)[0]
+        default = ([d for d in deployments if d.default] + aspect_cloud)[0]
         _print_default_usage_hint(default, len(deployments))
     else:
         print("No single-tenant Aspect Workflows deployments configured.")

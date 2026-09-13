@@ -11,6 +11,7 @@ OAuth bearer); `auth_kind` picks the header convention:
     project access tokens; opt-in).
 """
 
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_url")
 load("./rate_limit.axl", "BUCKET_APP", "record_from_headers")
 
 DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
@@ -446,9 +447,9 @@ def _set_auth_reason(_reason, kind, msg):
         _reason["reason"] = msg
 
 def _classify_missing_credentials(ctx):
-    """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
-    None. The kind discriminates the CI case (where setting
-    `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`)."""
+    """Return `(kind, msg)` for an absent Aspect Cloud credential. The kind
+    discriminates the CI case (where setting `ASPECT_API_TOKEN` is the fix) from
+    the local case (`aspect auth login`)."""
     setup_url = "https://aspect.build/docs/cli/authentication"
     if ctx.std.env.var("GITHUB_ACTIONS"):
         msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
@@ -465,8 +466,8 @@ def _classify_missing_credentials(ctx):
     return kind, msg + ". Setup guide: " + setup_url
 
 def _missing_credentials_reason(ctx):
-    """Human-readable explanation for `ctx.aspect.auth.credentials()`
-    returning None, tailored to the environment the CLI is running in."""
+    """Human-readable explanation for an absent Aspect Cloud credential, tailored
+    to the environment the CLI is running in."""
     _, msg = _classify_missing_credentials(ctx)
     return msg
 
@@ -487,7 +488,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         _set_auth_reason(_reason, _AUTH_KIND_NO_PROJECT_PATH, "project_path not provided")
         return None
 
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         kind, msg = _classify_missing_credentials(ctx)
         _set_auth_reason(_reason, kind, msg)
@@ -499,7 +500,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
                 msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
                 fail(msg)
 
-    url = ctx.aspect.auth.api_url + "/gitlab/token"
+    url = aspect_cloud_url(ctx, "/gitlab/token")
     if roles:
         url = url + "?roles=" + ",".join(roles)
 
