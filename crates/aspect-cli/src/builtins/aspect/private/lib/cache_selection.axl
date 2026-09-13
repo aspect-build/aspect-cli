@@ -1,0 +1,118 @@
+"""Resolve cache-diff test scope through Bazel's test loading phase."""
+
+load("./runnable.axl", "apparent_label")
+
+def testonly_selected_tests(events: list, exit_code: int) -> list[str] | None:
+    """Accept only a complete, successful loading-only test selection."""
+
+    # With analysis disabled, `test` exits NO_TESTS_FOUND even when loading
+    # selected tests. Never treat that exit code alone as successful selection.
+    if exit_code not in [0, 4]:
+        return None
+    labels = {}
+    aborted = {}
+    expansions = 0
+    finished = False
+    complete = False
+    for event in events:
+        if complete:
+            return None
+        complete = event.get("lastMessage", False)
+        if "expanded" in event:
+            expansions += 1
+            for child in event.get("children", []):
+                if "targetConfigured" not in child:
+                    return None
+                labels[child["targetConfigured"]["label"]] = None
+        if "aborted" in event:
+            label = event.get("id", {}).get("targetConfigured", {}).get("label")
+            if event["aborted"].get("reason") != "NO_ANALYZE" or not label:
+                return None
+            aborted[label] = None
+        if "finished" in event:
+            if finished or event["finished"].get("exitCode", {}).get("code") != exit_code:
+                return None
+            finished = True
+    if not complete or not finished or expansions != 1 or labels != aborted:
+        return None
+    return sorted({apparent_label(label): None for label in labels})
+
+def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | None = None, endpoint_auth_flags: list = [], announce_version: bool = False, announce_command: bool = False) -> list[str] | None:
+    """Load the original patterns with test-command RC and filtering semantics."""
+    version = ctx.bazel.version()
+    if version != None and int(version.split(".")[0]) < 7:
+        ctx.std.io.stderr.write("ERROR: cache diff test selection requires Bazel 7 or newer (found {}).\n".format(version))
+        return None
+    work = ctx.std.fs.mkdtemp(prefix = "aspect-cache-selection-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(work) if ctx.std.fs.exists(work) else None)
+    event_path = work + "/events.json"
+    error_path = work + "/stderr"
+    status = ctx.bazel.test(
+        rc = rc,
+        directory = directory,
+        # --build overrides a user's --nobuild (which changes test's exit
+        # code). --noanalyze still prevents analysis and all build/test actions.
+        flags = endpoint_auth_flags + [
+            "--bes_backend=",
+            "--build",
+            "--noanalyze",
+            "--build_tests_only",
+            "--nokeep_going",
+            "--build_event_json_file=" + event_path,
+            # Keep this private log local; uploading its referenced files would
+            # contact the cache even for an empty selection.
+            "--nobuild_event_json_file_path_conversion",
+        ],
+        build_events = False,
+        stdout = None,
+        stderr = ctx.std.fs.create(error_path),
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *patterns
+    ).wait()
+    events = []
+    if ctx.std.fs.exists(event_path):
+        for line in ctx.std.fs.read_to_string(event_path).splitlines():
+            if line:
+                event = json.try_decode(line, None)
+                if type(event) != "dict":
+                    events = []
+                    break
+                events.append(event)
+    tests = testonly_selected_tests(events, status.code)
+    if tests == None:
+        ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", status.code))
+        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))
+    ctx.std.fs.remove_dir_all(work)
+    return tests
+
+# Negative filter values are valid Bazel argv values even though they start
+# with '-'. Other two-token pairs use the same non-flag guard as BazelRC.
+_NEGATIVE_FILTER_FLAGS = ["--test_tag_filters", "--test_size_filters", "--test_timeout_filters", "--test_lang_filters", "--test_filter"]
+
+def testonly_attribution_flags(flags: list) -> list:
+    """Let Bazel ignore command-inapplicable flags through its common section."""
+    values = [flag[0] if type(flag) == "tuple" else flag for flag in flags]
+    result = []
+    consumed = False
+    for i, value in enumerate(values):
+        if consumed:
+            consumed = False
+            continue
+        if value.startswith("--default_override="):
+            result.append(value)
+            continue
+        if value.startswith("-") and "=" not in value and i + 1 < len(values):
+            following = values[i + 1]
+            if not following.startswith("-") or (value in _NEGATIVE_FILTER_FLAGS and not following.startswith("--")):
+                value += "=" + following
+                consumed = True
+
+        # expand_all has already evaluated version conditions against the source RC.
+        result.append("--default_override=0:common=" + value)
+    return result
+
+def attribution_rc(ctx: TaskContext, rc):
+    _, flags = rc.expand_all(command = "query")
+    startup = [f for f in rc.startup_flags() if f != "--ignore_all_rc_files"]
+    return ctx.bazel.new_rc(startup_flags = startup, flags = testonly_attribution_flags(flags))
