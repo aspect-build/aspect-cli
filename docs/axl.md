@@ -192,11 +192,20 @@ the normal way out. From a nested helper, an expected refusal whose message
 says it all is `ctx.std.process.exit(code, message)`: the message prints as an
 `ERROR:` line with no traceback, `ctx.defer` callbacks still run, and the task
 ends with `code` (1..=255; 0 is rejected because an early success would skip
-the hooks the body had yet to invoke). Keep `fail()` for bugs, where the
-traceback is what you want.
+the hooks the body had yet to invoke). At the top of `_impl`, where a `return`
+can reach, `return TaskConclusion(exit_code = 1, message = ...)` renders the
+same way. Keep `fail()` for bugs, where the traceback is what you want.
 
 ```python
 def _require_target(ctx: TaskContext, targets: list[str]):
     if not targets:
         ctx.std.process.exit(1, "Provide a target, e.g. `aspect build //...`.")
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not ctx.args.targets:
+        return TaskConclusion(exit_code = 1, message = "Provide a target, e.g. `aspect build //...`.")
 ```
+
+For a task with a status surface, end through `phases.update(final = True, ...)`
+and return its conclusion, so the surface is closed with the real status. Both
+shortcuts above leave that to the surface's abort guard.

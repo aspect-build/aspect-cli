@@ -75,6 +75,12 @@ impl TaskExit {
         if let Some(message) = &self.message {
             diag::error(message);
         }
+        Self::debug_traceback(full);
+    }
+
+    /// Print the evaluator's full rendering of the error, traceback
+    /// included, when `ASPECT_DEBUG` is set. Nothing otherwise.
+    pub fn debug_traceback(full: &dyn fmt::Display) {
         if std::env::var_os("ASPECT_DEBUG").is_some_and(|v| !v.is_empty()) {
             errln!("{full}");
         }

@@ -601,18 +601,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
         run_deferred(context, &mut eval);
-        let (exit_code, flagged, conclusion) = match impl_result {
-            Ok(ret) => unpack_task_return(ret),
+        let (outcome, raised) = match impl_result {
+            Ok(ret) => (unpack_task_return(ret), None),
             // `ctx.std.process.exit` and a builtin's `TaskExit` end the task
-            // like `return code`: the message, no traceback.
+            // like `return TaskConclusion(exit_code, message)`: no traceback.
             Err(e) => match TaskExit::from_starlark(&e) {
-                Some(exit) => {
-                    exit.report(&e);
-                    (Some(exit.code.get()), false, String::new())
-                }
+                Some(exit) => (Outcome::from_exit(exit), Some(e)),
                 None => return Err(e.into()),
             },
         };
+        outcome.report_message();
+        if let Some(e) = &raised {
+            TaskExit::debug_traceback(e);
+        }
+        let Outcome {
+            exit_code,
+            flagged,
+            text: conclusion,
+            ..
+        } = outcome;
 
         // The task has had its chance to act on the flags the CLI could not
         // attribute to a declared arg.
@@ -807,19 +814,63 @@ impl<'a> Verdict<'a> {
     }
 }
 
-/// Unpack the return value of `_impl` into `(exit_code, flagged, conclusion)`.
+/// What `_impl` left behind, whichever way it ended: a return value or a
+/// [`TaskExit`]. One shape for everything the runtime does afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Outcome {
+    exit_code: Option<u8>,
+    flagged: bool,
+    /// Bookend suffix, rendered as `· <text>` when non-empty.
+    text: String,
+    /// Why the task ended, printed on its own line before the bookend.
+    message: Option<String>,
+}
+
+impl Outcome {
+    fn from_exit(exit: &TaskExit) -> Self {
+        Self {
+            exit_code: Some(exit.code.get()),
+            flagged: false,
+            text: String::new(),
+            message: exit.message.clone(),
+        }
+    }
+
+    /// Print `message`, if any, with a severity matching the verdict:
+    /// `ERROR:` on a non-zero exit, `WARNING:` when flagged, plain otherwise.
+    fn report_message(&self) {
+        let Some(message) = &self.message else {
+            return;
+        };
+        match self.exit_code {
+            Some(code) if code != 0 => diag::error(message),
+            _ if self.flagged => diag::warn(message),
+            _ => errln!("{message}"),
+        }
+    }
+}
+
+/// Unpack the return value of `_impl` into an [`Outcome`].
 ///
 /// Tasks may return either a bare `int` (treated as `TaskConclusion(
 /// exit_code=int)`) or a `TaskConclusion` record carrying the full
-/// terminal state. Anything else yields `(None, false, "")` — the
-/// runtime renders that as `✅ Passed` with no conclusion suffix.
-fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> (Option<u8>, bool, String) {
+/// terminal state. Anything else yields no exit code — the runtime
+/// renders that as `✅ Passed` with no conclusion suffix.
+fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> Outcome {
     if let Some(tc) = ret.downcast_ref::<crate::engine::task_info::TaskConclusion>() {
-        (Some(tc.exit_code as u8), tc.flagged, tc.text.clone())
-    } else if let Some(code) = ret.unpack_i32() {
-        (Some(code as u8), false, String::new())
+        Outcome {
+            exit_code: Some(tc.exit_code as u8),
+            flagged: tc.flagged,
+            text: tc.text.clone(),
+            message: tc.message.clone(),
+        }
     } else {
-        (None, false, String::new())
+        Outcome {
+            exit_code: ret.unpack_i32().map(|code| code as u8),
+            flagged: false,
+            text: String::new(),
+            message: None,
+        }
     }
 }
 
