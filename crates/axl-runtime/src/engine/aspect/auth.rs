@@ -1144,7 +1144,8 @@ fn deployment_from_discovery(
 /// An entry naming Aspect Cloud neither holds the default nor withholds it: it is
 /// folded into the built-in seed on load, so its `default` flag is never read, and
 /// Aspect Cloud is what `--remote` targets whenever no configured deployment
-/// claims it.
+/// claims it. `--default` on such an entry therefore takes the default by clearing
+/// whichever deployment holds it, rather than by setting a flag.
 ///
 /// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
 /// here — derived names and an explicit `--deployment` alike — so this is the one
@@ -1168,9 +1169,16 @@ fn upsert_deployment(
         return Err(reserved_name_error(&deployment.name));
     }
     // Such an entry folds into the seed on load under either of its names, so keep
-    // one and drop the flag the loader ignores.
+    // one. Aspect Cloud takes the default by *nothing else* holding it, so
+    // `--default` here means clearing whoever does — its own flag is never read.
     if names_aspect_cloud(&deployment.name) {
+        let take_default = deployment.default;
         existing.retain(|d| !names_aspect_cloud(&d.name));
+        if take_default {
+            for d in existing.iter_mut() {
+                d.default = false;
+            }
+        }
         deployment.default = false;
         let claimed = existing.iter().any(|d| d.default);
         existing.push(deployment);
@@ -4260,6 +4268,34 @@ mod tests {
                 .default,
             "Aspect Cloud's entry never carries the flag — the loader ignores it"
         );
+    }
+
+    /// `aspect auth configure <Aspect Cloud host> --default` has to work, and the
+    /// only way Aspect Cloud can hold the default is for nothing else to. Setting
+    /// a flag on its entry would do nothing — the loader never reads it — so the
+    /// request has to clear whichever deployment holds it instead.
+    #[test]
+    fn an_explicit_default_on_aspect_cloud_clears_the_holder() {
+        let mut existing = vec![dep("acme", true), dep("emca", false)];
+        let mut cloud = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        cloud.default = true; // `--default`
+
+        assert!(
+            upsert_deployment(&mut existing, cloud, true).unwrap(),
+            "Aspect Cloud takes the default"
+        );
+        assert!(
+            existing.iter().all(|d| !d.default),
+            "nothing configured holds it, which is what makes Aspect Cloud the default"
+        );
+
+        // Without `--default` the holder keeps it, so a plain re-configure of an
+        // Aspect Cloud host cannot quietly take the default away from a deployment.
+        let mut held = vec![dep("acme", true)];
+        assert!(
+            !upsert_deployment(&mut held, dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false), true).unwrap()
+        );
+        assert!(held.iter().find(|d| d.name == "acme").unwrap().default);
     }
 
     /// `--default` reaches past Aspect Cloud's entry. That entry never holds the
