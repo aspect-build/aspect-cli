@@ -18,8 +18,18 @@ variables:
     description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
 stages:
   - CI
+# The regular task jobs run on every pipeline EXCEPT a scheduled one. A
+# scheduled pipeline exists to run `warming` (at the bottom of this file), which
+# clears the runner's Bazel state before rebuilding it — so running the normal
+# suite alongside it both doubles the work of every schedule and has those jobs
+# racing the state warming is rebuilding. A job with no `rules` runs in
+# scheduled pipelines too, so this has to be stated rather than assumed.
+.not-scheduled:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
 pre-build:
   stage: CI
+  extends: .not-scheduled
   script:
     - echo "Build and upload CLI to remote cache"
     - .aspect/bootstrap.sh
@@ -29,7 +39,9 @@ pre-build:
 build-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -40,7 +52,9 @@ build-task:
 test-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -51,7 +65,9 @@ test-task:
 lint-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -69,7 +85,9 @@ lint-task:
 buildifier-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -80,7 +98,9 @@ buildifier-task:
 format-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -93,7 +113,9 @@ format-task:
 gazelle-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -109,7 +131,9 @@ gazelle-task:
 gazelle-from-source-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -120,7 +144,9 @@ gazelle-from-source-task:
 delivery-task:
   stage: CI
   needs: [pre-build]
-  extends: .setup-aspect
+  extends:
+    - .setup-aspect
+    - .not-scheduled
   tags:
     - aspect-workflows
     - aspect-default
@@ -142,3 +168,31 @@ delivery-task:
     # must SKIP it, proving the digest is stable across runs.
     - aspect delivery --task:name delivery-gl-nre --query //examples/deliverable:no_remote_exec_deliverable
     - aspect delivery --task:name delivery-gl-nre --query //examples/deliverable:no_remote_exec_deliverable
+# Pre-populates this repo's Bazel caches on a schedule, so a CI runner starts
+# from a warm state instead of refetching every external dependency. Without it
+# each run pays a full cold fetch, which is both slow and a single point of
+# failure when an upstream download is briefly unavailable.
+#
+# GitLab only: this is the CI host where the repo has a runner pool of its own,
+# so a warmed cache here belongs to this repo alone. Adding the same on the
+# other hosts would need pools that are not shared, which is out of scope here.
+#
+# Schedule-gated because `aspect ci warming` clears the runner's prior Bazel
+# state before rebuilding it, so it must not run beside the regular tasks --
+# `.not-scheduled` above keeps those out of scheduled pipelines. For the same
+# reason it does not run .aspect/bootstrap.sh: that cleanup would discard the
+# freshly built CLI, so this task uses the released CLI from the setup
+# component, unlike every other job here.
+#
+# Does nothing until a pipeline schedule is configured; with none, the job is
+# never created.
+warming:
+  stage: CI
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  extends: .setup-aspect
+  tags:
+    - aspect-workflows
+    - aspect-default
+  script:
+    - aspect ci warming --task:name warming -- //... -//exclude/...
