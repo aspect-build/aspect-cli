@@ -1,11 +1,16 @@
 load("@aspect//bazel/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load("@aspect//bazel.axl", "BazelTrait")
 load(
-    "../private/lib/environment.axl",
+    "../private/lib/aspect_flags.axl",
     "apply_output_base_suffix",
+    "omit_flags",
+    "protected_omissions",
+    "runner_diagnostics_flags",
+    "runner_flags",
+)
+load(
+    "../private/lib/environment.axl",
     "color_enabled",
-    "get_bazelrc_flags",
-    "get_build_diagnostics_flags",
     "get_workflows_environment",
     "print_environment_info",
     "sanitize_filename",
@@ -26,6 +31,15 @@ def _workflows_impl(ctx: FeatureContext):
     # calling `bazel_trait.task_flags` hooks from its impl — one place to
     # register, zero per-task wiring.
     bazel_trait.task_flags.append(get_task_metadata_flags)
+
+    # The user's opt-outs apply to every flag Aspect injects below and to the rc
+    # `aspect ci bazelrc` writes; `aspect_flags.axl` says which cannot be dropped.
+    omitted = ctx.args.omit_bazel_flags
+    if omitted:
+        blocked = protected_omissions(omitted)
+        if blocked:
+            ctx.std.process.exit(1, "--omit-bazel-flag cannot drop %s: endpoints, credentials, and the runner's paths are what make the build Aspect's." % ", ".join(blocked))
+        bazel_trait.flag_filters.append(lambda flags: omit_flags(flags, omitted))
 
     # `--color=yes` is wanted in every environment where aspect-cli will
     # render ANSI elsewhere — not just on Workflows runners. Bazel's
@@ -63,11 +77,7 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.build_retry = recovery.build_retry
         bazel_trait.build_end.append(recovery.build_end)
 
-        # Flags to optimize build & test
-        (startup_flags, build_flags) = get_bazelrc_flags(
-            environment = environment,
-            aspect_root_dir = ctx.std.env.aspect_root_dir(),
-        )
+        (startup_flags, build_flags) = runner_flags(environment, ctx.std.env.aspect_root_dir())
 
         # Optionally move this task to its own Bazel server by suffixing the
         # runner-derived output base, so a job that flips Bazel options (e.g.
@@ -79,12 +89,8 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.extra_startup_flags.extend(startup_flags)
         bazel_trait.extra_flags.extend(build_flags)
 
-        # BES-backend upload of the JSON profile + compact exec log. Driven by
-        # the deployment (ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS) or a
-        # workspace-level override arg. get_build_diagnostics_flags re-checks
-        # build_events/remote_cache and returns [] if either is missing.
         diagnostics_on = ctx.args.upload_build_diagnostics or environment.runner.upload_build_diagnostics
-        bazel_trait.extra_flags.extend(get_build_diagnostics_flags(environment, diagnostics_on))
+        bazel_trait.extra_flags.extend(runner_diagnostics_flags(environment, diagnostics_on))
 
         # On older runners, `bazel` on the PATH is the legacy CLI, which we
         # disable the plugin feature on. `ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI`
@@ -163,6 +169,16 @@ Workflows = feature(
             default = "0s",
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
+        ),
+        "omit_bazel_flags": args.string_list(
+            long = "omit-bazel-flag",
+            description = "A Bazel flag Aspect would otherwise set that you do not want, " +
+                          "named as Aspect spells it (e.g. --omit-bazel-flag=--heap_dump_on_oom; " +
+                          "a value after `=` is ignored). Repeat for several. Applies to every " +
+                          "task's Bazel calls and to the rc `aspect ci bazelrc` writes; set it " +
+                          "once per repo in config.axl via " +
+                          "ctx.features[Workflows].args.omit_bazel_flags. Endpoints, credentials, " +
+                          "and the runner's output paths cannot be omitted.",
         ),
         "runner_output_base_suffix": args.string(
             default = "",
