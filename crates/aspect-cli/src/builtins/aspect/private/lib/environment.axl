@@ -471,8 +471,25 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
+def bes_diagnostics_upload_flags(exec_log_path: str = "") -> list:
+    """Flags that carry build diagnostics to the BES backend: every BEP-referenced
+    local file (the JSON profile among them) uploaded to the remote cache, and —
+    when `exec_log_path` is given — the compact execution log written there so it
+    rides along.
+
+    Both are version-gated tuples. Bazel 7 renamed `--remote_build_event_upload`
+    and flipped its default to `minimal`; Bazel 6 only knows the `experimental_`
+    spelling, whose default is already `all`. The compact execution log arrived in
+    Bazel 7.1.
+    """
+    flags = [("--remote_build_event_upload=all", ">=7.0.0")]
+    if exec_log_path:
+        flags.append(("--execution_log_compact_file=" + exec_log_path, ">=7.1.0"))
+    return flags
+
 def get_build_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool) -> list:
-    """BES-backend upload flags for the JSON profile + compact exec log.
+    """BES-backend upload flags for the JSON profile + compact exec log on a
+    Workflows runner.
 
     `enabled` is the opt-in decision the caller owns — the deployment env var
     (runner.upload_build_diagnostics) OR the workspace-level override arg — so
@@ -480,7 +497,8 @@ def get_build_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool
     BES backend and a remote cache are wired up: the files ride the BES stream
     to the remote cache as bytestream:// refs, so both are required for the
     upload to land. The profile itself is already generated and enriched by
-    `get_generic_bazelrc_flags`; this only places and uploads it.
+    `get_generic_bazelrc_flags`; this places it under the job tmpdir and adds
+    `bes_diagnostics_upload_flags`.
     """
     runner = environment.runner
     if not enabled or runner == None:
@@ -489,17 +507,7 @@ def get_build_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool
         return []
 
     tmpdir = runner.job_tmpdir
-    return [
-        "--profile=" + tmpdir + "/command.profile.gz",
-        # Version-gated tuple like the cache-compression flags above;
-        # --execution_log_compact_file needs Bazel >= 7.1.
-        ("--execution_log_compact_file=" + tmpdir + "/exec.log.zstd", ">=7.1.0"),
-        # Upload ALL BEP-referenced local outputs so the profile + exec log
-        # actually reach the cache for ivy-bep-etl. Bazel 7 renamed the flag
-        # and flipped its default to `minimal`; Bazel 6 only knows the
-        # `experimental_` spelling, whose default is already `all`.
-        ("--remote_build_event_upload=all", ">=7.0.0"),
-    ]
+    return ["--profile=" + tmpdir + "/command.profile.gz"] + bes_diagnostics_upload_flags(tmpdir + "/exec.log.zstd")
 
 # Display helpers
 

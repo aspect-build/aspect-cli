@@ -1,25 +1,25 @@
-"""`aspect ci bazelrc` — write a Bazel rc block that configures vanilla `bazel`
-calls to use Aspect's remote services and recommended optimizations.
+"""`aspect ci bazelrc` — write a Bazel rc that configures vanilla `bazel` calls to
+use Aspect's remote services and recommended optimizations.
 
 `aspect <task>` injects its Bazel flags itself (see `feature/workflows.axl`,
 `feature/deployment.axl`, and `get_bazelrc_flags` in `lib/environment.axl`). A
 bare `bazel build` started from the same job gets none of that. This command
-writes the equivalent into a Bazel rc file (`~/.bazelrc` by default — the first
-user rc Bazel loads, picked up with no `--bazelrc` plumbing) so vanilla `bazel`
-calls in the job pick up the same configuration.
+writes the equivalent to `~/.aspect/bazelrc` and adds one `try-import` line for it
+to `~/.bazelrc` (the first user rc Bazel loads, picked up with no `--bazelrc`
+plumbing), so vanilla `bazel` calls in the job pick up the same configuration.
 
 It is the in-CLI successor to `rosetta bazelrc`: the CI integrations (the
 setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab component)
 call this instead of `rosetta` once `rosetta` is gone from the runner image.
 
-The rc gets two kinds of content:
+The generated rc gets two kinds of content:
 
   - Unconditional flags, applied to every `bazel` call. On a Workflows runner the
     full set — generic tuning, the remote-cache endpoint (from env), and the
     runner-specific flags (repository cache, per-runner output paths, identity
-    header, the Workflows-cache compression gates). On other CI, or with an
-    explicit `--output`: only the generic flags (plus the remote-cache endpoint
-    when its env vars are set) — nothing tied to a runner's mounts or identity.
+    header, the Workflows-cache compression gates). Elsewhere only the generic
+    flags (plus the remote-cache endpoint when its env vars are set) — nothing
+    tied to a runner's mounts or identity.
 
   - Opt-in `--config` sections, one per Aspect deployment this machine knows
     (`aspect auth status`) that advertises a remote cache or BES backend:
@@ -33,23 +33,28 @@ The rc gets two kinds of content:
     Aspect Cloud's config takes its own name; a configured deployment `<name>`
     gets `aspect-<name>` (`aspect-cloud` and `aspect` are reserved names, so the
     two never collide). Each wires `--remote_cache` / `--bes_backend` /
-    `--bes_results_url`, authenticates through the `aspect get` credential
-    helper (scoped to the deployment's hosts), and — where BES is wired — asks
-    Bazel for a complete stream: every action event, all BEP-referenced files
-    uploaded, the compact execution log (Bazel >= 7.1), and no early exit before
-    the upload finishes. Remote execution is never part of the base config: it
+    `--bes_results_url` and authenticates through the `aspect get` credential
+    helper, scoped to the deployment's hosts and pointed at the binary running
+    this command — it certainly exists, whereas a bare `aspect` on PATH may not
+    for a later `bazel` step, and Bazel fails outright on a helper it cannot
+    find. Where BES is wired the config also asks Bazel for a complete stream:
+    every action event, all BEP-referenced files uploaded, the compact execution
+    log (Bazel >= 7.1) under the OS temp dir, and no early exit before the
+    upload finishes. Remote execution is never part of the base config: it
     relocates every action, so it is only ever reached by naming `-exec`,
     mirroring `--remote=exec` on `aspect <task>`. Aspect Cloud advertises no
     executor, so it gets no `-exec` config.
 
-Off a runner and off CI with no `--output`, nothing is written, so a developer's
-own `~/.bazelrc` is never clobbered.
-
-The output is a marker-delimited managed block. An existing file keeps its other
-content: the block replaces a previous one in place, or is appended when the file
-has none — so an rc another setup step wrote survives, and re-running is
-idempotent. A file consisting solely of an older (marker-less) `aspect ci bazelrc`
-output is replaced whole.
+The generated file is ours and is rewritten whole on every run. The user rc is
+not: it only ever gains the one `try-import` line, skipped when already present,
+so re-running never accumulates anything and the user's own lines are untouched.
+`try-import` rather than `import` so a generated file that later disappears
+degrades to "no Aspect configuration" instead of failing every `bazel` call. A
+`~/.bazelrc` written whole by an earlier version of this command (recognizable by
+its header) is replaced by the import line, since keeping it would leave its
+stale flags in force. Off CI (no Workflows runner, no CI env) the user rc is left
+alone entirely by default: the generated file is still written, and the import
+line is only added when `--import-into` names the rc explicitly.
 
 On Bazel >= 6.3.0 flags are emitted under `common` (applies to every command);
 older Bazel has no `common` pseudo-command, so they're spelled out under `build`
@@ -65,6 +70,7 @@ load("@aspect//bazel/build_metadata.axl", "version_gte")
 load("./private/lib/aspect_endpoint_auth.axl", "endpoint_host")
 load(
     "./private/lib/environment.axl",
+    "bes_diagnostics_upload_flags",
     "detect_ci",
     "error",
     "get_bazelrc_flags",
@@ -89,21 +95,25 @@ _COMMON_PSEUDO_COMMAND_MIN_VERSION = "6.3.0"
 # newer versions, where we use `common` instead and never reach this path.
 _PRE_COMMON_COMMANDS = ["build", "query"]
 
-# Delimits the managed block in the rc file. `merge_managed_block` replaces
-# whatever sits between them on the next run, so the text must stay stable.
-BEGIN_MARKER = "# BEGIN aspect ci bazelrc"
-END_MARKER = "# END aspect ci bazelrc"
+# First line of the generated rc. The prefix is also how a `~/.bazelrc` written
+# whole by an earlier version of this command is recognized, so it must not change.
+_GENERATED_HEADER_PREFIX = "# Generated by `aspect ci bazelrc`"
+GENERATED_HEADER = _GENERATED_HEADER_PREFIX + " — do not edit; rewritten on every run."
 
-# The first line of an rc written before the markers existed. That output was the
-# whole file, so a file opening with it is still ours to replace.
-_LEGACY_HEADER = "# Generated by `aspect ci bazelrc`"
+# Where the generated rc lives under the home directory, and the user rc that
+# imports it.
+_GENERATED_RC = ".aspect/bazelrc"
+_USER_RC = ".bazelrc"
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
 
-# Config name of the default deployment, and of the built-in Aspect Cloud entry
-# (which takes its own name — see the module docstring).
-DEFAULT_CONFIG = "aspect"
+# Bazel 6.0.0 introduced the credential-helper protocol as
+# `--experimental_credential_helper`; 6.4.0 dropped the prefix.
+_CREDENTIAL_HELPER_MIN_VERSION = "6.0.0"
+_CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION = "6.4.0"
+
+_DEFAULT_CONFIG = "aspect"
 _CONFIG_PREFIX = "aspect-"
 _EXEC_SUFFIX = "-exec"
 
@@ -116,15 +126,20 @@ RcConfig = record(
     flags = field(list),
 )
 
+# What `ensure_import` did to the user rc.
+ImportAction = enum("created", "unchanged", "appended", "replaced")
+
+ImportResult = record(
+    content = field(str),
+    action = field(ImportAction),
+)
+
 def _flag_str(flag) -> str:
     """A flag is either a plain string or, for a surviving version-gated option,
     a `(flag, version_condition)` tuple from `rc.expand` — take the flag text."""
     return flag[0] if type(flag) == "tuple" else flag
 
-def is_config_chain(flag) -> bool:
-    """Whether `flag` chains to another config section (`--config=<name>`).
-
-    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+def _is_config_chain(flag) -> bool:
     return type(flag) == "string" and flag.startswith("--config=")
 
 def startup_flags_for_rc(startup_flags: list) -> list:
@@ -164,24 +179,41 @@ def config_name(deployment) -> str:
 
 def credential_helper_flags(hosts: list, helper: str) -> list:
     """`--credential_helper=<host>=<helper>` for each host, scoped so the helper is
-    only ever invoked for a deployment's own endpoints, as version-gated tuples:
-    Bazel 6.4.0 dropped the `experimental_` prefix (the old spelling still works
-    there, with a deprecation warning), and 6.0.0 introduced the helper protocol.
+    only ever invoked for a deployment's own endpoints. Version-gated tuples: the
+    unprefixed spelling from 6.4.0 (the old one still works there, with a
+    deprecation warning), `--experimental_credential_helper` from 6.0.0 to 6.3.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
     flags = []
     for host in hosts:
         scoped = host + "=" + helper
-        flags.append(("--credential_helper=" + scoped, ">=6.4.0"))
-        flags.append(("--experimental_credential_helper=" + scoped, ">=6.0.0, <6.4.0"))
+        flags.append(("--credential_helper=" + scoped, ">=" + _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION))
+        flags.append(("--experimental_credential_helper=" + scoped, ">=" + _CREDENTIAL_HELPER_MIN_VERSION + ", <" + _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION))
     return flags
 
-def _dedupe(items: list) -> list:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out
+def bes_completeness_flags(exec_log_path: str = "") -> list:
+    """Flags that make a Bazel-uploaded BES stream report everything the Aspect
+    backend can use: every action's event (Bazel only publishes failed ones by
+    default), no early exit before the upload completes, and the diagnostics
+    upload — every BEP-referenced file, plus the compact execution log when a
+    path is given (see `bes_diagnostics_upload_flags`).
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    return [
+        "--build_event_publish_all_actions",
+        "--bes_upload_mode=wait_for_upload_complete",
+    ] + bes_diagnostics_upload_flags(exec_log_path)
+
+def _unique_hosts(uris: list) -> list:
+    hosts = []
+    for uri in uris:
+        host = endpoint_host(uri) if uri else ""
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+def _label(deployment) -> str:
+    return "Aspect Cloud" if deployment.builtin else "Aspect Workflows deployment '" + deployment.name + "'"
 
 def _login_hint(deployment) -> str:
     """How CI authenticates this deployment's config: its API-token variable,
@@ -191,15 +223,42 @@ def _login_hint(deployment) -> str:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
     return "auth via `" + login + "`"
 
-def _label(deployment) -> str:
-    return "Aspect Cloud" if deployment.builtin else "Aspect Workflows deployment '" + deployment.name + "'"
+def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
+    """`--config=<name>`: the deployment's remote cache and/or BES, the credential
+    helper for their hosts, and the BES completeness flags when BES is wired."""
+    flags = []
+    wired = []
+    if d.cache:
+        flags.append("--remote_cache=" + _SCHEME + d.cache)
+        wired.append("remote cache")
+    if d.bes:
+        flags.append("--bes_backend=" + _SCHEME + d.bes)
+        if d.results_url:
+            flags.append("--bes_results_url=" + d.results_url)
+        wired.append("BES")
+    flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
+    if d.bes:
+        flags.extend(bes_completeness_flags(exec_log_path))
+    return RcConfig(
+        name = name,
+        comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
+        flags = flags,
+    )
+
+def _exec_config(d, name: str, credential_helper: str) -> RcConfig:
+    """`--config=<name>-exec`: chains to the base config and adds the executor,
+    with a credential helper for its host when the base config's don't cover it."""
+    flags = ["--config=" + name, "--remote_executor=" + _SCHEME + d.exec]
+    exec_hosts = [h for h in _unique_hosts([d.exec]) if h not in _unique_hosts([d.cache, d.bes])]
+    flags.extend(credential_helper_flags(exec_hosts, credential_helper))
+    return RcConfig(name = name + _EXEC_SUFFIX, comment = "--config=" + name + " plus its remote execution.", flags = flags)
 
 def deployment_configs(deployments: list, credential_helper: str, exec_log_path: str = "") -> list:
     """The `--config` sections for every deployment that advertises a remote cache
     or BES backend, in `deployments` order, followed by the `aspect` /
     `aspect-exec` aliases for the default one.
 
-    `deployments` carries `aspect.DeploymentSummary` rows (or anything with the
+    `deployments` carries `aspect.DeploymentEndpoints` rows (or anything with the
     same `name` / `builtin` / `default` / `cache` / `bes` / `exec` /
     `results_url` / `api_token_env` fields). `credential_helper` is the path Bazel
     invokes as `<helper> get`. `exec_log_path`, when set, is where a BES-wired
@@ -213,82 +272,28 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
         if not (d.cache or d.bes):
             continue
         name = config_name(d)
-        cache = endpoint_host(d.cache) if d.cache else ""
-        bes = endpoint_host(d.bes) if d.bes else ""
-        hosts = _dedupe([cache, bes])
-
-        flags = []
-        wired = []
-        if cache:
-            flags.append("--remote_cache=" + _SCHEME + d.cache)
-            wired.append("remote cache")
-        if bes:
-            flags.append("--bes_backend=" + _SCHEME + d.bes)
-            if d.results_url:
-                flags.append("--bes_results_url=" + d.results_url)
-            wired.append("BES")
-        flags.extend(credential_helper_flags(hosts, credential_helper))
-        if bes:
-            flags.extend(bes_completeness_flags(exec_log_path))
-        configs.append(RcConfig(
-            name = name,
-            comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
-            flags = flags,
-        ))
-
-        exec_name = ""
+        configs.append(_base_config(d, name, credential_helper, exec_log_path))
         if d.exec:
-            exec_name = name + _EXEC_SUFFIX
-            exec_host = endpoint_host(d.exec)
-            exec_flags = ["--config=" + name, "--remote_executor=" + _SCHEME + d.exec]
-            if exec_host not in hosts:
-                exec_flags.extend(credential_helper_flags([exec_host], credential_helper))
-            configs.append(RcConfig(
-                name = exec_name,
-                comment = "--config=" + name + " plus its remote execution.",
-                flags = exec_flags,
-            ))
-
+            configs.append(_exec_config(d, name, credential_helper))
         if d.default:
             aliases.append(RcConfig(
-                name = DEFAULT_CONFIG,
+                name = _DEFAULT_CONFIG,
                 comment = "The default deployment (`aspect auth use`): " + _label(d) + ".",
                 flags = ["--config=" + name],
             ))
-            if exec_name:
-                aliases.append(RcConfig(
-                    name = DEFAULT_CONFIG + _EXEC_SUFFIX,
-                    flags = ["--config=" + exec_name],
-                ))
+            if d.exec:
+                aliases.append(RcConfig(name = _DEFAULT_CONFIG + _EXEC_SUFFIX, flags = ["--config=" + name + _EXEC_SUFFIX]))
     return configs + aliases
 
-def bes_completeness_flags(exec_log_path: str = "") -> list:
-    """Flags that make a BES-wired invocation report everything the Aspect backend
-    can use: every action's event (Bazel only publishes failed ones by default),
-    every BEP-referenced local file uploaded to the remote cache (Bazel 7 flipped
-    the default to `minimal`; 6.x already uploads all), the compact execution log
-    (Bazel >= 7.1) when a path is given, and no early exit before the upload
-    completes.
-
-    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
-    flags = [
-        "--build_event_publish_all_actions",
-        "--bes_upload_mode=wait_for_upload_complete",
-        ("--remote_build_event_upload=all", ">=7.0.0"),
-    ]
-    if exec_log_path:
-        flags.append(("--execution_log_compact_file=" + exec_log_path, ">=7.1.0"))
-    return flags
-
 def render_bazelrc(startup_flags: list, build_flags: list, command_sections: list, configs: list = []) -> str:
-    """Render the managed block: markers, a `startup` line per startup flag, every
-    build flag under each section in `command_sections` (`["common"]` on modern
-    Bazel, `["build", "query"]` on Bazel < 6.3.0), then each `RcConfig` as a
-    commented `<section>:<name>` group. Flags may be `(flag, condition)` tuples
+    """Render the generated rc: the header, a `startup` line per startup flag,
+    every build flag under each section in `command_sections` (`["common"]` on
+    modern Bazel, `["build", "query"]` on Bazel < 6.3.0), then each `RcConfig` as
+    a commented `<section>:<name>` group. Flags may be `(flag, condition)` tuples
     (the shape `rc.expand` yields for version-gated options); only the flag text
     is written."""
     lines = [
-        BEGIN_MARKER + " — managed block, regenerated on every run; do not edit.",
+        GENERATED_HEADER,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
         "",
     ]
@@ -304,38 +309,52 @@ def render_bazelrc(startup_flags: list, build_flags: list, command_sections: lis
         for flag in config.flags:
             for section in command_sections:
                 lines.append(section + ":" + config.name + " " + _flag_str(flag))
-    lines.append(END_MARKER)
     return "\n".join(lines) + "\n"
 
-def merge_managed_block(existing: str | None, block: str) -> str:
-    """The rc file content after placing `block` (a `render_bazelrc` result) into
-    `existing`: replacing a previous block between the markers in place, replacing
-    the whole file when it is an older marker-less `aspect ci bazelrc` output, and
-    otherwise appending after the existing content. `None`/empty `existing` is a
-    new file.
+def import_line(generated_rc: str) -> str:
+    """The `try-import` line that pulls `generated_rc` into a user rc.
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    return "try-import " + generated_rc
+
+def ensure_import(existing: str | None, line: str) -> ImportResult:
+    """The user rc content with `line` present exactly once: unchanged when it is
+    already there, appended after the existing content otherwise, or — when the
+    file was written whole by an earlier version of this command, so every line in
+    it is a stale flag of ours — replaced by the line alone. `None`/empty
+    `existing` is a new file.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
     if not existing:
-        return block
-    lines = existing.split("\n")
-    begin = [i for i, line in enumerate(lines) if line.startswith(BEGIN_MARKER)]
-    end = [i for i, line in enumerate(lines) if line.startswith(END_MARKER)]
-    if begin and end and end[-1] > begin[0]:
-        before = "\n".join(lines[:begin[0]])
-        after = "\n".join(lines[end[-1] + 1:])
-        return (before + "\n" if before else "") + block + after
-    if existing.startswith(_LEGACY_HEADER):
-        return block
-    return existing.rstrip("\n") + "\n\n" + block
+        return ImportResult(content = line + "\n", action = ImportAction("created"))
+    if line in existing.split("\n"):
+        return ImportResult(content = existing, action = ImportAction("unchanged"))
+    if existing.startswith(_GENERATED_HEADER_PREFIX):
+        return ImportResult(content = line + "\n", action = ImportAction("replaced"))
+    return ImportResult(content = existing.rstrip("\n") + "\n" + line + "\n", action = ImportAction("appended"))
 
-def _default_output(ctx: TaskContext) -> str | None:
-    """Default rc destination: `~/.bazelrc`. None (with an error) when the home
-    directory can't be resolved and no `--output` was given."""
+_IMPORT_VERBS = {
+    ImportAction("created"): "created %s with it",
+    ImportAction("unchanged"): "%s already imports it",
+    ImportAction("appended"): "added the import to %s",
+    ImportAction("replaced"): "replaced the previously generated %s with the import",
+}
+
+def _home_path(ctx: TaskContext, relative: str) -> str | None:
+    """`~/<relative>`, or None (with an error) when the home directory can't be
+    resolved."""
     home = ctx.std.env.home_dir()
     if home == None:
-        error(ctx.std, "Could not resolve your home directory to default the output path. Pass --output=<path> explicitly.")
+        error(ctx.std, "Could not resolve your home directory to default the rc paths. Pass --output=<path> (and --import-into=<rc>) explicitly.")
         return None
-    return home.rstrip("/") + "/.bazelrc"
+    return home.rstrip("/") + "/" + relative
+
+def _write(ctx: TaskContext, path: str, content: str) -> None:
+    """Write `content` to `path`, creating parent directories."""
+    parent = path.rstrip("/").rsplit("/", 1)
+    if len(parent) == 2 and parent[0] and not ctx.std.fs.exists(parent[0]):
+        ctx.std.fs.create_dir_all(parent[0])
+    ctx.std.fs.write(path, content)
 
 def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     """Resolve the version-gated `(flag, constraint)` tuples in `flags` against the
@@ -343,8 +362,8 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     `common` bucket holds every flag, expanded assumed-latest when the version is
     unknown. Config chain entries are kept verbatim ahead of the rest — the blank
     RunCommand has no section for them to expand into."""
-    chain = [f for f in flags if is_config_chain(f)]
-    rest = [f for f in flags if not is_config_chain(f)]
+    chain = [f for f in flags if _is_config_chain(f)]
+    rest = [f for f in flags if not _is_config_chain(f)]
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 
@@ -356,16 +375,20 @@ def _exec_log_path(ctx: TaskContext) -> str:
     ctx.std.fs.create_dir_all(dir)
     return dir + "/exec.log.zstd"
 
+def _resolved_configs(ctx: TaskContext, bazel_version: str | None) -> list:
+    """`deployment_configs` for this machine's deployments, version-resolved.
+    `deployments()` rather than `list()`: the latter reads the credential store,
+    which a CI runner may not have, and nothing here needs login status."""
+    deployments = ctx.aspect.auth.deployments()
+    exec_log_path = _exec_log_path(ctx) if any([d.bes for d in deployments]) else ""
+    return [
+        RcConfig(name = c.name, comment = c.comment, flags = _resolve(ctx, c.flags, bazel_version))
+        for c in deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
+    ]
+
 def _bazelrc_impl(ctx: TaskContext) -> int:
     environment = get_workflows_environment(ctx.std)
     on_runner = is_aspect_workflows_runner(ctx.std.env)
-    explicit_output = bool(ctx.args.output)
-
-    # Off a runner and off CI, don't write ~/.bazelrc by default — it's the
-    # developer's own. Require an explicit --output there. On CI/runner, expected.
-    if not on_runner and detect_ci(ctx.std.env) == None and not explicit_output:
-        error(ctx.std, "Not on an Aspect Workflows runner or other CI. Not writing ~/.bazelrc by default off CI; pass --output=<path> to write somewhere explicit.")
-        return 1
 
     if on_runner:
         # Full set: generic CI flags + the runner-specific cache/identity/output
@@ -379,53 +402,58 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
         )
         startup_flags = startup_flags_for_rc(startup_flags)
     else:
-        # Off a runner (CI, or explicit --output): only the generic flags that
-        # don't depend on the runner's mounts, identity, or the Workflows cache.
-        # The remote-cache endpoint flags are still picked up from env vars when
-        # set. No runner-specific startup flags.
+        # Only the generic flags that don't depend on the runner's mounts,
+        # identity, or the Workflows cache. The remote-cache endpoint flags are
+        # still picked up from env vars when set. No runner-specific startup flags.
         build_flags = get_generic_bazelrc_flags(environment)
         startup_flags = []
 
     bazel_version = ctx.bazel.version()
     build_flags = _resolve(ctx, build_flags, bazel_version)
+    configs = _resolved_configs(ctx, bazel_version)
 
-    # The running binary is the credential helper: it certainly exists, whereas
-    # a bare `aspect` on PATH may not for a later `bazel` step.
-    configs = [
-        RcConfig(name = c.name, comment = c.comment, flags = _resolve(ctx, c.flags, bazel_version))
-        for c in deployment_configs(ctx.aspect.auth.list(), ctx.std.env.current_exe(), _exec_log_path(ctx))
-    ]
-
-    output = ctx.args.output if explicit_output else _default_output(ctx)
+    output = ctx.args.output or _home_path(ctx, _GENERATED_RC)
     if output == None:
         return 1
+    _write(ctx, output, render_bazelrc(startup_flags, build_flags, command_sections(bazel_version), configs))
 
-    block = render_bazelrc(startup_flags, build_flags, command_sections(bazel_version), configs)
-
-    parent = output.rstrip("/").rsplit("/", 1)
-    if len(parent) == 2 and parent[0] and not ctx.std.fs.exists(parent[0]):
-        ctx.std.fs.create_dir_all(parent[0])
-    existing = ctx.std.fs.read_to_string(output) if ctx.std.fs.exists(output) else None
-    ctx.std.fs.write(output, merge_managed_block(existing, block))
-
-    placed = "Replaced the Aspect bazelrc block in" if existing and BEGIN_MARKER in existing else ("Appended the Aspect bazelrc block to" if existing else "Wrote Aspect bazelrc to")
-    summary = "%s %s (%d build flags, %d startup flags)" % (placed, output, len(build_flags), len(startup_flags))
+    summary = "Wrote Aspect bazelrc to %s (%d build flags, %d startup flags)" % (output, len(build_flags), len(startup_flags))
     if configs:
-        summary += "; --config sections: " + ", ".join([c.name for c in configs]) + "."
+        summary += "; --config sections: " + ", ".join([c.name for c in configs])
     else:
-        summary += "; no --config sections, since no deployment advertises endpoints here (see `aspect auth status`; `aspect auth login` records Aspect Cloud's)."
-    info(ctx.std, summary)
+        summary += "; no --config sections, since no deployment advertises endpoints here (see `aspect auth status`; `aspect auth login` records Aspect Cloud's)"
+
+    # Off CI the user rc is a developer's own: only touch it when named explicitly.
+    on_ci = on_runner or detect_ci(ctx.std.env) != None
+    user_rc = ctx.args.import_into or (_home_path(ctx, _USER_RC) if on_ci else None)
+    if user_rc == None:
+        info(ctx.std, summary + ". Not on CI, so no user rc was changed; add `%s` to yours to use it." % import_line(output))
+        return 0
+    if user_rc == output:
+        info(ctx.std, summary + ". It is the user rc itself, so no import line was added.")
+        return 0
+
+    existing = ctx.std.fs.read_to_string(user_rc) if ctx.std.fs.exists(user_rc) else None
+    result = ensure_import(existing, import_line(output))
+    if result.action != ImportAction("unchanged"):
+        _write(ctx, user_rc, result.content)
+    info(ctx.std, summary + "; " + _IMPORT_VERBS[result.action] % user_rc + ".")
     return 0
 
 bazelrc = task(
     group = ["ci"],
-    summary = "Write a Bazel rc block that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc block so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Unconditionally: the recommended CI/profiling flags, plus on an Aspect Workflows runner its remote cache, repository cache, and per-runner output paths. Opt-in `--config` sections for every Aspect deployment this machine knows (`aspect auth status`): `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment, `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. Defaults to `~/.bazelrc`, replacing a previous block in place or appending to an existing file; off a runner and off CI it writes nothing unless `--output` is given, so it won't clobber your local `~/.bazelrc`.",
+    summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects: `~/.aspect/bazelrc`, imported by a single `try-import` line added once to `~/.bazelrc`. Unconditionally: the recommended CI/profiling flags, plus on an Aspect Workflows runner its remote cache, repository cache, and per-runner output paths. Opt-in `--config` sections for every Aspect deployment this machine knows (`aspect auth status`): `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment, `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. Off CI the generated file is still written but `~/.bazelrc` is left alone unless --import-into names it.",
     implementation = _bazelrc_impl,
     args = {
         "output": args.string(
             default = "",
-            description = "Rc file to write. Defaults to `~/.bazelrc` (the first user rc Bazel loads). Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
+            description = "Generated rc file, rewritten on every run. Defaults to `~/.aspect/bazelrc`. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
+        ),
+        "import_into": args.string(
+            long = "import-into",
+            default = "",
+            description = "User rc that receives a `try-import <output>` line, added only when not already present. Defaults to `~/.bazelrc` on an Aspect Workflows runner or other CI, and to nothing off CI, so a developer's own rc is never modified without asking.",
         ),
     },
 )

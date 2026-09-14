@@ -336,7 +336,7 @@ def config(ctx: ConfigContext):
 
     # `aspect ci bazelrc` pure helpers — the version-gated flag tuples, rc
     # rendering (startup vs common sections, per-deployment `--config` groups),
-    # and the managed-block merge into an existing rc.
+    # and the one-time `try-import` line in the user rc.
     # Run with: aspect dev test-bazelrc
     ctx.tasks.add(bazelrc_tests)
 

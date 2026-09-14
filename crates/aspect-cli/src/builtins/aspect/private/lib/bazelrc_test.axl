@@ -2,9 +2,9 @@
 
   - `bazelrc.axl` rendering: `command_sections` (which rc command sections to
     use for a Bazel version), `render_bazelrc` (rc text, including `--config`
-    groups), `startup_flags_for_rc`, `merge_managed_block` (placing the block in
-    an existing file), and `deployment_configs` (the `--config` sections built
-    from `aspect auth status` rows).
+    groups), `startup_flags_for_rc`, `ensure_import` (the one-time `try-import`
+    line in the user rc), and `deployment_configs` (the `--config` sections
+    built from `aspect auth status` rows).
   - `environment.axl` flags: `get_generic_bazelrc_flags` / `get_bazelrc_flags` /
     `get_build_diagnostics_flags` output, and `apply_output_base_suffix`.
 
@@ -16,15 +16,15 @@ constraints. Run with: aspect dev test-bazelrc
 
 load(
     "@aspect//bazelrc.axl",
-    "BEGIN_MARKER",
-    "END_MARKER",
+    "GENERATED_HEADER",
+    "ImportAction",
     "bes_completeness_flags",
     "command_sections",
     "config_name",
     "credential_helper_flags",
     "deployment_configs",
-    "is_config_chain",
-    "merge_managed_block",
+    "ensure_import",
+    "import_line",
     "render_bazelrc",
     "startup_flags_for_rc",
 )
@@ -36,6 +36,7 @@ load(
     "Runner",
     "WorkflowsEnvironment",
     "apply_output_base_suffix",
+    "bes_diagnostics_upload_flags",
     "get_bazelrc_flags",
     "get_build_diagnostics_flags",
     "get_generic_bazelrc_flags",
@@ -59,7 +60,7 @@ def _lacks(label, flags, fragment):
     _eq(label, any([fragment in f for f in _texts(flags)]), False)
 
 def _summary(name, builtin = False, default = False, cache = "", bes = "", exec = "", results_url = "", api_token_env = ""):
-    """A stand-in for an `aspect.DeploymentSummary` row from `ctx.aspect.auth.list()`."""
+    """A stand-in for an `aspect.DeploymentEndpoints` row from `ctx.aspect.auth.deployments()`."""
     return struct(
         name = name,
         builtin = builtin,
@@ -199,9 +200,8 @@ def _test_render_common_section(_ctx):
     _eq("no common startup_flag", "common --nohome_rc" in lines, False)
     _eq("no startup build_flag", "startup --remote_cache=grpcs://c:443" in lines, False)
 
-    # Marker-delimited so a later run can find and replace the block.
-    _eq("begins with marker", out.startswith(BEGIN_MARKER), True)
-    _eq("ends with marker", out.endswith(END_MARKER + "\n"), True)
+    _eq("header first", lines[0], GENERATED_HEADER)
+    _eq("trailing newline", out.endswith("\n"), True)
 
 def _test_render_pre_common_sections(_ctx):
     # < 6.3.0: each build flag is emitted once per section (build + query);
@@ -259,9 +259,12 @@ def _test_render_configs_pre_common(_ctx):
 
 def _test_config_name(_ctx):
     # Aspect Cloud keeps its own (already `aspect-` prefixed) name; a configured
-    # deployment is prefixed so the names share one namespace.
+    # deployment is prefixed so the names share one namespace. A self-hosted
+    # deployment keeps its dotted domain as its name; Bazel accepts dots in a
+    # config name.
     _eq("builtin", config_name(_CLOUD), "aspect-cloud")
     _eq("configured", config_name(_SILO), "aspect-silo-gcp")
+    _eq("dotted", config_name(_summary("remote.acme.com")), "aspect-remote.acme.com")
 
 def _test_deployment_configs_cloud(_ctx):
     configs = _by_name(deployment_configs([_CLOUD], _HELPER, exec_log_path = "/tmp/x/exec.log.zstd"))
@@ -299,7 +302,6 @@ def _test_deployment_configs_exec(_ctx):
 
     exec = configs["aspect-silo-gcp-exec"].flags
     _eq("chains to base first", exec[0], "--config=aspect-silo-gcp")
-    _eq("chain recognized", is_config_chain(exec[0]), True)
     _eq("executor", "--remote_executor=grpcs://remote.silo-gcp.aspect.build" in exec, True)
 
     # The exec host is already covered by the base config's helper.
@@ -349,47 +351,55 @@ def _test_credential_helper_scope_strips_port(_ctx):
 
 def _test_bes_completeness_without_exec_log(_ctx):
     _lacks("no exec log without a path", bes_completeness_flags(), "--execution_log_compact_file")
+    _has("upload all still present", bes_completeness_flags(), "--remote_build_event_upload=all")
 
-def _test_merge_new_file(_ctx):
-    block = render_bazelrc([], ["--disk_cache="], ["common"])
-    _eq("None → block", merge_managed_block(None, block), block)
-    _eq("empty → block", merge_managed_block("", block), block)
+def _test_bes_diagnostics_upload_flags(_ctx):
+    # Shared between the runner diagnostics and the rc's BES configs, so both
+    # gate the same way.
+    _eq("no path", bes_diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
+    _eq("with path", bes_diagnostics_upload_flags("/x/e.zstd")[1], ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
 
-def _test_merge_appends_to_foreign_rc(_ctx):
-    # An rc another setup step wrote keeps its content; ours follows after a
-    # blank line, and the trailing newline is normalized.
-    block = render_bazelrc([], ["--disk_cache="], ["common"])
-    got = merge_managed_block("build --disk_cache=/tmp/dc\n", block)
-    _eq("append", got, "build --disk_cache=/tmp/dc\n\n" + block)
-    _eq("append no trailing newline", merge_managed_block("build --x", block), "build --x\n\n" + block)
+_LINE = import_line("/home/ci/.aspect/bazelrc")
 
-def _test_merge_replaces_previous_block(_ctx):
-    # Re-running replaces the previous block in place, leaving content on either
-    # side untouched — so the command is idempotent.
-    old = render_bazelrc([], ["--old_flag"], ["common"])
-    new = render_bazelrc([], ["--new_flag"], ["common"])
-    existing = "build --before\n" + old + "\nbuild --after\n"
-    got = merge_managed_block(existing, new)
-    _eq("replaced", got, "build --before\n" + new + "\nbuild --after\n")
-    _eq("old flag gone", "--old_flag" in got, False)
-    _eq("idempotent", merge_managed_block(got, new), got)
+def _test_import_line(_ctx):
+    # `try-import`, so a generated file that later disappears is not fatal.
+    _eq("try-import", _LINE, "try-import /home/ci/.aspect/bazelrc")
 
-    # A block at the very start of the file (the common case: we created it).
-    _eq("block-only file", merge_managed_block(old, new), new)
-    _eq("block-only idempotent", merge_managed_block(new, new), new)
+def _test_ensure_import_new_file(_ctx):
+    got = ensure_import(None, _LINE)
+    _eq("created content", got.content, _LINE + "\n")
+    _eq("created", got.action, ImportAction("created"))
+    _eq("empty is new", ensure_import("", _LINE).action, ImportAction("created"))
 
-def _test_merge_replaces_legacy_output(_ctx):
-    # A marker-less rc from an older CLI was the whole file, so it is replaced
-    # rather than appended to (which would leave its stale flags in force).
+def _test_ensure_import_appends_once(_ctx):
+    # A user's rc keeps every line; ours is added after them, and a second run
+    # finds it and changes nothing — so re-running never accumulates lines.
+    first = ensure_import("build --disk_cache=/tmp/dc\n", _LINE)
+    _eq("appended content", first.content, "build --disk_cache=/tmp/dc\n" + _LINE + "\n")
+    _eq("appended", first.action, ImportAction("appended"))
+    _eq("no trailing newline", ensure_import("build --x", _LINE).content, "build --x\n" + _LINE + "\n")
+
+    second = ensure_import(first.content, _LINE)
+    _eq("unchanged content", second.content, first.content)
+    _eq("unchanged", second.action, ImportAction("unchanged"))
+
+    # Present anywhere, not just last.
+    _eq("mid-file", ensure_import(_LINE + "\nbuild --later\n", _LINE).action, ImportAction("unchanged"))
+
+def _test_ensure_import_replaces_generated_rc(_ctx):
+    # A `~/.bazelrc` an earlier version wrote whole is all stale flags of ours:
+    # replacing it with the import keeps them from staying in force.
     legacy = "# Generated by `aspect ci bazelrc` — do not edit.\ncommon --remote_cache=grpcs://stale\n"
-    block = render_bazelrc([], ["--disk_cache="], ["common"])
-    _eq("legacy replaced", merge_managed_block(legacy, block), block)
+    got = ensure_import(legacy, _LINE)
+    _eq("replaced content", got.content, _LINE + "\n")
+    _eq("replaced", got.action, ImportAction("replaced"))
 
-def _test_merge_unmatched_markers_append(_ctx):
-    # An END with no BEGIN (or in the wrong order) is not a block of ours.
-    block = render_bazelrc([], [], ["common"])
-    existing = END_MARKER + "\nbuild --x\n"
-    _eq("appended", merge_managed_block(existing, block), existing + "\n" + block)
+    # The current header is recognized the same way.
+    _eq("current header", ensure_import(render_bazelrc([], [], ["common"]), _LINE).action, ImportAction("replaced"))
+
+    # Only a file *starting* with the header counts; a user rc that mentions it
+    # later is theirs.
+    _eq("user rc", ensure_import("build --x\n" + GENERATED_HEADER + "\n", _LINE).action, ImportAction("appended"))
 
 def _test_apply_output_base_suffix_only_output_base(_ctx):
     # Only --output_base gains the suffix; --output_user_root (shared install
@@ -450,11 +460,11 @@ _UNIT_TESTS = [
     _test_deployment_configs_skip_unadvertised,
     _test_credential_helper_scope_strips_port,
     _test_bes_completeness_without_exec_log,
-    _test_merge_new_file,
-    _test_merge_appends_to_foreign_rc,
-    _test_merge_replaces_previous_block,
-    _test_merge_replaces_legacy_output,
-    _test_merge_unmatched_markers_append,
+    _test_bes_diagnostics_upload_flags,
+    _test_import_line,
+    _test_ensure_import_new_file,
+    _test_ensure_import_appends_once,
+    _test_ensure_import_replaces_generated_rc,
     _test_apply_output_base_suffix_only_output_base,
     _test_apply_output_base_suffix_empty_noop,
     _test_apply_output_base_suffix_no_output_base_noop,

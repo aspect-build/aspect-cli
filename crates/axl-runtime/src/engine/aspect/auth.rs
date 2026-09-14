@@ -3618,8 +3618,8 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
 fn summary_inputs() -> anyhow::Result<(Vec<Deployment>, ProfileCredentials, bool)> {
     let deployments = load_deployments()?;
     let creds = load_profile_credentials(&resolve_profile(None))?;
-    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
-    Ok((deployments, creds, any_configured_default))
+    let any_default = any_configured_default(&deployments);
+    Ok((deployments, creds, any_default))
 }
 
 fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
@@ -3695,22 +3695,57 @@ fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary
         .map(|d| summarize_deployment(d, &creds, any_configured_default)))
 }
 
-/// The resolved Bazel-facing endpoints for `ctx.aspect.auth.deployment_endpoints(name)`:
-/// `cache` (→ --remote_cache), `bes` (→ the CLI BES sink / --bes_backend), and
-/// `exec` (→ --remote_executor). Each is a bare host, or "" when the deployment
-/// doesn't advertise/serve that capability. `name` is the resolved deployment
-/// name. Consumed by bazel-spawning tasks' `--remote` to auto-wire the flags.
+/// A deployment as Bazel sees it, for `ctx.aspect.auth.deployment_endpoints(name)`
+/// and `ctx.aspect.auth.deployments()`: `cache` (→ --remote_cache), `bes` (→ the
+/// CLI BES sink / --bes_backend), and `exec` (→ --remote_executor). Each is a bare
+/// host, or "" when the deployment doesn't advertise/serve that capability.
+/// `name` is the resolved deployment name. Consumed by bazel-spawning tasks'
+/// `--remote` to auto-wire the flags, and by `aspect ci bazelrc` to write them.
 ///
 /// `results_url` is a full URL rather than a host — the build-result viewer
 /// (→ --bes_results_url), "" when the deployment advertises no web UI.
+///
+/// Built from the deployment config alone, never from the credential store, so
+/// it is available where no keyring or login exists (a CI runner writing an rc).
+/// `default` follows [`DeploymentSummary`]: the built-in entry is default only
+/// when no configured deployment claims it. `api_token_env` names the variable
+/// whose token authenticates the deployment unattended.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.DeploymentEndpoints>")]
 pub struct DeploymentEndpoints {
     pub name: String,
+    pub builtin: bool,
+    pub default: bool,
     pub cache: String,
     pub bes: String,
     pub exec: String,
     pub results_url: String,
+    pub api_token_env: String,
+}
+
+impl DeploymentEndpoints {
+    fn of(d: &Deployment, any_configured_default: bool) -> Self {
+        Self {
+            name: d.name.clone(),
+            builtin: d.builtin,
+            default: if d.builtin {
+                !any_configured_default
+            } else {
+                d.default
+            },
+            cache: d.endpoints.cache.clone(),
+            bes: d.endpoints.bes.clone(),
+            exec: d.endpoints.exec.clone(),
+            results_url: d.endpoints.results_url.clone(),
+            api_token_env: api_token_env_var(&d.name),
+        }
+    }
+}
+
+/// Whether any configured (non-built-in) deployment is marked default, which
+/// demotes the built-in Aspect Cloud entry from default.
+fn any_configured_default(deployments: &[Deployment]) -> bool {
+    deployments.iter().any(|d| d.default && !d.builtin)
 }
 
 starlark_simple_value!(DeploymentEndpoints);
@@ -3728,6 +3763,21 @@ fn deployment_endpoints_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentEndpoints, name)
+    }
+
+    #[starlark(attribute)]
+    fn builtin<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, DeploymentEndpoints, builtin)
+    }
+
+    #[starlark(attribute)]
+    fn default<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, DeploymentEndpoints, default)
+    }
+
+    #[starlark(attribute)]
+    fn api_token_env<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, DeploymentEndpoints, api_token_env)
     }
 
     #[starlark(attribute)]
@@ -4144,14 +4194,26 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
+        let any_default = any_configured_default(&deployments);
         let selected = select_deployment(&deployments, deployment.into_option().as_deref())?;
-        Ok(heap.alloc(DeploymentEndpoints {
-            name: selected.name,
-            cache: selected.endpoints.cache,
-            bes: selected.endpoints.bes,
-            exec: selected.endpoints.exec,
-            results_url: selected.endpoints.results_url,
-        }))
+        Ok(heap.alloc(DeploymentEndpoints::of(&selected, any_default)))
+    }
+
+    /// Every effective deployment (built-in seed + configured) as
+    /// [`DeploymentEndpoints`] rows, in config order. Reads only the deployment
+    /// config — never the credential store — so it works where `list` cannot
+    /// (no keyring, no login); use `list` when login status matters.
+    fn deployments<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let deployments = load_deployments()?;
+        let any_default = any_configured_default(&deployments);
+        let rows: Vec<DeploymentEndpoints> = deployments
+            .iter()
+            .map(|d| DeploymentEndpoints::of(d, any_default))
+            .collect();
+        Ok(heap.alloc(rows))
     }
 
     /// The name of the configured deployment that owns `host` (its advertised
