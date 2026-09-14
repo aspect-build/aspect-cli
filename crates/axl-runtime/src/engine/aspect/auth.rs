@@ -3623,7 +3623,7 @@ fn summary_inputs() -> anyhow::Result<(Vec<Deployment>, ProfileCredentials, bool
 }
 
 fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
-    let (deployments, creds, any_configured_default) = summary_inputs()?;
+    let (deployments, creds, any_default) = summary_inputs()?;
     // Reported here rather than at load: `auth status` is where a user is looking
     // at their deployments, so it is where a clash between two of them is
     // actionable.
@@ -3636,7 +3636,7 @@ fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
     }
     Ok(deployments
         .iter()
-        .map(|d| summarize_deployment(d, &creds, any_configured_default))
+        .map(|d| summarize_deployment(d, &creds, any_default))
         .collect())
 }
 
@@ -3650,11 +3650,7 @@ fn summarize_deployment(
 ) -> DeploymentSummary {
     let builtin = d.builtin;
     let entry = creds.get(&login_profile_for(d));
-    let default = if builtin {
-        !any_configured_default
-    } else {
-        d.default
-    };
+    let default = effective_default(d, any_configured_default);
     // Identity + expiry come from the stored credential (when present).
     let (email, display_name, status) = match entry {
         Some(e) => {
@@ -3688,11 +3684,11 @@ fn summarize_deployment(
 /// such deployment is configured. Used by `configure` to render the recorded
 /// deployment with the same detail as `list`.
 fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary>> {
-    let (deployments, creds, any_configured_default) = summary_inputs()?;
+    let (deployments, creds, any_default) = summary_inputs()?;
     Ok(deployments
         .iter()
         .find(|d| d.name == name)
-        .map(|d| summarize_deployment(d, &creds, any_configured_default)))
+        .map(|d| summarize_deployment(d, &creds, any_default)))
 }
 
 /// A deployment as Bazel sees it, for `ctx.aspect.auth.deployment_endpoints(name)`
@@ -3728,11 +3724,7 @@ impl DeploymentEndpoints {
         Self {
             name: d.name.clone(),
             builtin: d.builtin,
-            default: if d.builtin {
-                !any_configured_default
-            } else {
-                d.default
-            },
+            default: effective_default(d, any_configured_default),
             cache: d.endpoints.cache.clone(),
             bes: d.endpoints.bes.clone(),
             exec: d.endpoints.exec.clone(),
@@ -3746,6 +3738,17 @@ impl DeploymentEndpoints {
 /// demotes the built-in Aspect Cloud entry from default.
 fn any_configured_default(deployments: &[Deployment]) -> bool {
     deployments.iter().any(|d| d.default && !d.builtin)
+}
+
+/// Whether `d` is the deployment `--remote` targets by default: a configured
+/// deployment by its own flag, the built-in entry only when no configured one
+/// claims it.
+fn effective_default(d: &Deployment, any_configured_default: bool) -> bool {
+    if d.builtin {
+        !any_configured_default
+    } else {
+        d.default
+    }
 }
 
 starlark_simple_value!(DeploymentEndpoints);
@@ -6452,6 +6455,43 @@ mod tests {
         // The built-in seed is default only when nothing configured claims it.
         assert!(summarize_deployment(&aspect_cloud_deployment(), &creds, false).default);
         assert!(!summarize_deployment(&aspect_cloud_deployment(), &creds, true).default);
+    }
+
+    #[test]
+    fn deployment_endpoints_come_from_config_alone() {
+        // No credential store is consulted: the row carries the endpoints, the
+        // default marking, and the API-token variable, nothing login-derived.
+        let mut acme = dep("acme", true);
+        acme.endpoints = Endpoints {
+            cache: "remote.acme".to_string(),
+            bes: "bes.acme".to_string(),
+            exec: "exec.acme".to_string(),
+            api: String::new(),
+            results_url: "https://app.acme/i/".to_string(),
+        };
+        let e = DeploymentEndpoints::of(&acme, true);
+        assert!(e.default && !e.builtin);
+        assert_eq!(
+            (e.cache.as_str(), e.bes.as_str(), e.exec.as_str()),
+            ("remote.acme", "bes.acme", "exec.acme")
+        );
+        assert_eq!(e.results_url, "https://app.acme/i/");
+        assert_eq!(e.api_token_env, api_token_env_var("acme"));
+
+        // The built-in seed is default only when nothing configured claims it,
+        // the same rule `summarize_deployment` applies.
+        let seed = DeploymentEndpoints::of(&aspect_cloud_deployment(), false);
+        assert!(seed.builtin && seed.default);
+        assert_eq!(seed.api_token_env, API_TOKEN_ENV);
+        assert!(!DeploymentEndpoints::of(&aspect_cloud_deployment(), true).default);
+
+        let deployments = vec![
+            aspect_cloud_deployment(),
+            dep("acme", true),
+            dep("other", false),
+        ];
+        assert!(any_configured_default(&deployments));
+        assert!(!any_configured_default(&deployments[..1]));
     }
 
     #[test]
