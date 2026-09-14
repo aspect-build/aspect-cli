@@ -929,27 +929,32 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
     /// Probe the Bazel server to determine whether it is responsive.
     ///
-    /// Runs `bazel --noblock_for_lock info server_pid`. If the server is
-    /// unresponsive, attempts recovery by killing the server process and
-    /// re-checking.
+    /// Runs `bazel --noblock_for_lock info server_pid`. When another bazel
+    /// client holds the output base lock, waits for it to finish, then
+    /// SIGTERMs and finally SIGKILLs it. When the server itself is wedged,
+    /// kills the server and re-checks. Each step prints a line to stderr,
+    /// indented to sit under a section heading.
     ///
-    /// Returns a `HealthCheckResult` with `.success`, `.healthy`, `.message`,
-    /// and `.exit_code` attributes.
+    /// Returns a `HealthCheckResult` with `.outcome` (`"healthy"`,
+    /// `"unhealthy"`, or `"inconclusive"`), `.message`, and `.exit_code`
+    /// attributes.
     ///
     /// **Examples**
     ///
     /// ```python
     /// def _health_probe_impl(ctx):
     ///     result = ctx.bazel.health_check()
-    ///     if not result.healthy:
-    ///         fail("Bazel server is unhealthy")
+    ///     if result.outcome == "unhealthy":
+    ///         fail("Bazel server is unhealthy: " + result.message)
     /// ```
     fn health_check<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
-        Ok(health_check::run(&startup_flags))
+        Ok(health_check::run(&startup_flags, &mut |line| {
+            crate::errln!("\t{line}")
+        }))
     }
 
     /// Detect and best-effort repair runner-poisoning sandbox state

@@ -889,7 +889,8 @@ def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
          `ctx.bazel.startup_flags`, and returns the flag list. Else `None`.
       4. `health_check` hooks (only when `HealthCheckTrait` is declared) — must
          run after step 3 (they read its startup flags). On unhealthy, concludes
-         the surface ("Health check failed") and `fail()`s — never returns.
+         the surface ("Health check failed") and ends the task with the
+         message and no traceback — never returns.
 
     Args:
       ctx:         TaskContext (source of the trait handlers).
@@ -956,7 +957,8 @@ def _setup_surface(ctx, subject, kind, data):
       3. `health_check` hooks — they read the ALREADY-active run command
          (`ctx.bazel.active_rc()`, set by the caller's rc pipeline), so this
          must run after the caller has `use_rc`'d. On unhealthy, concludes the
-         surface and `fail()`s — never returns.
+         surface and ends the task with the message and no traceback — never
+         returns.
 
     Unlike `_setup`, this never touches `ctx.bazel` flags itself; the caller
     owns the rc so the same active run command drives both the health check and
@@ -991,9 +993,11 @@ def _setup_surface(ctx, subject, kind, data):
 _HEALTH_CHECK_FAILED = "Health check failed"
 
 def _fail_health_check(ctx, kind, data, reason):
-    """Conclude the surface for a failed `phases.setup` health check, then
-    `fail(reason)`. Emits a terminal `phases.update` so the surface flips to
-    failed instead of sticking at "running"; `reason` is the CLI/log message."""
+    """Conclude the surface for a failed `phases.setup` health check, then end
+    the task with `reason` as an `ERROR:` line and no traceback: an unhealthy
+    runner is an expected refusal, and the health check has already printed
+    what it found and tried. Emits a terminal `phases.update` first so the
+    surface flips to failed instead of sticking at "running"."""
     _dispatch(ctx, ctx.traits[Phases], TaskUpdate(
         kind = kind,
         status = "failed",
@@ -1002,7 +1006,7 @@ def _fail_health_check(ctx, kind, data, reason):
         data = data,
         progress = ProgressStyles(body = _HEALTH_CHECK_FAILED),
     ))
-    fail(reason)
+    ctx.std.process.exit(1, "Health check failed: " + reason)
 
 def _new(ctx, data):
     """The task-facing lifecycle handle, bound to `ctx` and the task's mutable

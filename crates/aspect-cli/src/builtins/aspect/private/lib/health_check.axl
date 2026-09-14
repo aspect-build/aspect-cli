@@ -9,7 +9,9 @@ is the Workflows-registered hook that:
   2. Displays the last runner health check.
   3. Verifies `ctx.bazel.startup_flags` targets the project-specific
      Bazel server (`assert_ctx_bazel_ready_for_health_check`).
-  4. Runs `ctx.bazel.health_check()` and displays the result.
+  4. Runs `ctx.bazel.health_check()`, which waits out or removes a leftover
+     lock holder and restarts a wedged server, logging each step, and
+     displays the result.
   5. Signals the agent if the Bazel server is unhealthy.
 
 The `assert_ctx_bazel_ready_for_health_check` guard is exported so
@@ -172,8 +174,9 @@ def _display_warming(environment):
     print("\t" + _status_marker("ok") + " warmed by previous jobs on this runner")
 
 def _display_bazel_health(health):
-    """Render the Bazel Health sub-section under Runner Health."""
-    print(_section_heading("Bazel Health"))
+    """Render the Bazel Health status line. The section heading is printed
+    before the probe runs (see `agent_health_check`) so the recovery steps
+    the probe logs while it waits land under it."""
     if health.outcome == "healthy":
         print("\t" + _status_marker("ok") + " bazel health check passed")
     elif health.outcome == "unhealthy":
@@ -355,12 +358,14 @@ def agent_health_check(ctx, environment):
     1. Waits for runner cache warming to complete.
     2. Displays the last runner health check.
     3. Asserts the `ctx.bazel.startup_flags` ordering contract holds.
-    4. Runs `ctx.bazel.health_check()` and displays the result.
+    4. Prints the Bazel Health heading, runs `ctx.bazel.health_check()`
+       (its recovery steps print under the heading) and displays the result.
     5. Signals the agent if the Bazel server is unhealthy.
 
     Returns:
       None if healthy, or a str error message if the Bazel server is
-      unhealthy.
+      unhealthy. The caller ends the task with that message and no
+      traceback; the details are already in the Bazel Health section.
     """
     if environment.ci and environment.ci.host == "buildkite":
         print("--- :thermometer: Workflows runner health check")
@@ -379,6 +384,7 @@ def agent_health_check(ctx, environment):
     _display_runner_health(environment, job_history)
     _display_warming(environment)
     assert_ctx_bazel_ready_for_health_check(ctx, environment)
+    print(_section_heading("Bazel Health"))
     health = ctx.bazel.health_check()
     _display_bazel_health(health)
 
