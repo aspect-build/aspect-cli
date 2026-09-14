@@ -31,8 +31,10 @@ The generated rc gets two kinds of content:
         --config=aspect-exec           the default deployment's `-exec` config
 
     Aspect Cloud's config takes its own name; a configured deployment `<name>`
-    gets `aspect-<name>` (`aspect-cloud` and `aspect` are reserved names, so the
-    two never collide). Each wires `--remote_cache` / `--bes_backend` /
+    gets `aspect-<name>`. Two deployments can still land on one config name (one
+    named `cloud`, or `silo` beside `silo-exec`), and Bazel would merge such
+    sections and route the build to whichever host came last, so the command
+    refuses to write until one is renamed. Each wires `--remote_cache` / `--bes_backend` /
     `--bes_results_url` and authenticates through the `aspect get` credential
     helper, scoped to the deployment's hosts and pointed at the binary running
     this command — it certainly exists, whereas a bare `aspect` on PATH may not
@@ -50,9 +52,10 @@ not: it only ever gains the one `try-import` line, skipped when already present,
 so re-running never accumulates anything and the user's own lines are untouched.
 `try-import` rather than `import` so a generated file that later disappears
 degrades to "no Aspect configuration" instead of failing every `bazel` call. A
-`~/.bazelrc` written whole by an earlier version of this command (recognizable by
-its header) is replaced by the import line, since keeping it would leave its
-stale flags in force. Off CI (no Workflows runner, no CI env) the user rc is left
+`~/.bazelrc` an earlier version of this command wrote whole (recognizable by its
+header) has that output stripped — the header and every flag line this command
+generates — since keeping it would leave stale flags in force; lines it cannot
+account for, such as another setup step's additions, stay. Off CI (no Workflows runner, no CI env) the user rc is left
 alone entirely by default: the generated file is still written, and the import
 line is only added when `--import-into` names the rc explicitly.
 
@@ -70,6 +73,10 @@ load("@aspect//bazel/build_metadata.axl", "version_gte")
 load("./private/lib/aspect_endpoint_auth.axl", "endpoint_host")
 load(
     "./private/lib/environment.axl",
+    "CI",
+    "RemoteCache",
+    "Runner",
+    "WorkflowsEnvironment",
     "bes_diagnostics_upload_flags",
     "detect_ci",
     "get_bazelrc_flags",
@@ -115,12 +122,15 @@ _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION = "6.4.0"
 _DEFAULT_CONFIG = "aspect"
 _CONFIG_PREFIX = "aspect-"
 _EXEC_SUFFIX = "-exec"
+_DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
 
 # One `--config` section of the rc. `flags` are `str | (str, constraint)` like
 # everywhere else; a plain `--config=<other>` entry chains to another section and
-# is written as-is rather than version-resolved.
+# is written as-is rather than version-resolved. `source` names what claims the
+# section, for the collision error.
 RcConfig = record(
     name = field(str),
+    source = field(str),
     comment = field(str, default = ""),
     flags = field(list),
 )
@@ -240,6 +250,7 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
         flags.extend(bes_completeness_flags(exec_log_path))
     return RcConfig(
         name = name,
+        source = _label(d),
         comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
         flags = flags,
     )
@@ -251,7 +262,12 @@ def _exec_config(d, name: str, credential_helper: str) -> RcConfig:
     exec_host = endpoint_host(d.exec)
     if exec_host not in _unique_hosts([d.cache, d.bes]):
         flags.extend(credential_helper_flags([exec_host], credential_helper))
-    return RcConfig(name = name + _EXEC_SUFFIX, comment = "--config=" + name + " plus its remote execution.", flags = flags)
+    return RcConfig(
+        name = name + _EXEC_SUFFIX,
+        source = _label(d) + " (remote execution)",
+        comment = "--config=" + name + " plus its remote execution.",
+        flags = flags,
+    )
 
 def deployment_configs(deployments: list, credential_helper: str, exec_log_path: str = "") -> list:
     """The `--config` sections for every deployment that advertises a remote cache
@@ -278,12 +294,29 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
         if d.default:
             aliases.append(RcConfig(
                 name = _DEFAULT_CONFIG,
+                source = _DEFAULT_ALIAS_SOURCE,
                 comment = "The default deployment (`aspect auth use`): " + _label(d) + ".",
                 flags = ["--config=" + name],
             ))
             if d.exec:
-                aliases.append(RcConfig(name = _DEFAULT_CONFIG + _EXEC_SUFFIX, flags = ["--config=" + name + _EXEC_SUFFIX]))
+                aliases.append(RcConfig(name = _DEFAULT_CONFIG + _EXEC_SUFFIX, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
     return configs + aliases
+
+def config_collisions(configs: list) -> list:
+    """One message per `--config` name that more than one `RcConfig` claims, naming
+    the claimants and the fix. Bazel merges same-named sections, so a collision
+    would route a build to whichever deployment's host came last; the caller
+    refuses to write instead.
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    claimants = {}
+    for c in configs:
+        claimants[c.name] = claimants.get(c.name, []) + [c.source]
+    return [
+        "--config=%s would be written for both %s. Rename the deployment: `aspect auth remove <name>`, then `aspect auth configure <host> --name <other>`." % (name, " and ".join(sources))
+        for (name, sources) in claimants.items()
+        if len(sources) > 1
+    ]
 
 def render_bazelrc(startup_flags: list, build_flags: list, command_sections: list, configs: list = []) -> str:
     """Render the generated rc: the header, a `startup` line per startup flag,
@@ -317,27 +350,65 @@ def import_line(generated_rc: str) -> str:
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
     return "try-import " + generated_rc
 
-def ensure_import(existing: str | None, line: str) -> ImportResult:
+def generated_flag_names() -> list:
+    """The names (`--flag`, no value) of every flag this command can write
+    unconditionally, from the same generators the rc is rendered from, with every
+    environment-dependent flag present. What `strip_generated` recognizes.
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    populated = WorkflowsEnvironment(
+        runner = Runner(identity = "x"),
+        remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"),
+        ci = CI(scm_repo_name = "x"),
+    )
+    (startup_flags, build_flags) = get_bazelrc_flags(populated, "/x")
+    return [_flag_str(f).split("=")[0] for f in startup_flags + build_flags]
+
+def strip_generated(existing: str, flag_names: list) -> str:
+    """`existing` minus what an earlier version of this command wrote into it when
+    it wrote the user rc whole: the header comments it opened with and every
+    `startup` / `common` / `build` / `query` line whose flag is in `flag_names`.
+    Lines it cannot account for — another setup step's additions — stay, so only
+    flags known to be ours are ever removed. Leading blank lines are trimmed.
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    kept = []
+    in_header = True
+    for line in existing.split("\n"):
+        if in_header and (line.startswith("#") or not line.strip()):
+            continue
+        in_header = False
+        words = line.split(" ", 1)
+        if len(words) == 2 and words[0] in ["startup"] + ["common"] + _PRE_COMMON_COMMANDS and words[1].split("=")[0] in flag_names:
+            continue
+        kept.append(line)
+    return "\n".join(kept).lstrip("\n")
+
+def ensure_import(existing: str | None, line: str, flag_names: list) -> ImportResult:
     """The user rc content with `line` present exactly once: unchanged when it is
-    already there, appended after the existing content otherwise, or — when the
-    file was written whole by an earlier version of this command, so every line in
-    it is a stale flag of ours — replaced by the line alone. `None`/empty
-    `existing` is a new file.
+    already there, appended after the existing content otherwise. A file an
+    earlier version of this command wrote whole (it opens with the generated
+    header) first has that output stripped — see `strip_generated`, which takes
+    `flag_names` — since its flags would otherwise stay in force beside the
+    import. `None`/empty `existing` is a new file.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
     if not existing:
         return ImportResult(content = line + "\n", action = ImportAction("created"))
     if line in existing.split("\n"):
         return ImportResult(content = existing, action = ImportAction("unchanged"))
+    action = ImportAction("appended")
     if existing.startswith(_GENERATED_HEADER_PREFIX):
-        return ImportResult(content = line + "\n", action = ImportAction("replaced"))
-    return ImportResult(content = existing.rstrip("\n") + "\n" + line + "\n", action = ImportAction("appended"))
+        existing = strip_generated(existing, flag_names)
+        action = ImportAction("replaced")
+    content = (existing.rstrip("\n") + "\n" if existing.strip() else "") + line + "\n"
+    return ImportResult(content = content, action = action)
 
 _IMPORT_VERBS = {
     ImportAction("created"): "created %s with it",
     ImportAction("unchanged"): "%s already imports it",
     ImportAction("appended"): "added the import to %s",
-    ImportAction("replaced"): "replaced the previously generated %s with the import",
+    ImportAction("replaced"): "replaced the lines an earlier version generated in %s with the import",
 }
 
 def _home_path(ctx: TaskContext, relative: str) -> str:
@@ -379,9 +450,13 @@ def _resolved_configs(ctx: TaskContext, bazel_version: str | None) -> list:
     runner may have no credential store to read."""
     deployments = ctx.aspect.auth.deployments()
     exec_log_path = _exec_log_path(ctx) if any([d.bes for d in deployments]) else ""
+    configs = deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
+    collisions = config_collisions(configs)
+    if collisions:
+        ctx.std.process.exit(1, "\n".join(collisions))
     return [
-        RcConfig(name = c.name, comment = c.comment, flags = _resolve(ctx, c.flags, bazel_version))
-        for c in deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
+        RcConfig(name = c.name, source = c.source, comment = c.comment, flags = _resolve(ctx, c.flags, bazel_version))
+        for c in configs
     ]
 
 def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -429,7 +504,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     existing = ctx.std.fs.read_to_string(user_rc) if ctx.std.fs.exists(user_rc) else None
-    result = ensure_import(existing, import_line(output))
+    result = ensure_import(existing, import_line(output), generated_flag_names())
     if result.action != ImportAction("unchanged"):
         _write(ctx, user_rc, result.content)
     info(ctx.std, summary + "; " + _IMPORT_VERBS[result.action] % user_rc + ".")
