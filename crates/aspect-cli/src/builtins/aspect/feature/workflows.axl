@@ -106,12 +106,6 @@ def _workflows_impl(ctx: FeatureContext):
     if environment.build_events != None:
         metadata_flags = get_build_metadata_flags(ctx.std)
 
-        # The runtime owns the BES connection, so send `x-identity` as sink
-        # metadata (the remote cache/RE path gets it via `--remote_header`).
-        bes_metadata = {}
-        if environment.runner and environment.runner.identity:
-            bes_metadata["x-identity"] = environment.runner.identity
-
         bessie_sinks = []
         if environment.build_events and environment.build_events.backend:
             # Passing 0 (unset) through would let this flag's default outrank
@@ -120,7 +114,6 @@ def _workflows_impl(ctx: FeatureContext):
             buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = environment.build_events.backend,
-                metadata = bes_metadata,
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
                 retry_max_buffer_bytes = buffer_bytes if buffer_bytes > 0 else None,

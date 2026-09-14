@@ -25,9 +25,6 @@ BuildEvents = record(
 
 Runner = record(
     storage_path = field(str, default = DEFAULT_STORAGE_PATH),
-    # Opaque value sent verbatim as the `x-identity` header on the build's
-    # remote connections. "" when unset (no header sent).
-    identity = field(str, default = ""),
     product_version = field(str, default = ""),
     instance_id = field(str, default = ""),
     instance_name = field(str, default = ""),
@@ -264,7 +261,6 @@ def _read_runner(std) -> Runner | None:
     return Runner(
         account = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT") or "",
         aspect_launcher_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION") or "",
-        identity = std.env.var("ASPECT_WORKFLOWS_RUNNER_IDENTITY") or "",
         az = std.env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or "",
         bazel_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR") or (storage_path + "/bazel"),
         bin_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BIN_DIR") or DEFAULT_BIN_DIR,
@@ -342,8 +338,8 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
     set off a runner too), surfaced via `environment.remote_cache`.
 
     Excludes runner-specific flags — the per-runner mount paths
-    (`--repository_cache`, output base/root), the runner identity header, the
-    `--nosystem_rc` startup flag, the cache-compression gates (Aspect
+    (`--repository_cache`, output base/root), the `--nosystem_rc` startup
+    flag, the cache-compression gates (Aspect
     Workflows' own remote cache does not support compression, so those only
     apply when talking to it on a runner), and the disk-cache reset (a disk
     cache is redundant beside the runner's cache but may well be deliberate
@@ -388,8 +384,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
 
     The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
     ones: the cache-compression gates (the Workflows remote cache doesn't support
-    compression), the disk-cache reset, the runner identity header, the
-    per-runner repository cache and output paths, and `--nohome_rc`/`--nosystem_rc`.
+    compression), the disk-cache reset, the per-runner repository cache and
+    output paths, and `--nohome_rc`/`--nosystem_rc`.
 
     The `--output_base` startup flag in the result is what `apply_output_base_suffix`
     rewrites to move a task to its own Bazel server (`--output_user_root` stays
@@ -423,12 +419,6 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     # which is local to it and warmed. Elsewhere a disk cache is left as the user
     # set it.
     build_flags.append("--disk_cache=")
-
-    # `--remote_header` is the shared header Bazel applies to both the remote
-    # cache and the executor channel, so gate on the identity alone: this also
-    # covers executor-only setups, and Bazel ignores the flag with no backend.
-    if runner.identity:
-        build_flags.append("--remote_header=x-identity=" + runner.identity)
 
     build_flags.append("--repository_cache=" + runner.repository_cache_dir)
 

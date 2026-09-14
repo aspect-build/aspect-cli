@@ -16,10 +16,10 @@ The generated rc gets two kinds of content:
 
   - Unconditional flags, applied to every `bazel` call. On a Workflows runner the
     full set — generic tuning, the remote-cache endpoint (from env), and the
-    runner-specific flags (repository cache, per-runner output paths, identity
-    header, the Workflows-cache compression gates). Elsewhere only the generic
-    flags (plus the remote-cache endpoint when its env vars are set) — nothing
-    tied to a runner's mounts or identity.
+    runner-specific flags (repository cache, per-runner output paths, the
+    Workflows-cache compression gates). Elsewhere only the generic flags (plus
+    the remote-cache endpoint when its env vars are set) — nothing tied to a
+    runner's mounts.
 
   - Opt-in `--config` sections, one per Aspect deployment this machine knows
     (`aspect auth status`) that advertises a remote cache or BES backend:
@@ -357,7 +357,7 @@ def generated_flag_names() -> list:
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
     populated = WorkflowsEnvironment(
-        runner = Runner(identity = "x"),
+        runner = Runner(),
         remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"),
         ci = CI(scm_repo_name = "x"),
     )
@@ -464,8 +464,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     on_runner = is_aspect_workflows_runner(ctx.std.env)
 
     if on_runner:
-        # Full set: generic CI flags + the runner-specific cache/identity/output
-        # flags. Gate on the runner metadata being present.
+        # Full set: generic CI flags + the runner-specific cache/output flags.
+        # Gate on the runner metadata being present.
         if environment.runner == None:
             return TaskConclusion(exit_code = 1, message = "Running on an Aspect Workflows runner but the runner metadata env vars are missing, so the cache flags cannot be generated. This usually means an older runner image; upgrade the runner.")
         (startup_flags, build_flags) = get_bazelrc_flags(
@@ -474,9 +474,9 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         )
         startup_flags = startup_flags_for_rc(startup_flags)
     else:
-        # Only the generic flags that don't depend on the runner's mounts,
-        # identity, or the Workflows cache. The remote-cache endpoint flags are
-        # still picked up from env vars when set. No runner-specific startup flags.
+        # Only the generic flags that don't depend on the runner's mounts or the
+        # Workflows cache. The remote-cache endpoint flags are still picked up
+        # from env vars when set. No runner-specific startup flags.
         build_flags = get_generic_bazelrc_flags(environment)
         startup_flags = []
 
