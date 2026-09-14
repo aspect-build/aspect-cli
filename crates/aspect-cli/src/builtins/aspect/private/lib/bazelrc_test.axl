@@ -1,31 +1,82 @@
 """Unit tests for the pure bazelrc/output-base flag helpers:
 
   - `bazelrc.axl` rendering: `command_sections` (which rc command sections to
-    use for a Bazel version), `render_bazelrc` (rc text), `startup_flags_for_rc`.
-  - `environment.axl` flags: `get_generic_bazelrc_flags` / `get_bazelrc_flags`
-    output, and `apply_output_base_suffix`.
+    use for a Bazel version), `render_bazelrc` (rc text, including `--config`
+    groups), `startup_flags_for_rc`, `merge_managed_block` (placing the block in
+    an existing file), and `deployment_configs` (the `--config` sections built
+    from `aspect auth status` rows).
+  - `environment.axl` flags: `get_generic_bazelrc_flags` / `get_bazelrc_flags` /
+    `get_build_diagnostics_flags` output, and `apply_output_base_suffix`.
 
-Version-gating of the `(flag, constraint)` tuples from `get_bazelrc_flags` is
-delegated to the bazelrc runtime (`ctx.bazel.new_rc(...).expand(...)`), so it's
-covered by the runtime's own tests rather than here. Run with:
-aspect dev test-bazelrc
+Version-gating of the `(flag, constraint)` tuples is delegated to the bazelrc
+runtime (`ctx.bazel.new_rc(...).expand(...)`), so it's covered by the runtime's
+own tests rather than here; these assert the tuples are emitted with the right
+constraints. Run with: aspect dev test-bazelrc
 """
 
-load("@aspect//bazelrc.axl", "command_sections", "render_bazelrc", "startup_flags_for_rc")
+load(
+    "@aspect//bazelrc.axl",
+    "BEGIN_MARKER",
+    "END_MARKER",
+    "bes_completeness_flags",
+    "command_sections",
+    "config_name",
+    "credential_helper_flags",
+    "deployment_configs",
+    "is_config_chain",
+    "merge_managed_block",
+    "render_bazelrc",
+    "startup_flags_for_rc",
+)
 load(
     "./environment.axl",
+    "BuildEvents",
     "CI",
     "RemoteCache",
     "Runner",
     "WorkflowsEnvironment",
     "apply_output_base_suffix",
     "get_bazelrc_flags",
+    "get_build_diagnostics_flags",
     "get_generic_bazelrc_flags",
 )
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _text(flag) -> str:
+    """The flag text of a plain or `(flag, constraint)` entry."""
+    return flag[0] if type(flag) == "tuple" else flag
+
+def _texts(flags) -> list:
+    return [_text(f) for f in flags]
+
+def _has(label, flags, want):
+    _eq(label, want in _texts(flags), True)
+
+def _lacks(label, flags, fragment):
+    _eq(label, any([fragment in f for f in _texts(flags)]), False)
+
+def _summary(name, builtin = False, default = False, cache = "", bes = "", exec = "", results_url = "", api_token_env = ""):
+    """A stand-in for an `aspect.DeploymentSummary` row from `ctx.aspect.auth.list()`."""
+    return struct(
+        name = name,
+        builtin = builtin,
+        default = default,
+        cache = cache,
+        bes = bes,
+        exec = exec,
+        results_url = results_url,
+        api_token_env = api_token_env,
+    )
+
+_CLOUD = _summary("aspect-cloud", builtin = True, default = True, cache = "cache.aspect.build", bes = "bes.aspect.build", results_url = "https://app.aspect.build/i/", api_token_env = "ASPECT_API_TOKEN")
+_SILO = _summary("silo-gcp", cache = "remote.silo-gcp.aspect.build", bes = "remote.silo-gcp.aspect.build", exec = "remote.silo-gcp.aspect.build", results_url = "https://app.silo-gcp.aspect.build/i/", api_token_env = "ASPECT_API_TOKEN_SILO_GCP")
+_HELPER = "/opt/aspect/aspect-cli"
+
+def _by_name(configs) -> dict:
+    return {c.name: c for c in configs}
 
 # Runner-specific flag fragments that must NEVER appear in the generic set —
 # they depend on a runner's mounts, identity, or the Workflows cache.
@@ -43,14 +94,34 @@ def _test_generic_flags_are_runner_independent(_ctx):
 
     # The generic profiling/remote tuning flags are present...
     for want in ["--remote_upload_local_results", "--disk_cache=", "--remote_timeout=3600"]:
-        _eq("generic has " + want, want in flags, True)
+        _has("generic has " + want, flags, want)
 
     # ...and nothing runner-specific leaks in.
     for frag in _RUNNER_ONLY_FRAGMENTS:
-        _eq("no runner-only " + frag, any([frag in f for f in flags]), False)
+        _lacks("no runner-only " + frag, flags, frag)
 
     # No remote-cache endpoint without the env (no RemoteCache on the environment).
-    _eq("no remote_cache", any(["--remote_cache=" in f for f in flags]), False)
+    _lacks("no remote_cache", flags, "--remote_cache=")
+
+def _test_generic_flags_enrich_the_profile(_ctx):
+    # The recommended profile flags ride the generic set, so both the CI rc and
+    # the runner task injection (get_bazelrc_flags) carry them.
+    flags = get_generic_bazelrc_flags(WorkflowsEnvironment())
+    for want in [
+        "--generate_json_trace_profile",
+        "--noslim_profile",
+        "--experimental_profile_include_primary_output",
+        "--experimental_profile_include_target_label",
+        "--legacy_important_outputs",
+    ]:
+        _has("generic has " + want, flags, want)
+
+    # Bazel 8 added the target-configuration column; older Bazel rejects the flag.
+    _eq("target_configuration gated", ("--experimental_profile_include_target_configuration", ">=8.0.0") in flags, True)
+
+    _startup, runner_flags = get_bazelrc_flags(WorkflowsEnvironment(runner = Runner()), "/work/repo")
+    _has("runner tasks get noslim_profile", runner_flags, "--noslim_profile")
+    _has("runner tasks get legacy_important_outputs", runner_flags, "--legacy_important_outputs")
 
 def _test_generic_flags_include_remote_cache_env(_ctx):
     # When the remote-cache env vars are set (surfaced as environment.remote_cache),
@@ -62,6 +133,26 @@ def _test_generic_flags_include_remote_cache_env(_ctx):
     flags = get_generic_bazelrc_flags(env)
     _eq("remote_cache", "--remote_cache=unix:///x/grpc" in flags, True)
     _eq("bytestream prefix", "--remote_bytestream_uri_prefix=aw-remote.example" in flags, True)
+
+def _test_build_diagnostics_flags(_ctx):
+    env = WorkflowsEnvironment(
+        runner = Runner(job_tmpdir = "/workflows"),
+        build_events = BuildEvents(backend = "grpcs://bes"),
+        remote_cache = RemoteCache(endpoint = "grpcs://cache"),
+    )
+    flags = get_build_diagnostics_flags(env, True)
+    _eq("profile placed", "--profile=/workflows/command.profile.gz" in flags, True)
+    _eq("exec log gated", ("--execution_log_compact_file=/workflows/exec.log.zstd", ">=7.1.0") in flags, True)
+
+    # Bazel 6 only knows `--experimental_remote_build_event_upload` (default
+    # `all`), so the unprefixed spelling must be gated to 7+.
+    _eq("upload=all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
+
+    # The profile-enrichment flags moved to the generic set; no duplicate here.
+    _lacks("no profile include here", flags, "--experimental_profile_include")
+
+    _eq("disabled → empty", get_build_diagnostics_flags(env, False), [])
+    _eq("no BES → empty", get_build_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x")), True), [])
 
 def _test_startup_flags_for_rc(_ctx):
     # The `--no*_rc` suppression flags must all be dropped: Bazel fatals on any of
@@ -108,8 +199,9 @@ def _test_render_common_section(_ctx):
     _eq("no common startup_flag", "common --nohome_rc" in lines, False)
     _eq("no startup build_flag", "startup --remote_cache=grpcs://c:443" in lines, False)
 
-    # Trailing newline so the file ends cleanly.
-    _eq("trailing newline", out.endswith("\n"), True)
+    # Marker-delimited so a later run can find and replace the block.
+    _eq("begins with marker", out.startswith(BEGIN_MARKER), True)
+    _eq("ends with marker", out.endswith(END_MARKER + "\n"), True)
 
 def _test_render_pre_common_sections(_ctx):
     # < 6.3.0: each build flag is emitted once per section (build + query);
@@ -136,10 +228,168 @@ def _test_render_unwraps_version_gated_tuple(_ctx):
     _eq("tuple flag unwrapped", "common --noremote_cache_compression" in lines, True)
     _eq("no condition leaked", any([">=8.0.0" in ln for ln in lines]), False)
 
-def _test_render_empty(_ctx):
-    # With no flags, the header is still written.
-    out = render_bazelrc([], [], ["common"])
-    _eq("header present", out.startswith("# Generated by `aspect ci bazelrc`"), True)
+def _test_render_configs(_ctx):
+    configs = deployment_configs([_CLOUD, _SILO], _HELPER)
+    out = render_bazelrc([], ["--disk_cache="], ["common"], configs)
+    lines = out.split("\n")
+
+    # Each config's flags are written under `<section>:<name>`, chain lines verbatim.
+    _eq("cloud cache", "common:aspect-cloud --remote_cache=grpcs://cache.aspect.build" in lines, True)
+    _eq("silo bes", "common:aspect-silo-gcp --bes_backend=grpcs://remote.silo-gcp.aspect.build" in lines, True)
+    _eq("exec chains", "common:aspect-silo-gcp-exec --config=aspect-silo-gcp" in lines, True)
+    _eq("exec executor", "common:aspect-silo-gcp-exec --remote_executor=grpcs://remote.silo-gcp.aspect.build" in lines, True)
+    _eq("default alias", "common:aspect --config=aspect-cloud" in lines, True)
+
+    # The unconditional flags never pick up a config name.
+    _eq("plain flag unscoped", "common --disk_cache=" in lines, True)
+
+    # Each config carries a comment saying what it wires and how it authenticates.
+    _eq("cloud commented", any([ln.startswith("# Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN") for ln in lines]), True)
+
+    # Version conditions never leak into the file.
+    _eq("no condition leaked", any([">=" in ln for ln in lines]), False)
+
+def _test_render_configs_pre_common(_ctx):
+    # < 6.3.0: config lines are spelled out per section too, chain lines included.
+    configs = deployment_configs([_SILO], _HELPER)
+    lines = render_bazelrc([], [], ["build", "query"], configs).split("\n")
+    _eq("build config", "build:aspect-silo-gcp --remote_cache=grpcs://remote.silo-gcp.aspect.build" in lines, True)
+    _eq("query config", "query:aspect-silo-gcp --remote_cache=grpcs://remote.silo-gcp.aspect.build" in lines, True)
+    _eq("query chain", "query:aspect-silo-gcp-exec --config=aspect-silo-gcp" in lines, True)
+
+def _test_config_name(_ctx):
+    # Aspect Cloud keeps its own (already `aspect-` prefixed) name; a configured
+    # deployment is prefixed so the names share one namespace.
+    _eq("builtin", config_name(_CLOUD), "aspect-cloud")
+    _eq("configured", config_name(_SILO), "aspect-silo-gcp")
+
+def _test_deployment_configs_cloud(_ctx):
+    configs = _by_name(deployment_configs([_CLOUD], _HELPER, exec_log_path = "/tmp/x/exec.log.zstd"))
+    _eq("names", sorted(configs.keys()), ["aspect", "aspect-cloud"])
+    flags = configs["aspect-cloud"].flags
+
+    _eq("cache", "--remote_cache=grpcs://cache.aspect.build" in flags, True)
+    _eq("bes", "--bes_backend=grpcs://bes.aspect.build" in flags, True)
+    _eq("results url", "--bes_results_url=https://app.aspect.build/i/" in flags, True)
+
+    # Aspect Cloud has no remote execution: no executor flag and no -exec config.
+    _lacks("no remote_executor", flags, "--remote_executor")
+
+    # One scoped credential helper per distinct host, both spellings gated.
+    _eq("cache helper", ("--credential_helper=cache.aspect.build=" + _HELPER, ">=6.4.0") in flags, True)
+    _eq("bes helper", ("--credential_helper=bes.aspect.build=" + _HELPER, ">=6.4.0") in flags, True)
+    _eq("cache helper (6.0–6.3)", ("--experimental_credential_helper=cache.aspect.build=" + _HELPER, ">=6.0.0, <6.4.0") in flags, True)
+    _lacks("no unscoped helper", flags, "--credential_helper=" + _HELPER)
+
+    # BES is wired, so the stream is asked to be complete.
+    _has("publish all actions", flags, "--build_event_publish_all_actions")
+    _has("wait for upload", flags, "--bes_upload_mode=wait_for_upload_complete")
+    _eq("upload all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
+    _eq("exec log gated", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in flags, True)
+
+def _test_deployment_configs_exec(_ctx):
+    configs = _by_name(deployment_configs([_SILO], _HELPER))
+    _eq("names", sorted(configs.keys()), ["aspect-silo-gcp", "aspect-silo-gcp-exec"])
+
+    base = configs["aspect-silo-gcp"].flags
+    _lacks("base has no executor", base, "--remote_executor")
+
+    # The one multiplexed host gets a single helper line per spelling.
+    _eq("one helper", len([f for f in base if _text(f).startswith("--credential_helper=")]), 1)
+
+    exec = configs["aspect-silo-gcp-exec"].flags
+    _eq("chains to base first", exec[0], "--config=aspect-silo-gcp")
+    _eq("chain recognized", is_config_chain(exec[0]), True)
+    _eq("executor", "--remote_executor=grpcs://remote.silo-gcp.aspect.build" in exec, True)
+
+    # The exec host is already covered by the base config's helper.
+    _lacks("no duplicate helper", exec, "--credential_helper")
+
+def _test_deployment_configs_exec_on_its_own_host(_ctx):
+    split = _summary("split", cache = "cache.split", bes = "bes.split", exec = "exec.split")
+    exec = _by_name(deployment_configs([split], _HELPER))["aspect-split-exec"].flags
+    _eq("exec host helper", ("--credential_helper=exec.split=" + _HELPER, ">=6.4.0") in exec, True)
+
+def _test_deployment_configs_default_alias(_ctx):
+    # `aspect` follows the default deployment; `aspect-exec` only exists when the
+    # default has remote execution.
+    cloud_default = _by_name(deployment_configs([_summary("aspect-cloud", builtin = True, default = True, cache = "c", bes = "b"), _SILO], _HELPER))
+    _eq("aspect → cloud", cloud_default["aspect"].flags, ["--config=aspect-cloud"])
+    _eq("no aspect-exec for cloud", "aspect-exec" in cloud_default, False)
+
+    silo_default = _by_name(deployment_configs([_CLOUD, _summary("silo-gcp", default = True, cache = "c", bes = "b", exec = "e")], _HELPER))
+    _eq("aspect → silo", silo_default["aspect"].flags, ["--config=aspect-silo-gcp"])
+    _eq("aspect-exec → silo-exec", silo_default["aspect-exec"].flags, ["--config=aspect-silo-gcp-exec"])
+
+    # Aliases render after every deployment's own sections so they chain forward.
+    cloud = _summary("aspect-cloud", builtin = True, cache = "c", bes = "b")
+    names = [c.name for c in deployment_configs([cloud, _summary("silo-gcp", default = True, cache = "c")], _HELPER)]
+    _eq("aliases last", names, ["aspect-cloud", "aspect-silo-gcp", "aspect"])
+
+def _test_deployment_configs_skip_unadvertised(_ctx):
+    # A fresh install's Aspect Cloud seed advertises nothing (no login yet) — no
+    # config for it, and no dangling `aspect` alias even though it is the default.
+    seed = _summary("aspect-cloud", builtin = True, default = True)
+    _eq("nothing", deployment_configs([seed], _HELPER), [])
+
+    # BES-only and cache-only deployments still get a config, wiring what they have.
+    bes_only = _by_name(deployment_configs([_summary("b", bes = "bes.b")], _HELPER))["aspect-b"].flags
+    _lacks("no cache", bes_only, "--remote_cache")
+    _has("bes", bes_only, "--bes_backend=grpcs://bes.b")
+    cache_only = _by_name(deployment_configs([_summary("c", cache = "cache.c")], _HELPER))["aspect-c"].flags
+    _lacks("no bes", cache_only, "--bes_backend")
+    _lacks("no bes completeness", cache_only, "--build_event_publish_all_actions")
+
+def _test_credential_helper_scope_strips_port(_ctx):
+    # A host advertised with a port still scopes the helper by bare host, which is
+    # what Bazel matches the request URI against.
+    flags = deployment_configs([_summary("p", cache = "cache.p:8980")], _HELPER)[0].flags
+    _eq("bare host scope", ("--credential_helper=cache.p=" + _HELPER, ">=6.4.0") in flags, True)
+    _eq("helper flags helper", credential_helper_flags(["h"], "x")[0], ("--credential_helper=h=x", ">=6.4.0"))
+
+def _test_bes_completeness_without_exec_log(_ctx):
+    _lacks("no exec log without a path", bes_completeness_flags(), "--execution_log_compact_file")
+
+def _test_merge_new_file(_ctx):
+    block = render_bazelrc([], ["--disk_cache="], ["common"])
+    _eq("None → block", merge_managed_block(None, block), block)
+    _eq("empty → block", merge_managed_block("", block), block)
+
+def _test_merge_appends_to_foreign_rc(_ctx):
+    # An rc another setup step wrote keeps its content; ours follows after a
+    # blank line, and the trailing newline is normalized.
+    block = render_bazelrc([], ["--disk_cache="], ["common"])
+    got = merge_managed_block("build --disk_cache=/tmp/dc\n", block)
+    _eq("append", got, "build --disk_cache=/tmp/dc\n\n" + block)
+    _eq("append no trailing newline", merge_managed_block("build --x", block), "build --x\n\n" + block)
+
+def _test_merge_replaces_previous_block(_ctx):
+    # Re-running replaces the previous block in place, leaving content on either
+    # side untouched — so the command is idempotent.
+    old = render_bazelrc([], ["--old_flag"], ["common"])
+    new = render_bazelrc([], ["--new_flag"], ["common"])
+    existing = "build --before\n" + old + "\nbuild --after\n"
+    got = merge_managed_block(existing, new)
+    _eq("replaced", got, "build --before\n" + new + "\nbuild --after\n")
+    _eq("old flag gone", "--old_flag" in got, False)
+    _eq("idempotent", merge_managed_block(got, new), got)
+
+    # A block at the very start of the file (the common case: we created it).
+    _eq("block-only file", merge_managed_block(old, new), new)
+    _eq("block-only idempotent", merge_managed_block(new, new), new)
+
+def _test_merge_replaces_legacy_output(_ctx):
+    # A marker-less rc from an older CLI was the whole file, so it is replaced
+    # rather than appended to (which would leave its stale flags in force).
+    legacy = "# Generated by `aspect ci bazelrc` — do not edit.\ncommon --remote_cache=grpcs://stale\n"
+    block = render_bazelrc([], ["--disk_cache="], ["common"])
+    _eq("legacy replaced", merge_managed_block(legacy, block), block)
+
+def _test_merge_unmatched_markers_append(_ctx):
+    # An END with no BEGIN (or in the wrong order) is not a block of ours.
+    block = render_bazelrc([], [], ["common"])
+    existing = END_MARKER + "\nbuild --x\n"
+    _eq("appended", merge_managed_block(existing, block), existing + "\n" + block)
 
 def _test_apply_output_base_suffix_only_output_base(_ctx):
     # Only --output_base gains the suffix; --output_user_root (shared install
@@ -182,13 +432,29 @@ def _test_get_bazelrc_flags_output_base_and_suffix(_ctx):
 
 _UNIT_TESTS = [
     _test_generic_flags_are_runner_independent,
+    _test_generic_flags_enrich_the_profile,
     _test_generic_flags_include_remote_cache_env,
+    _test_build_diagnostics_flags,
     _test_startup_flags_for_rc,
     _test_command_sections,
     _test_render_common_section,
     _test_render_pre_common_sections,
     _test_render_unwraps_version_gated_tuple,
-    _test_render_empty,
+    _test_render_configs,
+    _test_render_configs_pre_common,
+    _test_config_name,
+    _test_deployment_configs_cloud,
+    _test_deployment_configs_exec,
+    _test_deployment_configs_exec_on_its_own_host,
+    _test_deployment_configs_default_alias,
+    _test_deployment_configs_skip_unadvertised,
+    _test_credential_helper_scope_strips_port,
+    _test_bes_completeness_without_exec_log,
+    _test_merge_new_file,
+    _test_merge_appends_to_foreign_rc,
+    _test_merge_replaces_previous_block,
+    _test_merge_replaces_legacy_output,
+    _test_merge_unmatched_markers_append,
     _test_apply_output_base_suffix_only_output_base,
     _test_apply_output_base_suffix_empty_noop,
     _test_apply_output_base_suffix_no_output_base_noop,

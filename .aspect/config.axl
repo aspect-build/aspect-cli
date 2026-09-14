@@ -334,9 +334,9 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(runnable_tests)
     ctx.tasks.add(cache_selection_tests)
 
-    # `aspect ci bazelrc` pure helpers — version-constraint gating
-    # (assumed-latest when the Bazel version is unknown), mixed plain/tuple
-    # flag resolution, and rc rendering (startup vs common sections).
+    # `aspect ci bazelrc` pure helpers — the version-gated flag tuples, rc
+    # rendering (startup vs common sections, per-deployment `--config` groups),
+    # and the managed-block merge into an existing rc.
     # Run with: aspect dev test-bazelrc
     ctx.tasks.add(bazelrc_tests)
 
