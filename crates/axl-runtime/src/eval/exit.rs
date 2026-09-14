@@ -126,8 +126,22 @@ t = task(implementation = _impl)
     }
 
     #[test]
-    fn exit_defaults_to_code_one_without_a_message() {
-        let exit = run("ctx.std.process.exit()").expect("run_task");
+    fn exit_requires_a_code() {
+        let err = run("ctx.std.process.exit()").expect_err("a bare exit() is a bug");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("code"),
+            "error should name the missing parameter: {msg}"
+        );
+        assert!(
+            msg.contains("Traceback"),
+            "a bad call keeps its trace: {msg}"
+        );
+    }
+
+    #[test]
+    fn exit_without_a_message_prints_nothing_but_the_bookend() {
+        let exit = run("ctx.std.process.exit(1)").expect("run_task");
         assert_eq!(exit, Some(1));
     }
 
