@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::num::NonZeroU8;
 use std::process;
 use std::process::Stdio;
 
@@ -75,26 +74,24 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
         Ok(process::id() as i32)
     }
 
-    /// End the task with a non-zero exit `code` (default 1) and, optionally,
-    /// a `message` printed as a red `ERROR:` line, with no traceback. Use it
-    /// for an expected refusal whose message says it all, from however deep
-    /// in the call stack the refusal is discovered; keep `fail()` for bugs,
-    /// where the traceback helps. `ASPECT_DEBUG=1` prints the traceback after
-    /// the message anyway.
+    /// End the task with exit `code` (default 1) and, optionally, a `message`,
+    /// with no traceback. The message prints as an `ERROR:` line for a
+    /// non-zero code and `INFO:` for 0. Use it for an expected refusal, or an
+    /// early "nothing to do", from however deep in the call stack it is
+    /// discovered; keep `fail()` for bugs, where the traceback helps.
+    /// `ASPECT_DEBUG=1` prints the traceback after the message anyway.
     ///
     /// The exit unwinds through every caller like an error: `ctx.defer`
-    /// callbacks still run, but hooks the task body had yet to invoke do not.
-    /// That is why `code` 0 is rejected; to succeed early, `return 0` from the
-    /// task's implementation instead.
+    /// callbacks still run, but whatever the task body had yet to run does
+    /// not, including a status surface's final update. A task that reports to
+    /// a surface ends through its final `phases.update` instead.
     fn exit<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(default = 1)] code: i32,
         #[starlark(default = NoneOr::None)] message: NoneOr<&'v str>,
     ) -> anyhow::Result<StarlarkNever> {
-        let code = u8::try_from(code)
-            .ok()
-            .and_then(NonZeroU8::new)
-            .ok_or_else(|| anyhow!("exit code must be 1..=255, got {code}"))?;
+        let code =
+            u8::try_from(code).map_err(|_| anyhow!("exit code must be 0..=255, got {code}"))?;
         Err(TaskExit::new(code, message.into_option().map(str::to_owned)).into())
     }
 }

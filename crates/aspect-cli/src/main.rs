@@ -357,7 +357,7 @@ fn main() -> ExitCode {
             // task runner, so it is recognized here instead.
             if let Some(exit) = TaskExit::from_anyhow(&err) {
                 exit.report(&err);
-                return ExitCode::from(exit.code.get());
+                return ExitCode::from(exit.code);
             }
             errln!("error: {err:?}");
             ExitCode::FAILURE

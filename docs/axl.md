@@ -188,13 +188,12 @@ for the configured RE or BES backend.
 
 
 **§13 Ending a task early.** `return code` from the task's implementation is
-the normal way out. From a nested helper, an expected refusal whose message
-says it all is `ctx.std.process.exit(code, message)`: the message prints as an
-`ERROR:` line with no traceback, `ctx.defer` callbacks still run, and the task
-ends with `code` (1..=255; 0 is rejected because an early success would skip
-the hooks the body had yet to invoke). At the top of `_impl`, where a `return`
-can reach, `return TaskConclusion(exit_code = 1, message = ...)` renders the
-same way. Keep `fail()` for bugs, where the traceback is what you want.
+the normal way out. From a nested helper, `ctx.std.process.exit(code, message)`
+ends the task with `code` (0..=255) and no traceback: the message prints as an
+`ERROR:` line, or `INFO:` for code 0, and `ctx.defer` callbacks still run. At
+the top of `_impl`, where a `return` can reach,
+`return TaskConclusion(exit_code = 1, message = ...)` renders the same way.
+Keep `fail()` for bugs, where the traceback is what you want.
 
 ```python
 def _require_target(ctx: TaskContext, targets: list[str]):
@@ -206,6 +205,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return TaskConclusion(exit_code = 1, message = "Provide a target, e.g. `aspect build //...`.")
 ```
 
-For a task with a status surface, end through `phases.update(final = True, ...)`
-and return its conclusion, so the surface is closed with the real status. Both
-shortcuts above leave that to the surface's abort guard.
+Either shortcut skips whatever the body had yet to run, so a task with a status
+surface uses neither: it ends through `phases.update(final = True, ...)` and
+returns its conclusion, which closes the surface with the real status. An early
+`exit` or hand-built `TaskConclusion` there leaves the surface to its abort
+guard, which can only report "aborted".

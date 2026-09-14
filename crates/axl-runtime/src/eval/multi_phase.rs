@@ -836,7 +836,7 @@ struct Outcome {
 impl Outcome {
     fn from_exit(exit: &TaskExit) -> Self {
         Self {
-            exit_code: Some(exit.code.get()),
+            exit_code: Some(exit.code),
             flagged: false,
             text: String::new(),
             message: exit.message.clone(),
@@ -1143,7 +1143,6 @@ mod tests {
     use super::Outcome;
     use crate::diag::Severity;
     use crate::eval::TaskExit;
-    use std::num::NonZeroU8;
 
     fn outcome(exit_code: Option<u8>, flagged: bool) -> Outcome {
         Outcome {
@@ -1166,7 +1165,7 @@ mod tests {
 
     #[test]
     fn an_exit_becomes_a_failed_outcome_with_its_message() {
-        let exit = TaskExit::new(NonZeroU8::new(3).unwrap(), Some("stop".to_string()));
+        let exit = TaskExit::new(3, Some("stop".to_string()));
         assert_eq!(
             Outcome::from_exit(&exit),
             Outcome {

@@ -12,13 +12,12 @@
 //!
 //! The downcast finds `TaskExit` only at the root of the anyhow chain; a
 //! `.context(...)` wrapper hides it and the error renders as a traceback.
-//! The code is `NonZeroU8` on purpose: an early *success* would skip the hooks
-//! the task body had yet to invoke while reporting a clean run, so exiting is
-//! for refusals and `return 0` at the top of `_impl` remains the way to succeed
-//! early.
+//!
+//! Code 0 is an early success. Like any exit it skips whatever the body had
+//! yet to run, including a status surface's final update, so a task that
+//! reports to a surface ends through its final `phases.update` instead.
 
 use std::fmt;
-use std::num::NonZeroU8;
 
 use crate::diag;
 use crate::errln;
@@ -27,18 +26,18 @@ use crate::eval::EvalError;
 /// A task ending early: the exit code it wants and, optionally, why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskExit {
-    pub code: NonZeroU8,
+    pub code: u8,
     pub message: Option<String>,
 }
 
 impl TaskExit {
-    pub fn new(code: NonZeroU8, message: Option<String>) -> Self {
+    pub fn new(code: u8, message: Option<String>) -> Self {
         Self { code, message }
     }
 
     /// A refusal with exit code 1.
     pub fn error(message: impl Into<String>) -> Self {
-        Self::new(NonZeroU8::MIN, Some(message.into()))
+        Self::new(1, Some(message.into()))
     }
 
     /// The exit carried by `err`, if that is what it is. `Native` is how a
@@ -70,13 +69,17 @@ impl TaskExit {
             .and_then(Self::from_eval_error)
     }
 
-    /// Print the message as a red `ERROR:` line, matching the AXL `error()`
-    /// helper a task would have used itself. `full` is the error as the
-    /// evaluator raised it; under `ASPECT_DEBUG` it follows the message so the
-    /// traceback is still available to whoever wants it.
+    /// Print the message as an `ERROR:` line, or `INFO:` for code 0, matching
+    /// the AXL helpers a task would have used itself. `full` is the error as
+    /// the evaluator raised it; under `ASPECT_DEBUG` it follows the message so
+    /// the traceback is still available to whoever wants it.
     pub fn report(&self, full: &dyn fmt::Display) {
         if let Some(message) = &self.message {
-            diag::error(message);
+            if self.code == 0 {
+                diag::info(message);
+            } else {
+                diag::error(message);
+            }
         }
         Self::debug_traceback(full);
     }
@@ -134,11 +137,17 @@ t = task(implementation = _impl)
     }
 
     #[test]
-    fn exit_rejects_zero_and_out_of_range_codes() {
-        for code in ["0", "256", "-1"] {
+    fn exit_zero_is_an_early_success() {
+        let exit = run(r#"ctx.std.process.exit(0, "nothing to do")"#).expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn exit_rejects_out_of_range_codes() {
+        for code in ["256", "-1"] {
             let err = run(&format!("ctx.std.process.exit({code})")).expect_err(code);
             let msg = err.to_string();
-            assert!(msg.contains("exit code must be 1..=255"), "{code}: {msg}");
+            assert!(msg.contains("exit code must be 0..=255"), "{code}: {msg}");
             assert!(
                 msg.contains("Traceback"),
                 "{code}: a bad code is a bug, so it keeps its trace: {msg}"
@@ -171,15 +180,9 @@ t = task(implementation = _impl)
         assert_eq!(TaskExit::from_starlark(&plain), None);
 
         let wrapped: anyhow::Error = EvalError::from(exit).into();
-        assert_eq!(
-            TaskExit::from_anyhow(&wrapped).map(|e| e.code.get()),
-            Some(1)
-        );
+        assert_eq!(TaskExit::from_anyhow(&wrapped).map(|e| e.code), Some(1));
         let context = wrapped.context("outer");
-        assert_eq!(
-            TaskExit::from_anyhow(&context).map(|e| e.code.get()),
-            Some(1)
-        );
+        assert_eq!(TaskExit::from_anyhow(&context).map(|e| e.code), Some(1));
     }
 
     /// A feature impl runs before the task runner is involved, so its exit
@@ -201,15 +204,12 @@ t = task(implementation = _impl)
         .with_features(&["Guard"])
         .run_task(0)
         .expect_err("a feature impl exit is an error to the task runner");
-        assert_eq!(TaskExit::from_anyhow(&err).map(|e| e.code.get()), Some(4));
+        assert_eq!(TaskExit::from_anyhow(&err).map(|e| e.code), Some(4));
     }
 
     #[test]
     fn display_is_the_message_or_the_code() {
         assert_eq!(TaskExit::error("nope").to_string(), "nope");
-        assert_eq!(
-            TaskExit::new(NonZeroU8::new(7).unwrap(), None).to_string(),
-            "exit 7"
-        );
+        assert_eq!(TaskExit::new(7, None).to_string(), "exit 7");
     }
 }
