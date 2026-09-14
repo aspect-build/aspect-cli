@@ -343,9 +343,11 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
 
     Excludes runner-specific flags — the per-runner mount paths
     (`--repository_cache`, output base/root), the runner identity header, the
-    `--nosystem_rc` startup flag, and the cache-compression gates (Aspect
+    `--nosystem_rc` startup flag, the cache-compression gates (Aspect
     Workflows' own remote cache does not support compression, so those only
-    apply when talking to it on a runner). `get_bazelrc_flags` adds those.
+    apply when talking to it on a runner), and the disk-cache reset (a disk
+    cache is redundant beside the runner's cache but may well be deliberate
+    elsewhere). `get_bazelrc_flags` adds those.
 
     The profile flags make the JSON trace profile complete enough for backend
     analysis: unslimmed, and with the target label, primary output, and target
@@ -367,7 +369,6 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
         "--legacy_important_outputs",
         "--experimental_repository_cache_hardlinks",
         "--remote_accept_cached",
-        "--disk_cache=",
         "--remote_timeout=3600",
         "--remote_retries=360",
         "--grpc_keepalive_timeout=30s",
@@ -387,8 +388,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
 
     The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
     ones: the cache-compression gates (the Workflows remote cache doesn't support
-    compression), the runner identity header, the per-runner repository cache and
-    output paths, and `--nohome_rc`/`--nosystem_rc`.
+    compression), the disk-cache reset, the runner identity header, the
+    per-runner repository cache and output paths, and `--nohome_rc`/`--nosystem_rc`.
 
     The `--output_base` startup flag in the result is what `apply_output_base_suffix`
     rewrites to move a task to its own Bazel server (`--output_user_root` stays
@@ -417,6 +418,11 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     build_flags.append(("--noexperimental_remote_cache_compression", "<8.0.0"))
     build_flags.append(("--noremote_cache_compression", ">=8.0.0"))
     build_flags.append(("--incompatible_remote_results_ignore_disk", "<7.0.0"))
+
+    # A workspace rc's disk cache would only duplicate the runner's remote cache,
+    # which is local to it and warmed. Elsewhere a disk cache is left as the user
+    # set it.
+    build_flags.append("--disk_cache=")
 
     # `--remote_header` is the shared header Bazel applies to both the remote
     # cache and the executor channel, so gate on the identity alone: this also

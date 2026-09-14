@@ -91,13 +91,14 @@ _RUNNER_ONLY_FRAGMENTS = [
     "--remote_header=",
     "--nosystem_rc",
     "_remote_cache_compression",
+    "--disk_cache=",
 ]
 
 def _test_generic_flags_are_runner_independent(_ctx):
     flags = get_generic_bazelrc_flags(WorkflowsEnvironment())
 
     # The generic profiling/remote tuning flags are present...
-    for want in ["--remote_upload_local_results", "--disk_cache=", "--remote_timeout=3600"]:
+    for want in ["--remote_upload_local_results", "--remote_accept_cached", "--remote_timeout=3600"]:
         _has("generic has " + want, flags, want)
 
     # ...and nothing runner-specific leaks in.
@@ -126,6 +127,10 @@ def _test_generic_flags_enrich_the_profile(_ctx):
     _startup, runner_flags = get_bazelrc_flags(WorkflowsEnvironment(runner = Runner()), "/work/repo")
     _has("runner tasks get noslim_profile", runner_flags, "--noslim_profile")
     _has("runner tasks get legacy_important_outputs", runner_flags, "--legacy_important_outputs")
+
+    # The disk-cache reset is runner-only: a developer's or another CI's disk
+    # cache is deliberate, only the runner's own cache makes it redundant.
+    _has("runner resets disk cache", runner_flags, "--disk_cache=")
 
 def _test_generic_flags_include_remote_cache_env(_ctx):
     # When the remote-cache env vars are set (surfaced as environment.remote_cache),
