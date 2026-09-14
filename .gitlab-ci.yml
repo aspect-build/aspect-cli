@@ -179,10 +179,16 @@ delivery-task:
 #
 # Schedule-gated because `aspect ci warming` clears the runner's prior Bazel
 # state before rebuilding it, so it must not run beside the regular tasks --
-# `.not-scheduled` above keeps those out of scheduled pipelines. For the same
-# reason it does not run .aspect/bootstrap.sh: that cleanup would discard the
-# freshly built CLI, so this task uses the released CLI from the setup
-# component, unlike every other job here.
+# `.not-scheduled` above keeps those out of scheduled pipelines.
+#
+# Bootstraps first, like every other job here. The released CLI cannot evaluate
+# this repo's own .aspect/axl.axl once the builtins reference a symbol it does
+# not ship yet, which is the normal state on main between releases; the task
+# then fails before it starts. The earlier revision skipped bootstrap on the
+# theory that warming's cleanup would discard the freshly built CLI -- it does
+# not: `aspect` resolves through local("target/ci/aspect-cli")
+# (.aspect/version.axl), and by the time the cleanup runs it is already the
+# running process.
 #
 # Does nothing until a pipeline schedule is configured; with none, the job is
 # never created.
@@ -195,4 +201,5 @@ warming:
     - aspect-workflows
     - aspect-default
   script:
+    - .aspect/bootstrap.sh
     - aspect ci warming --task:name warming -- //... -//exclude/...
