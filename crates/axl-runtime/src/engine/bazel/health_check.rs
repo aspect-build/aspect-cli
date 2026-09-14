@@ -74,6 +74,65 @@ impl Timing {
         after_sigterm: Duration::from_secs(10),
         after_sigkill: Duration::from_secs(5),
     };
+
+    /// The ladder in order: wait, SIGTERM and wait, SIGKILL and wait.
+    fn rungs(&self) -> [Rung; 3] {
+        [
+            Rung {
+                signal: None,
+                wait: self.graceful,
+            },
+            Rung {
+                signal: Some(Signal::Term),
+                wait: self.after_sigterm,
+            },
+            Rung {
+                signal: Some(Signal::Kill),
+                wait: self.after_sigkill,
+            },
+        ]
+    }
+}
+
+/// One rung of the client-lock ladder: signal the holder, if the rung has a
+/// signal, then wait up to `wait` for the lock to clear.
+struct Rung {
+    signal: Option<Signal>,
+    wait: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Signal {
+    Term,
+    Kill,
+}
+
+impl Signal {
+    fn send(self, pid: u32) {
+        match self {
+            Signal::Term => {
+                super::process::sigterm(pid);
+            }
+            Signal::Kill => super::process::sigkill(pid),
+        }
+    }
+
+    /// The log-line phrase for what the signal is meant to achieve.
+    fn intent(self) -> &'static str {
+        match self {
+            Signal::Term => "SIGTERM so it cancels its command",
+            Signal::Kill => "SIGKILL",
+        }
+    }
+}
+
+/// Whole seconds, or milliseconds under a second, for log lines.
+fn fmt_duration(d: Duration) -> String {
+    if d >= Duration::from_secs(1) {
+        format!("{}s", d.as_secs_f64().round() as u64)
+    } else {
+        format!("{}ms", d.as_millis())
+    }
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -386,14 +445,11 @@ fn cleanup_stranded_sandbox_state(output_base: &Path) -> bool {
 /// holding the lock, and `bazel info output_base` (without
 /// `--noblock_for_lock`) would queue behind it.
 fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
-    for flag in startup_flags {
-        if let Some(value) = flag.strip_prefix("--output_base=") {
-            if !value.is_empty() {
-                return Some(PathBuf::from(value));
-            }
-        }
-    }
-    None
+    startup_flags
+        .iter()
+        .filter_map(|flag| flag.strip_prefix("--output_base="))
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Probe the Bazel server and recover from a held lock or a wedged server
@@ -409,10 +465,10 @@ pub fn run(startup_flags: &[String], log: &mut dyn FnMut(&str)) -> HealthCheckRe
     let output_base = output_base_from_flags(startup_flags);
     let mut probe = || check_bazel_server(startup_flags);
     let result = run_with(&mut probe, output_base.as_deref(), &Timing::DEFAULT, log);
-    if result.outcome == "healthy" {
-        if let Some(base) = output_base.or_else(|| get_output_base(startup_flags)) {
-            let _ = cleanup_stranded_sandbox_state(&base);
-        }
+    if result.outcome == "healthy"
+        && let Some(base) = output_base.or_else(|| get_output_base(startup_flags))
+    {
+        let _ = cleanup_stranded_sandbox_state(&base);
     }
     result
 }
@@ -434,15 +490,15 @@ fn run_with(
     log: &mut dyn FnMut(&str),
 ) -> HealthCheckResult {
     let mut last = classify(probe(), output_base);
-    if let Probe::ClientLockHeld { holder, .. } = &last {
-        last = clear_client_lock(probe, output_base, timing, *holder, log);
+    if matches!(last, Probe::ClientLockHeld { .. }) {
+        last = clear_client_lock(probe, output_base, timing, last, log);
     }
     match last {
         Probe::Healthy => HealthCheckResult::healthy(),
         Probe::ClientLockHeld { holder, stderr } => {
             let message = match holder {
                 Some(pid) => format!(
-                    "another bazel client ({}) holds the output base lock and survived SIGTERM and SIGKILL: {}",
+                    "another bazel client ({}) still holds the output base lock after waiting, SIGTERM and SIGKILL: {}",
                     describe_holder(Some(pid)),
                     one_line(&stderr)
                 ),
@@ -470,30 +526,27 @@ fn run_with(
     }
 }
 
-/// Re-probe every `timing.poll` until the lock is no longer held by a client
-/// or `budget` elapses. Logs a change of holder. Returns the last probe.
+/// Re-probe every `poll` until the lock is no longer held by a client or
+/// `budget` elapses, tracking (and logging) a change of holder. Returns the
+/// last probe and the time spent.
 fn poll_while_client_holds(
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
-    timing: &Timing,
+    poll: Duration,
     budget: Duration,
     holder: &mut Option<u32>,
     log: &mut dyn FnMut(&str),
-) -> Probe {
+) -> (Probe, Duration) {
     let start = Instant::now();
     loop {
-        std::thread::sleep(timing.poll);
+        std::thread::sleep(poll);
         let p = classify(probe(), output_base);
         let Probe::ClientLockHeld {
             holder: now_holding,
             ..
         } = &p
         else {
-            log(&format!(
-                "output base lock released after {}s",
-                start.elapsed().as_secs()
-            ));
-            return p;
+            return (p, start.elapsed());
         };
         if *now_holding != *holder {
             log(&format!(
@@ -504,84 +557,66 @@ fn poll_while_client_holds(
             *holder = *now_holding;
         }
         if start.elapsed() >= budget {
-            return p;
+            return (p, start.elapsed());
         }
     }
 }
 
-/// The client-lock rungs: wait for the holder to exit on its own, then
-/// SIGTERM so it cancels its command gracefully, then SIGKILL. Returns the
-/// first probe that is not `ClientLockHeld`, or the last one if the lock never
-/// cleared.
+/// Climb the client-lock rungs of `timing` starting from `first`, a
+/// `ClientLockHeld` probe. Each signalling rung targets whoever holds the
+/// lock at that moment, so a holder that appears mid-ladder is signalled
+/// too. Returns the first probe that is not `ClientLockHeld`, or the last
+/// one if the lock never cleared.
 fn clear_client_lock(
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
     timing: &Timing,
-    mut holder: Option<u32>,
+    first: Probe,
     log: &mut dyn FnMut(&str),
 ) -> Probe {
+    let mut holder = match &first {
+        Probe::ClientLockHeld { holder, .. } => *holder,
+        _ => return first,
+    };
     log(&format!(
-        "output base lock is held by {}; waiting up to {}s for it to finish",
+        "output base lock is held by {}; waiting up to {} for it to finish",
         describe_holder(holder),
-        timing.graceful.as_secs()
+        fmt_duration(timing.graceful)
     ));
-    let p = poll_while_client_holds(
-        probe,
-        output_base,
-        timing,
-        timing.graceful,
-        &mut holder,
-        log,
-    );
-    if !matches!(p, Probe::ClientLockHeld { .. }) {
-        return p;
+    let mut last = first;
+    let mut waited = Duration::ZERO;
+    for rung in timing.rungs() {
+        if let Some(signal) = rung.signal {
+            let Some(pid) = holder else {
+                log(
+                    "output base lock is still held and the holder's pid is unknown; nothing to signal",
+                );
+                break;
+            };
+            log(&format!(
+                "output base lock is still held by pid {pid} after {}; sending {}",
+                fmt_duration(waited),
+                signal.intent()
+            ));
+            signal.send(pid);
+        }
+        let (p, elapsed) =
+            poll_while_client_holds(probe, output_base, timing.poll, rung.wait, &mut holder, log);
+        waited += elapsed;
+        if !matches!(p, Probe::ClientLockHeld { .. }) {
+            log(&format!(
+                "output base lock released after {}",
+                fmt_duration(waited)
+            ));
+            return p;
+        }
+        last = p;
     }
-    let Some(pid) = holder else {
-        log("output base lock is still held and the holder's pid is unknown; nothing to signal");
-        return p;
-    };
-
     log(&format!(
-        "output base lock is still held by pid {pid} after {}s; sending SIGTERM so it cancels its command",
-        timing.graceful.as_secs()
+        "output base lock is still held after {}; giving up",
+        fmt_duration(waited)
     ));
-    super::process::sigterm(pid);
-    let p = poll_while_client_holds(
-        probe,
-        output_base,
-        timing,
-        timing.after_sigterm,
-        &mut holder,
-        log,
-    );
-    if !matches!(p, Probe::ClientLockHeld { .. }) {
-        return p;
-    }
-    let Some(pid) = holder else {
-        log("output base lock is still held and the holder's pid is unknown; nothing to signal");
-        return p;
-    };
-
-    log(&format!(
-        "pid {pid} did not exit within {}s of SIGTERM; sending SIGKILL",
-        timing.after_sigterm.as_secs()
-    ));
-    super::process::sigkill(pid);
-    let p = poll_while_client_holds(
-        probe,
-        output_base,
-        timing,
-        timing.after_sigkill,
-        &mut holder,
-        log,
-    );
-    if matches!(p, Probe::ClientLockHeld { .. }) {
-        log(&format!(
-            "output base lock is still held {}s after SIGKILL; giving up",
-            timing.after_sigkill.as_secs()
-        ));
-    }
-    p
+    last
 }
 
 /// The server rung: SIGKILL the pid in `<output_base>/server/server.pid.txt`
@@ -779,6 +814,23 @@ mod tests {
     }
 
     #[test]
+    fn fmt_duration_rounds_seconds_and_keeps_millis_under_a_second() {
+        assert_eq!(fmt_duration(Duration::from_millis(150)), "150ms");
+        assert_eq!(fmt_duration(Duration::from_millis(999)), "999ms");
+        assert_eq!(fmt_duration(Duration::from_secs(30)), "30s");
+        assert_eq!(fmt_duration(Duration::from_millis(30_400)), "30s");
+        assert_eq!(fmt_duration(Duration::from_millis(30_600)), "31s");
+    }
+
+    #[test]
+    fn one_line_collapses_stderr() {
+        assert_eq!(
+            one_line("Another command holds the lock: \npid=1\n\n  owner=client \n"),
+            "Another command holds the lock:; pid=1; owner=client"
+        );
+    }
+
+    #[test]
     fn find_pid_reads_own_line_and_parenthesised_forms() {
         assert_eq!(find_pid("pid=123\nowner=client\n"), Some(123));
         assert_eq!(find_pid("Another command (pid=77) is running."), Some(77));
@@ -941,7 +993,7 @@ mod tests {
             let (result, lines) = run_lock_ladder(&mut holder, true);
             assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
             let log = joined(&lines);
-            assert!(log.contains("waiting up to 0s"), "{log}");
+            assert!(log.contains("waiting up to 150ms"), "{log}");
             assert!(log.contains("lock released"), "{log}");
             assert!(!log.contains("SIGTERM"), "{log}");
         }
