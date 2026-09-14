@@ -42,15 +42,6 @@ pub(crate) fn sigint(_pid: u32) -> bool {
     false
 }
 
-/// Sends SIGTERM to the given PID. Returns true if the signal was sent successfully.
-#[cfg(unix)]
-pub(crate) fn sigterm(pid: u32) -> bool {
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_ok()
-}
-
 #[cfg(not(unix))]
 pub(crate) fn sigterm(_pid: u32) -> bool {
     tracing::warn!("sigterm is not supported on this platform");
@@ -60,6 +51,10 @@ pub(crate) fn sigterm(_pid: u32) -> bool {
 /// Best-effort one-line description of a running process for diagnostics:
 /// its command line, plus its working directory where the platform exposes
 /// one. `None` when the process is gone or cannot be inspected.
+///
+/// The description goes to CI logs, so the arguments pass through the same
+/// redaction as an echoed bazel command (`--remote_header`, `--action_env`,
+/// URL credentials).
 #[cfg(target_os = "linux")]
 pub(crate) fn describe_process(pid: u32) -> Option<String> {
     let proc_dir = std::path::PathBuf::from(format!("/proc/{pid}"));
@@ -72,28 +67,34 @@ pub(crate) fn describe_process(pid: u32) -> Option<String> {
     if cmdline.is_empty() {
         return None;
     }
-    let mut desc = cmdline.join(" ");
+    let mut desc = redact_args(cmdline.iter().map(String::as_str));
     if let Ok(cwd) = std::fs::read_link(proc_dir.join("cwd")) {
         desc.push_str(&format!(" (cwd {})", cwd.display()));
     }
     Some(desc)
 }
 
-/// See the Linux variant. Without procfs, `ps` gives the command line and
-/// nothing reports the working directory.
+/// See the Linux variant. Without procfs there is no way to recover argv
+/// boundaries for redaction (`ps` flattens them into one string), so only
+/// the executable is reported, and no working directory.
 #[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn describe_process(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+        .args(["-o", "comm=", "-p", &pid.to_string()])
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
-    let desc = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if output.status.success() && !desc.is_empty() {
-        Some(desc)
-    } else {
-        None
+    let exe = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || exe.is_empty() {
+        return None;
     }
+    Some(exe)
+}
+
+/// Join `args` into one line with credential-bearing values scrubbed.
+#[cfg(target_os = "linux")]
+fn redact_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) -> String {
+    super::stream::redaction::redact_command_args(args).join(" ")
 }
 
 #[cfg(not(unix))]
@@ -125,7 +126,9 @@ mod tests {
         child.wait().unwrap();
         let desc = desc.expect("live process is describable");
         assert!(desc.contains("sleep"), "{desc}");
-        assert!(desc.contains("30"), "{desc}");
+        if cfg!(target_os = "linux") {
+            assert!(desc.contains("30"), "{desc}");
+        }
     }
 
     #[test]
@@ -136,18 +139,45 @@ mod tests {
     }
 
     #[test]
-    fn sigterm_terminates_and_reports_success() {
-        let mut child = sleeper();
-        assert!(sigterm(child.id()));
-        let status = child.wait().unwrap();
-        assert_eq!(status.signal(), Some(libc_sigterm()));
+    fn describe_process_redacts_credentials() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30",
+                "sh",
+                "--remote_header=Authorization: Bearer hunter2",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let desc = describe_process(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let desc = desc.expect("live process is describable");
+        assert!(!desc.contains("hunter2"), "{desc}");
+        if cfg!(target_os = "linux") {
+            assert!(desc.contains("--remote_header="), "{desc}");
+        }
     }
 
     #[test]
-    fn sigterm_to_a_missing_pid_reports_failure() {
+    fn sigint_interrupts_and_reports_success() {
+        let mut child = sleeper();
+        assert!(sigint(child.id()));
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(nix::sys::signal::Signal::SIGINT as i32)
+        );
+    }
+
+    #[test]
+    fn sigint_to_a_missing_pid_reports_failure() {
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();
-        assert!(!sigterm(child.id()));
+        assert!(!sigint(child.id()));
     }
 
     #[test]
@@ -157,9 +187,5 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!is_pid_running(child.id()));
-    }
-
-    fn libc_sigterm() -> i32 {
-        nix::sys::signal::Signal::SIGTERM as i32
     }
 }

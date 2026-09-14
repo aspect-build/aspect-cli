@@ -20,10 +20,12 @@
 //!   probe starts a fresh one.
 //!
 //! [`run`] therefore climbs a ladder: wait for a client holder to finish on
-//! its own, SIGTERM it, SIGKILL it, and only then kill a wedged server and
-//! re-probe. Each rung logs what it found and what it is about to do, so a
-//! job log explains a slow or failed health check. The wait windows are in
-//! [`Timing`]; tests shrink them.
+//! its own, SIGINT it (Bazel's graceful cancel, as in `live.rs`), SIGKILL it,
+//! and only then kill a wedged server and re-probe. A new holder taking the
+//! lock mid-ladder gets a fresh ladder, a bounded number of times. Each rung
+//! logs what it found and what it is about to do, so a job log explains a
+//! slow or failed health check. The wait windows are in [`Timing`]; tests
+//! shrink them.
 //!
 //! On success the check also removes stranded sandbox state from a prior
 //! SIGKILL'd invocation (bazelbuild/bazel#23880).
@@ -59,10 +61,10 @@ const WEDGED_SERVER_EXIT_CODES: &[i32] = &[
 pub struct Timing {
     /// Interval between probes while waiting for a lock to clear.
     pub poll: Duration,
-    /// How long a live client holder gets to finish on its own before SIGTERM.
+    /// How long a live client holder gets to finish on its own before SIGINT.
     pub graceful: Duration,
-    /// How long after SIGTERM before SIGKILL.
-    pub after_sigterm: Duration,
+    /// How long after SIGINT before SIGKILL.
+    pub after_sigint: Duration,
     /// How long after SIGKILL before giving up on the lock.
     pub after_sigkill: Duration,
 }
@@ -71,11 +73,11 @@ impl Timing {
     pub const DEFAULT: Timing = Timing {
         poll: Duration::from_secs(1),
         graceful: Duration::from_secs(30),
-        after_sigterm: Duration::from_secs(10),
+        after_sigint: Duration::from_secs(10),
         after_sigkill: Duration::from_secs(5),
     };
 
-    /// The ladder in order: wait, SIGTERM and wait, SIGKILL and wait.
+    /// The ladder in order: wait, SIGINT and wait, SIGKILL and wait.
     fn rungs(&self) -> [Rung; 3] {
         [
             Rung {
@@ -83,8 +85,8 @@ impl Timing {
                 wait: self.graceful,
             },
             Rung {
-                signal: Some(Signal::Term),
-                wait: self.after_sigterm,
+                signal: Some(Signal::Int),
+                wait: self.after_sigint,
             },
             Rung {
                 signal: Some(Signal::Kill),
@@ -103,15 +105,15 @@ struct Rung {
 
 #[derive(Debug, Clone, Copy)]
 enum Signal {
-    Term,
+    Int,
     Kill,
 }
 
 impl Signal {
     fn send(self, pid: u32) {
         match self {
-            Signal::Term => {
-                super::process::sigterm(pid);
+            Signal::Int => {
+                super::process::sigint(pid);
             }
             Signal::Kill => super::process::sigkill(pid),
         }
@@ -120,7 +122,7 @@ impl Signal {
     /// The log-line phrase for what the signal is meant to achieve.
     fn intent(self) -> &'static str {
         match self {
-            Signal::Term => "SIGTERM so it cancels its command",
+            Signal::Int => "SIGINT so it cancels its command",
             Signal::Kill => "SIGKILL",
         }
     }
@@ -498,7 +500,7 @@ fn run_with(
         Probe::ClientLockHeld { holder, stderr } => {
             let message = match holder {
                 Some(pid) => format!(
-                    "another bazel client ({}) still holds the output base lock after waiting, SIGTERM and SIGKILL: {}",
+                    "another bazel client ({}) still holds the output base lock after waiting, SIGINT and SIGKILL: {}",
                     describe_holder(Some(pid)),
                     one_line(&stderr)
                 ),
@@ -526,17 +528,30 @@ fn run_with(
     }
 }
 
-/// Re-probe every `poll` until the lock is no longer held by a client or
-/// `budget` elapses, tracking (and logging) a change of holder. Returns the
-/// last probe and the time spent.
+/// How many times a new holder taking the lock restarts the ladder before
+/// the current ladder runs on regardless. Bounds the total wait under
+/// pathological lock churn.
+const MAX_LADDER_RESTARTS: u32 = 3;
+
+/// What a polling window ended with.
+enum Poll {
+    /// The lock is no longer held by a client; here is that probe.
+    Released(Probe),
+    /// The same holder still has the lock after the whole budget.
+    StillHeld(Probe),
+    /// A different holder (by pid) has the lock now.
+    HolderChanged(Probe, Option<u32>),
+}
+
+/// Re-probe every `poll` until the lock is released, its holder changes, or
+/// `budget` elapses. Returns what happened and the time spent.
 fn poll_while_client_holds(
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
     poll: Duration,
     budget: Duration,
-    holder: &mut Option<u32>,
-    log: &mut dyn FnMut(&str),
-) -> (Probe, Duration) {
+    holder: Option<u32>,
+) -> (Poll, Duration) {
     let start = Instant::now();
     loop {
         std::thread::sleep(poll);
@@ -546,27 +561,23 @@ fn poll_while_client_holds(
             ..
         } = &p
         else {
-            return (p, start.elapsed());
+            return (Poll::Released(p), start.elapsed());
         };
-        if *now_holding != *holder {
-            log(&format!(
-                "output base lock holder changed from {} to {}",
-                describe_holder(*holder),
-                describe_holder(*now_holding)
-            ));
-            *holder = *now_holding;
+        if *now_holding != holder {
+            let now_holding = *now_holding;
+            return (Poll::HolderChanged(p, now_holding), start.elapsed());
         }
         if start.elapsed() >= budget {
-            return (p, start.elapsed());
+            return (Poll::StillHeld(p), start.elapsed());
         }
     }
 }
 
 /// Climb the client-lock rungs of `timing` starting from `first`, a
-/// `ClientLockHeld` probe. Each signalling rung targets whoever holds the
-/// lock at that moment, so a holder that appears mid-ladder is signalled
-/// too. Returns the first probe that is not `ClientLockHeld`, or the last
-/// one if the lock never cleared.
+/// `ClientLockHeld` probe. A new holder gets a fresh ladder, up to
+/// `MAX_LADDER_RESTARTS` times; after that the ladder runs on and signals
+/// whoever holds the lock at each rung. Returns the first probe that is not
+/// `ClientLockHeld`, or the last one if the lock never cleared.
 fn clear_client_lock(
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
@@ -578,45 +589,66 @@ fn clear_client_lock(
         Probe::ClientLockHeld { holder, .. } => *holder,
         _ => return first,
     };
-    log(&format!(
-        "output base lock is held by {}; waiting up to {} for it to finish",
-        describe_holder(holder),
-        fmt_duration(timing.graceful)
-    ));
     let mut last = first;
-    let mut waited = Duration::ZERO;
-    for rung in timing.rungs() {
-        if let Some(signal) = rung.signal {
-            let Some(pid) = holder else {
-                log(
-                    "output base lock is still held and the holder's pid is unknown; nothing to signal",
-                );
-                break;
-            };
-            log(&format!(
-                "output base lock is still held by pid {pid} after {}; sending {}",
-                fmt_duration(waited),
-                signal.intent()
-            ));
-            signal.send(pid);
+    let mut restarts = 0;
+    'ladder: loop {
+        log(&format!(
+            "output base lock is held by {}; waiting up to {} for it to finish",
+            describe_holder(holder),
+            fmt_duration(timing.graceful)
+        ));
+        let mut waited = Duration::ZERO;
+        for rung in timing.rungs() {
+            if let Some(signal) = rung.signal {
+                let Some(pid) = holder else {
+                    log(
+                        "output base lock is still held and the holder's pid is unknown; nothing to signal",
+                    );
+                    break;
+                };
+                log(&format!(
+                    "output base lock is still held by pid {pid} after {}; sending {}",
+                    fmt_duration(waited),
+                    signal.intent()
+                ));
+                signal.send(pid);
+            }
+            let (poll, elapsed) =
+                poll_while_client_holds(probe, output_base, timing.poll, rung.wait, holder);
+            waited += elapsed;
+            match poll {
+                Poll::Released(p) => {
+                    log(&format!(
+                        "output base lock released after {}",
+                        fmt_duration(waited)
+                    ));
+                    return p;
+                }
+                Poll::StillHeld(p) => last = p,
+                Poll::HolderChanged(p, new_holder) => {
+                    log(&format!(
+                        "output base lock holder changed from {} to {}",
+                        describe_holder(holder),
+                        describe_holder(new_holder)
+                    ));
+                    holder = new_holder;
+                    last = p;
+                    if restarts < MAX_LADDER_RESTARTS {
+                        restarts += 1;
+                        continue 'ladder;
+                    }
+                    log(
+                        "holder has changed too many times; continuing without restarting the wait",
+                    );
+                }
+            }
         }
-        let (p, elapsed) =
-            poll_while_client_holds(probe, output_base, timing.poll, rung.wait, &mut holder, log);
-        waited += elapsed;
-        if !matches!(p, Probe::ClientLockHeld { .. }) {
-            log(&format!(
-                "output base lock released after {}",
-                fmt_duration(waited)
-            ));
-            return p;
-        }
-        last = p;
+        log(&format!(
+            "output base lock is still held after {}; giving up",
+            fmt_duration(waited)
+        ));
+        return last;
     }
-    log(&format!(
-        "output base lock is still held after {}; giving up",
-        fmt_duration(waited)
-    ));
-    last
 }
 
 /// The server rung: SIGKILL the pid in `<output_base>/server/server.pid.txt`
@@ -927,7 +959,7 @@ mod tests {
         const FAST: Timing = Timing {
             poll: Duration::from_millis(20),
             graceful: Duration::from_millis(150),
-            after_sigterm: Duration::from_millis(300),
+            after_sigint: Duration::from_millis(300),
             after_sigkill: Duration::from_millis(1500),
         };
 
@@ -995,29 +1027,59 @@ mod tests {
             let log = joined(&lines);
             assert!(log.contains("waiting up to 150ms"), "{log}");
             assert!(log.contains("lock released"), "{log}");
-            assert!(!log.contains("SIGTERM"), "{log}");
+            assert!(!log.contains("SIGINT"), "{log}");
         }
 
         #[test]
-        fn holder_that_overstays_gets_sigterm() {
+        fn holder_that_overstays_gets_sigint() {
             let mut holder = spawn("sleep 30");
             let (result, lines) = run_lock_ladder(&mut holder, true);
             assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
             let log = joined(&lines);
-            assert!(log.contains("sending SIGTERM"), "{log}");
+            assert!(log.contains("sending SIGINT"), "{log}");
             assert!(!log.contains("SIGKILL"), "{log}");
             assert!(!alive(&mut holder));
         }
 
         #[test]
-        fn holder_that_ignores_sigterm_gets_sigkill() {
-            let mut holder = spawn("trap '' TERM; sleep 30");
+        fn holder_that_ignores_sigint_gets_sigkill() {
+            let mut holder = spawn("trap '' INT; sleep 30");
             let (result, lines) = run_lock_ladder(&mut holder, true);
             assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
             let log = joined(&lines);
-            assert!(log.contains("sending SIGTERM"), "{log}");
+            assert!(log.contains("sending SIGINT"), "{log}");
             assert!(log.contains("sending SIGKILL"), "{log}");
             assert!(!alive(&mut holder));
+        }
+
+        #[test]
+        fn a_new_holder_gets_a_fresh_ladder() {
+            // A exits during the graceful wait and B takes the lock. B must
+            // get its own graceful window before any signal, and then the
+            // SIGINT that A never needed.
+            let mut a = spawn("sleep 0.05");
+            let mut b = spawn("sleep 30");
+            let (a_pid, b_pid) = (a.id(), b.id());
+            let mut probe = || {
+                if alive(&mut a) {
+                    failed(9, &client_lock_stderr(a_pid))
+                } else if alive(&mut b) {
+                    failed(9, &client_lock_stderr(b_pid))
+                } else {
+                    ok()
+                }
+            };
+            let (result, lines) = run_ladder(&mut probe, None);
+            assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
+            let log = joined(&lines);
+            assert!(log.contains("holder changed"), "{log}");
+            assert_eq!(log.matches("waiting up to 150ms").count(), 2, "{log}");
+            assert!(log.contains(&format!("held by pid {b_pid} after")), "{log}");
+            assert!(
+                !log.contains(&format!("held by pid {a_pid} after")),
+                "{log}"
+            );
+            assert!(!alive(&mut b));
         }
 
         #[test]
@@ -1028,7 +1090,7 @@ mod tests {
             let message = result.message.unwrap();
             assert!(message.contains("pid could not be determined"), "{message}");
             let log = joined(&lines);
-            assert!(!log.contains("SIGTERM"), "{log}");
+            assert!(!log.contains("SIGINT"), "{log}");
             assert!(alive(&mut holder), "must not guess at a pid to kill");
             let _ = holder.kill();
         }
@@ -1068,7 +1130,7 @@ mod tests {
                 log.contains(&format!("SIGKILL to bazel server pid {}", server.id())),
                 "{log}"
             );
-            assert!(!log.contains("sending SIGTERM"), "{log}");
+            assert!(!log.contains("sending SIGINT"), "{log}");
             let status = server.wait().unwrap();
             assert!(!status.success());
         }
