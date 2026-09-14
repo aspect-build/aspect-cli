@@ -51,7 +51,7 @@ The generated rc gets two kinds of content:
     for a later `bazel` step, and Bazel fails outright on a helper it cannot
     find. Each section also carries the `aspect_flags.axl` tuning that its
     endpoints justify — cache tuning only with a cache, BES enrichment only with
-    a BES backend — and, with both wired, has Bazel upload every BEP-referenced
+    a BES backend — and, with BES wired, has Bazel upload every BEP-referenced
     file and write the compact execution log (Bazel >= 7.1) under the OS temp
     dir, which is what the Aspect backend derives per-action cache and timing
     data from. A deployment advertising none of an endpoint gets none of the
@@ -240,7 +240,7 @@ def _login_hint(deployment) -> str:
 def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
     helper for their hosts, the `aspect_flags.axl` tuning (the endpoint-independent
-    flags, then what those endpoints justify), and — with both wired — the
+    flags, then what those endpoints justify), and — with BES wired — the
     diagnostics upload."""
     flags = []
     wired = []
@@ -255,7 +255,7 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
     flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
     flags.extend(independent_flags())
     flags.extend(endpoint_flags(cache = bool(d.cache), bes = bool(d.bes)))
-    if d.cache and d.bes:
+    if d.bes:
         flags.extend(diagnostics_upload_flags(exec_log_path))
     return RcConfig(
         name = name,
@@ -298,8 +298,8 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
     `deployments` carries `aspect.DeploymentEndpoints` rows (or anything with the
     same `name` / `builtin` / `default` / `cache` / `bes` / `exec` /
     `results_url` / `api_token_env` fields). `credential_helper` is the path Bazel
-    invokes as `<helper> get`. `exec_log_path`, when set, is where a section with
-    both BES and a cache writes the compact execution log for upload (Bazel >= 7.1).
+    invokes as `<helper> get`. `exec_log_path`, when set, is where a BES-wired
+    section writes the compact execution log for upload (Bazel >= 7.1).
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it.
     """

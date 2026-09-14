@@ -288,32 +288,29 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
     return [flag + suffix if flag.startswith(_OUTPUT_BASE_FLAG_PREFIX) else flag for flag in startup_flags]
 
 def diagnostics_upload_flags(exec_log_path: str = "") -> list:
-    """Flags that carry build diagnostics to the BES backend through the remote
-    cache: every BEP-referenced local file uploaded (the JSON profile among
-    them) and, when `exec_log_path` is given, the compact execution log written
-    there so it rides along. The backend derives per-action cache and timing
-    data from that log, so the per-action BEP events behind
+    """Flags that carry build diagnostics to the BES backend: every BEP-referenced
+    local file uploaded to the remote cache (the JSON profile among them) and,
+    when `exec_log_path` is given, the compact execution log written there so it
+    rides along. The Web UI is richer with both: per-action cache and timing data
+    comes from that log, which is also why the per-action BEP events behind
     `--build_event_publish_all_actions` are not requested.
 
-    Presumes both a BES backend and a remote cache. Version-gated: Bazel 7
-    renamed `--remote_build_event_upload` and flipped its default to `minimal`
-    (Bazel 6 only knows the `experimental_` spelling, whose default is already
-    `all`); the compact execution log arrived in 7.1."""
+    Set wherever a BES backend is wired. Version-gated: Bazel 7 renamed
+    `--remote_build_event_upload` and flipped its default to `minimal` (Bazel 6
+    only knows the `experimental_` spelling, whose default is already `all`); the
+    compact execution log arrived in 7.1."""
     flags = [("--remote_build_event_upload=all", ">=7.0.0")]
     if exec_log_path:
         flags.append(("--execution_log_compact_file=" + exec_log_path, ">=7.1.0"))
     return flags
 
-def runner_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool) -> list:
-    """`diagnostics_upload_flags` for a Workflows runner, with the profile placed
-    under the job tmpdir. `enabled` is the caller's opt-in (the deployment's
-    `ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS` or the workspace override
-    arg). Empty unless enabled on a runner with both a BES backend and a remote
-    cache wired, since the files ride the BES stream to the cache."""
+def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
+    """`diagnostics_upload_flags` for a Workflows runner whose env names a BES
+    backend, with the profile and execution log placed under the job tmpdir. The
+    profile keeps its `command.profile.gz` name, which the backend's ingest
+    matches on. Empty off a runner or without a BES backend."""
     runner = environment.runner
-    if not enabled or runner == None:
-        return []
-    if environment.build_events == None or environment.remote_cache == None:
+    if runner == None or environment.build_events == None:
         return []
     tmpdir = runner.job_tmpdir
     return ["--profile=" + tmpdir + "/command.profile.gz"] + diagnostics_upload_flags(tmpdir + "/exec.log.zstd")

@@ -197,9 +197,8 @@ def _test_runner_diagnostics_flags(_ctx):
     env = WorkflowsEnvironment(
         runner = Runner(job_tmpdir = "/workflows"),
         build_events = BuildEvents(backend = "grpcs://bes"),
-        remote_cache = RemoteCache(endpoint = "grpcs://cache"),
     )
-    flags = runner_diagnostics_flags(env, True)
+    flags = runner_diagnostics_flags(env)
     _eq("profile placed", "--profile=/workflows/command.profile.gz" in flags, True)
     _eq("exec log gated", ("--execution_log_compact_file=/workflows/exec.log.zstd", ">=7.1.0") in flags, True)
 
@@ -207,8 +206,9 @@ def _test_runner_diagnostics_flags(_ctx):
     # `all`), so the unprefixed spelling must be gated to 7+.
     _eq("upload=all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
 
-    _eq("disabled → empty", runner_diagnostics_flags(env, False), [])
-    _eq("no BES → empty", runner_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x")), True), [])
+    # On by default wherever a BES backend is; nothing without one or off a runner.
+    _eq("no BES → empty", runner_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x"))), [])
+    _eq("no runner → empty", runner_diagnostics_flags(_WITH_BES), [])
 
 def _test_diagnostics_upload_flags(_ctx):
     # Shared between the runner diagnostics and the rc's BES configs, so both
@@ -433,8 +433,8 @@ def _test_deployment_configs_skip_unadvertised(_ctx):
     _has("bes", bes_only, "--bes_backend=grpcs://bes.b")
     _has("bes enrichment", bes_only, "--noslim_profile")
     _lacks("no cache tuning", bes_only, "--remote_accept_cached")
-    _lacks("no upload without a cache to upload to", bes_only, "--remote_build_event_upload")
-    _lacks("no exec log without a cache", bes_only, "--execution_log_compact_file")
+    _has("diagnostics ride BES", bes_only, "--remote_build_event_upload=all")
+    _has("exec log rides BES", bes_only, "--execution_log_compact_file=/x")
     cache_only = _by_name(deployment_configs([_summary("c", cache = "cache.c")], _HELPER))["aspect-c"].flags
     _lacks("no bes", cache_only, "--bes_backend")
     _has("cache tuning", cache_only, "--remote_accept_cached")

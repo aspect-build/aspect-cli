@@ -38,8 +38,6 @@ Runner = record(
     az = field(str, default = ""),
     preemptible = field(bool, default = False),
     warming_enabled = field(bool, default = False),
-    # → enables BES-backend upload of the JSON profile + compact exec log.
-    upload_build_diagnostics = field(bool, default = False),
     cloud_provider = field(str, default = ""),
     data_dir = field(str, default = ""),
     bin_dir = field(str, default = DEFAULT_BIN_DIR),
@@ -285,7 +283,6 @@ def _read_runner(std) -> Runner | None:
         warming_complete = warming_complete,
         warming_current_cache = warming_current_cache,
         warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
-        upload_build_diagnostics = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS")),
         runner_group_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME") or "",
         runner_group_queue = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE") or "",
         runner_resource_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE") or "",
