@@ -5,6 +5,7 @@ mod exit;
 mod load;
 mod load_path;
 mod multi_phase;
+mod outcome;
 pub mod task;
 
 pub use api::get_globals;

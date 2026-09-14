@@ -19,9 +19,9 @@
 
 use std::fmt;
 
-use crate::diag;
 use crate::errln;
 use crate::eval::EvalError;
+use crate::eval::outcome::Outcome;
 
 /// A task ending early: the exit code it wants and, optionally, why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,7 @@ impl TaskExit {
         }
     }
 
+    /// The exit carried by `err`, whichever variant a phase wrapped it in.
     pub fn from_eval_error(err: &EvalError) -> Option<&TaskExit> {
         match err {
             EvalError::StarlarkError(e) => Self::from_starlark(e),
@@ -69,18 +70,12 @@ impl TaskExit {
             .and_then(Self::from_eval_error)
     }
 
-    /// Print the message as an `ERROR:` line, or `INFO:` for code 0, matching
-    /// the AXL helpers a task would have used itself. `full` is the error as
-    /// the evaluator raised it; under `ASPECT_DEBUG` it follows the message so
-    /// the traceback is still available to whoever wants it.
+    /// Print the message the way the task runner would have, then the
+    /// traceback under `ASPECT_DEBUG`. For the consumer that has no task
+    /// runner: an exit raised from a feature or config impl. `full` is the
+    /// error as the evaluator raised it.
     pub fn report(&self, full: &dyn fmt::Display) {
-        if let Some(message) = &self.message {
-            if self.code == 0 {
-                diag::info(message);
-            } else {
-                diag::error(message);
-            }
-        }
+        Outcome::from_exit(self).report_message();
         Self::debug_traceback(full);
     }
 

@@ -29,6 +29,7 @@ use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
 use crate::eval::load::AxlLoader;
+use crate::eval::outcome::Outcome;
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
@@ -609,7 +610,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
         run_deferred(context, &mut eval);
         let (outcome, raised) = match impl_result {
-            Ok(ret) => (unpack_task_return(ret), None),
+            Ok(ret) => (Outcome::from_return(ret), None),
             // `ctx.std.process.exit` and a builtin's `TaskExit` end the task
             // like `return TaskConclusion(exit_code, message)`: no traceback.
             Err(e) => match TaskExit::from_starlark(&e) {
@@ -637,9 +638,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // A task that concluded with its own non-zero code has the more
             // informative story, so it keeps it; only an otherwise-successful
             // run fails over dropped flags. A hard error never reaches here at
-            // all (propagated from `impl_result` above), and an early exit
-            // arrives with its own non-zero code, so a real failure is never
-            // masked.
+            // all (propagated from `impl_result` above), and an early exit is
+            // treated like the return it stands in for, so a real failure is
+            // never masked.
             let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
             for (bucket, flags) in &unclaimed {
                 let message = passthrough::message(&task_kind, "return", bucket, flags);
@@ -817,70 +818,6 @@ impl<'a> Verdict<'a> {
                 verb: "Failed",
                 color: bold_red,
             },
-        }
-    }
-}
-
-/// What `_impl` left behind, whichever way it ended: a return value or a
-/// [`TaskExit`]. One shape for everything the runtime does afterwards.
-#[derive(Debug, PartialEq, Eq)]
-struct Outcome {
-    exit_code: Option<u8>,
-    flagged: bool,
-    /// Bookend suffix, rendered as `· <text>` when non-empty.
-    text: String,
-    /// Why the task ended, printed on its own line before the bookend.
-    message: Option<String>,
-}
-
-impl Outcome {
-    fn from_exit(exit: &TaskExit) -> Self {
-        Self {
-            exit_code: Some(exit.code),
-            flagged: false,
-            text: String::new(),
-            message: exit.message.clone(),
-        }
-    }
-
-    /// The severity `message` is printed with, following the verdict the
-    /// bookend will show: `ERROR` for a failure, `WARNING` when flagged,
-    /// `INFO` for a clean pass.
-    fn severity(&self) -> diag::Severity {
-        match self.exit_code {
-            Some(code) if code != 0 => diag::Severity::Error,
-            _ if self.flagged => diag::Severity::Warning,
-            _ => diag::Severity::Info,
-        }
-    }
-
-    fn report_message(&self) {
-        if let Some(message) = &self.message {
-            diag::emit(self.severity(), message);
-        }
-    }
-}
-
-/// Unpack the return value of `_impl` into an [`Outcome`].
-///
-/// Tasks may return either a bare `int` (treated as `TaskConclusion(
-/// exit_code=int)`) or a `TaskConclusion` record carrying the full
-/// terminal state. Anything else yields no exit code — the runtime
-/// renders that as `✅ Passed` with no conclusion suffix.
-fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> Outcome {
-    if let Some(tc) = ret.downcast_ref::<crate::engine::task_info::TaskConclusion>() {
-        Outcome {
-            exit_code: Some(tc.exit_code as u8),
-            flagged: tc.flagged,
-            text: tc.text.clone(),
-            message: tc.message.clone(),
-        }
-    } else {
-        Outcome {
-            exit_code: ret.unpack_i32().map(|code| code as u8),
-            flagged: false,
-            text: String::new(),
-            message: None,
         }
     }
 }
@@ -1139,43 +1076,6 @@ mod tests {
     use crate::module::Mod;
     use starlark::values::ValueLike;
     use std::time::Duration;
-
-    use super::Outcome;
-    use crate::diag::Severity;
-    use crate::eval::TaskExit;
-
-    fn outcome(exit_code: Option<u8>, flagged: bool) -> Outcome {
-        Outcome {
-            exit_code,
-            flagged,
-            text: String::new(),
-            message: Some("why".to_string()),
-        }
-    }
-
-    #[test]
-    fn message_severity_follows_the_verdict() {
-        assert_eq!(outcome(Some(1), false).severity(), Severity::Error);
-        // Failure dominates the flag, as it does on the bookend.
-        assert_eq!(outcome(Some(1), true).severity(), Severity::Error);
-        assert_eq!(outcome(Some(0), true).severity(), Severity::Warning);
-        assert_eq!(outcome(Some(0), false).severity(), Severity::Info);
-        assert_eq!(outcome(None, false).severity(), Severity::Info);
-    }
-
-    #[test]
-    fn an_exit_becomes_a_failed_outcome_with_its_message() {
-        let exit = TaskExit::new(3, Some("stop".to_string()));
-        assert_eq!(
-            Outcome::from_exit(&exit),
-            Outcome {
-                exit_code: Some(3),
-                flagged: false,
-                text: String::new(),
-                message: Some("stop".to_string()),
-            }
-        );
-    }
 
     /// A task declaring an `args.passthrough()` bucket promises to act on what
     /// the CLI routes into it. These four pin the whole contract: the task gets
