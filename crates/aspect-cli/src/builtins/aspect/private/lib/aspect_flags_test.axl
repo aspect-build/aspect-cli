@@ -19,6 +19,7 @@ load(
     "independent_flags",
     "omit_flags",
     "protected_omissions",
+    "runner_bes_flags",
     "runner_diagnostics_flags",
     "runner_flags",
     "written_flag_names",
@@ -151,6 +152,18 @@ def _test_runner_diagnostics_flags(_ctx):
     _eq("no BES → empty", runner_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x"))), [])
     _eq("no runner → empty", runner_diagnostics_flags(_WITH_BES), [])
 
+def _test_runner_bes_flags(_ctx):
+    # The env's BES backend and viewer, for vanilla `bazel` on the runner.
+    env = WorkflowsEnvironment(runner = Runner(), build_events = BuildEvents(backend = "grpc://bes:1985", results_url = "https://ui/i/"))
+    _eq("both", runner_bes_flags(env), ["--bes_backend=grpc://bes:1985", "--bes_results_url=https://ui/i/"])
+    _eq("no viewer", runner_bes_flags(WorkflowsEnvironment(build_events = BuildEvents(backend = "grpc://bes:1985"))), ["--bes_backend=grpc://bes:1985"])
+    _eq("no BES", runner_bes_flags(WorkflowsEnvironment(remote_cache = RemoteCache(endpoint = "x"))), [])
+
+    # Not part of `runner_flags`: tasks stream BES from the CLI, so only the rc
+    # takes these, and only after checking the workspace rc.
+    _startup, build = runner_flags(env, "/x")
+    _lacks("runner_flags omits bes", build, "--bes_backend")
+
 def _test_diagnostics_upload_flags(_ctx):
     # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.
     _eq("no path", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
@@ -166,7 +179,7 @@ def _test_written_flag_names(_ctx):
     # `bazelrc_file.axl` recognizes every line.
     env = WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"), build_events = BuildEvents(backend = "x"), ci = CI(scm_repo_name = "x"))
     startup, build = runner_flags(env, "/x")
-    for f in startup + build + runner_diagnostics_flags(env):
+    for f in startup + build + runner_diagnostics_flags(env) + runner_bes_flags(WorkflowsEnvironment(build_events = BuildEvents(backend = "x", results_url = "y"))):
         _eq("listed " + flag_name(f), flag_name(f) in names, True)
 
 def _test_omit_flags(_ctx):
@@ -197,6 +210,7 @@ _UNIT_TESTS = [
     _test_runner_flags,
     _test_runner_flags_output_base,
     _test_runner_diagnostics_flags,
+    _test_runner_bes_flags,
     _test_diagnostics_upload_flags,
     _test_written_flag_names,
     _test_omit_flags,

@@ -177,6 +177,8 @@ _OUTPUT_USER_ROOT = "--output_user_root"
 _OUTPUT_BASE = "--output_base"
 _NOHOME_RC = "--nohome_rc"
 _NOSYSTEM_RC = "--nosystem_rc"
+_BES_BACKEND = "--bes_backend"
+_BES_RESULTS_URL = "--bes_results_url"
 _PROFILE = "--profile"
 _REMOTE_BUILD_EVENT_UPLOAD = "--remote_build_event_upload"
 _EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
@@ -247,6 +249,21 @@ def env_flags(environment: WorkflowsEnvironment) -> list:
         cache = environment.remote_cache != None,
         bes = environment.build_events != None,
     ) + env_endpoint_flags(environment)
+
+def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
+    """The BES backend the runner environment names, for vanilla `bazel` on the
+    runner: `--bes_backend` and, when surfaced, `--bes_results_url`. Tasks never
+    take these — the CLI streams a task's build events from its own sink — so
+    only `aspect ci bazelrc` writes them, and only where the workspace rc does
+    not already choose a backend of its own (a home-rc value would override it).
+    Empty when the env names no BES backend."""
+    build_events = environment.build_events
+    if build_events == None or not build_events.backend:
+        return []
+    flags = [_BES_BACKEND + "=" + build_events.backend]
+    if build_events.results_url:
+        flags.append(_BES_RESULTS_URL + "=" + build_events.results_url)
+    return flags
 
 def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
     """The full flag set for an Aspect Workflows runner: the endpoint-independent
@@ -347,6 +364,8 @@ def written_flag_names() -> list:
         _OUTPUT_BASE,
         _NOHOME_RC,
         _NOSYSTEM_RC,
+        _BES_BACKEND,
+        _BES_RESULTS_URL,
         _PROFILE,
         _REMOTE_BUILD_EVENT_UPLOAD,
         _EXECUTION_LOG_COMPACT_FILE,
