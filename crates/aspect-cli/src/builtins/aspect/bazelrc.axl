@@ -45,10 +45,12 @@ The generated rc gets two kinds of content:
     helper, scoped to the deployment's hosts and pointed at the binary running
     this command — it certainly exists, whereas a bare `aspect` on PATH may not
     for a later `bazel` step, and Bazel fails outright on a helper it cannot
-    find. Where BES is wired the config also asks Bazel for a complete stream:
-    every action event, all BEP-referenced files uploaded, and the compact
-    execution log (Bazel >= 7.1) under the OS temp dir. How long Bazel waits for
-    that upload (`--bes_upload_mode`) is left to the user. Remote execution is
+    find. Where BES is wired the config also has Bazel upload every
+    BEP-referenced file and write the compact execution log (Bazel >= 7.1)
+    under the OS temp dir, which is what the Aspect backend derives per-action
+    cache and timing data from. Which actions Bazel reports as BEP events
+    (`--build_event_publish_all_actions`) and how long it waits for the upload
+    (`--bes_upload_mode`) are left to the user. Remote execution is
     never part of the base config: it relocates every action, so it is only ever
     reached by naming `-exec`, mirroring `--remote=exec` on `aspect <task>`.
     Aspect Cloud advertises no executor, so it gets no `-exec` config.
@@ -206,16 +208,16 @@ def credential_helper_flags(hosts: list, helper: str) -> list:
         flags.append(("--experimental_credential_helper=" + scoped, ">=" + _CREDENTIAL_HELPER_MIN_VERSION + ", <" + _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION))
     return flags
 
-def bes_completeness_flags(exec_log_path: str = "") -> list:
-    """Flags that make a Bazel-uploaded BES stream report everything the Aspect
-    backend can use: every action's event (Bazel only publishes failed ones by
-    default) and the diagnostics upload — every BEP-referenced file, plus the
-    compact execution log when a path is given (see
-    `bes_diagnostics_upload_flags`). Deliberately silent on `--bes_upload_mode`:
-    whether a build waits for its upload is the user's trade-off.
+def bes_diagnostics_flags(exec_log_path: str = "") -> list:
+    """Flags for a Bazel-uploaded BES stream that carry the build diagnostics the
+    Aspect backend reads: every BEP-referenced file uploaded, plus the compact
+    execution log when a path is given (see `bes_diagnostics_upload_flags`).
+    Per-action data comes from the execution log, so the per-action BEP events
+    behind `--build_event_publish_all_actions` are not requested; Bazel's default
+    of publishing only failed actions is what every consumer needs.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
-    return ["--build_event_publish_all_actions"] + bes_diagnostics_upload_flags(exec_log_path)
+    return bes_diagnostics_upload_flags(exec_log_path)
 
 def _unique_hosts(uris: list) -> list:
     hosts = []
@@ -238,7 +240,7 @@ def _login_hint(deployment) -> str:
 
 def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
-    helper for their hosts, and the BES completeness flags when BES is wired."""
+    helper for their hosts, and the BES diagnostics flags when BES is wired."""
     flags = []
     wired = []
     if d.cache:
@@ -251,7 +253,7 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
         wired.append("BES")
     flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
     if d.bes:
-        flags.extend(bes_completeness_flags(exec_log_path))
+        flags.extend(bes_diagnostics_flags(exec_log_path))
     return RcConfig(
         name = name,
         source = _label(d),

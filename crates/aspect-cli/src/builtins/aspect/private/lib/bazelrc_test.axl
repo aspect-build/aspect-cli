@@ -18,7 +18,7 @@ load(
     "@aspect//bazelrc.axl",
     "GENERATED_HEADER",
     "ImportAction",
-    "bes_completeness_flags",
+    "bes_diagnostics_flags",
     "command_sections",
     "config_collisions",
     "config_name",
@@ -291,8 +291,9 @@ def _test_deployment_configs_cloud(_ctx):
     _eq("cache helper (6.0–6.3)", ("--experimental_credential_helper=cache.aspect.build=" + _HELPER, ">=6.0.0, <6.4.0") in flags, True)
     _lacks("no unscoped helper", flags, "--credential_helper=" + _HELPER)
 
-    # BES is wired, so the stream is asked to be complete.
-    _has("publish all actions", flags, "--build_event_publish_all_actions")
+    # BES is wired, so the diagnostics ride along. Which actions Bazel reports
+    # and how long it waits for the upload stay the user's choice.
+    _lacks("action publishing left to the user", flags, "--build_event_publish_all_actions")
     _lacks("upload mode left to the user", flags, "--bes_upload_mode")
     _eq("upload all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
     _eq("exec log gated", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in flags, True)
@@ -347,7 +348,7 @@ def _test_deployment_configs_skip_unadvertised(_ctx):
     _has("bes", bes_only, "--bes_backend=grpcs://bes.b")
     cache_only = _by_name(deployment_configs([_summary("c", cache = "cache.c")], _HELPER))["aspect-c"].flags
     _lacks("no bes", cache_only, "--bes_backend")
-    _lacks("no bes completeness", cache_only, "--build_event_publish_all_actions")
+    _lacks("no bes diagnostics", cache_only, "--remote_build_event_upload")
 
 def _test_credential_helper_scope_strips_port(_ctx):
     # A host advertised with a port still scopes the helper by bare host, which is
@@ -356,9 +357,9 @@ def _test_credential_helper_scope_strips_port(_ctx):
     _eq("bare host scope", ("--credential_helper=cache.p=" + _HELPER, ">=6.4.0") in flags, True)
     _eq("helper flags helper", credential_helper_flags(["h"], "x")[0], ("--credential_helper=h=x", ">=6.4.0"))
 
-def _test_bes_completeness_without_exec_log(_ctx):
-    _lacks("no exec log without a path", bes_completeness_flags(), "--execution_log_compact_file")
-    _has("upload all still present", bes_completeness_flags(), "--remote_build_event_upload=all")
+def _test_bes_diagnostics_without_exec_log(_ctx):
+    _lacks("no exec log without a path", bes_diagnostics_flags(), "--execution_log_compact_file")
+    _has("upload all still present", bes_diagnostics_flags(), "--remote_build_event_upload=all")
 
 def _test_bes_diagnostics_upload_flags(_ctx):
     # Shared between the runner diagnostics and the rc's BES configs, so both
@@ -513,7 +514,7 @@ _UNIT_TESTS = [
     _test_deployment_configs_default_alias,
     _test_deployment_configs_skip_unadvertised,
     _test_credential_helper_scope_strips_port,
-    _test_bes_completeness_without_exec_log,
+    _test_bes_diagnostics_without_exec_log,
     _test_bes_diagnostics_upload_flags,
     _test_import_line,
     _test_ensure_import_new_file,
