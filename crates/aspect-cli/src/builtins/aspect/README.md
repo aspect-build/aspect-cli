@@ -100,6 +100,9 @@ aspect lint --fix                        # apply rules_lint patches in-place
 
 Required: at least one `--aspect=//path:linters.bzl%name`. Repeatable to run multiple linters in one invocation.
 
+Use `--target-pattern-file=<path>` to read newline-separated Bazel target
+patterns from a file. It cannot be combined with command-line patterns.
+
 Strategies (`--strategy=`):
 
 | Strategy        | Fails on                                                                              |
