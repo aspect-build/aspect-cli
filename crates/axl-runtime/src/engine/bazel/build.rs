@@ -819,11 +819,8 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        // Probe with the invocation's own startup flags so the answer describes
-        // the server this command will talk to. A bare `bazel info` reads the rc
-        // files instead, which can name a different output base — or the same
-        // one with different options, in which case the invocation restarts the
-        // server and the pid returned here is dead before the build begins.
+        // Match the invocation's startup flags to avoid probing a different server
+        // or triggering a restart that invalidates the returned pid.
         let (pid, version) = super::info::server_info_with_startup_flags(&startup_flags)?;
 
         let span = tracing::info_span!(

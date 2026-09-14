@@ -181,7 +181,7 @@ impl ExecLogStream {
 
     /// Spawn the execlog reader thread for a regular file.
     ///
-    /// `path` is the file Bazel was given as `--execution_log_compact_file`.
+    /// `execlog_path` is the file Bazel was given as `--execution_log_compact_file`.
     /// `writer_pid` is the bazel client pid of the invocation writing it: the
     /// server closes the log before the client exits, so the client's exit is
     /// the end-of-stream signal. Call this after the client has been spawned.
@@ -190,7 +190,7 @@ impl ExecLogStream {
     /// which busy-polls for file existence at open time and retries reads while the
     /// client is alive.
     pub fn spawn_with_file(
-        path: PathBuf,
+        execlog_path: PathBuf,
         writer_pid: u32,
         compact_sink_paths: Vec<String>,
         has_file_sinks: bool,
@@ -201,7 +201,7 @@ impl ExecLogStream {
             // 10 is the maximum size of a varint so start with that size.
             buf.resize(10, 0);
 
-            let out_raw = galvanize::StreamingFile::open(path, writer_pid)?;
+            let out_raw = galvanize::StreamingFile::open(execlog_path, writer_pid)?;
             let writers = compact_sink_paths
                 .iter()
                 .map(|p| Ok(BufWriter::new(File::create(p)?)))
