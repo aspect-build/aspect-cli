@@ -293,7 +293,7 @@ def _test_deployment_configs_cloud(_ctx):
 
     # BES is wired, so the stream is asked to be complete.
     _has("publish all actions", flags, "--build_event_publish_all_actions")
-    _has("wait for upload", flags, "--bes_upload_mode=wait_for_upload_complete")
+    _lacks("upload mode left to the user", flags, "--bes_upload_mode")
     _eq("upload all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
     _eq("exec log gated", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in flags, True)
 

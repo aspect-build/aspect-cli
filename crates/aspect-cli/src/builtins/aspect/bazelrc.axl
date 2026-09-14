@@ -40,9 +40,9 @@ The generated rc gets two kinds of content:
     this command — it certainly exists, whereas a bare `aspect` on PATH may not
     for a later `bazel` step, and Bazel fails outright on a helper it cannot
     find. Where BES is wired the config also asks Bazel for a complete stream:
-    every action event, all BEP-referenced files uploaded, the compact execution
-    log (Bazel >= 7.1) under the OS temp dir, and no early exit before the
-    upload finishes. Remote execution is never part of the base config: it
+    every action event, all BEP-referenced files uploaded, and the compact
+    execution log (Bazel >= 7.1) under the OS temp dir. How long Bazel waits for
+    that upload (`--bes_upload_mode`) is left to the user. Remote execution is never part of the base config: it
     relocates every action, so it is only ever reached by naming `-exec`,
     mirroring `--remote=exec` on `aspect <task>`. Aspect Cloud advertises no
     executor, so it gets no `-exec` config.
@@ -203,15 +203,13 @@ def credential_helper_flags(hosts: list, helper: str) -> list:
 def bes_completeness_flags(exec_log_path: str = "") -> list:
     """Flags that make a Bazel-uploaded BES stream report everything the Aspect
     backend can use: every action's event (Bazel only publishes failed ones by
-    default), no early exit before the upload completes, and the diagnostics
-    upload — every BEP-referenced file, plus the compact execution log when a
-    path is given (see `bes_diagnostics_upload_flags`).
+    default) and the diagnostics upload — every BEP-referenced file, plus the
+    compact execution log when a path is given (see
+    `bes_diagnostics_upload_flags`). Deliberately silent on `--bes_upload_mode`:
+    whether a build waits for its upload is the user's trade-off.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
-    return [
-        "--build_event_publish_all_actions",
-        "--bes_upload_mode=wait_for_upload_complete",
-    ] + bes_diagnostics_upload_flags(exec_log_path)
+    return ["--build_event_publish_all_actions"] + bes_diagnostics_upload_flags(exec_log_path)
 
 def _unique_hosts(uris: list) -> list:
     hosts = []
