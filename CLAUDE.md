@@ -83,15 +83,42 @@ Two things to know when adding tests here:
   rule's `env`) with an `option_env!("CARGO_BIN_EXE_…")` fallback for cargo;
   plain `env!` will not compile under Bazel.
 
-## Refusals from Rust builtins
+## Ending a task early: refusals versus bugs
 
-A `#[starlark_module]` fn that returns a plain `anyhow::Error` renders in the
-terminal with the AXL traceback and an annotated source snippet. That is right
-for a bug. For an expected refusal whose message is the whole story (an unknown
-deployment, a missing login), return `axl_runtime::TaskExit::error(msg)` as
-the error instead: the task runner prints the message as an `ERROR:` line, no
-traceback, and exits with code 1. `TaskExit::new(code, message)` picks another
-code; 0 prints the message as `INFO:`. Keep it at the root of the error, not
-under `.context(...)`, or the downcast misses it and the error renders as a
-traceback. `ASPECT_DEBUG=1` prints the traceback after the message for anyone
-debugging.
+An error that escapes a task renders with the AXL traceback and an annotated
+source snippet. That is the right output for a **bug**. For an **expected
+refusal** whose message is the whole story (an unknown deployment, a missing
+login, nothing to do), end the task with the message alone. The runtime prints
+it as an `ERROR:` line (`WARNING:` when flagged, `INFO:` for exit code 0),
+then the usual closing bookend, and exits with the code. `ctx.defer` callbacks
+still run. `ASPECT_DEBUG=1` appends the traceback for anyone debugging.
+
+**From AXL**, pick by where you are:
+
+| Where | Use |
+|---|---|
+| Top of `_impl` | `return TaskConclusion(exit_code = 1, message = "...")` |
+| Any nested helper | `ctx.std.process.exit(1, "...")` |
+| A bug, anywhere | `fail("...")`, which keeps the traceback |
+
+`exit` takes any code 0..=255 and unwinds through every caller like an error,
+so whatever the body had yet to run is skipped. A task with a status surface
+therefore uses neither shortcut and ends through its final `phases.update`,
+which closes the surface with the real status. `docs/axl.md` §13 has the
+examples.
+
+**From Rust**, a `#[starlark_module]` fn returns
+`axl_runtime::TaskExit::error(msg)` as its `anyhow::Error` instead of a plain
+`anyhow!`; `TaskExit::new(code, message)` picks another code. Keep it at the
+root of the error, not under `.context(...)`, or the downcast misses it and
+the error renders as a traceback. The `unknown deployment` refusals in
+`engine/aspect/auth.rs` are the pattern to copy.
+
+**Where it is caught.** A `TaskExit` raised inside the task body is resolved
+by the task runner in `eval/multi_phase.rs` into the same `Outcome` a returned
+`TaskConclusion` produces (`eval/outcome.rs`). One raised from a feature or
+config impl never reaches the runner; the top-level error arm in
+`aspect-cli/src/main.rs` recognizes it instead. Both paths have tests:
+`eval/exit.rs` for the runtime, and `crates/aspect-cli/tests/task_exit.rs`
+for the real binary, one command per path. A runtime test that needs a feature
+impl to run opts in with `.with_features(&["Name"])` on the test harness.

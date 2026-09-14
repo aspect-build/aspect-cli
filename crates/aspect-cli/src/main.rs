@@ -356,7 +356,9 @@ fn main() -> ExitCode {
             // An exit raised from a feature or config impl never reaches the
             // task runner, so it is recognized here instead.
             if let Some(exit) = TaskExit::from_anyhow(&err) {
-                exit.report(&err);
+                // `{err:#}` walks the chain to the Starlark error, whose
+                // rendering carries the traceback.
+                exit.report(&format_args!("{err:#}"));
                 return ExitCode::from(exit.code);
             }
             errln!("error: {err:?}");
