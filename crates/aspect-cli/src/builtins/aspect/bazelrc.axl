@@ -42,10 +42,10 @@ The generated rc gets two kinds of content:
     find. Where BES is wired the config also asks Bazel for a complete stream:
     every action event, all BEP-referenced files uploaded, and the compact
     execution log (Bazel >= 7.1) under the OS temp dir. How long Bazel waits for
-    that upload (`--bes_upload_mode`) is left to the user. Remote execution is never part of the base config: it
-    relocates every action, so it is only ever reached by naming `-exec`,
-    mirroring `--remote=exec` on `aspect <task>`. Aspect Cloud advertises no
-    executor, so it gets no `-exec` config.
+    that upload (`--bes_upload_mode`) is left to the user. Remote execution is
+    never part of the base config: it relocates every action, so it is only ever
+    reached by naming `-exec`, mirroring `--remote=exec` on `aspect <task>`.
+    Aspect Cloud advertises no executor, so it gets no `-exec` config.
 
 The generated file is ours and is rewritten whole on every run. The user rc is
 not: it only ever gains the one `try-import` line, skipped when already present,
