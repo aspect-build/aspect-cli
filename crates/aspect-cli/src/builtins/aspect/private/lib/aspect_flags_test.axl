@@ -1,0 +1,218 @@
+"""Unit tests for `aspect_flags.axl`: which catalog flags each endpoint justifies
+(`independent_flags` / `endpoint_flags`), the `env_flags` / `runner_flags` /
+`runner_diagnostics_flags` compositions, `apply_output_base_suffix`, the
+written-names list, and the opt-out (`omit_flags`, `protected_omissions`).
+
+Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
+assert the tuples carry the right constraints. Run with: aspect dev test-aspect-flags
+"""
+
+load(
+    "./aspect_flags.axl",
+    "CATALOG",
+    "PROTECTED_FLAGS",
+    "apply_output_base_suffix",
+    "diagnostics_upload_flags",
+    "endpoint_flags",
+    "env_flags",
+    "flag_name",
+    "independent_flags",
+    "omit_flags",
+    "protected_omissions",
+    "runner_diagnostics_flags",
+    "runner_flags",
+    "written_flag_names",
+)
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "Runner", "WorkflowsEnvironment")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _texts(flags) -> list:
+    return [f[0] if type(f) == "tuple" else f for f in flags]
+
+def _has(label, flags, want):
+    _eq(label, want in _texts(flags), True)
+
+def _lacks(label, flags, fragment):
+    _eq(label, any([fragment in f for f in _texts(flags)]), False)
+
+# Flags only a Workflows runner's mounts or its own cache justify. Never in
+# `env_flags`, whatever endpoints the environment names.
+_RUNNER_ONLY_FRAGMENTS = ["--repository_cache=", "--output_base=", "--output_user_root=", "--nosystem_rc", "_remote_cache_compression", "--disk_cache="]
+
+_CACHE_TUNING = ["--remote_upload_local_results", "--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
+_BES_ENRICHMENT = ["--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--legacy_important_outputs"]
+_INDEPENDENT = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks"]
+_CHANNEL = "--grpc_keepalive_timeout=30s"
+
+_WITH_BES = WorkflowsEnvironment(build_events = BuildEvents(backend = "grpcs://b"))
+
+def _test_endpoint_flags_follow_endpoints(_ctx):
+    # No endpoint: nothing. The endpoint-independent flags are a separate group
+    # so each surface places them once.
+    _eq("nothing wired", endpoint_flags(cache = False, bes = False), [])
+    _eq("independent", sorted(_texts(independent_flags())), sorted(_INDEPENDENT))
+
+    # A cache brings its tuning and the channel keepalive, nothing BES-shaped.
+    cache = endpoint_flags(cache = True, bes = False)
+    for want in _CACHE_TUNING + [_CHANNEL]:
+        _has("cache has " + want, cache, want)
+    for absent in _BES_ENRICHMENT:
+        _lacks("cache lacks " + absent, cache, absent)
+
+    # BES brings the profile/BEP enrichment and the keepalive, no cache tuning.
+    bes = endpoint_flags(cache = False, bes = True)
+    for want in _BES_ENRICHMENT + [_CHANNEL]:
+        _has("bes has " + want, bes, want)
+    for absent in _CACHE_TUNING:
+        _lacks("bes lacks " + absent, bes, absent)
+    _eq("target_configuration gated", ("--experimental_profile_include_target_configuration", ">=8.0.0") in bes, True)
+
+    # An executor doubles as the cache, so it earns the cache tuning.
+    exec_only = endpoint_flags(cache = False, bes = False, exec = True)
+    for want in _CACHE_TUNING + [_CHANNEL]:
+        _has("exec has " + want, exec_only, want)
+
+    # Every catalog entry is reachable between the two groups.
+    _eq("catalog covered", len(independent_flags()) + len(endpoint_flags(True, True, True)), len(CATALOG))
+
+def _test_env_flags_follow_the_environment(_ctx):
+    # Nothing in the env: nothing unconditional, so an imported rc is inert.
+    _eq("bare", env_flags(WorkflowsEnvironment()), [])
+
+    # The env's cache brings its endpoint flags and tuning, still nothing runner-only.
+    env = WorkflowsEnvironment(remote_cache = RemoteCache(endpoint = "unix:///x/grpc", bytestream_uri_prefix = "aw-remote.example"))
+    flags = env_flags(env)
+    _has("remote_cache", flags, "--remote_cache=unix:///x/grpc")
+    _has("bytestream prefix", flags, "--remote_bytestream_uri_prefix=aw-remote.example")
+    _has("cache tuning", flags, "--remote_timeout=3600")
+    _lacks("independent flags are not the env's", flags, "--heap_dump_on_oom")
+    for frag in _RUNNER_ONLY_FRAGMENTS:
+        _lacks("no runner-only " + frag, flags, frag)
+
+    # The env's BES brings the enrichment.
+    _has("bes enrichment", env_flags(_WITH_BES), "--noslim_profile")
+    _lacks("no cache tuning without a cache", env_flags(_WITH_BES), "--remote_timeout")
+
+def _test_runner_flags(_ctx):
+    env = WorkflowsEnvironment(
+        runner = Runner(repository_cache_dir = "/mnt/caches/repository"),
+        remote_cache = RemoteCache(endpoint = "grpcs://c"),
+        build_events = BuildEvents(backend = "grpcs://b"),
+    )
+    startup, build = runner_flags(env, "/work/repo")
+
+    # The independent flags, the env's tuning, the Workflows-cache specifics, and
+    # the repository cache.
+    _has("independent", build, "--heap_dump_on_oom")
+    _has("tuning", build, "--remote_timeout=3600")
+    _has("enrichment", build, "--noslim_profile")
+    _has("repository cache", build, "--repository_cache=/mnt/caches/repository")
+    _has("disk cache reset", build, "--disk_cache=")
+    _eq("compression <8", ("--noexperimental_remote_cache_compression", "<8.0.0") in build, True)
+    _eq("compression >=8", ("--noremote_cache_compression", ">=8.0.0") in build, True)
+    _eq("ignore_disk <7", ("--incompatible_remote_results_ignore_disk", "<7.0.0") in build, True)
+    _eq("startup", startup[:2], ["--nohome_rc", "--nosystem_rc"])
+
+    # Without the runner's cache in the env, its cache specifics stay out too.
+    _startup, no_cache = runner_flags(WorkflowsEnvironment(runner = Runner(), build_events = BuildEvents(backend = "b")), "/work/repo")
+    _lacks("no disk cache reset", no_cache, "--disk_cache=")
+    _lacks("no compression gate", no_cache, "_remote_cache_compression")
+    _lacks("no cache tuning", no_cache, "--remote_timeout")
+
+def _test_runner_flags_output_base(_ctx):
+    # The repo name and the checkout's last path segment scope both roots; the
+    # repo name is sanitized. subdir "aspect-cli" is clean.
+    env = WorkflowsEnvironment(runner = Runner(bazel_root_dir = "/b", output_root_dir = "/o"), ci = CI(scm_repo_name = "my repo"))
+    startup, _build = runner_flags(env, "/work/aspect-cli")
+    _eq("output_base", "--output_base=/o/my_repo/aspect-cli" in startup, True)
+    _eq("output_user_root", "--output_user_root=/b/my_repo/aspect-cli" in startup, True)
+
+    # Only --output_base gains a suffix; --output_user_root stays shared.
+    suffixed = apply_output_base_suffix(startup, "-delivery")
+    _eq("output_base moved", "--output_base=/o/my_repo/aspect-cli-delivery" in suffixed, True)
+    _eq("output_user_root shared", "--output_user_root=/b/my_repo/aspect-cli" in suffixed, True)
+    _eq("empty suffix noop", apply_output_base_suffix(startup, ""), startup)
+    _eq("no output_base noop", apply_output_base_suffix(["--nohome_rc"], "-x"), ["--nohome_rc"])
+
+def _test_runner_diagnostics_flags(_ctx):
+    env = WorkflowsEnvironment(runner = Runner(job_tmpdir = "/workflows"), build_events = BuildEvents(backend = "grpcs://bes"))
+    flags = runner_diagnostics_flags(env)
+    _eq("profile placed", "--profile=/workflows/command.profile.gz" in flags, True)
+    _eq("exec log gated", ("--execution_log_compact_file=/workflows/exec.log.zstd", ">=7.1.0") in flags, True)
+
+    # Bazel 6 only knows `--experimental_remote_build_event_upload` (default
+    # `all`), so the unprefixed spelling must be gated to 7+.
+    _eq("upload=all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
+
+    # On by default wherever a BES backend is; nothing without one or off a runner.
+    _eq("no BES → empty", runner_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x"))), [])
+    _eq("no runner → empty", runner_diagnostics_flags(_WITH_BES), [])
+
+def _test_diagnostics_upload_flags(_ctx):
+    # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.
+    _eq("no path", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
+    _eq("with path", diagnostics_upload_flags("/x/e.zstd")[1], ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
+
+def _test_written_flag_names(_ctx):
+    names = written_flag_names()
+    for want in ["--heap_dump_on_oom", "--noremote_cache_compression", "--disk_cache", "--remote_cache", "--output_base", "--repository_cache", "--profile", "--execution_log_compact_file"]:
+        _eq("knows " + want, want in names, True)
+    _eq("names only", any(["=" in n for n in names]), False)
+
+    # Everything the generators can produce is listed, so the legacy strip in
+    # `bazelrc_file.axl` recognizes every line.
+    env = WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"), build_events = BuildEvents(backend = "x"), ci = CI(scm_repo_name = "x"))
+    startup, build = runner_flags(env, "/x")
+    for f in startup + build + runner_diagnostics_flags(env):
+        _eq("listed " + flag_name(f), flag_name(f) in names, True)
+
+def _test_omit_flags(_ctx):
+    flags = ["--heap_dump_on_oom", "--remote_timeout=3600", ("--noremote_cache_compression", ">=8.0.0"), "--remote_cache=grpcs://c"]
+
+    # Matched by name, with or without a value on either side; tuples included.
+    got = omit_flags(flags, ["--heap_dump_on_oom", "--remote_timeout=999", "--noremote_cache_compression"])
+    _eq("omitted", got, ["--remote_cache=grpcs://c"])
+    _eq("untouched when nothing omitted", omit_flags(flags, []), flags)
+    _eq("unknown name is a no-op", omit_flags(flags, ["--not_ours"]), flags)
+
+    # Names compare exactly as Aspect spells them: the `no` form is its own flag.
+    _eq("no-form is distinct", len(omit_flags(["--noslim_profile"], ["--slim_profile"])), 1)
+
+def _test_protected_omissions(_ctx):
+    _eq("allowed", protected_omissions(["--heap_dump_on_oom", "--remote_timeout"]), [])
+    _eq("blocked, as spelled", protected_omissions(["--heap_dump_on_oom", "--remote_cache=x", "--output_base"]), ["--remote_cache=x", "--output_base"])
+
+    # Every endpoint, credential, chain, and runner-path flag the generators can
+    # write is protected — otherwise an opt-out could point a build nowhere.
+    for name in ["--remote_cache", "--remote_executor", "--bes_backend", "--credential_helper", "--experimental_credential_helper", "--config", "--output_base", "--output_user_root", "--repository_cache"]:
+        _eq("protected " + name, name in PROTECTED_FLAGS, True)
+    _eq("flag_name strips value", flag_name("--remote_cache=grpcs://c"), "--remote_cache")
+
+_UNIT_TESTS = [
+    _test_endpoint_flags_follow_endpoints,
+    _test_env_flags_follow_the_environment,
+    _test_runner_flags,
+    _test_runner_flags_output_base,
+    _test_runner_diagnostics_flags,
+    _test_diagnostics_upload_flags,
+    _test_written_flag_names,
+    _test_omit_flags,
+    _test_protected_omissions,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("aspect_flags.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+aspect_flags_tests = task(
+    summary = "Run the aspect_flags AXL unit tests.",
+    kind = "test-aspect-flags",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

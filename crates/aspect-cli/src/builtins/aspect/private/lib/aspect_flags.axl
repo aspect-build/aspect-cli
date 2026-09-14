@@ -22,12 +22,12 @@ from the environment or a deployment — the endpoints themselves, the runner's
 paths, the diagnostics file locations — are built by the functions below and
 documented there.
 
-Users may opt out of individual flags (`--omit-bazel-flag`, or
-`ctx.features[Workflows].args.omit_bazel_flags` in `config.axl`). `omit_flags`
-applies that to what Aspect injects, never to the user's own flags, and
-`PROTECTED_FLAGS` names the ones that cannot be dropped: endpoints, credentials,
-and the runner's paths, without which the build stops talking to Aspect or
-breaks the runner.
+Users may opt out of individual flags, per surface: `--bazel-flags:omit` for
+tasks (`feature/bazel_flags.axl`) and `--omit-bazel-flag` on `aspect ci bazelrc`.
+Both use `omit_flags`, which applies only to what Aspect injects, and
+`PROTECTED_FLAGS`, the flags that cannot be dropped: endpoints, credentials, and
+the runner's paths, without which the build stops talking to Aspect or breaks
+the runner.
 
 A flag is a plain string or a `(flag, constraint)` tuple carrying a Bazel semver
 constraint, the shape the bazelrc runtime resolves (`ctx.bazel.new_rc(...)
@@ -168,6 +168,19 @@ PROTECTED_FLAGS = [
     "--aspect:lock_version",
 ]
 
+# The value-bearing flags the functions below build, by name, so
+# `written_flag_names` can list everything this file can write.
+_REMOTE_CACHE = "--remote_cache"
+_BYTESTREAM_URI_PREFIX = "--remote_bytestream_uri_prefix"
+_REPOSITORY_CACHE = "--repository_cache"
+_OUTPUT_USER_ROOT = "--output_user_root"
+_OUTPUT_BASE = "--output_base"
+_NOHOME_RC = "--nohome_rc"
+_NOSYSTEM_RC = "--nosystem_rc"
+_PROFILE = "--profile"
+_REMOTE_BUILD_EVENT_UPLOAD = "--remote_build_event_upload"
+_EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
+
 def flag_text(flag) -> str:
     """The flag text of a plain or `(flag, constraint)` entry."""
     return flag[0] if type(flag) == "tuple" else flag
@@ -219,9 +232,9 @@ def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
         return []
     flags = []
     if remote_cache.endpoint:
-        flags.append("--remote_cache=" + remote_cache.endpoint)
+        flags.append(_REMOTE_CACHE + "=" + remote_cache.endpoint)
     if remote_cache.bytestream_uri_prefix:
-        flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
+        flags.append(_BYTESTREAM_URI_PREFIX + "=" + remote_cache.bytestream_uri_prefix)
     return flags
 
 def env_flags(environment: WorkflowsEnvironment) -> list:
@@ -258,20 +271,20 @@ def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (li
     build_flags = independent_flags() + env_flags(environment)
     if environment.remote_cache != None:
         build_flags.extend([_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS])
-    build_flags.append("--repository_cache=" + runner.repository_cache_dir)
+    build_flags.append(_REPOSITORY_CACHE + "=" + runner.repository_cache_dir)
 
     repo_name = environment.ci.scm_repo_name if environment.ci else ""
     subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
     scope = sanitize_filename(repo_name) + "/" + subdir if repo_name else subdir
     startup_flags = [
-        "--nohome_rc",
-        "--nosystem_rc",
-        "--output_user_root=" + runner.bazel_root_dir + "/" + scope,
-        "--output_base=" + runner.output_root_dir + "/" + scope,
+        _NOHOME_RC,
+        _NOSYSTEM_RC,
+        _OUTPUT_USER_ROOT + "=" + runner.bazel_root_dir + "/" + scope,
+        _OUTPUT_BASE + "=" + runner.output_root_dir + "/" + scope,
     ]
     return (startup_flags, build_flags)
 
-_OUTPUT_BASE_FLAG_PREFIX = "--output_base="
+_OUTPUT_BASE_FLAG_PREFIX = _OUTPUT_BASE + "="
 
 def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
     """A copy of `startup_flags` with `suffix` appended to the `--output_base=`
@@ -299,10 +312,18 @@ def diagnostics_upload_flags(exec_log_path: str = "") -> list:
     `--remote_build_event_upload` and flipped its default to `minimal` (Bazel 6
     only knows the `experimental_` spelling, whose default is already `all`); the
     compact execution log arrived in 7.1."""
-    flags = [("--remote_build_event_upload=all", ">=7.0.0")]
+    flags = [(_REMOTE_BUILD_EVENT_UPLOAD + "=all", ">=7.0.0")]
     if exec_log_path:
-        flags.append(("--execution_log_compact_file=" + exec_log_path, ">=7.1.0"))
+        flags.append((_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.1.0"))
     return flags
+
+def temp_exec_log_path(std, run_id: str) -> str:
+    """A place for the compact execution log off a Workflows runner: under the OS
+    temp dir so nothing lands in the checkout, namespaced by `run_id` since
+    concurrent jobs on one machine share that dir. Creates the directory."""
+    dir = std.env.temp_dir().rstrip("/") + "/aspect-bazel-" + (run_id or "exec")
+    std.fs.create_dir_all(dir)
+    return dir + "/exec.log.zstd"
 
 def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
     """`diagnostics_upload_flags` for a Workflows runner whose env names a BES
@@ -313,4 +334,20 @@ def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
     if runner == None or environment.build_events == None:
         return []
     tmpdir = runner.job_tmpdir
-    return ["--profile=" + tmpdir + "/command.profile.gz"] + diagnostics_upload_flags(tmpdir + "/exec.log.zstd")
+    return [_PROFILE + "=" + tmpdir + "/command.profile.gz"] + diagnostics_upload_flags(tmpdir + "/exec.log.zstd")
+
+def written_flag_names() -> list:
+    """The name of every flag this file can produce, catalog and built alike. What
+    `aspect ci bazelrc` uses to recognize the lines it once wrote into a user rc."""
+    return [e.flag.split("=")[0] for e in CATALOG + WORKFLOWS_CACHE_FLAGS] + [
+        _REMOTE_CACHE,
+        _BYTESTREAM_URI_PREFIX,
+        _REPOSITORY_CACHE,
+        _OUTPUT_USER_ROOT,
+        _OUTPUT_BASE,
+        _NOHOME_RC,
+        _NOSYSTEM_RC,
+        _PROFILE,
+        _REMOTE_BUILD_EVENT_UPLOAD,
+        _EXECUTION_LOG_COMPACT_FILE,
+    ]

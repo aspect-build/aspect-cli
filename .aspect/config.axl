@@ -13,15 +13,17 @@ load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_s
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
+load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
-load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
+load("@aspect//private/lib/bazelrc_file_test.axl", "bazelrc_file_tests")
 load("@aspect//private/lib/cache_selection_test.axl", "cache_selection_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
+load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
@@ -334,11 +336,21 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(runnable_tests)
     ctx.tasks.add(cache_selection_tests)
 
-    # `aspect ci bazelrc` pure helpers — the version-gated flag tuples, rc
-    # rendering (startup vs common sections, per-deployment `--config` groups),
-    # and the one-time `try-import` line in a non-runner CI user rc.
-    # Run with: aspect dev test-bazelrc
-    ctx.tasks.add(bazelrc_tests)
+    # The Bazel flags Aspect sets: the catalog's endpoint keying, the runner and
+    # env compositions, and the opt-out with its protected set.
+    # Run with: aspect dev test-aspect-flags
+    ctx.tasks.add(aspect_flags_tests)
+
+    # The rc `aspect ci bazelrc` writes as a document — rendering (startup vs
+    # common sections, `--config` groups), the `try-import` placement, and the
+    # upgrade from a whole-file output.
+    # Run with: aspect dev test-bazelrc-file
+    ctx.tasks.add(bazelrc_file_tests)
+
+    # The `--config=aspect-*` sections built from deployment rows: naming,
+    # credential helpers, per-endpoint flags, aliases, and collisions.
+    # Run with: aspect dev test-deployment-rc
+    ctx.tasks.add(deployment_rc_tests)
 
     # tools/bazel wrapper helpers — workspace-root detection, raw-URL
     # building, wrapper-version parsing, install classification, shell

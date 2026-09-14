@@ -3,8 +3,6 @@ load("@aspect//bazel.axl", "BazelTrait")
 load(
     "../private/lib/aspect_flags.axl",
     "apply_output_base_suffix",
-    "omit_flags",
-    "protected_omissions",
     "runner_diagnostics_flags",
     "runner_flags",
 )
@@ -31,15 +29,6 @@ def _workflows_impl(ctx: FeatureContext):
     # calling `bazel_trait.task_flags` hooks from its impl — one place to
     # register, zero per-task wiring.
     bazel_trait.task_flags.append(get_task_metadata_flags)
-
-    # The user's opt-outs apply to every flag Aspect injects below and to the rc
-    # `aspect ci bazelrc` writes; `aspect_flags.axl` says which cannot be dropped.
-    omitted = ctx.args.omit_bazel_flags
-    if omitted:
-        blocked = protected_omissions(omitted)
-        if blocked:
-            ctx.std.process.exit(1, "--omit-bazel-flag cannot drop %s: endpoints, credentials, and the runner's paths are what make the build Aspect's." % ", ".join(blocked))
-        bazel_trait.flag_filters.append(lambda flags: omit_flags(flags, omitted))
 
     # `--color=yes` is wanted in every environment where aspect-cli will
     # render ANSI elsewhere — not just on Workflows runners. Bazel's
@@ -168,16 +157,6 @@ Workflows = feature(
             default = "0s",
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
-        ),
-        "omit_bazel_flags": args.string_list(
-            long = "omit-bazel-flag",
-            description = "A Bazel flag Aspect would otherwise set that you do not want, " +
-                          "named as Aspect spells it (e.g. --omit-bazel-flag=--heap_dump_on_oom; " +
-                          "a value after `=` is ignored). Repeat for several. Applies to every " +
-                          "task's Bazel calls and to the rc `aspect ci bazelrc` writes; set it " +
-                          "once per repo in config.axl via " +
-                          "ctx.features[Workflows].args.omit_bazel_flags. Endpoints, credentials, " +
-                          "and the runner's output paths cannot be omitted.",
         ),
         "runner_output_base_suffix": args.string(
             default = "",

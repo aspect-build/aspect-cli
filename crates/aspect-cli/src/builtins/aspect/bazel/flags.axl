@@ -206,11 +206,10 @@ def _disclaim_passthrough(ctx) -> None:
     for bucket in _PASSTHROUGH_ARGS:
         _claim_bucket(ctx, bucket)
 
-def apply_flag_filters(ctx, flags: list) -> list:
-    """`flags` through every `trait.flag_filters` hook: the user's opt-outs,
-    applied only to what Aspect injects. Public so `aspect ci bazelrc` filters
-    the rc it writes the same way."""
-    for flag_filter in ctx.traits[BazelTrait].flag_filters:
+def _filter_injected(ctx, flags: list) -> list:
+    """`flags` through every `trait.injected_flag_filters` hook: the user's
+    opt-outs, applied only to what features inject."""
+    for flag_filter in ctx.traits[BazelTrait].injected_flag_filters:
         flags = flag_filter(flags)
     return flags
 
@@ -222,7 +221,7 @@ def _resolve_startup_flags(ctx) -> list:
     _require_arg(ctx, "bazel_startup_flags")
     flags = list(ctx.args.bazel_startup_flags)
     flags.extend(_claim_bucket(ctx, _PASSTHROUGH_STARTUP_FLAGS_ARG))
-    flags.extend(apply_flag_filters(ctx, list(bazel_trait.extra_startup_flags)))
+    flags.extend(_filter_injected(ctx, list(bazel_trait.extra_startup_flags)))
     if bazel_trait.startup_flags:
         flags = bazel_trait.startup_flags(flags)
     return flags
@@ -242,7 +241,7 @@ def _resolve_flags(ctx) -> list:
     injected = list(bazel_trait.extra_flags)
     for hook in bazel_trait.task_flags:
         injected.extend(hook(ctx))
-    flags.extend(apply_flag_filters(ctx, injected))
+    flags.extend(_filter_injected(ctx, injected))
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
     return flags
@@ -263,7 +262,7 @@ def _setup_command(ctx, command: str, base_flags: list = []):
     active run command every Bazel call uses.
     """
     startup_flags = _resolve_startup_flags(ctx)
-    flags = apply_flag_filters(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
+    flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
     rc = ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,
@@ -289,7 +288,7 @@ def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list
     the disclosure — pass the returned rc as a per-call `rc=` on `ctx.bazel.build`.
     """
     startup_flags = startup_transform(_resolve_startup_flags(ctx))
-    flags = apply_flag_filters(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
+    flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
     return ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,

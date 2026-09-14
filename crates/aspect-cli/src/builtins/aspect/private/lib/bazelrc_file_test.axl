@@ -1,0 +1,171 @@
+"""Unit tests for `bazelrc_file.axl`: `command_sections`, `render_bazelrc`,
+`startup_flags_for_rc`, `import_line`, and `ensure_import` / `strip_generated`
+(the one-time `try-import` line and the upgrade from a whole-file output).
+Run with: aspect dev test-bazelrc-file
+"""
+
+load(
+    "./bazelrc_file.axl",
+    "GENERATED_HEADER",
+    "ImportAction",
+    "RcConfig",
+    "command_sections",
+    "ensure_import",
+    "import_line",
+    "render_bazelrc",
+    "startup_flags_for_rc",
+    "strip_generated",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_SECTION = RcConfig(name = "aspect-x", source = "x", comment = "x: remote cache.", flags = ["--remote_cache=grpcs://x", ("--credential_helper=x=h", ">=6.4.0")])
+_CHAIN = RcConfig(name = "aspect-x-exec", source = "x exec", flags = ["--config=aspect-x", "--remote_executor=grpcs://x"])
+
+def _test_startup_flags_for_rc(_ctx):
+    # The `--no*_rc` suppression flags must all be dropped: Bazel fatals on any of
+    # them inside a bazelrc. Output paths stay.
+    got = startup_flags_for_rc(["--nohome_rc", "--nosystem_rc", "--output_user_root=/b/x", "--output_base=/o/x"])
+    _eq("suppression dropped, paths kept", got, ["--output_user_root=/b/x", "--output_base=/o/x"])
+
+def _test_command_sections(_ctx):
+    # >= 6.3.0 and the unknown-version (assume latest) case use `common`.
+    for v in [None, "6.3.0", "7.4.1", "8.0.0"]:
+        _eq("%s -> common" % v, command_sections(v), ["common"])
+
+    # < 6.3.0 has no `common`; spell out build (inherited) + query (not inherited).
+    for v in ["6.2.1", "6.0.0", "5.4.0"]:
+        _eq("%s -> build/query" % v, command_sections(v), ["build", "query"])
+
+def _test_render_common_section(_ctx):
+    out = render_bazelrc(["--output_base=/mnt/output"], ["--remote_cache=grpcs://c:443", "--disk_cache="], ["common"])
+    lines = out.split("\n")
+    _eq("header first", lines[0], GENERATED_HEADER)
+    _eq("startup line", "startup --output_base=/mnt/output" in lines, True)
+    _eq("common remote_cache", "common --remote_cache=grpcs://c:443" in lines, True)
+    _eq("common disk_cache", "common --disk_cache=" in lines, True)
+    _eq("no common startup_flag", "common --output_base=/mnt/output" in lines, False)
+    _eq("no startup build_flag", "startup --remote_cache=grpcs://c:443" in lines, False)
+    _eq("trailing newline", out.endswith("\n"), True)
+
+def _test_render_pre_common_sections(_ctx):
+    # < 6.3.0: each build flag is emitted once per section (build + query);
+    # startup flags are emitted once regardless of the command sections.
+    lines = render_bazelrc(["--output_base=/o"], ["--remote_cache=grpcs://c"], ["build", "query"]).split("\n")
+    _eq("build section", "build --remote_cache=grpcs://c" in lines, True)
+    _eq("query section", "query --remote_cache=grpcs://c" in lines, True)
+    _eq("no common", "common --remote_cache=grpcs://c" in lines, False)
+    _eq("startup once", len([ln for ln in lines if ln == "startup --output_base=/o"]), 1)
+
+def _test_render_configs(_ctx):
+    # Config flags go under `<section>:<name>`, tuples unwrapped, chain lines
+    # verbatim, each group behind its comment. Below 6.3 every line is doubled.
+    lines = render_bazelrc([], ["--disk_cache="], ["common"], [_SECTION, _CHAIN]).split("\n")
+    _eq("section flag", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
+    _eq("tuple unwrapped", "common:aspect-x --credential_helper=x=h" in lines, True)
+    _eq("chain verbatim", "common:aspect-x-exec --config=aspect-x" in lines, True)
+    _eq("comment", "# x: remote cache." in lines, True)
+    _eq("plain flag unscoped", "common --disk_cache=" in lines, True)
+    _eq("no condition leaked", any([">=" in ln for ln in lines]), False)
+
+    old = render_bazelrc([], [], ["build", "query"], [_CHAIN]).split("\n")
+    _eq("query chain", "query:aspect-x-exec --config=aspect-x" in old, True)
+    _eq("build chain", "build:aspect-x-exec --config=aspect-x" in old, True)
+
+_LINE = import_line("/home/ci/.aspect/bazelrc")
+_NAMES = ["--output_base", "--remote_cache", "--disk_cache", "--credential_helper", "--config", "--remote_executor"]
+
+def _ensure(existing):
+    return ensure_import(existing, _LINE, _NAMES)
+
+def _test_import_line(_ctx):
+    # `try-import`, so a generated file that later disappears is not fatal.
+    _eq("try-import", _LINE, "try-import /home/ci/.aspect/bazelrc")
+
+def _test_ensure_import_new_file(_ctx):
+    got = _ensure(None)
+    _eq("created content", got.content, _LINE + "\n")
+    _eq("created", got.action, ImportAction("created"))
+    _eq("empty is new", _ensure("").action, ImportAction("created"))
+
+def _test_ensure_import_appends_once(_ctx):
+    # A user's rc keeps every line; ours is added after them, and a second run
+    # finds it and changes nothing — so re-running never accumulates lines.
+    first = _ensure("build --disk_cache=/tmp/dc\n")
+    _eq("appended content", first.content, "build --disk_cache=/tmp/dc\n" + _LINE + "\n")
+    _eq("appended", first.action, ImportAction("appended"))
+    _eq("no trailing newline", _ensure("build --x").content, "build --x\n" + _LINE + "\n")
+
+    second = _ensure(first.content)
+    _eq("unchanged content", second.content, first.content)
+    _eq("unchanged", second.action, ImportAction("unchanged"))
+    _eq("mid-file", _ensure(_LINE + "\nbuild --later\n").action, ImportAction("unchanged"))
+
+_LEGACY = ("# Generated by `aspect ci bazelrc` — do not edit.\n" +
+           "# Configures vanilla `bazel` calls to use Aspect Workflows services and optimizations.\n\n" +
+           "startup --output_base=/mnt/ephemeral/output/repo\n" +
+           "common --remote_cache=grpcs://stale\n" +
+           "common --disk_cache=\n")
+
+def _test_strip_generated(_ctx):
+    _eq("whole legacy file → empty", strip_generated(_LEGACY, _NAMES), "")
+
+    # A whole-file rc with `--config` sections is entirely ours too.
+    whole = render_bazelrc(["--output_base=/o"], ["--disk_cache="], ["common"], [_SECTION, _CHAIN])
+    _eq("whole current file → empty", strip_generated(whole, _NAMES), "")
+
+    # Lines the command never generated survive, wherever they sit, and so does a
+    # generated-looking flag under a section we never wrote.
+    mixed = _LEGACY + "build --disk_cache=/tmp/mine\ncommon --keep_going\ntest --remote_cache=grpcs://theirs\n"
+    _eq("unknown lines kept", strip_generated(mixed, _NAMES), "common --keep_going\ntest --remote_cache=grpcs://theirs\n")
+
+def _test_ensure_import_replaces_generated_rc(_ctx):
+    # A `~/.bazelrc` this command wrote whole is all stale flags of ours: they
+    # are dropped so they don't stay in force beside the import.
+    got = _ensure(_LEGACY)
+    _eq("replaced content", got.content, _LINE + "\n")
+    _eq("replaced", got.action, ImportAction("replaced"))
+
+    # Another setup step's flags after the generated output survive the upgrade
+    # (its comments do not: a generated file's comments are ours to drop).
+    got = _ensure(_LEGACY + "\n# mine\nbuild --keep_going\n")
+    _eq("additions kept", got.content, "build --keep_going\n" + _LINE + "\n")
+    _eq("still replaced", got.action, ImportAction("replaced"))
+
+    # The current header is recognized the same way.
+    _eq("current header", _ensure(render_bazelrc([], [], ["common"])).action, ImportAction("replaced"))
+
+    # Only a file *starting* with the header counts; a user rc that mentions it
+    # later is theirs, untouched but for the import.
+    got = _ensure("build --x\n" + GENERATED_HEADER + "\ncommon --disk_cache=\n")
+    _eq("user rc appended", got.action, ImportAction("appended"))
+    _eq("user rc kept whole", got.content, "build --x\n" + GENERATED_HEADER + "\ncommon --disk_cache=\n" + _LINE + "\n")
+
+_UNIT_TESTS = [
+    _test_startup_flags_for_rc,
+    _test_command_sections,
+    _test_render_common_section,
+    _test_render_pre_common_sections,
+    _test_render_configs,
+    _test_import_line,
+    _test_ensure_import_new_file,
+    _test_ensure_import_appends_once,
+    _test_strip_generated,
+    _test_ensure_import_replaces_generated_rc,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bazelrc_file.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+bazelrc_file_tests = task(
+    summary = "Run the bazelrc_file AXL unit tests.",
+    kind = "test-bazelrc-file",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

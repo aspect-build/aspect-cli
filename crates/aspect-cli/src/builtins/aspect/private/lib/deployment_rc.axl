@@ -1,0 +1,186 @@
+"""The `--config=aspect-*` sections `aspect ci bazelrc` writes, one per Aspect
+deployment this machine knows (`ctx.aspect.auth.deployments()`) that advertises
+an endpoint:
+
+    --config=aspect-cloud          Aspect Cloud: remote cache + BES
+    --config=aspect-<name>         a configured Aspect Workflows deployment
+    --config=aspect-<name>-exec    the same, plus its remote execution
+    --config=aspect                the default deployment (`aspect auth use`)
+    --config=aspect-exec           the default deployment's `-exec` config
+
+Aspect Cloud's section takes its own name; a configured deployment `<name>`
+gets `aspect-<name>`. A cache or BES gives a base section, an executor an
+`-exec` section chained to it (standalone for an executor-only deployment), and
+a deployment with neither gets nothing.
+
+Each section wires the endpoints the deployment advertises (`--remote_cache`,
+`--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
+through the `aspect get` credential helper scoped to each distinct host, and
+carries the `aspect_flags.axl` tuning those endpoints justify — with BES, the
+build-diagnostics upload as well. Remote execution is never part of the base
+section: it relocates every action, so it is only ever reached by naming
+`-exec`, mirroring `--remote=exec` on `aspect <task>`.
+
+Two deployments can land on one section name (one named `cloud`, or `silo`
+beside `silo-exec`); Bazel would merge such sections and route the build to
+whichever host came last, so `config_collisions` reports them for the task to
+refuse.
+"""
+
+load("./aspect_endpoint_auth.axl", "endpoint_host")
+load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags")
+load("./bazelrc_file.axl", "RcConfig")
+
+# Bazel-facing Aspect endpoints are TLS gRPC.
+_SCHEME = "grpcs://"
+
+# Bazel 6.0.0 introduced the credential-helper protocol as
+# `--experimental_credential_helper`; 6.4.0 dropped the prefix.
+_CREDENTIAL_HELPER_MIN_VERSION = "6.0.0"
+_CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION = "6.4.0"
+
+_DEFAULT_CONFIG = "aspect"
+_CONFIG_PREFIX = "aspect-"
+_EXEC_SUFFIX = "-exec"
+_DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
+
+# The value-bearing flags these sections write, by name, so `strip_generated`
+# can recognize a section this command wrote into a user rc.
+SECTION_FLAG_NAMES = [
+    "--remote_cache",
+    "--bes_backend",
+    "--bes_results_url",
+    "--remote_executor",
+    "--credential_helper",
+    "--experimental_credential_helper",
+    "--config",
+]
+
+def config_name(deployment) -> str:
+    """The `--config` name for a deployment row: Aspect Cloud's own name for the
+    built-in entry, `aspect-<name>` for a configured deployment."""
+    return deployment.name if deployment.builtin else _CONFIG_PREFIX + deployment.name
+
+def credential_helper_flags(hosts: list, helper: str) -> list:
+    """`--credential_helper=<host>=<helper>` for each host, scoped so the helper is
+    only ever invoked for a deployment's own endpoints. Version-gated tuples: the
+    unprefixed spelling from 6.4.0 (the old one still works there, with a
+    deprecation warning), `--experimental_credential_helper` from 6.0.0 to 6.3."""
+    flags = []
+    for host in hosts:
+        scoped = host + "=" + helper
+        flags.append(("--credential_helper=" + scoped, ">=" + _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION))
+        flags.append(("--experimental_credential_helper=" + scoped, ">=" + _CREDENTIAL_HELPER_MIN_VERSION + ", <" + _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION))
+    return flags
+
+def _unique_hosts(uris: list) -> list:
+    hosts = []
+    for uri in uris:
+        host = endpoint_host(uri) if uri else ""
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+def _label(deployment) -> str:
+    return "Aspect Cloud" if deployment.builtin else "Aspect Workflows deployment '" + deployment.name + "'"
+
+def _login_hint(deployment) -> str:
+    """How CI authenticates this deployment's section: its API-token variable,
+    or the login command for a machine with a browser."""
+    login = "aspect auth login" if deployment.builtin else "aspect auth login --deployment " + deployment.name
+    if deployment.api_token_env:
+        return "auth via " + deployment.api_token_env + " or `" + login + "`"
+    return "auth via `" + login + "`"
+
+def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
+    """`--config=<name>`: the deployment's remote cache and/or BES, the credential
+    helper for their hosts, the tuning those endpoints justify, and — with BES —
+    the diagnostics upload."""
+    flags = []
+    wired = []
+    if d.cache:
+        flags.append("--remote_cache=" + _SCHEME + d.cache)
+        wired.append("remote cache")
+    if d.bes:
+        flags.append("--bes_backend=" + _SCHEME + d.bes)
+        if d.results_url:
+            flags.append("--bes_results_url=" + d.results_url)
+        wired.append("BES")
+    flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
+    flags.extend(independent_flags())
+    flags.extend(endpoint_flags(cache = bool(d.cache), bes = bool(d.bes)))
+    if d.bes:
+        flags.extend(diagnostics_upload_flags(exec_log_path))
+    return RcConfig(
+        name = name,
+        source = _label(d),
+        comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
+        flags = flags,
+    )
+
+def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConfig:
+    """`--config=<name>-exec`: the base section plus the deployment's executor. An
+    executor-only deployment has no base to chain to, so its section stands alone
+    with the tuning an executor justifies (it doubles as the cache). A credential
+    helper is added for the exec host only when the base section's don't cover it."""
+    if has_base:
+        flags = ["--config=" + name]
+        covered = _unique_hosts([d.cache, d.bes])
+    else:
+        flags = []
+        covered = []
+    flags.append("--remote_executor=" + _SCHEME + d.exec)
+    exec_host = endpoint_host(d.exec)
+    if exec_host not in covered:
+        flags.extend(credential_helper_flags([exec_host], credential_helper))
+    if not has_base:
+        flags.extend(independent_flags() + endpoint_flags(cache = False, bes = False, exec = True))
+    return RcConfig(
+        name = name + _EXEC_SUFFIX,
+        source = _label(d) + " (remote execution)",
+        comment = ("--config=" + name + " plus its" if has_base else _label(d) + ":") + " remote execution" + ("" if has_base else "; " + _login_hint(d)) + ".",
+        flags = flags,
+    )
+
+def deployment_configs(deployments: list, credential_helper: str, exec_log_path: str = "") -> list:
+    """The sections for every deployment in `deployments` (rows of
+    `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
+    `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
+    fields), in order, followed by the `aspect` / `aspect-exec` aliases for the
+    default one. `credential_helper` is the path Bazel invokes as `<helper> get`;
+    `exec_log_path`, when set, is where a BES-wired section writes the compact
+    execution log (Bazel >= 7.1)."""
+    configs = []
+    aliases = []
+    for d in deployments:
+        has_base = bool(d.cache or d.bes)
+        if not (has_base or d.exec):
+            continue
+        name = config_name(d)
+        if has_base:
+            configs.append(_base_config(d, name, credential_helper, exec_log_path))
+        if d.exec:
+            configs.append(_exec_config(d, name, credential_helper, has_base))
+        if d.default:
+            if has_base:
+                aliases.append(RcConfig(
+                    name = _DEFAULT_CONFIG,
+                    source = _DEFAULT_ALIAS_SOURCE,
+                    comment = "The default deployment (`aspect auth use`): " + _label(d) + ".",
+                    flags = ["--config=" + name],
+                ))
+            if d.exec:
+                aliases.append(RcConfig(name = _DEFAULT_CONFIG + _EXEC_SUFFIX, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
+    return configs + aliases
+
+def config_collisions(configs: list) -> list:
+    """One message per section name that more than one `RcConfig` claims, naming
+    the claimants and the fix; empty when every name is unique."""
+    claimants = {}
+    for c in configs:
+        claimants[c.name] = claimants.get(c.name, []) + [c.source]
+    return [
+        "--config=%s would be written for both %s. Rename the deployment: `aspect auth remove <name>`, then `aspect auth configure <host> --name <other>`." % (name, " and ".join(sources))
+        for (name, sources) in claimants.items()
+        if len(sources) > 1
+    ]

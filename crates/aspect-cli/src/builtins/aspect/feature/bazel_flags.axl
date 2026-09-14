@@ -1,0 +1,44 @@
+"""Aspect's Bazel flag policy for tasks: the user's opt-outs from the flags other
+features inject into a task's Bazel call.
+
+The flags themselves are decided in `lib/aspect_flags.axl` and injected by the
+features that own their situation — `Workflows` on a runner, `Deployment` for
+`--remote`. This feature owns only what the user may take away, so the knob has
+one home whatever injects: `--bazel-flags:omit=<flag>` on any task, or once per
+repo in `config.axl`:
+
+    ctx.features[BazelFlags].args.omit = ["--heap_dump_on_oom"]
+
+It registers the omission on `BazelTrait.injected_flag_filters`, which the spawn
+path applies to every injected flag and never to the user's own. The rc
+`aspect ci bazelrc` writes has its own `--omit-bazel-flag`, since vanilla `bazel`
+and tasks are different contexts and may want different omissions.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+load("../private/lib/aspect_flags.axl", "omit_flags", "protected_omissions")
+
+def _bazel_flags_impl(ctx: FeatureContext):
+    omitted = ctx.args.omit
+    if not omitted:
+        return
+    blocked = protected_omissions(omitted)
+    if blocked:
+        ctx.std.process.exit(1, "--bazel-flags:omit cannot drop %s: endpoints, credentials, and the runner's paths are what make the build Aspect's." % ", ".join(blocked))
+    ctx.traits[BazelTrait].injected_flag_filters.append(lambda flags: omit_flags(flags, omitted))
+
+BazelFlags = feature(
+    display_name = "Aspect Bazel flags",
+    summary = "Opt out of Bazel flags Aspect would otherwise set on a task's Bazel call.",
+    implementation = _bazel_flags_impl,
+    args = {
+        "omit": args.string_list(
+            description = "A Bazel flag Aspect would otherwise set on this task's Bazel call that you do not want, " +
+                          "named as Aspect spells it (e.g. --bazel-flags:omit=--heap_dump_on_oom; a value after `=` " +
+                          "is ignored). Repeat for several. Applies to what Aspect injects, never to your own flags; " +
+                          "set it once per repo in config.axl via ctx.features[BazelFlags].args.omit. Endpoints, " +
+                          "credentials, and the runner's output paths cannot be omitted. The rc written by " +
+                          "`aspect ci bazelrc` has its own --omit-bazel-flag.",
+        ),
+    },
+)

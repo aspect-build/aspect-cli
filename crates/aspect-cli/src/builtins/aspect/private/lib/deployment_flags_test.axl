@@ -15,7 +15,7 @@ when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
 `bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -214,7 +214,23 @@ def _test_join_and(ctx):
     _eq("two (oxford)", join_and(["remote cache", "bes backend"], oxford = True), "remote cache, and bes backend")
     _eq("three", join_and(["remote cache", "remote execution", "bes backend"]), "remote cache, remote execution, and bes backend")
 
+def _test_tuning_follows_wired_capabilities(ctx):
+    # `--remote` brings the same catalog tuning the rc's `--config` sections get,
+    # for exactly the capabilities it wired; nothing when nothing was wired.
+    _eq("nothing wired", deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL))), [])
+
+    both = deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL, remote = BARE)))
+    texts = [f[0] if type(f) == "tuple" else f for f in both]
+    _eq("independent", "--heap_dump_on_oom" in texts, True)
+    _eq("cache tuning", "--remote_timeout=3600" in texts, True)
+    _eq("bes enrichment", "--noslim_profile" in texts, True)
+
+    cache_only = [f[0] if type(f) == "tuple" else f for f in deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL, remote = "no-bes")))]
+    _eq("no bes enrichment without bes", "--noslim_profile" in cache_only, False)
+    _eq("cache tuning stays", "--remote_accept_cached" in cache_only, True)
+
 _UNIT_TESTS = [
+    _test_tuning_follows_wired_capabilities,
     _test_parse_defaults,
     _test_parse_omitted_is_off,
     _test_parse_exec_is_additive,
