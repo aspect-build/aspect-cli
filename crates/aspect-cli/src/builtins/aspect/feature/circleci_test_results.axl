@@ -8,7 +8,8 @@ on CircleCI.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("../private/lib/bazel_results.axl", "bb_clientd_root", "bes_get", "file_uri_to_path")
+load("@aspect//helpers.axl", "bb_clientd_root", "file_uri_to_path")
+load("../private/lib/bazel_results.axl", "bes_get")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
 load("../private/lib/tar.axl", "tar_create")
