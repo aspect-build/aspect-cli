@@ -185,3 +185,28 @@ but should provide necessary injection points via traits to allow external `feat
 
 For instance build.axl task uses BazelTrait to allow features to inspect final form of `BazelRc` object to decide whether to add `--remote_header` 
 for the configured RE or BES backend.
+
+
+**§13 Ending a task early.** `return code` from the task's implementation is
+the normal way out. From a nested helper, `ctx.std.process.exit(code, message)`
+ends the task with `code` (0..=255) and no traceback: the message prints as an
+`ERROR:` line, or `INFO:` for code 0, and `ctx.defer` callbacks still run. At
+the top of `_impl`, where a `return` can reach,
+`return TaskConclusion(exit_code = 1, message = ...)` renders the same way.
+Keep `fail()` for bugs, where the traceback is what you want.
+
+```python
+def _require_target(ctx: TaskContext, targets: list[str]):
+    if not targets:
+        ctx.std.process.exit(1, "Provide a target, e.g. `aspect build //...`.")
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not ctx.args.targets:
+        return TaskConclusion(exit_code = 1, message = "Provide a target, e.g. `aspect build //...`.")
+```
+
+Either shortcut skips whatever the body had yet to run, so a task with a status
+surface uses neither: it ends through `phases.update(final = True, ...)` and
+returns its conclusion, which closes the surface with the real status. An early
+`exit` or hand-built `TaskConclusion` there leaves the surface to its abort
+guard, which can only report "aborted".

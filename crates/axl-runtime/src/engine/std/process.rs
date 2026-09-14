@@ -26,8 +26,10 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
+use starlark::values::typing::StarlarkNever;
 
 use super::stream;
+use crate::eval::TaskExit;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Process>")]
@@ -70,6 +72,28 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     /// being in scope.
     fn id<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<i32> {
         Ok(process::id() as i32)
+    }
+
+    /// End the task with exit `code` (0..=255, no default, as in Rust's
+    /// `std::process::exit`) and, optionally, a `message`, with no traceback.
+    /// The message prints as an `ERROR:` line for a non-zero code and `INFO:`
+    /// for 0. Use it for an expected refusal, or an early "nothing to do",
+    /// from however deep in the call stack it is discovered; keep `fail()` for
+    /// bugs, where the traceback helps. `ASPECT_DEBUG=1` prints the traceback
+    /// after the message anyway.
+    ///
+    /// The exit unwinds through every caller like an error: `ctx.defer`
+    /// callbacks still run, but whatever the task body had yet to run does
+    /// not, including a status surface's final update. A task that reports to
+    /// a surface ends through its final `phases.update` instead.
+    fn exit<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] code: i32,
+        #[starlark(default = NoneOr::None)] message: NoneOr<&'v str>,
+    ) -> anyhow::Result<StarlarkNever> {
+        let code =
+            u8::try_from(code).map_err(|_| anyhow!("exit code must be 0..=255, got {code}"))?;
+        Err(TaskExit::new(code, message.into_option().map(str::to_owned)).into())
     }
 }
 

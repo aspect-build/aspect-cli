@@ -12,6 +12,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::aspect_cli;
 use std::os::fd::FromRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
@@ -21,18 +24,8 @@ use std::process::{Command, Output};
 /// `main` on a warm laptop, more on a loaded CI machine.
 const CRASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The CLI binary under test: `ASPECT_CLI_BIN` (Bazel) with a
-/// `CARGO_BIN_EXE_*` fallback (cargo). Plain `env!` would not compile under
-/// Bazel, where the cargo variable does not exist.
-fn cli_bin() -> String {
-    std::env::var("ASPECT_CLI_BIN")
-        .ok()
-        .or_else(|| option_env!("CARGO_BIN_EXE_aspect-cli").map(str::to_owned))
-        .expect("neither ASPECT_CLI_BIN nor CARGO_BIN_EXE_aspect-cli is set")
-}
-
 fn run_with_trigger(kind: &str, extra_env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = Command::new(aspect_cli());
     cmd.env("ASPECT_INTERNAL_TEST_CRASH", kind);
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -189,7 +182,7 @@ fn crash_log_is_written_when_stderr_blocks() {
     }
     set_nonblocking(write_fd, false);
 
-    let mut child = Command::new(cli_bin())
+    let mut child = Command::new(aspect_cli())
         .env("ASPECT_INTERNAL_TEST_CRASH", "segv")
         .env("ASPECT_CRASH_LOG", path.to_str().unwrap())
         // SAFETY: `Stdio` takes ownership of the duplicate, leaving the
