@@ -11,9 +11,13 @@ first user rc Bazel loads, picked up with no `--bazelrc` plumbing:
   - On an Aspect Workflows runner, `~/.bazelrc` is written whole. The runner is
     ours, nothing else configures Bazel on it, and rewriting the file is what
     keeps it in step with the runner's environment.
-  - On any other CI host, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc`
-    gains one `try-import` line for it, so an rc another setup step wrote
-    survives and re-running never accumulates anything.
+  - Anywhere else, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains
+    one `try-import` line for it, so an rc another setup step or the developer
+    wrote survives and re-running never accumulates anything. That rc is inert
+    until a `--config=aspect-*` is named — every flag in it is scoped to a
+    section (only a cache or BES the `ASPECT_WORKFLOWS_*` env names is
+    unconditional, and only where someone set those) — so importing it into a
+    developer's own rc changes nothing by itself.
 
 It is the in-CLI successor to `rosetta bazelrc`: the CI integrations (the
 setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab component)
@@ -22,11 +26,10 @@ call this instead of `rosetta` once `rosetta` is gone from the runner image.
 The generated rc gets two kinds of content:
 
   - Unconditional flags, applied to every `bazel` call. On a Workflows runner the
-    full set — generic tuning, the remote-cache endpoint (from env), and the
+    full set — the tuning catalog, the remote-cache endpoint (from env), and the
     runner-specific flags (repository cache, per-runner output paths, the
-    Workflows-cache compression gates). Elsewhere only the generic flags (plus
-    the remote-cache endpoint when its env vars are set) — nothing tied to a
-    runner's mounts.
+    Workflows-cache compression gates). Elsewhere only what the
+    `ASPECT_WORKFLOWS_*` env justifies, which is normally nothing.
 
   - Opt-in `--config` sections, one per Aspect deployment this machine knows
     (`aspect auth status`) that advertises a remote cache or BES backend:
@@ -68,9 +71,7 @@ degrades to "no Aspect configuration" instead of failing every `bazel` call. A
 (recognizable by its header) has that output stripped — the header and every
 flag line this command generates — since keeping it would leave stale flags in
 force; lines it cannot account for, such as another setup step's additions,
-stay. Off CI (no Workflows runner, no CI env) the user rc is left alone
-entirely by default: the generated file is still written, and the import line
-is only added when `--import-into` names the rc explicitly.
+stay.
 
 On Bazel >= 6.3.0 flags are emitted under `common` (applies to every command);
 older Bazel has no `common` pseudo-command, so they're spelled out under `build`
@@ -90,9 +91,10 @@ load(
     "./private/lib/aspect_flags.axl",
     "diagnostics_upload_flags",
     "endpoint_flags",
+    "env_flags",
     "flag_name",
     "flag_text",
-    "generic_flags",
+    "independent_flags",
     "runner_flags",
 )
 load(
@@ -102,7 +104,6 @@ load(
     "RemoteCache",
     "Runner",
     "WorkflowsEnvironment",
-    "detect_ci",
     "get_workflows_environment",
     "info",
     "is_aspect_workflows_runner",
@@ -238,8 +239,9 @@ def _login_hint(deployment) -> str:
 
 def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
-    helper for their hosts, the `aspect_flags.axl` tuning those endpoints
-    justify, and — with both wired — the diagnostics upload."""
+    helper for their hosts, the `aspect_flags.axl` tuning (the endpoint-independent
+    flags, then what those endpoints justify), and — with both wired — the
+    diagnostics upload."""
     flags = []
     wired = []
     if d.cache:
@@ -251,6 +253,7 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
             flags.append("--bes_results_url=" + d.results_url)
         wired.append("BES")
     flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
+    flags.extend(independent_flags())
     flags.extend(endpoint_flags(cache = bool(d.cache), bes = bool(d.bes)))
     if d.cache and d.bes:
         flags.extend(diagnostics_upload_flags(exec_log_path))
@@ -278,7 +281,7 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConf
     if exec_host not in covered:
         flags.extend(credential_helper_flags([exec_host], credential_helper))
     if not has_base:
-        flags.extend(endpoint_flags(cache = False, bes = False, exec = True))
+        flags.extend(independent_flags() + endpoint_flags(cache = False, bes = False, exec = True))
     return RcConfig(
         name = name + _EXEC_SUFFIX,
         source = _label(d) + " (remote execution)",
@@ -500,10 +503,9 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         (startup_flags, build_flags) = runner_flags(environment, ctx.std.env.aspect_root_dir())
         startup_flags = startup_flags_for_rc(startup_flags)
     else:
-        # Only the flags that don't depend on the runner's mounts or the
-        # Workflows cache. The remote-cache endpoint flags are still picked up
-        # from env vars when set. No runner-specific startup flags.
-        build_flags = generic_flags(environment)
+        # Off a runner nothing is unconditional but what the env asks for; the
+        # tuning lives in the `--config` sections so the rc is safe to import.
+        build_flags = env_flags(environment)
         startup_flags = []
 
     bazel_version = ctx.bazel.version()
@@ -522,12 +524,9 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     else:
         summary += "; no --config sections, since no deployment advertises endpoints here (see `aspect auth status`; `aspect auth login` records Aspect Cloud's)"
 
-    # Off CI the user rc is a developer's own: only touch it when named explicitly.
-    on_other_ci = not on_runner and detect_ci(ctx.std.env) != None
-    user_rc = ctx.args.import_into or (_home_path(ctx, _USER_RC) if on_other_ci else None)
-    if user_rc == None or user_rc == output:
-        hint = "" if on_runner or user_rc == output else ". Not on CI, so no user rc was changed; add `%s` to yours to use it" % import_line(output)
-        info(ctx.std, summary + hint + ".")
+    user_rc = ctx.args.import_into or _home_path(ctx, _USER_RC)
+    if user_rc == output:
+        info(ctx.std, summary + ".")
         return 0
 
     existing = ctx.std.fs.read_to_string(user_rc) if ctx.std.fs.exists(user_rc) else None
@@ -540,7 +539,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 bazelrc = task(
     group = ["ci"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; on other CI the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. Unconditionally: the recommended CI/profiling flags, plus on a Workflows runner its remote cache, repository cache, and per-runner output paths. Opt-in `--config` sections for every Aspect deployment this machine knows (`aspect auth status`): `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment, `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. Off CI the rc is still written to `~/.aspect/bazelrc` but `~/.bazelrc` is left alone unless --import-into names it.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. On a Workflows runner the recommended CI/profiling flags plus its remote cache, repository cache, and per-runner output paths apply to every `bazel` call; elsewhere every flag sits under an opt-in `--config` section, so the imported rc changes nothing until one is named: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
     implementation = _bazelrc_impl,
     traits = [BazelTrait],
     args = {
@@ -551,7 +550,7 @@ bazelrc = task(
         "import_into": args.string(
             long = "import-into",
             default = "",
-            description = "User rc that receives a `try-import <output>` line, added only when not already present. Defaults to `~/.bazelrc` on CI other than an Aspect Workflows runner (where the output is `~/.bazelrc` itself), and to nothing off CI, so a developer's own rc is never modified without asking.",
+            description = "User rc that receives a `try-import <output>` line, added only when not already present. Defaults to `~/.bazelrc`; on an Aspect Workflows runner the output is `~/.bazelrc` itself and no import is needed.",
         ),
     },
 )

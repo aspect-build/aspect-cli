@@ -1,7 +1,7 @@
 """Unit tests for the pure bazelrc/flag helpers:
 
   - `aspect_flags.axl`: `endpoint_flags` (which catalog flags each endpoint
-    justifies), `generic_flags` / `runner_flags` / `runner_diagnostics_flags`
+    justifies), `env_flags` / `runner_flags` / `runner_diagnostics_flags`
     composition, `apply_output_base_suffix`, and the opt-out (`omit_flags`,
     `protected_omissions`).
   - `bazelrc.axl` rendering: `command_sections` (which rc command sections to
@@ -40,8 +40,8 @@ load(
     "apply_output_base_suffix",
     "diagnostics_upload_flags",
     "endpoint_flags",
+    "env_flags",
     "flag_name",
-    "generic_flags",
     "independent_flags",
     "omit_flags",
     "protected_omissions",
@@ -95,7 +95,7 @@ def _by_name(configs) -> dict:
     return {c.name: c for c in configs}
 
 # Flags only a Workflows runner's mounts or its own cache justify. Never in
-# `generic_flags`, whatever endpoints the environment names.
+# `env_flags`, whatever endpoints the environment names.
 _RUNNER_ONLY_FRAGMENTS = [
     "--repository_cache=",
     "--output_base=",
@@ -149,25 +149,23 @@ def _test_endpoint_flags_follow_endpoints(_ctx):
     # Every catalog entry is reachable between the two groups.
     _eq("catalog covered", len(independent_flags()) + len(endpoint_flags(True, True, True)), len(CATALOG))
 
-def _test_generic_flags_follow_the_environment(_ctx):
-    # Nothing in the env: only the endpoint-independent flags, no runner-only ones.
-    bare = generic_flags(WorkflowsEnvironment())
-    _eq("bare", sorted(_texts(bare)), sorted(_ALWAYS))
-    for frag in _RUNNER_ONLY_FRAGMENTS:
-        _lacks("no runner-only " + frag, bare, frag)
+def _test_env_flags_follow_the_environment(_ctx):
+    # Nothing in the env: nothing unconditional, so an imported rc is inert.
+    _eq("bare", env_flags(WorkflowsEnvironment()), [])
 
     # The env's cache brings its endpoint flags and tuning, still nothing runner-only.
     env = WorkflowsEnvironment(remote_cache = RemoteCache(endpoint = "unix:///x/grpc", bytestream_uri_prefix = "aw-remote.example"))
-    flags = generic_flags(env)
+    flags = env_flags(env)
     _has("remote_cache", flags, "--remote_cache=unix:///x/grpc")
     _has("bytestream prefix", flags, "--remote_bytestream_uri_prefix=aw-remote.example")
     _has("cache tuning", flags, "--remote_timeout=3600")
+    _lacks("independent flags are not the env's", flags, "--heap_dump_on_oom")
     for frag in _RUNNER_ONLY_FRAGMENTS:
         _lacks("no runner-only " + frag, flags, frag)
 
     # The env's BES brings the enrichment.
-    _has("bes enrichment", generic_flags(_WITH_BES), "--noslim_profile")
-    _lacks("no cache tuning without a cache", generic_flags(_WITH_BES), "--remote_timeout")
+    _has("bes enrichment", env_flags(_WITH_BES), "--noslim_profile")
+    _lacks("no cache tuning without a cache", env_flags(_WITH_BES), "--remote_timeout")
 
 def _test_runner_flags(_ctx):
     env = WorkflowsEnvironment(
@@ -177,7 +175,9 @@ def _test_runner_flags(_ctx):
     )
     startup, build = runner_flags(env, "/work/repo")
 
-    # Everything generic, plus the Workflows-cache specifics and the repository cache.
+    # The independent flags, the env's tuning, the Workflows-cache specifics, and
+    # the repository cache.
+    _has("independent", build, "--heap_dump_on_oom")
     _has("tuning", build, "--remote_timeout=3600")
     _has("enrichment", build, "--noslim_profile")
     _has("repository cache", build, "--repository_cache=/mnt/caches/repository")
@@ -372,7 +372,10 @@ def _test_deployment_configs_cloud(_ctx):
     _has("cache tuning", flags, "--remote_upload_local_results")
     _has("bes enrichment", flags, "--legacy_important_outputs")
     _has("channel keepalive", flags, "--grpc_keepalive_timeout=30s")
-    _lacks("independent flags stay unconditional", flags, "--heap_dump_on_oom")
+
+    # Off a runner nothing is unconditional, so the endpoint-independent flags
+    # ride in every section.
+    _has("independent flags in the section", flags, "--heap_dump_on_oom")
     _lacks("action publishing left to the user", flags, "--build_event_publish_all_actions")
     _lacks("upload mode left to the user", flags, "--bes_upload_mode")
     _eq("upload all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
@@ -445,6 +448,7 @@ def _test_deployment_configs_skip_unadvertised(_ctx):
     flags = exec_only["aspect-e-exec"].flags
     _lacks("no chain", flags, "--config=")
     _has("executor", flags, "--remote_executor=grpcs://exec.e")
+    _has("independent flags, standalone", flags, "--heap_dump_on_oom")
     _has("exec earns cache tuning", flags, "--remote_accept_cached")
     _eq("helper", ("--credential_helper=exec.e=" + _HELPER, ">=6.4.0") in flags, True)
     _eq("alias to exec", exec_only["aspect-exec"].flags, ["--config=aspect-e-exec"])
@@ -592,7 +596,7 @@ def _test_runner_flags_output_base_and_suffix(_ctx):
 
 _UNIT_TESTS = [
     _test_endpoint_flags_follow_endpoints,
-    _test_generic_flags_follow_the_environment,
+    _test_env_flags_follow_the_environment,
     _test_runner_flags,
     _test_runner_diagnostics_flags,
     _test_diagnostics_upload_flags,

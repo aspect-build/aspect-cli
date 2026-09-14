@@ -10,7 +10,10 @@ Every flag is tied to what it presumes (`Needs`). A flag that tunes the remote
 cache is set only where a remote cache is wired, a flag that enriches the BES
 stream only where a BES backend reads it. A runner or deployment with no cache,
 no BES, or no executor gets none of the flags that presume the missing one, so
-every line Aspect writes is accounted for by an endpoint that is present.
+every line Aspect writes is accounted for by an endpoint that is present. Off a
+Workflows runner even the endpoint-independent flags live inside the `--config`
+sections, so the rc `aspect ci bazelrc` writes there changes nothing until a
+section is named and is safe to import into any `~/.bazelrc`.
 
 `CATALOG` and `WORKFLOWS_CACHE_FLAGS` are the maintained tables: each entry says
 what the flag does, why we set it, and what it presumes. Read them as the
@@ -177,14 +180,16 @@ def _as_flag(entry: InjectedFlag):
     return (entry.flag, entry.bazel) if entry.bazel else entry.flag
 
 def independent_flags() -> list:
-    """The `CATALOG` flags that presume no endpoint, set on every host."""
+    """The `CATALOG` flags that presume no endpoint. Unconditional on a Workflows
+    runner; elsewhere they ride inside each `--config` section, so an imported rc
+    changes nothing until a section is named."""
     return [_as_flag(e) for e in CATALOG if e.needs == Needs("nothing")]
 
 def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:
     """The `CATALOG` flags the wired endpoints justify: cache tuning with a cache
     or an executor, BES enrichment with a BES backend, channel tuning with any of
-    the three. Nothing when none is wired; `independent_flags` are separate so a
-    `--config` section never repeats what the unconditional rc already set."""
+    the three. Nothing when none is wired; `independent_flags` are separate so
+    each surface places them once."""
     satisfied = {
         Needs("nothing"): False,
         Needs("cache"): cache or exec,
@@ -219,21 +224,22 @@ def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
         flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
     return flags
 
-def generic_flags(environment: WorkflowsEnvironment) -> list:
-    """Build flags safe on any CI host, not just a Workflows runner: the
-    endpoint-independent `CATALOG` flags, the selection for whichever endpoints
-    the `ASPECT_WORKFLOWS_*` env names (cache and BES may be set off a runner
-    too), plus that cache endpoint. Nothing tied to a runner's mounts or its
-    cache implementation."""
-    return independent_flags() + endpoint_flags(
+def env_flags(environment: WorkflowsEnvironment) -> list:
+    """The flags the `ASPECT_WORKFLOWS_*` env justifies on any host: the cache
+    endpoint it names and the `CATALOG` selection for its cache and BES (both may
+    be set off a runner too). Empty when the env names neither, so an rc written
+    off a runner is inert until a `--config` section is named. Nothing tied to a
+    runner's mounts or its cache implementation."""
+    return endpoint_flags(
         cache = environment.remote_cache != None,
         bes = environment.build_events != None,
     ) + env_endpoint_flags(environment)
 
 def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
-    """The full flag set for an Aspect Workflows runner: `generic_flags` plus the
-    Workflows-cache specifics, the runner's repository cache, and the startup
-    flags that give each repo its own Bazel server on the runner's storage.
+    """The full flag set for an Aspect Workflows runner: the endpoint-independent
+    flags, `env_flags`, the Workflows-cache specifics, the runner's repository
+    cache, and the startup flags that give each repo its own Bazel server on the
+    runner's storage.
 
     `--output_user_root` holds the install base and external repos, shared across
     that repo's jobs; `--output_base` holds the server and its analysis cache, so
@@ -249,7 +255,7 @@ def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (li
     if runner == None:
         fail("runner_flags called without a Workflows runner — gate on environment.runner != None")
 
-    build_flags = generic_flags(environment)
+    build_flags = independent_flags() + env_flags(environment)
     if environment.remote_cache != None:
         build_flags.extend([_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS])
     build_flags.append("--repository_cache=" + runner.repository_cache_dir)
