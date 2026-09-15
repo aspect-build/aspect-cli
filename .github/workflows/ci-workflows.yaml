@@ -702,7 +702,7 @@ jobs:
   ci-ok:
     runs-on: ubuntu-latest
     if: always()
-    timeout-minutes: 2
+    timeout-minutes: 5
     needs:
       - wrapper-test
       - pre-build
