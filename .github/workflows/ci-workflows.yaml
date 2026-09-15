@@ -13,10 +13,28 @@ concurrency:
 # call, which dogfoods the trace.event/trace.log pipeline against a real backend.
 # Both are no-ops if a secret isn't configured (unset env var = empty string,
 # config.axl skips registration).
+#
+# ASPECT_HAS_API_TOKEN carries only whether the secret exists — "true" or
+# "false", never the value. That is all .aspect/config.axl needs to tell a
+# logged-in run from a fork PR (which gets no secrets) before defaulting
+# `--remote` to Aspect Cloud. The token itself stays out of the job env on
+# purpose: setup-aspect pipes it straight into `aspect auth login
+# --with-api-token` and leaves only the short-lived JWT on disk, and an
+# ASPECT_API_TOKEN in the environment would override that stored credential
+# on every invocation.
+#
+# ASPECT_WORKSPACE is how the CLI finds the checked-in `.aspect/config.json`
+# that tells it `cache.aspect.build` is Aspect Cloud's. Without it the file is
+# never looked for, the `aspect get` credential helper treats the cache as an
+# unknown third party, and Bazel talks to it with no credentials. The CI login
+# (`--with-api-token`) records a credential but no endpoints, so nothing else
+# in the job supplies this.
 env:
   DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN != '' }}
+  ASPECT_WORKSPACE: ${{ github.workspace }}
 jobs:
   # Pure-bash unit tests for the tools/bazel wrapper. No aspect, no bazel, no
   # pre-build — runs on a stock ephemeral runner in seconds and guards the
