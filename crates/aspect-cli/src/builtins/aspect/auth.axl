@@ -376,7 +376,7 @@ login = task(
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "org": args.string(
-            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
+            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. The login stays in this organization: a later token refresh that finds the account's default moved sets it back, and asks you to log in again only if that fails. Browser login only: an API token or a pasted JWT is already bound to one organization.",
         ),
         "profile": args.string(
             description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",

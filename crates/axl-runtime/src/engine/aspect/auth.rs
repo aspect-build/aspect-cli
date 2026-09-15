@@ -2542,10 +2542,10 @@ fn build_login_session(
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshFailure {
     /// The issuer minted a token for a different tenant than the credential was
-    /// issued for: the user's default organization changed elsewhere (a web
-    /// session's organization switcher, say) between login and this refresh.
-    /// Refused rather than adopted, so a CLI session never silently crosses into
-    /// another organization.
+    /// issued for, because the user's default organization changed elsewhere (a
+    /// web session's organization switcher, say), and the default could not be
+    /// set back ([`restore_default_tenant`]). Refused rather than adopted, so a
+    /// CLI session never silently crosses into another organization.
     TenantChanged { was: String, now: String },
     /// The refresh itself failed: a revoked or expired refresh token, a network
     /// error, a response with no usable bearer. The cause goes to the runtime
@@ -2567,12 +2567,16 @@ impl RefreshFailure {
     }
 }
 
-/// Mint a fresh credential for `entry` with the standard refresh grant, refusing
-/// one minted for a different tenant than `entry`'s ([`ensure_tenant_unchanged`]).
+/// Mint a fresh credential for `entry` with the standard refresh grant, keeping
+/// it in the tenant `entry` was issued for.
 ///
-/// The issuer is looked at again on the way ([`resolve_oidc_endpoints`]), so a
-/// credential whose login missed the tenant API is upgraded to it here and
-/// persisted that way by the caller.
+/// The grant mints for the account's default tenant, which another client may
+/// have moved since login. When the result is for another tenant and the issuer
+/// has the tenant API, the default is set back and the grant re-run
+/// ([`restore_default_tenant`]); otherwise, or when that fails, the credential is
+/// refused ([`RefreshFailure::TenantChanged`]). The issuer is looked at again on
+/// the way ([`resolve_oidc_endpoints`]), so a credential whose login missed the
+/// tenant API is upgraded to it here and persisted that way by the caller.
 async fn refresh_access_token(
     entry: &CredentialsEntry,
 ) -> Result<CredentialsEntry, RefreshFailure> {
@@ -2582,11 +2586,77 @@ async fn refresh_access_token(
     };
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
+    let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
     let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
         .await
         .map_err(failed)?;
-    refreshed.issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
-    ensure_tenant_unchanged(entry, refreshed)
+    if let Some(now) = tenant_moved(entry, &refreshed) {
+        if issuer_kind != IssuerKind::TenantApi {
+            return Err(RefreshFailure::TenantChanged {
+                was: entry.tenant_id.clone(),
+                now,
+            });
+        }
+        refreshed =
+            restore_default_tenant(entry, refreshed, auth_domain, &endpoints.token, client_id)
+                .await?;
+    }
+    refreshed.issuer_kind = issuer_kind;
+    Ok(refreshed)
+}
+
+/// How many times a refresh that landed in another tenant sets the default back
+/// and tries again before giving up. The default can move again under us (a
+/// browser switching organizations at the same moment), so one try is not
+/// conclusive; a few are.
+const RESTORE_DEFAULT_ATTEMPTS: usize = 3;
+
+/// Bring a refresh that landed in another tenant back to `wanted`'s: the token
+/// just minted is valid, if for the wrong tenant, so it can set the account's
+/// default back ([`switch_and_refresh`]), after which the grant mints for
+/// `wanted`'s tenant again. `current` is the credential the grant minted; each
+/// attempt continues from the latest one, since the grant rotates the refresh
+/// token. Gives up after [`RESTORE_DEFAULT_ATTEMPTS`] so the caller asks for a
+/// re-login rather than run against another organization.
+async fn restore_default_tenant(
+    wanted: &CredentialsEntry,
+    mut current: CredentialsEntry,
+    auth_domain: &str,
+    token_url: &str,
+    client_id: &str,
+) -> Result<CredentialsEntry, RefreshFailure> {
+    let was = wanted.tenant_id.as_str();
+    for attempt in 1..=RESTORE_DEFAULT_ATTEMPTS {
+        match switch_and_refresh(&current, was, auth_domain, token_url, client_id).await {
+            Ok(restored) if restored.tenant_id == was => return Ok(restored),
+            Ok(minted) => {
+                crate::trace!(
+                    "attempt {attempt}: set the default organization back to {was} but the grant minted for {}",
+                    minted.tenant_id
+                );
+                current = minted;
+            }
+            Err(e) => {
+                crate::trace!(
+                    "attempt {attempt}: could not set the default organization back: {e:#}"
+                )
+            }
+        }
+    }
+    Err(RefreshFailure::TenantChanged {
+        was: was.to_string(),
+        now: current.tenant_id,
+    })
+}
+
+/// The tenant `fresh` was minted for when it differs from `prior`'s. `None` when
+/// they agree, or when either side has no tenant: an issuer that mints no
+/// `tenantId` has nothing to compare.
+fn tenant_moved(prior: &CredentialsEntry, fresh: &CredentialsEntry) -> Option<String> {
+    let moved = !prior.tenant_id.is_empty()
+        && !fresh.tenant_id.is_empty()
+        && prior.tenant_id != fresh.tenant_id;
+    moved.then(|| fresh.tenant_id.clone())
 }
 
 /// The standard OAuth refresh grant against `token_url`, the issuer's token
@@ -2629,11 +2699,23 @@ async fn set_default_tenant(
     Ok(())
 }
 
+/// Set `tenant_id` as the account's default with `current`'s bearer, then run the
+/// refresh grant, which now mints for it. The caller checks the result's tenant:
+/// the default can move again between the two calls.
+async fn switch_and_refresh(
+    current: &CredentialsEntry,
+    tenant_id: &str,
+    auth_domain: &str,
+    token_url: &str,
+    client_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
+    set_default_tenant(auth_domain, &current.access_token, tenant_id).await?;
+    refresh_with_grant(current, token_url, client_id).await
+}
+
 /// Re-mint `entry` for `tenant_id`, one of its user's organizations, by making
-/// it the user's default tenant at the issuer and re-running the refresh grant.
-/// The user chose this organization explicitly, so the new default other
-/// clients will pick up is the intended one; the login task says so. Errors
-/// unless the result is for `tenant_id`.
+/// it the user's default tenant at the issuer and re-running the refresh grant
+/// ([`switch_and_refresh`]). Errors unless the result is for `tenant_id`.
 async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
@@ -2643,8 +2725,8 @@ async fn select_tenant(
         return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    set_default_tenant(auth_domain, &entry.access_token, tenant_id).await?;
-    let refreshed = refresh_with_grant(entry, &endpoints.token, client_id).await?;
+    let refreshed =
+        switch_and_refresh(entry, tenant_id, auth_domain, &endpoints.token, client_id).await?;
     if refreshed.tenant_id != tenant_id {
         return Err(anyhow::anyhow!(
             "the issuer minted a token for organization {} instead",
@@ -2652,25 +2734,6 @@ async fn select_tenant(
         ));
     }
     Ok(refreshed)
-}
-
-/// Refuse a refreshed credential minted for a different tenant than `prior`'s.
-/// A credential with no tenant on either side (an issuer that mints no
-/// `tenantId`) has nothing to compare and passes.
-fn ensure_tenant_unchanged(
-    prior: &CredentialsEntry,
-    fresh: CredentialsEntry,
-) -> Result<CredentialsEntry, RefreshFailure> {
-    if !prior.tenant_id.is_empty()
-        && !fresh.tenant_id.is_empty()
-        && prior.tenant_id != fresh.tenant_id
-    {
-        return Err(RefreshFailure::TenantChanged {
-            was: prior.tenant_id.clone(),
-            now: fresh.tenant_id,
-        });
-    }
-    Ok(fresh)
 }
 
 /// The refresh token to persist after a refresh: the newly-issued `fresh` one, or
@@ -2705,16 +2768,17 @@ fn session_expired_message(profile: &str) -> String {
 }
 
 /// Shown when a refresh came back for a different organization than the one the
-/// stored session was logged in to ([`RefreshFailure::TenantChanged`]). Points at
-/// the re-login, and at API tokens as the login that cannot drift: one is bound
-/// to its organization when it is created.
+/// stored session was logged in to and the default could not be set back
+/// ([`RefreshFailure::TenantChanged`]). Points at the re-login, and at API tokens
+/// as the login that cannot drift: one is bound to its organization when it is
+/// created.
 fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
     let login = login_hint(deployment);
     format!(
-        "your default organization changed since you logged in (was {was}, now {now}); \
-         refresh login token failed under a different organization.\n\nRun `{login}` to \
-         log in again. An API token is bound to one organization and never needs this: \
-         `{login} --with-api-token`, or set {}.",
+        "your default organization changed since you logged in (was {was}, now {now}) \
+         and could not be set back; the refreshed token, minted for {now}, was not \
+         used.\n\nRun `{login}` to log in again. An API token is bound to one \
+         organization and never needs this: `{login} --with-api-token`, or set {}.",
         api_token_env_var(deployment)
     )
 }
@@ -3970,10 +4034,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // Never hand back a known-expired token (an endpoint would 401 on it).
         // Mirror `resolve_access_token`: refresh when possible, else fail —
         // `required = False` callers (best-effort endpoint auth) get `None` and
-        // proceed unauthenticated instead of a hard error. A refresh that came
-        // back for another organization is a refusal, not an inability, and ends
-        // the task for every caller: proceeding unauthenticated would only hide
-        // it behind later 401s.
+        // proceed unauthenticated instead of a hard error. A refresh stuck in
+        // another organization is a refusal, not an inability, and ends the task
+        // for every caller: proceeding unauthenticated would only hide it behind
+        // later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
             TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
@@ -6518,29 +6582,28 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_for_another_tenant_is_refused() {
+    fn a_tenant_move_is_detected_only_when_both_sides_name_one() {
         let prior = entry_with_tenant("t1", IssuerKind::TenantApi);
-        match ensure_tenant_unchanged(&prior, entry_with_tenant("t2", IssuerKind::TenantApi)) {
-            Err(RefreshFailure::TenantChanged { was, now }) => {
-                assert_eq!(was, "t1");
-                assert_eq!(now, "t2");
-            }
-            _ => panic!("a refresh minted for another tenant must be refused"),
-        }
-        // The same tenant passes, and so does a credential with no tenant on
-        // either side: an issuer that mints no tenantId has nothing to compare.
-        assert!(
-            ensure_tenant_unchanged(&prior, entry_with_tenant("t1", IssuerKind::TenantApi)).is_ok()
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("t2", IssuerKind::TenantApi)),
+            Some("t2".to_string())
         );
-        assert!(
-            ensure_tenant_unchanged(
+        // The same tenant is no move, and neither is a credential with no tenant
+        // on either side: an issuer that mints no tenantId has nothing to compare.
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("t1", IssuerKind::TenantApi)),
+            None
+        );
+        assert_eq!(
+            tenant_moved(
                 &entry_with_tenant("", IssuerKind::Oidc),
-                entry_with_tenant("t2", IssuerKind::Oidc)
-            )
-            .is_ok()
+                &entry_with_tenant("t2", IssuerKind::Oidc)
+            ),
+            None
         );
-        assert!(
-            ensure_tenant_unchanged(&prior, entry_with_tenant("", IssuerKind::TenantApi)).is_ok()
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("", IssuerKind::TenantApi)),
+            None
         );
     }
 
@@ -6552,6 +6615,7 @@ mod tests {
         };
         let msg = changed.message(ASPECT_CLOUD_DEPLOYMENT_NAME);
         assert!(msg.contains("was t1, now t2"), "{msg}");
+        assert!(msg.contains("minted for t2, was not used"), "{msg}");
         assert!(msg.contains("`aspect auth login`"), "{msg}");
         assert!(
             msg.contains("`aspect auth login --with-api-token`"),
@@ -6886,9 +6950,119 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_for_another_tenant_is_refused() {
-        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t2"));
+    fn a_refresh_that_landed_in_another_tenant_sets_the_default_back() {
+        // The grant mints for t2 until the default is set back to t1; the switch
+        // is made with the t2 token just minted, and the second grant lands home.
+        let switched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let issuer = MockIssuer::start(4, {
+            let switched = switched.clone();
+            move |request| match request.path.as_str() {
+                "/.well-known/openid-configuration" => (404, String::new()),
+                TENANT_API_SWITCH_PATH => {
+                    assert!(
+                        request.body.contains(r#""tenantId":"t1""#),
+                        "{}",
+                        request.body
+                    );
+                    switched.store(true, std::sync::atomic::Ordering::SeqCst);
+                    (200, "{}".into())
+                }
+                "/oauth/token" => {
+                    let tenant = if switched.load(std::sync::atomic::Ordering::SeqCst) {
+                        "t1"
+                    } else {
+                        "t2"
+                    };
+                    (200, token_body_for(tenant))
+                }
+                other => panic!("unexpected request to {other}"),
+            }
+        });
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.refresh_token, "rotated");
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/.well-known/openid-configuration",
+                "/oauth/token",
+                TENANT_API_SWITCH_PATH,
+                "/oauth/token"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_that_cannot_be_set_back_is_refused_after_a_few_tries() {
+        let issuer = MockIssuer::start(2 + RESTORE_DEFAULT_ATTEMPTS, |request| {
+            match request.path.as_str() {
+                TENANT_API_SWITCH_PATH => (500, r#"{"errors":["nope"]}"#.into()),
+                _ => respond_to_grant(request, "t2"),
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        let switches = issuer
+            .finish()
+            .iter()
+            .filter(|r| r.path == TENANT_API_SWITCH_PATH)
+            .count();
+        assert_eq!(switches, RESTORE_DEFAULT_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_default_another_client_keeps_moving_is_never_adopted() {
+        // Two CLI sessions in different organizations refreshing at once: our
+        // switch succeeds every time, but the grant keeps minting for the other
+        // session's tenant because it moved the default back in between. Nothing
+        // but a token for our own tenant is ever accepted.
+        let issuer = MockIssuer::start(2 + 2 * RESTORE_DEFAULT_ATTEMPTS, |request| {
+            match request.path.as_str() {
+                TENANT_API_SWITCH_PATH => (200, "{}".into()),
+                _ => respond_to_grant(request, "t2"),
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        let grants = issuer
+            .finish()
+            .iter()
+            .filter(|r| r.path == "/oauth/token")
+            .count();
+        assert_eq!(grants, 1 + RESTORE_DEFAULT_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_grant_for_another_tenant_is_refused_without_the_tenant_api() {
+        // Nothing to set back with, so the mismatch is refused outright.
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t2"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let failure = current_thread_runtime()
             .block_on(refresh_access_token(&entry))
