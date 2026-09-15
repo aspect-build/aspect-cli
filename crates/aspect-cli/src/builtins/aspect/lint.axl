@@ -21,7 +21,7 @@ load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "file_uri_to_path", "now_ms", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "now_ms", "process_event", "uri_to_path_under_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -85,7 +85,7 @@ def _lint_file_path(file, bb_root):
         if prefix and file.name:
             return "/".join(prefix) + "/" + file.name
         return ""
-    return file_uri_to_path(uri, bb_root)
+    return uri_to_path_under_root(uri, bb_root)
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def filter_all(diagnostics, changed_files):
@@ -583,7 +583,7 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, exp
     """Read a lint output file, or None when its contents can't be read yet.
 
     Paths under the bb_clientd mount (bytestream:// URIs resolved by
-    `file_uri_to_path`) go through the bounded `poll_read_to_string`: the
+    `_lint_file_path`) go through the bounded `poll_read_to_string`: the
     inode exists as soon as the BES event arrives but reading blocks until
     the blob materializes — and blocks *forever* when the blob can't be
     fetched at all. A plain read would wedge the whole task inside one
@@ -608,7 +608,7 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, exp
     Either way, None always means unreadable, never empty: a clean linter's
     empty `.out` reads as "".
     """
-    root = bb_clientd_root(ctx)
+    root = bb_clientd_root(ctx.std.env)
     if root == None or not filepath.startswith(root):
         return ctx.std.fs.read_to_string_if_complete(filepath, expected_len = expected_len)
     return ctx.std.fs.poll_read_to_string(filepath, timeout_ms, expected_len = expected_len)
@@ -891,7 +891,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # bytestream:// URIs resolve through bb_clientd only when this runner has
     # a usable mount (declared by env and actually mounted); bb_root None
     # routes them to the output-tree fallback instead (see _lint_file_path).
-    bb_root = bb_clientd_root(ctx)
+    bb_root = bb_clientd_root(ctx.std.env)
     if bb_root != None and not _bb_clientd_mounted(ctx, bb_root):
         bb_root = None
     skipped_remote_files = 0

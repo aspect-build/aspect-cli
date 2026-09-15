@@ -12,7 +12,7 @@ Run with:
   aspect dev test-helpers
 """
 
-load("@aspect//helpers.axl", "aspect_web_ui_url", "bb_clientd_root", "detect_build_url", "detect_ci_host", "file_uri_to_path", "render_bes_url")
+load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "file_uri_to_path", "render_bes_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -33,17 +33,24 @@ def _test_impl(ctx):
     _eq("helpers: aspect_web_ui_url empty without inputs", aspect_web_ui_url(env, {}), "")
     _eq("helpers: render_bes_url empty without inputs", render_bes_url({"bazel": {}}), "")
 
-    # URI helpers resolve through the public facade. Detailed URI and
-    # environment behavior is covered by the bazel_results tests.
-    _eq("helpers: file URI", file_uri_to_path("file:///tmp/test.xml"), "/tmp/test.xml")
+    # file_uri_to_path resolves through the public facade and reads the
+    # runner's mount from env. URI and environment behavior is covered by
+    # the bazel_results tests.
+    _eq("helpers: file URI", file_uri_to_path(env, "file:///tmp/test.xml"), "/tmp/test.xml")
+    prior_mount = env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT")
+    prior_no_bb = env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", "/mnt/bb_clientd")
+    env.remove_var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
     _eq(
         "helpers: bytestream URI",
-        file_uri_to_path("bytestream://cache.example/blobs/abc123/42", "/mnt/bb_clientd"),
+        file_uri_to_path(env, "bytestream://cache.example/blobs/abc123/42"),
         "/mnt/bb_clientd/cas/cache.example/blobs/sha256/file/abc123-42",
     )
-    root = bb_clientd_root(ctx)
-    if root != None and type(root) != "string":
-        fail("helpers: bb_clientd_root returned %r" % root)
+    for name, prior in [("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", prior_mount), ("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", prior_no_bb)]:
+        if prior == None:
+            env.remove_var(name)
+        else:
+            env.set_var(name, prior)
 
     print("helpers.axl facade: OK")
     return 0

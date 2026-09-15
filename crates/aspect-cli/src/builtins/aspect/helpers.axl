@@ -16,19 +16,16 @@ lives in its owning module (see there for full semantics):
   - `render_bes_url(data) -> str`
         the BES results URL from a Bazel task's `data["bazel"]`, or ""
         when unavailable. From `lib/bazel_results.axl`.
-  - `bb_clientd_root(ctx) -> str | None`
-        the runner's local bb_clientd mount, or None when unavailable. From
-        `lib/bazel_results.axl`.
-  - `file_uri_to_path(uri, bb_root) -> str`
-        a file:// or bytestream:// output URI resolved to a local path. Pass
-        `bb_clientd_root(ctx)` as `bb_root` to honor runner configuration.
-        From `lib/bazel_results.axl`.
+  - `file_uri_to_path(env, uri) -> str`
+        a Bazel output `file://` or `bytestream://` URI resolved to a local
+        path, or "" when none exists (a bytestream URI on a runner without
+        a remote-cache mount). Reads the runner's mount configuration from
+        `env`. From `lib/bazel_results.axl`.
 """
 
 load(
     "./private/lib/bazel_results.axl",
     _aspect_web_ui_url = "aspect_web_ui_url",
-    _bb_clientd_root = "bb_clientd_root",
     _file_uri_to_path = "file_uri_to_path",
     _render_bes_url = "render_bes_url",
 )
@@ -38,5 +35,4 @@ detect_ci_host = _detect_ci_host
 detect_build_url = _detect_build_url
 aspect_web_ui_url = _aspect_web_ui_url
 render_bes_url = _render_bes_url
-bb_clientd_root = _bb_clientd_root
 file_uri_to_path = _file_uri_to_path

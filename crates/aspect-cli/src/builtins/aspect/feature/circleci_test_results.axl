@@ -8,7 +8,7 @@ on CircleCI.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//helpers.axl", "bb_clientd_root", "file_uri_to_path")
+load("@aspect//helpers.axl", "file_uri_to_path")
 load("../private/lib/bazel_results.axl", "bes_get")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
@@ -61,7 +61,7 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
         name = bes_get(file, "name", "") or ""
         if not name.endswith(".xml"):
             continue
-        src = file_uri_to_path(bes_get(file, "file", "") or "", bb_clientd_root(ctx))
+        src = file_uri_to_path(ctx.std.env, bes_get(file, "file", "") or "")
         if not src or not ctx.std.fs.exists(src):
             continue
         entries[label_path + "/" + name] = {"src": src, "cached": cached}

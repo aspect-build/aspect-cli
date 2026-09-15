@@ -94,8 +94,8 @@ BES_DRAIN_TICK_MS = 250
 
 # Default bb_clientd FUSE mount root on Aspect Workflows runners, used for
 # runners that predate the ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT platform env
-# (see bb_clientd_root). Also the fallback for `process_event`'s internal
-# path derivations, which have no ctx to read the env from.
+# (see bb_clientd_root). Also the root for `process_event`'s internal path
+# derivations, which have no env to read the runner configuration from.
 _DEFAULT_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
@@ -210,7 +210,7 @@ def bes_get(obj, field, default = None):
         return default
     return getattr(obj, field, default)
 
-def bb_clientd_root(ctx) -> str | None:
+def bb_clientd_root(env: std.Env) -> str | None:
     """Resolve the bb_clientd mount root for bytestream:// URI resolution.
 
     None when the runner declares it has no bb_clientd
@@ -218,21 +218,37 @@ def bb_clientd_root(ctx) -> str | None:
     resolved locally at all, so callers should skip remote-blob reads.
     Otherwise the runner-exported ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT, falling
     back to the legacy hard-coded root for runners predating the env vars.
-    """
-    if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD"):
-        return None
-    return ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT") or _DEFAULT_BB_CLIENTD_ROOT
 
-def file_uri_to_path(uri, bb_root = _DEFAULT_BB_CLIENTD_ROOT):
-    """Convert a file:// or bytestream:// URI to a local filesystem path.
+    An implementation detail of the runner platform, deliberately absent from
+    the public `@aspect//helpers.axl` facade: user code resolves URIs through
+    `file_uri_to_path(env, uri)`, which reads the same configuration.
+    """
+    if env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD"):
+        return None
+    return env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT") or _DEFAULT_BB_CLIENTD_ROOT
+
+def file_uri_to_path(env: std.Env, uri) -> str:
+    """Convert a Bazel output `file://` or `bytestream://` URI to a local path.
+
+    The public helper (re-exported from `@aspect//helpers.axl`): the runner's
+    bb_clientd configuration is read from `env` (`ctx.std.env`), so a
+    `bytestream://` URI resolves against the mount the runner actually has.
+    See `uri_to_path_under_root` for the resolution rules and return values.
+    """
+    return uri_to_path_under_root(uri, bb_clientd_root(env))
+
+def uri_to_path_under_root(uri, bb_root) -> str:
+    """Convert a file:// or bytestream:// URI to a local path under an explicit
+    bb_clientd root.
 
     `file://` (disk-cache / local outputs) is returned verbatim; `bytestream://`
     (remote cache) is resolved via the bb_clientd mount:
       bytestream://host:port/blobs/<hash>/<size>
       -> {bb_root}/cas/{host}/blobs/sha256/file/{hash}-{size}
     (a 5-part form with an explicit digest-function segment shifts hash/size
-    right). Callers with a ctx should pass `bb_root = bb_clientd_root(ctx)` so
-    the runner-exported mount wins over the legacy default.
+    right). For callers that need to pick the root themselves, such as one
+    that has probed whether the mount is live; everyone else uses
+    `file_uri_to_path(env, uri)`.
 
     Returns "" for a non-string `uri` (the BES `File.file` oneof yields bytes
     when contents are inlined) and for bytestream URIs when `bb_root` is None
@@ -594,7 +610,7 @@ def process_event(data, event):
             # Resolve the stderr File.uri to a local path only (never .contents):
             # read on demand for the inline snippet, kept off the Starlark heap.
             stderr_uri = bes_get(bes_get(payload, "stderr", None), "file", "") or ""
-            stderr_path = file_uri_to_path(stderr_uri)
+            stderr_path = uri_to_path_under_root(stderr_uri, _DEFAULT_BB_CLIENTD_ROOT)
 
             # One entry per label, deduped mnemonics (a target can fail multiple
             # actions, e.g. CppCompile + CppLink). First action's stderr_path
@@ -693,10 +709,10 @@ def process_event(data, event):
                     xml_uri = bes_get(output, "file", "") or ""
         duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
-            "log_path": file_uri_to_path(log_uri),
+            "log_path": uri_to_path_under_root(log_uri, _DEFAULT_BB_CLIENTD_ROOT),
             # JUnit XML, when present: lets the snippet prefer structured
             # <failure>/<error> output over scraping the raw test.log.
-            "xml_path": file_uri_to_path(xml_uri),
+            "xml_path": uri_to_path_under_root(xml_uri, _DEFAULT_BB_CLIENTD_ROOT),
             "duration_ms": duration_ms,
         }
 
