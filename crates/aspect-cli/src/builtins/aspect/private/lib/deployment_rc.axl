@@ -170,7 +170,12 @@ def deployment_configs(deployments: list, credential_helper: str, host_groups: l
                     flags = ["--config=" + name],
                 ))
             if d.exec:
-                aliases.append(RcConfig(name = _DEFAULT_EXEC_CONFIG, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
+                aliases.append(RcConfig(
+                    name = _DEFAULT_EXEC_CONFIG,
+                    source = _DEFAULT_ALIAS_SOURCE,
+                    comment = "The default deployment's remote execution.",
+                    flags = ["--config=" + name + _EXEC_SUFFIX],
+                ))
     return configs + aliases
 
 def config_collisions(configs: list) -> list:

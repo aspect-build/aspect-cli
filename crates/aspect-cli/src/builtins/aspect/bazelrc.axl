@@ -238,33 +238,59 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     # A checkout's rc is its repository's to edit once written; only --force
     # regenerates it. A runner's is the runner's, rewritten every job.
     if not on_runner and not ctx.args.force and ctx.std.fs.exists(output):
-        return TaskConclusion(exit_code = 1, message = "%s exists and is the repository's to edit; pass --force to regenerate it from the current deployments and flags." % output)
+        return TaskConclusion(exit_code = 1, message = "%s exists and is the repository's to edit; pass --force to regenerate it from the current deployments and flags." % _relative(output, workspace))
     _write(ctx, output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs, header = RUNNER_HEADER if on_runner else GENERATED_HEADER))
+
+    group_names = [g.name for g in groups]
+    sections = [c for c in configs if c.name not in group_names]
+    shown = lambda path: _relative(path, workspace)
 
     if env_deployment:
         optional = [c.name for c in configs if c.name not in enabled]
-        summary = "Wrote Aspect bazelrc to %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (output, ", ".join(enabled), ", ".join(optional) or "none")
+        summary = "Wrote Aspect bazelrc to %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (shown(output), ", ".join(enabled), ", ".join(optional) or "none")
     else:
-        group_names = [g.name for g in groups]
-        sections = [c.name for c in configs if c.name not in group_names]
-        summary = "Wrote Aspect bazelrc to %s: inert until a --config is named; sections %s" % (output, ", ".join(sections) or "none")
-        if not sections:
-            summary += " (no deployment advertises endpoints here; see `aspect auth status`, and `aspect auth login` records Aspect Cloud's)"
+        summary = "Wrote %s" % shown(output)
 
     importer = ctx.args.import_into or (output if on_runner else workspace + "/" + _WORKSPACE_RC)
-    if importer == output:
-        info(ctx.std, summary + ".")
-        return 0
+    if importer != output:
+        # The default location is imported through `%workspace%`, so the
+        # workspace rc stays checkout-independent; an explicit --output is
+        # imported as given.
+        line = import_line(ctx.args.output or "%workspace%/" + _GENERATED_RC)
+        existing = ctx.std.fs.read_to_string(importer) if ctx.std.fs.exists(importer) else None
+        result = ensure_import(existing, line)
+        if result.action != ImportAction("unchanged"):
+            _write(ctx, importer, result.content)
+        summary += "; " + _IMPORT_VERBS[result.action] % shown(importer)
+    info(ctx.std, summary + ".")
 
-    # The default location is imported through `%workspace%`, so the workspace
-    # rc stays checkout-independent; an explicit --output is imported as given.
-    line = import_line(ctx.args.output or "%workspace%/" + _GENERATED_RC)
-    existing = ctx.std.fs.read_to_string(importer) if ctx.std.fs.exists(importer) else None
-    result = ensure_import(existing, line)
-    if result.action != ImportAction("unchanged"):
-        _write(ctx, importer, result.content)
-    info(ctx.std, summary + "; " + _IMPORT_VERBS[result.action] % importer + ".")
+    if not env_deployment:
+        print("")
+        for line in _usage(sections, shown(output), shown(importer)):
+            print(line)
     return 0
+
+def _relative(path: str, workspace: str) -> str:
+    """`path` relative to `workspace` when under it, for the summary; the
+    absolute path otherwise."""
+    prefix = workspace + "/"
+    return path[len(prefix):] if workspace and path.startswith(prefix) else path
+
+def _usage(sections: list, rc: str, importer: str) -> list:
+    """How to use the checkout's rc, printed after writing it: which `--config`
+    names exist and what each wires — the `aspect` alias first, since it names
+    the default deployment, whichever that is — then that the file is a starting
+    point to commit and edit."""
+    lines = ["Commit %s and the import in %s. Vanilla `bazel` uses none of it until a --config is named:" % (rc, importer)]
+    if not sections:
+        lines.append("  (no deployment advertises endpoints here — see `aspect auth status`; `aspect auth login` records Aspect Cloud's — so there are no --config sections yet)")
+    ordered = [c for c in sections if c.name == "aspect"] + [c for c in sections if c.name != "aspect"]
+    width = max([len(c.name) for c in ordered] + [0]) + len("--config=")
+    for c in ordered:
+        flag = "--config=" + c.name
+        lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
+    lines.append("The file is a starting point: edit it as your repository needs. `aspect setup bazelrc --force` restores the generated version.")
+    return lines
 
 _BAZELRC_ARGS = {
     "force": args.boolean(
