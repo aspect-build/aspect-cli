@@ -322,4 +322,124 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::ARCH)
     }
+
+    /// The absolute path a shell would run `name` as, or `None` when no `PATH`
+    /// entry holds an executable of that name — `which` / `command -v`.
+    ///
+    /// A bare name is looked up along `PATH`; a name containing a path
+    /// separator is checked as given. On Unix the file must carry an execute
+    /// bit; on Windows the `PATHEXT` extensions are tried.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// helper = "aspect" if ctx.std.env.which("aspect") else ctx.std.env.current_exe()
+    /// ```
+    fn which<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] name: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        Ok(
+            match find_executable(name, std::env::var_os("PATH").as_deref()) {
+                Some(path) => NoneOr::Other(
+                    heap.alloc_str(
+                        path.to_str()
+                            .ok_or_else(|| anyhow::anyhow!("path of `{name}` is non utf-8"))?,
+                    ),
+                ),
+                None => NoneOr::None,
+            },
+        )
+    }
+}
+
+/// Resolve `name` the way a shell does against `path` (the `PATH` value): a
+/// bare name against each entry in order, a name with a separator as given.
+/// The first existing executable wins.
+pub(crate) fn find_executable(
+    name: &str,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    let candidate = std::path::Path::new(name);
+    if candidate.components().count() > 1 {
+        return executable_variants(candidate)
+            .into_iter()
+            .find(|p| is_executable(p));
+    }
+    std::env::split_paths(path?)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| executable_variants(&dir.join(name)))
+        .find(|p| is_executable(p))
+}
+
+#[cfg(unix)]
+fn executable_variants(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![base.to_path_buf()]
+}
+
+#[cfg(windows)]
+fn executable_variants(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut variants = vec![base.to_path_buf()];
+    if let Some(exts) = std::env::var_os("PATHEXT") {
+        for ext in std::env::split_paths(&exts) {
+            let mut with_ext = base.as_os_str().to_owned();
+            with_ext.push(ext.as_os_str());
+            variants.push(std::path::PathBuf::from(with_ext));
+        }
+    }
+    variants
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::find_executable;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn file(dir: &std::path::Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn which_walks_path_in_order_and_requires_an_execute_bit() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        file(first.path(), "aspect", 0o644);
+        let runnable = file(second.path(), "aspect", 0o755);
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        // The non-executable file in the first entry is skipped; the second wins.
+        assert_eq!(
+            find_executable("aspect", Some(&path)),
+            Some(runnable.clone())
+        );
+        assert_eq!(find_executable("bazel", Some(&path)), None);
+        assert_eq!(find_executable("aspect", None), None);
+
+        // A name with a separator is checked as given, not along PATH.
+        assert_eq!(
+            find_executable(runnable.to_str().unwrap(), Some(&path)),
+            Some(runnable)
+        );
+        assert_eq!(
+            find_executable(first.path().join("aspect").to_str().unwrap(), Some(&path)),
+            None
+        );
+    }
 }

@@ -128,13 +128,12 @@ def _groups(ctx: TaskContext, environment, on_runner: bool, env_deployment: bool
 _HELPER_NAME = "aspect"
 
 def _credential_helper(ctx: TaskContext) -> str:
-    """What the sections hand Bazel as the credential helper: `aspect` when a
-    PATH entry holds it — Bazel resolves a bare helper name on PATH — else the
-    absolute path of the binary running this command, which exists wherever
+    """What the sections hand Bazel as the credential helper: `aspect` when it
+    is on PATH — Bazel resolves a bare helper name the way a shell does — else
+    the absolute path of the binary running this command, which exists wherever
     this rc is read on the same machine."""
-    for dir in (ctx.std.env.var("PATH") or "").split(":"):
-        if dir and ctx.std.fs.exists(dir.rstrip("/") + "/" + _HELPER_NAME):
-            return _HELPER_NAME
+    if ctx.std.env.which(_HELPER_NAME) != None:
+        return _HELPER_NAME
     return ctx.std.env.current_exe()
 
 def _sections(ctx: TaskContext, host_groups: list) -> list:
