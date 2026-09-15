@@ -1,5 +1,6 @@
 """Unit tests for `rc_groups.axl`: what each named `--config` group holds on and
-off a runner, the CI host group's naming, and which groups an rc enables.
+off a runner, the CI host group's naming, the two rc shapes (which groups are
+enabled, which a deployment section chains), and `env_names_deployment`.
 Run with: aspect dev test-rc-groups
 """
 
@@ -13,8 +14,10 @@ load(
     "GROUP_EXEC",
     "GROUP_RUNNER",
     "HOST_GROUPS",
+    "env_names_deployment",
     "host_group",
     "rc_groups",
+    "section_chains",
 )
 
 def _eq(label, got, want):
@@ -34,11 +37,12 @@ _EXEC = RemoteExecutor(endpoint = "grpc://exec:8980")
 
 def _test_bare_host(_ctx):
     # Nothing in the env, no recognized host: the tuning groups alone, pure and
-    # unenabled but for the common one.
+    # none enabled — this is the deployment shape, inert until a section is named.
     (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "/tmp/x/exec.log.zstd")
     by = _by_name(groups)
     _eq("names", [g.name for g in groups], [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
-    _eq("enabled", enabled, [GROUP_COMMON])
+    _eq("nothing enabled", enabled, [])
+    _eq("sections chain common", section_chains(groups), [GROUP_COMMON])
     _eq("common", by[GROUP_COMMON].flags, independent_flags())
     _eq("cache is tuning alone", by[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
     _eq("bes is tuning + upload", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags("/tmp/x/exec.log.zstd"))
@@ -108,10 +112,25 @@ def _test_host_group(_ctx):
     _eq("unknown host", host_group(WorkflowsEnvironment(ci = CI(host = "unknown")), misdetects_color = True), [])
     _eq("every detected host has a name", sorted(HOST_GROUPS.keys()), ["buildkite", "circleci", "github", "gitlab"])
 
-    # In the rc it sits between common and the endpoint groups, enabled.
+    # In the rc it sits between common and the endpoint groups. With nothing in
+    # the env nothing is enabled, and the deployment sections chain it with common.
     (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github")), on_runner = False, misdetects_color = True, exec_log_path = "/x")
     _eq("placed", [g.name for g in groups], [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE, GROUP_BES])
-    _eq("enabled", enabled, [GROUP_COMMON, "aspect-github-actions"])
+    _eq("nothing enabled", enabled, [])
+    _eq("sections chain common + host", section_chains(groups), [GROUP_COMMON, "aspect-github-actions"])
+
+    # Where the env names the deployment, the same host group is enabled at the top.
+    (_groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github"), remote_cache = _CACHE), on_runner = False, misdetects_color = True, exec_log_path = "/x")
+    _eq("enabled with env", enabled, [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE])
+
+def _test_env_names_deployment(_ctx):
+    # The runner marker or any one endpoint variable is the environment's answer.
+    _eq("silent", env_names_deployment(WorkflowsEnvironment(), False), False)
+    _eq("marker", env_names_deployment(WorkflowsEnvironment(runner = _RUNNER), True), True)
+    _eq("cache", env_names_deployment(WorkflowsEnvironment(remote_cache = _CACHE), False), True)
+    _eq("bes", env_names_deployment(WorkflowsEnvironment(build_events = _BES), False), True)
+    _eq("executor", env_names_deployment(WorkflowsEnvironment(remote_executor = _EXEC), False), True)
+    _eq("ci host alone is not a deployment", env_names_deployment(WorkflowsEnvironment(ci = CI(host = "github")), False), False)
 
 def _test_enabled_are_defined(_ctx):
     for env, on_runner in [
@@ -130,6 +149,7 @@ _UNIT_TESTS = [
     _test_runner,
     _test_exec_without_cache,
     _test_host_group,
+    _test_env_names_deployment,
     _test_enabled_are_defined,
 ]
 

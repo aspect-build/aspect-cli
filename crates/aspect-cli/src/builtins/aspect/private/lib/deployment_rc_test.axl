@@ -62,8 +62,8 @@ def _test_cloud_section(_ctx):
     _lacks("no unscoped helper", flags, "--credential_helper=" + _HELPER)
 
     # Both endpoints are wired, so the section chains to both tuning groups the
-    # rc defines; it repeats none of their flags, and not the host tuning the
-    # rc enables for every command.
+    # rc defines and repeats none of their flags. Without `host_groups` nothing
+    # else is chained.
     _eq("chains", [f for f in flags if _texts([f])[0].startswith("--config=")], ["--config=aspect-cache", "--config=aspect-bes"])
     _lacks("no inlined tuning", flags, "--remote_upload_local_results")
     _lacks("no inlined enrichment", flags, "--legacy_important_outputs")

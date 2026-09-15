@@ -54,7 +54,7 @@ def is_config_chain(flag) -> bool:
 def startup_flags_for_rc(startup_flags: list) -> list:
     """Drop the rc-suppression startup flags, which are illegal inside an rc file.
 
-    `runner_flags` includes `--nohome_rc` and `--nosystem_rc` because the
+    `runner_startup_flags` includes `--nohome_rc` and `--nosystem_rc` because the
     Workflows feature passes them as *command-line* startup flags to
     `aspect <task>`. Bazel rejects any `--no*_rc` option inside a bazelrc with a
     fatal `Can't specify --nosystem_rc in the .bazelrc file` (`--nohome_rc` would
@@ -83,8 +83,8 @@ def render_bazelrc(startup_flags: list, enabled: list, command_sections: list, c
     lines = [
         GENERATED_HEADER,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
-        "# Flags are grouped by what they presume; the groups on for this host are enabled here,",
-        "# the rest are opt-in by name. `bazel build --announce_rc` shows which group set what.",
+        "# Flags are grouped by what they presume; the groups that apply here are enabled at the",
+        "# top, the rest reached by chaining or by name. `bazel build --announce_rc` shows which group set what.",
         "",
     ]
     for flag in startup_flags:

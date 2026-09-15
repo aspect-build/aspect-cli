@@ -16,13 +16,13 @@ a deployment with neither gets nothing.
 Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
-chains to the `rc_groups.axl` tuning groups those endpoints justify —
-`aspect-cache`, `aspect-bes` — so the tuning is spelled once per rc. It also
-chains the groups the rc would otherwise enable for every command
-(`aspect-common`, the CI host's), since the rc that carries deployment
-sections enables nothing: it is inert until a section is named. Remote execution is never part of the base
-section: it relocates every action, so it is only ever reached by naming
-`-exec`, mirroring `--remote=exec` on `aspect <task>`.
+chains `rc_groups.axl` groups rather than repeating flags: first the groups the
+rc would otherwise enable for every command (`aspect-common`, the CI host's) —
+the rc that carries sections enables nothing, so it is inert until a section is
+named — then the tuning groups its endpoints justify (`aspect-cache`,
+`aspect-bes`). Remote execution is never part of the base section: it relocates
+every action, so it is only ever reached by naming `-exec`, mirroring
+`--remote=exec` on `aspect <task>`.
 
 Two deployments can land on one section name (one named `cloud`, or `silo`
 beside `silo-exec`); Bazel would merge such sections and route the build to
@@ -131,9 +131,8 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_grou
     """`--config=<name>-exec`: the base section plus the deployment's executor. An
     executor-only deployment has no base to chain to, so its section stands alone
     and chains `host_groups` and the tuning an executor justifies (it doubles as
-    the cache).
-    A credential helper is added for the exec host only when the base section's
-    don't cover it."""
+    the cache). A credential helper is added for the exec host only when the base
+    section's don't cover it."""
     if has_base:
         flags = ["--config=" + name]
         covered = _unique_hosts([d.cache, d.bes])

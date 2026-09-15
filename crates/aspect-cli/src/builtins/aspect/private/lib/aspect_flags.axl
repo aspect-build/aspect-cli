@@ -1,24 +1,22 @@
 """The Bazel flags Aspect sets on the user's behalf, in one place.
 
-Two surfaces set them: `feature/workflows.axl` injects them into every
-`aspect <task>` Bazel call on an Aspect Workflows runner, and `aspect ci bazelrc`
-writes them to an rc for vanilla `bazel` calls. Both compose from the same
-groups here, so a flag is set the same way — and for the same reason — wherever
-it appears.
+Three surfaces set them: the Workflows feature injects them into every
+`aspect <task>` Bazel call on an Aspect Workflows runner, the Deployment feature
+into a task told `--remote`, and `aspect ci bazelrc` writes them to an rc for
+vanilla `bazel` calls. All compose from the same selections here, so a flag is
+set the same way — and for the same reason — wherever it appears.
 
 Every flag is tied to what it presumes (`Needs`). A flag that tunes the remote
 cache is set only where a remote cache is wired, a flag that enriches the BES
 stream only where a BES backend reads it. A runner or deployment with no cache,
 no BES, or no executor gets none of the flags that presume the missing one, so
 every line Aspect writes is accounted for by an endpoint that is present. In the
-rc the same keying becomes named `--config` groups (`rc_groups.axl`): a flag sits
-in the group for what it presumes, and only the groups whose endpoint the host
-has are enabled, so the rc written off a runner changes nothing until a section
-is named and is safe to import into any `~/.bazelrc`.
+rc the same keying becomes named `--config` groups (`rc_groups.axl`), one per
+thing presumed.
 
-`CATALOG`, `WORKFLOWS_CACHE_FLAGS`, and `NO_COMPRESSION_FLAGS` are the maintained tables: each entry says
-what the flag does, why we set it, and what it presumes. Read them as the
-documentation; the functions only select from them. Flags whose values come
+`CATALOG`, `WORKFLOWS_CACHE_FLAGS`, and `NO_COMPRESSION_FLAGS` are the maintained
+tables: each entry says what the flag does, why we set it, and what it presumes.
+Read them as the documentation; the functions only select from them. Flags whose values come
 from the environment or a deployment — the endpoints themselves, the runner's
 paths, the diagnostics file locations — are built by the functions below and
 documented there.
@@ -207,9 +205,9 @@ def _as_flag(entry: InjectedFlag):
     return (entry.flag, entry.bazel) if entry.bazel else entry.flag
 
 def independent_flags() -> list:
-    """The `CATALOG` flags that presume no endpoint. Unconditional on a Workflows
-    runner; elsewhere they ride inside each `--config` section, so an imported rc
-    changes nothing until a section is named."""
+    """The `CATALOG` flags that presume no endpoint. Kept apart from
+    `endpoint_flags` so each surface places them once: the head of a task's
+    injected flags, the `aspect-common` group of the rc."""
     return [_as_flag(e) for e in CATALOG if e.needs == Needs("nothing")]
 
 def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:
@@ -242,7 +240,7 @@ def color_flags(misdetected: bool) -> list:
     whose log viewer renders ANSI but runs the job with no TTY for Bazel to see
     (`environment.bazel_misdetects_color`). Presumes no endpoint — the host, not
     a deployment, decides — so in the rc it lives in the group named for that
-    host (`aspect-github-actions`, …), enabled wherever the rc is written."""
+    host (`aspect-github-actions`, …)."""
     return [_COLOR + "=yes"] if misdetected else []
 
 def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
@@ -260,11 +258,10 @@ def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
     return flags
 
 def env_flags(environment: WorkflowsEnvironment) -> list:
-    """The flags the `ASPECT_WORKFLOWS_*` env justifies on any host: the cache
-    endpoint it names and the `CATALOG` selection for its cache and BES (both may
-    be set off a runner too). Empty when the env names neither, so an rc written
-    off a runner is inert until a `--config` section is named. Nothing tied to a
-    runner's mounts or its cache implementation."""
+    """The task flags the `ASPECT_WORKFLOWS_*` env justifies: the cache endpoint
+    it names and the `CATALOG` selection for its cache and BES. Empty when the
+    env names neither. Nothing tied to a runner's mounts or its cache
+    implementation; `runner_cache_flags` adds those."""
     return endpoint_flags(
         cache = environment.remote_cache != None,
         bes = environment.build_events != None,
@@ -390,7 +387,8 @@ def diagnostics_upload_flags(exec_log_path: str = "") -> list:
     comes from that log, which is also why the per-action BEP events behind
     `--build_event_publish_all_actions` are not requested.
 
-    Set wherever a BES backend is wired. Version-gated: Bazel 7 renamed
+    Set wherever a BES backend is wired; the upload itself needs a remote cache
+    to land in, so with a BES alone the flags are inert. Version-gated: Bazel 7 renamed
     `--remote_build_event_upload` and flipped its default to `minimal` (Bazel 6
     only knows the `experimental_` spelling, whose default is already `all`); the
     compact execution log arrived in 7.1."""
@@ -431,7 +429,7 @@ def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
 def written_flag_names() -> list:
     """The name of every flag this file can produce, catalog and built alike. What
     `aspect ci bazelrc` uses to recognize the lines it once wrote into a user rc."""
-    return [e.flag.split("=")[0] for e in CATALOG + NO_COMPRESSION_FLAGS + WORKFLOWS_CACHE_FLAGS] + [
+    return [flag_name(e.flag) for e in CATALOG + NO_COMPRESSION_FLAGS + WORKFLOWS_CACHE_FLAGS] + [
         _REMOTE_CACHE,
         _REMOTE_EXECUTOR,
         _BYTESTREAM_URI_PREFIX,
