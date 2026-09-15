@@ -2775,10 +2775,10 @@ fn session_expired_message(profile: &str) -> String {
 fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
     let login = login_hint(deployment);
     format!(
-        "your default organization changed since you logged in (was {was}, now {now}) \
-         and could not be set back; the refreshed token, minted for {now}, was not \
-         used.\n\nRun `{login}` to log in again. An API token is bound to one \
-         organization and never needs this: `{login} --with-api-token`, or set {}.",
+        "could not refresh the login for organization {was}: your account's default \
+         organization is now {now}, and setting it back to {was} failed.\n\nRun `{login}` \
+         to log in again. An API token is bound to one organization and never needs \
+         this: `{login} --with-api-token`, or set {}.",
         api_token_env_var(deployment)
     )
 }
@@ -6614,8 +6614,14 @@ mod tests {
             now: "t2".into(),
         };
         let msg = changed.message(ASPECT_CLOUD_DEPLOYMENT_NAME);
-        assert!(msg.contains("was t1, now t2"), "{msg}");
-        assert!(msg.contains("minted for t2, was not used"), "{msg}");
+        assert!(
+            msg.contains("refresh the login for organization t1"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("is now t2, and setting it back to t1 failed"),
+            "{msg}"
+        );
         assert!(msg.contains("`aspect auth login`"), "{msg}");
         assert!(
             msg.contains("`aspect auth login --with-api-token`"),
