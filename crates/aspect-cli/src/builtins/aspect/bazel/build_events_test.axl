@@ -44,9 +44,10 @@ def _sinks(*uris):
 _GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
 _RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
-def _fake_trait(sinks):
-    """Stand-in for `BazelTrait`: `collect_bes_sinks` reads only its sink list."""
-    return struct(build_event_sinks = sinks)
+def _fake_trait(sinks, bes_backends = []):
+    """Stand-in for `BazelTrait`: `collect_bes_sinks` reads its sink list and the
+    backend URIs features injected (`bes_backends`, what `--remote=bes` fills in)."""
+    return struct(build_event_sinks = sinks, bes_backends = bes_backends)
 
 def _test_clean_stream(_):
     """A clean stream reports the sent count and names the backend."""
@@ -256,6 +257,50 @@ def _test_collect_bes_sinks(_):
         [None, "grpcs://bes.other.example.com"],
     )
 
+def _test_feature_injected_backend_reaches_every_task(_):
+    """A backend on `BazelTrait.bes_backends` — what the `Deployment` feature fills
+    in from `--remote=bes` — is streamed without the caller passing it.
+
+    The regression: `collect_bes_sinks` took the feature's backends as a parameter,
+    so only `bazel/invocation.axl` (behind `build`/`test`) passed them. `format`,
+    `gazelle`, `lint`, `run`, `warming`, and `delivery` build their own sinks and
+    call it with no `extra_backends`, so `--remote=bes` silently streamed nowhere
+    for them, while `--remote=cache` reached them normally as an ordinary flag."""
+    injected = "grpcs://bes.aspect.build"
+    ctx = _fake_ctx(bes_backends = [])
+    rc = _fake_rc({})
+
+    # The call a task that builds its own sinks makes: no extra_backends.
+    _eq(
+        "streamed with no extra_backends from the caller",
+        [s.uri for s in collect_bes_sinks(ctx, _fake_trait([], [injected]), rc)],
+        [injected],
+    )
+
+    # Bazel uploading to the same endpoint still wins, so it is streamed once.
+    _eq(
+        "dropped when bazel uploads there itself",
+        [s.uri for s in collect_bes_sinks(
+            ctx,
+            _fake_trait([], [injected]),
+            _fake_rc({"--bes_backend": injected}),
+        )],
+        [],
+    )
+    _eq(
+        "and named in the disclosure",
+        dropped_bes_backends(ctx, _fake_trait([], [injected]), _fake_rc({"--bes_backend": injected})),
+        [injected],
+    )
+
+    # A caller that still passes the trait's backends (as invocation.axl did)
+    # must not get two sinks for one endpoint.
+    _eq(
+        "caller passing the same backend is deduped",
+        [s.uri for s in collect_bes_sinks(ctx, _fake_trait([], [injected]), rc, extra_backends = [injected])],
+        [injected],
+    )
+
 def _test_bes_streamed_by_bazel(_):
     """True only when Bazel's `--bes_backend` is the runner's own Aspect BES
     backend — the case where the Web UI still holds the invocation (under
@@ -372,6 +417,7 @@ _UNIT_TESTS = [
     _test_bazel_bes_backend,
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
+    _test_feature_injected_backend_reaches_every_task,
     _test_bes_streamed_by_bazel,
     _test_bes_flag_only_when_bazel_uploads,
     _test_bes_flag_needs_an_advertised_backend,
