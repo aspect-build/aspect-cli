@@ -239,7 +239,12 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
             ctx,
             orgs,
             organization_label,
-            ["Your account belongs to multiple organizations.", "Choose the one this login should use:"],
+            [
+                "Your account belongs to multiple organizations.",
+                "Choosing one other than [current] also makes it your active organization",
+                "everywhere you are signed in, the browser included.",
+                "Choose the one this login should use:",
+            ],
         )
         if chosen == None:
             error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
@@ -248,7 +253,7 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
         wanted = chosen.name
     selected = creds.with_organization(wanted)
     if selected.switched_active_organization:
-        print("Switched your active organization to " + wanted + "; browser sessions follow it.")
+        print("Your active organization is now " + wanted + " everywhere you are signed in, the browser included.")
     return selected
 
 def _login_impl(ctx: TaskContext) -> int:
@@ -384,7 +389,7 @@ login = task(
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "org": args.string(
-            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
+            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. Choosing an organization other than your current one also makes it your active organization everywhere you are signed in, the browser included. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
         ),
         "profile": args.string(
             description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",
