@@ -161,7 +161,7 @@ def _test_runner_bes_flags(_ctx):
     _eq("no BES", runner_bes_flags(WorkflowsEnvironment(remote_cache = RemoteCache(endpoint = "x"))), [])
 
     # Not part of `runner_flags`: tasks stream BES from the CLI, so only the rc
-    # takes these, and only after checking the workspace rc.
+    # takes these.
     _startup, build = runner_flags(env, "/x")
     _lacks("runner_flags omits bes", build, "--bes_backend")
 
@@ -216,8 +216,12 @@ def _test_protected_omissions(_ctx):
 
     # Every endpoint, credential, chain, and runner-path flag the generators can
     # write is protected — otherwise an opt-out could point a build nowhere.
-    for name in ["--remote_cache", "--remote_executor", "--bes_backend", "--credential_helper", "--experimental_credential_helper", "--config", "--output_base", "--output_user_root", "--repository_cache"]:
+    for name in ["--remote_cache", "--remote_executor", "--credential_helper", "--experimental_credential_helper", "--config", "--output_base", "--output_user_root", "--repository_cache"]:
         _eq("protected " + name, name in PROTECTED_FLAGS, True)
+
+    # The runner rc's BES pair stays omittable: a repository that streams its
+    # vanilla builds elsewhere drops it with --omit-bazel-flag=--bes_backend.
+    _eq("bes not protected", protected_omissions(["--bes_backend", "--bes_results_url"]), [])
     _eq("flag_name strips value", flag_name("--remote_cache=grpcs://c"), "--remote_cache")
 
 _UNIT_TESTS = [

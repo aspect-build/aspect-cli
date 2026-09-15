@@ -145,15 +145,16 @@ WORKFLOWS_CACHE_FLAGS = [
     ),
 ]
 
-# Flag names (no value) that `--omit-bazel-flag` may not drop. Each is an
-# endpoint, a credential, an rc chain, or a path the runner's isolation depends
-# on; without it the build stops talking to Aspect or lands in the wrong place.
+# Flag names (no value) that the opt-outs may not drop. Each is an endpoint, a
+# credential, an rc chain, or a path the runner's isolation depends on; without
+# it the build stops talking to Aspect or lands in the wrong place. The BES pair
+# (`--bes_backend`, `--bes_results_url`) is deliberately absent: it is the one
+# endpoint a repository may legitimately route elsewhere for vanilla `bazel`,
+# and the opt-out is how the runner's rc yields to that.
 PROTECTED_FLAGS = [
     "--remote_cache",
     "--remote_executor",
     "--remote_bytestream_uri_prefix",
-    "--bes_backend",
-    "--bes_results_url",
     "--credential_helper",
     "--experimental_credential_helper",
     "--remote_header",
@@ -262,10 +263,11 @@ def env_flags(environment: WorkflowsEnvironment) -> list:
 def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
     """The BES backend the runner environment names, for vanilla `bazel` on the
     runner: `--bes_backend` and, when surfaced, `--bes_results_url`. Tasks never
-    take these — the CLI streams a task's build events from its own sink — so
-    only `aspect ci bazelrc` writes them, and only where the workspace rc does
-    not already choose a backend of its own (a home-rc value would override it).
-    Empty when the env names no BES backend."""
+    take these — they run with `--nohome_rc` and the CLI streams their build
+    events from its own sink — so only `aspect ci bazelrc` writes them. A
+    repository routing vanilla calls to another backend opts out with
+    `--omit-bazel-flag=--bes_backend`, which is why the pair is not in
+    `PROTECTED_FLAGS`. Empty when the env names no BES backend."""
     build_events = environment.build_events
     if build_events == None or not build_events.backend:
         return []

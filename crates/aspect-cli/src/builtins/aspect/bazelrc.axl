@@ -11,12 +11,11 @@ plumbing:
   - On an Aspect Workflows runner, `~/.bazelrc` is written whole. The runner is
     ours, nothing else configures Bazel on it, and rewriting the file is what
     keeps it in step with the runner's environment. The runner's BES backend is
-    written too, so vanilla `bazel` reaches the Web UI like a task does — as an
-    unconditional `--bes_backend` when the workspace rc sets none of its own,
-    else under `--config=aspect-bes`, since Bazel reads the home rc after the
-    workspace rc and a single-valued `--bes_backend` there would silently replace
-    the user's. A backend the workspace sets inside a config section is safe
-    either way: it expands where its `--config` appears, after every rc default.
+    written too, so vanilla `bazel` reaches the Web UI like a task does. Tasks
+    themselves run with `--nohome_rc` and stream BES from the CLI, so nothing in
+    this file reaches them. Bazel reads the home rc after the workspace rc, so a
+    repository whose own rc names a different `--bes_backend` for vanilla calls
+    keeps it by opting out: `--omit-bazel-flag=--bes_backend`.
   - Anywhere else, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains
     one `try-import` line for it, so an rc another setup step or the developer
     wrote survives and re-running never accumulates anything. That rc is inert
@@ -80,11 +79,6 @@ load("./private/lib/environment.axl", "bazel_misdetects_color", "get_workflows_e
 _GENERATED_RC = ".aspect/bazelrc"
 _USER_RC = ".bazelrc"
 
-# The section the runner's BES backend goes under when the workspace rc already
-# chooses one of its own.
-_RUNNER_BES_CONFIG = "aspect-bes"
-_RUNNER_BES_SOURCE = "the runner's BES section"
-
 _IMPORT_VERBS = {
     ImportAction("created"): "created %s with it",
     ImportAction("unchanged"): "%s already imports it",
@@ -117,41 +111,14 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 
-def _workspace_sets_bes_backend(ctx: TaskContext) -> bool:
-    """Whether the workspace rc chain sets a `--bes_backend` that a home-rc line
-    would override: one in force for `build` or `test` without a `--config` the
-    user has to name. The home and system rcs are excluded so a previous run's
-    own output is never mistaken for the user's choice."""
-    rc = ctx.bazel.parse_rc(startup_flags = ["--nohome_rc", "--nosystem_rc"])
-    return any([bool(rc.flag_value("--bes_backend", command = command)) for command in ["build", "test"]])
-
-def _runner_bes(ctx: TaskContext, environment) -> (list, list):
-    """The runner's BES backend and diagnostics upload for vanilla `bazel`, as
-    `(unconditional_flags, sections)`: unconditional when the workspace rc sets
-    no `--bes_backend` of its own, else one `aspect-bes` section the user opts
-    into per call, so their backend keeps winning by default."""
-    flags = runner_bes_flags(environment)
-    if not flags:
-        return ([], [])
-    flags = flags + runner_diagnostics_flags(environment)
-    if not _workspace_sets_bes_backend(ctx):
-        return (flags, [])
-    section = RcConfig(
-        name = _RUNNER_BES_CONFIG,
-        source = _RUNNER_BES_SOURCE,
-        comment = "The runner's BES backend. Not on by default because this workspace's rc sets its own --bes_backend; `--config=" + _RUNNER_BES_CONFIG + "` streams a build to Aspect instead.",
-        flags = flags,
-    )
-    return ([], [section])
-
-def _sections(ctx: TaskContext, omitted: list, bazel_version: str | None, extra: list = []) -> list:
-    """`extra` plus the `--config` sections for this machine's deployments, with
-    the user's omissions applied and versions resolved. Reads `deployments()`,
-    not `list()`: nothing here needs login status, and a CI runner may have no
-    credential store to read. Refuses two sections claiming one name."""
+def _sections(ctx: TaskContext, omitted: list, bazel_version: str | None) -> list:
+    """The `--config` sections for this machine's deployments, with the user's
+    omissions applied and versions resolved. Reads `deployments()`, not `list()`:
+    nothing here needs login status, and a CI runner may have no credential store
+    to read. Refuses two deployments claiming one section name."""
     deployments = ctx.aspect.auth.deployments()
     exec_log_path = temp_exec_log_path(ctx.std, ctx.task.id) if any([d.bes for d in deployments]) else ""
-    configs = extra + deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
+    configs = deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
     collisions = config_collisions(configs)
     if collisions:
         ctx.std.process.exit(1, "\n".join(collisions))
@@ -168,14 +135,12 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     environment = get_workflows_environment(ctx.std)
     on_runner = is_aspect_workflows_runner(ctx.std.env)
-    runner_sections = []
     if on_runner:
         if environment.runner == None:
             return TaskConclusion(exit_code = 1, message = "Running on an Aspect Workflows runner but the runner metadata env vars are missing, so the cache flags cannot be generated. This usually means an older runner image; upgrade the runner.")
         (startup_flags, build_flags) = runner_flags(environment, ctx.std.env.aspect_root_dir())
         startup_flags = startup_flags_for_rc(startup_flags)
-        (bes_flags, runner_sections) = _runner_bes(ctx, environment)
-        build_flags.extend(bes_flags)
+        build_flags.extend(runner_bes_flags(environment) + runner_diagnostics_flags(environment))
     else:
         build_flags = env_flags(environment)
         startup_flags = []
@@ -184,7 +149,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_version = ctx.bazel.version()
     startup_flags = omit_flags(startup_flags, omitted)
     build_flags = _resolve(ctx, omit_flags(build_flags, omitted), bazel_version)
-    configs = _sections(ctx, omitted, bazel_version, runner_sections)
+    configs = _sections(ctx, omitted, bazel_version)
 
     # A runner's user rc is written whole; elsewhere the rc is a separate file
     # the user rc imports.
@@ -196,8 +161,6 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         summary += "; --config sections: " + ", ".join([c.name for c in configs])
     else:
         summary += "; no --config sections, since no deployment advertises endpoints here (see `aspect auth status`; `aspect auth login` records Aspect Cloud's)"
-    if runner_sections:
-        summary += ". The workspace rc sets its own --bes_backend, so the runner's is under --config=" + _RUNNER_BES_CONFIG + " rather than on by default"
 
     user_rc = ctx.args.import_into or _home_path(ctx, _USER_RC)
     if user_rc == output:
