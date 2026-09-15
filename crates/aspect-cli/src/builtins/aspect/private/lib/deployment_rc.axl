@@ -5,8 +5,10 @@ an endpoint:
     --config=aspect-cloud          Aspect Cloud: remote cache + BES
     --config=aspect-<name>         a configured Aspect Workflows deployment
     --config=aspect-<name>-exec    the same, plus its remote execution
-    --config=aspect                the default deployment (`aspect auth use`)
-    --config=aspect-exec           the default deployment's `-exec` config
+
+No section names "the default deployment": the rc is committed and shared, and
+the default (`aspect auth use`) is one machine's setting that could change
+under it. A deployment is chosen by its own name.
 
 Aspect Cloud's section takes its own name; a configured deployment `<name>`
 gets `aspect-<name>`. A cache or BES gives a base section, an executor an
@@ -32,7 +34,7 @@ refuse.
 
 load("./aspect_endpoint_auth.axl", "endpoint_host")
 load("./bazelrc_file.axl", "RcConfig")
-load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE", "GROUP_EXEC")
+load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -42,16 +44,8 @@ _SCHEME = "grpcs://"
 _CREDENTIAL_HELPER_MIN_VERSION = "6.0.0"
 _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION = "6.4.0"
 
-_DEFAULT_CONFIG = "aspect"
 _CONFIG_PREFIX = "aspect-"
 _EXEC_SUFFIX = "-exec"
-_DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
-
-# The default deployment's remote-execution alias shares its name with the
-# runner's `aspect-exec` group (`rc_groups.axl`): whichever the rc writes, the
-# runner's or the default deployment's, `--config=aspect-exec` is the build's
-# remote execution.
-_DEFAULT_EXEC_CONFIG = GROUP_EXEC
 
 def config_name(deployment) -> str:
     """The `--config` name for a deployment row: Aspect Cloud's own name for the
@@ -142,16 +136,14 @@ def deployment_configs(deployments: list, credential_helper: str, host_groups: l
     """The sections for every deployment in `deployments` (rows of
     `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
     `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
-    fields), in order, followed by the `aspect` / `aspect-exec` aliases for the
-    default one. `credential_helper` is the name or path Bazel invokes as `<helper> get`.
-    Every section (the aliases aside, which chain a section) starts by chaining
+    fields), in order. `credential_helper` is the name or path Bazel invokes as
+    `<helper> get`. Every section starts by chaining
     `host_groups` — the rc's `aspect-common` and CI-host groups, which the
     deployment shape of the rc leaves unenabled so the file is inert until a
     section is named — then the tuning groups its endpoints justify, a BES
     chaining `bes_groups` (`aspect-bes`, plus `aspect-exec-log` where the rc
     defines it); all are `rc_groups.axl` groups the rc defines alongside."""
     configs = []
-    aliases = []
     for d in deployments:
         has_base = bool(d.cache or d.bes)
         if not (has_base or d.exec):
@@ -161,22 +153,7 @@ def deployment_configs(deployments: list, credential_helper: str, host_groups: l
             configs.append(_base_config(d, name, credential_helper, host_groups, bes_groups))
         if d.exec:
             configs.append(_exec_config(d, name, credential_helper, has_base, host_groups))
-        if d.default:
-            if has_base:
-                aliases.append(RcConfig(
-                    name = _DEFAULT_CONFIG,
-                    source = _DEFAULT_ALIAS_SOURCE,
-                    comment = "The default deployment (`aspect auth use`): " + _label(d) + ".",
-                    flags = ["--config=" + name],
-                ))
-            if d.exec:
-                aliases.append(RcConfig(
-                    name = _DEFAULT_EXEC_CONFIG,
-                    source = _DEFAULT_ALIAS_SOURCE,
-                    comment = "The default deployment's remote execution.",
-                    flags = ["--config=" + name + _EXEC_SUFFIX],
-                ))
-    return configs + aliases
+    return configs
 
 def config_collisions(configs: list) -> list:
     """One message per section name that more than one `RcConfig` claims, naming

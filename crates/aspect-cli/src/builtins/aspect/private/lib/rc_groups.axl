@@ -30,9 +30,8 @@ The host group is named for the detected CI host — `aspect-github-actions`,
 `aspect-circleci`, `aspect-gitlab`, `aspect-buildkite` — and exists only when
 that host needs something; today that is `--color=yes` where Bazel's
 `--color=auto` misdetects (`environment.bazel_misdetects_color`), which leaves
-Buildkite with none. `aspect-exec` is the deployment pattern's name for the
-default deployment's execution; where the env names an executor the runner is
-that deployment.
+Buildkite with none. `aspect-exec` is the runner's executor, the one endpoint
+a build opts into by name.
 """
 
 load(

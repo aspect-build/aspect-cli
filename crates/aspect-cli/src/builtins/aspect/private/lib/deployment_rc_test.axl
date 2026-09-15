@@ -1,6 +1,6 @@
 """Unit tests for `deployment_rc.axl`: the `--config=aspect-*` sections built from
 deployment rows — naming, credential helpers per distinct host, the flags each
-endpoint combination justifies, the default aliases, and name collisions.
+endpoint combination justifies, and name collisions.
 Run with: aspect dev test-deployment-rc
 """
 
@@ -46,7 +46,7 @@ def _test_config_name(_ctx):
 
 def _test_cloud_section(_ctx):
     configs = _by_name(deployment_configs([_CLOUD], _HELPER))
-    _eq("names", sorted(configs.keys()), ["aspect", "aspect-cloud"])
+    _eq("names", sorted(configs.keys()), ["aspect-cloud"])
     flags = configs["aspect-cloud"].flags
 
     _has("cache", flags, "--remote_cache=grpcs://cache.aspect.build")
@@ -121,31 +121,22 @@ def _test_partial_deployments(_ctx):
     # An executor-only deployment gets a standalone `-exec` section: no base to
     # chain to, the executor standing in as the cache.
     exec_only = _by_name(deployment_configs([_summary("e", default = True, exec = "exec.e")], _HELPER))
-    _eq("exec-only sections", sorted(exec_only.keys()), ["aspect-e-exec", "aspect-exec"])
+    _eq("exec-only sections", sorted(exec_only.keys()), ["aspect-e-exec"])
     flags = exec_only["aspect-e-exec"].flags
     _lacks("no base to chain", flags, "--config=aspect-e")
     _has("executor", flags, "--remote_executor=grpcs://exec.e")
     _has("exec earns the cache group", flags, "--config=aspect-cache")
     _eq("helper", ("--credential_helper=exec.e=" + _HELPER, ">=6.4.0") in flags, True)
-    _eq("alias to exec", exec_only["aspect-exec"].flags, ["--config=aspect-e-exec"])
 
     # A fresh install's Aspect Cloud seed advertises nothing: no section, and no
     # dangling `aspect` alias even though it is the default.
     _eq("nothing advertised → nothing", deployment_configs([_summary("aspect-cloud", builtin = True, default = True)], _HELPER), [])
 
-def _test_default_aliases(_ctx):
-    # `aspect` follows the default deployment; `aspect-exec` only exists when the
-    # default has remote execution. Aliases render after every section.
-    cloud_default = _by_name(deployment_configs([_CLOUD, _SILO], _HELPER))
-    _eq("aspect → cloud", cloud_default["aspect"].flags, ["--config=aspect-cloud"])
-    _eq("no aspect-exec for cloud", "aspect-exec" in cloud_default, False)
-
-    silo_default = _by_name(deployment_configs([_summary("aspect-cloud", builtin = True, cache = "c", bes = "b"), _summary("silo", default = True, cache = "c", bes = "b", exec = "e")], _HELPER))
-    _eq("aspect → silo", silo_default["aspect"].flags, ["--config=aspect-silo"])
-    _eq("aspect-exec → silo-exec", silo_default["aspect-exec"].flags, ["--config=aspect-silo-exec"])
-
-    names = [c.name for c in deployment_configs([_summary("aspect-cloud", builtin = True, cache = "c", bes = "b"), _summary("silo", default = True, cache = "c")], _HELPER)]
-    _eq("aliases last", names, ["aspect-cloud", "aspect-silo", "aspect"])
+def _test_no_default_alias(_ctx):
+    # The rc is committed and shared, and the default deployment is one machine's
+    # setting that can change under it, so no section names "the default".
+    names = [c.name for c in deployment_configs([_summary("aspect-cloud", builtin = True, cache = "c", bes = "b"), _summary("silo", default = True, cache = "c", bes = "b", exec = "e")], _HELPER)]
+    _eq("one section per deployment, none for the default", names, ["aspect-cloud", "aspect-silo", "aspect-silo-exec"])
 
 def _test_credential_helper_scope(_ctx):
     # A host advertised with a port still scopes the helper by bare host, which
@@ -166,17 +157,13 @@ def _test_config_collisions(_ctx):
     clash = deployment_configs([_SILO, _summary("silo-gcp-exec", cache = "c")], _HELPER)
     _eq("exec suffix collision", [m.split(" ")[0] for m in config_collisions(clash)], ["--config=aspect-silo-gcp-exec"])
 
-    # A deployment named `exec` collides with the default's `aspect-exec` alias.
-    clash = deployment_configs([_summary("silo", default = True, cache = "c", exec = "e"), _summary("exec", cache = "c")], _HELPER)
-    _eq("alias collision", [m.split(" ")[0] for m in config_collisions(clash)], ["--config=aspect-exec"])
-
 _UNIT_TESTS = [
     _test_config_name,
     _test_cloud_section,
     _test_host_groups_chained_first,
     _test_exec_section,
     _test_partial_deployments,
-    _test_default_aliases,
+    _test_no_default_alias,
     _test_credential_helper_scope,
     _test_config_collisions,
 ]
