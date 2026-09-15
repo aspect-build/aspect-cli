@@ -112,15 +112,17 @@ def _test_host_group(_ctx):
     _eq("unknown host", host_group(WorkflowsEnvironment(ci = CI(host = "unknown")), misdetects_color = True), [])
     _eq("every detected host has a name", sorted(HOST_GROUPS.keys()), ["buildkite", "circleci", "github", "gitlab"])
 
-    # In the rc it sits between common and the endpoint groups. With nothing in
-    # the env nothing is enabled, and the deployment sections chain it with common.
+    # The checkout's rc is shared across hosts, so with nothing in the env the
+    # host group is not defined; the deployment sections chain common alone.
     (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github")), on_runner = False, misdetects_color = True, exec_log_path = "/x", names_deployment = False)
-    _eq("placed", [g.name for g in groups], [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE, GROUP_BES])
+    _eq("no host group in a shared rc", [g.name for g in groups], [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
     _eq("nothing enabled", enabled, [])
-    _eq("sections chain common + host", section_chains(groups), [GROUP_COMMON, "aspect-github-actions"])
+    _eq("sections chain common", section_chains(groups), [GROUP_COMMON])
 
-    # Where the env names the deployment, the same host group is enabled at the top.
-    (_groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github"), remote_cache = _CACHE), on_runner = False, misdetects_color = True, exec_log_path = "/x", names_deployment = True)
+    # Where the env names the deployment the rc is this machine's, and the host
+    # group sits between common and the endpoint groups, enabled.
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github"), remote_cache = _CACHE), on_runner = False, misdetects_color = True, exec_log_path = "/x", names_deployment = True)
+    _eq("placed", [g.name for g in groups], [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE, GROUP_BES])
     _eq("enabled with env", enabled, [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE])
 
 def _test_env_names_deployment(_ctx):

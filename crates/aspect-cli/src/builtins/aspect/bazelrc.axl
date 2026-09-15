@@ -19,17 +19,20 @@ Where the rc goes:
     is what keeps it in step with the runner's environment. Tasks run with
     `--nohome_rc` and stream BES from the CLI, so nothing in this file reaches
     them.
-  - Anywhere else, the rc is per checkout: `<workspace>/.aspect/generated/bazelrc`,
-    where `.aspect/generated/` is the home of every file an Aspect tool generates
-    into a checkout and ignores itself with a `.gitignore` of `*`. The workspace
-    `.bazelrc` gains `try-import %workspace%/.aspect/generated/bazelrc` under a
-    comment, a blank line apart from its other content, added once; that line
-    is the one thing to commit. `%workspace%` is the one variable Bazel gives an
-    rc, and it names exactly this: Bazel's workspace root, the nearest ancestor
-    with a `MODULE.bazel` / `REPO.bazel` / `WORKSPACE` boundary file, which is
-    what `ctx.std.env.bazel_root_dir()` resolves too. A per-checkout rc can carry
-    per-checkout paths — the compact execution log lands in the same generated
-    directory — and stays out of every other workspace on the machine.
+  - Anywhere else, the rc is the checkout's, meant to be committed:
+    `<workspace>/.aspect/bazelrc`, imported by the workspace `.bazelrc` through
+    `try-import %workspace%/.aspect/bazelrc`, which the command adds under a
+    comment, a blank line apart from the file's other content, once. Both go
+    into the repository, so everyone who builds it gets the same rc. Nothing in
+    that file may be this machine's: the credential helper is the tool's name,
+    the CI host's group is left out, and the compact execution log is placed
+    through `%workspace%`, the one variable Bazel expands in rc values, at
+    `%workspace%/.aspect/generated/exec.log.zstd`. `.aspect/generated/` is the
+    home of what tools write into a checkout at build time; the command creates
+    it with a `.gitignore` of `*` and `!.gitignore`, committed so the directory
+    exists in every checkout — Bazel does not create the log's parent. The
+    workspace root is `ctx.std.env.bazel_root_dir()`, found by the boundary
+    files Bazel finds `%workspace%` by, and the command refuses where none is.
 
 What it holds: every flag sits in a named `--config` group from
 `lib/rc_groups.axl`, and the rc has two shapes. Where the environment names the
@@ -92,12 +95,14 @@ load("./private/lib/rc_groups.axl", "rc_groups", "section_chains")
 # A runner's rc, written whole.
 _HOME_RC = ".bazelrc"
 
-# Everywhere else: the generated files of a checkout, and the workspace rc that
-# imports the generated rc through Bazel's `%workspace%`.
-_GENERATED_DIR = ".aspect/generated"
-_GENERATED_RC = _GENERATED_DIR + "/bazelrc"
-_EXEC_LOG_NAME = "exec.log.zstd"
+# Everywhere else: the checkout's committed rc, the workspace rc that imports
+# it through Bazel's `%workspace%`, and the committed self-ignoring directory
+# build-time outputs land in.
+_GENERATED_RC = ".aspect/bazelrc"
 _WORKSPACE_RC = ".bazelrc"
+_GENERATED_DIR = ".aspect/generated"
+_EXEC_LOG_NAME = "exec.log.zstd"
+_WORKSPACE_EXEC_LOG = "%workspace%/" + _GENERATED_DIR + "/" + _EXEC_LOG_NAME
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
 
 _HELPER_NAME = "aspect"
@@ -129,12 +134,13 @@ def _dirname(path: str) -> str:
     return path.rsplit("/", 1)[0] if "/" in path else "."
 
 def _generated_dir(ctx: TaskContext, workspace: str) -> None:
-    """Create `<workspace>/.aspect/generated/`, self-ignored: a `.gitignore` of
-    `*` so nothing a tool writes there is ever tracked, and the checkout needs
-    no ignore rule of its own."""
+    """Create `<workspace>/.aspect/generated/` with a `.gitignore` that ignores
+    everything but itself. Committed, it makes the directory exist in every
+    checkout — Bazel will not create the execution log's parent — while nothing
+    written there is ever tracked."""
     dir = workspace + "/" + _GENERATED_DIR
     ctx.std.fs.create_dir_all(dir)
-    ctx.std.fs.write(dir + "/.gitignore", "*\n")
+    ctx.std.fs.write(dir + "/.gitignore", "*\n!.gitignore\n")
 
 def _write(ctx: TaskContext, path: str, content: str) -> None:
     """Write `content` to `path`, creating parent directories."""
@@ -192,10 +198,11 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         workspace = ""
         exec_log_path = runner_exec_log_path(environment)
     else:
-        # The workspace is needed only for the default paths; an explicit
-        # --output keeps the execution log beside itself.
+        # The workspace is needed only for the default paths. The committed rc
+        # places the log through `%workspace%`; an explicit --output, which may
+        # live anywhere, keeps it beside itself.
         workspace = "" if ctx.args.output and ctx.args.import_into else _workspace(ctx)
-        exec_log_path = (_dirname(ctx.args.output) if ctx.args.output else workspace + "/" + _GENERATED_DIR) + "/" + _EXEC_LOG_NAME
+        exec_log_path = _dirname(ctx.args.output) + "/" + _EXEC_LOG_NAME if ctx.args.output else _WORKSPACE_EXEC_LOG
 
     env_deployment = env_names_deployment(ctx.std.env)
     (groups, enabled) = _groups(ctx, environment, on_runner, env_deployment, exec_log_path)
@@ -251,12 +258,12 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 _BAZELRC_ARGS = {
     "output": args.string(
         default = "",
-        description = "Rc file to write, rewritten on every run. Defaults to `~/.bazelrc` on an Aspect Workflows runner and to `<workspace>/.aspect/generated/bazelrc` elsewhere. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
+        description = "Rc file to write, rewritten on every run. Defaults to `~/.bazelrc` on an Aspect Workflows runner and to `<workspace>/.aspect/bazelrc` elsewhere, a file to commit. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
     ),
     "import_into": args.string(
         long = "import-into",
         default = "",
-        description = "Rc that receives the `try-import` line for the written rc, added only when not already present. Defaults to the workspace `.bazelrc`, importing `%workspace%/.aspect/generated/bazelrc`; on an Aspect Workflows runner the output is `~/.bazelrc` itself and no import is needed.",
+        description = "Rc that receives the `try-import` line for the written rc, added only when not already present. Defaults to the workspace `.bazelrc`, importing `%workspace%/.aspect/bazelrc`; on an Aspect Workflows runner the output is `~/.bazelrc` itself and no import is needed.",
     ),
     "omit_bazel_flags": args.string_list(
         long = "omit-bazel-flag",
@@ -267,7 +274,7 @@ _BAZELRC_ARGS = {
 bazelrc = task(
     group = ["setup"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `<workspace>/.aspect/generated/bazelrc` (self-ignored) and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/generated/bazelrc` under a comment, added once — the one line to commit. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere nothing is enabled and the deployment sections are opt-in, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. `aspect ci bazelrc` is an alias.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` under a comment, added once — commit both. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere nothing is enabled and the deployment sections are opt-in, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. `aspect ci bazelrc` is an alias.",
     implementation = _bazelrc_impl,
     args = _BAZELRC_ARGS,
 )
