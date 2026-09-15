@@ -2660,6 +2660,14 @@ async fn switch_frontegg_active_tenant(
     Ok(())
 }
 
+/// The outcome of [`select_tenant`]: the re-minted credential, and whether the
+/// user's active tenant at Frontegg had to be switched to get it (a change every
+/// other client of that user sees, so the login task reports it).
+struct SelectedTenant {
+    entry: CredentialsEntry,
+    switched_active: bool,
+}
+
 /// Re-mint `entry` for `tenant_id`, one of its user's organizations.
 ///
 /// The tenant-scoped refresh comes first, since it changes nothing outside this
@@ -2670,7 +2678,7 @@ async fn switch_frontegg_active_tenant(
 async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
-) -> anyhow::Result<CredentialsEntry> {
+) -> anyhow::Result<SelectedTenant> {
     let auth_domain = entry
         .auth_domain
         .as_deref()
@@ -2685,7 +2693,12 @@ async fn select_tenant(
         ));
     }
     match frontegg_tenant_refresh(entry, auth_domain, client_id, tenant_id).await {
-        Ok(refreshed) if refreshed.tenant_id == tenant_id => return Ok(refreshed),
+        Ok(refreshed) if refreshed.tenant_id == tenant_id => {
+            return Ok(SelectedTenant {
+                entry: refreshed,
+                switched_active: false,
+            });
+        }
         Ok(refreshed) => crate::trace!(
             "tenant-scoped refresh minted for {} rather than {tenant_id}; switching the active organization instead",
             refreshed.tenant_id
@@ -2702,7 +2715,10 @@ async fn select_tenant(
             refreshed.tenant_id
         ));
     }
-    Ok(refreshed)
+    Ok(SelectedTenant {
+        entry: refreshed,
+        switched_active: true,
+    })
 }
 
 /// Refuse a refreshed credential minted for a different tenant than `prior`'s.
@@ -2894,6 +2910,10 @@ pub struct AuthCredentials {
     pub tenant_id: String,
     pub access_token: String,
     pub token_status: String,
+    /// Set on the value `with_organization` returns when getting it meant
+    /// switching the user's active organization at the issuer, which other
+    /// sessions of that user (the browser's included) follow. Not persisted.
+    pub switched_active_organization: bool,
     // Internal fields preserved for persist()
     pub(crate) refresh_token: String,
     pub(crate) auth_domain: Option<String>,
@@ -2988,18 +3008,25 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
         if chosen.id == entry.tenant_id {
             return Ok(heap.alloc(creds.clone()));
         }
-        let switched = block_on(select_tenant(&entry, &chosen.id)).map_err(|e| {
+        let selected = block_on(select_tenant(&entry, &chosen.id)).map_err(|e| {
             TaskExit::error(format!(
                 "could not log in to organization {} ({}): {e}",
                 chosen.name, chosen.id
             ))
         })?;
-        Ok(heap.alloc(AuthCredentials::from_entry(&switched)))
+        let mut creds = AuthCredentials::from_entry(&selected.entry);
+        creds.switched_active_organization = selected.switched_active;
+        Ok(heap.alloc(creds))
     }
 
     #[starlark(attribute)]
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
+    }
+
+    #[starlark(attribute)]
+    fn switched_active_organization<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, AuthCredentials, switched_active_organization)
     }
 }
 
@@ -3013,6 +3040,7 @@ impl AuthCredentials {
             tenant_id: entry.tenant_id.clone(),
             access_token: entry.access_token.clone(),
             token_status: format_token_status(exp),
+            switched_active_organization: false,
             refresh_token: entry.refresh_token.clone(),
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
@@ -7051,10 +7079,11 @@ mod tests {
         });
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
 
-        let switched = current_thread_runtime()
+        let selected = current_thread_runtime()
             .block_on(select_tenant(&entry, "t2"))
             .unwrap();
-        assert_eq!(switched.tenant_id, "t2");
+        assert_eq!(selected.entry.tenant_id, "t2");
+        assert!(selected.switched_active);
 
         let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
         assert_eq!(
@@ -7073,10 +7102,11 @@ mod tests {
         let issuer = MockIssuer::start(1, |_| (200, token_body_for("t2")));
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
 
-        let switched = current_thread_runtime()
+        let selected = current_thread_runtime()
             .block_on(select_tenant(&entry, "t2"))
             .unwrap();
-        assert_eq!(switched.tenant_id, "t2");
+        assert_eq!(selected.entry.tenant_id, "t2");
+        assert!(!selected.switched_active);
         assert_eq!(issuer.finish().len(), 1);
     }
 

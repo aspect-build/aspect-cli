@@ -225,24 +225,31 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
     and that is the one the browser login came back for. `--org` (a name or id)
     picks another; otherwise a TTY is prompted, and off a TTY the login fails
     rather than landing in whichever organization happened to be active. One
-    organization, or an issuer that reports none, needs no choice.
+    organization, or an issuer that reports none, needs no choice. When getting
+    the chosen organization meant switching the active one at the issuer, says
+    so: the browser and every other session of the user follow that switch.
     """
     if ctx.args.org:
-        return creds.with_organization(ctx.args.org)
-    orgs = creds.organizations()
-    if len(orgs) <= 1:
-        return creds
-    chosen = prompt_choice(
-        ctx,
-        orgs,
-        organization_label,
-        ["Your account belongs to multiple organizations.", "Choose the one this login should use:"],
-    )
-    if chosen == None:
-        error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
-        error(ctx.std, "Choose one of: " + ", ".join([organization_label(o) for o in orgs]))
-        return None
-    return creds.with_organization(chosen.id)
+        wanted = ctx.args.org
+    else:
+        orgs = creds.organizations()
+        if len(orgs) <= 1:
+            return creds
+        chosen = prompt_choice(
+            ctx,
+            orgs,
+            organization_label,
+            ["Your account belongs to multiple organizations.", "Choose the one this login should use:"],
+        )
+        if chosen == None:
+            error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
+            error(ctx.std, "Choose one of: " + ", ".join([organization_label(o) for o in orgs]))
+            return None
+        wanted = chosen.name
+    selected = creds.with_organization(wanted)
+    if selected.switched_active_organization:
+        print("Switched your active organization to " + wanted + "; browser sessions follow it.")
+    return selected
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
@@ -377,7 +384,7 @@ login = task(
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "org": args.string(
-            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. The login stays in this organization until you log in again, whatever is active in the browser. Browser login only.",
+            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
         ),
         "profile": args.string(
             description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",
