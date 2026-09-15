@@ -697,14 +697,8 @@ jobs:
             --coverage-tool=cat --coverage-tool-arg='{report}' \
             //examples/test_states:always_pass
           rm -f "$REPORT"
-  # Single required status check for the `main` ruleset. Branch protection
-  # names this job alone rather than the ~45 jobs above, so adding, renaming
-  # or matrix-expanding a job never silently drops it out of protection: it
-  # only has to be listed in `needs` here. `if: always()` makes the job run
-  # even when a dependency failed or was cancelled, so it can report red
-  # instead of being skipped (a skipped required check blocks merge with no
-  # explanation). Delivery tasks are not listed: they run in the separately
-  # dispatched CI - Delivery workflow and gate nothing here.
+  # The one status check the `main` ruleset requires. Add new jobs to `needs`;
+  # `if: always()` lets it report red when a dependency fails or is cancelled.
   ci-ok:
     runs-on: ubuntu-latest
     if: always()
