@@ -298,10 +298,12 @@ def _report(written: list, import_result, importer: str, imported: str, shown, s
 
     lines.append("")
     lines.append("Choose a deployment with --config on any bazel command:")
+    lines.append("")
     width = max([len(c.name) for c in sections]) + len("--config=")
     for c in sections:
         flag = "--config=" + c.name
         lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
+    lines.append("")
     lines.append("The file is a starting point: edit it as your repository needs; rerunning `aspect setup bazelrc` restores it.")
 
     lines.append("")
