@@ -47,3 +47,6 @@ common --test_output=errors
 # build-only options from the query expansion. Mirrors the customer rc that
 # surfaced the bug.
 build --show_result=20
+
+# Aspect's rc for vanilla `bazel`, maintained by `aspect setup bazelrc`.
+try-import %workspace%/.aspect/bazelrc

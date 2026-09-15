@@ -110,9 +110,12 @@ def _test_ensure_import_appends_once(_ctx):
     # A user's rc keeps every line; ours is added after them, and a second run
     # finds it and changes nothing — so re-running never accumulates lines.
     first = _ensure("build --disk_cache=/tmp/dc\n")
-    _eq("appended a blank line apart, under the comment", first.content, "build --disk_cache=/tmp/dc\n\n" + _BLOCK)
-    _eq("appended", first.action, ImportAction("appended"))
-    _eq("no trailing newline", _ensure("build --x").content, "build --x\n\n" + _BLOCK)
+
+    # At the top, so the file's own lines come after and override the import.
+    _eq("prepended a blank line apart, under the comment", first.content, _BLOCK + "\nbuild --disk_cache=/tmp/dc\n")
+    _eq("prepended", first.action, ImportAction("prepended"))
+    _eq("no trailing newline", _ensure("build --x").content, _BLOCK + "\nbuild --x")
+    _eq("leading blank lines folded", _ensure("\n\nbuild --x\n").content, _BLOCK + "\nbuild --x\n")
 
     second = _ensure(first.content)
     _eq("unchanged content", second.content, first.content)

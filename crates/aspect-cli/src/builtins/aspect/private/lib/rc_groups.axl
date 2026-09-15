@@ -10,6 +10,7 @@ The startup options are the exception, since Bazel gives them no `--config`.
     aspect-common     tuning that presumes no endpoint
     aspect-cache      the cache — its endpoint where the env names one — and the tuning a cache justifies
     aspect-bes        the BES — its endpoint where the env names one — and the tuning a BES justifies
+    aspect-exec-log   the compact execution log for the diagnostics upload; apart so a repo can drop it
     aspect-<ci host>  what that CI host needs (`--color=yes`); only in a machine's own rc
     aspect-runner     the runner's storage (`--repository_cache`); only with the runner marker
     aspect-exec       the runner's remote executor; only where the env names one
@@ -40,6 +41,7 @@ load(
     "diagnostics_upload_flags",
     "endpoint_flags",
     "env_endpoint_flags",
+    "exec_log_flags",
     "independent_flags",
     "runner_bes_flags",
     "runner_executor_endpoint",
@@ -54,6 +56,7 @@ GROUP_COMMON = "aspect-common"
 GROUP_CACHE = "aspect-cache"
 GROUP_BES = "aspect-bes"
 GROUP_RUNNER = "aspect-runner"
+GROUP_EXEC_LOG = "aspect-exec-log"
 GROUP_EXEC = "aspect-exec"
 
 # `CI.host` → the host group's name.
@@ -82,17 +85,26 @@ def cache_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
         endpoint.extend(workflows_cache_flags(environment))
     return _group(GROUP_CACHE, "The remote cache (ASPECT_WORKFLOWS_REMOTE_CACHE where set) and the tuning a cache justifies.", endpoint + endpoint_flags(cache = True, bes = False))
 
-def bes_group(environment: WorkflowsEnvironment, on_runner: bool, exec_log_path: str) -> RcConfig:
+def bes_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
     """`aspect-bes`: the BES backend and viewer the env names and, with the
     runner marker, `--profile` under the job tmpdir, followed by the enrichment
-    any BES justifies and the diagnostics upload, with the compact execution
-    log at `exec_log_path` when one is given: a runner's job tmpdir, or
-    `%workspace%/.aspect/generated/…` for a committed rc. Tuning alone when the
-    env names no BES."""
+    any BES justifies and the diagnostics upload switch. Tuning alone when the
+    env names no BES. The execution log is `exec_log_group`, apart."""
     endpoint = runner_bes_flags(environment)
     if endpoint and on_runner:
         endpoint.extend(runner_profile_flags(environment))
-    return _group(GROUP_BES, "The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set), its enrichment, and the build-diagnostics upload the Aspect backend reads.", endpoint + endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags(exec_log_path))
+    return _group(GROUP_BES, "The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set), its enrichment, and the build-diagnostics upload the Aspect backend reads.", endpoint + endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags())
+
+def exec_log_group(exec_log_path: str) -> list:
+    """`aspect-exec-log`: the compact execution log at `exec_log_path` — a
+    runner's job tmpdir, or `%workspace%/.aspect/generated/…` in a checkout's
+    rc — for the diagnostics upload to carry. Its own group, enabled or chained
+    beside `aspect-bes`, so a repository on a thin link can drop the upload of
+    this one large file by removing the lines that name the group. Empty (no
+    group) without a path."""
+    if not exec_log_path:
+        return []
+    return [_group(GROUP_EXEC_LOG, "The compact execution log, uploaded with the build diagnostics for per-action data in the Web UI. Slow on a thin link: remove this group and the --config lines naming it to skip it.", exec_log_flags(exec_log_path))]
 
 def host_group(environment: WorkflowsEnvironment, misdetects_color: bool) -> list:
     """`aspect-<ci host>`: what the detected CI host needs — `--color=yes` where
@@ -129,7 +141,8 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     them it enables with `common --config=<group>` lines. Where the env names
     the deployment (`names_deployment`, from `environment.env_names_deployment`)
     the rc is this machine's: every group but `aspect-exec` is enabled, with
-    `aspect-cache` / `aspect-bes` only where the env names their endpoint.
+    `aspect-cache` / `aspect-bes` (and `aspect-exec-log` with the latter) only
+    where the env names their endpoint.
     Elsewhere the rc is the checkout's, shared by every host that builds it, so
     the CI host's group is not defined at all and nothing is enabled; the
     deployment sections chain `section_chains` instead. Returns
@@ -139,7 +152,8 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
         groups.extend(host_group(environment, misdetects_color))
     groups.extend(runner_group(environment, on_runner))
     groups.append(cache_group(environment, on_runner))
-    groups.append(bes_group(environment, on_runner, exec_log_path))
+    groups.append(bes_group(environment, on_runner))
+    groups.extend(exec_log_group(exec_log_path))
     groups.extend(exec_group(environment))
 
     if not names_deployment:
@@ -150,7 +164,13 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
         enabled.append(GROUP_CACHE)
     if environment.build_events != None:
         enabled.append(GROUP_BES)
+        enabled.extend([g.name for g in groups if g.name == GROUP_EXEC_LOG])
     return (groups, enabled)
+
+def bes_chains(groups: list) -> list:
+    """The groups a BES-wired deployment section chains: `aspect-bes`, and
+    `aspect-exec-log` when `groups` defines it."""
+    return [g.name for g in groups if g.name in [GROUP_BES, GROUP_EXEC_LOG]]
 
 def section_chains(groups: list) -> list:
     """The groups every deployment section chains first, so a section brings

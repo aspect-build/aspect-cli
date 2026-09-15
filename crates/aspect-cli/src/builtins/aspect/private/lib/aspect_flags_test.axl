@@ -18,6 +18,7 @@ load(
     "endpoint_flags",
     "env_flags",
     "env_task_flags",
+    "exec_log_flags",
     "flag_name",
     "independent_flags",
     "omit_flags",
@@ -196,7 +197,7 @@ def _test_runner_pieces(_ctx):
     _eq("profile", runner_profile_flags(env), ["--profile=/wf/command.profile.gz"])
     _eq("profile needs BES", runner_profile_flags(WorkflowsEnvironment(runner = Runner(job_tmpdir = "/wf"))), [])
     _eq("exec log", runner_exec_log_path(env), "/wf/exec.log.zstd")
-    _eq("diagnostics = profile + upload", runner_diagnostics_flags(env), runner_profile_flags(env) + diagnostics_upload_flags("/wf/exec.log.zstd"))
+    _eq("diagnostics = profile + upload + log", runner_diagnostics_flags(env), runner_profile_flags(env) + diagnostics_upload_flags() + exec_log_flags("/wf/exec.log.zstd"))
 
 def _test_runner_bes_flags(_ctx):
     # The env's BES backend and viewer, for vanilla `bazel` on the runner.
@@ -245,14 +246,14 @@ def _test_color_flags(_ctx):
 
 def _test_diagnostics_upload_flags(_ctx):
     # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.
-    _eq("no path", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
-    _eq("with path, build-scoped", diagnostics_upload_flags("/x/e.zstd")[1], ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0", "build"))
-    _eq("scope stripped for the rc", unscoped(diagnostics_upload_flags("/x/e.zstd")[1]), ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
+    _eq("upload switch", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
+    _eq("exec log, build-scoped", exec_log_flags("/x/e.zstd"), [("--execution_log_compact_file=/x/e.zstd", ">=7.1.0", "build")])
+    _eq("scope stripped for the rc", unscoped(exec_log_flags("/x/e.zstd")[0]), ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
     _eq("unscoped passthrough", [unscoped(f) for f in ["--a", ("--b", ">=1.0.0"), ("--c", "", "build")]], ["--a", ("--b", ">=1.0.0"), "--c"])
 
     # Through the bazelrc runtime the scope holds: query never sees the
     # execution log, test does (the cache-diff task queries with the task's rc).
-    rc = _ctx.bazel.new_rc(flags = diagnostics_upload_flags("/x/e.zstd"), version = "8.0.0")
+    rc = _ctx.bazel.new_rc(flags = diagnostics_upload_flags() + exec_log_flags("/x/e.zstd"), version = "8.0.0")
     _eq("query", _texts(rc.expand(command = "query")), ["--remote_build_event_upload=all"])
     _eq("test", sorted(_texts(rc.expand(command = "test"))), ["--execution_log_compact_file=/x/e.zstd", "--remote_build_event_upload=all"])
 

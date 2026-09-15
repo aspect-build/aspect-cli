@@ -79,6 +79,12 @@ def _test_host_groups_chained_first(_ctx):
     _eq("exec chains its base only", configs["aspect-silo-gcp-exec"].flags[0], "--config=aspect-silo-gcp")
     _lacks("exec does not repeat them", configs["aspect-silo-gcp-exec"].flags, "--config=aspect-common")
     _eq("standalone exec opens with them", configs["aspect-e-exec"].flags[:3], ["--config=aspect-common", "--config=aspect-github-actions", "--config=aspect-cache"])
+
+    # A BES-wired section chains the groups the rc defines for a BES, so the
+    # execution log rides along where the rc has one and is absent where not.
+    with_log = _by_name(deployment_configs([_CLOUD], _HELPER, bes_groups = ["aspect-bes", "aspect-exec-log"]))["aspect-cloud"].flags
+    _eq("bes chains", [f for f in with_log if _texts([f])[0] in ["--config=aspect-bes", "--config=aspect-exec-log"]], ["--config=aspect-bes", "--config=aspect-exec-log"])
+    _lacks("default chains bes alone", deployment_configs([_CLOUD], _HELPER)[0].flags, "exec-log")
     _eq("none by default", [f for f in deployment_configs([_SILO], _HELPER)[0].flags if f == "--config=aspect-common"], [])
 
 def _test_exec_section(_ctx):
