@@ -488,8 +488,8 @@ fn tool_defs() -> &'static [ToolDef] {
             name: "get_target_stats",
             description: "Cross-invocation statistics for the organization's targets over a \
                           lookback window: build counts, failure and flake rates, durations. With \
-                          `label`, the same shape narrowed to one target — in that form no other \
-                          filter or paging parameter is accepted, and the collection-wide \
+                          `label`, the same shape narrowed to one target and repository — only \
+                          `repo` may accompany the label, and the collection-wide \
                           `profiled_invocations_daily` series is empty. A label with no builds in \
                           the window is an empty page, not an error.",
             schema: || {
@@ -497,7 +497,7 @@ fn tool_defs() -> &'static [ToolDef] {
                     serde_json::json!({
                         "range": range_prop(),
                         "label": label_prop(),
-                        "repo": prop("Filter to one repository.", "string"),
+                        "repo": prop("Filter to one repository. With label, selects that repository's row; omitting repo selects builds with no recorded repository, not all repositories.", "string"),
                         "is_test": {"type": "boolean", "description": "Only test targets (true) or only non-test targets (false)."},
                         "limit": limit_prop(20),
                     }),
@@ -508,11 +508,16 @@ fn tool_defs() -> &'static [ToolDef] {
                 let mut q = String::new();
                 push_param(&mut q, "range", args.required_str("range")?);
                 if let Some(label) = args.str("label").filter(|l| !l.is_empty()) {
-                    // The API rejects other params alongside `label`; send it alone.
+                    // An exact row is keyed by both label and repository.
                     push_param(&mut q, "label", label);
+                    push_common(args, &mut q, &["repo"]);
                     return Ok(format!("/target-stats{q}"));
                 }
-                push_common(args, &mut q, &["repo", "is_test", "limit"]);
+                // The collection uses `repos`; `repo` is only valid with a label.
+                if let Some(repo) = args.str("repo").filter(|r| !r.is_empty()) {
+                    push_param(&mut q, "repos", repo);
+                }
+                push_common(args, &mut q, &["is_test", "limit"]);
                 Ok(format!("/target-stats{q}"))
             },
         },
@@ -907,15 +912,40 @@ mod tests {
     }
 
     #[test]
-    fn target_stats_with_label_sends_no_other_filters() {
+    fn target_stats_with_label_preserves_repo_and_omits_collection_filters() {
         let path = route(
             "get_target_stats",
             args(
-                serde_json::json!({"range": "d7", "label": "//a:b", "repo": "ignored", "limit": 5}),
+                serde_json::json!({"range": "d7", "label": "//a:b", "repo": "org/repo & tools", "limit": 5, "is_test": true}),
             ),
         )
         .unwrap();
+        assert_eq!(
+            path,
+            "/target-stats?range=d7&label=%2F%2Fa%3Ab&repo=org%2Frepo+%26+tools"
+        );
+    }
+
+    #[test]
+    fn target_stats_with_label_without_repo_selects_unattributed_builds() {
+        let path = route(
+            "get_target_stats",
+            args(serde_json::json!({"range": "d7", "label": "//a:b"})),
+        )
+        .unwrap();
         assert_eq!(path, "/target-stats?range=d7&label=%2F%2Fa%3Ab");
+    }
+
+    #[test]
+    fn target_stats_collection_maps_repo_to_repos() {
+        let path = route(
+            "get_target_stats",
+            args(serde_json::json!({"range": "d7", "repo": "org/repo & tools", "is_test": false, "limit": 5})),
+        ).unwrap();
+        assert_eq!(
+            path,
+            "/target-stats?range=d7&repos=org%2Frepo+%26+tools&is_test=false&limit=5"
+        );
     }
 
     #[test]
