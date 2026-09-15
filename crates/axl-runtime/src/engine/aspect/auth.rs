@@ -1485,6 +1485,21 @@ impl IssuerKind {
 
 const FRONTEGG_TRACE_HEADER: &str = "frontegg-trace-id";
 
+/// Frontegg's identity endpoints want the issuer's bare host here; its edge
+/// rejects the request before Frontegg sees it when given a URL.
+const FRONTEGG_VENDOR_HOST_HEADER: &str = "frontegg-vendor-host";
+
+/// The Frontegg identity API paths the CLI calls, all served under the issuer.
+const FRONTEGG_API_TOKEN_PATH: &str = "/identity/resources/auth/v1/api-token";
+const FRONTEGG_TENANT_REFRESH_PATH: &str = "/identity/resources/auth/v1/user/token/refresh";
+const FRONTEGG_SWITCH_TENANT_PATH: &str = "/identity/resources/users/v1/tenant";
+const FRONTEGG_TENANTS_PATH: &str = "/identity/resources/users/v3/me/tenants";
+
+/// `path` on the Frontegg identity API behind `auth_domain`.
+fn frontegg_url(auth_domain: &str, path: &str) -> String {
+    format!("{}{path}", auth_domain.trim_end_matches('/'))
+}
+
 impl CredentialsEntry {
     /// Build an entry for `bearer` (the JWT sent to endpoints), decoding its
     /// email/name/tenant claims for display and recording the issuer + client_id
@@ -1512,6 +1527,21 @@ impl CredentialsEntry {
             prefer_id_token,
             issuer_kind,
         })
+    }
+
+    /// This credential re-minted from `token_resp`: the same issuer, client,
+    /// bearer kind and provider, with the rotated refresh token when one came
+    /// back ([`merged_refresh_token`]).
+    fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
+        let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(self.prefer_id_token)?,
+            refresh_token,
+            self.auth_domain.clone(),
+            self.auth_client_id.clone(),
+            self.prefer_id_token,
+            self.issuer_kind,
+        )
     }
 
     /// Every tenant the bearer says its user belongs to (Frontegg's `tenantIds`
@@ -1947,30 +1977,13 @@ async fn exchange_api_token(
         #[serde(rename = "accessToken", alias = "access_token")]
         access_token: String,
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!(
-            "{}/identity/resources/auth/v1/api-token",
-            env.domain
-        ))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "clientId": client_id, "secret": secret }))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("API token exchange failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "API token exchange failed (HTTP {}): {}",
-            status,
-            body
-        ));
-    }
-    let data: ApiTokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse API token response: {}", e))?;
+    let data: ApiTokenResponse = send_json(
+        reqwest::Client::new()
+            .post(frontegg_url(&env.domain, FRONTEGG_API_TOKEN_PATH))
+            .json(&serde_json::json!({ "clientId": client_id, "secret": secret })),
+        "API token exchange",
+    )
+    .await?;
     // Not refreshable (the api-token is re-exchanged each run), so no
     // auth_domain/client_id are stored and the issuer kind is moot. Access-token
     // bearer (Aspect cloud).
@@ -2073,12 +2086,10 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
 /// `id_token` when present (self-hosted edges validate the OIDC id_token), else
-/// the `access_token` (the Aspect Cloud flow).
+/// the `access_token` (the Aspect Cloud flow). Frontegg's identity endpoints
+/// answer with the same fields, in places spelled camelCase, hence the aliases.
 #[derive(Deserialize)]
 struct TokenResponse {
-    // The camelCase aliases cover Frontegg's identity endpoints, which answer
-    // with the same fields as its OAuth token endpoint but not always in the
-    // OAuth spelling.
     #[serde(default, alias = "accessToken")]
     access_token: String,
     #[serde(default, alias = "idToken")]
@@ -2120,15 +2131,36 @@ impl TokenResponse {
 }
 
 /// POST an `application/x-www-form-urlencoded` body to a token/exchange endpoint
-/// and deserialize the JSON response, surfacing a non-2xx status with its body.
+/// and deserialize the JSON response ([`send_json`]).
 async fn post_form<T: serde::de::DeserializeOwned>(
     url: &str,
     form: &[(&str, &str)],
     what: &str,
 ) -> anyhow::Result<T> {
-    let resp = reqwest::Client::new()
-        .post(url)
-        .form(form)
+    send_json(reqwest::Client::new().post(url).form(form), what).await
+}
+
+/// Send `request` and deserialize its JSON body. Every failure names `what`: a
+/// transport error, a non-2xx status (with the body the server sent, which is
+/// where an IdP explains a refusal), or an unparseable body.
+async fn send_json<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<T> {
+    send_ok(request, what)
+        .await?
+        .json::<T>()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse {what} response: {e}"))
+}
+
+/// Send `request`, requiring a 2xx answer; the error names `what` and carries
+/// the status and body of a refusal.
+async fn send_ok(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let resp = request
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("{what} request failed: {e}"))?;
@@ -2137,9 +2169,7 @@ async fn post_form<T: serde::de::DeserializeOwned>(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!("{what} failed (HTTP {status}): {body}"));
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse {what} response: {e}"))
+    Ok(resp)
 }
 
 /// Exchange an authorization `code` for tokens at `token_url` (PKCE — sends
@@ -2480,6 +2510,7 @@ fn build_login_session(
 }
 
 /// Why a refresh did not yield a usable credential.
+#[derive(Debug, PartialEq, Eq)]
 enum RefreshFailure {
     /// The issuer minted a token for a different tenant than the credential was
     /// issued for: the user's active organization changed elsewhere (a web
@@ -2488,8 +2519,9 @@ enum RefreshFailure {
     /// another organization.
     TenantChanged { was: String, now: String },
     /// The refresh itself failed: a revoked or expired refresh token, a network
-    /// error, a response with no usable bearer.
-    Failed(anyhow::Error),
+    /// error, a response with no usable bearer. The cause is logged at debug
+    /// level where it happened; the user is told to log in again.
+    Failed,
 }
 
 impl RefreshFailure {
@@ -2500,10 +2532,7 @@ impl RefreshFailure {
             RefreshFailure::TenantChanged { was, now } => {
                 tenant_changed_message(deployment, was, now)
             }
-            RefreshFailure::Failed(cause) => {
-                tracing::debug!("refreshing the {deployment} credential failed: {cause:#}");
-                session_expired_message(deployment)
-            }
+            RefreshFailure::Failed => session_expired_message(deployment),
         }
     }
 }
@@ -2520,12 +2549,18 @@ impl RefreshFailure {
 async fn refresh_access_token(
     entry: &CredentialsEntry,
 ) -> Result<CredentialsEntry, RefreshFailure> {
-    let auth_domain = entry.auth_domain.as_deref().ok_or_else(|| {
-        RefreshFailure::Failed(anyhow::anyhow!("no auth_domain stored — cannot refresh"))
-    })?;
-    let client_id = entry.auth_client_id.as_deref().ok_or_else(|| {
-        RefreshFailure::Failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh"))
-    })?;
+    let failed = |cause: anyhow::Error| {
+        tracing::debug!("refreshing the stored credential failed: {cause:#}");
+        RefreshFailure::Failed
+    };
+    let auth_domain = entry
+        .auth_domain
+        .as_deref()
+        .ok_or_else(|| failed(anyhow::anyhow!("no auth_domain stored — cannot refresh")))?;
+    let client_id = entry
+        .auth_client_id
+        .as_deref()
+        .ok_or_else(|| failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh")))?;
     let pinned = if entry.issuer_kind == IssuerKind::Frontegg && !entry.tenant_id.is_empty() {
         frontegg_tenant_refresh(entry, auth_domain, client_id, &entry.tenant_id)
             .await
@@ -2540,7 +2575,7 @@ async fn refresh_access_token(
         Some(refreshed) => refreshed,
         None => refresh_with_grant(entry, auth_domain, client_id)
             .await
-            .map_err(RefreshFailure::Failed)?,
+            .map_err(failed)?,
     };
     ensure_tenant_unchanged(entry, refreshed)
 }
@@ -2573,44 +2608,28 @@ async fn refresh_with_grant(
 /// The request is shaped the way Frontegg's own native SDKs shape it: the refresh
 /// token travels in the `fe_refresh_*` cookie ([`frontegg_refresh_cookie`]), the
 /// current bearer (expired or not) in `Authorization`, and the issuer's bare host
-/// in `frontegg-vendor-host`, which Frontegg's edge rejects when given a URL.
+/// in [`FRONTEGG_VENDOR_HOST_HEADER`].
 async fn frontegg_tenant_refresh(
     entry: &CredentialsEntry,
     auth_domain: &str,
     client_id: &str,
     tenant_id: &str,
 ) -> anyhow::Result<CredentialsEntry> {
-    let url = format!(
-        "{}/identity/resources/auth/v1/user/token/refresh",
-        auth_domain.trim_end_matches('/')
-    );
-    let resp = reqwest::Client::new()
-        .post(url)
-        .header(
-            "Cookie",
-            frontegg_refresh_cookie(client_id, &entry.refresh_token),
-        )
-        .header("Authorization", format!("Bearer {}", entry.access_token))
-        .header(FRONTEGG_VENDOR_HOST_HEADER, endpoint_host_str(auth_domain))
-        .json(&serde_json::json!({ "tenantId": tenant_id }))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("tenant refresh request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "tenant refresh failed (HTTP {status}): {body}"
-        ));
-    }
-    let token_resp: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse tenant refresh response: {e}"))?;
+    let token_resp: TokenResponse = send_json(
+        reqwest::Client::new()
+            .post(frontegg_url(auth_domain, FRONTEGG_TENANT_REFRESH_PATH))
+            .header(
+                "Cookie",
+                frontegg_refresh_cookie(client_id, &entry.refresh_token),
+            )
+            .bearer_auth(&entry.access_token)
+            .header(FRONTEGG_VENDOR_HOST_HEADER, endpoint_host_str(auth_domain))
+            .json(&serde_json::json!({ "tenantId": tenant_id })),
+        "tenant refresh",
+    )
+    .await?;
     entry.renewed(token_resp)
 }
-
-const FRONTEGG_VENDOR_HOST_HEADER: &str = "frontegg-vendor-host";
 
 /// The cookie Frontegg reads a refresh token from: named after the client id
 /// with its first dash removed, as Frontegg's SDKs derive it.
@@ -2629,24 +2648,14 @@ async fn switch_frontegg_active_tenant(
     bearer: &str,
     tenant_id: &str,
 ) -> anyhow::Result<()> {
-    let url = format!(
-        "{}/identity/resources/users/v1/tenant",
-        auth_domain.trim_end_matches('/')
-    );
-    let resp = reqwest::Client::new()
-        .put(url)
-        .header("Authorization", format!("Bearer {bearer}"))
-        .json(&serde_json::json!({ "tenantId": tenant_id }))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("switching the active organization failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "switching the active organization failed (HTTP {status}): {body}"
-        ));
-    }
+    send_ok(
+        reqwest::Client::new()
+            .put(frontegg_url(auth_domain, FRONTEGG_SWITCH_TENANT_PATH))
+            .bearer_auth(bearer)
+            .json(&serde_json::json!({ "tenantId": tenant_id })),
+        "switching the active organization",
+    )
+    .await?;
     Ok(())
 }
 
@@ -2707,23 +2716,6 @@ fn ensure_tenant_unchanged(
         });
     }
     Ok(fresh)
-}
-
-impl CredentialsEntry {
-    /// This credential re-minted from `token_resp`: the same issuer, client,
-    /// bearer kind and provider, with the rotated refresh token when one came
-    /// back ([`merged_refresh_token`]).
-    fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
-        let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
-        CredentialsEntry::from_bearer(
-            token_resp.bearer(self.prefer_id_token)?,
-            refresh_token,
-            self.auth_domain.clone(),
-            self.auth_client_id.clone(),
-            self.prefer_id_token,
-            self.issuer_kind,
-        )
-    }
 }
 
 /// The refresh token to persist after a refresh: the newly-issued `fresh` one, or
@@ -3049,6 +3041,19 @@ pub struct Organization {
     pub active: bool,
 }
 
+impl Organization {
+    /// An inactive organization; `id` stands in for an empty `name`, so every
+    /// organization has something to show.
+    fn named(id: String, name: String) -> Self {
+        let name = if name.is_empty() { id.clone() } else { name };
+        Organization {
+            id,
+            name,
+            active: false,
+        }
+    }
+}
+
 starlark_simple_value!(Organization);
 
 #[starlark_value(type = "aspect.Organization")]
@@ -3088,37 +3093,34 @@ async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
     if entry.issuer_kind != IssuerKind::Frontegg {
         return Vec::new();
     }
-    let fetched = match entry.auth_domain.as_deref() {
+    let mut orgs = match entry.auth_domain.as_deref() {
         Some(domain) => fetch_frontegg_tenants(domain, &entry.access_token)
             .await
-            .unwrap_or_default(),
+            .unwrap_or_else(|e| {
+                tracing::debug!("falling back to the token's tenantIds claim: {e:#}");
+                Vec::new()
+            }),
         None => Vec::new(),
     };
-    let named = if fetched.is_empty() {
-        entry
+    if orgs.is_empty() {
+        orgs = entry
             .tenant_ids()
             .into_iter()
-            .map(|id| (id.clone(), id))
-            .collect::<Vec<_>>()
-    } else {
-        fetched
-    };
-    named
-        .into_iter()
-        .map(|(id, name)| Organization {
-            active: id == entry.tenant_id,
-            id,
-            name,
-        })
-        .collect()
+            .map(|id| Organization::named(id.clone(), id))
+            .collect();
+    }
+    for org in &mut orgs {
+        org.active = org.id == entry.tenant_id;
+    }
+    orgs
 }
 
-/// `(tenant id, name)` for every tenant the bearer's user belongs to, from
-/// Frontegg's tenants endpoint.
+/// Every tenant the bearer's user belongs to, from Frontegg's tenants endpoint,
+/// none marked active.
 async fn fetch_frontegg_tenants(
     auth_domain: &str,
     bearer: &str,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> anyhow::Result<Vec<Organization>> {
     #[derive(Deserialize)]
     struct Tenant {
         #[serde(rename = "tenantId")]
@@ -3131,37 +3133,17 @@ async fn fetch_frontegg_tenants(
         #[serde(default)]
         tenants: Vec<Tenant>,
     }
-    let url = format!(
-        "{}/identity/resources/users/v3/me/tenants",
-        auth_domain.trim_end_matches('/')
-    );
-    let resp = discovery_client()
-        .get(url)
-        .header("Authorization", format!("Bearer {bearer}"))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("listing organizations failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "listing organizations failed (HTTP {})",
-            resp.status()
-        ));
-    }
-    let tenants: Tenants = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse the organizations response: {e}"))?;
+    let tenants: Tenants = send_json(
+        discovery_client()
+            .get(frontegg_url(auth_domain, FRONTEGG_TENANTS_PATH))
+            .bearer_auth(bearer),
+        "listing organizations",
+    )
+    .await?;
     Ok(tenants
         .tenants
         .into_iter()
-        .map(|t| {
-            let name = if t.name.is_empty() {
-                t.tenant_id.clone()
-            } else {
-                t.name
-            };
-            (t.tenant_id, name)
-        })
+        .map(|t| Organization::named(t.tenant_id, t.name))
         .collect())
 }
 
@@ -6639,8 +6621,39 @@ mod tests {
         let msg = changed.message("acme");
         assert!(msg.contains("--deployment acme"), "{msg}");
         // Any other failure keeps the plain expiry message.
-        let failed = RefreshFailure::Failed(anyhow::anyhow!("boom"));
-        assert_eq!(failed.message("acme"), session_expired_message("acme"));
+        assert_eq!(
+            RefreshFailure::Failed.message("acme"),
+            session_expired_message("acme")
+        );
+    }
+
+    #[test]
+    fn frontegg_urls_join_the_issuer_and_path_once() {
+        assert_eq!(
+            frontegg_url("https://auth.example.com/", FRONTEGG_TENANTS_PATH),
+            "https://auth.example.com/identity/resources/users/v3/me/tenants"
+        );
+        assert_eq!(
+            frontegg_url("https://auth.example.com", FRONTEGG_SWITCH_TENANT_PATH),
+            "https://auth.example.com/identity/resources/users/v1/tenant"
+        );
+    }
+
+    #[test]
+    fn an_organization_without_a_name_shows_its_id() {
+        let named = Organization::named("id-1".into(), "Acme".into());
+        assert_eq!((named.name.as_str(), named.active), ("Acme", false));
+        assert_eq!(
+            Organization::named("id-1".into(), String::new()).name,
+            "id-1"
+        );
+    }
+
+    #[test]
+    fn an_org_request_with_nothing_to_choose_from_says_so() {
+        let msg = unknown_organization_message("acme", &[]);
+        assert!(msg.contains("reports no organizations"), "{msg}");
+        assert!(!msg.contains("Choose one of"), "{msg}");
     }
 
     #[test]
@@ -6742,6 +6755,348 @@ mod tests {
             CredentialsEntry::from_bearer(jwt, "r".into(), None, None, false, IssuerKind::Oidc)
                 .unwrap();
         assert!(runtime.block_on(list_organizations(&oidc)).is_empty());
+    }
+
+    /// One request a [`MockIssuer`] answered: its request line parts, the raw
+    /// header block lower-cased (hyper writes header names that way), and body.
+    struct Received {
+        method: String,
+        path: String,
+        headers: String,
+        body: String,
+    }
+
+    /// A loopback HTTP/1.1 issuer for the refresh paths: answers exactly
+    /// `connections` requests, one per connection (every response closes it, so
+    /// reqwest reconnects for the next), from `respond`, which maps a request to
+    /// a `(status, JSON body)`. `finish()` joins the server and hands back what it
+    /// received, in order, so a test can assert on the route each step took.
+    struct MockIssuer {
+        address: std::net::SocketAddr,
+        received: std::sync::Arc<Mutex<Vec<Received>>>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockIssuer {
+        fn start(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+        ) -> Self {
+            use std::io::Write;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let received = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let log = received.clone();
+            let server = std::thread::spawn(move || {
+                for _ in 0..connections {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = Self::read_request(&mut stream);
+                    let (status, body) = respond(&request);
+                    log.lock().unwrap().push(request);
+                    let reason = match status {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        404 => "Not Found",
+                        _ => "Other",
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            MockIssuer {
+                address,
+                received,
+                server: Some(server),
+            }
+        }
+
+        fn read_request(stream: &mut std::net::TcpStream) -> Received {
+            use std::io::Read;
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "connection closed before the headers ended");
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "connection closed before the body ended");
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let body =
+                String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string();
+            let mut request_line = headers
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace();
+            Received {
+                method: request_line.next().unwrap_or_default().to_uppercase(),
+                path: request_line.next().unwrap_or_default().to_string(),
+                headers,
+                body,
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        fn finish(mut self) -> Vec<Received> {
+            self.server.take().unwrap().join().unwrap();
+            std::mem::take(&mut *self.received.lock().unwrap())
+        }
+    }
+
+    /// A token response minting for `tenant`, rotating the refresh token.
+    fn token_body_for(tenant: &str) -> String {
+        format!(
+            r#"{{"access_token":"{}","refresh_token":"rotated"}}"#,
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}"}}"#))
+        )
+    }
+
+    /// An expired credential from `issuer` pinned to `tenant`.
+    fn stored_entry(issuer: &str, tenant: &str, kind: IssuerKind) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}","exp":1}}"#)),
+            "refresh-token".into(),
+            Some(issuer.into()),
+            Some("client-id-1".into()),
+            false,
+            kind,
+        )
+        .unwrap()
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_frontegg_credential_refreshes_through_the_tenant_scoped_endpoint() {
+        let issuer = MockIssuer::start(1, |request| {
+            assert_eq!(request.path, FRONTEGG_TENANT_REFRESH_PATH);
+            (200, token_body_for("t1"))
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.refresh_token, "rotated");
+        assert_eq!(refreshed.issuer_kind, IssuerKind::Frontegg);
+
+        // Shaped as Frontegg expects: the pinned tenant in the body, the refresh
+        // token in its cookie, the current bearer, and the bare host.
+        let [request] = issuer.finish().try_into().ok().unwrap();
+        assert_eq!(request.method, "POST");
+        assert!(
+            request.body.contains(r#""tenantId":"t1""#),
+            "{}",
+            request.body
+        );
+        assert!(
+            request
+                .headers
+                .contains("cookie: fe_refresh_clientid-1=refresh-token"),
+            "{}",
+            request.headers
+        );
+        assert!(
+            request
+                .headers
+                .contains(&format!("authorization: bearer {}", entry.access_token).to_lowercase()),
+            "{}",
+            request.headers
+        );
+        assert!(
+            request
+                .headers
+                .contains("frontegg-vendor-host: 127.0.0.1\r\n"),
+            "{}",
+            request.headers
+        );
+    }
+
+    /// The routes the standard grant takes against an issuer serving no discovery
+    /// document: the conventional token endpoint after a 404'd discovery probe.
+    fn respond_to_grant(request: &Received, tenant: &str) -> (u16, String) {
+        match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            "/oauth/token" => (200, token_body_for(tenant)),
+            other => panic!("unexpected request to {other}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_tenant_refresh_falls_back_to_the_standard_grant() {
+        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
+            FRONTEGG_TENANT_REFRESH_PATH => (401, r#"{"errors":["nope"]}"#.into()),
+            _ => respond_to_grant(request, "t1"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                FRONTEGG_TENANT_REFRESH_PATH,
+                "/.well-known/openid-configuration",
+                "/oauth/token"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fallback_grant_for_another_tenant_is_refused() {
+        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
+            FRONTEGG_TENANT_REFRESH_PATH => (401, String::new()),
+            _ => respond_to_grant(request, "t2"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        issuer.finish();
+    }
+
+    #[test]
+    fn a_plain_oidc_credential_never_touches_the_frontegg_endpoints() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.issuer_kind, IssuerKind::Oidc);
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", "/oauth/token"]
+        );
+    }
+
+    #[test]
+    fn a_failed_grant_is_reported_as_a_plain_failure() {
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/oauth/token" => (401, r#"{"errors":["invalid_grant"]}"#.into()),
+            _ => respond_to_grant(request, "t1"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(failure, RefreshFailure::Failed);
+        issuer.finish();
+    }
+
+    #[test]
+    fn selecting_an_organization_switches_the_active_tenant_when_the_pin_is_ignored() {
+        // The tenant-scoped refresh answers with the old tenant, so the login
+        // falls back to switching the active tenant and re-running the grant.
+        let issuer = MockIssuer::start(4, |request| match request.path.as_str() {
+            FRONTEGG_TENANT_REFRESH_PATH => (200, token_body_for("t1")),
+            FRONTEGG_SWITCH_TENANT_PATH => {
+                assert_eq!(request.method, "PUT");
+                assert!(
+                    request.body.contains(r#""tenantId":"t2""#),
+                    "{}",
+                    request.body
+                );
+                (200, "{}".into())
+            }
+            _ => respond_to_grant(request, "t2"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let switched = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap();
+        assert_eq!(switched.tenant_id, "t2");
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                FRONTEGG_TENANT_REFRESH_PATH,
+                FRONTEGG_SWITCH_TENANT_PATH,
+                "/.well-known/openid-configuration",
+                "/oauth/token"
+            ]
+        );
+    }
+
+    #[test]
+    fn selecting_an_organization_takes_the_pinned_refresh_when_honored() {
+        let issuer = MockIssuer::start(1, |_| (200, token_body_for("t2")));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let switched = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap();
+        assert_eq!(switched.tenant_id, "t2");
+        assert_eq!(issuer.finish().len(), 1);
+    }
+
+    #[test]
+    fn organizations_are_named_from_the_tenants_endpoint() {
+        let issuer = MockIssuer::start(1, |request| {
+            assert_eq!(request.path, FRONTEGG_TENANTS_PATH);
+            assert!(
+                request.headers.contains("authorization: bearer "),
+                "{}",
+                request.headers
+            );
+            (
+                200,
+                r#"{"tenants":[{"tenantId":"t1","name":"Acme"},{"tenantId":"t2","name":""}],"activeTenant":{"tenantId":"t1"}}"#.into(),
+            )
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Frontegg);
+
+        let orgs = current_thread_runtime().block_on(list_organizations(&entry));
+        let listed: Vec<_> = orgs
+            .iter()
+            .map(|o| (o.id.as_str(), o.name.as_str(), o.active))
+            .collect();
+        assert_eq!(listed, vec![("t1", "Acme", true), ("t2", "t2", false)]);
+        issuer.finish();
     }
 
     #[test]
