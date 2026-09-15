@@ -280,7 +280,8 @@ def _usage(sections: list, rc: str, importer: str) -> list:
     """How to use the checkout's rc, printed after writing it: which `--config`
     names exist and what each wires — the `aspect` alias first, since it names
     the default deployment, whichever that is — then that the file is a starting
-    point to commit and edit."""
+    point to commit and edit, and that Aspect's own tasks reach the default
+    deployment with `--remote`, needing none of it."""
     lines = ["Commit %s and the import in %s. Vanilla `bazel` uses none of it until a --config is named:" % (rc, importer)]
     if not sections:
         lines.append("  (no deployment advertises endpoints here — see `aspect auth status`; `aspect auth login` records Aspect Cloud's — so there are no --config sections yet)")
@@ -290,6 +291,8 @@ def _usage(sections: list, rc: str, importer: str) -> list:
         flag = "--config=" + c.name
         lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
     lines.append("The file is a starting point: edit it as your repository needs. `aspect setup bazelrc --force` restores the generated version.")
+    if sections:
+        lines.append("Aspect CLI tasks need none of this: `aspect build --remote` and `aspect test --remote` target the default deployment on their own (`--remote=exec` adds its remote execution).")
     return lines
 
 _BAZELRC_ARGS = {
