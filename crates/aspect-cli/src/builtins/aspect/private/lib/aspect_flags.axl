@@ -298,18 +298,28 @@ def runner_executor_endpoint(environment: WorkflowsEnvironment) -> list:
         return []
     return [_REMOTE_EXECUTOR + "=" + executor.endpoint]
 
-def runner_cache_flags(environment: WorkflowsEnvironment) -> list:
-    """The runner's own cache specifics: the Workflows-cache gates and the
-    disk-cache reset when the env names the runner's cache, plus the repository
-    cache the runner's warming restores. Presumes the runner marker."""
+def workflows_cache_flags() -> list:
+    """The Workflows cache's specifics from `WORKFLOWS_CACHE_FLAGS`: the
+    compression gates and the disk-cache reset. Presumes the runner's own cache,
+    so callers gate on the runner marker and `environment.remote_cache`."""
+    return [_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS]
+
+def runner_repository_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """`--repository_cache` at the runner's warmed repository cache. Presumes
+    the runner marker."""
     runner = environment.runner
     if runner == None:
+        fail("runner_repository_cache_flags called without a Workflows runner — gate on environment.runner != None")
+    return [_REPOSITORY_CACHE + "=" + runner.repository_cache_dir]
+
+def runner_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """The runner's own cache specifics for a task: `workflows_cache_flags` when
+    the env names the runner's cache, plus `runner_repository_cache_flags`.
+    Presumes the runner marker."""
+    if environment.runner == None:
         fail("runner_cache_flags called without a Workflows runner — gate on environment.runner != None")
-    flags = []
-    if environment.remote_cache != None:
-        flags.extend([_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS])
-    flags.append(_REPOSITORY_CACHE + "=" + runner.repository_cache_dir)
-    return flags
+    specifics = workflows_cache_flags() if environment.remote_cache != None else []
+    return specifics + runner_repository_cache_flags(environment)
 
 def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> list:
     """The startup flags that give each repository its own Bazel server on the

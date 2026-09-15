@@ -29,7 +29,9 @@ load(
     "runner_executor_flags",
     "runner_flags",
     "runner_profile_flags",
+    "runner_repository_cache_flags",
     "runner_startup_flags",
+    "workflows_cache_flags",
     "written_flag_names",
 )
 load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
@@ -172,6 +174,8 @@ def _test_runner_pieces(_ctx):
     _has("disk cache reset", cache, "--disk_cache=")
     _eq("build = independent + env + cache", _texts(build), _texts(independent_flags() + env_flags(env) + cache))
     _eq("no env cache → only the repository cache", runner_cache_flags(WorkflowsEnvironment(runner = Runner(repository_cache_dir = "/mnt/r"))), ["--repository_cache=/mnt/r"])
+    _eq("cache = specifics + repository cache", cache, workflows_cache_flags() + runner_repository_cache_flags(env))
+    _has("specifics carry the disk-cache reset", workflows_cache_flags(), "--disk_cache=")
     _eq("profile", runner_profile_flags(env), ["--profile=/wf/command.profile.gz"])
     _eq("profile needs BES", runner_profile_flags(WorkflowsEnvironment(runner = Runner(job_tmpdir = "/wf"))), [])
     _eq("exec log", runner_exec_log_path(env), "/wf/exec.log.zstd")

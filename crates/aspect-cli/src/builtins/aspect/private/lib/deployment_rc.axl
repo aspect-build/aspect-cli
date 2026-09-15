@@ -47,7 +47,7 @@ _EXEC_SUFFIX = "-exec"
 _DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
 
 # The default deployment's remote-execution alias shares its name with the
-# runner's `aspect-exec` group (`rc_groups.axl`): on a runner the runner is the
+# runner's `aspect-exec` alias (`rc_groups.axl`): on a runner the runner is the
 # build's deployment. The collision check refuses a runner that also records a
 # default deployment with an executor.
 _DEFAULT_EXEC_CONFIG = GROUP_EXEC
