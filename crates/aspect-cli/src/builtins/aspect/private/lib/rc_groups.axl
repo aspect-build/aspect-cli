@@ -25,14 +25,13 @@ detected CI host — `aspect-github-actions`, `aspect-circleci`, `aspect-gitlab`
 is `--color=yes` where Bazel's `--color=auto` misdetects
 (`environment.bazel_misdetects_color`), which leaves Buildkite with none.
 `aspect-exec` is the deployment pattern's name for the default deployment's
-execution; on a runner the runner is that deployment, and the collision check
-refuses a runner that also records a default deployment with an executor.
+execution; where the env names an executor the runner is that deployment.
 
 Deployment sections chain `aspect-cache` / `aspect-bes` but never
 `aspect-common`: the rc enables it for every command already, and a config
-expanded twice draws a Bazel warning. On a runner whose env names the same
-endpoint kind, naming a deployment section draws that warning too, and the
-section's endpoint wins since it comes last.
+expanded twice draws a Bazel warning. They are written only where the env
+names no endpoint (`bazelrc.axl`), so the groups they chain are always tuning
+alone and no name is ever claimed twice.
 """
 
 load(
