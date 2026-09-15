@@ -11,9 +11,10 @@ plumbing:
   - On an Aspect Workflows runner, `~/.bazelrc` is written whole. The runner is
     ours, nothing else configures Bazel on it, and rewriting the file is what
     keeps it in step with the runner's environment. The runner's BES backend is
-    written too, so vanilla `bazel` reaches the Web UI like a task does. Tasks
-    themselves run with `--nohome_rc` and stream BES from the CLI, so nothing in
-    this file reaches them. Bazel reads the home rc after the workspace rc, so a
+    written too, so vanilla `bazel` reaches the Web UI like a task does, and a
+    runner that names a remote executor gets an opt-in `--config=aspect-exec`
+    for it. Tasks themselves run with `--nohome_rc` and stream BES from the
+    CLI, so nothing in this file reaches them. Bazel reads the home rc after the workspace rc, so a
     repository whose own rc names a different `--bes_backend` for vanilla calls
     keeps it by opting out: `--omit-bazel-flag=--bes_backend`.
   - Anywhere else, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains
@@ -57,6 +58,7 @@ load(
     "protected_omissions",
     "runner_bes_flags",
     "runner_diagnostics_flags",
+    "runner_executor_flags",
     "runner_flags",
     "temp_exec_log_path",
     "written_flag_names",
@@ -72,7 +74,7 @@ load(
     "render_bazelrc",
     "startup_flags_for_rc",
 )
-load("./private/lib/deployment_rc.axl", "SECTION_FLAG_NAMES", "config_collisions", "deployment_configs")
+load("./private/lib/deployment_rc.axl", "DEFAULT_EXEC_CONFIG", "SECTION_FLAG_NAMES", "config_collisions", "deployment_configs")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "get_workflows_environment", "info", "is_aspect_workflows_runner")
 
 # Where the rc lives under the home directory, and the user rc that imports it.
@@ -111,14 +113,29 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 
-def _sections(ctx: TaskContext, omitted: list, bazel_version: str | None) -> list:
-    """The `--config` sections for this machine's deployments, with the user's
-    omissions applied and versions resolved. Reads `deployments()`, not `list()`:
-    nothing here needs login status, and a CI runner may have no credential store
-    to read. Refuses two deployments claiming one section name."""
+def _runner_exec_section(environment) -> list:
+    """The runner's remote executor as an opt-in `--config=aspect-exec` section —
+    the deployment pattern's name for the default deployment's execution, which
+    on a runner is the runner itself. Empty when the env names no executor."""
+    flags = runner_executor_flags(environment)
+    if not flags:
+        return []
+    return [RcConfig(
+        name = DEFAULT_EXEC_CONFIG,
+        source = "the runner's remote executor",
+        comment = "The runner's remote execution (ASPECT_WORKFLOWS_REMOTE_EXECUTOR); opt in per call.",
+        flags = flags,
+    )]
+
+def _sections(ctx: TaskContext, omitted: list, bazel_version: str | None, environment) -> list:
+    """The runner's `aspect-exec` section, then the `--config` sections for this
+    machine's deployments, with the user's omissions applied and versions
+    resolved. Reads `deployments()`, not `list()`: nothing here needs login
+    status, and a CI runner may have no credential store to read. Refuses two
+    claimants of one section name."""
     deployments = ctx.aspect.auth.deployments()
     exec_log_path = temp_exec_log_path(ctx.std, ctx.task.id) if any([d.bes for d in deployments]) else ""
-    configs = deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
+    configs = _runner_exec_section(environment) + deployment_configs(deployments, ctx.std.env.current_exe(), exec_log_path)
     collisions = config_collisions(configs)
     if collisions:
         ctx.std.process.exit(1, "\n".join(collisions))
@@ -149,7 +166,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_version = ctx.bazel.version()
     startup_flags = omit_flags(startup_flags, omitted)
     build_flags = _resolve(ctx, omit_flags(build_flags, omitted), bazel_version)
-    configs = _sections(ctx, omitted, bazel_version)
+    configs = _sections(ctx, omitted, bazel_version, environment)
 
     # A runner's user rc is written whole; elsewhere the rc is a separate file
     # the user rc imports.

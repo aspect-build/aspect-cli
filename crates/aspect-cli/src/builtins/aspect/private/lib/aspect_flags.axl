@@ -172,6 +172,7 @@ PROTECTED_FLAGS = [
 # The value-bearing flags the functions below build, by name, so
 # `written_flag_names` can list everything this file can write.
 _REMOTE_CACHE = "--remote_cache"
+_REMOTE_EXECUTOR = "--remote_executor"
 _BYTESTREAM_URI_PREFIX = "--remote_bytestream_uri_prefix"
 _REPOSITORY_CACHE = "--repository_cache"
 _OUTPUT_USER_ROOT = "--output_user_root"
@@ -276,6 +277,21 @@ def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
         flags.append(_BES_RESULTS_URL + "=" + build_events.results_url)
     return flags
 
+def runner_executor_flags(environment: WorkflowsEnvironment) -> list:
+    """The remote executor the runner environment names, for a build that opted in:
+    `--remote_executor` plus, when the env names no separate cache, the tuning an
+    executor justifies (it doubles as the cache). Never part of `runner_flags`
+    or `env_flags` — remote execution relocates every action, so it is reached
+    only by naming it: `--workflows:remote-exec` on a task, `--config=aspect-exec`
+    in the rc. Empty when the env names no executor."""
+    executor = environment.remote_executor
+    if executor == None or not executor.endpoint:
+        return []
+    flags = [_REMOTE_EXECUTOR + "=" + executor.endpoint]
+    if environment.remote_cache == None:
+        flags.extend(endpoint_flags(cache = False, bes = False, exec = True))
+    return flags
+
 def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
     """The full flag set for an Aspect Workflows runner: the endpoint-independent
     flags, `env_flags`, the Workflows-cache specifics, the runner's repository
@@ -369,6 +385,7 @@ def written_flag_names() -> list:
     `aspect ci bazelrc` uses to recognize the lines it once wrote into a user rc."""
     return [e.flag.split("=")[0] for e in CATALOG + WORKFLOWS_CACHE_FLAGS] + [
         _REMOTE_CACHE,
+        _REMOTE_EXECUTOR,
         _BYTESTREAM_URI_PREFIX,
         _REPOSITORY_CACHE,
         _OUTPUT_USER_ROOT,

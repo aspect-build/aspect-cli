@@ -5,12 +5,14 @@ load(
     "apply_output_base_suffix",
     "color_flags",
     "runner_diagnostics_flags",
+    "runner_executor_flags",
     "runner_flags",
 )
 load(
     "../private/lib/environment.axl",
     "bazel_misdetects_color",
     "get_workflows_environment",
+    "info",
     "print_environment_info",
     "sanitize_filename",
 )
@@ -24,6 +26,13 @@ def _workflows_impl(ctx: FeatureContext):
     bazel_trait = ctx.traits[BazelTrait]
 
     bazel_trait.extra_flags.extend(color_flags(bazel_misdetects_color(ctx.std.env)))
+
+    if ctx.args.remote_exec:
+        executor_flags = runner_executor_flags(environment)
+        if executor_flags:
+            bazel_trait.extra_flags.extend(executor_flags)
+        else:
+            info(ctx.std, "Remote execution was requested (--workflows:remote-exec) but ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset, so none is wired.")
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the
@@ -136,6 +145,16 @@ Workflows = feature(
             default = "0s",
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
+        ),
+        "remote_exec": args.boolean(
+            default = False,
+            description = "Run actions on the remote executor the runner environment names " +
+                          "(ASPECT_WORKFLOWS_REMOTE_EXECUTOR), by setting --remote_executor on this " +
+                          "task's Bazel call. Off by default because remote execution relocates " +
+                          "every action; the runner's cache and BES are wired regardless. Set it " +
+                          "once per repo in config.axl via ctx.features[Workflows].args.remote_exec, " +
+                          "or per task with --workflows:remote-exec. Vanilla `bazel` on the runner " +
+                          "opts in with --config=aspect-exec from the rc `aspect ci bazelrc` writes.",
         ),
         "runner_output_base_suffix": args.string(
             default = "",

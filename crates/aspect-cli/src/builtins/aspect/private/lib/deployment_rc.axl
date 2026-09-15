@@ -44,6 +44,12 @@ _CONFIG_PREFIX = "aspect-"
 _EXEC_SUFFIX = "-exec"
 _DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
 
+# The default deployment's remote-execution section. On a Workflows runner the
+# runner is the build's deployment, so `aspect ci bazelrc` writes the runner's
+# executor under this same name — and the collision check refuses a runner
+# that also records a default deployment with an executor.
+DEFAULT_EXEC_CONFIG = _DEFAULT_CONFIG + _EXEC_SUFFIX
+
 # The value-bearing flags these sections write, by name, so `strip_generated`
 # can recognize a section this command wrote into a user rc.
 SECTION_FLAG_NAMES = [
@@ -170,7 +176,7 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
                     flags = ["--config=" + name],
                 ))
             if d.exec:
-                aliases.append(RcConfig(name = _DEFAULT_CONFIG + _EXEC_SUFFIX, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
+                aliases.append(RcConfig(name = DEFAULT_EXEC_CONFIG, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
     return configs + aliases
 
 def config_collisions(configs: list) -> list:

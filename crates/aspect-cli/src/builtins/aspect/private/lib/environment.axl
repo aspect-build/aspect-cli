@@ -24,6 +24,11 @@ BuildEvents = record(
     results_url = field(str, default = ""),
 )
 
+# → Bazel `--remote_executor=<endpoint>`, only where a build opts in.
+RemoteExecutor = record(
+    endpoint = field(str, default = ""),
+)
+
 Runner = record(
     storage_path = field(str, default = DEFAULT_STORAGE_PATH),
     product_version = field(str, default = ""),
@@ -66,6 +71,7 @@ WorkflowsEnvironment = record(
     # Each field is independently None when its `_read_*` found no signals;
     # callers gate per field (e.g. plain GHA: runner == None but ci != None).
     remote_cache = field(RemoteCache | None, default = None),
+    remote_executor = field(RemoteExecutor | None, default = None),
     build_events = field(BuildEvents | None, default = None),
     runner = field(Runner | None, default = None),
     ci = field(CI | None, default = None),
@@ -218,6 +224,16 @@ def _read_remote_cache(std) -> RemoteCache | None:
         bytestream_uri_prefix = std.env.var("ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX") or "",
     )
 
+def _read_remote_executor(std) -> RemoteExecutor | None:
+    """Read the remote-execution endpoint; None when
+    ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset. Never wired on its own: remote
+    execution relocates every action, so a build names it (`--workflows:remote-exec`
+    on a task, `--config=aspect-exec` for vanilla `bazel`)."""
+    endpoint = std.env.var("ASPECT_WORKFLOWS_REMOTE_EXECUTOR") or ""
+    if not endpoint:
+        return None
+    return RemoteExecutor(endpoint = endpoint)
+
 def get_workflows_environment(std) -> WorkflowsEnvironment:
     """Read all Aspect-Workflows-managed environment state in one call.
 
@@ -226,6 +242,7 @@ def get_workflows_environment(std) -> WorkflowsEnvironment:
     """
     return WorkflowsEnvironment(
         remote_cache = _read_remote_cache(std),
+        remote_executor = _read_remote_executor(std),
         build_events = _read_build_events(std),
         runner = _read_runner(std),
         ci = _read_ci(std),

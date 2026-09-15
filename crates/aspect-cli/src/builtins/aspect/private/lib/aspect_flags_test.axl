@@ -22,10 +22,11 @@ load(
     "protected_omissions",
     "runner_bes_flags",
     "runner_diagnostics_flags",
+    "runner_executor_flags",
     "runner_flags",
     "written_flag_names",
 )
-load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
 
 def _eq(label, got, want):
     if got != want:
@@ -165,6 +166,22 @@ def _test_runner_bes_flags(_ctx):
     _startup, build = runner_flags(env, "/x")
     _lacks("runner_flags omits bes", build, "--bes_backend")
 
+def _test_runner_executor_flags(_ctx):
+    # Opt-in only: never in runner_flags or env_flags.
+    with_cache = WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "grpc://c"), remote_executor = RemoteExecutor(endpoint = "grpc://e"))
+    _eq("executor only, cache tuning already unconditional", runner_executor_flags(with_cache), ["--remote_executor=grpc://e"])
+    _startup, build = runner_flags(with_cache, "/x")
+    _lacks("runner_flags omits executor", build, "--remote_executor")
+    _lacks("env_flags omits executor", env_flags(with_cache), "--remote_executor")
+
+    # Without a separate cache the executor doubles as one and earns its tuning.
+    exec_only = WorkflowsEnvironment(remote_executor = RemoteExecutor(endpoint = "grpc://e"))
+    flags = runner_executor_flags(exec_only)
+    _has("executor", flags, "--remote_executor=grpc://e")
+    _has("cache tuning via executor", flags, "--remote_accept_cached")
+    _has("keepalive", flags, "--grpc_keepalive_timeout=30s")
+    _eq("no executor → nothing", runner_executor_flags(WorkflowsEnvironment(runner = Runner())), [])
+
 def _test_color_flags(_ctx):
     _eq("misdetected", color_flags(True), ["--color=yes"])
     _eq("detected fine", color_flags(False), [])
@@ -195,7 +212,7 @@ def _test_written_flag_names(_ctx):
     # `bazelrc_file.axl` recognizes every line.
     env = WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"), build_events = BuildEvents(backend = "x"), ci = CI(scm_repo_name = "x"))
     startup, build = runner_flags(env, "/x")
-    for f in startup + build + runner_diagnostics_flags(env) + runner_bes_flags(WorkflowsEnvironment(build_events = BuildEvents(backend = "x", results_url = "y"))):
+    for f in startup + build + runner_diagnostics_flags(env) + runner_bes_flags(WorkflowsEnvironment(build_events = BuildEvents(backend = "x", results_url = "y"))) + runner_executor_flags(WorkflowsEnvironment(remote_executor = RemoteExecutor(endpoint = "e"))):
         _eq("listed " + flag_name(f), flag_name(f) in names, True)
 
 def _test_omit_flags(_ctx):
@@ -231,6 +248,7 @@ _UNIT_TESTS = [
     _test_runner_flags_output_base,
     _test_runner_diagnostics_flags,
     _test_runner_bes_flags,
+    _test_runner_executor_flags,
     _test_color_flags,
     _test_diagnostics_upload_flags,
     _test_written_flag_names,
