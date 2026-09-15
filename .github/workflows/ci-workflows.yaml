@@ -725,6 +725,7 @@ jobs:
       - build-task-ephemeral
       - test-task-ephemeral
       - init-preset
+      - cache-diff-integration
       - cache-diff-task
       - cache-diff-debug-task
       - runner-smoke
