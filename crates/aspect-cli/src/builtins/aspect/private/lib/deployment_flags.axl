@@ -74,7 +74,7 @@ match the endpoint-auth host gate and receive its login JWT (see
 The wired endpoints also bring the `aspect_flags.axl` tuning they justify (cache
 tuning, BES enrichment, the keepalive) and, with BES, the build-diagnostics
 upload and the `--build_metadata` the Web UI reads — the same flags the
-`--config=aspect-*` sections of `aspect ci bazelrc` carry, so `aspect build
+`--config=aspect-*` sections of `aspect setup bazelrc` carry, so `aspect build
 --remote` and `bazel build --config=aspect-<name>` run alike. The user's
 `--bazel-flags:omit` applies to them like any injected flag.
 """

@@ -394,7 +394,7 @@ _DEPLOYMENT_VARS = ["ASPECT_WORKFLOWS_RUNNER", "ASPECT_WORKFLOWS_REMOTE_CACHE", 
 def env_names_deployment(env) -> bool:
     """Whether the environment says which deployment this machine is on: the
     runner marker, or any `ASPECT_WORKFLOWS_*` endpoint. Then that is the
-    deployment for every Bazel call here — `aspect ci bazelrc` takes its
+    deployment for every Bazel call here — `aspect setup bazelrc` takes its
     endpoints from the env and writes no `--config=aspect-*` sections, and a
     task refuses `--remote`, which would point at a configured deployment
     instead. The two are answers to the same question; a build routed off the

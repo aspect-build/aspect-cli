@@ -2,7 +2,7 @@
 
 Three surfaces set them: the Workflows feature injects them into every
 `aspect <task>` Bazel call on an Aspect Workflows runner, the Deployment feature
-into a task told `--remote`, and `aspect ci bazelrc` writes them to an rc for
+into a task told `--remote`, and `aspect setup bazelrc` writes them to an rc for
 vanilla `bazel` calls. All compose from the same selections here, so a flag is
 set the same way — and for the same reason — wherever it appears.
 
@@ -22,7 +22,7 @@ paths, the diagnostics file locations — are built by the functions below and
 documented there.
 
 Users may opt out of individual flags, per surface: `--bazel-flags:omit` for
-tasks (`feature/bazel_flags.axl`) and `--omit-bazel-flag` on `aspect ci bazelrc`.
+tasks (`feature/bazel_flags.axl`) and `--omit-bazel-flag` on `aspect setup bazelrc`.
 Both use `omit_flags`, which applies only to what Aspect injects, and
 `PROTECTED_FLAGS`, the flags that cannot be dropped: endpoints, credentials, and
 the runner's paths, without which the build stops talking to Aspect or breaks
@@ -207,7 +207,7 @@ def flag_name(flag) -> str:
 def unscoped(flag):
     """`flag` without a command scope: a `(flag, constraint, command)` entry
     becomes `(flag, constraint)`, or the bare flag when the constraint is empty.
-    For the rc `aspect ci bazelrc` writes, whose `common` sections Bazel already
+    For the rc `aspect setup bazelrc` writes, whose `common` sections Bazel already
     applies only where the option is accepted."""
     if type(flag) != "tuple" or len(flag) < 3:
         return flag
@@ -293,7 +293,7 @@ def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
     """The BES backend the runner environment names, for vanilla `bazel` on the
     runner: `--bes_backend` and, when surfaced, `--bes_results_url`. Tasks never
     take these — they run with `--nohome_rc` and the CLI streams their build
-    events from its own sink — so only `aspect ci bazelrc` writes them. A
+    events from its own sink — so only `aspect setup bazelrc` writes them. A
     repository routing vanilla calls to another backend opts out with
     `--omit-bazel-flag=--bes_backend`, which is why the pair is not in
     `PROTECTED_FLAGS`. Empty when the env names no BES backend."""
@@ -360,7 +360,7 @@ def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str
     its analysis cache, so a persistent runner keeps it warm between jobs
     (`apply_output_base_suffix` moves a task to a sibling server).
     `--nohome_rc`/`--nosystem_rc` make the workspace rc plus the injected flags
-    the whole configuration; they are command-line only, and `aspect ci bazelrc`
+    the whole configuration; they are command-line only, and `aspect setup bazelrc`
     drops them. Presumes the runner marker."""
     runner = environment.runner
     if runner == None:
@@ -458,7 +458,7 @@ def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
 
 def written_flag_names() -> list:
     """The name of every flag this file can produce, catalog and built alike. What
-    `aspect ci bazelrc` uses to recognize the lines it once wrote into a user rc."""
+    `aspect setup bazelrc` uses to recognize the lines it once wrote into a user rc."""
     return [flag_name(e.flag) for e in CATALOG + NO_COMPRESSION_FLAGS + WORKFLOWS_CACHE_FLAGS] + [
         _REMOTE_CACHE,
         _REMOTE_EXECUTOR,

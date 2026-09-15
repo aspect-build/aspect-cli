@@ -1,4 +1,4 @@
-"""The `--config=aspect-*` sections `aspect ci bazelrc` writes, one per Aspect
+"""The `--config=aspect-*` sections `aspect setup bazelrc` writes, one per Aspect
 deployment this machine knows (`ctx.aspect.auth.deployments()`) that advertises
 an endpoint:
 

@@ -163,7 +163,7 @@ Workflows = feature(
                           "every action; the runner's cache and BES are wired regardless. Set it " +
                           "once per repo in config.axl via ctx.features[Workflows].args.remote_exec, " +
                           "or per task with --workflows:remote-exec. Vanilla `bazel` on the runner " +
-                          "opts in with --config=aspect-exec from the rc `aspect ci bazelrc` writes.",
+                          "opts in with --config=aspect-exec from the rc `aspect setup bazelrc` writes.",
         ),
         "runner_output_base_suffix": args.string(
             default = "",

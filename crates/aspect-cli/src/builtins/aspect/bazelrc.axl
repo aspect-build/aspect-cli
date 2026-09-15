@@ -1,5 +1,6 @@
-"""`aspect ci bazelrc` — write a Bazel rc that configures vanilla `bazel` calls to
-use Aspect's remote services and recommended optimizations.
+"""`aspect setup bazelrc` — write a Bazel rc that configures vanilla `bazel` calls to
+use Aspect's remote services and recommended optimizations. `aspect ci bazelrc`,
+the name the CI integrations in the wild call, is kept as an alias that runs it.
 
 `aspect <task>` injects its Bazel flags itself (`feature/workflows.axl`,
 `feature/deployment.axl`, and `lib/aspect_flags.axl`, the table of every flag
@@ -8,7 +9,8 @@ of that. This command writes the equivalent where vanilla `bazel` will find it �
 `~/.bazelrc` is the first user rc Bazel loads, picked up with no `--bazelrc`
 plumbing. It is the in-CLI successor to `rosetta bazelrc`: the CI integrations
 (the setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab
-component) call it once `rosetta` is gone from the runner image.
+component) call it, as `aspect ci bazelrc`, once `rosetta` is gone from the
+runner image.
 
 Where the rc goes:
 
@@ -187,24 +189,47 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     info(ctx.std, summary + "; " + _IMPORT_VERBS[result.action] % user_rc + ".")
     return 0
 
+_BAZELRC_ARGS = {
+    "output": args.string(
+        default = "",
+        description = "Rc file to write, rewritten on every run. Defaults to `~/.bazelrc` on an Aspect Workflows runner and to `~/.aspect/bazelrc` elsewhere. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
+    ),
+    "import_into": args.string(
+        long = "import-into",
+        default = "",
+        description = "User rc that receives a `try-import <output>` line, added only when not already present. Defaults to `~/.bazelrc`; on an Aspect Workflows runner the output is `~/.bazelrc` itself and no import is needed.",
+    ),
+    "omit_bazel_flags": args.string_list(
+        long = "omit-bazel-flag",
+        description = "A Bazel flag this rc would otherwise set that you do not want, named as Aspect spells it (e.g. --omit-bazel-flag=--heap_dump_on_oom; a value after `=` is ignored). Repeat for several. Set it once per repo in config.axl via ctx.tasks[\"setup/bazelrc\"].args.omit_bazel_flags. Endpoints, credentials, and the runner's output paths cannot be omitted. Tasks have their own knob, --bazel-flags:omit.",
+    ),
+}
+
 bazelrc = task(
-    group = ["ci"],
+    group = ["setup"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a commented `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere nothing is enabled and the deployment sections are opt-in, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a commented `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere nothing is enabled and the deployment sections are opt-in, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper. `aspect ci bazelrc` is an alias.",
     implementation = _bazelrc_impl,
-    args = {
-        "output": args.string(
-            default = "",
-            description = "Rc file to write, rewritten on every run. Defaults to `~/.bazelrc` on an Aspect Workflows runner and to `~/.aspect/bazelrc` elsewhere. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
-        ),
-        "import_into": args.string(
-            long = "import-into",
-            default = "",
-            description = "User rc that receives a `try-import <output>` line, added only when not already present. Defaults to `~/.bazelrc`; on an Aspect Workflows runner the output is `~/.bazelrc` itself and no import is needed.",
-        ),
-        "omit_bazel_flags": args.string_list(
-            long = "omit-bazel-flag",
-            description = "A Bazel flag this rc would otherwise set that you do not want, named as Aspect spells it (e.g. --omit-bazel-flag=--heap_dump_on_oom; a value after `=` is ignored). Repeat for several. Set it once per repo in config.axl via ctx.tasks[\"bazelrc\"].args.omit_bazel_flags. Endpoints, credentials, and the runner's output paths cannot be omitted. Tasks have their own knob, --bazel-flags:omit.",
-        ),
-    },
+    args = _BAZELRC_ARGS,
+)
+
+def _ci_bazelrc_impl(ctx: TaskContext) -> int:
+    """Run `aspect setup bazelrc` with the same arguments. A separate process so
+    the canonical task resolves its own `ctx.tasks["setup/bazelrc"]` overrides;
+    a repository's omissions then apply whichever name a plugin calls."""
+    argv = ["setup", "bazelrc"]
+    if ctx.args.is_explicit("output"):
+        argv.append("--output=" + ctx.args.output)
+    if ctx.args.is_explicit("import_into"):
+        argv.append("--import-into=" + ctx.args.import_into)
+    argv.extend(["--omit-bazel-flag=" + flag for flag in ctx.args.omit_bazel_flags])
+    return ctx.std.process.command(ctx.std.env.current_exe()).args(argv).spawn().wait().code
+
+ci_bazelrc = task(
+    group = ["ci"],
+    kind = "bazelrc",
+    summary = "Alias of `aspect setup bazelrc`, kept for the CI integrations that call it.",
+    description = "Runs `aspect setup bazelrc` with the same arguments. The setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, and GitLab component call this name; new callers should use `aspect setup bazelrc`.",
+    implementation = _ci_bazelrc_impl,
+    args = _BAZELRC_ARGS,
 )

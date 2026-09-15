@@ -1,4 +1,4 @@
-"""The named `--config` groups every rc `aspect ci bazelrc` writes is built from.
+"""The named `--config` groups every rc `aspect setup bazelrc` writes is built from.
 
 Bazel collects every rc section before expanding any `--config`, so a group can
 be enabled by a `common --config=<group>` line and defined further down the same

@@ -11,7 +11,7 @@ repo in `config.axl`:
 
 It registers the omission on `BazelTrait.injected_flag_filters`, which the spawn
 path applies to every injected flag and never to the user's own. The rc
-`aspect ci bazelrc` writes has its own `--omit-bazel-flag`, since vanilla `bazel`
+`aspect setup bazelrc` writes has its own `--omit-bazel-flag`, since vanilla `bazel`
 and tasks are different contexts and may want different omissions.
 """
 
@@ -38,7 +38,7 @@ BazelFlags = feature(
                           "is ignored). Repeat for several. Applies to what Aspect injects, never to your own flags; " +
                           "set it once per repo in config.axl via ctx.features[BazelFlags].args.omit. Endpoints, " +
                           "credentials, and the runner's output paths cannot be omitted. The rc written by " +
-                          "`aspect ci bazelrc` has its own --omit-bazel-flag.",
+                          "`aspect setup bazelrc` has its own --omit-bazel-flag.",
         ),
     },
 )
