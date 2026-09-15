@@ -2519,8 +2519,9 @@ enum RefreshFailure {
     /// another organization.
     TenantChanged { was: String, now: String },
     /// The refresh itself failed: a revoked or expired refresh token, a network
-    /// error, a response with no usable bearer. The cause is logged at debug
-    /// level where it happened; the user is told to log in again.
+    /// error, a response with no usable bearer. The cause goes to the runtime
+    /// log (`ASPECT_DEBUG=1`) where it happened; the user is told to log in
+    /// again.
     Failed,
 }
 
@@ -2550,7 +2551,7 @@ async fn refresh_access_token(
     entry: &CredentialsEntry,
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
-        tracing::debug!("refreshing the stored credential failed: {cause:#}");
+        crate::trace!("refreshing the stored credential failed: {cause:#}");
         RefreshFailure::Failed
     };
     let auth_domain = entry
@@ -2565,7 +2566,7 @@ async fn refresh_access_token(
         frontegg_tenant_refresh(entry, auth_domain, client_id, &entry.tenant_id)
             .await
             .inspect_err(|e| {
-                tracing::debug!("tenant-scoped refresh refused, trying the standard grant: {e:#}")
+                crate::trace!("tenant-scoped refresh refused, trying the standard grant: {e:#}")
             })
             .ok()
     } else {
@@ -2685,11 +2686,11 @@ async fn select_tenant(
     }
     match frontegg_tenant_refresh(entry, auth_domain, client_id, tenant_id).await {
         Ok(refreshed) if refreshed.tenant_id == tenant_id => return Ok(refreshed),
-        Ok(refreshed) => tracing::debug!(
+        Ok(refreshed) => crate::trace!(
             "tenant-scoped refresh minted for {} rather than {tenant_id}; switching the active organization instead",
             refreshed.tenant_id
         ),
-        Err(e) => tracing::debug!(
+        Err(e) => crate::trace!(
             "tenant-scoped refresh refused; switching the active organization instead: {e:#}"
         ),
     }
@@ -3102,7 +3103,7 @@ async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
         Some(domain) => fetch_frontegg_tenants(domain, &entry.access_token)
             .await
             .unwrap_or_else(|e| {
-                tracing::debug!("falling back to the token's tenantIds claim: {e:#}");
+                crate::trace!("falling back to the token's tenantIds claim: {e:#}");
                 Vec::new()
             }),
         None => Vec::new(),
