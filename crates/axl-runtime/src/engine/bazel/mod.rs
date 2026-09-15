@@ -952,8 +952,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// def _health_probe_impl(ctx):
     ///     result = ctx.bazel.health_check(log = _indented)
     ///     if result.outcome == "unhealthy":
-    ///         fail("Bazel server is unhealthy: " + result.message)
+    ///         ctx.std.process.exit(1, "Bazel server is unhealthy: " + result.message)
     /// ```
+    ///
+    /// An unhealthy server is an expected refusal, so the example ends the
+    /// task with the message and no traceback; `fail()` is for bugs.
     fn health_check<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] log: NoneOr<values::Value<'v>>,
