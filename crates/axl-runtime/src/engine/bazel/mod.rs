@@ -1055,8 +1055,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   root here in a sub-workspace layout would read the outer
     ///   `.bazelrc` and leak the parent project's flags.
     /// * `startup_flags` - Startup flags (e.g. `["--bazelrc=/path/to/extra.bazelrc"]`).
-    /// * `flags` - Command flags to inject as synthetic `always` options; each
-    ///   element is a `str` or a `(flag, version_constraint)` tuple.
+    /// * `flags` - Command flags to inject as synthetic rc entries: a `str`, a
+    ///   `(flag, version_condition)` tuple, or `(flag, version_condition, command)`
+    ///   naming the section (`"build"` for an option only build-like commands
+    ///   accept; default `always`, which every command reads).
     /// * `skip_config_if_missing` - `--config` names to drop if undefined.
     /// * `version` - Bazel version for evaluating version-gated options. When
     ///   unset, the running Bazel is probed (only if a gated option exists).
@@ -1100,7 +1102,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// # Arguments
     /// * `startup_flags` - Startup flags carried by the run command.
-    /// * `flags` - Command flags, same `str | (str, str)` shape as `parse_rc`.
+    /// * `flags` - Command flags, same `str | (str, str) | (str, str, str)` shape as `parse_rc`.
     /// * `version` - Bazel version for evaluating version-gated options.
     fn new_rc<'v>(
         #[allow(unused)] this: values::Value<'v>,

@@ -59,6 +59,7 @@ load(
     "runner_exec_log_path",
     "runner_startup_flags",
     "temp_exec_log_path",
+    "unscoped",
     "written_flag_names",
 )
 load(
@@ -107,9 +108,11 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     detected Bazel version via the bazelrc runtime: a blank RunCommand whose
     `common` bucket holds every flag, expanded assumed-latest when the version is
     unknown. Config chain entries are kept verbatim ahead of the rest — the blank
-    RunCommand has no section for them to expand into."""
+    RunCommand has no section for them to expand into. Command scopes are
+    dropped: the rc writes every flag under `common`, which Bazel applies only
+    where the option is accepted."""
     chain = [f for f in flags if is_config_chain(f)]
-    rest = [f for f in flags if not is_config_chain(f)]
+    rest = [unscoped(f) for f in flags if not is_config_chain(f)]
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 

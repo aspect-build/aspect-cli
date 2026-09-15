@@ -32,6 +32,7 @@ load(
     "runner_profile_flags",
     "runner_repository_cache_flags",
     "runner_startup_flags",
+    "unscoped",
     "workflows_cache_flags",
     "written_flag_names",
 )
@@ -162,7 +163,7 @@ def _test_runner_diagnostics_flags(_ctx):
     env = WorkflowsEnvironment(runner = Runner(job_tmpdir = "/workflows"), build_events = BuildEvents(backend = "grpcs://bes"))
     flags = runner_diagnostics_flags(env)
     _eq("profile placed", "--profile=/workflows/command.profile.gz" in flags, True)
-    _eq("exec log gated", ("--execution_log_compact_file=/workflows/exec.log.zstd", ">=7.1.0") in flags, True)
+    _eq("exec log gated", ("--execution_log_compact_file=/workflows/exec.log.zstd", ">=7.1.0", "build") in flags, True)
 
     # Bazel 6 only knows `--experimental_remote_build_event_upload` (default
     # `all`), so the unprefixed spelling must be gated to 7+.
@@ -246,7 +247,15 @@ def _test_color_flags(_ctx):
 def _test_diagnostics_upload_flags(_ctx):
     # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.
     _eq("no path", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
-    _eq("with path", diagnostics_upload_flags("/x/e.zstd")[1], ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
+    _eq("with path, build-scoped", diagnostics_upload_flags("/x/e.zstd")[1], ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0", "build"))
+    _eq("scope stripped for the rc", unscoped(diagnostics_upload_flags("/x/e.zstd")[1]), ("--execution_log_compact_file=/x/e.zstd", ">=7.1.0"))
+    _eq("unscoped passthrough", [unscoped(f) for f in ["--a", ("--b", ">=1.0.0"), ("--c", "", "build")]], ["--a", ("--b", ">=1.0.0"), "--c"])
+
+    # Through the bazelrc runtime the scope holds: query never sees the
+    # execution log, test does (the cache-diff task queries with the task's rc).
+    rc = _ctx.bazel.new_rc(flags = diagnostics_upload_flags("/x/e.zstd"), version = "8.0.0")
+    _eq("query", _texts(rc.expand(command = "query")), ["--remote_build_event_upload=all"])
+    _eq("test", sorted(_texts(rc.expand(command = "test"))), ["--execution_log_compact_file=/x/e.zstd", "--remote_build_event_upload=all"])
 
 def _test_written_flag_names(_ctx):
     names = written_flag_names()
