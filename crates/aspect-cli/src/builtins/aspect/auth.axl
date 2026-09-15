@@ -252,7 +252,7 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
             return None
         wanted = chosen.name
     selected = creds.with_organization(wanted)
-    if selected.switched_active_organization:
+    if selected.tenant_id != creds.tenant_id:
         print("Your active organization is now " + wanted + " everywhere you are signed in, the browser included.")
     return selected
 

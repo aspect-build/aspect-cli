@@ -1442,9 +1442,9 @@ struct CredentialsEntry {
     prefer_id_token: bool,
     /// What kind of issuer minted this credential, read off the discovery
     /// response at login and again on every refresh ([`IssuerKind::or`] keeps a
-    /// detection once made). Drives which refresh the credential gets: an issuer
-    /// with the tenant API can re-mint for the pinned `tenant_id`. Defaulted so
-    /// entries written before this field existed load as plain OIDC sessions.
+    /// detection once made). An issuer with the tenant API can list the user's
+    /// organizations and switch between them at login. Defaulted so entries
+    /// written before this field existed load as plain OIDC sessions.
     #[serde(default, skip_serializing_if = "IssuerKind::is_oidc")]
     issuer_kind: IssuerKind,
 }
@@ -1453,12 +1453,10 @@ struct CredentialsEntry {
 ///
 /// Aspect Cloud's identity provider mints tenant-bound user tokens (the
 /// `tenantId` claim), and a user who belongs to several tenants has one *active*
-/// tenant kept server-side that any client can switch. The plain OAuth refresh
-/// grant mints for whichever tenant is active at that moment. The provider also
-/// serves a tenant API under the issuer: the user's tenants, a switch of the
-/// active one, and a refresh pinned to a chosen tenant. A credential from such an
-/// issuer is refreshed through that pinned refresh first; anything else is
-/// refreshed with the standard grant.
+/// tenant kept server-side that any client can switch. The OAuth refresh grant
+/// mints for whichever tenant is active at that moment. The provider also serves
+/// a tenant API under the issuer: the user's tenants, and a switch of the active
+/// one. The login task uses both to offer and apply an organization choice.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Allocative)]
 pub(crate) enum IssuerKind {
     #[default]
@@ -1476,7 +1474,7 @@ impl IssuerKind {
     /// The kind after another look at the issuer: the tenant API once seen is
     /// kept. Detection rides on a discovery request that can time out or be
     /// refused for a moment, and a miss must not demote a credential to plain
-    /// OIDC, which would drop its organization list and pinned refresh.
+    /// OIDC, which would drop its organization list.
     fn or(self, other: IssuerKind) -> IssuerKind {
         if self == IssuerKind::TenantApi || other == IssuerKind::TenantApi {
             IssuerKind::TenantApi
@@ -1500,13 +1498,8 @@ impl IssuerKind {
 
 const TENANT_API_TRACE_HEADER: &str = "frontegg-trace-id";
 
-/// The tenant API wants the issuer's bare host here; the edge in front of it
-/// rejects the request when given a URL.
-const TENANT_API_HOST_HEADER: &str = "frontegg-vendor-host";
-
 /// The tenant API paths the CLI calls, all served under the issuer.
 const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v1/api-token";
-const TENANT_API_REFRESH_PATH: &str = "/identity/resources/auth/v1/user/token/refresh";
 const TENANT_API_SWITCH_PATH: &str = "/identity/resources/users/v1/tenant";
 const TENANT_API_TENANTS_PATH: &str = "/identity/resources/users/v3/me/tenants";
 
@@ -2101,15 +2094,14 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
 /// `id_token` when present (self-hosted edges validate the OIDC id_token), else
-/// the `access_token` (the Aspect Cloud flow). The tenant API answers with the
-/// same fields, in places spelled camelCase, hence the aliases.
+/// the `access_token` (the Aspect Cloud flow).
 #[derive(Deserialize)]
 struct TokenResponse {
-    #[serde(default, alias = "accessToken")]
+    #[serde(default)]
     access_token: String,
-    #[serde(default, alias = "idToken")]
+    #[serde(default)]
     id_token: String,
-    #[serde(default, alias = "refreshToken")]
+    #[serde(default)]
     refresh_token: String,
 }
 
@@ -2557,16 +2549,8 @@ impl RefreshFailure {
     }
 }
 
-/// Mint a fresh credential for `entry`, pinned to the tenant it was issued for.
-///
-/// A credential from an issuer with the tenant API is refreshed through its
-/// tenant-scoped endpoint ([`tenant_scoped_refresh`]), which mints for the pinned
-/// tenant whatever the user has active elsewhere. When that is refused, the
-/// standard refresh grant is tried, as the provider's own SDKs do: the
-/// tenant-scoped endpoint can refuse a refresh token the standard grant still
-/// accepts. Any other credential goes straight to the standard grant. Either way
-/// the result is checked against the pinned tenant ([`ensure_tenant_unchanged`])
-/// before it is returned.
+/// Mint a fresh credential for `entry` with the standard refresh grant, refusing
+/// one minted for a different tenant than `entry` was ([`ensure_tenant_unchanged`]).
 ///
 /// The issuer is looked at again on the way ([`resolve_oidc_endpoints`]), so a
 /// credential whose login missed the tenant API is upgraded to it here and
@@ -2587,24 +2571,10 @@ async fn refresh_access_token(
         .as_deref()
         .ok_or_else(|| failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh")))?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
-    let pinned = if issuer_kind == IssuerKind::TenantApi && !entry.tenant_id.is_empty() {
-        tenant_scoped_refresh(entry, auth_domain, client_id, &entry.tenant_id)
-            .await
-            .inspect_err(|e| {
-                crate::trace!("tenant-scoped refresh refused, trying the standard grant: {e:#}")
-            })
-            .ok()
-    } else {
-        None
-    };
-    let mut refreshed = match pinned {
-        Some(refreshed) => refreshed,
-        None => refresh_with_grant(entry, &endpoints.token, client_id)
-            .await
-            .map_err(failed)?,
-    };
-    refreshed.issuer_kind = issuer_kind;
+    let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
+        .await
+        .map_err(failed)?;
+    refreshed.issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
     ensure_tenant_unchanged(entry, refreshed)
 }
 
@@ -2628,47 +2598,9 @@ async fn refresh_with_grant(
     entry.renewed(token_resp)
 }
 
-/// The tenant API's refresh: a new token for `tenant_id` from `entry`'s refresh
-/// token, independent of which tenant the user has active elsewhere.
-///
-/// The request is shaped the way the provider's native SDKs shape it: the refresh
-/// token travels in the `fe_refresh_*` cookie ([`tenant_api_refresh_cookie`]), the
-/// current bearer (expired or not) in `Authorization`, and the issuer's bare host
-/// in [`TENANT_API_HOST_HEADER`].
-async fn tenant_scoped_refresh(
-    entry: &CredentialsEntry,
-    auth_domain: &str,
-    client_id: &str,
-    tenant_id: &str,
-) -> anyhow::Result<CredentialsEntry> {
-    let token_resp: TokenResponse = send_json(
-        reqwest::Client::new()
-            .post(tenant_api_url(auth_domain, TENANT_API_REFRESH_PATH))
-            .header(
-                "Cookie",
-                tenant_api_refresh_cookie(client_id, &entry.refresh_token),
-            )
-            .bearer_auth(&entry.access_token)
-            .header(TENANT_API_HOST_HEADER, endpoint_host_str(auth_domain))
-            .json(&serde_json::json!({ "tenantId": tenant_id })),
-        "tenant refresh",
-    )
-    .await?;
-    entry.renewed(token_resp)
-}
-
-/// The cookie the tenant API reads a refresh token from: named after the client
-/// id with its first dash removed, as the provider's SDKs derive it.
-fn tenant_api_refresh_cookie(client_id: &str, refresh_token: &str) -> String {
-    format!(
-        "fe_refresh_{}={refresh_token}",
-        client_id.replacen('-', "", 1)
-    )
-}
-
-/// Switch the user's active tenant at the issuer, the state its plain refresh
-/// grant mints for. What the provider's tenant-switch SDK call does, and what a
-/// web session's organization switcher does; every client of this user sees it.
+/// Switch the user's active tenant at the issuer, the state its refresh grant
+/// mints for. What the provider's tenant-switch SDK call does, and what a web
+/// session's organization switcher does; every client of this user sees it.
 async fn switch_active_tenant(
     auth_domain: &str,
     bearer: &str,
@@ -2685,25 +2617,15 @@ async fn switch_active_tenant(
     Ok(())
 }
 
-/// The outcome of [`select_tenant`]: the re-minted credential, and whether the
-/// user's active tenant at the issuer had to be switched to get it (a change
-/// every other client of that user sees, so the login task reports it).
-struct SelectedTenant {
-    entry: CredentialsEntry,
-    switched_active: bool,
-}
-
-/// Re-mint `entry` for `tenant_id`, one of its user's organizations.
-///
-/// The tenant-scoped refresh comes first, since it changes nothing outside this
-/// credential. When the issuer still answers with another tenant, the user's
-/// active tenant is switched at the issuer and the standard grant re-run; the user
-/// chose this organization explicitly, so the switch other clients will notice
-/// is the intended one. Errors unless the result is for `tenant_id`.
+/// Re-mint `entry` for `tenant_id`, one of its user's organizations, by
+/// switching the user's active tenant at the issuer and re-running the refresh
+/// grant. The user chose this organization explicitly, so the switch other
+/// clients will notice is the intended one; the login task says so. Errors
+/// unless the result is for `tenant_id`.
 async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
-) -> anyhow::Result<SelectedTenant> {
+) -> anyhow::Result<CredentialsEntry> {
     let auth_domain = entry
         .auth_domain
         .as_deref()
@@ -2718,21 +2640,6 @@ async fn select_tenant(
         ));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    match tenant_scoped_refresh(entry, auth_domain, client_id, tenant_id).await {
-        Ok(refreshed) if refreshed.tenant_id == tenant_id => {
-            return Ok(SelectedTenant {
-                entry: refreshed,
-                switched_active: false,
-            });
-        }
-        Ok(refreshed) => crate::trace!(
-            "tenant-scoped refresh minted for {} rather than {tenant_id}; switching the active organization instead",
-            refreshed.tenant_id
-        ),
-        Err(e) => crate::trace!(
-            "tenant-scoped refresh refused; switching the active organization instead: {e:#}"
-        ),
-    }
     switch_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
     let refreshed = refresh_with_grant(entry, &endpoints.token, client_id).await?;
     if refreshed.tenant_id != tenant_id {
@@ -2741,10 +2648,7 @@ async fn select_tenant(
             refreshed.tenant_id
         ));
     }
-    Ok(SelectedTenant {
-        entry: refreshed,
-        switched_active: true,
-    })
+    Ok(refreshed)
 }
 
 /// Refuse a refreshed credential minted for a different tenant than `prior`'s.
@@ -2936,10 +2840,6 @@ pub struct AuthCredentials {
     pub tenant_id: String,
     pub access_token: String,
     pub token_status: String,
-    /// Set on the value `with_organization` returns when getting it meant
-    /// switching the user's active organization at the issuer, which other
-    /// sessions of that user (the browser's included) follow. Not persisted.
-    pub switched_active_organization: bool,
     // Internal fields preserved for persist()
     pub(crate) refresh_token: String,
     pub(crate) auth_domain: Option<String>,
@@ -3016,9 +2916,11 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
 
     /// This login re-minted for organization `org`, named by display name
     /// (case-insensitive) or tenant id ([`find_organization`]). Returns the same
-    /// credential when `org` is already the one it is minted for. Ends the task
-    /// with a message when `org` names none of the user's organizations or the
-    /// issuer will not mint for it.
+    /// credential when `org` is already the one it is minted for; otherwise the
+    /// user's active organization at the issuer is switched to get it
+    /// ([`select_tenant`]), which the caller can tell from the changed
+    /// `tenant_id`. Ends the task with a message when `org` names none of the
+    /// user's organizations or the issuer will not mint for it.
     fn with_organization<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] org: &str,
@@ -3040,19 +2942,12 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
                 chosen.name, chosen.id
             ))
         })?;
-        let mut creds = AuthCredentials::from_entry(&selected.entry);
-        creds.switched_active_organization = selected.switched_active;
-        Ok(heap.alloc(creds))
+        Ok(heap.alloc(AuthCredentials::from_entry(&selected)))
     }
 
     #[starlark(attribute)]
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
-    }
-
-    #[starlark(attribute)]
-    fn switched_active_organization<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        attr_bool!(this, AuthCredentials, switched_active_organization)
     }
 }
 
@@ -3066,7 +2961,6 @@ impl AuthCredentials {
             tenant_id: entry.tenant_id.clone(),
             access_token: entry.access_token.clone(),
             token_status: format_token_status(exp),
-            switched_active_organization: false,
             refresh_token: entry.refresh_token.clone(),
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
@@ -6631,18 +6525,6 @@ mod tests {
     }
 
     #[test]
-    fn tenant_api_refresh_cookie_drops_the_client_ids_first_dash_only() {
-        assert_eq!(
-            tenant_api_refresh_cookie("ab12-cd34-ef56", "rt"),
-            "fe_refresh_ab12cd34-ef56=rt"
-        );
-        assert_eq!(
-            tenant_api_refresh_cookie("nodash", "rt"),
-            "fe_refresh_nodash=rt"
-        );
-    }
-
-    #[test]
     fn a_refresh_for_another_tenant_is_refused() {
         let prior = entry_with_tenant("t1", IssuerKind::TenantApi);
         match ensure_tenant_unchanged(&prior, entry_with_tenant("t2", IssuerKind::TenantApi)) {
@@ -6714,31 +6596,6 @@ mod tests {
         let msg = unknown_organization_message("acme", &[]);
         assert!(msg.contains("reports no organizations"), "{msg}");
         assert!(!msg.contains("Choose one of"), "{msg}");
-    }
-
-    #[test]
-    fn token_response_accepts_camel_case() {
-        let r: TokenResponse =
-            serde_json::from_str(r#"{"accessToken":"a","refreshToken":"r","idToken":"i"}"#)
-                .unwrap();
-        assert_eq!(
-            (
-                r.access_token.as_str(),
-                r.refresh_token.as_str(),
-                r.id_token.as_str()
-            ),
-            ("a", "r", "i")
-        );
-        let r: TokenResponse =
-            serde_json::from_str(r#"{"access_token":"a","refresh_token":"r"}"#).unwrap();
-        assert_eq!(
-            (
-                r.access_token.as_str(),
-                r.refresh_token.as_str(),
-                r.id_token.as_str()
-            ),
-            ("a", "r", "")
-        );
     }
 
     #[test]
@@ -6974,56 +6831,7 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn a_tenant_api_credential_refreshes_through_the_tenant_scoped_endpoint() {
-        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
-            "/.well-known/openid-configuration" => (404, String::new()),
-            TENANT_API_REFRESH_PATH => (200, token_body_for("t1")),
-            other => panic!("unexpected request to {other}"),
-        });
-        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
-
-        let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
-            .unwrap();
-        assert_eq!(refreshed.tenant_id, "t1");
-        assert_eq!(refreshed.refresh_token, "rotated");
-        assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
-
-        // Shaped as the tenant API expects: the pinned tenant in the body, the
-        // refresh token in its cookie, the current bearer, and the bare host.
-        let [_discovery, request] = issuer.finish().try_into().ok().unwrap();
-        assert_eq!(request.path, TENANT_API_REFRESH_PATH);
-        assert_eq!(request.method, "POST");
-        assert!(
-            request.body.contains(r#""tenantId":"t1""#),
-            "{}",
-            request.body
-        );
-        assert!(
-            request
-                .headers
-                .contains("cookie: fe_refresh_clientid-1=refresh-token"),
-            "{}",
-            request.headers
-        );
-        assert!(
-            request
-                .headers
-                .contains(&format!("authorization: bearer {}", entry.access_token).to_lowercase()),
-            "{}",
-            request.headers
-        );
-        assert!(
-            request
-                .headers
-                .contains(&format!("{TENANT_API_HOST_HEADER}: 127.0.0.1\r\n")),
-            "{}",
-            request.headers
-        );
-    }
-
-    /// The routes the standard grant takes against an issuer serving no discovery
+    /// The routes the refresh grant takes against an issuer serving no discovery
     /// document: the conventional token endpoint after a 404'd discovery probe.
     fn respond_to_grant(request: &Received, tenant: &str) -> (u16, String) {
         match request.path.as_str() {
@@ -7034,40 +6842,30 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_tenant_refresh_falls_back_to_the_standard_grant() {
-        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
-            TENANT_API_REFRESH_PATH => (401, r#"{"errors":["nope"]}"#.into()),
-            _ => respond_to_grant(request, "t1"),
-        });
+    fn a_refresh_for_the_same_tenant_rotates_the_credential() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let refreshed = current_thread_runtime()
             .block_on(refresh_access_token(&entry))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.refresh_token, "rotated");
+        assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
 
         let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
         assert_eq!(
             paths,
-            vec![
-                "/.well-known/openid-configuration",
-                TENANT_API_REFRESH_PATH,
-                "/oauth/token"
-            ]
+            vec!["/.well-known/openid-configuration", "/oauth/token"]
         );
     }
 
     #[test]
     fn a_login_that_missed_the_tenant_api_is_upgraded_on_refresh() {
         // Stored as plain OIDC (the discovery request failed at login), but the
-        // issuer answers with its trace header now, even on a 404: the refresh
-        // takes the tenant-scoped path and the returned credential records the
-        // tenant API, so the caller persists the upgrade.
-        let issuer = MockIssuer::start_tenant_api(2, |request| match request.path.as_str() {
-            "/.well-known/openid-configuration" => (404, String::new()),
-            TENANT_API_REFRESH_PATH => (200, token_body_for("t1")),
-            other => panic!("unexpected request to {other}"),
-        });
+        // issuer answers with its trace header now, even on a 404: the returned
+        // credential records the tenant API, so the caller persists the upgrade.
+        let issuer = MockIssuer::start_tenant_api(2, |request| respond_to_grant(request, "t1"));
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let refreshed = current_thread_runtime()
@@ -7088,11 +6886,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fallback_grant_for_another_tenant_is_refused() {
-        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
-            TENANT_API_REFRESH_PATH => (401, String::new()),
-            _ => respond_to_grant(request, "t2"),
-        });
+    fn a_grant_for_another_tenant_is_refused() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t2"));
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let failure = current_thread_runtime()
@@ -7141,11 +6936,8 @@ mod tests {
     }
 
     #[test]
-    fn selecting_an_organization_switches_the_active_tenant_when_the_pin_is_ignored() {
-        // The tenant-scoped refresh answers with the old tenant, so the login
-        // falls back to switching the active tenant and re-running the grant.
-        let issuer = MockIssuer::start(4, |request| match request.path.as_str() {
-            TENANT_API_REFRESH_PATH => (200, token_body_for("t1")),
+    fn selecting_an_organization_switches_the_active_tenant_then_refreshes() {
+        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
             TENANT_API_SWITCH_PATH => {
                 assert_eq!(request.method, "PUT");
                 assert!(
@@ -7162,36 +6954,17 @@ mod tests {
         let selected = current_thread_runtime()
             .block_on(select_tenant(&entry, "t2"))
             .unwrap();
-        assert_eq!(selected.entry.tenant_id, "t2");
-        assert!(selected.switched_active);
+        assert_eq!(selected.tenant_id, "t2");
 
         let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
         assert_eq!(
             paths,
             vec![
                 "/.well-known/openid-configuration",
-                TENANT_API_REFRESH_PATH,
                 TENANT_API_SWITCH_PATH,
                 "/oauth/token"
             ]
         );
-    }
-
-    #[test]
-    fn selecting_an_organization_takes_the_pinned_refresh_when_honored() {
-        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
-            "/.well-known/openid-configuration" => (404, String::new()),
-            TENANT_API_REFRESH_PATH => (200, token_body_for("t2")),
-            other => panic!("unexpected request to {other}"),
-        });
-        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
-
-        let selected = current_thread_runtime()
-            .block_on(select_tenant(&entry, "t2"))
-            .unwrap();
-        assert_eq!(selected.entry.tenant_id, "t2");
-        assert!(!selected.switched_active);
-        assert_eq!(issuer.finish().len(), 2);
     }
 
     #[test]
