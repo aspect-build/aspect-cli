@@ -48,7 +48,11 @@ vanilla build off the runner's own services. Where the environment is silent,
 nothing is enabled and the configured deployments (`aspect auth status`) get
 the opt-in sections of `lib/deployment_rc.axl`, each chaining the common and
 CI-host groups and the tuning its endpoints justify, so the file is inert until
-a section is named and safe to import into a developer's rc. `--announce_rc`
+a section is named and safe to import into a developer's rc. With no deployment
+on record there would be nothing to point at, so the command stops and says to
+log in (`aspect auth login` records Aspect Cloud's endpoints; `aspect auth
+configure` adds a single-tenant deployment) before writing anything.
+`--announce_rc`
 names the group every flag came from either way. Startup options have no
 `--config`, so the runner's output paths are plain `startup` lines. The
 credential helper the sections name is `aspect`, which Bazel resolves on PATH
@@ -213,7 +217,10 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     env_deployment = env_names_deployment(ctx.std.env)
     (groups, enabled) = _groups(ctx, environment, on_runner, env_deployment, exec_log_path)
-    configs = groups if env_deployment else groups + _sections(ctx, groups)
+    sections = [] if env_deployment else _sections(ctx, groups)
+    if not env_deployment and not sections:
+        return TaskConclusion(exit_code = 1, message = "No Aspect deployment is configured here, so there is nothing for the rc to point `bazel` at. Log in first — `aspect auth login` records Aspect Cloud's endpoints — and to target a single-tenant Aspect Workflows deployment as well, run `aspect auth configure <host>` beforehand. Then rerun `aspect setup bazelrc`.")
+    configs = groups + sections
     collisions = config_collisions(configs)
     if collisions:
         return TaskConclusion(exit_code = 1, message = "\n".join(collisions))
@@ -291,15 +298,12 @@ def _report(written: list, import_result, importer: str, imported: str, shown, s
     lines.append("Commit these with your repository.")
 
     lines.append("")
-    if sections:
-        lines.append("Choose a deployment with --config on any bazel command:")
-        ordered = [c for c in sections if c.name == "aspect"] + [c for c in sections if c.name != "aspect"]
-        width = max([len(c.name) for c in ordered]) + len("--config=")
-        for c in ordered:
-            flag = "--config=" + c.name
-            lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
-    else:
-        lines.append("No deployment advertises endpoints yet, so the rc defines no --config sections; `aspect auth login` records Aspect Cloud's, then rerun this command.")
+    lines.append("Choose a deployment with --config on any bazel command:")
+    ordered = [c for c in sections if c.name == "aspect"] + [c for c in sections if c.name != "aspect"]
+    width = max([len(c.name) for c in ordered]) + len("--config=")
+    for c in ordered:
+        flag = "--config=" + c.name
+        lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
     lines.append("The file is a starting point: edit it as your repository needs; rerunning `aspect setup bazelrc` restores it.")
 
     lines.append("")
