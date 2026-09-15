@@ -1,6 +1,7 @@
 """`aspect setup bazelrc` — write a Bazel rc that configures vanilla `bazel` calls to
 use Aspect's remote services and recommended optimizations. `aspect ci bazelrc`,
-the name the CI integrations in the wild call, is kept as an alias that runs it.
+the name the CI integrations in the wild call, is the same task under its old
+group.
 
 `aspect <task>` injects its Bazel flags itself (`feature/workflows.axl`,
 `feature/deployment.axl`, and `lib/aspect_flags.axl`, the table of every flag
@@ -213,23 +214,11 @@ bazelrc = task(
     args = _BAZELRC_ARGS,
 )
 
-def _ci_bazelrc_impl(ctx: TaskContext) -> int:
-    """Run `aspect setup bazelrc` with the same arguments. A separate process so
-    the canonical task resolves its own `ctx.tasks["setup/bazelrc"]` overrides;
-    a repository's omissions then apply whichever name a plugin calls."""
-    argv = ["setup", "bazelrc"]
-    if ctx.args.is_explicit("output"):
-        argv.append("--output=" + ctx.args.output)
-    if ctx.args.is_explicit("import_into"):
-        argv.append("--import-into=" + ctx.args.import_into)
-    argv.extend(["--omit-bazel-flag=" + flag for flag in ctx.args.omit_bazel_flags])
-    return ctx.std.process.command(ctx.std.env.current_exe()).args(argv).spawn().wait().code
-
 ci_bazelrc = task(
     group = ["ci"],
     kind = "bazelrc",
     summary = "Alias of `aspect setup bazelrc`, kept for the CI integrations that call it.",
-    description = "Runs `aspect setup bazelrc` with the same arguments. The setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, and GitLab component call this name; new callers should use `aspect setup bazelrc`.",
-    implementation = _ci_bazelrc_impl,
+    description = "The same command as `aspect setup bazelrc`, under the name the setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, and GitLab component call; new callers should use `aspect setup bazelrc`. Config overrides for this name go to ctx.tasks[\"ci/bazelrc\"].",
+    implementation = _bazelrc_impl,
     args = _BAZELRC_ARGS,
 )
