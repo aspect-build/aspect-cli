@@ -231,13 +231,17 @@ def advertised_results_url(sources: list[(str, str)], rc, bes_sinks: list, comma
             return results_url
     return ""
 
-def bes_results_url_flag(sources: list[(str, str)], rc, bes_sinks: list, command: str = "build") -> list:
-    """`["--bes_results_url=<url>"]` when *Bazel* uploads the BES itself, else `[]`.
+def bes_results_url_flag(sources: list[(str, str)], rc, command: str = "build") -> list:
+    """`["--bes_results_url=<url>"]` when *Bazel* uploads the BES itself to a backend
+    with an advertised viewer, else `[]`.
 
     Only Bazel consumes this flag, and only its BES module — the one `--bes_backend`
     activates — reads it, to print "Streaming build results to: …" and to key the link
-    on its own `invocation_id`. Passing it on the CLI-streamed path would inject a flag
-    nothing acts on, so that path announces the URL itself; see
+    on its own `invocation_id`. So the viewer is matched against Bazel's backend
+    alone, never the CLI's sinks: when Bazel uploads to a third party while the CLI
+    streams to Aspect, Aspect's viewer would name an invocation the backend indexes
+    under the sink's id, not Bazel's, and the third party would be handed a URL it
+    does not serve. The CLI-streamed path announces its own URL instead; see
     `announce_bes_results_url`.
 
     A `--bes_results_url` the user already set — command line, `.bazelrc`, or an
@@ -248,7 +252,7 @@ def bes_results_url_flag(sources: list[(str, str)], rc, bes_sinks: list, command
     if not bazel_bes_backend(rc, command):
         return []
 
-    results_url = advertised_results_url(sources, rc, bes_sinks, command)
+    results_url = advertised_results_url(sources, rc, [], command)
     return ["--bes_results_url=" + results_url] if results_url else []
 
 def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
