@@ -143,6 +143,7 @@ def _runinfo_aspect_impl(target, ctx):
         args = _expand_and_tokenize_args(ctx, target),
         environment = env,
         inherited_environment = inherited,
+        tags = getattr(ctx.rule.attr, "tags", []),
     )
 
     out = ctx.actions.declare_file(target.label.name + ".aspect_runinfo.json")
@@ -426,11 +427,12 @@ def _get_default_outputs(state: struct, target: str) -> list[str]:
 def _read_runinfo(state: struct, target_key: str) -> struct | None:
     """Parse the `aspect_runinfo` JSON the injected aspect wrote for `target_key`.
 
-    Returns `struct(executable, args, environment, inherited_environment)` —
+    Returns `struct(executable, args, environment, inherited_environment, tags)` —
     `executable` the runfiles-relative short_path of the binary, `args` the
-    expanded+tokenized `args` attribute, and the `RunEnvironmentInfo` env split.
-    `None` when the aspect didn't run for this target (no injection, or a
-    non-runnable target the aspect skipped) or when `ctx` is absent (unit tests).
+    expanded+tokenized `args` attribute, the `RunEnvironmentInfo` env split,
+    and `tags` the target's `tags` attribute. `None` when the aspect didn't run
+    for this target (no injection, or a non-runnable target the aspect skipped)
+    or when `ctx` is absent (unit tests).
     """
     if state.ctx == None or target_key not in state.runinfo_fileset:
         return None
@@ -445,6 +447,7 @@ def _read_runinfo(state: struct, target_key: str) -> struct | None:
             args = parsed.get("args", []),
             environment = parsed.get("environment", {}),
             inherited_environment = parsed.get("inherited_environment", []),
+            tags = parsed.get("tags", []),
         )
     return None
 
@@ -452,15 +455,16 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Resolve `target` to an executable path and runfiles directory.
 
     Returns `struct(path, runfiles_dir, runfiles_workspace_dir, args,
-    environment, inherited_environment)` or `None` when the target produced no
-    BES `target_completed` event or its default output group has no selectable
-    executable.
+    environment, inherited_environment, tags)` or `None` when the target
+    produced no BES `target_completed` event or its default output group has no
+    selectable executable.
 
-    `args` / `environment` / `inherited_environment` come from the injected
+    `args` / `environment` / `inherited_environment` / `tags` come from the injected
     `runinfo` aspect (see `runinfo_aspect_flags`): the expanded+tokenized `args`
-    attribute and the target's `RunEnvironmentInfo` env, for `_spawn` to replay
-    the way `bazel run` does. They are empty when the aspect didn't run — e.g.
-    `delivery`, which doesn't inject it, and the unit tests.
+    attribute, the target's `RunEnvironmentInfo` env, and its `tags` attribute.
+    `_spawn` replays the args and environment the way `bazel run` does. They are
+    empty when the aspect didn't run — e.g. `delivery`, which doesn't inject it,
+    and the unit tests.
 
     `runfiles_dir` is the resolved runfiles directory path (e.g.
     `…/format.runfiles`), or `None` when no `<entrypoint>.runfiles`
@@ -546,6 +550,7 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         args = runinfo.args if runinfo != None else [],
         environment = runinfo.environment if runinfo != None else {},
         inherited_environment = runinfo.inherited_environment if runinfo != None else [],
+        tags = runinfo.tags if runinfo != None else [],
     )
 
 def _entrypoint_ready(state: struct, target: str) -> bool:
@@ -567,7 +572,7 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, stdin: str | None = None, env: dict | None = None) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
@@ -575,7 +580,9 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     the caller poll `try_wait()` for liveness and read the files after exit
     without draining a pipe. Otherwise `capture=True` pipes both streams for a
     single `wait_with_output()`. When neither is set the child inherits our
-    stdout/stderr.
+    stdout/stderr. `stdin` accepts the `Command.stdin` modes ("piped" for the
+    ibazel notify protocol); default inherits ours. `env` entries are applied
+    last, over the target's `RunEnvironmentInfo` and the runfiles/BUILD_* vars.
 
     The argv is `ep.args + args`: the target's `args` attribute (expanded and
     tokenized by the `runinfo` aspect) precedes the caller's forwarded args,
@@ -618,6 +625,10 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .args(getattr(ep, "args", []) + list(args))
     for k, v in runfiles_env(ep).items():
         cmd = cmd.env(k, v)
+    for k, v in (env or {}).items():
+        cmd = cmd.env(k, v)
+    if stdin != None:
+        cmd = cmd.stdin(stdin)
     if stdout_path:
         cmd = cmd.stdout(ctx.std.fs.create(stdout_path))
     if stderr_path:
@@ -705,7 +716,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           aspect completion; targets still not-ready at build end are resolved
           via `determine_entrypoint` (non-runnable ones never turn ready).
 
-      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment) | None
+      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment, tags) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
@@ -713,7 +724,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
           cwd `bazel run` uses; usually `…/format.runfiles/_main`), or `None`
           when `runfiles_dir` is `None`. `args` / `environment` /
-          `inherited_environment` carry the `runinfo` aspect's capture (empty
+          `inherited_environment` / `tags` carry the `runinfo` aspect's capture (empty
           when the caller didn't inject it — i.e. constructed `runnable` without
           `rc`, or built without `r.flags`).
 
@@ -725,7 +736,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           the build's `--remote_download_outputs` setting; the caller is
           responsible for materializing what it intends to read.
 
-      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None) → Child
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, stdin=None, env=None) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -736,6 +747,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           Pass `stdout_path` / `stderr_path` to redirect the child's streams to
           files (so a non-blocking `try_wait()` reap can read them after exit
           without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
+          `stdin` accepts the `Command.stdin` modes. `env` is applied last and
+          may override or remove variables inherited from the target or runfiles.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -768,5 +781,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, stdin = None, env = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, stdin, env),
     )
