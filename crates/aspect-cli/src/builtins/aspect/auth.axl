@@ -213,21 +213,22 @@ def _print_configured_usage_hint(summary):
 
 def organization_label(org) -> str:
     """How an organization reads in a prompt or a list: its name with its id, or
-    the id alone when no name came back for it, and a marker on the one the
-    login is currently minted for."""
+    the id alone when no name came back for it, and a marker on the account's
+    default, the one this login was minted for."""
     label = org.name if org.name == org.id else org.name + " (" + org.id + ")"
-    return label + (" [current]" if org.active else "")
+    return label + (" [default]" if org.default else "")
 
 def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -> aspect.auth.AuthCredentials | None:
     """The login re-minted for the organization this session should use.
 
-    A user who belongs to several organizations has one active at the issuer,
-    and that is the one the browser login came back for. `--org` (a name or id)
-    picks another; otherwise a TTY is prompted, and off a TTY the login fails
-    rather than landing in whichever organization happened to be active. One
-    organization, or an issuer that reports none, needs no choice. When getting
-    the chosen organization meant switching the active one at the issuer, says
-    so: the browser and every other session of the user follow that switch.
+    A user who belongs to several organizations has a default at the issuer,
+    the one every login and token refresh mints for, and that is what the
+    browser login came back with. `--org` (a name or id) picks another;
+    otherwise a TTY is prompted, and off a TTY the login fails rather than
+    landing in whichever organization happened to be the default. One
+    organization, or an issuer that reports none, needs no choice. Getting a
+    different organization means making it the account's default, which other
+    sessions pick up on their next login or refresh; says so when that happened.
     """
     if ctx.args.org:
         wanted = ctx.args.org
@@ -241,8 +242,8 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
             organization_label,
             [
                 "Your account belongs to multiple organizations.",
-                "Choosing one other than [current] also makes it your active organization",
-                "everywhere you are signed in, the browser included.",
+                "Choosing one other than [default] makes it your account's default: the one",
+                "your next login or token refresh lands in, on any client.",
                 "Choose the one this login should use:",
             ],
         )
@@ -253,7 +254,7 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
         wanted = chosen.name
     selected = creds.with_organization(wanted)
     if selected.tenant_id != creds.tenant_id:
-        print("Your active organization is now " + wanted + " everywhere you are signed in, the browser included.")
+        print("Your account's default organization is now " + wanted + "; other sessions pick it up on their next login or token refresh.")
     return selected
 
 def _login_impl(ctx: TaskContext) -> int:
@@ -389,7 +390,7 @@ login = task(
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "org": args.string(
-            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. Choosing an organization other than your current one also makes it your active organization everywhere you are signed in, the browser included. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
+            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. Choosing an organization other than your account's default makes it the default: the one your next login or token refresh lands in, on any client. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
         ),
         "profile": args.string(
             description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",

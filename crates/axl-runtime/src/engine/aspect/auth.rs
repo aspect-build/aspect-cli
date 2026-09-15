@@ -1452,11 +1452,12 @@ struct CredentialsEntry {
 /// What an issuer offers beyond OAuth, as far as the CLI can tell.
 ///
 /// Aspect Cloud's identity provider mints tenant-bound user tokens (the
-/// `tenantId` claim), and a user who belongs to several tenants has one *active*
-/// tenant kept server-side that any client can switch. The OAuth refresh grant
-/// mints for whichever tenant is active at that moment. The provider also serves
-/// a tenant API under the issuer: the user's tenants, and a switch of the active
-/// one. The login task uses both to offer and apply an organization choice.
+/// `tenantId` claim), and a user who belongs to several tenants has one *default*
+/// tenant kept server-side: the one a login or a refresh grant mints for, on
+/// whichever client mints next, and one any client can change. Sessions already
+/// holding a token keep it until they refresh. The provider also serves a tenant
+/// API under the issuer: the user's tenants, and a way to set that default. The
+/// login task uses both to offer and apply an organization choice.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Allocative)]
 pub(crate) enum IssuerKind {
     #[default]
@@ -2541,7 +2542,7 @@ fn build_login_session(
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshFailure {
     /// The issuer minted a token for a different tenant than the credential was
-    /// issued for: the user's active organization changed elsewhere (a web
+    /// issued for: the user's default organization changed elsewhere (a web
     /// session's organization switcher, say) between login and this refresh.
     /// Refused rather than adopted, so a CLI session never silently crosses into
     /// another organization.
@@ -2608,10 +2609,11 @@ async fn refresh_with_grant(
     entry.renewed(token_resp)
 }
 
-/// Switch the user's active tenant at the issuer, the state its refresh grant
-/// mints for. What the provider's tenant-switch SDK call does, and what a web
-/// session's organization switcher does; every client of this user sees it.
-async fn switch_active_tenant(
+/// Set the user's default tenant at the issuer, the one its login and refresh
+/// grants mint for from now on. What the provider's tenant-switch SDK call does,
+/// and what a web session's organization switcher does; every client of this
+/// user picks it up on its next login or refresh.
+async fn set_default_tenant(
     auth_domain: &str,
     bearer: &str,
     tenant_id: &str,
@@ -2621,16 +2623,16 @@ async fn switch_active_tenant(
             .put(tenant_api_url(auth_domain, TENANT_API_SWITCH_PATH))
             .bearer_auth(bearer)
             .json(&serde_json::json!({ "tenantId": tenant_id })),
-        "switching the active organization",
+        "setting the default organization",
     )
     .await?;
     Ok(())
 }
 
-/// Re-mint `entry` for `tenant_id`, one of its user's organizations, by
-/// switching the user's active tenant at the issuer and re-running the refresh
-/// grant. The user chose this organization explicitly, so the switch other
-/// clients will notice is the intended one; the login task says so. Errors
+/// Re-mint `entry` for `tenant_id`, one of its user's organizations, by making
+/// it the user's default tenant at the issuer and re-running the refresh grant.
+/// The user chose this organization explicitly, so the new default other
+/// clients will pick up is the intended one; the login task says so. Errors
 /// unless the result is for `tenant_id`.
 async fn select_tenant(
     entry: &CredentialsEntry,
@@ -2641,7 +2643,7 @@ async fn select_tenant(
         return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    switch_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
+    set_default_tenant(auth_domain, &entry.access_token, tenant_id).await?;
     let refreshed = refresh_with_grant(entry, &endpoints.token, client_id).await?;
     if refreshed.tenant_id != tenant_id {
         return Err(anyhow::anyhow!(
@@ -2706,7 +2708,7 @@ fn session_expired_message(profile: &str) -> String {
 /// stored session was logged in to ([`RefreshFailure::TenantChanged`]).
 fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
     format!(
-        "your active organization changed since you logged in (was {was}, now {now}); \
+        "your default organization changed since you logged in (was {was}, now {now}); \
          refusing to continue under a different organization.\n\nRun `{}` to log in \
          again and choose the organization for this session.",
         login_hint(deployment)
@@ -2917,8 +2919,8 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
 
     /// This login re-minted for organization `org`, named by display name
     /// (case-insensitive) or tenant id ([`find_organization`]). Returns the same
-    /// credential when `org` is already the one it is minted for; otherwise the
-    /// user's active organization at the issuer is switched to get it
+    /// credential when `org` is already the one it is minted for; otherwise `org`
+    /// becomes the user's default organization at the issuer to get it
     /// ([`select_tenant`]), which the caller can tell from the changed
     /// `tenant_id`. Ends the task with a message when `org` names none of the
     /// user's organizations or the issuer will not mint for it.
@@ -2987,24 +2989,25 @@ impl AuthCredentials {
 
 /// One organization (a tenant at the issuer) the logged-in user belongs to, as
 /// `AuthCredentials.organizations()` lists them for the login task's choice.
-/// `active` marks the one the credential is currently minted for.
+/// `default` marks the one the credential was minted for: the user's default
+/// organization at the issuer when they logged in.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.Organization>")]
 pub struct Organization {
     pub id: String,
     pub name: String,
-    pub active: bool,
+    pub default: bool,
 }
 
 impl Organization {
-    /// An inactive organization; `id` stands in for an empty `name`, so every
+    /// A non-default organization; `id` stands in for an empty `name`, so every
     /// organization has something to show.
     fn named(id: String, name: String) -> Self {
         let name = if name.is_empty() { id.clone() } else { name };
         Organization {
             id,
             name,
-            active: false,
+            default: false,
         }
     }
 }
@@ -3032,8 +3035,8 @@ fn organization_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn active<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        attr_bool!(this, Organization, active)
+    fn default<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, Organization, default)
     }
 }
 
@@ -3065,13 +3068,13 @@ async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
             .collect();
     }
     for org in &mut orgs {
-        org.active = org.id == entry.tenant_id;
+        org.default = org.id == entry.tenant_id;
     }
     orgs
 }
 
 /// Every tenant the bearer's user belongs to, from the tenant API's tenants
-/// endpoint, none marked active.
+/// endpoint, none marked default.
 async fn fetch_tenants(auth_domain: &str, bearer: &str) -> anyhow::Result<Vec<Organization>> {
     #[derive(Deserialize)]
     struct Tenant {
@@ -6585,7 +6588,7 @@ mod tests {
     #[test]
     fn an_organization_without_a_name_shows_its_id() {
         let named = Organization::named("id-1".into(), "Acme".into());
-        assert_eq!((named.name.as_str(), named.active), ("Acme", false));
+        assert_eq!((named.name.as_str(), named.default), ("Acme", false));
         assert_eq!(
             Organization::named("id-1".into(), String::new()).name,
             "id-1"
@@ -6622,7 +6625,7 @@ mod tests {
         Organization {
             id: id.into(),
             name: name.into(),
-            active: false,
+            default: false,
         }
     }
 
@@ -6649,7 +6652,7 @@ mod tests {
         let runtime = current_thread_runtime();
         let jwt = jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#);
         // With no issuer recorded there is nowhere to fetch names from, so the
-        // claim's ids stand in for them; the active one is flagged.
+        // claim's ids stand in for them; the one the token is for is flagged.
         let tenant_api = CredentialsEntry::from_bearer(
             jwt.clone(),
             "r".into(),
@@ -6662,7 +6665,7 @@ mod tests {
         let orgs = runtime.block_on(list_organizations(&tenant_api));
         let listed: Vec<_> = orgs
             .iter()
-            .map(|o| (o.id.as_str(), o.name.as_str(), o.active))
+            .map(|o| (o.id.as_str(), o.name.as_str(), o.default))
             .collect();
         assert_eq!(listed, vec![("t1", "t1", true), ("t2", "t2", false)]);
 
@@ -6967,7 +6970,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_an_organization_switches_the_active_tenant_then_refreshes() {
+    fn selecting_an_organization_sets_the_default_tenant_then_refreshes() {
         let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
             TENANT_API_SWITCH_PATH => {
                 assert_eq!(request.method, "PUT");
@@ -7017,7 +7020,7 @@ mod tests {
         let orgs = current_thread_runtime().block_on(list_organizations(&entry));
         let listed: Vec<_> = orgs
             .iter()
-            .map(|o| (o.id.as_str(), o.name.as_str(), o.active))
+            .map(|o| (o.id.as_str(), o.name.as_str(), o.default))
             .collect();
         assert_eq!(listed, vec![("t1", "Acme", true), ("t2", "t2", false)]);
         issuer.finish();
