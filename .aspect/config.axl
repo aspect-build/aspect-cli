@@ -39,6 +39,7 @@ load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
+load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
@@ -346,6 +347,11 @@ def config(ctx: ConfigContext):
     # upgrade from a whole-file output.
     # Run with: aspect dev test-bazelrc-file
     ctx.tasks.add(bazelrc_file_tests)
+
+    # The named `--config` groups the rc is built from: what each holds, which
+    # are enabled where, and the host group's naming.
+    # Run with: aspect dev test-rc-groups
+    ctx.tasks.add(rc_groups_tests)
 
     # The `--config=aspect-*` sections built from deployment rows: naming,
     # credential helpers, per-endpoint flags, aliases, and collisions.

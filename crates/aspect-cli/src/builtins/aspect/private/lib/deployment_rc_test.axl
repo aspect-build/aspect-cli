@@ -46,7 +46,7 @@ def _test_config_name(_ctx):
     _eq("dotted", config_name(_summary("remote.acme.com")), "aspect-remote.acme.com")
 
 def _test_cloud_section(_ctx):
-    configs = _by_name(deployment_configs([_CLOUD], _HELPER, exec_log_path = "/tmp/x/exec.log.zstd"))
+    configs = _by_name(deployment_configs([_CLOUD], _HELPER))
     _eq("names", sorted(configs.keys()), ["aspect", "aspect-cloud"])
     flags = configs["aspect-cloud"].flags
 
@@ -61,18 +61,13 @@ def _test_cloud_section(_ctx):
     _eq("cache helper (6.0–6.3)", ("--experimental_credential_helper=cache.aspect.build=" + _HELPER, ">=6.0.0, <6.4.0") in flags, True)
     _lacks("no unscoped helper", flags, "--credential_helper=" + _HELPER)
 
-    # Both endpoints are wired, so their tuning and the diagnostics ride along;
-    # off a runner the endpoint-independent flags ride in every section too.
-    _has("independent", flags, "--heap_dump_on_oom")
-    _has("cache tuning", flags, "--remote_upload_local_results")
-    _has("bes enrichment", flags, "--legacy_important_outputs")
-    _has("channel keepalive", flags, "--grpc_keepalive_timeout=30s")
-    _eq("upload all gated", ("--remote_build_event_upload=all", ">=7.0.0") in flags, True)
-    _eq("exec log gated", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in flags, True)
-
-    # Which actions Bazel reports and how long it waits stay the user's choice.
-    _lacks("action publishing left to the user", flags, "--build_event_publish_all_actions")
-    _lacks("upload mode left to the user", flags, "--bes_upload_mode")
+    # Both endpoints are wired, so the section chains to both tuning groups the
+    # rc defines; it repeats none of their flags, and not the host tuning the
+    # rc enables for every command.
+    _eq("chains", [f for f in flags if _texts([f])[0].startswith("--config=")], ["--config=aspect-cache", "--config=aspect-bes"])
+    _lacks("no inlined tuning", flags, "--remote_upload_local_results")
+    _lacks("no inlined enrichment", flags, "--legacy_important_outputs")
+    _lacks("no host tuning", flags, "--heap_dump_on_oom")
 
     # Each section says what it wires and how it authenticates.
     _eq("comment", configs["aspect-cloud"].comment.startswith("Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN"), True)
@@ -97,29 +92,25 @@ def _test_exec_section(_ctx):
 
 def _test_partial_deployments(_ctx):
     # Each deployment gets exactly the flags its endpoints justify.
-    bes_only = _by_name(deployment_configs([_summary("b", bes = "bes.b")], _HELPER, exec_log_path = "/x"))["aspect-b"].flags
+    bes_only = _by_name(deployment_configs([_summary("b", bes = "bes.b")], _HELPER))["aspect-b"].flags
     _lacks("no cache", bes_only, "--remote_cache")
     _has("bes", bes_only, "--bes_backend=grpcs://bes.b")
-    _has("bes enrichment", bes_only, "--noslim_profile")
-    _lacks("no cache tuning", bes_only, "--remote_accept_cached")
-    _has("diagnostics ride BES", bes_only, "--remote_build_event_upload=all")
-    _has("exec log rides BES", bes_only, "--execution_log_compact_file=/x")
+    _has("bes group", bes_only, "--config=aspect-bes")
+    _lacks("no cache group", bes_only, "--config=aspect-cache")
 
     cache_only = _by_name(deployment_configs([_summary("c", cache = "cache.c")], _HELPER))["aspect-c"].flags
     _lacks("no bes", cache_only, "--bes_backend")
-    _has("cache tuning", cache_only, "--remote_accept_cached")
-    _lacks("no bes enrichment", cache_only, "--noslim_profile")
-    _lacks("no diagnostics", cache_only, "--remote_build_event_upload")
+    _has("cache group", cache_only, "--config=aspect-cache")
+    _lacks("no bes group", cache_only, "--config=aspect-bes")
 
     # An executor-only deployment gets a standalone `-exec` section: no base to
     # chain to, the executor standing in as the cache.
     exec_only = _by_name(deployment_configs([_summary("e", default = True, exec = "exec.e")], _HELPER))
     _eq("exec-only sections", sorted(exec_only.keys()), ["aspect-e-exec", "aspect-exec"])
     flags = exec_only["aspect-e-exec"].flags
-    _lacks("no chain", flags, "--config=")
+    _lacks("no base to chain", flags, "--config=aspect-e")
     _has("executor", flags, "--remote_executor=grpcs://exec.e")
-    _has("independent, standalone", flags, "--heap_dump_on_oom")
-    _has("exec earns cache tuning", flags, "--remote_accept_cached")
+    _has("exec earns the cache group", flags, "--config=aspect-cache")
     _eq("helper", ("--credential_helper=exec.e=" + _HELPER, ">=6.4.0") in flags, True)
     _eq("alias to exec", exec_only["aspect-exec"].flags, ["--config=aspect-e-exec"])
 
@@ -151,12 +142,11 @@ def _test_credential_helper_scope(_ctx):
 def _test_section_flag_names(_ctx):
     # Every value-bearing flag a section writes is listed, so the legacy strip
     # in `bazelrc_file.axl` recognizes it.
-    configs = deployment_configs([_CLOUD, _SILO, _summary("e", exec = "exec.e")], _HELPER, "/x")
-    tuning_names = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks", "--remote_upload_local_results", "--remote_accept_cached", "--remote_timeout", "--remote_retries", "--grpc_keepalive_timeout", "--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--experimental_profile_include_target_configuration", "--legacy_important_outputs", "--remote_build_event_upload", "--execution_log_compact_file"]
+    configs = deployment_configs([_CLOUD, _SILO, _summary("e", exec = "exec.e")], _HELPER)
     for c in configs:
         for f in _texts(c.flags):
             name = f.split("=")[0]
-            _eq("listed " + name, name in SECTION_FLAG_NAMES or name in tuning_names, True)
+            _eq("listed " + name, name in SECTION_FLAG_NAMES, True)
 
 def _test_config_collisions(_ctx):
     _eq("no collision", config_collisions(deployment_configs([_CLOUD, _SILO], _HELPER)), [])

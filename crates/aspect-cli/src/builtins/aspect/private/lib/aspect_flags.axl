@@ -10,10 +10,11 @@ Every flag is tied to what it presumes (`Needs`). A flag that tunes the remote
 cache is set only where a remote cache is wired, a flag that enriches the BES
 stream only where a BES backend reads it. A runner or deployment with no cache,
 no BES, or no executor gets none of the flags that presume the missing one, so
-every line Aspect writes is accounted for by an endpoint that is present. Off a
-Workflows runner even the endpoint-independent flags live inside the `--config`
-sections, so the rc `aspect ci bazelrc` writes there changes nothing until a
-section is named and is safe to import into any `~/.bazelrc`.
+every line Aspect writes is accounted for by an endpoint that is present. In the
+rc the same keying becomes named `--config` groups (`rc_groups.axl`): a flag sits
+in the group for what it presumes, and only the groups whose endpoint the host
+has are enabled, so the rc written off a runner changes nothing until a section
+is named and is safe to import into any `~/.bazelrc`.
 
 `CATALOG` and `WORKFLOWS_CACHE_FLAGS` are the maintained tables: each entry says
 what the flag does, why we set it, and what it presumes. Read them as the
@@ -232,8 +233,8 @@ def color_flags(misdetected: bool) -> list:
     """`--color=yes` where Bazel's `--color=auto` would wrongly say no: a CI host
     whose log viewer renders ANSI but runs the job with no TTY for Bazel to see
     (`environment.bazel_misdetects_color`). Presumes no endpoint — the host, not
-    a deployment, decides — so it is the one flag that is unconditional on such
-    a host in the rc written off a runner."""
+    a deployment, decides — so in the rc it lives in the group named for that
+    host (`aspect-github-actions`, …), enabled wherever the rc is written."""
     return [_COLOR + "=yes"] if misdetected else []
 
 def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
@@ -284,49 +285,63 @@ def runner_executor_flags(environment: WorkflowsEnvironment) -> list:
     or `env_flags` — remote execution relocates every action, so it is reached
     only by naming it: `--workflows:remote-exec` on a task, `--config=aspect-exec`
     in the rc. Empty when the env names no executor."""
+    endpoint = runner_executor_endpoint(environment)
+    if not endpoint:
+        return []
+    return endpoint + ([] if environment.remote_cache != None else endpoint_flags(cache = False, bes = False, exec = True))
+
+def runner_executor_endpoint(environment: WorkflowsEnvironment) -> list:
+    """Just `--remote_executor=<value>` from the environment, or empty. The rc's
+    `aspect-exec` group takes this and chains the cache tuning by name."""
     executor = environment.remote_executor
     if executor == None or not executor.endpoint:
         return []
-    flags = [_REMOTE_EXECUTOR + "=" + executor.endpoint]
-    if environment.remote_cache == None:
-        flags.extend(endpoint_flags(cache = False, bes = False, exec = True))
-    return flags
+    return [_REMOTE_EXECUTOR + "=" + executor.endpoint]
 
-def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
-    """The full flag set for an Aspect Workflows runner: the endpoint-independent
-    flags, `env_flags`, the Workflows-cache specifics, the runner's repository
-    cache, and the startup flags that give each repo its own Bazel server on the
-    runner's storage.
-
-    `--output_user_root` holds the install base and external repos, shared across
-    that repo's jobs; `--output_base` holds the server and its analysis cache, so
-    a persistent runner keeps it warm between jobs (`apply_output_base_suffix`
-    moves a task to a sibling server). `--nohome_rc`/`--nosystem_rc` make the
-    workspace rc plus these flags the whole configuration; they are command-line
-    only, and `aspect ci bazelrc` drops them.
-
-    Caller must have verified `environment.runner != None`. Returns
-    `(startup_flags, build_flags)`.
-    """
+def runner_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """The runner's own cache specifics: the Workflows-cache gates and the
+    disk-cache reset when the env names the runner's cache, plus the repository
+    cache the runner's warming restores. Presumes the runner marker."""
     runner = environment.runner
     if runner == None:
-        fail("runner_flags called without a Workflows runner — gate on environment.runner != None")
-
-    build_flags = independent_flags() + env_flags(environment)
+        fail("runner_cache_flags called without a Workflows runner — gate on environment.runner != None")
+    flags = []
     if environment.remote_cache != None:
-        build_flags.extend([_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS])
-    build_flags.append(_REPOSITORY_CACHE + "=" + runner.repository_cache_dir)
+        flags.extend([_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS])
+    flags.append(_REPOSITORY_CACHE + "=" + runner.repository_cache_dir)
+    return flags
 
+def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> list:
+    """The startup flags that give each repository its own Bazel server on the
+    runner's storage. `--output_user_root` holds the install base and external
+    repos, shared across that repo's jobs; `--output_base` holds the server and
+    its analysis cache, so a persistent runner keeps it warm between jobs
+    (`apply_output_base_suffix` moves a task to a sibling server).
+    `--nohome_rc`/`--nosystem_rc` make the workspace rc plus the injected flags
+    the whole configuration; they are command-line only, and `aspect ci bazelrc`
+    drops them. Presumes the runner marker."""
+    runner = environment.runner
+    if runner == None:
+        fail("runner_startup_flags called without a Workflows runner — gate on environment.runner != None")
     repo_name = environment.ci.scm_repo_name if environment.ci else ""
     subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
     scope = sanitize_filename(repo_name) + "/" + subdir if repo_name else subdir
-    startup_flags = [
+    return [
         _NOHOME_RC,
         _NOSYSTEM_RC,
         _OUTPUT_USER_ROOT + "=" + runner.bazel_root_dir + "/" + scope,
         _OUTPUT_BASE + "=" + runner.output_root_dir + "/" + scope,
     ]
-    return (startup_flags, build_flags)
+
+def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
+    """The full flag set the Workflows feature injects into a task on a runner:
+    the endpoint-independent flags, `env_flags`, and `runner_cache_flags` as
+    build flags, and `runner_startup_flags` as startup flags. Caller must have
+    verified `environment.runner != None`. Returns `(startup_flags, build_flags)`."""
+    return (
+        runner_startup_flags(environment, aspect_root_dir),
+        independent_flags() + env_flags(environment) + runner_cache_flags(environment),
+    )
 
 _OUTPUT_BASE_FLAG_PREFIX = _OUTPUT_BASE + "="
 
@@ -369,16 +384,26 @@ def temp_exec_log_path(std, run_id: str) -> str:
     std.fs.create_dir_all(dir)
     return dir + "/exec.log.zstd"
 
-def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
-    """`diagnostics_upload_flags` for a Workflows runner whose env names a BES
-    backend, with the profile and execution log placed under the job tmpdir. The
-    profile keeps its `command.profile.gz` name, which the backend's ingest
-    matches on. Empty off a runner or without a BES backend."""
+def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
+    """`--profile` placed under the runner's job tmpdir, keeping the
+    `command.profile.gz` name the backend's ingest matches on. Empty off a runner
+    or without a BES backend to upload it to."""
     runner = environment.runner
     if runner == None or environment.build_events == None:
         return []
-    tmpdir = runner.job_tmpdir
-    return [_PROFILE + "=" + tmpdir + "/command.profile.gz"] + diagnostics_upload_flags(tmpdir + "/exec.log.zstd")
+    return [_PROFILE + "=" + runner.job_tmpdir + "/command.profile.gz"]
+
+def runner_exec_log_path(environment: WorkflowsEnvironment) -> str:
+    """Where a runner's compact execution log is written: the job tmpdir."""
+    return environment.runner.job_tmpdir + "/exec.log.zstd"
+
+def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
+    """`runner_profile_flags` plus `diagnostics_upload_flags` at
+    `runner_exec_log_path`, for a task on a runner whose env names a BES backend.
+    Empty off a runner or without one."""
+    if environment.runner == None or environment.build_events == None:
+        return []
+    return runner_profile_flags(environment) + diagnostics_upload_flags(runner_exec_log_path(environment))
 
 def written_flag_names() -> list:
     """The name of every flag this file can produce, catalog and built alike. What

@@ -2,10 +2,10 @@
 sections, how the file announces itself, and how it is placed in a user's
 `~/.bazelrc` through a single `try-import` line.
 
-Nothing here decides *which* flags are written — `aspect_flags.axl` and
-`deployment_rc.axl` do — only how a list of flags and `RcConfig` sections
-becomes text, and how that text lands without disturbing what a user or another
-setup step already put in their rc.
+Nothing here decides *which* flags are written — `aspect_flags.axl`,
+`rc_groups.axl`, and `deployment_rc.axl` do — only how startup flags, enabled
+groups, and `RcConfig` sections become text, and how that text lands without
+disturbing what a user or another setup step already put in their rc.
 
 On Bazel >= 6.3.0 flags are emitted under `common` (applies to every command);
 older Bazel has no `common` pseudo-command, so they're spelled out under `build`
@@ -72,22 +72,26 @@ def command_sections(bazel_version: str | None) -> list:
         return ["common"]
     return _PRE_COMMON_COMMANDS
 
-def render_bazelrc(startup_flags: list, build_flags: list, command_sections: list, configs: list = []) -> str:
-    """Render the rc: the header, a `startup` line per startup flag, every build
-    flag under each section in `command_sections`, then each `RcConfig` as a
-    commented `<section>:<name>` group. Flags may be `(flag, condition)` tuples
-    (the shape `rc.expand` yields for surviving version-gated options); only the
-    flag text is written."""
+def render_bazelrc(startup_flags: list, enabled: list, command_sections: list, configs: list) -> str:
+    """Render the rc: the header, a `startup` line per startup flag, a
+    `<section> --config=<group>` line per group in `enabled`, then each
+    `RcConfig` in `configs` as a commented `<section>:<name>` group. Every
+    section is written once per entry in `command_sections` (`["common"]` on
+    modern Bazel, `["build", "query"]` on Bazel < 6.3.0). Flags may be
+    `(flag, condition)` tuples (the shape `rc.expand` yields for surviving
+    version-gated options); only the flag text is written."""
     lines = [
         GENERATED_HEADER,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
+        "# Flags are grouped by what they presume; the groups on for this host are enabled here,",
+        "# the rest are opt-in by name. `bazel build --announce_rc` shows which group set what.",
         "",
     ]
     for flag in startup_flags:
         lines.append("startup " + flag_text(flag))
-    for flag in build_flags:
+    for group in enabled:
         for section in command_sections:
-            lines.append(section + " " + flag_text(flag))
+            lines.append(section + " --config=" + group)
     for config in configs:
         lines.append("")
         if config.comment:
@@ -96,6 +100,23 @@ def render_bazelrc(startup_flags: list, build_flags: list, command_sections: lis
             for section in command_sections:
                 lines.append(section + ":" + config.name + " " + flag_text(flag))
     return "\n".join(lines) + "\n"
+
+def prune_configs(configs: list, enabled: list) -> (list, list):
+    """`configs` and `enabled` without the sections left empty by the user's
+    omissions, and without the `--config=<name>` chains and enable lines that
+    named them: Bazel fails on a `--config` no rc defines. Dropping a section can
+    empty one that only chained to it, so this runs to a fixed point."""
+    for _ in range(len(configs) + 1):
+        dropped = [c.name for c in configs if not c.flags]
+        if not dropped:
+            break
+        configs = [
+            RcConfig(name = c.name, source = c.source, comment = c.comment, flags = [f for f in c.flags if not (is_config_chain(f) and f[len("--config="):] in dropped)])
+            for c in configs
+            if c.flags
+        ]
+        enabled = [name for name in enabled if name not in dropped]
+    return (configs, enabled)
 
 def import_line(generated_rc: str) -> str:
     """The line that pulls `generated_rc` into a user rc. `try-import` rather than

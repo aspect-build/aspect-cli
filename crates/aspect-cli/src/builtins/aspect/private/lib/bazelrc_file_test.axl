@@ -1,5 +1,5 @@
 """Unit tests for `bazelrc_file.axl`: `command_sections`, `render_bazelrc`,
-`startup_flags_for_rc`, `import_line`, and `ensure_import` / `strip_generated`
+`prune_configs`, `startup_flags_for_rc`, `import_line`, and `ensure_import` / `strip_generated`
 (the one-time `try-import` line and the upgrade from a whole-file output).
 Run with: aspect dev test-bazelrc-file
 """
@@ -12,6 +12,7 @@ load(
     "command_sections",
     "ensure_import",
     "import_line",
+    "prune_configs",
     "render_bazelrc",
     "startup_flags_for_rc",
     "strip_generated",
@@ -39,40 +40,54 @@ def _test_command_sections(_ctx):
     for v in ["6.2.1", "6.0.0", "5.4.0"]:
         _eq("%s -> build/query" % v, command_sections(v), ["build", "query"])
 
+_CI = RcConfig(name = "aspect-ci", source = "ci", comment = "CI tuning.", flags = ["--heap_dump_on_oom"])
+
 def _test_render_common_section(_ctx):
-    out = render_bazelrc(["--output_base=/mnt/output"], ["--remote_cache=grpcs://c:443", "--disk_cache="], ["common"])
+    out = render_bazelrc(["--output_base=/mnt/output"], ["aspect-ci"], ["common"], [_CI])
     lines = out.split("\n")
     _eq("header first", lines[0], GENERATED_HEADER)
     _eq("startup line", "startup --output_base=/mnt/output" in lines, True)
-    _eq("common remote_cache", "common --remote_cache=grpcs://c:443" in lines, True)
-    _eq("common disk_cache", "common --disk_cache=" in lines, True)
+    _eq("enable line", "common --config=aspect-ci" in lines, True)
+    _eq("group flag", "common:aspect-ci --heap_dump_on_oom" in lines, True)
+    _eq("enable before definition", lines.index("common --config=aspect-ci") < lines.index("common:aspect-ci --heap_dump_on_oom"), True)
+    _eq("no unscoped flag", "common --heap_dump_on_oom" in lines, False)
     _eq("no common startup_flag", "common --output_base=/mnt/output" in lines, False)
-    _eq("no startup build_flag", "startup --remote_cache=grpcs://c:443" in lines, False)
     _eq("trailing newline", out.endswith("\n"), True)
 
 def _test_render_pre_common_sections(_ctx):
-    # < 6.3.0: each build flag is emitted once per section (build + query);
-    # startup flags are emitted once regardless of the command sections.
-    lines = render_bazelrc(["--output_base=/o"], ["--remote_cache=grpcs://c"], ["build", "query"]).split("\n")
-    _eq("build section", "build --remote_cache=grpcs://c" in lines, True)
-    _eq("query section", "query --remote_cache=grpcs://c" in lines, True)
-    _eq("no common", "common --remote_cache=grpcs://c" in lines, False)
+    # < 6.3.0: each enable and group line is emitted once per section (build +
+    # query); startup flags are emitted once regardless of the command sections.
+    lines = render_bazelrc(["--output_base=/o"], ["aspect-ci"], ["build", "query"], [_CI]).split("\n")
+    _eq("build enable", "build --config=aspect-ci" in lines, True)
+    _eq("query enable", "query --config=aspect-ci" in lines, True)
+    _eq("build group", "build:aspect-ci --heap_dump_on_oom" in lines, True)
+    _eq("query group", "query:aspect-ci --heap_dump_on_oom" in lines, True)
+    _eq("no common", any([ln.startswith("common") for ln in lines]), False)
     _eq("startup once", len([ln for ln in lines if ln == "startup --output_base=/o"]), 1)
 
 def _test_render_configs(_ctx):
     # Config flags go under `<section>:<name>`, tuples unwrapped, chain lines
-    # verbatim, each group behind its comment. Below 6.3 every line is doubled.
-    lines = render_bazelrc([], ["--disk_cache="], ["common"], [_SECTION, _CHAIN]).split("\n")
+    # verbatim, each group behind its comment; an unenabled group is defined only.
+    lines = render_bazelrc([], [], ["common"], [_SECTION, _CHAIN]).split("\n")
     _eq("section flag", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
     _eq("tuple unwrapped", "common:aspect-x --credential_helper=x=h" in lines, True)
     _eq("chain verbatim", "common:aspect-x-exec --config=aspect-x" in lines, True)
     _eq("comment", "# x: remote cache." in lines, True)
-    _eq("plain flag unscoped", "common --disk_cache=" in lines, True)
+    _eq("nothing enabled", any([ln.startswith("common --config=") for ln in lines]), False)
     _eq("no condition leaked", any([">=" in ln for ln in lines]), False)
 
-    old = render_bazelrc([], [], ["build", "query"], [_CHAIN]).split("\n")
-    _eq("query chain", "query:aspect-x-exec --config=aspect-x" in old, True)
-    _eq("build chain", "build:aspect-x-exec --config=aspect-x" in old, True)
+def _test_prune_configs(_ctx):
+    cache = RcConfig(name = "aspect-cache", source = "g", flags = [])
+    exec = RcConfig(name = "aspect-exec", source = "e", flags = ["--config=aspect-cache", "--remote_executor=grpcs://e"])
+    alias = RcConfig(name = "aspect", source = "a", flags = ["--config=aspect-cache"])
+    (configs, enabled) = prune_configs([_CI, cache, exec, alias], ["aspect-ci", "aspect-cache"])
+
+    # The emptied group goes, with its enable line and every chain to it; a
+    # section that only chained to it empties in turn and goes too.
+    _eq("survivors", [c.name for c in configs], ["aspect-ci", "aspect-exec"])
+    _eq("chain dropped", configs[1].flags, ["--remote_executor=grpcs://e"])
+    _eq("enable dropped", enabled, ["aspect-ci"])
+    _eq("nothing to prune", prune_configs([_CI], ["aspect-ci"]), ([_CI], ["aspect-ci"]))
 
 _LINE = import_line("/home/ci/.aspect/bazelrc")
 _NAMES = ["--output_base", "--remote_cache", "--disk_cache", "--credential_helper", "--config", "--remote_executor"]
@@ -113,7 +128,7 @@ def _test_strip_generated(_ctx):
     _eq("whole legacy file → empty", strip_generated(_LEGACY, _NAMES), "")
 
     # A whole-file rc with `--config` sections is entirely ours too.
-    whole = render_bazelrc(["--output_base=/o"], ["--disk_cache="], ["common"], [_SECTION, _CHAIN])
+    whole = render_bazelrc(["--output_base=/o"], ["aspect-x"], ["common"], [_SECTION, _CHAIN])
     _eq("whole current file → empty", strip_generated(whole, _NAMES), "")
 
     # Lines the command never generated survive, wherever they sit, and so does a
@@ -135,7 +150,7 @@ def _test_ensure_import_replaces_generated_rc(_ctx):
     _eq("still replaced", got.action, ImportAction("replaced"))
 
     # The current header is recognized the same way.
-    _eq("current header", _ensure(render_bazelrc([], [], ["common"])).action, ImportAction("replaced"))
+    _eq("current header", _ensure(render_bazelrc([], [], ["common"], [])).action, ImportAction("replaced"))
 
     # Only a file *starting* with the header counts; a user rc that mentions it
     # later is theirs, untouched but for the import.
@@ -149,6 +164,7 @@ _UNIT_TESTS = [
     _test_render_common_section,
     _test_render_pre_common_sections,
     _test_render_configs,
+    _test_prune_configs,
     _test_import_line,
     _test_ensure_import_new_file,
     _test_ensure_import_appends_once,

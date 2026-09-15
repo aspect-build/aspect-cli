@@ -16,8 +16,10 @@ a deployment with neither gets nothing.
 Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
-carries the `aspect_flags.axl` tuning those endpoints justify — with BES, the
-build-diagnostics upload as well. Remote execution is never part of the base
+chains to the `rc_groups.axl` tuning groups those endpoints justify —
+`aspect-cache`, `aspect-bes` — so the tuning is spelled once per rc. The
+host tuning (`aspect-ci`) is the rc's, enabled for every command, so no
+section repeats it. Remote execution is never part of the base
 section: it relocates every action, so it is only ever reached by naming
 `-exec`, mirroring `--remote=exec` on `aspect <task>`.
 
@@ -28,8 +30,8 @@ refuse.
 """
 
 load("./aspect_endpoint_auth.axl", "endpoint_host")
-load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags")
 load("./bazelrc_file.axl", "RcConfig")
+load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE", "GROUP_EXEC")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -44,11 +46,11 @@ _CONFIG_PREFIX = "aspect-"
 _EXEC_SUFFIX = "-exec"
 _DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
 
-# The default deployment's remote-execution section. On a Workflows runner the
-# runner is the build's deployment, so `aspect ci bazelrc` writes the runner's
-# executor under this same name — and the collision check refuses a runner
-# that also records a default deployment with an executor.
-DEFAULT_EXEC_CONFIG = _DEFAULT_CONFIG + _EXEC_SUFFIX
+# The default deployment's remote-execution alias shares its name with the
+# runner's `aspect-exec` group (`rc_groups.axl`): on a runner the runner is the
+# build's deployment. The collision check refuses a runner that also records a
+# default deployment with an executor.
+_DEFAULT_EXEC_CONFIG = GROUP_EXEC
 
 # The value-bearing flags these sections write, by name, so `strip_generated`
 # can recognize a section this command wrote into a user rc.
@@ -98,10 +100,9 @@ def _login_hint(deployment) -> str:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
     return "auth via `" + login + "`"
 
-def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> RcConfig:
+def _base_config(d, name: str, credential_helper: str) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
-    helper for their hosts, the tuning those endpoints justify, and — with BES —
-    the diagnostics upload."""
+    helper for their hosts, and the tuning groups those endpoints justify."""
     flags = []
     wired = []
     if d.cache:
@@ -113,10 +114,10 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
             flags.append("--bes_results_url=" + d.results_url)
         wired.append("BES")
     flags.extend(credential_helper_flags(_unique_hosts([d.cache, d.bes]), credential_helper))
-    flags.extend(independent_flags())
-    flags.extend(endpoint_flags(cache = bool(d.cache), bes = bool(d.bes)))
+    if d.cache:
+        flags.append("--config=" + GROUP_CACHE)
     if d.bes:
-        flags.extend(diagnostics_upload_flags(exec_log_path))
+        flags.append("--config=" + GROUP_BES)
     return RcConfig(
         name = name,
         source = _label(d),
@@ -127,8 +128,9 @@ def _base_config(d, name: str, credential_helper: str, exec_log_path: str) -> Rc
 def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConfig:
     """`--config=<name>-exec`: the base section plus the deployment's executor. An
     executor-only deployment has no base to chain to, so its section stands alone
-    with the tuning an executor justifies (it doubles as the cache). A credential
-    helper is added for the exec host only when the base section's don't cover it."""
+    and chains the tuning groups an executor justifies (it doubles as the cache).
+    A credential helper is added for the exec host only when the base section's
+    don't cover it."""
     if has_base:
         flags = ["--config=" + name]
         covered = _unique_hosts([d.cache, d.bes])
@@ -140,7 +142,7 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConf
     if exec_host not in covered:
         flags.extend(credential_helper_flags([exec_host], credential_helper))
     if not has_base:
-        flags.extend(independent_flags() + endpoint_flags(cache = False, bes = False, exec = True))
+        flags.append("--config=" + GROUP_CACHE)
     return RcConfig(
         name = name + _EXEC_SUFFIX,
         source = _label(d) + " (remote execution)",
@@ -148,14 +150,14 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConf
         flags = flags,
     )
 
-def deployment_configs(deployments: list, credential_helper: str, exec_log_path: str = "") -> list:
+def deployment_configs(deployments: list, credential_helper: str) -> list:
     """The sections for every deployment in `deployments` (rows of
     `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
     `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
     fields), in order, followed by the `aspect` / `aspect-exec` aliases for the
-    default one. `credential_helper` is the path Bazel invokes as `<helper> get`;
-    `exec_log_path`, when set, is where a BES-wired section writes the compact
-    execution log (Bazel >= 7.1)."""
+    default one. `credential_helper` is the path Bazel invokes as `<helper> get`.
+    The tuning each section needs comes from the `rc_groups.axl` groups it chains
+    to, which the rc defines alongside."""
     configs = []
     aliases = []
     for d in deployments:
@@ -164,7 +166,7 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
             continue
         name = config_name(d)
         if has_base:
-            configs.append(_base_config(d, name, credential_helper, exec_log_path))
+            configs.append(_base_config(d, name, credential_helper))
         if d.exec:
             configs.append(_exec_config(d, name, credential_helper, has_base))
         if d.default:
@@ -176,7 +178,7 @@ def deployment_configs(deployments: list, credential_helper: str, exec_log_path:
                     flags = ["--config=" + name],
                 ))
             if d.exec:
-                aliases.append(RcConfig(name = DEFAULT_EXEC_CONFIG, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
+                aliases.append(RcConfig(name = _DEFAULT_EXEC_CONFIG, source = _DEFAULT_ALIAS_SOURCE, flags = ["--config=" + name + _EXEC_SUFFIX]))
     return configs + aliases
 
 def config_collisions(configs: list) -> list:

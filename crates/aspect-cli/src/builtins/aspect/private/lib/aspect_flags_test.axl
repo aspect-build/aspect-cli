@@ -1,6 +1,7 @@
 """Unit tests for `aspect_flags.axl`: which catalog flags each endpoint justifies
 (`independent_flags` / `endpoint_flags`), the `env_flags` / `runner_flags` /
-`runner_diagnostics_flags` compositions, `apply_output_base_suffix`, the
+`runner_diagnostics_flags` compositions and the runner pieces the rc groups are
+assembled from, `apply_output_base_suffix`, the
 written-names list, and the opt-out (`omit_flags`, `protected_omissions`).
 
 Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
@@ -21,9 +22,14 @@ load(
     "omit_flags",
     "protected_omissions",
     "runner_bes_flags",
+    "runner_cache_flags",
     "runner_diagnostics_flags",
+    "runner_exec_log_path",
+    "runner_executor_endpoint",
     "runner_executor_flags",
     "runner_flags",
+    "runner_profile_flags",
+    "runner_startup_flags",
     "written_flag_names",
 )
 load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
@@ -154,6 +160,23 @@ def _test_runner_diagnostics_flags(_ctx):
     _eq("no BES → empty", runner_diagnostics_flags(WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x"))), [])
     _eq("no runner → empty", runner_diagnostics_flags(_WITH_BES), [])
 
+def _test_runner_pieces(_ctx):
+    # The rc assembles `runner_flags` from its parts, so each part is exactly
+    # its share: startup paths; cache specifics with the repository cache; the
+    # profile placement; the exec-log path.
+    env = WorkflowsEnvironment(runner = Runner(bazel_root_dir = "/mnt/b", output_root_dir = "/mnt/o", repository_cache_dir = "/mnt/r", job_tmpdir = "/wf"), remote_cache = RemoteCache(endpoint = "grpc://c"), build_events = BuildEvents(backend = "grpc://b"), ci = CI(scm_repo_name = "repo"))
+    startup, build = runner_flags(env, "/work/repo")
+    _eq("startup is its part", startup, runner_startup_flags(env, "/work/repo"))
+    cache = runner_cache_flags(env)
+    _has("repository cache", cache, "--repository_cache=/mnt/r")
+    _has("disk cache reset", cache, "--disk_cache=")
+    _eq("build = independent + env + cache", _texts(build), _texts(independent_flags() + env_flags(env) + cache))
+    _eq("no env cache → only the repository cache", runner_cache_flags(WorkflowsEnvironment(runner = Runner(repository_cache_dir = "/mnt/r"))), ["--repository_cache=/mnt/r"])
+    _eq("profile", runner_profile_flags(env), ["--profile=/wf/command.profile.gz"])
+    _eq("profile needs BES", runner_profile_flags(WorkflowsEnvironment(runner = Runner(job_tmpdir = "/wf"))), [])
+    _eq("exec log", runner_exec_log_path(env), "/wf/exec.log.zstd")
+    _eq("diagnostics = profile + upload", runner_diagnostics_flags(env), runner_profile_flags(env) + diagnostics_upload_flags("/wf/exec.log.zstd"))
+
 def _test_runner_bes_flags(_ctx):
     # The env's BES backend and viewer, for vanilla `bazel` on the runner.
     env = WorkflowsEnvironment(runner = Runner(), build_events = BuildEvents(backend = "grpc://bes:1985", results_url = "https://ui/i/"))
@@ -181,6 +204,8 @@ def _test_runner_executor_flags(_ctx):
     _has("cache tuning via executor", flags, "--remote_accept_cached")
     _has("keepalive", flags, "--grpc_keepalive_timeout=30s")
     _eq("no executor → nothing", runner_executor_flags(WorkflowsEnvironment(runner = Runner())), [])
+    _eq("endpoint alone", runner_executor_endpoint(exec_only), ["--remote_executor=grpc://e"])
+    _eq("no endpoint", runner_executor_endpoint(WorkflowsEnvironment()), [])
 
 def _test_color_flags(_ctx):
     _eq("misdetected", color_flags(True), ["--color=yes"])
@@ -246,6 +271,7 @@ _UNIT_TESTS = [
     _test_env_flags_follow_the_environment,
     _test_runner_flags,
     _test_runner_flags_output_base,
+    _test_runner_pieces,
     _test_runner_diagnostics_flags,
     _test_runner_bes_flags,
     _test_runner_executor_flags,
