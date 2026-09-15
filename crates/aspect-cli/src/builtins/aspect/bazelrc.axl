@@ -26,8 +26,8 @@ Where the rc goes:
     at the top so the repository's own lines come after and win where they
     disagree, which is how it overrides a recommendation. Both go into the
     repository, so everyone who builds it gets the same rc. The file is a
-    starting point the repository then owns: edit it freely; the command
-    leaves an existing one alone unless told `--force`. Nothing in
+    starting point the repository then owns: edit it freely; a rerun of the
+    command restores the generated version. Nothing in
     that file may be this machine's: the credential helper is the tool's name,
     the CI host's group is left out, and the compact execution log is placed
     through `%workspace%`, the one variable Bazel expands in rc values, at
@@ -235,10 +235,6 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         _generated_dir(ctx, workspace)
         output = workspace + "/" + _GENERATED_RC
 
-    # A checkout's rc is its repository's to edit once written; only --force
-    # regenerates it. A runner's is the runner's, rewritten every job.
-    if not on_runner and not ctx.args.force and ctx.std.fs.exists(output):
-        return TaskConclusion(exit_code = 1, message = "%s exists and is the repository's to edit; pass --force to regenerate it from the current deployments and flags." % _relative(output, workspace))
     _write(ctx, output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs, header = RUNNER_HEADER if on_runner else GENERATED_HEADER))
 
     group_names = [g.name for g in groups]
@@ -280,7 +276,7 @@ def _usage(sections: list, rc: str, importer: str) -> list:
     """How to use the checkout's rc, printed after writing it: which `--config`
     names exist and what each wires — the `aspect` alias first, since it names
     the default deployment, whichever that is — then that the file is a starting
-    point to commit and edit, and that Aspect's own tasks reach the default
+    point to commit and edit that a rerun restores, and that Aspect's own tasks reach the default
     deployment with `--remote`, needing none of it."""
     lines = ["Commit %s and the import in %s. Vanilla `bazel` uses none of it until a --config is named:" % (rc, importer)]
     if not sections:
@@ -290,16 +286,12 @@ def _usage(sections: list, rc: str, importer: str) -> list:
     for c in ordered:
         flag = "--config=" + c.name
         lines.append("  %s%s  %s" % (flag, " " * (width - len(flag)), c.comment))
-    lines.append("The file is a starting point: edit it as your repository needs. `aspect setup bazelrc --force` restores the generated version.")
+    lines.append("The file is a starting point: edit it as your repository needs. Rerunning `aspect setup bazelrc` restores the generated version.")
     if sections:
         lines.append("Aspect CLI tasks need none of this: `aspect build --remote` and `aspect test --remote` target the default deployment on their own (`--remote=exec` adds its remote execution).")
     return lines
 
 _BAZELRC_ARGS = {
-    "force": args.boolean(
-        default = False,
-        description = "Overwrite an existing rc off an Aspect Workflows runner. The checkout's rc is a starting point the repository edits, so it is not regenerated unless asked; a runner's rc is rewritten every job regardless.",
-    ),
     "output": args.string(
         default = "",
         description = "Rc file to write, rewritten on every run. Defaults to `~/.bazelrc` on an Aspect Workflows runner and to `<workspace>/.aspect/bazelrc` elsewhere, a file to commit. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
