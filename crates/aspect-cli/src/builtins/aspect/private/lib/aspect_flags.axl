@@ -421,9 +421,10 @@ def diagnostics_upload_flags(exec_log_path: str = "") -> list:
     return flags
 
 def temp_exec_log_path(std, run_id: str) -> str:
-    """A place for the compact execution log off a Workflows runner: under the OS
-    temp dir so nothing lands in the checkout, namespaced by `run_id` since
-    concurrent jobs on one machine share that dir. Creates the directory."""
+    """A place for a task's compact execution log off a Workflows runner: under
+    the OS temp dir so nothing lands in the checkout, namespaced by `run_id`
+    since concurrent tasks on one machine share that dir. Creates the directory,
+    at the task's own run — never for an rc, which outlives the directory."""
     dir = std.env.temp_dir().rstrip("/") + "/aspect-bazel-" + (run_id or "exec")
     std.fs.create_dir_all(dir)
     return dir + "/exec.log.zstd"

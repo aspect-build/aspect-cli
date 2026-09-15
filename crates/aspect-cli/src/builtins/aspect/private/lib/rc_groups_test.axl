@@ -37,14 +37,15 @@ _EXEC = RemoteExecutor(endpoint = "grpc://exec:8980")
 def _test_bare_host(_ctx):
     # Nothing in the env, no recognized host: the tuning groups alone, pure and
     # none enabled — this is the deployment shape, inert until a section is named.
-    (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "/tmp/x/exec.log.zstd", names_deployment = False)
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "", names_deployment = False)
     by = _by_name(groups)
     _eq("names", [g.name for g in groups], [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
     _eq("nothing enabled", enabled, [])
     _eq("sections chain common", section_chains(groups), [GROUP_COMMON])
     _eq("common", by[GROUP_COMMON].flags, independent_flags())
     _eq("cache is tuning alone", by[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
-    _eq("bes is tuning + upload", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags("/tmp/x/exec.log.zstd"))
+    _eq("bes is tuning + upload, no execution log", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags())
+    _eq("no path in a static rc", any(["execution_log" in f for f in _texts(by[GROUP_BES].flags)]), False)
     for g in groups:
         _eq(g.name + " commented", bool(g.comment), True)
 

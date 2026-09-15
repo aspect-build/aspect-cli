@@ -62,7 +62,6 @@ load(
     "protected_omissions",
     "runner_exec_log_path",
     "runner_startup_flags",
-    "temp_exec_log_path",
     "unscoped",
 )
 load(
@@ -120,9 +119,12 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
 
 def _groups(ctx: TaskContext, environment, on_runner: bool, env_deployment: bool) -> (list, list):
     """`rc_groups` for this host: every group defined, and the names enabled.
-    The BES group's execution log goes under the runner's job tmpdir on a
-    runner and under the temp dir elsewhere."""
-    exec_log_path = runner_exec_log_path(environment) if on_runner else temp_exec_log_path(ctx.std, ctx.task.id)
+    The compact execution log is written only on a runner, under the job tmpdir
+    the runner creates for each job and regenerates this rc with. Elsewhere the
+    rc is static and long-lived, and any path fixed into it would be one file
+    shared by every later build and, under a temp dir, gone after a reboot —
+    Bazel does not create the parent and fails the build."""
+    exec_log_path = runner_exec_log_path(environment) if on_runner else ""
     return rc_groups(environment, on_runner, bazel_misdetects_color(ctx.std.env), exec_log_path, env_deployment)
 
 _HELPER_NAME = "aspect"
