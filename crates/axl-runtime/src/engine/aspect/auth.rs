@@ -2711,9 +2711,9 @@ fn session_expired_message(profile: &str) -> String {
 fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
     let login = login_hint(deployment);
     format!(
-        "your organization changed since you logged in (was {was}, now {now}); \
-         refusing to continue under a different organization.\n\nRun `{login}` to log \
-         in again. To keep a login in one organization whatever other sessions do, \
+        "your default organization changed since you logged in (was {was}, now {now}); \
+         refresh login token failed under a different organization.\n\nRun `{login}` to \
+         log in again. To keep a login in one organization whatever other sessions do, \
          use an API token: `{login} --with-api-token`, or set {}.",
         api_token_env_var(deployment)
     )
