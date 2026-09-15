@@ -118,16 +118,43 @@ mod tests {
             .expect("spawn sleep")
     }
 
-    #[test]
-    fn describe_process_names_a_live_process() {
-        let mut child = sleeper();
+    /// A shell carrying `args` in its argv that prints `ready` once it is
+    /// running, then blocks on stdin. Reading the line before inspecting
+    /// the process rules out catching it mid-exec, when `/proc/<pid>/cmdline`
+    /// is empty or still the parent's.
+    fn ready_holder(args: &[&str]) -> std::process::Child {
+        use std::io::{BufRead, BufReader};
+        let mut child = Command::new("sh")
+            .args(["-c", "echo ready; read _", "sh"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let mut line = String::new();
+        BufReader::new(child.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .expect("read ready line");
+        assert_eq!(line.trim(), "ready");
+        child
+    }
+
+    fn describe_then_kill(child: &mut std::process::Child) -> String {
         let desc = describe_process(child.id());
         child.kill().unwrap();
         child.wait().unwrap();
-        let desc = desc.expect("live process is describable");
-        assert!(desc.contains("sleep"), "{desc}");
+        desc.expect("live process is describable")
+    }
+
+    #[test]
+    fn describe_process_names_a_live_process() {
+        let mut child = ready_holder(&["--marker=visible"]);
+        let desc = describe_then_kill(&mut child);
+        assert!(desc.contains("sh"), "{desc}");
         if cfg!(target_os = "linux") {
-            assert!(desc.contains("30"), "{desc}");
+            assert!(desc.contains("--marker=visible"), "{desc}");
+            assert!(desc.contains("(cwd "), "{desc}");
         }
     }
 
@@ -140,22 +167,8 @@ mod tests {
 
     #[test]
     fn describe_process_redacts_credentials() {
-        let mut child = Command::new("sh")
-            .args([
-                "-c",
-                "sleep 30",
-                "sh",
-                "--remote_header=Authorization: Bearer hunter2",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let desc = describe_process(child.id());
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let desc = desc.expect("live process is describable");
+        let mut child = ready_holder(&["--remote_header=Authorization: Bearer hunter2"]);
+        let desc = describe_then_kill(&mut child);
         assert!(!desc.contains("hunter2"), "{desc}");
         if cfg!(target_os = "linux") {
             assert!(desc.contains("--remote_header="), "{desc}");

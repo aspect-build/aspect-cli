@@ -963,6 +963,9 @@ mod tests {
             after_sigkill: Duration::from_millis(1500),
         };
 
+        /// A child standing in for a lock holder or a server. Scripts that
+        /// only sleep `exec` so the sleep is the signalled process: a shell
+        /// waiting on a foreground child defers a SIGINT sent to it alone.
         fn spawn(script: &str) -> Child {
             Command::new("sh")
                 .arg("-c")
@@ -1021,7 +1024,7 @@ mod tests {
 
         #[test]
         fn holder_that_exits_on_its_own_is_left_alone() {
-            let mut holder = spawn("sleep 0.05");
+            let mut holder = spawn("exec sleep 0.05");
             let (result, lines) = run_lock_ladder(&mut holder, true);
             assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
             let log = joined(&lines);
@@ -1032,7 +1035,7 @@ mod tests {
 
         #[test]
         fn holder_that_overstays_gets_sigint() {
-            let mut holder = spawn("sleep 30");
+            let mut holder = spawn("exec sleep 30");
             let (result, lines) = run_lock_ladder(&mut holder, true);
             assert_eq!(result.outcome, "healthy", "{}", joined(&lines));
             let log = joined(&lines);
@@ -1057,8 +1060,8 @@ mod tests {
             // A exits during the graceful wait and B takes the lock. B must
             // get its own graceful window before any signal, and then the
             // SIGINT that A never needed.
-            let mut a = spawn("sleep 0.05");
-            let mut b = spawn("sleep 30");
+            let mut a = spawn("exec sleep 0.05");
+            let mut b = spawn("exec sleep 30");
             let (a_pid, b_pid) = (a.id(), b.id());
             let mut probe = || {
                 if alive(&mut a) {
@@ -1084,7 +1087,7 @@ mod tests {
 
         #[test]
         fn unknown_holder_is_unhealthy_without_signalling() {
-            let mut holder = spawn("sleep 30");
+            let mut holder = spawn("exec sleep 30");
             let (result, lines) = run_lock_ladder(&mut holder, false);
             assert_eq!(result.outcome, "unhealthy", "{}", joined(&lines));
             let message = result.message.unwrap();
@@ -1103,13 +1106,13 @@ mod tests {
             // the pid file and the probe after that succeeds.
             let base = tempfile::tempdir().unwrap();
             std::fs::create_dir(base.path().join("server")).unwrap();
-            let mut server = spawn("sleep 30");
+            let mut server = spawn("exec sleep 30");
             std::fs::write(
                 base.path().join("server/server.pid.txt"),
                 server.id().to_string(),
             )
             .unwrap();
-            let mut client = spawn("sleep 0.05");
+            let mut client = spawn("exec sleep 0.05");
             let client_pid = client.id();
             let mut server_busy_reported = false;
             let mut probe = || {
@@ -1139,7 +1142,7 @@ mod tests {
         fn server_that_stays_wedged_after_kill_is_unhealthy() {
             let base = tempfile::tempdir().unwrap();
             std::fs::create_dir(base.path().join("server")).unwrap();
-            let mut server = spawn("sleep 30");
+            let mut server = spawn("exec sleep 30");
             std::fs::write(
                 base.path().join("server/server.pid.txt"),
                 server.id().to_string(),
