@@ -1,6 +1,6 @@
 """The rc file `aspect setup bazelrc` writes, as a document: how flags render into
-sections, how the file announces itself, and how it is placed in a user's
-`~/.bazelrc` through a commented `try-import` line.
+sections, how the file announces itself, and how it is placed in another rc —
+the workspace `.bazelrc` — through a commented `try-import` line.
 
 Nothing here decides *which* flags are written — `aspect_flags.axl`,
 `rc_groups.axl`, and `deployment_rc.axl` do — only how startup flags, enabled
@@ -36,8 +36,8 @@ RcConfig = record(
     flags = field(list),
 )
 
-# The comment written above the `try-import` line in a user rc, so the import
-# reads as ours next to whatever else the file holds.
+# The comment written above the `try-import` line in the importing rc, so the
+# import reads as ours next to whatever else the file holds.
 IMPORT_COMMENT = "# Aspect's rc for vanilla `bazel`, maintained by `aspect setup bazelrc`."
 
 # What `ensure_import` did to the user rc.
@@ -121,11 +121,13 @@ def prune_configs(configs: list, enabled: list) -> (list, list):
     return (configs, enabled)
 
 def import_line(generated_rc: str) -> str:
-    """The line that pulls `generated_rc` into a user rc. `try-import` rather than
-    `import` so a generated file that later disappears degrades to no Aspect
-    configuration instead of failing every `bazel` call. The path is absolute:
-    Bazel resolves an import as written unless it starts with `%workspace%`, so
-    a relative one would resolve against Bazel's working directory."""
+    """The line that pulls `generated_rc` into another rc. `try-import` rather
+    than `import` so a generated file that later disappears degrades to no
+    Aspect configuration instead of failing every `bazel` call. Bazel resolves
+    the path as written except for a leading `%workspace%`, its one rc variable,
+    so the caller passes `%workspace%/…` for a file in the checkout and an
+    absolute path otherwise; a bare relative path would resolve against Bazel's
+    working directory."""
     return "try-import " + generated_rc
 
 def ensure_import(existing: str | None, line: str) -> ImportResult:

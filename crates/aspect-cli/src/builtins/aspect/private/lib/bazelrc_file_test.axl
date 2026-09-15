@@ -89,7 +89,7 @@ def _test_prune_configs(_ctx):
     _eq("enable dropped", enabled, ["aspect-common"])
     _eq("nothing to prune", prune_configs([_COMMON], ["aspect-common"]), ([_COMMON], ["aspect-common"]))
 
-_LINE = import_line("/home/ci/.aspect/bazelrc")
+_LINE = import_line("%workspace%/.aspect/generated/bazelrc")
 _BLOCK = IMPORT_COMMENT + "\n" + _LINE + "\n"
 
 def _ensure(existing):
@@ -97,7 +97,8 @@ def _ensure(existing):
 
 def _test_import_line(_ctx):
     # `try-import`, so a generated file that later disappears is not fatal.
-    _eq("try-import", _LINE, "try-import /home/ci/.aspect/bazelrc")
+    _eq("try-import", _LINE, "try-import %workspace%/.aspect/generated/bazelrc")
+    _eq("explicit path as given", import_line("/srv/ci/aspect.bazelrc"), "try-import /srv/ci/aspect.bazelrc")
 
 def _test_ensure_import_new_file(_ctx):
     got = _ensure(None)

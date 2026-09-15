@@ -84,9 +84,9 @@ def cache_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
 def bes_group(environment: WorkflowsEnvironment, on_runner: bool, exec_log_path: str) -> RcConfig:
     """`aspect-bes`: the BES backend and viewer the env names and, with the
     runner marker, `--profile` under the job tmpdir, followed by the enrichment
-    any BES justifies and the diagnostics upload — with the compact execution
-    log at `exec_log_path` when one is given, which only a runner's per-job
-    tmpdir affords a static rc. Tuning alone when the env names no BES."""
+    any BES justifies and the diagnostics upload, with the compact execution
+    log at `exec_log_path` when one is given: a runner's job tmpdir, or the
+    checkout's `.aspect/generated/`. Tuning alone when the env names no BES."""
     endpoint = runner_bes_flags(environment)
     if endpoint and on_runner:
         endpoint.extend(runner_profile_flags(environment))
