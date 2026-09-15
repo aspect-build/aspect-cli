@@ -322,41 +322,11 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::ARCH)
     }
-
-    /// The absolute path a shell would run `name` as, or `None` when no `PATH`
-    /// entry holds an executable of that name — `which` / `command -v`.
-    ///
-    /// A bare name is looked up along `PATH`; a name containing a path
-    /// separator is checked as given. On Unix the file must carry an execute
-    /// bit; on Windows the `PATHEXT` extensions are tried.
-    ///
-    /// **Examples**
-    ///
-    /// ```python
-    /// helper = "aspect" if ctx.std.env.which("aspect") else ctx.std.env.current_exe()
-    /// ```
-    fn which<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = pos)] name: &str,
-        heap: Heap<'v>,
-    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        Ok(
-            match find_executable(name, std::env::var_os("PATH").as_deref()) {
-                Some(path) => NoneOr::Other(
-                    heap.alloc_str(
-                        path.to_str()
-                            .ok_or_else(|| anyhow::anyhow!("path of `{name}` is non utf-8"))?,
-                    ),
-                ),
-                None => NoneOr::None,
-            },
-        )
-    }
 }
 
 /// Resolve `name` the way a shell does against `path` (the `PATH` value): a
 /// bare name against each entry in order, a name with a separator as given.
-/// The first existing executable wins.
+/// The first existing executable wins. Behind `ctx.std.process.which`.
 pub(crate) fn find_executable(
     name: &str,
     path: Option<&std::ffi::OsStr>,

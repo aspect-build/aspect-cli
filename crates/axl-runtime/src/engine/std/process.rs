@@ -95,6 +95,36 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
             u8::try_from(code).map_err(|_| anyhow!("exit code must be 0..=255, got {code}"))?;
         Err(TaskExit::new(code, message.into_option().map(str::to_owned)).into())
     }
+
+    /// The absolute path `command(name)` would run, or `None` when no `PATH`
+    /// entry holds an executable of that name — `which` / `command -v`.
+    ///
+    /// A bare name is looked up along `PATH`; a name containing a path
+    /// separator is checked as given. On Unix the file must carry an execute
+    /// bit; on Windows the `PATHEXT` extensions are tried.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// helper = "aspect" if ctx.std.process.which("aspect") else ctx.std.env.current_exe()
+    /// ```
+    fn which<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] name: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        Ok(
+            match super::env::find_executable(name, std::env::var_os("PATH").as_deref()) {
+                Some(path) => NoneOr::Other(
+                    heap.alloc_str(
+                        path.to_str()
+                            .ok_or_else(|| anyhow::anyhow!("path of `{name}` is non utf-8"))?,
+                    ),
+                ),
+                None => NoneOr::None,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]

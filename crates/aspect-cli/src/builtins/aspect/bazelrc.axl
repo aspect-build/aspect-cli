@@ -132,7 +132,7 @@ def _credential_helper(ctx: TaskContext) -> str:
     is on PATH — Bazel resolves a bare helper name the way a shell does — else
     the absolute path of the binary running this command, which exists wherever
     this rc is read on the same machine."""
-    if ctx.std.env.which(_HELPER_NAME) != None:
+    if ctx.std.process.which(_HELPER_NAME) != None:
         return _HELPER_NAME
     return ctx.std.env.current_exe()
 
