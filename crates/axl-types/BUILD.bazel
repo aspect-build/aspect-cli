@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "axl-types",
@@ -13,6 +13,12 @@ rust_library(
         "@crates//:anyhow",
         "@crates//:derive_more",
         "@crates//:dupe",
+        "@crates//:libc",
         "@crates//:starlark",
     ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":axl-types",
 )
