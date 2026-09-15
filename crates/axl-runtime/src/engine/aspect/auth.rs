@@ -2705,13 +2705,17 @@ fn session_expired_message(profile: &str) -> String {
 }
 
 /// Shown when a refresh came back for a different organization than the one the
-/// stored session was logged in to ([`RefreshFailure::TenantChanged`]).
+/// stored session was logged in to ([`RefreshFailure::TenantChanged`]). Points at
+/// the re-login, and at API tokens as the login that cannot drift: one is bound
+/// to its organization when it is created.
 fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
+    let login = login_hint(deployment);
     format!(
-        "your default organization changed since you logged in (was {was}, now {now}); \
-         refusing to continue under a different organization.\n\nRun `{}` to log in \
-         again and choose the organization for this session.",
-        login_hint(deployment)
+        "your organization changed since you logged in (was {was}, now {now}); \
+         refusing to continue under a different organization.\n\nRun `{login}` to log \
+         in again. To keep a login in one organization whatever other sessions do, \
+         use an API token: `{login} --with-api-token`, or set {}.",
+        api_token_env_var(deployment)
     )
 }
 
@@ -6564,8 +6568,17 @@ mod tests {
         let msg = changed.message(ASPECT_CLOUD_DEPLOYMENT_NAME);
         assert!(msg.contains("was t1, now t2"), "{msg}");
         assert!(msg.contains("`aspect auth login`"), "{msg}");
+        assert!(
+            msg.contains("`aspect auth login --with-api-token`"),
+            "{msg}"
+        );
+        assert!(msg.contains("set ASPECT_API_TOKEN."), "{msg}");
         let msg = changed.message("acme");
-        assert!(msg.contains("--deployment acme"), "{msg}");
+        assert!(
+            msg.contains("`aspect auth login --deployment acme --with-api-token`"),
+            "{msg}"
+        );
+        assert!(msg.contains("set ASPECT_API_TOKEN_ACME."), "{msg}");
         // Any other failure keeps the plain expiry message.
         assert_eq!(
             RefreshFailure::Failed.message("acme"),

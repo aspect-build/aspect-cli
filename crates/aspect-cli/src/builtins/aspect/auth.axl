@@ -226,36 +226,24 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
     browser login came back with. `--org` (a name or id) picks another;
     otherwise a TTY is prompted, and off a TTY the login fails rather than
     landing in whichever organization happened to be the default. One
-    organization, or an issuer that reports none, needs no choice. Getting a
-    different organization means making it the account's default, which other
-    sessions pick up on their next login or refresh; says so when that happened.
+    organization, or an issuer that reports none, needs no choice.
     """
     if ctx.args.org:
-        wanted = ctx.args.org
-    else:
-        orgs = creds.organizations()
-        if len(orgs) <= 1:
-            return creds
-        chosen = prompt_choice(
-            ctx,
-            orgs,
-            organization_label,
-            [
-                "Your account belongs to multiple organizations.",
-                "Choosing one other than [default] makes it your account's default: the one",
-                "your next login or token refresh lands in, on any client.",
-                "Choose the one this login should use:",
-            ],
-        )
-        if chosen == None:
-            error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
-            error(ctx.std, "Choose one of: " + ", ".join([organization_label(o) for o in orgs]))
-            return None
-        wanted = chosen.name
-    selected = creds.with_organization(wanted)
-    if selected.tenant_id != creds.tenant_id:
-        print("Your account's default organization is now " + wanted + "; other sessions pick it up on their next login or token refresh.")
-    return selected
+        return creds.with_organization(ctx.args.org)
+    orgs = creds.organizations()
+    if len(orgs) <= 1:
+        return creds
+    chosen = prompt_choice(
+        ctx,
+        orgs,
+        organization_label,
+        ["Your account belongs to multiple organizations.", "Choose the one this login should use:"],
+    )
+    if chosen == None:
+        error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
+        error(ctx.std, "Choose one of: " + ", ".join([organization_label(o) for o in orgs]))
+        return None
+    return creds.with_organization(chosen.name)
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
@@ -390,7 +378,7 @@ login = task(
             description = "Don't open a browser locally; print the URL and ask for the callback URL or authorization code. Use this when the browser is on another machine, such as over SSH.",
         ),
         "org": args.string(
-            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. Choosing an organization other than your account's default makes it the default: the one your next login or token refresh lands in, on any client. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
+            description = "The organization to log in to, by name or id, for an account that belongs to more than one. Required when running non-interactively; on a TTY you are prompted to choose. A later token refresh that would land this login in another organization is refused rather than followed. Browser login only: an API token or a pasted JWT is already bound to one organization.",
         ),
         "profile": args.string(
             description = "The identity to file this login under, defaulting to \"default\". A profile holds one credential per deployment, so --profile bob covers Aspect Cloud and every deployment bob uses; switching profiles switches all of them. Unlike --deployment (which picks what to authenticate against), this picks who. Also settable via $ASPECT_AUTH_PROFILE, which the Bazel credential helper reads too.",
