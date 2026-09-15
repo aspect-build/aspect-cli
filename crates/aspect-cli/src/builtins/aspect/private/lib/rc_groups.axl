@@ -79,7 +79,7 @@ def cache_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
     when the env names no cache."""
     endpoint = env_endpoint_flags(environment)
     if endpoint and on_runner:
-        endpoint.extend(workflows_cache_flags())
+        endpoint.extend(workflows_cache_flags(environment))
     return _group(GROUP_CACHE, "The remote cache (ASPECT_WORKFLOWS_REMOTE_CACHE where set) and the tuning a cache justifies.", endpoint + endpoint_flags(cache = True, bes = False))
 
 def bes_group(environment: WorkflowsEnvironment, on_runner: bool, exec_log_path: str) -> RcConfig:

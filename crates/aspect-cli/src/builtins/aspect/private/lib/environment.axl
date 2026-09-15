@@ -17,6 +17,11 @@ RemoteCache = record(
     endpoint = field(str, default = ""),
     # → Bazel `--remote_bytestream_uri_prefix`; cross-cache de-dup. "" when runner didn't surface one.
     bytestream_uri_prefix = field(str, default = ""),
+    # Whether the cache accepts compressed blobs (ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION
+    # set). False forces `--noremote_cache_compression`, since Bazel errors when a
+    # repository asks a cache that lacks it for compression; true leaves the
+    # choice to the repository. Goes away once no deployment lacks compression.
+    supports_compression = field(bool, default = False),
 )
 
 BuildEvents = record(
@@ -222,6 +227,7 @@ def _read_remote_cache(std) -> RemoteCache | None:
     return RemoteCache(
         endpoint = endpoint,
         bytestream_uri_prefix = std.env.var("ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX") or "",
+        supports_compression = bool(std.env.var("ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION")),
     )
 
 def _read_remote_executor(std) -> RemoteExecutor | None:

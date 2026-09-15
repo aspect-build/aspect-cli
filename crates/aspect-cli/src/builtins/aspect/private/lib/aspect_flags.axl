@@ -16,7 +16,7 @@ in the group for what it presumes, and only the groups whose endpoint the host
 has are enabled, so the rc written off a runner changes nothing until a section
 is named and is safe to import into any `~/.bazelrc`.
 
-`CATALOG` and `WORKFLOWS_CACHE_FLAGS` are the maintained tables: each entry says
+`CATALOG`, `WORKFLOWS_CACHE_FLAGS`, and `NO_COMPRESSION_FLAGS` are the maintained tables: each entry says
 what the flag does, why we set it, and what it presumes. Read them as the
 documentation; the functions only select from them. Flags whose values come
 from the environment or a deployment — the endpoints themselves, the runner's
@@ -121,20 +121,28 @@ CATALOG = [
     ),
 ]
 
-# Flags specific to the Aspect Workflows runner's own remote cache, set only on a
-# runner with that cache wired. They presume the Workflows cache implementation,
-# not just any cache, so they are not in `CATALOG`.
-WORKFLOWS_CACHE_FLAGS = [
+# Set on a runner whose cache does not accept compressed blobs
+# (ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION unset): Bazel errors when a
+# repository rc asks such a cache for compression, so the runner forces it off.
+# A cache that declares support leaves the choice to the repository. Drop once no
+# Workflows deployment without compression is left in the wild.
+NO_COMPRESSION_FLAGS = [
     _entry(
         "--noexperimental_remote_cache_compression",
-        "The Workflows remote cache does not support compressed blobs.",
+        "This Workflows remote cache does not support compressed blobs.",
         bazel = "<8.0.0",
     ),
     _entry(
         "--noremote_cache_compression",
-        "The Workflows remote cache does not support compressed blobs; Bazel 8 renamed the flag.",
+        "This Workflows remote cache does not support compressed blobs; Bazel 8 renamed the flag.",
         bazel = ">=8.0.0",
     ),
+]
+
+# Flags specific to the Aspect Workflows runner's own remote cache, set only on a
+# runner with that cache wired. They presume the Workflows cache implementation,
+# not just any cache, so they are not in `CATALOG`.
+WORKFLOWS_CACHE_FLAGS = [
     _entry(
         "--incompatible_remote_results_ignore_disk",
         "Give Bazel 6 the combined-cache semantics Bazel 7 made the default.",
@@ -142,7 +150,7 @@ WORKFLOWS_CACHE_FLAGS = [
     ),
     _entry(
         "--disk_cache=",
-        "A workspace rc's disk cache only duplicates the runner's own local, warmed cache. Elsewhere a disk cache is left as the user set it.",
+        "With the runner's remote cache set, a disk cache from a workspace rc would only fill the runner's disk with a second copy of what the remote cache holds. Elsewhere a disk cache is left as the user set it.",
     ),
 ]
 
@@ -298,11 +306,16 @@ def runner_executor_endpoint(environment: WorkflowsEnvironment) -> list:
         return []
     return [_REMOTE_EXECUTOR + "=" + executor.endpoint]
 
-def workflows_cache_flags() -> list:
-    """The Workflows cache's specifics from `WORKFLOWS_CACHE_FLAGS`: the
-    compression gates and the disk-cache reset. Presumes the runner's own cache,
-    so callers gate on the runner marker and `environment.remote_cache`."""
-    return [_as_flag(e) for e in WORKFLOWS_CACHE_FLAGS]
+def workflows_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """The Workflows cache's specifics: `NO_COMPRESSION_FLAGS` unless the cache
+    declares compression support, then `WORKFLOWS_CACHE_FLAGS`. Presumes the
+    runner's own cache, so callers gate on the runner marker; fails without
+    `environment.remote_cache`."""
+    remote_cache = environment.remote_cache
+    if remote_cache == None:
+        fail("workflows_cache_flags called without a remote cache — gate on environment.remote_cache != None")
+    compression = [] if remote_cache.supports_compression else NO_COMPRESSION_FLAGS
+    return [_as_flag(e) for e in compression + WORKFLOWS_CACHE_FLAGS]
 
 def runner_repository_cache_flags(environment: WorkflowsEnvironment) -> list:
     """`--repository_cache` at the runner's warmed repository cache. Presumes
@@ -318,7 +331,7 @@ def runner_cache_flags(environment: WorkflowsEnvironment) -> list:
     Presumes the runner marker."""
     if environment.runner == None:
         fail("runner_cache_flags called without a Workflows runner — gate on environment.runner != None")
-    specifics = workflows_cache_flags() if environment.remote_cache != None else []
+    specifics = workflows_cache_flags(environment) if environment.remote_cache != None else []
     return specifics + runner_repository_cache_flags(environment)
 
 def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> list:
@@ -418,7 +431,7 @@ def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
 def written_flag_names() -> list:
     """The name of every flag this file can produce, catalog and built alike. What
     `aspect ci bazelrc` uses to recognize the lines it once wrote into a user rc."""
-    return [e.flag.split("=")[0] for e in CATALOG + WORKFLOWS_CACHE_FLAGS] + [
+    return [e.flag.split("=")[0] for e in CATALOG + NO_COMPRESSION_FLAGS + WORKFLOWS_CACHE_FLAGS] + [
         _REMOTE_CACHE,
         _REMOTE_EXECUTOR,
         _BYTESTREAM_URI_PREFIX,

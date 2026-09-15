@@ -174,8 +174,15 @@ def _test_runner_pieces(_ctx):
     _has("disk cache reset", cache, "--disk_cache=")
     _eq("build = independent + env + cache", _texts(build), _texts(independent_flags() + env_flags(env) + cache))
     _eq("no env cache → only the repository cache", runner_cache_flags(WorkflowsEnvironment(runner = Runner(repository_cache_dir = "/mnt/r"))), ["--repository_cache=/mnt/r"])
-    _eq("cache = specifics + repository cache", cache, workflows_cache_flags() + runner_repository_cache_flags(env))
-    _has("specifics carry the disk-cache reset", workflows_cache_flags(), "--disk_cache=")
+    _eq("cache = specifics + repository cache", cache, workflows_cache_flags(env) + runner_repository_cache_flags(env))
+    _has("specifics carry the disk-cache reset", workflows_cache_flags(env), "--disk_cache=")
+
+    # A cache that declares compression support (ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION)
+    # is no longer forced off; the repository decides. The other specifics stay.
+    compressing = WorkflowsEnvironment(runner = Runner(repository_cache_dir = "/mnt/r"), remote_cache = RemoteCache(endpoint = "grpc://c", supports_compression = True))
+    _lacks("compression left to the repo", workflows_cache_flags(compressing), "_remote_cache_compression")
+    _has("disk-cache reset stays", workflows_cache_flags(compressing), "--disk_cache=")
+    _lacks("task flags follow", runner_flags(compressing, "/x")[1], "_remote_cache_compression")
     _eq("profile", runner_profile_flags(env), ["--profile=/wf/command.profile.gz"])
     _eq("profile needs BES", runner_profile_flags(WorkflowsEnvironment(runner = Runner(job_tmpdir = "/wf"))), [])
     _eq("exec log", runner_exec_log_path(env), "/wf/exec.log.zstd")
