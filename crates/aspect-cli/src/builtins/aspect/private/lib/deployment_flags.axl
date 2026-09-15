@@ -55,6 +55,10 @@ Failures:
   - An unrecognized capability token, a value naming no capabilities at all, or
     `none` combined with anything else.
   - `--deployment` with no `--remote` (nothing to wire).
+  - `--remote` where the `ASPECT_WORKFLOWS_*` environment already names this
+    machine's deployment (a Workflows runner, or the endpoint variables set by
+    hand): the Workflows feature wires that deployment, and a second one would
+    route the build off it. `REMOTE_REFUSED_BY_ENV` is the message.
   - `--remote` with no deployment to draw from — no `--deployment` and no default
     Aspect Workflows deployment configured (the target resolves to Aspect Cloud
     before discovery has recorded its endpoints).
@@ -79,7 +83,13 @@ load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./aspect_flags.axl", "endpoint_flags", "independent_flags", "temp_diagnostics_upload_flags")
-load("./environment.axl", "info")
+load("./environment.axl", "env_names_deployment", "info")
+
+REMOTE_REFUSED_BY_ENV = (
+    "--remote would wire a configured deployment, but the ASPECT_WORKFLOWS_* environment already names this machine's deployment, " +
+    "which every task here builds against without --remote. Unset ASPECT_WORKFLOWS_RUNNER and the ASPECT_WORKFLOWS_REMOTE_CACHE / " +
+    "BES_BACKEND / REMOTE_EXECUTOR variables to build against a configured deployment instead."
+)
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -289,6 +299,9 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
 
     if not any(spec.on.values()):
         return DeploymentFlags(base_flags = [], bes_backends = [])
+
+    if env_names_deployment(ctx.std.env):
+        ctx.std.process.exit(1, REMOTE_REFUSED_BY_ENV)
 
     endpoints = ctx.aspect.auth.deployment_endpoints(deployment = ctx.args.deployment)
 

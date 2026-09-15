@@ -388,6 +388,19 @@ def is_aspect_workflows_runner(env):
     """True when the current process is running on an Aspect Workflows runner."""
     return bool(env.var("ASPECT_WORKFLOWS_RUNNER"))
 
+# The variables by which the environment names this machine's deployment.
+_DEPLOYMENT_VARS = ["ASPECT_WORKFLOWS_RUNNER", "ASPECT_WORKFLOWS_REMOTE_CACHE", "ASPECT_WORKFLOWS_BES_BACKEND", "ASPECT_WORKFLOWS_REMOTE_EXECUTOR"]
+
+def env_names_deployment(env) -> bool:
+    """Whether the environment says which deployment this machine is on: the
+    runner marker, or any `ASPECT_WORKFLOWS_*` endpoint. Then that is the
+    deployment for every Bazel call here — `aspect ci bazelrc` takes its
+    endpoints from the env and writes no `--config=aspect-*` sections, and a
+    task refuses `--remote`, which would point at a configured deployment
+    instead. The two are answers to the same question; a build routed off the
+    runner's own services by a second answer is never what anyone meant."""
+    return any([bool(env.var(name)) for name in _DEPLOYMENT_VARS])
+
 def detect_ci(env):
     """Detect the CI platform from env vars (env = ctx.std.env). Returns:
       - "github"/"buildkite"/"gitlab"/"circleci" — gated on a host-exclusive marker.

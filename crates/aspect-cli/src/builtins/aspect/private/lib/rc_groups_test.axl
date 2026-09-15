@@ -1,11 +1,11 @@
 """Unit tests for `rc_groups.axl`: what each named `--config` group holds on and
 off a runner, the CI host group's naming, the two rc shapes (which groups are
-enabled, which a deployment section chains), and `env_names_deployment`.
+enabled, which a deployment section chains), and `environment.env_names_deployment`.
 Run with: aspect dev test-rc-groups
 """
 
 load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags")
-load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment")
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "env_names_deployment")
 load(
     "./rc_groups.axl",
     "GROUP_BES",
@@ -14,7 +14,6 @@ load(
     "GROUP_EXEC",
     "GROUP_RUNNER",
     "HOST_GROUPS",
-    "env_names_deployment",
     "host_group",
     "rc_groups",
     "section_chains",
@@ -38,7 +37,7 @@ _EXEC = RemoteExecutor(endpoint = "grpc://exec:8980")
 def _test_bare_host(_ctx):
     # Nothing in the env, no recognized host: the tuning groups alone, pure and
     # none enabled — this is the deployment shape, inert until a section is named.
-    (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "/tmp/x/exec.log.zstd")
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "/tmp/x/exec.log.zstd", names_deployment = False)
     by = _by_name(groups)
     _eq("names", [g.name for g in groups], [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
     _eq("nothing enabled", enabled, [])
@@ -54,7 +53,7 @@ def _test_env_off_runner(_ctx):
     # tuning group, ahead of the tuning, and enables it; nothing tied to a
     # runner's mounts.
     env = WorkflowsEnvironment(remote_cache = _CACHE, build_events = _BES)
-    (groups, enabled) = rc_groups(env, on_runner = False, misdetects_color = False, exec_log_path = "/x")
+    (groups, enabled) = rc_groups(env, on_runner = False, misdetects_color = False, exec_log_path = "/x", names_deployment = True)
     by = _by_name(groups)
     _eq("enabled", enabled, [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
     _eq("no runner group", GROUP_RUNNER in by, False)
@@ -68,7 +67,7 @@ def _test_env_off_runner(_ctx):
 
 def _test_runner(_ctx):
     env = WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = _EXEC, ci = CI(host = "buildkite"))
-    (groups, enabled) = rc_groups(env, on_runner = True, misdetects_color = False, exec_log_path = "/wf/exec.log.zstd")
+    (groups, enabled) = rc_groups(env, on_runner = True, misdetects_color = False, exec_log_path = "/wf/exec.log.zstd", names_deployment = True)
     by = _by_name(groups)
     _eq("order", [g.name for g in groups], [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE, GROUP_BES, GROUP_EXEC])
     _eq("enabled: all but exec", enabled, [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE, GROUP_BES])
@@ -96,7 +95,7 @@ def _test_runner(_ctx):
 def _test_exec_without_cache(_ctx):
     # Without a cache the executor doubles as one: chain the (tuning-only)
     # cache group, which is not otherwise enabled.
-    (groups, enabled) = rc_groups(WorkflowsEnvironment(remote_executor = _EXEC), on_runner = False, misdetects_color = False, exec_log_path = "/x")
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(remote_executor = _EXEC), on_runner = False, misdetects_color = False, exec_log_path = "/x", names_deployment = True)
     by = _by_name(groups)
     _eq("chains cache tuning", by[GROUP_EXEC].flags, ["--config=" + GROUP_CACHE, "--remote_executor=grpc://exec:8980"])
     _eq("cache not enabled", GROUP_CACHE in enabled, False)
@@ -114,23 +113,26 @@ def _test_host_group(_ctx):
 
     # In the rc it sits between common and the endpoint groups. With nothing in
     # the env nothing is enabled, and the deployment sections chain it with common.
-    (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github")), on_runner = False, misdetects_color = True, exec_log_path = "/x")
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github")), on_runner = False, misdetects_color = True, exec_log_path = "/x", names_deployment = False)
     _eq("placed", [g.name for g in groups], [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE, GROUP_BES])
     _eq("nothing enabled", enabled, [])
     _eq("sections chain common + host", section_chains(groups), [GROUP_COMMON, "aspect-github-actions"])
 
     # Where the env names the deployment, the same host group is enabled at the top.
-    (_groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github"), remote_cache = _CACHE), on_runner = False, misdetects_color = True, exec_log_path = "/x")
+    (_groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github"), remote_cache = _CACHE), on_runner = False, misdetects_color = True, exec_log_path = "/x", names_deployment = True)
     _eq("enabled with env", enabled, [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE])
 
 def _test_env_names_deployment(_ctx):
     # The runner marker or any one endpoint variable is the environment's answer.
-    _eq("silent", env_names_deployment(WorkflowsEnvironment(), False), False)
-    _eq("marker", env_names_deployment(WorkflowsEnvironment(runner = _RUNNER), True), True)
-    _eq("cache", env_names_deployment(WorkflowsEnvironment(remote_cache = _CACHE), False), True)
-    _eq("bes", env_names_deployment(WorkflowsEnvironment(build_events = _BES), False), True)
-    _eq("executor", env_names_deployment(WorkflowsEnvironment(remote_executor = _EXEC), False), True)
-    _eq("ci host alone is not a deployment", env_names_deployment(WorkflowsEnvironment(ci = CI(host = "github")), False), False)
+    def env(**vars):
+        return struct(var = lambda k: vars.get(k, ""))
+
+    _eq("silent", env_names_deployment(env()), False)
+    _eq("marker", env_names_deployment(env(ASPECT_WORKFLOWS_RUNNER = "1")), True)
+    _eq("cache", env_names_deployment(env(ASPECT_WORKFLOWS_REMOTE_CACHE = "grpc://c")), True)
+    _eq("bes", env_names_deployment(env(ASPECT_WORKFLOWS_BES_BACKEND = "grpc://b")), True)
+    _eq("executor", env_names_deployment(env(ASPECT_WORKFLOWS_REMOTE_EXECUTOR = "grpc://e")), True)
+    _eq("ci host alone is not a deployment", env_names_deployment(env(GITHUB_ACTIONS = "true")), False)
 
 def _test_enabled_are_defined(_ctx):
     for env, on_runner in [
@@ -138,7 +140,7 @@ def _test_enabled_are_defined(_ctx):
         (WorkflowsEnvironment(remote_cache = _CACHE), False),
         (WorkflowsEnvironment(runner = _RUNNER), True),
     ]:
-        (groups, enabled) = rc_groups(env, on_runner, False, "/x")
+        (groups, enabled) = rc_groups(env, on_runner, False, "/x", True)
         defined = [g.name for g in groups]
         for name in enabled:
             _eq(name + " defined", name in defined, True)

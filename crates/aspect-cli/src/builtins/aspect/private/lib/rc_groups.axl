@@ -14,7 +14,7 @@ The startup options are the exception, since Bazel gives them no `--config`.
     aspect-runner     the runner's storage (`--repository_cache`); only with the runner marker
     aspect-exec       the runner's remote executor; only where the env names one
 
-The rc has two shapes, decided by `env_names_deployment`. Where the environment
+The rc has two shapes, decided by `environment.env_names_deployment`. Where the environment
 names the deployment — the runner marker, or any `ASPECT_WORKFLOWS_*` endpoint —
 every group but `aspect-exec` is enabled (`aspect-cache` / `aspect-bes` only
 where the env names their endpoint) and no deployment sections are written.
@@ -121,19 +121,12 @@ def exec_group(environment: WorkflowsEnvironment) -> list:
     chain = [] if environment.remote_cache != None else ["--config=" + GROUP_CACHE]
     return [_group(GROUP_EXEC, "The runner's remote execution (ASPECT_WORKFLOWS_REMOTE_EXECUTOR); opt in per call.", chain + endpoint, source = "the runner's remote executor")]
 
-def env_names_deployment(environment: WorkflowsEnvironment, on_runner: bool) -> bool:
-    """Whether the environment says which deployment this machine is on: the
-    runner marker, or any `ASPECT_WORKFLOWS_*` endpoint. Then the rc takes its
-    endpoints from the env alone and writes no deployment sections; the two are
-    answers to the same question, and a section pointing elsewhere would route a
-    vanilla build off the runner's own services."""
-    return on_runner or environment.remote_cache != None or environment.build_events != None or environment.remote_executor != None
-
-def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str) -> (list, list):
+def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str, names_deployment: bool) -> (list, list):
     """Every group the rc defines for this host, in the order written, and the
     names among them it enables with `common --config=<group>` lines. Where the
-    env names the deployment that is every group but `aspect-exec`, with
-    `aspect-cache` / `aspect-bes` only where the env names their endpoint;
+    env names the deployment (`names_deployment`, from
+    `environment.env_names_deployment`) that is every group but `aspect-exec`,
+    with `aspect-cache` / `aspect-bes` only where the env names their endpoint;
     elsewhere nothing, the deployment sections chaining `section_chains`
     instead. Returns `(groups, enabled)`."""
     groups = [_group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags())]
@@ -143,7 +136,7 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     groups.append(bes_group(environment, on_runner, exec_log_path))
     groups.extend(exec_group(environment))
 
-    if not env_names_deployment(environment, on_runner):
+    if not names_deployment:
         return (groups, [])
     enabled = section_chains(groups)
     enabled.extend([g.name for g in groups if g.name == GROUP_RUNNER])
