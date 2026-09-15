@@ -595,9 +595,9 @@ def _test_run_in_relative_dotdot(_ctx):
 
 # runinfo aspect integration — when the injected aspect's JSON is present,
 # `determine_entrypoint` selects the exact `files_to_run` executable (pass 0)
-# and attaches the replayed `args` / `environment`.
+# and attaches the captured run metadata.
 
-_RUNINFO_JSON = '{"executable": "_main/tools/format/format_real", "args": ["--config", "x"], "environment": {"FOO": "1"}, "inherited_environment": ["HOME"]}'
+_RUNINFO_JSON = '{"executable": "_main/tools/format/format_real", "args": ["--config", "x"], "environment": {"FOO": "1"}, "inherited_environment": ["HOME"], "tags": ["ibazel_notify_changes"]}'
 
 def _test_runinfo_selects_executable_over_heuristic(ctx):
     """Pass 0 picks the file whose basename matches the aspect's executable
@@ -621,8 +621,8 @@ def _test_runinfo_selects_executable_over_heuristic(ctx):
         fail("runinfo-pass0: expected entrypoint, got None")
     _eq("runinfo-pass0: executable", ep.path, "/out/bin/tools/format/format_real")
 
-def _test_runinfo_attaches_args_and_env(ctx):
-    """The expanded args + RunEnvironmentInfo env flow onto the entrypoint."""
+def _test_runinfo_attaches_metadata(ctx):
+    """The args, environment, and tags flow onto the entrypoint."""
     mock = _make_mock_ctx(
         existing_paths = [],
         file_contents = {"/out/bin/tools/format/format.aspect_runinfo.json": _RUNINFO_JSON},
@@ -635,6 +635,7 @@ def _test_runinfo_attaches_args_and_env(ctx):
     _eq("runinfo-args", ep.args, ["--config", "x"])
     _eq("runinfo-env", ep.environment, {"FOO": "1"})
     _eq("runinfo-inherited", ep.inherited_environment, ["HOME"])
+    _eq("runinfo-tags", ep.tags, ["ibazel_notify_changes"])
 
 def _test_no_runinfo_yields_empty_args_env(ctx):
     """Without the aspect (no aspect_runinfo group), args/env default to empty
@@ -649,6 +650,37 @@ def _test_no_runinfo_yields_empty_args_env(ctx):
     _eq("no-runinfo: args empty", ep.args, [])
     _eq("no-runinfo: env empty", ep.environment, {})
     _eq("no-runinfo: inherited empty", ep.inherited_environment, [])
+    _eq("no-runinfo: tags empty", ep.tags, [])
+
+def _test_spawn_forwards_stdin_and_overrides_env(ctx):
+    r = runnable(ctx, [])
+    ep = struct(
+        path = "sh",
+        runfiles_dir = None,
+        runfiles_workspace_dir = None,
+        args = [],
+        environment = {
+            "RUNNABLE_REMOVED_ENV": "target",
+            "RUNNABLE_TEST_ENV": "target",
+        },
+    )
+    child = r.spawn(
+        ep,
+        ["-c", 'IFS= read -r line; printf "%s:%s:%s:%s" "$RUNNABLE_TEST_ENV" "${RUNNABLE_REMOVED_ENV-unset}" "$BUILD_WORKSPACE_DIRECTORY" "$line"'],
+        capture = True,
+        stdin = "piped",
+        env = {
+            "BUILD_WORKSPACE_DIRECTORY": "override-root",
+            "RUNNABLE_REMOVED_ENV": None,
+            "RUNNABLE_TEST_ENV": "override",
+        },
+    )
+    stdin = child.stdin()
+    _eq("spawn stdin bytes", stdin.write("hello\n"), 6)
+    stdin.close()
+    out = child.wait_with_output()
+    _eq("spawn status", out.status.success, True)
+    _eq("spawn stdin/env", out.stdout, "override:unset:override-root:hello")
 
 # runfiles_env — the RUNFILES_* env `_spawn` applies. RUNFILES_MANIFEST_FILE is
 # mapped to None (actively removed): if present it forces manifest-mode
@@ -910,8 +942,9 @@ _UNIT_TESTS = [
     _test_get_default_outputs_apparent_label_normalization,
     _test_get_default_outputs_strips_file_uri_prefix,
     _test_runinfo_selects_executable_over_heuristic,
-    _test_runinfo_attaches_args_and_env,
+    _test_runinfo_attaches_metadata,
     _test_no_runinfo_yields_empty_args_env,
+    _test_spawn_forwards_stdin_and_overrides_env,
     _test_runfiles_env_unsets_manifest_file,
     _test_runfiles_env_empty_without_tree,
     _test_download_floor_forced_when_unset,

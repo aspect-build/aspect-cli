@@ -803,6 +803,54 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn try_write_survives_dead_child() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    c = ctx.std.process.command("cat").stdin("piped").stdout("null").spawn()
+    w = c.stdin()
+    if w.try_write("ping\n") != 5:
+        fail("write to a live child must succeed")
+    c.kill()
+    c.wait()
+    if w.try_write("ping\n") != 0:
+        fail("write to a dead child's pipe must report zero, not raise")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn try_write_accepts_file_and_stdout_streams() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    d = ctx.std.fs.mkdtemp(prefix = "trywrite")
+    f = ctx.std.fs.create(d + "/out.txt")
+    if f.try_write("data") != 4:
+        fail("file try_write must accept the buffer")
+    f.close()
+    if ctx.std.fs.read_to_string(d + "/out.txt") != "data":
+        fail("file try_write must land on disk")
+    ctx.std.io.stdout.try_write("")
+    ctx.std.io.stderr.try_write("")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
     #[test]
     fn shutdown_spawn_refusal_is_a_quiet_task_exit() {
         let cmd = Command {

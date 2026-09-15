@@ -412,6 +412,7 @@ dependencies = [
  "anyhow",
  "derive_more 2.0.1",
  "dupe",
+ "libc",
  "starlark",
 ]
 
