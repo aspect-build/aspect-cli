@@ -318,7 +318,6 @@ def _test_bes_flag_yields_to_user_flag(_):
         bes_results_url_flag(
             [_GCP],
             _fake_rc({"--bes_results_url": "https://mine.example", "--bes_backend": "grpcs://bes.gcp"}),
-            _sinks("grpcs://bes.gcp"),
         ),
         [],
     )
