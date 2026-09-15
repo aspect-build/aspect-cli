@@ -697,3 +697,54 @@ jobs:
             --coverage-tool=cat --coverage-tool-arg='{report}' \
             //examples/test_states:always_pass
           rm -f "$REPORT"
+  # Single required status check for the `main` ruleset. Branch protection
+  # names this job alone rather than the ~45 jobs above, so adding, renaming
+  # or matrix-expanding a job never silently drops it out of protection: it
+  # only has to be listed in `needs` here. `if: always()` makes the job run
+  # even when a dependency failed or was cancelled, so it can report red
+  # instead of being skipped (a skipped required check blocks merge with no
+  # explanation). Delivery tasks are not listed: they run in the separately
+  # dispatched CI - Delivery workflow and gate nothing here.
+  ci-ok:
+    runs-on: ubuntu-latest
+    if: always()
+    timeout-minutes: 2
+    needs:
+      - wrapper-test
+      - pre-build
+      - dispatch-delivery
+      - buildifier-task
+      - buildifier-debug-task
+      - format-task
+      - format-debug-task
+      - format-repeat-task
+      - gazelle-task
+      - gazelle-debug-task
+      - gazelle-from-source-task
+      - gazelle-from-source-debug-task
+      - lint-task
+      - lint-debug-task
+      - build-task
+      - build-debug-task
+      - test-task
+      - test-debug-task
+      - build-task-ephemeral
+      - test-task-ephemeral
+      - init-preset
+      - cache-diff-task
+      - cache-diff-debug-task
+      - runner-smoke
+      - axl-tests
+      - axl-smoke
+      - test-flags-task
+    steps:
+      - name: Every CI job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<<"$RESULTS" | sort
+          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | .key' <<<"$RESULTS")
+          if [ -n "$failed" ]; then
+            echo "::error::CI jobs that did not succeed: $(tr '\n' ' ' <<<"$failed")"
+            exit 1
+          fi
