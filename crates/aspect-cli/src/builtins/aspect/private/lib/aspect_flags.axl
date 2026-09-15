@@ -177,6 +177,7 @@ _OUTPUT_USER_ROOT = "--output_user_root"
 _OUTPUT_BASE = "--output_base"
 _NOHOME_RC = "--nohome_rc"
 _NOSYSTEM_RC = "--nosystem_rc"
+_COLOR = "--color"
 _BES_BACKEND = "--bes_backend"
 _BES_RESULTS_URL = "--bes_results_url"
 _PROFILE = "--profile"
@@ -224,6 +225,15 @@ def protected_omissions(omitted: list) -> list:
     """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user
     spelled them; empty when every omission is allowed."""
     return [o for o in omitted if flag_name(o) in PROTECTED_FLAGS]
+
+def color_flags(renders_ansi: bool) -> list:
+    """`--color=yes` where the console renders ANSI although Bazel would not
+    detect it. Bazel's default `--color=auto` keys off stderr being a TTY, which
+    CI log capture and `TERM=dumb` defeat even though the log viewer renders
+    color fine; forcing it there costs nothing on a real TTY. Presumes no
+    endpoint — the host, not a deployment, decides — so it is the one flag that
+    is unconditional on a CI host in the rc written off a runner."""
+    return [_COLOR + "=yes"] if renders_ansi else []
 
 def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
     """The remote-cache endpoint the runner environment names: `--remote_cache`
@@ -364,6 +374,7 @@ def written_flag_names() -> list:
         _OUTPUT_BASE,
         _NOHOME_RC,
         _NOSYSTEM_RC,
+        _COLOR,
         _BES_BACKEND,
         _BES_RESULTS_URL,
         _PROFILE,

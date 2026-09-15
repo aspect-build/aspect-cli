@@ -12,6 +12,7 @@ load(
     "CATALOG",
     "PROTECTED_FLAGS",
     "apply_output_base_suffix",
+    "color_flags",
     "diagnostics_upload_flags",
     "endpoint_flags",
     "env_flags",
@@ -164,6 +165,10 @@ def _test_runner_bes_flags(_ctx):
     _startup, build = runner_flags(env, "/x")
     _lacks("runner_flags omits bes", build, "--bes_backend")
 
+def _test_color_flags(_ctx):
+    _eq("renders ansi", color_flags(True), ["--color=yes"])
+    _eq("does not", color_flags(False), [])
+
 def _test_diagnostics_upload_flags(_ctx):
     # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.
     _eq("no path", diagnostics_upload_flags(), [("--remote_build_event_upload=all", ">=7.0.0")])
@@ -171,7 +176,7 @@ def _test_diagnostics_upload_flags(_ctx):
 
 def _test_written_flag_names(_ctx):
     names = written_flag_names()
-    for want in ["--heap_dump_on_oom", "--noremote_cache_compression", "--disk_cache", "--remote_cache", "--output_base", "--repository_cache", "--profile", "--execution_log_compact_file"]:
+    for want in ["--heap_dump_on_oom", "--noremote_cache_compression", "--disk_cache", "--remote_cache", "--output_base", "--repository_cache", "--profile", "--execution_log_compact_file", "--color"]:
         _eq("knows " + want, want in names, True)
     _eq("names only", any(["=" in n for n in names]), False)
 
@@ -211,6 +216,7 @@ _UNIT_TESTS = [
     _test_runner_flags_output_base,
     _test_runner_diagnostics_flags,
     _test_runner_bes_flags,
+    _test_color_flags,
     _test_diagnostics_upload_flags,
     _test_written_flag_names,
     _test_omit_flags,

@@ -3,6 +3,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load(
     "../private/lib/aspect_flags.axl",
     "apply_output_base_suffix",
+    "color_flags",
     "runner_diagnostics_flags",
     "runner_flags",
 )
@@ -22,20 +23,7 @@ def _workflows_impl(ctx: FeatureContext):
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
 
-    # `--color=yes` is wanted in every environment where aspect-cli will
-    # render ANSI elsewhere — not just on Workflows runners. Bazel's
-    # default `--color=auto` keys off stderr's isatty (since `ctx.bazel.
-    # build` inherits stderr by default that's normally a TTY locally),
-    # but several conditions still trip it to "no color" — `TERM=dumb`,
-    # being launched from a parent that's not on a tty (e.g. `cargo run
-    # -- format` from certain shells / editors), or CI log viewers that
-    # capture stderr to a pipe even though they render ANSI fine. Force
-    # it whenever `color_enabled` agrees output should be colored. On a
-    # plain TTY this matches what `auto` would have done. Deliberately
-    # not forcing `--curses=yes`: line-oriented log viewers garble
-    # cursor-control sequences.
-    if color_enabled(ctx.std):
-        bazel_trait.extra_flags.append("--color=yes")
+    bazel_trait.extra_flags.extend(color_flags(color_enabled(ctx.std)))
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the

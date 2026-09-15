@@ -73,24 +73,22 @@ WorkflowsEnvironment = record(
 
 # Terminal / ANSI detection
 
-def color_enabled(std):
-    """Should ANSI color be emitted to stdout? The "emit color?" predicate.
-
-    True on a real TTY, or on a recognized CI host (GHA, Buildkite, CircleCI,
-    GitLab) — those render ANSI in log viewers despite a non-TTY pipe.
-
-    Broader than `CI.supports_curses`: curses cursor control breaks
-    line-oriented log viewers, but plain ANSI color renders fine.
-    """
-    if std.io.stdout.is_tty:
-        return True
-    env = std.env
+def ci_renders_ansi(env) -> bool:
+    """Whether this is a CI host whose log viewer renders ANSI color despite a
+    non-TTY pipe: GitHub Actions, Buildkite, CircleCI, GitLab. Broader than
+    `CI.supports_curses`: curses cursor control breaks line-oriented log viewers,
+    but plain ANSI color renders fine."""
     return bool(
         env.var("GITHUB_ACTIONS") or
         env.var("BUILDKITE") or
         env.var("CIRCLECI") or
         env.var("GITLAB_CI"),
     )
+
+def color_enabled(std):
+    """Should ANSI color be emitted to stdout? True on a real TTY, or on a CI
+    host that renders ANSI (`ci_renders_ansi`)."""
+    return std.io.stdout.is_tty or ci_renders_ansi(std.env)
 
 # Severity-prefixed output. Channels (increasing alarm):
 #   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
