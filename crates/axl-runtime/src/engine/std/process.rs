@@ -645,10 +645,7 @@ mod tests {
 /// Resolve `name` the way a shell does against `path` (the `PATH` value): a
 /// bare name against each entry in order, a name with a separator as given.
 /// The first existing executable wins. Behind `which` above.
-fn find_executable(
-    name: &str,
-    path: Option<&std::ffi::OsStr>,
-) -> Option<std::path::PathBuf> {
+fn find_executable(name: &str, path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
     let candidate = std::path::Path::new(name);
     if candidate.components().count() > 1 {
         return executable_variants(candidate)
