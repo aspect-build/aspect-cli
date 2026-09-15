@@ -17,9 +17,10 @@ Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
 chains to the `rc_groups.axl` tuning groups those endpoints justify —
-`aspect-cache`, `aspect-bes` — so the tuning is spelled once per rc. The
-endpoint-free tuning (`aspect-common`) is the rc's, enabled for every command, so no
-section repeats it. Remote execution is never part of the base
+`aspect-cache`, `aspect-bes` — so the tuning is spelled once per rc. It also
+chains the groups the rc would otherwise enable for every command
+(`aspect-common`, the CI host's), since the rc that carries deployment
+sections enables nothing: it is inert until a section is named. Remote execution is never part of the base
 section: it relocates every action, so it is only ever reached by naming
 `-exec`, mirroring `--remote=exec` on `aspect <task>`.
 
@@ -100,10 +101,11 @@ def _login_hint(deployment) -> str:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
     return "auth via `" + login + "`"
 
-def _base_config(d, name: str, credential_helper: str) -> RcConfig:
+def _base_config(d, name: str, credential_helper: str, host_groups: list) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
-    helper for their hosts, and the tuning groups those endpoints justify."""
-    flags = []
+    helper for their hosts, and the groups it chains — `host_groups` first, then
+    the tuning groups those endpoints justify."""
+    flags = ["--config=" + g for g in host_groups]
     wired = []
     if d.cache:
         flags.append("--remote_cache=" + _SCHEME + d.cache)
@@ -125,24 +127,23 @@ def _base_config(d, name: str, credential_helper: str) -> RcConfig:
         flags = flags,
     )
 
-def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConfig:
+def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_groups: list) -> RcConfig:
     """`--config=<name>-exec`: the base section plus the deployment's executor. An
     executor-only deployment has no base to chain to, so its section stands alone
-    and chains the tuning groups an executor justifies (it doubles as the cache).
+    and chains `host_groups` and the tuning an executor justifies (it doubles as
+    the cache).
     A credential helper is added for the exec host only when the base section's
     don't cover it."""
     if has_base:
         flags = ["--config=" + name]
         covered = _unique_hosts([d.cache, d.bes])
     else:
-        flags = []
+        flags = ["--config=" + g for g in host_groups] + ["--config=" + GROUP_CACHE]
         covered = []
     flags.append("--remote_executor=" + _SCHEME + d.exec)
     exec_host = endpoint_host(d.exec)
     if exec_host not in covered:
         flags.extend(credential_helper_flags([exec_host], credential_helper))
-    if not has_base:
-        flags.append("--config=" + GROUP_CACHE)
     return RcConfig(
         name = name + _EXEC_SUFFIX,
         source = _label(d) + " (remote execution)",
@@ -150,14 +151,17 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConf
         flags = flags,
     )
 
-def deployment_configs(deployments: list, credential_helper: str) -> list:
+def deployment_configs(deployments: list, credential_helper: str, host_groups: list = []) -> list:
     """The sections for every deployment in `deployments` (rows of
     `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
     `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
     fields), in order, followed by the `aspect` / `aspect-exec` aliases for the
     default one. `credential_helper` is the path Bazel invokes as `<helper> get`.
-    The tuning each section needs comes from the `rc_groups.axl` groups it chains
-    to, which the rc defines alongside."""
+    Every section (the aliases aside, which chain a section) starts by chaining
+    `host_groups` — the rc's `aspect-common` and CI-host groups, which the
+    deployment shape of the rc leaves unenabled so the file is inert until a
+    section is named — then the tuning groups its endpoints justify; all are
+    `rc_groups.axl` groups the rc defines alongside."""
     configs = []
     aliases = []
     for d in deployments:
@@ -166,9 +170,9 @@ def deployment_configs(deployments: list, credential_helper: str) -> list:
             continue
         name = config_name(d)
         if has_base:
-            configs.append(_base_config(d, name, credential_helper))
+            configs.append(_base_config(d, name, credential_helper, host_groups))
         if d.exec:
-            configs.append(_exec_config(d, name, credential_helper, has_base))
+            configs.append(_exec_config(d, name, credential_helper, has_base, host_groups))
         if d.default:
             if has_base:
                 aliases.append(RcConfig(

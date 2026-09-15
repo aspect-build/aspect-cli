@@ -72,6 +72,16 @@ def _test_cloud_section(_ctx):
     # Each section says what it wires and how it authenticates.
     _eq("comment", configs["aspect-cloud"].comment.startswith("Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN"), True)
 
+def _test_host_groups_chained_first(_ctx):
+    # The rc that carries sections enables nothing, so every section opens by
+    # chaining what the env shape would have enabled; aliases chain a section.
+    configs = _by_name(deployment_configs([_SILO, _summary("e", exec = "exec.e")], _HELPER, host_groups = ["aspect-common", "aspect-github-actions"]))
+    _eq("base opens with host groups", configs["aspect-silo-gcp"].flags[:2], ["--config=aspect-common", "--config=aspect-github-actions"])
+    _eq("exec chains its base only", configs["aspect-silo-gcp-exec"].flags[0], "--config=aspect-silo-gcp")
+    _lacks("exec does not repeat them", configs["aspect-silo-gcp-exec"].flags, "--config=aspect-common")
+    _eq("standalone exec opens with them", configs["aspect-e-exec"].flags[:3], ["--config=aspect-common", "--config=aspect-github-actions", "--config=aspect-cache"])
+    _eq("none by default", [f for f in deployment_configs([_SILO], _HELPER)[0].flags if f == "--config=aspect-common"], [])
+
 def _test_exec_section(_ctx):
     configs = _by_name(deployment_configs([_SILO], _HELPER))
     _eq("names", sorted(configs.keys()), ["aspect-silo-gcp", "aspect-silo-gcp-exec"])
@@ -167,6 +177,7 @@ def _test_config_collisions(_ctx):
 _UNIT_TESTS = [
     _test_config_name,
     _test_cloud_section,
+    _test_host_groups_chained_first,
     _test_exec_section,
     _test_partial_deployments,
     _test_default_aliases,

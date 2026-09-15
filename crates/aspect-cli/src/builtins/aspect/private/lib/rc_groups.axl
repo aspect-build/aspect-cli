@@ -27,11 +27,11 @@ is `--color=yes` where Bazel's `--color=auto` misdetects
 `aspect-exec` is the deployment pattern's name for the default deployment's
 execution; where the env names an executor the runner is that deployment.
 
-Deployment sections chain `aspect-cache` / `aspect-bes` but never
-`aspect-common`: the rc enables it for every command already, and a config
-expanded twice draws a Bazel warning. They are written only where the env
-names no endpoint (`bazelrc.axl`), so the groups they chain are always tuning
-alone and no name is ever claimed twice.
+Deployment sections are written only where the env names no endpoint
+(`bazelrc.axl`), and that rc enables nothing at all: `aspect-common` and the
+host group are chained by every section instead, so the file is inert until a
+section is named, the groups a section chains are always tuning alone, and no
+config is ever expanded twice.
 """
 
 load(
@@ -124,10 +124,11 @@ def exec_group(environment: WorkflowsEnvironment) -> list:
 
 def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str) -> (list, list):
     """Every group the rc defines for this host, in the order written, and the
-    names among them it enables with `common --config=<group>` lines:
-    `aspect-common` always, the host and runner groups when defined,
-    `aspect-cache` and `aspect-bes` where the env names their endpoint. Returns
-    `(groups, enabled)`."""
+    names among them the env-shaped rc enables with `common --config=<group>`
+    lines: `aspect-common` always, the host and runner groups when defined,
+    `aspect-cache` and `aspect-bes` where the env names their endpoint. The
+    deployment-shaped rc enables none and chains the first two from its sections
+    instead (`bazelrc.axl`). Returns `(groups, enabled)`."""
     groups = [_group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags())]
     groups.extend(host_group(environment, misdetects_color))
     groups.extend(runner_group(environment, on_runner))

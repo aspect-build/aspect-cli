@@ -21,17 +21,17 @@ plumbing:
   - Anywhere else, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains
     one `try-import` line for it, so an rc another setup step or the developer
     wrote survives and re-running never accumulates anything. That rc is inert
-    until a `--config=aspect-*` is named, but for `aspect-common` and the CI
-    host's group — so importing it into a developer's own rc changes nothing
-    by itself.
+    until a `--config=aspect-*` is named — importing it into a developer's own
+    rc changes nothing by itself.
 
 Which deployment the rc points at is answered once. When the environment says —
 the runner marker, or any `ASPECT_WORKFLOWS_*` endpoint set by hand — the rc
-takes its endpoints from the env and writes no deployment sections: a
-`--config=aspect-cloud` in a runner's rc would route a vanilla build off the
-runner's own services, and the two answers would otherwise expand the same
-groups twice. When the environment is silent, the configured deployments
-(`aspect auth status`) get their opt-in sections.
+takes its endpoints from the env, enables the groups that apply, and writes no
+deployment sections: a `--config=aspect-cloud` in a runner's rc would route a
+vanilla build off the runner's own services. When the environment is silent,
+the configured deployments (`aspect auth status`) get their opt-in sections and
+nothing is enabled — each section chains `aspect-common` and the CI host's
+group itself — so the file does nothing until a section is named.
 
 It is the in-CLI successor to `rosetta bazelrc`: the CI integrations (the
 setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab component)
@@ -44,13 +44,13 @@ named for what it presumes: `aspect-common` for nothing, `aspect-cache` and
 `aspect-<ci host>` for what that host needs (`--color=yes` where Bazel
 misdetects), `aspect-runner` for the runner's storage, and the opt-in
 `aspect-exec` for the runner's executor. The groups whose endpoint this host has
-are enabled at the top with `common --config=<group>` lines — on a Workflows
-runner that is all but `aspect-exec`, elsewhere `aspect-common`, the host's, and
-whatever the env names — and the rest are reached by chaining or by name, so
-`--announce_rc` says which group set every flag. Where the environment is
-silent, the `--config=aspect-*` deployment sections from `lib/deployment_rc.axl`
-follow, one per deployment `aspect auth status` knows, chaining to the same
-groups. The credential helper those sections name is the
+are enabled at the top with `common --config=<group>` lines where the env names
+the deployment — on a Workflows runner that is all but `aspect-exec` — and the
+rest are reached by chaining or by name, so `--announce_rc` says which group set
+every flag. Where the environment is silent nothing is enabled, and the
+`--config=aspect-*` deployment sections from `lib/deployment_rc.axl` follow, one
+per deployment `aspect auth status` knows, each chaining `aspect-common`, the
+host's group, and the tuning its endpoints justify. The credential helper those sections name is the
 binary running this command — it certainly exists, whereas a bare `aspect` on
 PATH may not for a later `bazel` step, and Bazel fails outright on a helper it
 cannot find. Startup options have no `--config`, so the runner's output paths
@@ -144,11 +144,12 @@ def _env_is_the_deployment(environment, on_runner: bool) -> bool:
     vanilla build off the runner's own services."""
     return on_runner or environment.remote_cache != None or environment.build_events != None or environment.remote_executor != None
 
-def _sections(ctx: TaskContext) -> list:
-    """The `--config` sections for this machine's configured deployments. Reads
-    `deployments()`, not `list()`: nothing here needs login status. The
-    credential helper they name is the binary running this command."""
-    return deployment_configs(ctx.aspect.auth.deployments(), ctx.std.env.current_exe())
+def _sections(ctx: TaskContext, host_groups: list) -> list:
+    """The `--config` sections for this machine's configured deployments, each
+    chaining `host_groups` first. Reads `deployments()`, not `list()`: nothing
+    here needs login status. The credential helper they name is the binary
+    running this command."""
+    return deployment_configs(ctx.aspect.auth.deployments(), ctx.std.env.current_exe(), host_groups)
 
 def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     omitted = ctx.args.omit_bazel_flags
@@ -166,7 +167,13 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     (groups, enabled) = _groups(ctx, environment, on_runner)
     env_deployment = _env_is_the_deployment(environment, on_runner)
-    configs = groups + ([] if env_deployment else _sections(ctx))
+    if env_deployment:
+        configs = groups
+    else:
+        # Inert until a section is named: what the env shape would enable, the
+        # sections chain instead.
+        configs = groups + _sections(ctx, enabled)
+        enabled = []
     collisions = config_collisions(configs)
     if collisions:
         return TaskConclusion(exit_code = 1, message = "\n".join(collisions))
@@ -185,11 +192,13 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     _write(ctx, output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs))
 
     optional = [c.name for c in configs if c.name not in enabled]
-    summary = "Wrote Aspect bazelrc to %s: enabled --config groups %s; opt-in %s" % (output, ", ".join(enabled), ", ".join(optional) or "none")
     if env_deployment:
-        summary += " (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)"
-    elif len(optional) == len(groups) - len(enabled):
-        summary += " (no deployment advertises endpoints here; see `aspect auth status`, and `aspect auth login` records Aspect Cloud's)"
+        summary = "Wrote Aspect bazelrc to %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (output, ", ".join(enabled), ", ".join(optional) or "none")
+    else:
+        sections = [c.name for c in configs if c not in groups]
+        summary = "Wrote Aspect bazelrc to %s: inert until a --config is named; sections %s" % (output, ", ".join(sections) or "none")
+        if not sections:
+            summary += " (no deployment advertises endpoints here; see `aspect auth status`, and `aspect auth login` records Aspect Cloud's)"
 
     user_rc = ctx.args.import_into or _home_path(ctx, _USER_RC)
     if user_rc == output:
@@ -206,7 +215,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 bazelrc = task(
     group = ["ci"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere the deployment sections are opt-in: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner, or wherever the `ASPECT_WORKFLOWS_*` environment names an endpoint, that is the recommended CI/profiling flags plus that remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor, and no deployment sections. Elsewhere nothing is enabled and the deployment sections are opt-in, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
     implementation = _bazelrc_impl,
     args = {
         "output": args.string(
