@@ -1496,6 +1496,8 @@ impl IssuerKind {
     }
 }
 
+/// The header the tenant API's provider stamps on every response; see
+/// [`IssuerKind::from_response_headers`].
 const TENANT_API_TRACE_HEADER: &str = "frontegg-trace-id";
 
 /// The tenant API paths the CLI calls, all served under the issuer.
@@ -1514,7 +1516,8 @@ impl CredentialsEntry {
     /// so the credential can be refreshed. `refresh_token` may be empty (api-token
     /// and raw-token logins are not refreshable). `prefer_id_token` records that the
     /// bearer is an id_token (the self-hosted endpoint flow) so refresh preserves
-    /// that kind. `issuer_kind` records the provider so refresh can pin the tenant.
+    /// that kind. `issuer_kind` records what the issuer offers beyond OAuth
+    /// ([`IssuerKind`]).
     fn from_bearer(
         bearer: String,
         refresh_token: String,
@@ -1558,6 +1561,20 @@ impl CredentialsEntry {
         decode_jwt_claims(&self.access_token)
             .map(|c| c.tenant_ids)
             .unwrap_or_default()
+    }
+
+    /// The issuer and OAuth client this credential re-mints against, which only
+    /// a browser login records (see [`can_refresh`]).
+    fn refresh_target(&self) -> anyhow::Result<(&str, &str)> {
+        let auth_domain = self
+            .auth_domain
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("no auth_domain stored — cannot refresh"))?;
+        let client_id = self
+            .auth_client_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
+        Ok((auth_domain, client_id))
     }
 }
 
@@ -2550,7 +2567,7 @@ impl RefreshFailure {
 }
 
 /// Mint a fresh credential for `entry` with the standard refresh grant, refusing
-/// one minted for a different tenant than `entry` was ([`ensure_tenant_unchanged`]).
+/// one minted for a different tenant than `entry`'s ([`ensure_tenant_unchanged`]).
 ///
 /// The issuer is looked at again on the way ([`resolve_oidc_endpoints`]), so a
 /// credential whose login missed the tenant API is upgraded to it here and
@@ -2562,14 +2579,7 @@ async fn refresh_access_token(
         crate::trace!("refreshing the stored credential failed: {cause:#}");
         RefreshFailure::Failed
     };
-    let auth_domain = entry
-        .auth_domain
-        .as_deref()
-        .ok_or_else(|| failed(anyhow::anyhow!("no auth_domain stored — cannot refresh")))?;
-    let client_id = entry
-        .auth_client_id
-        .as_deref()
-        .ok_or_else(|| failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh")))?;
+    let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
         .await
@@ -2626,18 +2636,9 @@ async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
 ) -> anyhow::Result<CredentialsEntry> {
-    let auth_domain = entry
-        .auth_domain
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("this login records no issuer to re-mint against"))?;
-    let client_id = entry
-        .auth_client_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("this login records no client to re-mint with"))?;
+    let (auth_domain, client_id) = entry.refresh_target()?;
     if entry.refresh_token.is_empty() {
-        return Err(anyhow::anyhow!(
-            "this login has no refresh token to re-mint with"
-        ));
+        return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     switch_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
@@ -3145,8 +3146,8 @@ struct AuthSessionInner {
     /// id_token, while Aspect Cloud addresses an API that validates the
     /// access_token — and both may reach the IdP through the same relay.
     prefer_id_token: bool,
-    /// The provider behind the issuer, as the discovery response identified it,
-    /// recorded on the credential so its refresh can pin the tenant.
+    /// What the issuer offers beyond OAuth, as the discovery response identified
+    /// it when the authorize URL was built; recorded on the credential.
     issuer_kind: IssuerKind,
 }
 
@@ -6645,10 +6646,7 @@ mod tests {
 
     #[test]
     fn organizations_are_listed_for_tenant_api_credentials_only() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = current_thread_runtime();
         let jwt = jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#);
         // With no issuer recorded there is nowhere to fetch names from, so the
         // claim's ids stand in for them; the active one is flagged.
@@ -6933,6 +6931,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure, RefreshFailure::Failed);
         issuer.finish();
+    }
+
+    #[test]
+    fn a_refusal_names_the_call_with_its_status_and_body() {
+        let issuer = MockIssuer::start(1, |_| (401, r#"{"errors":["invalid_grant"]}"#.into()));
+        let error = current_thread_runtime()
+            .block_on(post_form::<serde_json::Value>(
+                &format!("{}/oauth/token", issuer.url()),
+                &[("grant_type", "refresh_token")],
+                "token refresh",
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("token refresh failed (HTTP 401 Unauthorized): "),
+            "{error}"
+        );
+        assert!(
+            error.ends_with(r#"{"errors":["invalid_grant"]}"#),
+            "{error}"
+        );
+        issuer.finish();
+    }
+
+    #[test]
+    fn selecting_an_organization_needs_a_refresh_token() {
+        let mut entry = stored_entry("http://127.0.0.1:1", "t1", IssuerKind::TenantApi);
+        entry.refresh_token.clear();
+        let error = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no refresh token stored"), "{error}");
     }
 
     #[test]
