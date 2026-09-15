@@ -7,14 +7,14 @@ sits in a group named for what it presumes, the groups that apply on this host
 are enabled at the top, and `--announce_rc` names the group every flag came from.
 The startup options are the exception, since Bazel gives them no `--config`.
 
-    aspect-ci             CI-host tuning that presumes no endpoint    enabled in every rc
+    aspect-common         tuning that presumes no endpoint            enabled in every rc
     aspect-cache          remote-cache tuning and the keepalive       enabled where the env names a cache
     aspect-bes            BES enrichment, diagnostics upload          enabled where the env names a BES
     aspect-<ci host>      what that host needs (`--color=yes`)        enabled on that host
     aspect-runner         the runner's endpoints and specifics        enabled where the env names any
     aspect-exec           the runner's remote executor                defined, never enabled: opt in per call
 
-`aspect-ci`, `aspect-cache`, and `aspect-bes` are defined in every rc so a host
+`aspect-common`, `aspect-cache`, and `aspect-bes` are defined in every rc so a host
 can borrow one by name (`bazel build --config=aspect-cache` against a cache of
 its own), and enabled only where their condition holds. The host group is
 named for the detected CI host — `aspect-github-actions`, `aspect-circleci`,
@@ -24,7 +24,7 @@ something; today that is `--color=yes` where Bazel's `--color=auto` misdetects
 
 The deployment sections of `deployment_rc.axl` chain to `aspect-cache` /
 `aspect-bes` instead of repeating their flags, so the tuning is spelled once per
-file. They do not chain `aspect-ci`: the rc enables it for every command
+file. They do not chain `aspect-common`: the rc enables it for every command
 already (a config expanded twice draws a Bazel warning), and it describes the
 host, not the deployment. `aspect-exec` is the deployment pattern's name for the
 default deployment's execution; on a runner the runner is that deployment.
@@ -45,7 +45,7 @@ load(
 load("./bazelrc_file.axl", "RcConfig")
 load("./environment.axl", "WorkflowsEnvironment")
 
-GROUP_CI = "aspect-ci"
+GROUP_COMMON = "aspect-common"
 GROUP_CACHE = "aspect-cache"
 GROUP_BES = "aspect-bes"
 GROUP_RUNNER = "aspect-runner"
@@ -65,12 +65,12 @@ def _group(name: str, comment: str, flags: list) -> RcConfig:
     return RcConfig(name = name, source = _GROUP_SOURCE % name, comment = comment, flags = flags)
 
 def tuning_groups(exec_log_path: str) -> list:
-    """The three groups defined in every rc: `aspect-ci`, `aspect-cache`, and
+    """The three groups defined in every rc: `aspect-common`, `aspect-cache`, and
     `aspect-bes` (with the compact execution log at `exec_log_path`). Defining
     them where they are not enabled costs nothing and lets a host opt into one
     by name."""
     return [
-        _group(GROUP_CI, "Tuning for a CI host; presumes no endpoint.", independent_flags()),
+        _group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags()),
         _group(GROUP_CACHE, "Remote-cache tuning (also for an executor standing in as the cache).", endpoint_flags(cache = True, bes = False)),
         _group(GROUP_BES, "BES enrichment and the build-diagnostics upload the Aspect backend reads.", endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags(exec_log_path)),
     ]
@@ -120,11 +120,11 @@ def exec_group(environment: WorkflowsEnvironment) -> list:
 
 def enabled_groups(environment: WorkflowsEnvironment, groups: list) -> list:
     """The names among `groups` this rc turns on with `common --config=<group>`
-    lines, in the order they are written: `aspect-ci` always, the host group and
+    lines, in the order they are written: `aspect-common` always, the host group and
     `aspect-runner` when defined, `aspect-cache` where the env names a cache,
     `aspect-bes` where it names a BES. `aspect-exec` is never enabled."""
     defined = [g.name for g in groups]
-    enabled = [GROUP_CI]
+    enabled = [GROUP_COMMON]
     enabled.extend([name for name in HOST_GROUPS.values() if name in defined])
     if GROUP_RUNNER in defined:
         enabled.append(GROUP_RUNNER)

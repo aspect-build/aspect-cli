@@ -20,8 +20,8 @@ plumbing:
   - Anywhere else, the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains
     one `try-import` line for it, so an rc another setup step or the developer
     wrote survives and re-running never accumulates anything. That rc is inert
-    until a `--config=aspect-*` is named, but for the CI-host tuning
-    (`aspect-ci`, `aspect-<ci host>`) and a cache or BES the `ASPECT_WORKFLOWS_*`
+    until a `--config=aspect-*` is named, but for the endpoint-free tuning
+    (`aspect-common`, `aspect-<ci host>`) and a cache or BES the `ASPECT_WORKFLOWS_*`
     env names where someone set those — so importing it into a developer's own
     rc changes nothing by itself.
 
@@ -30,13 +30,13 @@ setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab component)
 call this instead of `rosetta` once `rosetta` is gone from the runner image.
 
 Every flag in the rc sits in a named `--config` group (`lib/rc_groups.axl`):
-`aspect-ci` for CI-host tuning, `aspect-cache` and `aspect-bes` for what a cache
+`aspect-common` for tuning that presumes no endpoint, `aspect-cache` and `aspect-bes` for what a cache
 or a BES justifies, `aspect-<ci host>` for what the detected host needs
 (`--color=yes` where Bazel misdetects), `aspect-runner` for the endpoints and
 specifics the `ASPECT_WORKFLOWS_*` env names, and `aspect-exec` for the runner's
 executor. The groups that apply here are enabled at the top with
 `common --config=<group>` lines — on a Workflows runner that is most of them,
-elsewhere only `aspect-ci`, the host's, and whatever the env names — and the
+elsewhere only `aspect-common`, the host's, and whatever the env names — and the
 rest are opt-in by name, so `--announce_rc` says which group set every flag.
 After them come the `--config=aspect-*` deployment sections from
 `lib/deployment_rc.axl`, one per deployment `aspect auth status` knows, which
@@ -192,7 +192,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 bazelrc = task(
     group = ["ci"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-ci`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner that is the recommended CI/profiling flags plus its remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor; elsewhere the deployment sections are opt-in: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. On an Aspect Workflows runner `~/.bazelrc` is written whole; elsewhere the rc goes to `~/.aspect/bazelrc` and `~/.bazelrc` gains a single `try-import` line for it, added once. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, `aspect-exec` — and the groups that apply on this host are enabled at the top of the file (`bazel build --announce_rc` shows which group set what). On a Workflows runner that is the recommended CI/profiling flags plus its remote cache, BES, repository cache, and per-runner output paths, with `--config=aspect-exec` opting into its remote executor; elsewhere the deployment sections are opt-in: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), `--config=aspect-<name>-exec` to add its remote execution, and `--config=aspect` for the default deployment — authenticated through the `aspect get` credential helper.",
     implementation = _bazelrc_impl,
     args = {
         "output": args.string(

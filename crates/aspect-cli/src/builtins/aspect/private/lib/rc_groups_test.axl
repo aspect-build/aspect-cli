@@ -4,12 +4,12 @@ executor groups. Run with: aspect dev test-rc-groups
 """
 
 load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags")
-load("./environment.axl", "CI", "BuildEvents", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment")
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment")
 load(
     "./rc_groups.axl",
     "GROUP_BES",
     "GROUP_CACHE",
-    "GROUP_CI",
+    "GROUP_COMMON",
     "GROUP_EXEC",
     "GROUP_RUNNER",
     "HOST_GROUPS",
@@ -36,11 +36,11 @@ _BES = BuildEvents(backend = "grpc://bes:1985", results_url = "https://ui/i/")
 
 def _test_tuning_groups(_ctx):
     groups = _by_name(tuning_groups("/tmp/x/exec.log.zstd"))
-    _eq("names", sorted(groups.keys()), sorted([GROUP_CI, GROUP_CACHE, GROUP_BES]))
+    _eq("names", sorted(groups.keys()), sorted([GROUP_COMMON, GROUP_CACHE, GROUP_BES]))
 
     # Each group is exactly its catalog share; the BES group carries the
     # diagnostics upload with the given log path.
-    _eq("ci", groups[GROUP_CI].flags, independent_flags())
+    _eq("common", groups[GROUP_COMMON].flags, independent_flags())
     _eq("cache", groups[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
     _eq("bes", groups[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags("/tmp/x/exec.log.zstd"))
     _eq("exec log placed", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in groups[GROUP_BES].flags, True)
@@ -97,19 +97,19 @@ def _test_enabled_groups(_ctx):
 
     # A full runner on Buildkite: everything but exec; Buildkite needs no host group.
     full = WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = RemoteExecutor(endpoint = "e"), ci = CI(host = "buildkite"))
-    _eq("runner", enabled_groups(full, groups_for(full, True, False)), [GROUP_CI, GROUP_RUNNER, GROUP_CACHE, GROUP_BES])
+    _eq("runner", enabled_groups(full, groups_for(full, True, False)), [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE, GROUP_BES])
 
-    # GitHub Actions with nothing in the env: CI tuning and the host's color.
+    # GitHub Actions with nothing in the env: the common tuning and the host's color.
     gha = WorkflowsEnvironment(ci = CI(host = "github"))
-    _eq("plain gha", enabled_groups(gha, groups_for(gha, False, True)), [GROUP_CI, "aspect-github-actions"])
+    _eq("plain gha", enabled_groups(gha, groups_for(gha, False, True)), [GROUP_COMMON, "aspect-github-actions"])
 
     # A cache-only env off a runner: the runner group carries the endpoint,
     # the cache group its tuning; no BES.
     cache_only = WorkflowsEnvironment(remote_cache = _CACHE)
-    _eq("cache only", enabled_groups(cache_only, groups_for(cache_only, False, False)), [GROUP_CI, GROUP_RUNNER, GROUP_CACHE])
+    _eq("cache only", enabled_groups(cache_only, groups_for(cache_only, False, False)), [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE])
 
-    # Nothing anywhere: just the CI tuning.
-    _eq("bare", enabled_groups(WorkflowsEnvironment(), groups_for(WorkflowsEnvironment(), False, False)), [GROUP_CI])
+    # Nothing anywhere: just the common tuning.
+    _eq("bare", enabled_groups(WorkflowsEnvironment(), groups_for(WorkflowsEnvironment(), False, False)), [GROUP_COMMON])
 
     # An enabled group is always among the defined ones, and exec never is.
     for env, on_runner, misdetects in [(full, True, False), (gha, False, True), (cache_only, False, False)]:

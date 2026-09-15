@@ -18,7 +18,7 @@ Each section wires the endpoints the deployment advertises (`--remote_cache`,
 through the `aspect get` credential helper scoped to each distinct host, and
 chains to the `rc_groups.axl` tuning groups those endpoints justify —
 `aspect-cache`, `aspect-bes` — so the tuning is spelled once per rc. The
-host tuning (`aspect-ci`) is the rc's, enabled for every command, so no
+endpoint-free tuning (`aspect-common`) is the rc's, enabled for every command, so no
 section repeats it. Remote execution is never part of the base
 section: it relocates every action, so it is only ever reached by naming
 `-exec`, mirroring `--remote=exec` on `aspect <task>`.
