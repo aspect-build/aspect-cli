@@ -295,7 +295,6 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
     time (`timing["attribute"]`) from our own bookkeeping (`timing["classify"]`)."""
     _t_all = time.monotonic()
     test_set = {t: None for t in test_targets}
-    query_rc = None
 
     # Frontier misses, de-duplicated by label (first mnemonic wins).
     missed = []
@@ -304,6 +303,12 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
         if e.code != 0 and e.label not in seen_miss:
             seen_miss[e.label] = None
             missed.append(e)
+
+    # The rdeps attribution RC is built only when a main-repo dependency miss
+    # needs it: on a fully cached run nothing is queried, and a build-only
+    # --config in the user's RC must not fail that happy path.
+    needs_query = [e for e in missed if not (e.mnemonic == _TEST_MNEMONIC and e.label in test_set) and e.label.startswith("//")]
+    query_rc = attribution_rc(ctx, rc) if needs_query else None
 
     causes = {}
     unattributable = 0
@@ -321,8 +326,6 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
             continue
         cause = {"target": e.label, "mnemonic": e.mnemonic}
         _tq = time.monotonic()
-        if query_rc == None:
-            query_rc = attribution_rc(ctx, rc)
         dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(json.encode(e.label)), rc = query_rc)]
         rdeps_secs += time.monotonic() - _tq
         for label in dep_tests:

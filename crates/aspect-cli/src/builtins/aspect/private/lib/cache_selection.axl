@@ -70,18 +70,26 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
         announce_command = announce_command,
         *patterns
     ).wait()
+    # Bazel writes this log itself, so a line that is not a JSON object means
+    # it is truncated or corrupt. Fail closed rather than trust the readable
+    # remainder as a complete selection, and name the offending line.
     events = []
+    malformed = None
     if ctx.std.fs.exists(event_path):
-        for line in ctx.std.fs.read_to_string(event_path).splitlines():
-            if line:
-                event = json.try_decode(line, None)
-                if type(event) != "dict":
-                    events = []
-                    break
-                events.append(event)
-    tests = testonly_selected_tests(events, status.code)
+        for number, line in enumerate(ctx.std.fs.read_to_string(event_path).splitlines(), 1):
+            if not line:
+                continue
+            event = json.try_decode(line, None)
+            if type(event) != "dict":
+                malformed = number
+                events = []
+                break
+            events.append(event)
+    tests = None if malformed else testonly_selected_tests(events, status.code)
     if tests == None:
         ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", status.code))
+        if malformed:
+            ctx.std.io.stderr.write("ERROR: line {} of Bazel's build event JSON file is not a JSON object; the log is truncated or corrupt.\n".format(malformed))
         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))
     ctx.std.fs.remove_dir_all(work)
     return tests
