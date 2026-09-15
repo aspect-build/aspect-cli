@@ -78,7 +78,7 @@ upload and the `--build_metadata` the Web UI reads — the same flags the
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
-load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags", "temp_exec_log_path")
+load("./aspect_flags.axl", "endpoint_flags", "independent_flags", "temp_diagnostics_upload_flags")
 load("./environment.axl", "info")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
@@ -458,9 +458,7 @@ def _deployment_impl(ctx):
     t.extra_flags.extend(deployment_tuning_flags(dep))
     if "bes" in dep.wired:
         register_bes_metadata(ctx, t)
-
-        # The execution log needs a per-run path, which only the task knows.
-        t.task_flags.append(lambda tctx: diagnostics_upload_flags(temp_exec_log_path(tctx.std, tctx.task.id)))
+        t.task_flags.append(temp_diagnostics_upload_flags)
     if dep.capabilities:
         t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))
 

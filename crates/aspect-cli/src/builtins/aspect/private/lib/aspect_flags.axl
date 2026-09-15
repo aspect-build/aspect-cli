@@ -267,6 +267,16 @@ def env_flags(environment: WorkflowsEnvironment) -> list:
         bes = environment.build_events != None,
     ) + env_endpoint_flags(environment)
 
+def env_task_flags(environment: WorkflowsEnvironment) -> list:
+    """The task flags a hand-set `ASPECT_WORKFLOWS_*` environment justifies off a
+    runner: the endpoint-independent flags and `env_flags`, the same set a
+    runner's task gets minus what its mounts add. Empty when the env names no
+    cache and no BES, so plain CI and developer machines get nothing. On a
+    runner `runner_flags` covers this."""
+    if environment.remote_cache == None and environment.build_events == None:
+        return []
+    return independent_flags() + env_flags(environment)
+
 def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
     """The BES backend the runner environment names, for vanilla `bazel` on the
     runner: `--bes_backend` and, when surfaced, `--bes_results_url`. Tasks never
@@ -404,6 +414,12 @@ def temp_exec_log_path(std, run_id: str) -> str:
     dir = std.env.temp_dir().rstrip("/") + "/aspect-bazel-" + (run_id or "exec")
     std.fs.create_dir_all(dir)
     return dir + "/exec.log.zstd"
+
+def temp_diagnostics_upload_flags(ctx) -> list:
+    """`diagnostics_upload_flags` with the execution log at `temp_exec_log_path`
+    for this run — a `BazelTrait.task_flags` hook, since only the task knows its
+    run id. For a BES wired off a runner (`--remote`, or a hand-set env)."""
+    return diagnostics_upload_flags(temp_exec_log_path(ctx.std, ctx.task.id))
 
 def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
     """`--profile` placed under the runner's job tmpdir, keeping the

@@ -4,9 +4,11 @@ load(
     "../private/lib/aspect_flags.axl",
     "apply_output_base_suffix",
     "color_flags",
+    "env_task_flags",
     "runner_diagnostics_flags",
     "runner_executor_flags",
     "runner_flags",
+    "temp_diagnostics_upload_flags",
 )
 load(
     "../private/lib/environment.axl",
@@ -85,6 +87,13 @@ def _workflows_impl(ctx: FeatureContext):
 
         if is_legacy_cli:
             bazel_trait.extra_startup_flags.extend(["--aspect:disable_plugins", "--aspect:lock_version"])
+
+    if environment.runner == None:
+        # A hand-set ASPECT_WORKFLOWS_* endpoint names the deployment the way a
+        # runner's does; only the runner's mounts are missing.
+        bazel_trait.extra_flags.extend(env_task_flags(environment))
+        if environment.build_events != None:
+            bazel_trait.task_flags.append(temp_diagnostics_upload_flags)
 
     if environment.build_events != None:
         register_bes_metadata(ctx, bazel_trait)
