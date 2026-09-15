@@ -1173,7 +1173,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
         if let Some(pid) = info::client_pid(&all_flags) {
-            process::sigint(pid);
+            crate::engine::process::sigint(pid);
         }
 
         Ok(cancel::Cancellation::new(all_flags, force_kill_after_ms))

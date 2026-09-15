@@ -28,6 +28,7 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkNever;
 
+use super::live;
 use super::stream;
 use crate::eval::TaskExit;
 
@@ -115,14 +116,16 @@ impl Command {
         )
     }
 
-    fn try_spawn(&self) -> anyhow::Result<process::Child> {
-        let result = self.inner.borrow_mut().spawn();
+    fn try_spawn(&self) -> anyhow::Result<(process::Child, live::LiveChildGuard)> {
+        let result = live::spawn_registered(&mut self.inner.borrow_mut());
         result.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))
     }
 
     fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
-        let result = self.inner.borrow_mut().status();
-        result.map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
+        let (mut child, _guard) = self.try_spawn()?;
+        child
+            .wait()
+            .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
     }
 }
 
@@ -268,9 +271,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// By default, stdin, stdout and stderr are inherited from the parent.
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let child = cmd.try_spawn()?;
+        let (child, guard) = cmd.try_spawn()?;
         Ok(Child {
             inner: RefCell::new(Some(child)),
+            guard: RefCell::new(Some(guard)),
         })
     }
 
@@ -291,6 +295,8 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
+    #[allocative(skip)]
+    guard: RefCell<Option<live::LiveChildGuard>>,
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -380,12 +386,48 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// This is equivalent to sending a SIGKILL on Unix platforms.
     fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        child
-            .inner
-            .borrow_mut()
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
             .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .kill()?;
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        if inner.try_wait()?.is_some() {
+            let _ = child.guard.borrow_mut().take();
+            return Ok(NoneType);
+        }
+        inner.kill()?;
+        Ok(NoneType)
+    }
+
+    /// Asks the child process to exit gracefully. Sends SIGTERM on Unix and
+    /// falls back to a forced kill on other platforms.
+    ///
+    /// The child is not reaped by this call — follow up with `wait()` or
+    /// `try_wait()` to collect the exit status.
+    fn terminate<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        // Avoid signalling a reused PID after the child exits.
+        if inner.try_wait()?.is_some() {
+            let _ = child.guard.borrow_mut().take();
+            return Ok(NoneType);
+        }
+        #[cfg(unix)]
+        if !crate::engine::process::sigterm(inner.id()) {
+            // Treat exit between try_wait and signal as success.
+            if inner.try_wait()?.is_some() {
+                let _ = child.guard.borrow_mut().take();
+                return Ok(NoneType);
+            }
+            return Err(anyhow::anyhow!(
+                "failed to deliver SIGTERM to pid {}",
+                inner.id()
+            ));
+        }
+        #[cfg(not(unix))]
+        inner.kill()?;
         Ok(NoneType)
     }
 
@@ -405,6 +447,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .as_mut()
             .ok_or(anyhow::anyhow!("child is no longer active"))?
             .wait()?;
+        let _ = child.guard.borrow_mut().take();
         Ok(ExitStatus(status))
     }
 
@@ -425,7 +468,10 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .try_wait()?;
         Ok(match status {
             None => values::Value::new_none(),
-            Some(s) => heap.alloc(ExitStatus(s)),
+            Some(s) => {
+                let _ = child.guard.borrow_mut().take();
+                heap.alloc(ExitStatus(s))
+            }
         })
     }
 
@@ -452,6 +498,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .replace(None)
             .ok_or(anyhow::anyhow!("child is no longer active"))?
             .wait_with_output()?;
+        let _ = child.guard.borrow_mut().take();
         Ok(Output(output))
     }
 }
@@ -596,6 +643,31 @@ mod tests {
         let err_msg = cmd.try_status().unwrap_err().to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_and_kill_are_noops_after_wait() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    c = ctx.std.process.command("sleep").arg("30").spawn()
+    c.terminate()
+    status = c.wait()
+    if status.success:
+        fail("SIGTERM'd child must not report success")
+    if status.signal != 15:
+        fail("expected SIGTERM (15), got %s" % status.signal)
+    c.terminate()
+    c.kill()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 
     #[test]
