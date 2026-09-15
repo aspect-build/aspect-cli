@@ -1,6 +1,6 @@
 """The rc file `aspect ci bazelrc` writes, as a document: how flags render into
 sections, how the file announces itself, and how it is placed in a user's
-`~/.bazelrc` through a single `try-import` line.
+`~/.bazelrc` through a commented `try-import` line.
 
 Nothing here decides *which* flags are written — `aspect_flags.axl`,
 `rc_groups.axl`, and `deployment_rc.axl` do — only how startup flags, enabled
@@ -37,6 +37,10 @@ RcConfig = record(
     comment = field(str, default = ""),
     flags = field(list),
 )
+
+# The comment written above the `try-import` line in a user rc, so the import
+# reads as ours next to whatever else the file holds.
+IMPORT_COMMENT = "# Aspect's rc for vanilla `bazel`, maintained by `aspect ci bazelrc`."
 
 # What `ensure_import` did to the user rc.
 ImportAction = enum("created", "unchanged", "appended", "replaced")
@@ -145,18 +149,19 @@ def strip_generated(existing: str, flag_names: list) -> str:
 
 def ensure_import(existing: str | None, line: str, flag_names: list) -> ImportResult:
     """The user rc content with `line` present exactly once: unchanged when it is
-    already there, appended after the existing content otherwise. A file this
-    command once wrote whole (it opens with the generated header) first has that
-    output stripped — see `strip_generated`, which takes `flag_names` — since its
-    flags would otherwise stay in force beside the import. `None`/empty
-    `existing` is a new file."""
+    already there, otherwise appended under `IMPORT_COMMENT`, a blank line apart
+    from whatever the file already holds. A file this command once wrote whole
+    (it opens with the generated header) first has that output stripped — see
+    `strip_generated`, which takes `flag_names` — since its flags would otherwise
+    stay in force beside the import. `None`/empty `existing` is a new file."""
+    block = IMPORT_COMMENT + "\n" + line + "\n"
     if not existing:
-        return ImportResult(content = line + "\n", action = ImportAction("created"))
+        return ImportResult(content = block, action = ImportAction("created"))
     if line in existing.split("\n"):
         return ImportResult(content = existing, action = ImportAction("unchanged"))
     action = ImportAction("appended")
     if existing.startswith(_GENERATED_HEADER_PREFIX):
         existing = strip_generated(existing, flag_names)
         action = ImportAction("replaced")
-    content = (existing.rstrip("\n") + "\n" if existing.strip() else "") + line + "\n"
+    content = (existing.rstrip("\n") + "\n\n" if existing.strip() else "") + block
     return ImportResult(content = content, action = action)

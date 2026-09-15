@@ -7,6 +7,7 @@ Run with: aspect dev test-bazelrc-file
 load(
     "./bazelrc_file.axl",
     "GENERATED_HEADER",
+    "IMPORT_COMMENT",
     "ImportAction",
     "RcConfig",
     "command_sections",
@@ -90,6 +91,7 @@ def _test_prune_configs(_ctx):
     _eq("nothing to prune", prune_configs([_COMMON], ["aspect-common"]), ([_COMMON], ["aspect-common"]))
 
 _LINE = import_line("/home/ci/.aspect/bazelrc")
+_BLOCK = IMPORT_COMMENT + "\n" + _LINE + "\n"
 _NAMES = ["--output_base", "--remote_cache", "--disk_cache", "--credential_helper", "--config", "--remote_executor"]
 
 def _ensure(existing):
@@ -101,7 +103,7 @@ def _test_import_line(_ctx):
 
 def _test_ensure_import_new_file(_ctx):
     got = _ensure(None)
-    _eq("created content", got.content, _LINE + "\n")
+    _eq("created content", got.content, _BLOCK)
     _eq("created", got.action, ImportAction("created"))
     _eq("empty is new", _ensure("").action, ImportAction("created"))
 
@@ -109,9 +111,9 @@ def _test_ensure_import_appends_once(_ctx):
     # A user's rc keeps every line; ours is added after them, and a second run
     # finds it and changes nothing — so re-running never accumulates lines.
     first = _ensure("build --disk_cache=/tmp/dc\n")
-    _eq("appended content", first.content, "build --disk_cache=/tmp/dc\n" + _LINE + "\n")
+    _eq("appended a blank line apart, under the comment", first.content, "build --disk_cache=/tmp/dc\n\n" + _BLOCK)
     _eq("appended", first.action, ImportAction("appended"))
-    _eq("no trailing newline", _ensure("build --x").content, "build --x\n" + _LINE + "\n")
+    _eq("no trailing newline", _ensure("build --x").content, "build --x\n\n" + _BLOCK)
 
     second = _ensure(first.content)
     _eq("unchanged content", second.content, first.content)
@@ -140,13 +142,13 @@ def _test_ensure_import_replaces_generated_rc(_ctx):
     # A `~/.bazelrc` this command wrote whole is all stale flags of ours: they
     # are dropped so they don't stay in force beside the import.
     got = _ensure(_LEGACY)
-    _eq("replaced content", got.content, _LINE + "\n")
+    _eq("replaced content", got.content, _BLOCK)
     _eq("replaced", got.action, ImportAction("replaced"))
 
     # Another setup step's flags after the generated output survive the upgrade
     # (its comments do not: a generated file's comments are ours to drop).
     got = _ensure(_LEGACY + "\n# mine\nbuild --keep_going\n")
-    _eq("additions kept", got.content, "build --keep_going\n" + _LINE + "\n")
+    _eq("additions kept", got.content, "build --keep_going\n\n" + _BLOCK)
     _eq("still replaced", got.action, ImportAction("replaced"))
 
     # The current header is recognized the same way.
@@ -156,7 +158,7 @@ def _test_ensure_import_replaces_generated_rc(_ctx):
     # later is theirs, untouched but for the import.
     got = _ensure("build --x\n" + GENERATED_HEADER + "\ncommon --disk_cache=\n")
     _eq("user rc appended", got.action, ImportAction("appended"))
-    _eq("user rc kept whole", got.content, "build --x\n" + GENERATED_HEADER + "\ncommon --disk_cache=\n" + _LINE + "\n")
+    _eq("user rc kept whole", got.content, "build --x\n" + GENERATED_HEADER + "\ncommon --disk_cache=\n\n" + _BLOCK)
 
 _UNIT_TESTS = [
     _test_startup_flags_for_rc,
