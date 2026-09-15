@@ -931,9 +931,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// Runs `bazel --noblock_for_lock info server_pid`. When another bazel
     /// client holds the output base lock, waits for it to finish, then
-    /// SIGTERMs and finally SIGKILLs it. When the server itself is wedged,
-    /// kills the server and re-checks. Each step prints a line to stderr,
-    /// indented to sit under a section heading.
+    /// SIGINTs and finally SIGKILLs it. When the server itself is wedged,
+    /// kills the server and re-checks.
+    ///
+    /// Each recovery step is reported as one line of text. Pass `log`, a
+    /// callable taking that line, to render it yourself, for example
+    /// indented under a heading; without it the line prints to stderr as is.
+    /// An error raised by `log` fails the call once the check completes.
     ///
     /// Returns a `HealthCheckResult` with `.outcome` (`"healthy"`,
     /// `"unhealthy"`, or `"inconclusive"`), `.message`, and `.exit_code`
@@ -942,19 +946,40 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// **Examples**
     ///
     /// ```python
+    /// def _indented(line):
+    ///     print("\t" + line)
+    ///
     /// def _health_probe_impl(ctx):
-    ///     result = ctx.bazel.health_check()
+    ///     result = ctx.bazel.health_check(log = _indented)
     ///     if result.outcome == "unhealthy":
     ///         fail("Bazel server is unhealthy: " + result.message)
     /// ```
     fn health_check<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] log: NoneOr<values::Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
-        Ok(health_check::run(&startup_flags, &mut |line| {
-            crate::errln!("\t{line}")
-        }))
+        let Some(log) = log.into_option() else {
+            return Ok(health_check::run(&startup_flags, &mut |line| {
+                crate::errln!("{line}")
+            }));
+        };
+        let mut log_error = None;
+        let result = health_check::run(&startup_flags, &mut |line| {
+            if log_error.is_some() {
+                return;
+            }
+            let line = eval.heap().alloc(line);
+            if let Err(e) = eval.eval_function(log, &[line], &[]) {
+                log_error = Some(e);
+            }
+        });
+        match log_error {
+            Some(e) => Err(e.into_anyhow()),
+            None => Ok(result),
+        }
     }
 
     /// Detect and best-effort repair runner-poisoning sandbox state
