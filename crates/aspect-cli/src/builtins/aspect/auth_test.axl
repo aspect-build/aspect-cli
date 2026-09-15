@@ -194,12 +194,11 @@ def _test_shadowed_warning(_):
     if "Rename or delete" not in repo:
         fail("repo warning should say to edit the file: %s" % repo)
 
-def _org(id = "0b1c-2d3e", name = "Acme", default = False):
-    return struct(id = id, name = name, default = default)
+def _org(id = "0b1c-2d3e", name = "Acme"):
+    return struct(id = id, name = name)
 
 def _test_organization_label(_):
     _eq("named → name (id)", organization_label(_org()), "Acme (0b1c-2d3e)")
-    _eq("default → marked", organization_label(_org(default = True)), "Acme (0b1c-2d3e) [default]")
 
     # No name came back for the organization, so the id stands in for it and is
     # not repeated in parentheses.

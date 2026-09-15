@@ -213,10 +213,8 @@ def _print_configured_usage_hint(summary):
 
 def organization_label(org) -> str:
     """How an organization reads in a prompt or a list: its name with its id, or
-    the id alone when no name came back for it, and a marker on the account's
-    default, the one this login was minted for."""
-    label = org.name if org.name == org.id else org.name + " (" + org.id + ")"
-    return label + (" [default]" if org.default else "")
+    the id alone when no name came back for it."""
+    return org.name if org.name == org.id else org.name + " (" + org.id + ")"
 
 def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -> aspect.auth.AuthCredentials | None:
     """The login re-minted for the organization this session should use.

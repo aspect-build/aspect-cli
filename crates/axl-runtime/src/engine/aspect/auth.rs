@@ -2713,8 +2713,8 @@ fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
     format!(
         "your default organization changed since you logged in (was {was}, now {now}); \
          refresh login token failed under a different organization.\n\nRun `{login}` to \
-         log in again. To keep a login in one organization whatever other sessions do, \
-         use an API token: `{login} --with-api-token`, or set {}.",
+         log in again. An API token is bound to one organization and never needs this: \
+         `{login} --with-api-token`, or set {}.",
         api_token_env_var(deployment)
     )
 }
@@ -2993,26 +2993,19 @@ impl AuthCredentials {
 
 /// One organization (a tenant at the issuer) the logged-in user belongs to, as
 /// `AuthCredentials.organizations()` lists them for the login task's choice.
-/// `default` marks the one the credential was minted for: the user's default
-/// organization at the issuer when they logged in.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.Organization>")]
 pub struct Organization {
     pub id: String,
     pub name: String,
-    pub default: bool,
 }
 
 impl Organization {
-    /// A non-default organization; `id` stands in for an empty `name`, so every
-    /// organization has something to show.
+    /// `id` stands in for an empty `name`, so every organization has something
+    /// to show.
     fn named(id: String, name: String) -> Self {
         let name = if name.is_empty() { id.clone() } else { name };
-        Organization {
-            id,
-            name,
-            default: false,
-        }
+        Organization { id, name }
     }
 }
 
@@ -3037,11 +3030,6 @@ fn organization_methods(registry: &mut MethodsBuilder) {
     fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, Organization, name)
     }
-
-    #[starlark(attribute)]
-    fn default<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        attr_bool!(this, Organization, default)
-    }
 }
 
 /// The organizations `entry`'s user belongs to, for a credential from an issuer
@@ -3055,7 +3043,7 @@ async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
     if entry.issuer_kind != IssuerKind::TenantApi {
         return Vec::new();
     }
-    let mut orgs = match entry.auth_domain.as_deref() {
+    let orgs = match entry.auth_domain.as_deref() {
         Some(domain) => fetch_tenants(domain, &entry.access_token)
             .await
             .unwrap_or_else(|e| {
@@ -3065,20 +3053,17 @@ async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
         None => Vec::new(),
     };
     if orgs.is_empty() {
-        orgs = entry
+        return entry
             .tenant_ids()
             .into_iter()
             .map(|id| Organization::named(id.clone(), id))
             .collect();
     }
-    for org in &mut orgs {
-        org.default = org.id == entry.tenant_id;
-    }
     orgs
 }
 
 /// Every tenant the bearer's user belongs to, from the tenant API's tenants
-/// endpoint, none marked default.
+/// endpoint.
 async fn fetch_tenants(auth_domain: &str, bearer: &str) -> anyhow::Result<Vec<Organization>> {
     #[derive(Deserialize)]
     struct Tenant {
@@ -6600,8 +6585,10 @@ mod tests {
 
     #[test]
     fn an_organization_without_a_name_shows_its_id() {
-        let named = Organization::named("id-1".into(), "Acme".into());
-        assert_eq!((named.name.as_str(), named.default), ("Acme", false));
+        assert_eq!(
+            Organization::named("id-1".into(), "Acme".into()).name,
+            "Acme"
+        );
         assert_eq!(
             Organization::named("id-1".into(), String::new()).name,
             "id-1"
@@ -6638,7 +6625,6 @@ mod tests {
         Organization {
             id: id.into(),
             name: name.into(),
-            default: false,
         }
     }
 
@@ -6665,7 +6651,7 @@ mod tests {
         let runtime = current_thread_runtime();
         let jwt = jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#);
         // With no issuer recorded there is nowhere to fetch names from, so the
-        // claim's ids stand in for them; the one the token is for is flagged.
+        // claim's ids stand in for them.
         let tenant_api = CredentialsEntry::from_bearer(
             jwt.clone(),
             "r".into(),
@@ -6678,9 +6664,9 @@ mod tests {
         let orgs = runtime.block_on(list_organizations(&tenant_api));
         let listed: Vec<_> = orgs
             .iter()
-            .map(|o| (o.id.as_str(), o.name.as_str(), o.default))
+            .map(|o| (o.id.as_str(), o.name.as_str()))
             .collect();
-        assert_eq!(listed, vec![("t1", "t1", true), ("t2", "t2", false)]);
+        assert_eq!(listed, vec![("t1", "t1"), ("t2", "t2")]);
 
         let oidc =
             CredentialsEntry::from_bearer(jwt, "r".into(), None, None, false, IssuerKind::Oidc)
@@ -7033,9 +7019,9 @@ mod tests {
         let orgs = current_thread_runtime().block_on(list_organizations(&entry));
         let listed: Vec<_> = orgs
             .iter()
-            .map(|o| (o.id.as_str(), o.name.as_str(), o.default))
+            .map(|o| (o.id.as_str(), o.name.as_str()))
             .collect();
-        assert_eq!(listed, vec![("t1", "Acme", true), ("t2", "t2", false)]);
+        assert_eq!(listed, vec![("t1", "Acme"), ("t2", "t2")]);
         issuer.finish();
     }
 
