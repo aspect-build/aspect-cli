@@ -37,6 +37,7 @@ mod aspect;
 mod build;
 mod cancel;
 mod health_check;
+mod ibp;
 mod info;
 mod iter;
 pub mod live;
@@ -427,6 +428,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .ok_or_else(|| anyhow::anyhow!("use_rc: ctx.bazel is frozen"))?;
         bazel.active_rc.replace(Some(rc));
         Ok(NoneType)
+    }
+
+    /// Start an Incremental Build Protocol host: a unix-socket server a
+    /// protocol-aware spawned target connects back to (find it via the env
+    /// from `.env()`) to receive change cycles instead of being restarted.
+    /// See `bazel.IbpServer` for the polling surface.
+    fn ibp_server<'v>(
+        #[allow(unused_variables)] this: values::Value<'v>,
+    ) -> anyhow::Result<ibp::IbpServer> {
+        ibp::start()
     }
 
     /// Define a Bazel aspect to apply via `ctx.bazel.build(aspects = [...])`

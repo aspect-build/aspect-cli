@@ -1,0 +1,20 @@
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "ibp",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+    ],
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "ibp_test",
+    size = "small",
+    crate = ":ibp",
+)

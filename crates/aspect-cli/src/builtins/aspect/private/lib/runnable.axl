@@ -702,6 +702,12 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           A caller with its own non-spawn extras (e.g. `delivery`'s release
           flags) places those before `r.flags` so the load-bearing flags win.
 
+      flags_for(rc) → list[str]
+          `flags` recomputed against a freshly parsed rc — for callers that
+          reparse per rebuild (`run --watch`), so a `.bazelrc` edit to
+          `--remote_download_outputs` moves the floor rather than keeping the
+          startup snapshot's.
+
       aspects → list
           The aspects to pass to `ctx.bazel.build(aspects = ...)` — the
           `runinfo` aspect when `rc` was given, else empty. Kept separate from
@@ -776,6 +782,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
 
     return struct(
         flags = flags,
+        flags_for = lambda rc: list(_LOCAL_SPAWN_FLAGS) + _download_floor_flags(rc),
         aspects = aspects,
         event = lambda event: _process_bes(state, event),
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),

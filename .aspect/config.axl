@@ -36,6 +36,7 @@ load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "li
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
+load("@aspect//private/lib/runfiles_delta_test.axl", "runfiles_delta_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
@@ -329,6 +330,10 @@ def config(ctx: ConfigContext):
     # canonical_label normalization (local/external/bzlmod @@module+version → @module).
     # Run with: aspect dev test-runnable
     ctx.tasks.add(runnable_tests)
+
+    # Runfiles-scope watch delta joins (manifest parse/diff, exec log outputs).
+    # Run with: aspect dev test-runfiles-delta
+    ctx.tasks.add(runfiles_delta_tests)
 
     # `aspect ci bazelrc` pure helpers — version-constraint gating
     # (assumed-latest when the Bazel version is unknown), mixed plain/tuple
