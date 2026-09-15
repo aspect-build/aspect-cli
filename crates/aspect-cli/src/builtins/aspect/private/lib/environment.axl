@@ -90,6 +90,13 @@ def color_enabled(std):
     host that renders ANSI (`ci_renders_ansi`)."""
     return std.io.stdout.is_tty or ci_renders_ansi(std.env)
 
+def bazel_misdetects_color(env) -> bool:
+    """Whether Bazel's `--color=auto` would wrongly decide against color here: a
+    CI host whose log viewer renders ANSI but which runs the job with no TTY for
+    Bazel to see — GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
+    but gives the job a PTY, so Bazel gets it right unaided and is left out."""
+    return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
+
 # Severity-prefixed output. Channels (increasing alarm):
 #   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
 #   print(msg)      — narrative beats every run produces (banners, tables, outcomes).

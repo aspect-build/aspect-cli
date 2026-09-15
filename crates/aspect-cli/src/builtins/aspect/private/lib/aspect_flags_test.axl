@@ -25,7 +25,7 @@ load(
     "runner_flags",
     "written_flag_names",
 )
-load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "Runner", "WorkflowsEnvironment")
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
 
 def _eq(label, got, want):
     if got != want:
@@ -166,8 +166,19 @@ def _test_runner_bes_flags(_ctx):
     _lacks("runner_flags omits bes", build, "--bes_backend")
 
 def _test_color_flags(_ctx):
-    _eq("renders ansi", color_flags(True), ["--color=yes"])
-    _eq("does not", color_flags(False), [])
+    _eq("misdetected", color_flags(True), ["--color=yes"])
+    _eq("detected fine", color_flags(False), [])
+
+    # Forced only where a viewer renders ANSI but Bazel sees no TTY. Buildkite
+    # gives the job a PTY, so Bazel colors unaided and it is left out.
+    def env(**vars):
+        return struct(var = lambda k: vars.get(k, ""))
+
+    _eq("github", bazel_misdetects_color(env(GITHUB_ACTIONS = "true")), True)
+    _eq("circleci", bazel_misdetects_color(env(CIRCLECI = "true")), True)
+    _eq("gitlab", bazel_misdetects_color(env(GITLAB_CI = "true")), True)
+    _eq("buildkite", bazel_misdetects_color(env(BUILDKITE = "true")), False)
+    _eq("plain CI", bazel_misdetects_color(env(CI = "1")), False)
 
 def _test_diagnostics_upload_flags(_ctx):
     # Shared by the runner diagnostics, the rc's BES sections, and `--remote`.

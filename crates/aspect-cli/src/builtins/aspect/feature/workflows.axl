@@ -9,7 +9,7 @@ load(
 )
 load(
     "../private/lib/environment.axl",
-    "color_enabled",
+    "bazel_misdetects_color",
     "get_workflows_environment",
     "print_environment_info",
     "sanitize_filename",
@@ -23,7 +23,7 @@ def _workflows_impl(ctx: FeatureContext):
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
 
-    bazel_trait.extra_flags.extend(color_flags(color_enabled(ctx.std)))
+    bazel_trait.extra_flags.extend(color_flags(bazel_misdetects_color(ctx.std.env)))
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the

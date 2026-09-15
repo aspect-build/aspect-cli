@@ -21,9 +21,10 @@ plumbing:
     one `try-import` line for it, so an rc another setup step or the developer
     wrote survives and re-running never accumulates anything. That rc is inert
     until a `--config=aspect-*` is named — every flag in it is scoped to a
-    section, except `--color=yes` on a CI host whose log viewer renders ANSI,
-    and a cache or BES the `ASPECT_WORKFLOWS_*` env names where someone set
-    those — so importing it into a developer's own rc changes nothing by itself.
+    section, except `--color=yes` on a CI host where Bazel's `--color=auto`
+    misdetects (a viewer that renders ANSI, a job with no TTY), and a cache or
+    BES the `ASPECT_WORKFLOWS_*` env names where someone set those — so
+    importing it into a developer's own rc changes nothing by itself.
 
 It is the in-CLI successor to `rosetta bazelrc`: the CI integrations (the
 setup-aspect GitHub Action, Buildkite plugin, CircleCI orb, GitLab component)
@@ -31,8 +32,8 @@ call this instead of `rosetta` once `rosetta` is gone from the runner image.
 
 The rc has two kinds of content. Unconditional flags, applied to every `bazel`
 call: on a Workflows runner the full `runner_flags` set, elsewhere only what the
-`ASPECT_WORKFLOWS_*` env justifies, plus `--color=yes` on a CI host that renders
-ANSI (the same rule tasks use). And the opt-in `--config=aspect-*` sections
+`ASPECT_WORKFLOWS_*` env justifies, plus `--color=yes` where Bazel would
+misdetect color (the same rule tasks use). And the opt-in `--config=aspect-*` sections
 from `lib/deployment_rc.axl`, one per deployment `aspect auth status` knows. The
 credential helper those sections name is the binary running this command — it
 certainly exists, whereas a bare `aspect` on PATH may not for a later `bazel`
@@ -73,7 +74,7 @@ load(
     "startup_flags_for_rc",
 )
 load("./private/lib/deployment_rc.axl", "SECTION_FLAG_NAMES", "config_collisions", "deployment_configs")
-load("./private/lib/environment.axl", "ci_renders_ansi", "get_workflows_environment", "info", "is_aspect_workflows_runner")
+load("./private/lib/environment.axl", "bazel_misdetects_color", "get_workflows_environment", "info", "is_aspect_workflows_runner")
 
 # Where the rc lives under the home directory, and the user rc that imports it.
 _GENERATED_RC = ".aspect/bazelrc"
@@ -178,7 +179,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     else:
         build_flags = env_flags(environment)
         startup_flags = []
-    build_flags.extend(color_flags(ci_renders_ansi(ctx.std.env)))
+    build_flags.extend(color_flags(bazel_misdetects_color(ctx.std.env)))
 
     bazel_version = ctx.bazel.version()
     startup_flags = omit_flags(startup_flags, omitted)

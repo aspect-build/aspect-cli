@@ -226,14 +226,13 @@ def protected_omissions(omitted: list) -> list:
     spelled them; empty when every omission is allowed."""
     return [o for o in omitted if flag_name(o) in PROTECTED_FLAGS]
 
-def color_flags(renders_ansi: bool) -> list:
-    """`--color=yes` where the console renders ANSI although Bazel would not
-    detect it. Bazel's default `--color=auto` keys off stderr being a TTY, which
-    CI log capture and `TERM=dumb` defeat even though the log viewer renders
-    color fine; forcing it there costs nothing on a real TTY. Presumes no
-    endpoint — the host, not a deployment, decides — so it is the one flag that
-    is unconditional on a CI host in the rc written off a runner."""
-    return [_COLOR + "=yes"] if renders_ansi else []
+def color_flags(misdetected: bool) -> list:
+    """`--color=yes` where Bazel's `--color=auto` would wrongly say no: a CI host
+    whose log viewer renders ANSI but runs the job with no TTY for Bazel to see
+    (`environment.bazel_misdetects_color`). Presumes no endpoint — the host, not
+    a deployment, decides — so it is the one flag that is unconditional on such
+    a host in the rc written off a runner."""
+    return [_COLOR + "=yes"] if misdetected else []
 
 def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
     """The remote-cache endpoint the runner environment names: `--remote_cache`
