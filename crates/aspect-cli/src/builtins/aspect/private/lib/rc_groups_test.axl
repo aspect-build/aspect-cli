@@ -1,6 +1,6 @@
-"""Unit tests for `rc_groups.axl`: what each named `--config` group holds, the CI
-host group's naming, the runner's per-endpoint groups, and which groups an rc
-enables. Run with: aspect dev test-rc-groups
+"""Unit tests for `rc_groups.axl`: what each named `--config` group holds on and
+off a runner, the CI host group's naming, and which groups an rc enables.
+Run with: aspect dev test-rc-groups
 """
 
 load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "independent_flags")
@@ -11,15 +11,10 @@ load(
     "GROUP_CACHE",
     "GROUP_COMMON",
     "GROUP_EXEC",
-    "GROUP_RUNNER_BES",
-    "GROUP_RUNNER_CACHE",
-    "GROUP_RUNNER_EXEC",
-    "GROUP_RUNNER_STORAGE",
+    "GROUP_RUNNER",
     "HOST_GROUPS",
-    "enabled_groups",
     "host_group",
-    "runner_groups",
-    "tuning_groups",
+    "rc_groups",
 )
 
 def _eq(label, got, want):
@@ -35,20 +30,73 @@ def _by_name(configs) -> dict:
 _RUNNER = Runner(bazel_root_dir = "/mnt/b", output_root_dir = "/mnt/o", repository_cache_dir = "/mnt/r", job_tmpdir = "/wf")
 _CACHE = RemoteCache(endpoint = "grpc://cache:8980", bytestream_uri_prefix = "cache:8980/main")
 _BES = BuildEvents(backend = "grpc://bes:1985", results_url = "https://ui/i/")
+_EXEC = RemoteExecutor(endpoint = "grpc://exec:8980")
 
-def _test_tuning_groups(_ctx):
-    groups = _by_name(tuning_groups("/tmp/x/exec.log.zstd"))
-    _eq("names", sorted(groups.keys()), sorted([GROUP_COMMON, GROUP_CACHE, GROUP_BES]))
-
-    # Each group is exactly its catalog share; the BES group carries the
-    # diagnostics upload with the given log path.
-    _eq("common", groups[GROUP_COMMON].flags, independent_flags())
-    _eq("cache", groups[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
-    _eq("bes", groups[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags("/tmp/x/exec.log.zstd"))
-    _eq("exec log placed", ("--execution_log_compact_file=/tmp/x/exec.log.zstd", ">=7.1.0") in groups[GROUP_BES].flags, True)
-    for g in groups.values():
+def _test_bare_host(_ctx):
+    # Nothing in the env, no recognized host: the tuning groups alone, pure and
+    # unenabled but for the common one.
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "/tmp/x/exec.log.zstd")
+    by = _by_name(groups)
+    _eq("names", [g.name for g in groups], [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
+    _eq("enabled", enabled, [GROUP_COMMON])
+    _eq("common", by[GROUP_COMMON].flags, independent_flags())
+    _eq("cache is tuning alone", by[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
+    _eq("bes is tuning + upload", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags("/tmp/x/exec.log.zstd"))
+    for g in groups:
         _eq(g.name + " commented", bool(g.comment), True)
-        _eq(g.name + " no endpoint", any([f.startswith("--remote_cache") or f.startswith("--bes_backend") for f in _texts(g.flags)]), False)
+
+def _test_env_off_runner(_ctx):
+    # Endpoint variables set by hand, no runner marker: each endpoint joins its
+    # tuning group, ahead of the tuning, and enables it; nothing tied to a
+    # runner's mounts.
+    env = WorkflowsEnvironment(remote_cache = _CACHE, build_events = _BES)
+    (groups, enabled) = rc_groups(env, on_runner = False, misdetects_color = False, exec_log_path = "/x")
+    by = _by_name(groups)
+    _eq("enabled", enabled, [GROUP_COMMON, GROUP_CACHE, GROUP_BES])
+    _eq("no runner group", GROUP_RUNNER in by, False)
+    cache = by[GROUP_CACHE].flags
+    _eq("cache endpoint first", cache[:2], ["--remote_cache=grpc://cache:8980", "--remote_bytestream_uri_prefix=cache:8980/main"])
+    _eq("then cache tuning", cache[2:], endpoint_flags(cache = True, bes = False))
+    _eq("no workflows specifics off runner", "--disk_cache=" in _texts(cache), False)
+    bes = by[GROUP_BES].flags
+    _eq("bes endpoint first", bes[:2], ["--bes_backend=grpc://bes:1985", "--bes_results_url=https://ui/i/"])
+    _eq("no profile off runner", any([f.startswith("--profile=") for f in _texts(bes)]), False)
+
+def _test_runner(_ctx):
+    env = WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = _EXEC, ci = CI(host = "buildkite"))
+    (groups, enabled) = rc_groups(env, on_runner = True, misdetects_color = False, exec_log_path = "/wf/exec.log.zstd")
+    by = _by_name(groups)
+    _eq("order", [g.name for g in groups], [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE, GROUP_BES, GROUP_EXEC])
+    _eq("enabled: all but exec", enabled, [GROUP_COMMON, GROUP_RUNNER, GROUP_CACHE, GROUP_BES])
+
+    # Storage is the repository cache alone; the server paths are startup lines.
+    _eq("runner storage", by[GROUP_RUNNER].flags, ["--repository_cache=/mnt/r"])
+
+    # With the marker the cache group carries the Workflows cache's specifics …
+    cache = _texts(by[GROUP_CACHE].flags)
+    for want in ["--remote_cache=grpc://cache:8980", "--disk_cache=", "--remote_timeout=3600"]:
+        _eq("cache has " + want, want in cache, True)
+    _eq("compression gated", ("--noremote_cache_compression", ">=8.0.0") in by[GROUP_CACHE].flags, True)
+    _eq("no bes in cache", any(["bes" in f or "profile" in f for f in cache]), False)
+
+    # … and the BES group the profile under the job tmpdir next to its enrichment.
+    bes = _texts(by[GROUP_BES].flags)
+    for want in ["--bes_backend=grpc://bes:1985", "--profile=/wf/command.profile.gz", "--generate_json_trace_profile", "--execution_log_compact_file=/wf/exec.log.zstd"]:
+        _eq("bes has " + want, want in bes, True)
+    _eq("no cache in bes", any(["remote_cache" in f for f in bes]), False)
+
+    # The executor stands alone when the cache group is already enabled.
+    _eq("exec", by[GROUP_EXEC].flags, ["--remote_executor=grpc://exec:8980"])
+    _eq("exec source", by[GROUP_EXEC].source, "the runner's remote executor")
+
+def _test_exec_without_cache(_ctx):
+    # Without a cache the executor doubles as one: chain the (tuning-only)
+    # cache group, which is not otherwise enabled.
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(remote_executor = _EXEC), on_runner = False, misdetects_color = False, exec_log_path = "/x")
+    by = _by_name(groups)
+    _eq("chains cache tuning", by[GROUP_EXEC].flags, ["--config=" + GROUP_CACHE, "--remote_executor=grpc://exec:8980"])
+    _eq("cache not enabled", GROUP_CACHE in enabled, False)
+    _eq("exec never enabled", GROUP_EXEC in enabled, False)
 
 def _test_host_group(_ctx):
     # Named for the detected host; exists only where the host needs something.
@@ -60,96 +108,29 @@ def _test_host_group(_ctx):
     _eq("unknown host", host_group(WorkflowsEnvironment(ci = CI(host = "unknown")), misdetects_color = True), [])
     _eq("every detected host has a name", sorted(HOST_GROUPS.keys()), ["buildkite", "circleci", "github", "gitlab"])
 
-def _test_runner_groups_off_runner(_ctx):
-    # Endpoint variables set by hand, no runner marker: one group per endpoint,
-    # each chaining its tuning group first; nothing tied to a runner's mounts.
-    groups = _by_name(runner_groups(WorkflowsEnvironment(remote_cache = _CACHE, build_events = _BES), on_runner = False))
-    _eq("names", sorted(groups.keys()), [GROUP_RUNNER_BES, GROUP_RUNNER_CACHE])
-    _eq("cache group", groups[GROUP_RUNNER_CACHE].flags, [
-        "--config=" + GROUP_CACHE,
-        "--remote_cache=grpc://cache:8980",
-        "--remote_bytestream_uri_prefix=cache:8980/main",
-    ])
-    _eq("bes group", groups[GROUP_RUNNER_BES].flags, [
-        "--config=" + GROUP_BES,
-        "--bes_backend=grpc://bes:1985",
-        "--bes_results_url=https://ui/i/",
-    ])
-    _eq("nothing named → nothing", runner_groups(WorkflowsEnvironment(), on_runner = False), [])
+    # In the rc it sits between common and the endpoint groups, enabled.
+    (groups, enabled) = rc_groups(WorkflowsEnvironment(ci = CI(host = "github")), on_runner = False, misdetects_color = True, exec_log_path = "/x")
+    _eq("placed", [g.name for g in groups], [GROUP_COMMON, "aspect-github-actions", GROUP_CACHE, GROUP_BES])
+    _eq("enabled", enabled, [GROUP_COMMON, "aspect-github-actions"])
 
-def _test_runner_groups_on_runner(_ctx):
-    env = WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = RemoteExecutor(endpoint = "grpc://exec:8980"))
-    groups = runner_groups(env, on_runner = True)
-    _eq("order", [g.name for g in groups], [GROUP_RUNNER_STORAGE, GROUP_RUNNER_CACHE, GROUP_RUNNER_BES, GROUP_RUNNER_EXEC, GROUP_EXEC])
-    by = _by_name(groups)
-
-    # Storage is the repository cache alone; the server paths are startup lines.
-    _eq("storage", by[GROUP_RUNNER_STORAGE].flags, ["--repository_cache=/mnt/r"])
-
-    # With the marker the cache group adds the Workflows cache's specifics …
-    cache = by[GROUP_RUNNER_CACHE].flags
-    _eq("chains cache tuning first", cache[0], "--config=" + GROUP_CACHE)
-    for want in ["--remote_cache=grpc://cache:8980", "--disk_cache="]:
-        _eq("cache has " + want, want in _texts(cache), True)
-    _eq("compression gated", ("--noremote_cache_compression", ">=8.0.0") in cache, True)
-    _eq("no bes in cache", any(["bes" in f for f in _texts(cache)]), False)
-
-    # … and the BES group the profile under the job tmpdir.
-    bes = by[GROUP_RUNNER_BES].flags
-    _eq("bes", bes, ["--config=" + GROUP_BES, "--bes_backend=grpc://bes:1985", "--bes_results_url=https://ui/i/", "--profile=/wf/command.profile.gz"])
-
-    # The executor is its own group behind the `aspect-exec` alias; with a cache
-    # already on, it carries the endpoint alone.
-    _eq("exec", by[GROUP_RUNNER_EXEC].flags, ["--remote_executor=grpc://exec:8980"])
-    _eq("alias", by[GROUP_EXEC].flags, ["--config=" + GROUP_RUNNER_EXEC])
-    _eq("alias source is the runner's", by[GROUP_EXEC].source, by[GROUP_RUNNER_EXEC].source)
-
-    # Marker but nothing named: only the storage group.
-    _eq("bare runner", [g.name for g in runner_groups(WorkflowsEnvironment(runner = _RUNNER), on_runner = True)], [GROUP_RUNNER_STORAGE])
-
-def _test_exec_without_cache(_ctx):
-    # Without a separate cache the executor doubles as one: chain the cache tuning.
-    groups = _by_name(runner_groups(WorkflowsEnvironment(remote_executor = RemoteExecutor(endpoint = "grpc://exec:8980")), on_runner = False))
-    _eq("names", sorted(groups.keys()), [GROUP_EXEC, GROUP_RUNNER_EXEC])
-    _eq("chains cache tuning", groups[GROUP_RUNNER_EXEC].flags, ["--config=" + GROUP_CACHE, "--remote_executor=grpc://exec:8980"])
-
-def _test_enabled_groups(_ctx):
-    def groups_for(env, on_runner, misdetects):
-        return tuning_groups("/x") + host_group(env, misdetects) + runner_groups(env, on_runner)
-
-    # A full runner on Buildkite: common and every runner group the env fills
-    # in; the tuning groups are reached by chaining, the executor by name.
-    full = WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = RemoteExecutor(endpoint = "e"), ci = CI(host = "buildkite"))
-    _eq("runner", enabled_groups(groups_for(full, True, False)), [GROUP_COMMON, GROUP_RUNNER_STORAGE, GROUP_RUNNER_CACHE, GROUP_RUNNER_BES])
-
-    # GitHub Actions with nothing in the env: the common tuning and the host's color.
-    gha = WorkflowsEnvironment(ci = CI(host = "github"))
-    _eq("plain gha", enabled_groups(groups_for(gha, False, True)), [GROUP_COMMON, "aspect-github-actions"])
-
-    # A cache set by hand off a runner: its endpoint group, which chains the tuning.
-    cache_only = WorkflowsEnvironment(remote_cache = _CACHE)
-    _eq("cache only", enabled_groups(groups_for(cache_only, False, False)), [GROUP_COMMON, GROUP_RUNNER_CACHE])
-
-    # Nothing anywhere: just the common tuning.
-    _eq("bare", enabled_groups(groups_for(WorkflowsEnvironment(), False, False)), [GROUP_COMMON])
-
-    # Every enabled group is defined, and the opt-in ones never are enabled.
-    for env, on_runner, misdetects in [(full, True, False), (gha, False, True), (cache_only, False, False)]:
-        groups = groups_for(env, on_runner, misdetects)
+def _test_enabled_are_defined(_ctx):
+    for env, on_runner in [
+        (WorkflowsEnvironment(runner = _RUNNER, remote_cache = _CACHE, build_events = _BES, remote_executor = _EXEC), True),
+        (WorkflowsEnvironment(remote_cache = _CACHE), False),
+        (WorkflowsEnvironment(runner = _RUNNER), True),
+    ]:
+        (groups, enabled) = rc_groups(env, on_runner, False, "/x")
         defined = [g.name for g in groups]
-        enabled = enabled_groups(groups)
         for name in enabled:
             _eq(name + " defined", name in defined, True)
-        for name in [GROUP_CACHE, GROUP_BES, GROUP_RUNNER_EXEC, GROUP_EXEC]:
-            _eq(name + " never enabled", name in enabled, False)
 
 _UNIT_TESTS = [
-    _test_tuning_groups,
-    _test_host_group,
-    _test_runner_groups_off_runner,
-    _test_runner_groups_on_runner,
+    _test_bare_host,
+    _test_env_off_runner,
+    _test_runner,
     _test_exec_without_cache,
-    _test_enabled_groups,
+    _test_host_group,
+    _test_enabled_are_defined,
 ]
 
 def _test_impl(ctx):

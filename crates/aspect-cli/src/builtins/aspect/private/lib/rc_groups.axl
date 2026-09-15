@@ -3,41 +3,36 @@
 Bazel collects every rc section before expanding any `--config`, so a group can
 be enabled by a `common --config=<group>` line and defined further down the same
 file. The rc uses that to say what it does in Bazel's own vocabulary: each flag
-sits in a group named for what it presumes, the groups that apply on this host
-are enabled at the top, and `--announce_rc` names the group every flag came from.
-The startup options are the exception, since Bazel gives them no `--config`.
+sits in the group named for what it presumes, the groups whose endpoint this host
+has are enabled at the top, and `--announce_rc` names the group every flag came
+from. The startup options are the exception, since Bazel gives them no `--config`.
 
-Three portable tuning groups, defined in every rc and never enabled directly —
-an endpoint group or a deployment section chains to them:
+    aspect-common     tuning that presumes no endpoint             enabled in every rc
+    aspect-cache      the cache — its endpoint where the env       enabled where the env names a cache
+                      names one — and the tuning a cache justifies
+    aspect-bes        the BES — its endpoint where the env names   enabled where the env names a BES
+                      one — and the tuning a BES justifies
+    aspect-<ci host>  what that CI host needs (`--color=yes`)      enabled on that host
+    aspect-runner     the runner's storage (`--repository_cache`)  enabled with the runner marker
+    aspect-exec       the runner's remote executor                 defined, never enabled: opt in per call
 
-    aspect-common          tuning that presumes no endpoint
-    aspect-cache           remote-cache tuning and the keepalive
-    aspect-bes             BES enrichment, diagnostics upload
+`aspect-cache` and `aspect-bes` are defined in every rc, so a deployment section
+(`deployment_rc.axl`) or a host with a cache of its own can chain to the tuning
+by name; only where the `ASPECT_WORKFLOWS_*` env names the endpoint do they
+carry it, and only then are they enabled. The host group is named for the
+detected CI host — `aspect-github-actions`, `aspect-circleci`, `aspect-gitlab`,
+`aspect-buildkite` — and exists only when that host needs something; today that
+is `--color=yes` where Bazel's `--color=auto` misdetects
+(`environment.bazel_misdetects_color`), which leaves Buildkite with none.
+`aspect-exec` is the deployment pattern's name for the default deployment's
+execution; on a runner the runner is that deployment, and the collision check
+refuses a runner that also records a default deployment with an executor.
 
-One group per thing the host provides, each holding the flags whose values come
-from this host and chaining the tuning group its endpoint justifies — the same
-shape as a deployment's `aspect-<name>` / `aspect-<name>-exec` sections:
-
-    aspect-<ci host>       what that CI host needs (`--color=yes`)      enabled on that host
-    aspect-runner-storage  the runner's repository cache                enabled with the runner marker
-    aspect-runner-cache    the runner's cache endpoint and specifics    enabled where the env names a cache
-    aspect-runner-bes      the runner's BES endpoint and profile        enabled where the env names a BES
-    aspect-runner-exec     the runner's remote executor                 defined, never enabled
-    aspect-exec            alias of aspect-runner-exec                  opt in per call
-
-`aspect-common` is enabled in every rc, being the one group with no host or
-endpoint behind it. The host group is named for the detected CI host —
-`aspect-github-actions`, `aspect-circleci`, `aspect-gitlab`, `aspect-buildkite` —
-and exists only when that host needs something; today that is `--color=yes` where
-Bazel's `--color=auto` misdetects (`environment.bazel_misdetects_color`), which
-leaves Buildkite with none. `aspect-exec` is the deployment pattern's name for
-the default deployment's execution; on a runner the runner is that deployment,
-and the collision check refuses a runner that also records a default deployment
-with an executor.
-
-Deployment sections chain to `aspect-cache` / `aspect-bes` but never to
+Deployment sections chain `aspect-cache` / `aspect-bes` but never
 `aspect-common`: the rc enables it for every command already, and a config
-expanded twice draws a Bazel warning.
+expanded twice draws a Bazel warning. On a runner whose env names the same
+endpoint kind, naming a deployment section draws that warning too, and the
+section's endpoint wins since it comes last.
 """
 
 load(
@@ -59,10 +54,7 @@ load("./environment.axl", "WorkflowsEnvironment")
 GROUP_COMMON = "aspect-common"
 GROUP_CACHE = "aspect-cache"
 GROUP_BES = "aspect-bes"
-GROUP_RUNNER_STORAGE = "aspect-runner-storage"
-GROUP_RUNNER_CACHE = "aspect-runner-cache"
-GROUP_RUNNER_BES = "aspect-runner-bes"
-GROUP_RUNNER_EXEC = "aspect-runner-exec"
+GROUP_RUNNER = "aspect-runner"
 GROUP_EXEC = "aspect-exec"
 
 # `CI.host` → the host group's name.
@@ -73,27 +65,33 @@ HOST_GROUPS = {
     "gitlab": "aspect-gitlab",
 }
 
-# The groups an rc defines but never enables: the tuning groups are reached by
-# chaining, the executor by naming it.
-_OPT_IN = [GROUP_CACHE, GROUP_BES, GROUP_RUNNER_EXEC, GROUP_EXEC]
-
 _GROUP_SOURCE = "the %s group"
-_RUNNER_SOURCE = "the runner's remote executor"
 
 def _group(name: str, comment: str, flags: list, source: str = "") -> RcConfig:
     return RcConfig(name = name, source = source or _GROUP_SOURCE % name, comment = comment, flags = flags)
 
-def tuning_groups(exec_log_path: str) -> list:
-    """The three portable groups defined in every rc: `aspect-common`,
-    `aspect-cache`, and `aspect-bes` (with the compact execution log at
-    `exec_log_path`, the one machine-local value, since the log has to land
-    somewhere on this machine). Defining them where nothing chains to them costs
-    nothing and lets a host opt into one by name."""
-    return [
-        _group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags()),
-        _group(GROUP_CACHE, "Remote-cache tuning (also for an executor standing in as the cache).", endpoint_flags(cache = True, bes = False)),
-        _group(GROUP_BES, "BES enrichment and the build-diagnostics upload the Aspect backend reads.", endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags(exec_log_path)),
-    ]
+def _host_label(host: str) -> str:
+    return {"github": "GitHub Actions", "buildkite": "Buildkite", "circleci": "CircleCI", "gitlab": "GitLab CI"}[host]
+
+def cache_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
+    """`aspect-cache`: the cache endpoint the env names (`--remote_cache`, the
+    bytestream prefix) and, with the runner marker, the Workflows cache's
+    specifics, followed by the tuning any remote cache justifies. Tuning alone
+    when the env names no cache."""
+    endpoint = env_endpoint_flags(environment)
+    if endpoint and on_runner:
+        endpoint.extend(workflows_cache_flags())
+    return _group(GROUP_CACHE, "The remote cache (ASPECT_WORKFLOWS_REMOTE_CACHE where set) and the tuning a cache justifies.", endpoint + endpoint_flags(cache = True, bes = False))
+
+def bes_group(environment: WorkflowsEnvironment, on_runner: bool, exec_log_path: str) -> RcConfig:
+    """`aspect-bes`: the BES backend and viewer the env names and, with the
+    runner marker, `--profile` under the job tmpdir, followed by the enrichment
+    any BES justifies and the diagnostics upload with the compact execution log
+    at `exec_log_path`. Tuning alone when the env names no BES."""
+    endpoint = runner_bes_flags(environment)
+    if endpoint and on_runner:
+        endpoint.extend(runner_profile_flags(environment))
+    return _group(GROUP_BES, "The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set), its enrichment, and the build-diagnostics upload the Aspect backend reads.", endpoint + endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags(exec_log_path))
 
 def host_group(environment: WorkflowsEnvironment, misdetects_color: bool) -> list:
     """`aspect-<ci host>`: what the detected CI host needs — `--color=yes` where
@@ -105,49 +103,42 @@ def host_group(environment: WorkflowsEnvironment, misdetects_color: bool) -> lis
         return []
     return [_group(name, "What %s needs: its log viewer renders ANSI but the job has no TTY, so Bazel's --color=auto misdetects." % _host_label(environment.ci.host), flags)]
 
-def _host_label(host: str) -> str:
-    return {"github": "GitHub Actions", "buildkite": "Buildkite", "circleci": "CircleCI", "gitlab": "GitLab CI"}[host]
+def runner_group(environment: WorkflowsEnvironment, on_runner: bool) -> list:
+    """`aspect-runner`: `--repository_cache` on the runner's warmed storage, the
+    build-option half of the runner's paths (the server paths are startup
+    lines). Empty without the runner marker."""
+    if not on_runner:
+        return []
+    return [_group(GROUP_RUNNER, "The runner's storage: the repository cache its warming restores.", runner_repository_cache_flags(environment))]
 
-def runner_groups(environment: WorkflowsEnvironment, on_runner: bool) -> list:
-    """The runner's groups, one per thing the `ASPECT_WORKFLOWS_*` environment
-    provides, each present only when it does:
+def exec_group(environment: WorkflowsEnvironment) -> list:
+    """`aspect-exec`: the runner's remote executor, chaining `aspect-cache` when
+    the env names no cache (the executor doubles as one; with a cache the group
+    is already enabled). Defined but never enabled — remote execution relocates
+    every action, so a call names `--config=aspect-exec`. Empty when the env
+    names no executor."""
+    endpoint = runner_executor_endpoint(environment)
+    if not endpoint:
+        return []
+    chain = [] if environment.remote_cache != None else ["--config=" + GROUP_CACHE]
+    return [_group(GROUP_EXEC, "The runner's remote execution (ASPECT_WORKFLOWS_REMOTE_EXECUTOR); opt in per call.", chain + endpoint, source = "the runner's remote executor")]
 
-      - `aspect-runner-storage`: `--repository_cache` on the runner's warmed
-        storage; needs the runner marker (`on_runner`).
-      - `aspect-runner-cache`: `--remote_cache`, the bytestream prefix, and —
-        with the marker — the Workflows cache's specifics; chains `aspect-cache`.
-      - `aspect-runner-bes`: `--bes_backend`, `--bes_results_url`, and — with
-        the marker — `--profile` under the job tmpdir; chains `aspect-bes`.
-      - `aspect-runner-exec` and its `aspect-exec` alias: `--remote_executor`,
-        chaining `aspect-cache` when the env names no separate cache (the
-        executor doubles as one). Never enabled: remote execution relocates
-        every action, so a call names `--config=aspect-exec`.
+def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str) -> (list, list):
+    """Every group the rc defines for this host, in the order written, and the
+    names among them it enables with `common --config=<group>` lines:
+    `aspect-common` always, the host and runner groups when defined,
+    `aspect-cache` and `aspect-bes` where the env names their endpoint. Returns
+    `(groups, enabled)`."""
+    groups = [_group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags())]
+    groups.extend(host_group(environment, misdetects_color))
+    groups.extend(runner_group(environment, on_runner))
+    groups.append(cache_group(environment, on_runner))
+    groups.append(bes_group(environment, on_runner, exec_log_path))
+    groups.extend(exec_group(environment))
 
-    The endpoint groups are honored without the marker, so a host that sets the
-    endpoint variables by hand gets the endpoints and their tuning and nothing
-    tied to a runner's mounts."""
-    groups = []
-    if on_runner:
-        groups.append(_group(GROUP_RUNNER_STORAGE, "The runner's storage: the repository cache its warming restores.", runner_repository_cache_flags(environment)))
-    cache = env_endpoint_flags(environment)
-    if cache:
-        if on_runner:
-            cache.extend(workflows_cache_flags())
-        groups.append(_group(GROUP_RUNNER_CACHE, "The runner's remote cache (ASPECT_WORKFLOWS_REMOTE_CACHE) and the tuning a cache justifies.", ["--config=" + GROUP_CACHE] + cache))
-    bes = runner_bes_flags(environment)
-    if bes:
-        if on_runner:
-            bes.extend(runner_profile_flags(environment))
-        groups.append(_group(GROUP_RUNNER_BES, "The runner's BES backend (ASPECT_WORKFLOWS_BES_BACKEND) and the tuning a BES justifies.", ["--config=" + GROUP_BES] + bes))
-    executor = runner_executor_endpoint(environment)
-    if executor:
-        chain = [] if cache else ["--config=" + GROUP_CACHE]
-        groups.append(_group(GROUP_RUNNER_EXEC, "The runner's remote execution (ASPECT_WORKFLOWS_REMOTE_EXECUTOR); opt in per call with --config=aspect-exec.", chain + executor, source = _RUNNER_SOURCE))
-        groups.append(_group(GROUP_EXEC, "", ["--config=" + GROUP_RUNNER_EXEC], source = _RUNNER_SOURCE))
-    return groups
-
-def enabled_groups(groups: list) -> list:
-    """The names among `groups` this rc turns on with `common --config=<group>`
-    lines, in definition order: every group but the tuning groups, which are
-    reached by chaining, and the executor, which is opt-in."""
-    return [g.name for g in groups if g.name not in _OPT_IN]
+    enabled = [g.name for g in groups if g.name not in [GROUP_CACHE, GROUP_BES, GROUP_EXEC]]
+    if environment.remote_cache != None:
+        enabled.append(GROUP_CACHE)
+    if environment.build_events != None:
+        enabled.append(GROUP_BES)
+    return (groups, enabled)
