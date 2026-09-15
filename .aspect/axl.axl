@@ -13,7 +13,7 @@ load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", 
 load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warning", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
-load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
+load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
@@ -2517,66 +2517,96 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     _clear_pr_env(env)
     return tc
 
-def test_file_uri_to_path(tc: int) -> int:
-    """Coverage for bazel_results.file_uri_to_path BES URI → local path."""
-    BB = "/mnt/ephemeral/buildbarn/bb_clientd"
+def _with_bb_clientd_env(ctx: TaskContext, mount, no_bb):
+    """Set the two runner bb_clientd env vars (None removes) and return the
+    prior values for `_restore_bb_clientd_env`."""
+    prior = [(name, ctx.std.env.var(name)) for name in ["ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", "ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD"]]
+    for name, value in [("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", mount), ("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", no_bb)]:
+        if value == None:
+            ctx.std.env.remove_var(name)
+        else:
+            ctx.std.env.set_var(name, value)
+    return prior
 
-    # file:// passthrough (scheme stripped).
-    tc = test_case(tc, file_uri_to_path("file:///abs/path/to/foo.txt") == "/abs/path/to/foo.txt", "file_uri_to_path: file:// scheme stripped")
+def _restore_bb_clientd_env(ctx: TaskContext, prior):
+    for name, value in prior:
+        if value == None:
+            ctx.std.env.remove_var(name)
+        else:
+            ctx.std.env.set_var(name, value)
+
+def test_uri_to_path_under_root(tc: int) -> int:
+    """Coverage for bazel_results.uri_to_path_under_root BES URI → local path
+    under an explicit bb_clientd root."""
+    BB = "/mnt/bb"
+
+    # file:// passthrough (scheme stripped); the root is irrelevant.
+    tc = test_case(tc, uri_to_path_under_root("file:///abs/path/to/foo.txt", BB) == "/abs/path/to/foo.txt", "uri_to_path_under_root: file:// scheme stripped")
+    tc = test_case(tc, uri_to_path_under_root("file:///a/b", None) == "/a/b", "uri_to_path_under_root: file:// unaffected by bb_root None")
 
     # Non-scheme: returned as-is.
-    tc = test_case(tc, file_uri_to_path("relative/path.txt") == "relative/path.txt", "file_uri_to_path: no scheme passthrough")
+    tc = test_case(tc, uri_to_path_under_root("relative/path.txt", BB) == "relative/path.txt", "uri_to_path_under_root: no scheme passthrough")
 
     # bytestream:// 5-part with explicit sha256 digest function (modern Bazel).
     uri5 = "bytestream://localhost:8443/blobs/sha256/abc123def/4567"
     expected5 = BB + "/cas/localhost/blobs/sha256/file/abc123def-4567"
-    tc = test_case(tc, file_uri_to_path(uri5) == expected5, "file_uri_to_path: bytestream 5-part (sha256/HASH/SIZE)")
+    tc = test_case(tc, uri_to_path_under_root(uri5, BB) == expected5, "uri_to_path_under_root: bytestream 5-part (sha256/HASH/SIZE)")
 
     # bytestream:// 4-part without digest function (legacy form).
     uri4 = "bytestream://localhost:8443/blobs/abc123def/4567"
     expected4 = BB + "/cas/localhost/blobs/sha256/file/abc123def-4567"
-    tc = test_case(tc, file_uri_to_path(uri4) == expected4, "file_uri_to_path: bytestream 4-part (HASH/SIZE)")
+    tc = test_case(tc, uri_to_path_under_root(uri4, BB) == expected4, "uri_to_path_under_root: bytestream 4-part (HASH/SIZE)")
 
     # bytestream:// with sha512 digest function.
     uri_sha512 = "bytestream://cache.example.com:443/blobs/sha512/HASHHASH/9999"
     expected_sha512 = BB + "/cas/cache.example.com/blobs/sha512/file/HASHHASH-9999"
-    tc = test_case(tc, file_uri_to_path(uri_sha512) == expected_sha512, "file_uri_to_path: bytestream sha512")
+    tc = test_case(tc, uri_to_path_under_root(uri_sha512, BB) == expected_sha512, "uri_to_path_under_root: bytestream sha512")
 
-    # Explicit bb_root overrides the default mount root.
-    custom = file_uri_to_path(uri4, "/custom/mount")
-    tc = test_case(tc, custom == "/custom/mount/cas/localhost/blobs/sha256/file/abc123def-4567", "file_uri_to_path: explicit bb_root")
-
-    # bb_root None (runner without bb_clientd): bytestream URIs have no local
-    # path; file:// still resolves.
-    tc = test_case(tc, file_uri_to_path(uri4, None) == "", "file_uri_to_path: bytestream with bb_root None → \"\"")
-    tc = test_case(tc, file_uri_to_path("file:///a/b", None) == "/a/b", "file_uri_to_path: file:// unaffected by bb_root None")
+    # bb_root None (runner without bb_clientd): bytestream URIs have no local path.
+    tc = test_case(tc, uri_to_path_under_root(uri4, None) == "", "uri_to_path_under_root: bytestream with bb_root None → \"\"")
 
     # Empty / non-URI values.
-    tc = test_case(tc, file_uri_to_path("") == "", "file_uri_to_path: empty → \"\"")
+    tc = test_case(tc, uri_to_path_under_root("", BB) == "", "uri_to_path_under_root: empty → \"\"")
+    tc = test_case(tc, uri_to_path_under_root(None, BB) == "", "uri_to_path_under_root: None → \"\"")
 
+    return tc
+
+def test_file_uri_to_path(ctx: TaskContext, tc: int) -> int:
+    """Coverage for the public bazel_results.file_uri_to_path(env, uri): the
+    bb_clientd root comes from the runner env, never from the caller."""
+    env = ctx.std.env
+    uri4 = "bytestream://localhost:8443/blobs/abc123def/4567"
+
+    prior = _with_bb_clientd_env(ctx, None, None)
+    tc = test_case(tc, file_uri_to_path(env, "file:///abs/path/to/foo.txt") == "/abs/path/to/foo.txt", "file_uri_to_path: file:// scheme stripped")
+    tc = test_case(tc, file_uri_to_path(env, uri4) == "/mnt/ephemeral/buildbarn/bb_clientd/cas/localhost/blobs/sha256/file/abc123def-4567", "file_uri_to_path: bytestream under legacy default root")
+
+    _with_bb_clientd_env(ctx, "/data/bb_clientd", None)
+    tc = test_case(tc, file_uri_to_path(env, uri4) == "/data/bb_clientd/cas/localhost/blobs/sha256/file/abc123def-4567", "file_uri_to_path: bytestream under runner-exported mount")
+
+    _with_bb_clientd_env(ctx, "/data/bb_clientd", "1")
+    tc = test_case(tc, file_uri_to_path(env, uri4) == "", "file_uri_to_path: bytestream on a runner without bb_clientd → \"\"")
+    tc = test_case(tc, file_uri_to_path(env, "file:///a/b") == "/a/b", "file_uri_to_path: file:// unaffected by NO_BB_CLIENTD")
+    tc = test_case(tc, file_uri_to_path(env, "") == "", "file_uri_to_path: empty → \"\"")
+
+    _restore_bb_clientd_env(ctx, prior)
     return tc
 
 def test_bb_clientd_root(ctx: TaskContext, tc: int) -> int:
     """Coverage for bazel_results.bb_clientd_root env precedence."""
-    prior_mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT")
-    prior_no_bb = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
+    env = ctx.std.env
 
-    ctx.std.env.remove_var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT")
-    ctx.std.env.remove_var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
-    tc = test_case(tc, bb_clientd_root(ctx) == "/mnt/ephemeral/buildbarn/bb_clientd", "bb_clientd_root: legacy default when no env")
+    prior = _with_bb_clientd_env(ctx, None, None)
+    tc = test_case(tc, bb_clientd_root(env) == "/mnt/ephemeral/buildbarn/bb_clientd", "bb_clientd_root: legacy default when no env")
 
-    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", "/data/bb_clientd")
-    tc = test_case(tc, bb_clientd_root(ctx) == "/data/bb_clientd", "bb_clientd_root: runner-exported mount wins")
+    _with_bb_clientd_env(ctx, "/data/bb_clientd", None)
+    tc = test_case(tc, bb_clientd_root(env) == "/data/bb_clientd", "bb_clientd_root: runner-exported mount wins")
 
     # The no-bb_clientd marker wins over everything, including a stale mount env.
-    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", "1")
-    tc = test_case(tc, bb_clientd_root(ctx) == None, "bb_clientd_root: NO_BB_CLIENTD → None")
+    _with_bb_clientd_env(ctx, "/data/bb_clientd", "1")
+    tc = test_case(tc, bb_clientd_root(env) == None, "bb_clientd_root: NO_BB_CLIENTD → None")
 
-    for name, prior in [("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", prior_mount), ("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", prior_no_bb)]:
-        if prior == None:
-            ctx.std.env.remove_var(name)
-        else:
-            ctx.std.env.set_var(name, prior)
+    _restore_bb_clientd_env(ctx, prior)
     return tc
 
 def test_validate_role(tc: int) -> int:
@@ -4076,7 +4106,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_artifacts_lib(ctx, tc)
     tc = test_collect_build_action_logs(ctx, tc, temp_dir)
     tc = test_sarif_lib(tc)
-    tc = test_file_uri_to_path(tc)
+    tc = test_uri_to_path_under_root(tc)
+    tc = test_file_uri_to_path(ctx, tc)
     tc = test_bb_clientd_root(ctx, tc)
     tc = test_json_try_decode(tc)
     tc = test_apparent_label(tc)
