@@ -484,6 +484,19 @@ def version_gte(a, b):
 # legacy two-field form (NAME=friendly_kind, ID=UUID).
 _TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
 
+def register_bes_metadata(ctx, bazel_trait) -> None:
+    """Give the invocation the `--build_metadata` a BES backend reads: the task
+    identity (`get_task_metadata_flags`, a `task_flags` hook since it needs the
+    TaskContext) and the commit and CI context (`get_build_metadata_flags`).
+    Idempotent, so every feature that wires a BES backend — Workflows for the
+    runner's, Deployment for `--remote` — can call it and the flags appear once.
+    Without a backend the metadata has nowhere to surface, so nothing else
+    registers it."""
+    if get_task_metadata_flags in bazel_trait.task_flags:
+        return
+    bazel_trait.task_flags.append(get_task_metadata_flags)
+    bazel_trait.extra_flags.extend(get_build_metadata_flags(ctx.std))
+
 def get_task_metadata_flags(ctx):
     """Generate --build_metadata flags for the current task identity.
 
