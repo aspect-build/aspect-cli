@@ -37,9 +37,9 @@ CI-host groups and the tuning its endpoints justify, so the file is inert until
 a section is named and safe to import into a developer's rc. `--announce_rc`
 names the group every flag came from either way. Startup options have no
 `--config`, so the runner's output paths are plain `startup` lines. The
-credential helper the sections name is the binary running this command — it
-certainly exists, whereas a bare `aspect` on PATH may not for a later `bazel`
-step, and Bazel fails outright on a helper it cannot find.
+credential helper the sections name is `aspect` when that is on PATH, which
+Bazel resolves like a shell would, and otherwise the binary running this
+command, so the rc never names a helper Bazel cannot find.
 
 Bazel reads the home rc after the workspace rc, so on a runner a repository
 whose own rc names a different `--bes_backend` for vanilla calls keeps it by
@@ -125,12 +125,23 @@ def _groups(ctx: TaskContext, environment, on_runner: bool, env_deployment: bool
     exec_log_path = runner_exec_log_path(environment) if on_runner else temp_exec_log_path(ctx.std, ctx.task.id)
     return rc_groups(environment, on_runner, bazel_misdetects_color(ctx.std.env), exec_log_path, env_deployment)
 
+_HELPER_NAME = "aspect"
+
+def _credential_helper(ctx: TaskContext) -> str:
+    """What the sections hand Bazel as the credential helper: `aspect` when a
+    PATH entry holds it — Bazel resolves a bare helper name on PATH — else the
+    absolute path of the binary running this command, which exists wherever
+    this rc is read on the same machine."""
+    for dir in (ctx.std.env.var("PATH") or "").split(":"):
+        if dir and ctx.std.fs.exists(dir.rstrip("/") + "/" + _HELPER_NAME):
+            return _HELPER_NAME
+    return ctx.std.env.current_exe()
+
 def _sections(ctx: TaskContext, host_groups: list) -> list:
     """The `--config` sections for this machine's configured deployments, each
     chaining `host_groups` first. Reads `deployments()`, not `list()`: nothing
-    here needs login status. The credential helper they name is the binary
-    running this command."""
-    return deployment_configs(ctx.aspect.auth.deployments(), ctx.std.env.current_exe(), host_groups)
+    here needs login status."""
+    return deployment_configs(ctx.aspect.auth.deployments(), _credential_helper(ctx), host_groups)
 
 def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     omitted = ctx.args.omit_bazel_flags
