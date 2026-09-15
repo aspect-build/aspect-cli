@@ -1440,11 +1440,11 @@ struct CredentialsEntry {
     // existed load as cloud sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     prefer_id_token: bool,
-    /// What kind of issuer minted this credential, decided at login from the
-    /// discovery response (see [`resolve_oidc_endpoints`]). Drives which refresh
-    /// the credential gets: an issuer with the tenant API can re-mint for the
-    /// pinned `tenant_id`. Defaulted so entries written before this field
-    /// existed load as plain OIDC sessions.
+    /// What kind of issuer minted this credential, read off the discovery
+    /// response at login and again on every refresh ([`IssuerKind::or`] keeps a
+    /// detection once made). Drives which refresh the credential gets: an issuer
+    /// with the tenant API can re-mint for the pinned `tenant_id`. Defaulted so
+    /// entries written before this field existed load as plain OIDC sessions.
     #[serde(default, skip_serializing_if = "IssuerKind::is_oidc")]
     issuer_kind: IssuerKind,
 }
@@ -1471,6 +1471,18 @@ pub(crate) enum IssuerKind {
 impl IssuerKind {
     fn is_oidc(&self) -> bool {
         *self == IssuerKind::Oidc
+    }
+
+    /// The kind after another look at the issuer: the tenant API once seen is
+    /// kept. Detection rides on a discovery request that can time out or be
+    /// refused for a moment, and a miss must not demote a credential to plain
+    /// OIDC, which would drop its organization list and pinned refresh.
+    fn or(self, other: IssuerKind) -> IssuerKind {
+        if self == IssuerKind::TenantApi || other == IssuerKind::TenantApi {
+            IssuerKind::TenantApi
+        } else {
+            IssuerKind::Oidc
+        }
     }
 
     /// The provider stamps every response, the discovery document included, with
@@ -2212,8 +2224,8 @@ struct OidcEndpoints {
 /// without assuming a URL layout, falling back to the conventional
 /// `{issuer}/oauth/{authorize,token}` when no discovery document is served. The
 /// discovery response's headers also identify the provider
-/// ([`IssuerKind::from_response_headers`]); an unserved or rejected document
-/// leaves it [`IssuerKind::Oidc`].
+/// ([`IssuerKind::from_response_headers`]) whatever its status or body says; a
+/// request that gets no response at all leaves it [`IssuerKind::Oidc`].
 async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
     let issuer = issuer.trim_end_matches('/');
     #[derive(Deserialize)]
@@ -2221,14 +2233,15 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
         authorization_endpoint: String,
         token_endpoint: String,
     }
-    let discovered = discovery_client()
+    let Ok(resp) = discovery_client()
         .get(format!("{issuer}/.well-known/openid-configuration"))
         .send()
         .await
-        .ok()
-        .filter(|r| r.status().is_success());
-    if let Some(resp) = discovered {
-        let issuer_kind = IssuerKind::from_response_headers(resp.headers());
+    else {
+        return oidc_endpoints_fallback(issuer);
+    };
+    let issuer_kind = IssuerKind::from_response_headers(resp.headers());
+    if resp.status().is_success() {
         if let Ok(d) = resp.json::<Discovery>().await {
             // The discovery doc is server-controlled and drives where the
             // authorization code + PKCE verifier are sent, so require https on
@@ -2244,7 +2257,10 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
             }
         }
     }
-    oidc_endpoints_fallback(issuer)
+    OidcEndpoints {
+        issuer_kind,
+        ..oidc_endpoints_fallback(issuer)
+    }
 }
 
 /// Whether `url` is an absolute `https://` URL (case-insensitive scheme).
@@ -2548,9 +2564,13 @@ impl RefreshFailure {
 /// tenant whatever the user has active elsewhere. When that is refused, the
 /// standard refresh grant is tried, as the provider's own SDKs do: the
 /// tenant-scoped endpoint can refuse a refresh token the standard grant still
-/// accepts. Any other credential goes
-/// straight to the standard grant. Either way the result is checked against the
-/// pinned tenant ([`ensure_tenant_unchanged`]) before it is returned.
+/// accepts. Any other credential goes straight to the standard grant. Either way
+/// the result is checked against the pinned tenant ([`ensure_tenant_unchanged`])
+/// before it is returned.
+///
+/// The issuer is looked at again on the way ([`resolve_oidc_endpoints`]), so a
+/// credential whose login missed the tenant API is upgraded to it here and
+/// persisted that way by the caller.
 async fn refresh_access_token(
     entry: &CredentialsEntry,
 ) -> Result<CredentialsEntry, RefreshFailure> {
@@ -2566,7 +2586,9 @@ async fn refresh_access_token(
         .auth_client_id
         .as_deref()
         .ok_or_else(|| failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh")))?;
-    let pinned = if entry.issuer_kind == IssuerKind::TenantApi && !entry.tenant_id.is_empty() {
+    let endpoints = resolve_oidc_endpoints(auth_domain).await;
+    let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
+    let pinned = if issuer_kind == IssuerKind::TenantApi && !entry.tenant_id.is_empty() {
         tenant_scoped_refresh(entry, auth_domain, client_id, &entry.tenant_id)
             .await
             .inspect_err(|e| {
@@ -2576,26 +2598,25 @@ async fn refresh_access_token(
     } else {
         None
     };
-    let refreshed = match pinned {
+    let mut refreshed = match pinned {
         Some(refreshed) => refreshed,
-        None => refresh_with_grant(entry, auth_domain, client_id)
+        None => refresh_with_grant(entry, &endpoints.token, client_id)
             .await
             .map_err(failed)?,
     };
+    refreshed.issuer_kind = issuer_kind;
     ensure_tenant_unchanged(entry, refreshed)
 }
 
-/// The standard OAuth refresh grant against the issuer's token endpoint,
-/// resolved via OIDC discovery (the conventional `/oauth/token` is the fallback)
-/// so a self-hosted issuer whose token endpoint is elsewhere still refreshes.
+/// The standard OAuth refresh grant against `token_url`, the issuer's token
+/// endpoint as [`resolve_oidc_endpoints`] found it.
 async fn refresh_with_grant(
     entry: &CredentialsEntry,
-    auth_domain: &str,
+    token_url: &str,
     client_id: &str,
 ) -> anyhow::Result<CredentialsEntry> {
-    let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let token_resp: TokenResponse = post_form(
-        &endpoints.token,
+        token_url,
         &[
             ("grant_type", "refresh_token"),
             ("refresh_token", &entry.refresh_token),
@@ -2696,6 +2717,7 @@ async fn select_tenant(
             "this login has no refresh token to re-mint with"
         ));
     }
+    let endpoints = resolve_oidc_endpoints(auth_domain).await;
     match tenant_scoped_refresh(entry, auth_domain, client_id, tenant_id).await {
         Ok(refreshed) if refreshed.tenant_id == tenant_id => {
             return Ok(SelectedTenant {
@@ -2712,7 +2734,7 @@ async fn select_tenant(
         ),
     }
     switch_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
-    let refreshed = refresh_with_grant(entry, auth_domain, client_id).await?;
+    let refreshed = refresh_with_grant(entry, &endpoints.token, client_id).await?;
     if refreshed.tenant_id != tenant_id {
         return Err(anyhow::anyhow!(
             "the issuer minted a token for organization {} instead",
@@ -3252,9 +3274,9 @@ impl AuthSessionInner {
                 "authentication failed: callback state did not match"
             ));
         }
-        let token_url = resolve_oidc_endpoints(&self.env.domain).await.token;
+        let endpoints = resolve_oidc_endpoints(&self.env.domain).await;
         let token_resp = exchange_code(
-            &token_url,
+            &endpoints.token,
             &self.env.client_id,
             &self.redirect_uri,
             &code,
@@ -3271,7 +3293,10 @@ impl AuthSessionInner {
             Some(self.env.domain.clone()),
             Some(self.env.client_id.clone()),
             prefer_id_token,
-            self.issuer_kind,
+            // Two looks at the issuer, when the authorize URL was built and now,
+            // so one discovery request failing does not record a plain OIDC
+            // credential for an issuer with the tenant API.
+            self.issuer_kind.or(endpoints.issuer_kind),
         )
     }
 }
@@ -6806,6 +6831,8 @@ mod tests {
     /// reqwest reconnects for the next), from `respond`, which maps a request to
     /// a `(status, JSON body)`. `finish()` joins the server and hands back what it
     /// received, in order, so a test can assert on the route each step took.
+    /// `start_tenant_api` stamps every response with the tenant API's trace
+    /// header, the way that provider's edge does.
     struct MockIssuer {
         address: std::net::SocketAddr,
         received: std::sync::Arc<Mutex<Vec<Received>>>,
@@ -6816,6 +6843,21 @@ mod tests {
         fn start(
             connections: usize,
             respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+        ) -> Self {
+            Self::start_with(connections, respond, false)
+        }
+
+        fn start_tenant_api(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+        ) -> Self {
+            Self::start_with(connections, respond, true)
+        }
+
+        fn start_with(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+            trace_header: bool,
         ) -> Self {
             use std::io::Write;
 
@@ -6835,9 +6877,14 @@ mod tests {
                         404 => "Not Found",
                         _ => "Other",
                     };
+                    let trace = if trace_header {
+                        format!("{TENANT_API_TRACE_HEADER}: mock\r\n")
+                    } else {
+                        String::new()
+                    };
                     write!(
                         stream,
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} {reason}\r\n{trace}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .unwrap();
@@ -6929,9 +6976,10 @@ mod tests {
 
     #[test]
     fn a_tenant_api_credential_refreshes_through_the_tenant_scoped_endpoint() {
-        let issuer = MockIssuer::start(1, |request| {
-            assert_eq!(request.path, TENANT_API_REFRESH_PATH);
-            (200, token_body_for("t1"))
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            TENANT_API_REFRESH_PATH => (200, token_body_for("t1")),
+            other => panic!("unexpected request to {other}"),
         });
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
@@ -6944,7 +6992,8 @@ mod tests {
 
         // Shaped as the tenant API expects: the pinned tenant in the body, the
         // refresh token in its cookie, the current bearer, and the bare host.
-        let [request] = issuer.finish().try_into().ok().unwrap();
+        let [_discovery, request] = issuer.finish().try_into().ok().unwrap();
+        assert_eq!(request.path, TENANT_API_REFRESH_PATH);
         assert_eq!(request.method, "POST");
         assert!(
             request.body.contains(r#""tenantId":"t1""#),
@@ -7001,11 +7050,41 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                TENANT_API_REFRESH_PATH,
                 "/.well-known/openid-configuration",
+                TENANT_API_REFRESH_PATH,
                 "/oauth/token"
             ]
         );
+    }
+
+    #[test]
+    fn a_login_that_missed_the_tenant_api_is_upgraded_on_refresh() {
+        // Stored as plain OIDC (the discovery request failed at login), but the
+        // issuer answers with its trace header now, even on a 404: the refresh
+        // takes the tenant-scoped path and the returned credential records the
+        // tenant API, so the caller persists the upgrade.
+        let issuer = MockIssuer::start_tenant_api(2, |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            TENANT_API_REFRESH_PATH => (200, token_body_for("t1")),
+            other => panic!("unexpected request to {other}"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(issuer.finish().len(), 2);
+    }
+
+    #[test]
+    fn issuer_kind_detection_only_ever_upgrades() {
+        use IssuerKind::{Oidc, TenantApi};
+        assert_eq!(Oidc.or(Oidc), Oidc);
+        assert_eq!(Oidc.or(TenantApi), TenantApi);
+        assert_eq!(TenantApi.or(Oidc), TenantApi);
+        assert_eq!(TenantApi.or(TenantApi), TenantApi);
     }
 
     #[test]
@@ -7090,9 +7169,9 @@ mod tests {
         assert_eq!(
             paths,
             vec![
+                "/.well-known/openid-configuration",
                 TENANT_API_REFRESH_PATH,
                 TENANT_API_SWITCH_PATH,
-                "/.well-known/openid-configuration",
                 "/oauth/token"
             ]
         );
@@ -7100,7 +7179,11 @@ mod tests {
 
     #[test]
     fn selecting_an_organization_takes_the_pinned_refresh_when_honored() {
-        let issuer = MockIssuer::start(1, |_| (200, token_body_for("t2")));
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            TENANT_API_REFRESH_PATH => (200, token_body_for("t2")),
+            other => panic!("unexpected request to {other}"),
+        });
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let selected = current_thread_runtime()
@@ -7108,7 +7191,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.entry.tenant_id, "t2");
         assert!(!selected.switched_active);
-        assert_eq!(issuer.finish().len(), 1);
+        assert_eq!(issuer.finish().len(), 2);
     }
 
     #[test]
@@ -7255,7 +7338,7 @@ mod tests {
             );
             write!(
                 stream,
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 404 Not Found\r\n{TENANT_API_TRACE_HEADER}: mock\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             )
             .unwrap();
             drop(stream);
@@ -7312,6 +7395,10 @@ mod tests {
 
         let credentials = finish_auth_session(&session, Some("auth-code")).unwrap();
         assert_eq!(credentials.access_token, token);
+        // The session was built when discovery had said nothing (plain OIDC); the
+        // 404 above still carried the tenant API's trace header, so the completed
+        // login records the tenant API rather than the earlier miss.
+        assert_eq!(credentials.issuer_kind, IssuerKind::TenantApi);
         responder.join().unwrap();
         assert!(
             finish_auth_session(&session, Some("auth-code"))
