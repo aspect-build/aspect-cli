@@ -70,6 +70,7 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
         announce_command = announce_command,
         *patterns
     ).wait()
+
     # Bazel writes this log itself, so a line that is not a JSON object means
     # it is truncated or corrupt. Fail closed rather than trust the readable
     # remainder as a complete selection, and name the offending line.
