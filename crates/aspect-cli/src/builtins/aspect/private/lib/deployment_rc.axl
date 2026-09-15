@@ -53,18 +53,6 @@ _DEFAULT_ALIAS_SOURCE = "the default-deployment alias"
 # remote execution.
 _DEFAULT_EXEC_CONFIG = GROUP_EXEC
 
-# The value-bearing flags these sections write, by name, so `strip_generated`
-# can recognize a section this command wrote into a user rc.
-SECTION_FLAG_NAMES = [
-    "--remote_cache",
-    "--bes_backend",
-    "--bes_results_url",
-    "--remote_executor",
-    "--credential_helper",
-    "--experimental_credential_helper",
-    "--config",
-]
-
 def config_name(deployment) -> str:
     """The `--config` name for a deployment row: Aspect Cloud's own name for the
     built-in entry, `aspect-<name>` for a configured deployment."""

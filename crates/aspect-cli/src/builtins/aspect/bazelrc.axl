@@ -64,7 +64,6 @@ load(
     "runner_startup_flags",
     "temp_exec_log_path",
     "unscoped",
-    "written_flag_names",
 )
 load(
     "./private/lib/bazelrc_file.axl",
@@ -78,7 +77,7 @@ load(
     "render_bazelrc",
     "startup_flags_for_rc",
 )
-load("./private/lib/deployment_rc.axl", "SECTION_FLAG_NAMES", "config_collisions", "deployment_configs")
+load("./private/lib/deployment_rc.axl", "config_collisions", "deployment_configs")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner")
 load("./private/lib/rc_groups.axl", "rc_groups", "section_chains")
 
@@ -90,7 +89,6 @@ _IMPORT_VERBS = {
     ImportAction("created"): "created %s with it",
     ImportAction("unchanged"): "%s already imports it",
     ImportAction("appended"): "added the import to %s",
-    ImportAction("replaced"): "replaced the lines this command had generated in %s with the import",
 }
 
 def _home_path(ctx: TaskContext, relative: str) -> str:
@@ -184,7 +182,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     existing = ctx.std.fs.read_to_string(user_rc) if ctx.std.fs.exists(user_rc) else None
-    result = ensure_import(existing, import_line(output), written_flag_names() + SECTION_FLAG_NAMES)
+    result = ensure_import(existing, import_line(output))
     if result.action != ImportAction("unchanged"):
         _write(ctx, user_rc, result.content)
     info(ctx.std, summary + "; " + _IMPORT_VERBS[result.action] % user_rc + ".")

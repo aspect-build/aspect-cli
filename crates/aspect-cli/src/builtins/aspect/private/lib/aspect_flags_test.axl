@@ -1,8 +1,8 @@
 """Unit tests for `aspect_flags.axl`: which catalog flags each endpoint justifies
 (`independent_flags` / `endpoint_flags`), the `env_flags` / `runner_flags` /
 `runner_diagnostics_flags` compositions and the runner pieces the rc groups are
-assembled from, `apply_output_base_suffix`, the
-written-names list, and the opt-out (`omit_flags`, `protected_omissions`).
+assembled from, `apply_output_base_suffix`, and the opt-out (`omit_flags`,
+`protected_omissions`).
 
 Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
 assert the tuples carry the right constraints. Run with: aspect dev test-aspect-flags
@@ -34,7 +34,6 @@ load(
     "runner_startup_flags",
     "unscoped",
     "workflows_cache_flags",
-    "written_flag_names",
 )
 load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
 
@@ -257,19 +256,6 @@ def _test_diagnostics_upload_flags(_ctx):
     _eq("query", _texts(rc.expand(command = "query")), ["--remote_build_event_upload=all"])
     _eq("test", sorted(_texts(rc.expand(command = "test"))), ["--execution_log_compact_file=/x/e.zstd", "--remote_build_event_upload=all"])
 
-def _test_written_flag_names(_ctx):
-    names = written_flag_names()
-    for want in ["--heap_dump_on_oom", "--noremote_cache_compression", "--disk_cache", "--remote_cache", "--output_base", "--repository_cache", "--profile", "--execution_log_compact_file", "--color"]:
-        _eq("knows " + want, want in names, True)
-    _eq("names only", any(["=" in n for n in names]), False)
-
-    # Everything the generators can produce is listed, so the legacy strip in
-    # `bazelrc_file.axl` recognizes every line.
-    env = WorkflowsEnvironment(runner = Runner(), remote_cache = RemoteCache(endpoint = "x", bytestream_uri_prefix = "x"), build_events = BuildEvents(backend = "x"), ci = CI(scm_repo_name = "x"))
-    startup, build = runner_flags(env, "/x")
-    for f in startup + build + runner_diagnostics_flags(env) + runner_bes_flags(WorkflowsEnvironment(build_events = BuildEvents(backend = "x", results_url = "y"))) + runner_executor_flags(WorkflowsEnvironment(remote_executor = RemoteExecutor(endpoint = "e"))):
-        _eq("listed " + flag_name(f), flag_name(f) in names, True)
-
 def _test_omit_flags(_ctx):
     flags = ["--heap_dump_on_oom", "--remote_timeout=3600", ("--noremote_cache_compression", ">=8.0.0"), "--remote_cache=grpcs://c"]
 
@@ -308,7 +294,6 @@ _UNIT_TESTS = [
     _test_runner_executor_flags,
     _test_color_flags,
     _test_diagnostics_upload_flags,
-    _test_written_flag_names,
     _test_omit_flags,
     _test_protected_omissions,
 ]

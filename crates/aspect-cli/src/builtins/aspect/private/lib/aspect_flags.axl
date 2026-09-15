@@ -179,8 +179,7 @@ PROTECTED_FLAGS = [
     "--aspect:lock_version",
 ]
 
-# The value-bearing flags the functions below build, by name, so
-# `written_flag_names` can list everything this file can write.
+# The value-bearing flags the functions below build, by name.
 _REMOTE_CACHE = "--remote_cache"
 _REMOTE_EXECUTOR = "--remote_executor"
 _BYTESTREAM_URI_PREFIX = "--remote_bytestream_uri_prefix"
@@ -455,23 +454,3 @@ def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
     if environment.runner == None or environment.build_events == None:
         return []
     return runner_profile_flags(environment) + diagnostics_upload_flags(runner_exec_log_path(environment))
-
-def written_flag_names() -> list:
-    """The name of every flag this file can produce, catalog and built alike. What
-    `aspect setup bazelrc` uses to recognize the lines it once wrote into a user rc."""
-    return [flag_name(e.flag) for e in CATALOG + NO_COMPRESSION_FLAGS + WORKFLOWS_CACHE_FLAGS] + [
-        _REMOTE_CACHE,
-        _REMOTE_EXECUTOR,
-        _BYTESTREAM_URI_PREFIX,
-        _REPOSITORY_CACHE,
-        _OUTPUT_USER_ROOT,
-        _OUTPUT_BASE,
-        _NOHOME_RC,
-        _NOSYSTEM_RC,
-        _COLOR,
-        _BES_BACKEND,
-        _BES_RESULTS_URL,
-        _PROFILE,
-        _REMOTE_BUILD_EVENT_UPLOAD,
-        _EXECUTION_LOG_COMPACT_FILE,
-    ]

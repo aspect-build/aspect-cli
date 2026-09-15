@@ -343,8 +343,7 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(aspect_flags_tests)
 
     # The rc `aspect setup bazelrc` writes as a document — rendering (startup vs
-    # common sections, `--config` groups), the `try-import` placement, and the
-    # upgrade from a whole-file output.
+    # common sections, `--config` groups) and the `try-import` placement.
     # Run with: aspect dev test-bazelrc-file
     ctx.tasks.add(bazelrc_file_tests)
 

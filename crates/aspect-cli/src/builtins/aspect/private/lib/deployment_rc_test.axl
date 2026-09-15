@@ -6,7 +6,6 @@ Run with: aspect dev test-deployment-rc
 
 load(
     "./deployment_rc.axl",
-    "SECTION_FLAG_NAMES",
     "config_collisions",
     "config_name",
     "credential_helper_flags",
@@ -149,15 +148,6 @@ def _test_credential_helper_scope(_ctx):
     _eq("bare host scope", ("--credential_helper=cache.p=" + _HELPER, ">=6.4.0") in flags, True)
     _eq("helper shape", credential_helper_flags(["h"], "x")[0], ("--credential_helper=h=x", ">=6.4.0"))
 
-def _test_section_flag_names(_ctx):
-    # Every value-bearing flag a section writes is listed, so the legacy strip
-    # in `bazelrc_file.axl` recognizes it.
-    configs = deployment_configs([_CLOUD, _SILO, _summary("e", exec = "exec.e")], _HELPER)
-    for c in configs:
-        for f in _texts(c.flags):
-            name = f.split("=")[0]
-            _eq("listed " + name, name in SECTION_FLAG_NAMES, True)
-
 def _test_config_collisions(_ctx):
     _eq("no collision", config_collisions(deployment_configs([_CLOUD, _SILO], _HELPER)), [])
 
@@ -182,7 +172,6 @@ _UNIT_TESTS = [
     _test_partial_deployments,
     _test_default_aliases,
     _test_credential_helper_scope,
-    _test_section_flag_names,
     _test_config_collisions,
 ]
 
