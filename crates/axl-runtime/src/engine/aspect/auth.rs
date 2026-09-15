@@ -1440,7 +1440,50 @@ struct CredentialsEntry {
     // existed load as cloud sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     prefer_id_token: bool,
+    /// What kind of issuer minted this credential, decided at login from the
+    /// discovery response (see [`resolve_oidc_endpoints`]). Drives which refresh
+    /// the credential gets: a Frontegg issuer can re-mint for the pinned
+    /// `tenant_id`. Defaulted so entries written before this field existed load
+    /// as plain OIDC sessions.
+    #[serde(default, skip_serializing_if = "IssuerKind::is_oidc")]
+    issuer_kind: IssuerKind,
 }
+
+/// The identity provider behind an issuer, as far as the CLI can tell.
+///
+/// Frontegg user tokens are tenant-bound (the `tenantId` claim), and a user who
+/// belongs to several tenants has one *active* tenant that Frontegg keeps
+/// server-side and any client can switch. The plain OAuth refresh grant mints for
+/// whichever tenant is active at that moment, so a Frontegg credential is
+/// refreshed through Frontegg's tenant-scoped endpoint instead, pinned to the
+/// tenant it was issued for. Anything else is refreshed with the standard grant.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Allocative)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum IssuerKind {
+    #[default]
+    Oidc,
+    Frontegg,
+}
+
+impl IssuerKind {
+    fn is_oidc(&self) -> bool {
+        *self == IssuerKind::Oidc
+    }
+
+    /// Frontegg stamps every response, the discovery document included, with a
+    /// `frontegg-trace-id` header. That is true of its custom domains too (Aspect
+    /// Cloud's issuer is one), so the header is what identifies the provider
+    /// rather than any URL shape.
+    fn from_response_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        if headers.contains_key(FRONTEGG_TRACE_HEADER) {
+            IssuerKind::Frontegg
+        } else {
+            IssuerKind::Oidc
+        }
+    }
+}
+
+const FRONTEGG_TRACE_HEADER: &str = "frontegg-trace-id";
 
 impl CredentialsEntry {
     /// Build an entry for `bearer` (the JWT sent to endpoints), decoding its
@@ -1448,13 +1491,14 @@ impl CredentialsEntry {
     /// so the credential can be refreshed. `refresh_token` may be empty (api-token
     /// and raw-token logins are not refreshable). `prefer_id_token` records that the
     /// bearer is an id_token (the self-hosted endpoint flow) so refresh preserves
-    /// that kind.
+    /// that kind. `issuer_kind` records the provider so refresh can pin the tenant.
     fn from_bearer(
         bearer: String,
         refresh_token: String,
         auth_domain: Option<String>,
         auth_client_id: Option<String>,
         prefer_id_token: bool,
+        issuer_kind: IssuerKind,
     ) -> anyhow::Result<Self> {
         let claims = decode_jwt_claims(&bearer)?;
         Ok(CredentialsEntry {
@@ -1466,7 +1510,16 @@ impl CredentialsEntry {
             auth_domain,
             auth_client_id,
             prefer_id_token,
+            issuer_kind,
         })
+    }
+
+    /// Every tenant the bearer says its user belongs to (Frontegg's `tenantIds`
+    /// claim), empty when the issuer mints no such claim.
+    fn tenant_ids(&self) -> Vec<String> {
+        decode_jwt_claims(&self.access_token)
+            .map(|c| c.tenant_ids)
+            .unwrap_or_default()
     }
 }
 
@@ -1564,6 +1617,9 @@ struct JwtClaims {
     // it as optional (display-only) rather than failing to decode.
     #[serde(rename = "tenantId", default)]
     tenant_id: String,
+    // Every tenant the user belongs to; Frontegg mints it alongside `tenantId`.
+    #[serde(rename = "tenantIds", default)]
+    tenant_ids: Vec<String>,
     exp: Option<u64>,
 }
 
@@ -1916,8 +1972,16 @@ async fn exchange_api_token(
         .await
         .map_err(|e| anyhow::anyhow!("failed to parse API token response: {}", e))?;
     // Not refreshable (the api-token is re-exchanged each run), so no
-    // auth_domain/client_id are stored. Access-token bearer (Aspect cloud).
-    CredentialsEntry::from_bearer(data.access_token, String::new(), None, None, false)
+    // auth_domain/client_id are stored and the issuer kind is moot. Access-token
+    // bearer (Aspect cloud).
+    CredentialsEntry::from_bearer(
+        data.access_token,
+        String::new(),
+        None,
+        None,
+        false,
+        IssuerKind::Oidc,
+    )
 }
 
 /// Accept one OAuth callback request on `listener` and return its `code` and
@@ -2012,11 +2076,14 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
 /// the `access_token` (the Aspect Cloud flow).
 #[derive(Deserialize)]
 struct TokenResponse {
-    #[serde(default)]
+    // The camelCase aliases cover Frontegg's identity endpoints, which answer
+    // with the same fields as its OAuth token endpoint but not always in the
+    // OAuth spelling.
+    #[serde(default, alias = "accessToken")]
     access_token: String,
-    #[serde(default)]
+    #[serde(default, alias = "idToken")]
     id_token: String,
-    #[serde(default)]
+    #[serde(default, alias = "refreshToken")]
     refresh_token: String,
 }
 
@@ -2099,16 +2166,21 @@ async fn exchange_code(
     .await
 }
 
-/// The authorize + token endpoints for an issuer.
+/// The authorize + token endpoints for an issuer, and what kind of provider
+/// answered for it.
 struct OidcEndpoints {
     authorize: String,
     token: String,
+    issuer_kind: IssuerKind,
 }
 
 /// Resolve an issuer's authorize + token endpoints, preferring OIDC discovery
 /// (`{issuer}/.well-known/openid-configuration`) so a self-hosted provider works
 /// without assuming a URL layout, falling back to the conventional
-/// `{issuer}/oauth/{authorize,token}` when no discovery document is served.
+/// `{issuer}/oauth/{authorize,token}` when no discovery document is served. The
+/// discovery response's headers also identify the provider
+/// ([`IssuerKind::from_response_headers`]); an unserved or rejected document
+/// leaves it [`IssuerKind::Oidc`].
 async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
     let issuer = issuer.trim_end_matches('/');
     #[derive(Deserialize)]
@@ -2123,6 +2195,7 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
         .ok()
         .filter(|r| r.status().is_success());
     if let Some(resp) = discovered {
+        let issuer_kind = IssuerKind::from_response_headers(resp.headers());
         if let Ok(d) = resp.json::<Discovery>().await {
             // The discovery doc is server-controlled and drives where the
             // authorization code + PKCE verifier are sent, so require https on
@@ -2133,6 +2206,7 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
                 return OidcEndpoints {
                     authorize: d.authorization_endpoint,
                     token: d.token_endpoint,
+                    issuer_kind,
                 };
             }
         }
@@ -2153,6 +2227,7 @@ fn oidc_endpoints_fallback(issuer: &str) -> OidcEndpoints {
     OidcEndpoints {
         authorize: format!("{issuer}/oauth/authorize"),
         token: format!("{issuer}/oauth/token"),
+        issuer_kind: IssuerKind::Oidc,
     }
 }
 
@@ -2399,22 +2474,85 @@ fn build_login_session(
             env,
             expected_state: state,
             prefer_id_token,
+            issuer_kind: endpoints.issuer_kind,
         })),
     })
 }
 
-async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<CredentialsEntry> {
-    let auth_domain = entry
-        .auth_domain
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("no auth_domain stored — cannot refresh"))?;
-    let client_id = entry
-        .auth_client_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
-    // Resolve the token endpoint via OIDC discovery (the conventional
-    // /oauth/token is the fallback), so a self-hosted issuer whose token endpoint
-    // is elsewhere still refreshes.
+/// Why a refresh did not yield a usable credential.
+enum RefreshFailure {
+    /// The issuer minted a token for a different tenant than the credential was
+    /// issued for: the user's active organization changed elsewhere (a web
+    /// session's organization switcher, say) between login and this refresh.
+    /// Refused rather than adopted, so a CLI session never silently crosses into
+    /// another organization.
+    TenantChanged { was: String, now: String },
+    /// The refresh itself failed: a revoked or expired refresh token, a network
+    /// error, a response with no usable bearer.
+    Failed(anyhow::Error),
+}
+
+impl RefreshFailure {
+    /// The message for a failed refresh of `deployment`'s credential: what
+    /// happened, and the login that fixes it.
+    fn message(&self, deployment: &str) -> String {
+        match self {
+            RefreshFailure::TenantChanged { was, now } => {
+                tenant_changed_message(deployment, was, now)
+            }
+            RefreshFailure::Failed(cause) => {
+                tracing::debug!("refreshing the {deployment} credential failed: {cause:#}");
+                session_expired_message(deployment)
+            }
+        }
+    }
+}
+
+/// Mint a fresh credential for `entry`, pinned to the tenant it was issued for.
+///
+/// A Frontegg credential is refreshed through Frontegg's tenant-scoped endpoint
+/// ([`frontegg_tenant_refresh`]), which mints for the pinned tenant whatever the
+/// user has active elsewhere. When that is refused, the standard refresh grant
+/// is tried, as Frontegg's own SDKs do: the tenant-scoped endpoint can refuse a
+/// refresh token the standard grant still accepts. Any other credential goes
+/// straight to the standard grant. Either way the result is checked against the
+/// pinned tenant ([`ensure_tenant_unchanged`]) before it is returned.
+async fn refresh_access_token(
+    entry: &CredentialsEntry,
+) -> Result<CredentialsEntry, RefreshFailure> {
+    let auth_domain = entry.auth_domain.as_deref().ok_or_else(|| {
+        RefreshFailure::Failed(anyhow::anyhow!("no auth_domain stored — cannot refresh"))
+    })?;
+    let client_id = entry.auth_client_id.as_deref().ok_or_else(|| {
+        RefreshFailure::Failed(anyhow::anyhow!("no auth_client_id stored — cannot refresh"))
+    })?;
+    let pinned = if entry.issuer_kind == IssuerKind::Frontegg && !entry.tenant_id.is_empty() {
+        frontegg_tenant_refresh(entry, auth_domain, client_id, &entry.tenant_id)
+            .await
+            .inspect_err(|e| {
+                tracing::debug!("tenant-scoped refresh refused, trying the standard grant: {e:#}")
+            })
+            .ok()
+    } else {
+        None
+    };
+    let refreshed = match pinned {
+        Some(refreshed) => refreshed,
+        None => refresh_with_grant(entry, auth_domain, client_id)
+            .await
+            .map_err(RefreshFailure::Failed)?,
+    };
+    ensure_tenant_unchanged(entry, refreshed)
+}
+
+/// The standard OAuth refresh grant against the issuer's token endpoint,
+/// resolved via OIDC discovery (the conventional `/oauth/token` is the fallback)
+/// so a self-hosted issuer whose token endpoint is elsewhere still refreshes.
+async fn refresh_with_grant(
+    entry: &CredentialsEntry,
+    auth_domain: &str,
+    client_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let token_resp: TokenResponse = post_form(
         &endpoints.token,
@@ -2426,14 +2564,166 @@ async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<Creden
         "token refresh",
     )
     .await?;
-    let refresh_token = merged_refresh_token(&entry.refresh_token, &token_resp.refresh_token);
-    CredentialsEntry::from_bearer(
-        token_resp.bearer(entry.prefer_id_token)?,
-        refresh_token,
-        entry.auth_domain.clone(),
-        entry.auth_client_id.clone(),
-        entry.prefer_id_token,
+    entry.renewed(token_resp)
+}
+
+/// Frontegg's tenant-scoped refresh: a new token for `tenant_id` from `entry`'s
+/// refresh token, independent of which tenant the user has active elsewhere.
+///
+/// The request is shaped the way Frontegg's own native SDKs shape it: the refresh
+/// token travels in the `fe_refresh_*` cookie ([`frontegg_refresh_cookie`]), the
+/// current bearer (expired or not) in `Authorization`, and the issuer's bare host
+/// in `frontegg-vendor-host`, which Frontegg's edge rejects when given a URL.
+async fn frontegg_tenant_refresh(
+    entry: &CredentialsEntry,
+    auth_domain: &str,
+    client_id: &str,
+    tenant_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
+    let url = format!(
+        "{}/identity/resources/auth/v1/user/token/refresh",
+        auth_domain.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header(
+            "Cookie",
+            frontegg_refresh_cookie(client_id, &entry.refresh_token),
+        )
+        .header("Authorization", format!("Bearer {}", entry.access_token))
+        .header(FRONTEGG_VENDOR_HOST_HEADER, endpoint_host_str(auth_domain))
+        .json(&serde_json::json!({ "tenantId": tenant_id }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("tenant refresh request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "tenant refresh failed (HTTP {status}): {body}"
+        ));
+    }
+    let token_resp: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse tenant refresh response: {e}"))?;
+    entry.renewed(token_resp)
+}
+
+const FRONTEGG_VENDOR_HOST_HEADER: &str = "frontegg-vendor-host";
+
+/// The cookie Frontegg reads a refresh token from: named after the client id
+/// with its first dash removed, as Frontegg's SDKs derive it.
+fn frontegg_refresh_cookie(client_id: &str, refresh_token: &str) -> String {
+    format!(
+        "fe_refresh_{}={refresh_token}",
+        client_id.replacen('-', "", 1)
     )
+}
+
+/// Switch the user's active tenant at Frontegg, the state its plain refresh
+/// grant mints for. What Frontegg's `switchTenant` SDK call does, and what a web
+/// session's organization switcher does; every client of this user sees it.
+async fn switch_frontegg_active_tenant(
+    auth_domain: &str,
+    bearer: &str,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    let url = format!(
+        "{}/identity/resources/users/v1/tenant",
+        auth_domain.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .put(url)
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&serde_json::json!({ "tenantId": tenant_id }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("switching the active organization failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "switching the active organization failed (HTTP {status}): {body}"
+        ));
+    }
+    Ok(())
+}
+
+/// Re-mint `entry` for `tenant_id`, one of its user's organizations.
+///
+/// The tenant-scoped refresh comes first, since it changes nothing outside this
+/// credential. When the issuer still answers with another tenant, the user's
+/// active tenant is switched at Frontegg and the standard grant re-run; the user
+/// chose this organization explicitly, so the switch other clients will notice
+/// is the intended one. Errors unless the result is for `tenant_id`.
+async fn select_tenant(
+    entry: &CredentialsEntry,
+    tenant_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
+    let auth_domain = entry
+        .auth_domain
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("this login records no issuer to re-mint against"))?;
+    let client_id = entry
+        .auth_client_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("this login records no client to re-mint with"))?;
+    if entry.refresh_token.is_empty() {
+        return Err(anyhow::anyhow!(
+            "this login has no refresh token to re-mint with"
+        ));
+    }
+    if let Ok(refreshed) = frontegg_tenant_refresh(entry, auth_domain, client_id, tenant_id).await {
+        if refreshed.tenant_id == tenant_id {
+            return Ok(refreshed);
+        }
+    }
+    switch_frontegg_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
+    let refreshed = refresh_with_grant(entry, auth_domain, client_id).await?;
+    if refreshed.tenant_id != tenant_id {
+        return Err(anyhow::anyhow!(
+            "the issuer minted a token for organization {} instead",
+            refreshed.tenant_id
+        ));
+    }
+    Ok(refreshed)
+}
+
+/// Refuse a refreshed credential minted for a different tenant than `prior`'s.
+/// A credential with no tenant on either side (an issuer that mints no
+/// `tenantId`) has nothing to compare and passes.
+fn ensure_tenant_unchanged(
+    prior: &CredentialsEntry,
+    fresh: CredentialsEntry,
+) -> Result<CredentialsEntry, RefreshFailure> {
+    if !prior.tenant_id.is_empty()
+        && !fresh.tenant_id.is_empty()
+        && prior.tenant_id != fresh.tenant_id
+    {
+        return Err(RefreshFailure::TenantChanged {
+            was: prior.tenant_id.clone(),
+            now: fresh.tenant_id,
+        });
+    }
+    Ok(fresh)
+}
+
+impl CredentialsEntry {
+    /// This credential re-minted from `token_resp`: the same issuer, client,
+    /// bearer kind and provider, with the rotated refresh token when one came
+    /// back ([`merged_refresh_token`]).
+    fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
+        let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(self.prefer_id_token)?,
+            refresh_token,
+            self.auth_domain.clone(),
+            self.auth_client_id.clone(),
+            self.prefer_id_token,
+            self.issuer_kind,
+        )
+    }
 }
 
 /// The refresh token to persist after a refresh: the newly-issued `fresh` one, or
@@ -2464,6 +2754,17 @@ fn session_expired_message(profile: &str) -> String {
     format!(
         "session expired\n\nRun `{}` to re-authenticate.",
         login_hint(profile)
+    )
+}
+
+/// Shown when a refresh came back for a different organization than the one the
+/// stored session was logged in to ([`RefreshFailure::TenantChanged`]).
+fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
+    format!(
+        "your active organization changed since you logged in (was {was}, now {now}); \
+         refusing to continue under a different organization.\n\nRun `{}` to log in \
+         again and choose the organization for this session.",
+        login_hint(deployment)
     )
 }
 
@@ -2553,7 +2854,6 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
     })
 }
 
-/// Resolve the current access token (JWT) for `profile` (already resolved, e.g.
 /// Resolve the current access token (JWT) for `deployment` as `profile` — the
 /// identity, already resolved via [`resolve_profile`].
 ///
@@ -2564,8 +2864,10 @@ pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
 /// Auto-refreshes an expired-but-refreshable token, persisting the refresh against
 /// this profile's entry for this deployment alone. Returns `None` when the profile
 /// holds no credential for the deployment, and errors when the stored token is
-/// expired and cannot be refreshed: it never returns a known-expired token, so a
-/// consumer (e.g. the credential helper) does not emit one a server will 401.
+/// expired and cannot be refreshed, or when the refresh came back for a different
+/// organization ([`RefreshFailure`]): it never returns a known-expired token, so a
+/// consumer (e.g. the credential helper) does not emit one a server will 401, and
+/// never one minted for an organization the user did not log in to.
 /// Requires a Tokio runtime (the refresh path blocks on async HTTP).
 pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<Option<String>> {
     if let Some(entry) = credentials_from_api_token_env(deployment)? {
@@ -2579,7 +2881,7 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
         TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
         TokenAction::Refresh => {
             let refreshed = block_on(refresh_access_token(&entry))
-                .map_err(|_| anyhow::anyhow!(session_expired_message(deployment)))?;
+                .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
             store_credential(profile, deployment, refreshed.clone())?;
             Ok(Some(refreshed.access_token))
         }
@@ -2599,6 +2901,7 @@ pub struct AuthCredentials {
     pub(crate) auth_domain: Option<String>,
     pub(crate) auth_client_id: Option<String>,
     pub(crate) prefer_id_token: bool,
+    pub(crate) issuer_kind: IssuerKind,
 }
 
 starlark_simple_value!(AuthCredentials);
@@ -2653,6 +2956,49 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthCredentials, access_token)
     }
 
+    /// The organizations this login's user belongs to ([`list_organizations`]),
+    /// for the login task to offer a choice when there is more than one. Empty
+    /// for an issuer that is not Frontegg.
+    fn organizations<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
+        let orgs = block_on(list_organizations(&creds.to_entry()));
+        Ok(heap.alloc(orgs))
+    }
+
+    /// This login re-minted for organization `org`, named by display name
+    /// (case-insensitive) or tenant id ([`find_organization`]). Returns the same
+    /// credential when `org` is already the one it is minted for. Ends the task
+    /// with a message when `org` names none of the user's organizations or the
+    /// issuer will not mint for it.
+    fn with_organization<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] org: &str,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
+        let entry = creds.to_entry();
+        let orgs = block_on(list_organizations(&entry));
+        let chosen = find_organization(&orgs, org)
+            .ok_or_else(|| TaskExit::error(unknown_organization_message(org, &orgs)))?;
+        if chosen.id == entry.tenant_id {
+            return Ok(heap.alloc(creds.clone()));
+        }
+        let switched = block_on(select_tenant(&entry, &chosen.id)).map_err(|e| {
+            TaskExit::error(format!(
+                "could not log in to organization {} ({}): {e}",
+                chosen.name, chosen.id
+            ))
+        })?;
+        Ok(heap.alloc(AuthCredentials::from_entry(&switched)))
+    }
+
     #[starlark(attribute)]
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
@@ -2673,6 +3019,7 @@ impl AuthCredentials {
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
             prefer_id_token: entry.prefer_id_token,
+            issuer_kind: entry.issuer_kind,
         }
     }
 
@@ -2686,8 +3033,166 @@ impl AuthCredentials {
             auth_domain: self.auth_domain.clone(),
             auth_client_id: self.auth_client_id.clone(),
             prefer_id_token: self.prefer_id_token,
+            issuer_kind: self.issuer_kind,
         }
     }
+}
+
+/// One organization (a Frontegg tenant) the logged-in user belongs to, as
+/// `AuthCredentials.organizations()` lists them for the login task's choice.
+/// `active` marks the one the credential is currently minted for.
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
+#[display("<aspect.Organization>")]
+pub struct Organization {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+}
+
+starlark_simple_value!(Organization);
+
+#[starlark_value(type = "aspect.Organization")]
+impl<'v> values::StarlarkValue<'v> for Organization {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(organization_methods)
+    }
+}
+
+#[starlark_module]
+fn organization_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn id<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, Organization, id)
+    }
+
+    #[starlark(attribute)]
+    fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, Organization, name)
+    }
+
+    #[starlark(attribute)]
+    fn active<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, Organization, active)
+    }
+}
+
+/// The organizations `entry`'s user belongs to, for a Frontegg credential; empty
+/// for any other issuer, whose tokens carry no organization membership the CLI
+/// understands.
+///
+/// Names come from Frontegg's tenants endpoint. When that call fails or answers
+/// with nothing, the list falls back to the bearer's `tenantIds` claim with each
+/// id standing in for its name, so the choice stays possible.
+async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
+    if entry.issuer_kind != IssuerKind::Frontegg {
+        return Vec::new();
+    }
+    let fetched = match entry.auth_domain.as_deref() {
+        Some(domain) => fetch_frontegg_tenants(domain, &entry.access_token)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let named = if fetched.is_empty() {
+        entry
+            .tenant_ids()
+            .into_iter()
+            .map(|id| (id.clone(), id))
+            .collect::<Vec<_>>()
+    } else {
+        fetched
+    };
+    named
+        .into_iter()
+        .map(|(id, name)| Organization {
+            active: id == entry.tenant_id,
+            id,
+            name,
+        })
+        .collect()
+}
+
+/// `(tenant id, name)` for every tenant the bearer's user belongs to, from
+/// Frontegg's tenants endpoint.
+async fn fetch_frontegg_tenants(
+    auth_domain: &str,
+    bearer: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    #[derive(Deserialize)]
+    struct Tenant {
+        #[serde(rename = "tenantId")]
+        tenant_id: String,
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Tenants {
+        #[serde(default)]
+        tenants: Vec<Tenant>,
+    }
+    let url = format!(
+        "{}/identity/resources/users/v3/me/tenants",
+        auth_domain.trim_end_matches('/')
+    );
+    let resp = discovery_client()
+        .get(url)
+        .header("Authorization", format!("Bearer {bearer}"))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("listing organizations failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "listing organizations failed (HTTP {})",
+            resp.status()
+        ));
+    }
+    let tenants: Tenants = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse the organizations response: {e}"))?;
+    Ok(tenants
+        .tenants
+        .into_iter()
+        .map(|t| {
+            let name = if t.name.is_empty() {
+                t.tenant_id.clone()
+            } else {
+                t.name
+            };
+            (t.tenant_id, name)
+        })
+        .collect())
+}
+
+/// The organization `wanted` names: by id exactly, else by display name ignoring
+/// case. `None` when nothing matches, or when two organizations share the name.
+fn find_organization<'a>(orgs: &'a [Organization], wanted: &str) -> Option<&'a Organization> {
+    let wanted = wanted.trim();
+    if let Some(by_id) = orgs.iter().find(|o| o.id == wanted) {
+        return Some(by_id);
+    }
+    let mut by_name = orgs.iter().filter(|o| o.name.eq_ignore_ascii_case(wanted));
+    let first = by_name.next();
+    if by_name.next().is_some() {
+        return None;
+    }
+    first
+}
+
+/// The refusal for an `--org` that names none, or more than one, of `orgs`.
+fn unknown_organization_message(wanted: &str, orgs: &[Organization]) -> String {
+    if orgs.is_empty() {
+        return format!(
+            "'{wanted}' cannot be selected: this login's issuer reports no organizations to choose from."
+        );
+    }
+    let choices = orgs
+        .iter()
+        .map(|o| format!("{} ({})", o.name, o.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("'{wanted}' does not name exactly one of your organizations. Choose one of: {choices}")
 }
 
 /// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
@@ -2707,6 +3212,9 @@ struct AuthSessionInner {
     /// id_token, while Aspect Cloud addresses an API that validates the
     /// access_token — and both may reach the IdP through the same relay.
     prefer_id_token: bool,
+    /// The provider behind the issuer, as the discovery response identified it,
+    /// recorded on the credential so its refresh can pin the tenant.
+    issuer_kind: IssuerKind,
 }
 
 impl AuthSessionInner {
@@ -2746,6 +3254,7 @@ impl AuthSessionInner {
             Some(self.env.domain.clone()),
             Some(self.env.client_id.clone()),
             prefer_id_token,
+            self.issuer_kind,
         )
     }
 }
@@ -3354,6 +3863,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 auth_domain: None,
                 auth_client_id: None,
                 prefer_id_token: false,
+                issuer_kind: IssuerKind::Oidc,
             };
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
@@ -3504,7 +4014,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// `profile`'s credential for `deployment`, or `None` when it holds none.
     ///
     /// `deployment` is taken as given rather than normalized: callers pass a name
-    /// `deployment_for_host` resolved, which is already canonical.
+    /// `deployment_for_host` resolved, which is already canonical. An expired
+    /// credential is refreshed first; one whose refresh came back for another
+    /// organization ends the task ([`RefreshFailure::TenantChanged`]), whatever
+    /// `required` says.
     fn credentials<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -3528,13 +4041,19 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // Never hand back a known-expired token (an endpoint would 401 on it).
         // Mirror `resolve_access_token`: refresh when possible, else fail —
         // `required = False` callers (best-effort endpoint auth) get `None` and
-        // proceed unauthenticated instead of a hard error.
+        // proceed unauthenticated instead of a hard error. A refresh that came
+        // back for another organization is a refusal, not an inability, and ends
+        // the task for every caller: proceeding unauthenticated would only hide
+        // it behind later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
             TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
                 Ok(refreshed) => {
                     store_credential(&profile, &deployment, refreshed.clone())?;
                     refreshed
+                }
+                Err(failure @ RefreshFailure::TenantChanged { .. }) => {
+                    return Err(TaskExit::error(failure.message(&deployment)).into());
                 }
                 Err(_) if !required => return Ok(values::Value::new_none()),
                 Err(_) => return Err(anyhow::anyhow!(session_expired_message(&deployment))),
@@ -3747,6 +4266,7 @@ mod tests {
             auth_domain: None,
             auth_client_id: None,
             prefer_id_token: false,
+            issuer_kind: IssuerKind::Oidc,
         }
     }
 
@@ -4027,6 +4547,7 @@ mod tests {
             Some(DEFAULT_ISSUER.to_string()),
             Some(DEFAULT_CLIENT_ID.to_string()),
             false,
+            IssuerKind::Oidc,
         )
         .unwrap()
     }
@@ -5625,11 +6146,13 @@ mod tests {
             Some("https://acme.auth.aspect.build".into()),
             Some("abc".into()),
             true,
+            IssuerKind::Frontegg,
         )
         .unwrap();
         assert_eq!(e.access_token, jwt);
         assert_eq!(e.email, "u@x.io");
         assert_eq!(e.tenant_id, "t1");
+        assert_eq!(e.issuer_kind, IssuerKind::Frontegg);
         assert!(e.prefer_id_token);
         assert_eq!(
             e.auth_domain.as_deref(),
@@ -5639,7 +6162,9 @@ mod tests {
         // A self-hosted id_token without email/tenantId decodes with empty
         // defaults (display-only) rather than failing.
         let bare = jwt_with_payload(r#"{"sub":"user-1"}"#);
-        let e = CredentialsEntry::from_bearer(bare, String::new(), None, None, false).unwrap();
+        let e =
+            CredentialsEntry::from_bearer(bare, String::new(), None, None, false, IssuerKind::Oidc)
+                .unwrap();
         assert_eq!(e.email, "");
         assert_eq!(e.tenant_id, "");
         assert_eq!(e.name, "Unknown");
@@ -5842,7 +6367,8 @@ mod tests {
         let mut creds = HashMap::new();
         creds.insert(
             "acme".to_string(),
-            CredentialsEntry::from_bearer(jwt, String::new(), None, None, false).unwrap(),
+            CredentialsEntry::from_bearer(jwt, String::new(), None, None, false, IssuerKind::Oidc)
+                .unwrap(),
         );
 
         // A logged-in configured deployment: identity from the credential,
@@ -6001,6 +6527,7 @@ mod tests {
             Some(DEFAULT_CLIENT_ID.to_string()),
             // Cloud sends the access_token, not the id_token.
             false,
+            IssuerKind::Frontegg,
         )
         .unwrap();
         assert!(can_refresh(&cloud));
@@ -6016,6 +6543,205 @@ mod tests {
         assert_eq!(merged_refresh_token("old", ""), "old");
         // No prior and none returned → empty (nothing to refresh with).
         assert_eq!(merged_refresh_token("", ""), "");
+    }
+
+    fn entry_with_tenant(tenant: &str, kind: IssuerKind) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}"}}"#)),
+            "refresh".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            false,
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn issuer_kind_defaults_to_oidc_and_is_omitted_when_so() {
+        // Entries written before the field existed load as plain OIDC sessions,
+        // and a plain OIDC session writes no field (no churn in the store).
+        let json = r#"{"access_token":"a","email":"u@x.io","name":"U","tenant_id":"t"}"#;
+        let e: CredentialsEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.issuer_kind, IssuerKind::Oidc);
+        assert!(!serde_json::to_string(&e).unwrap().contains("issuer_kind"));
+
+        let mut frontegg = e.clone();
+        frontegg.issuer_kind = IssuerKind::Frontegg;
+        let out = serde_json::to_string(&frontegg).unwrap();
+        assert!(out.contains(r#""issuer_kind":"frontegg""#), "{out}");
+        let back: CredentialsEntry = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.issuer_kind, IssuerKind::Frontegg);
+    }
+
+    #[test]
+    fn the_trace_header_identifies_frontegg() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(
+            IssuerKind::from_response_headers(&headers),
+            IssuerKind::Oidc
+        );
+        headers.insert(FRONTEGG_TRACE_HEADER, "513960cf".parse().unwrap());
+        assert_eq!(
+            IssuerKind::from_response_headers(&headers),
+            IssuerKind::Frontegg
+        );
+    }
+
+    #[test]
+    fn frontegg_refresh_cookie_drops_the_client_ids_first_dash_only() {
+        assert_eq!(
+            frontegg_refresh_cookie("ab12-cd34-ef56", "rt"),
+            "fe_refresh_ab12cd34-ef56=rt"
+        );
+        assert_eq!(
+            frontegg_refresh_cookie("nodash", "rt"),
+            "fe_refresh_nodash=rt"
+        );
+    }
+
+    #[test]
+    fn a_refresh_for_another_tenant_is_refused() {
+        let prior = entry_with_tenant("t1", IssuerKind::Frontegg);
+        match ensure_tenant_unchanged(&prior, entry_with_tenant("t2", IssuerKind::Frontegg)) {
+            Err(RefreshFailure::TenantChanged { was, now }) => {
+                assert_eq!(was, "t1");
+                assert_eq!(now, "t2");
+            }
+            _ => panic!("a refresh minted for another tenant must be refused"),
+        }
+        // The same tenant passes, and so does a credential with no tenant on
+        // either side: an issuer that mints no tenantId has nothing to compare.
+        assert!(
+            ensure_tenant_unchanged(&prior, entry_with_tenant("t1", IssuerKind::Frontegg)).is_ok()
+        );
+        assert!(
+            ensure_tenant_unchanged(
+                &entry_with_tenant("", IssuerKind::Oidc),
+                entry_with_tenant("t2", IssuerKind::Oidc)
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_tenant_unchanged(&prior, entry_with_tenant("", IssuerKind::Frontegg)).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_tenant_change_names_both_tenants_and_the_login() {
+        let changed = RefreshFailure::TenantChanged {
+            was: "t1".into(),
+            now: "t2".into(),
+        };
+        let msg = changed.message(ASPECT_CLOUD_DEPLOYMENT_NAME);
+        assert!(msg.contains("was t1, now t2"), "{msg}");
+        assert!(msg.contains("`aspect auth login`"), "{msg}");
+        let msg = changed.message("acme");
+        assert!(msg.contains("--deployment acme"), "{msg}");
+        // Any other failure keeps the plain expiry message.
+        let failed = RefreshFailure::Failed(anyhow::anyhow!("boom"));
+        assert_eq!(failed.message("acme"), session_expired_message("acme"));
+    }
+
+    #[test]
+    fn token_response_accepts_fronteggs_camel_case() {
+        let r: TokenResponse =
+            serde_json::from_str(r#"{"accessToken":"a","refreshToken":"r","idToken":"i"}"#)
+                .unwrap();
+        assert_eq!(
+            (
+                r.access_token.as_str(),
+                r.refresh_token.as_str(),
+                r.id_token.as_str()
+            ),
+            ("a", "r", "i")
+        );
+        let r: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"a","refresh_token":"r"}"#).unwrap();
+        assert_eq!(
+            (
+                r.access_token.as_str(),
+                r.refresh_token.as_str(),
+                r.id_token.as_str()
+            ),
+            ("a", "r", "")
+        );
+    }
+
+    #[test]
+    fn tenant_ids_come_from_the_claim() {
+        let e = CredentialsEntry::from_bearer(
+            jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#),
+            String::new(),
+            None,
+            None,
+            false,
+            IssuerKind::Frontegg,
+        )
+        .unwrap();
+        assert_eq!(e.tenant_ids(), vec!["t1".to_string(), "t2".to_string()]);
+        assert!(
+            entry_with_tenant("t1", IssuerKind::Oidc)
+                .tenant_ids()
+                .is_empty()
+        );
+    }
+
+    fn org(id: &str, name: &str) -> Organization {
+        Organization {
+            id: id.into(),
+            name: name.into(),
+            active: false,
+        }
+    }
+
+    #[test]
+    fn find_organization_matches_id_then_name_ignoring_case() {
+        let orgs = vec![
+            org("id-1", "Acme"),
+            org("id-2", "Beta"),
+            org("id-3", "beta"),
+        ];
+        assert_eq!(find_organization(&orgs, "id-2").unwrap().name, "Beta");
+        assert_eq!(find_organization(&orgs, " acme ").unwrap().id, "id-1");
+        // Two organizations share a name: ambiguous, so nothing matches.
+        assert!(find_organization(&orgs, "BETA").is_none());
+        assert!(find_organization(&orgs, "nope").is_none());
+
+        let msg = unknown_organization_message("nope", &orgs);
+        assert!(msg.contains("'nope'"), "{msg}");
+        assert!(msg.contains("Acme (id-1)"), "{msg}");
+    }
+
+    #[test]
+    fn organizations_are_listed_for_frontegg_credentials_only() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let jwt = jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#);
+        // With no issuer recorded there is nowhere to fetch names from, so the
+        // claim's ids stand in for them; the active one is flagged.
+        let frontegg = CredentialsEntry::from_bearer(
+            jwt.clone(),
+            "r".into(),
+            None,
+            None,
+            false,
+            IssuerKind::Frontegg,
+        )
+        .unwrap();
+        let orgs = runtime.block_on(list_organizations(&frontegg));
+        let listed: Vec<_> = orgs
+            .iter()
+            .map(|o| (o.id.as_str(), o.name.as_str(), o.active))
+            .collect();
+        assert_eq!(listed, vec![("t1", "t1", true), ("t2", "t2", false)]);
+
+        let oidc =
+            CredentialsEntry::from_bearer(jwt, "r".into(), None, None, false, IssuerKind::Oidc)
+                .unwrap();
+        assert!(runtime.block_on(list_organizations(&oidc)).is_empty());
     }
 
     #[test]
@@ -6183,6 +6909,7 @@ mod tests {
                 // allows; the nonce still has to be here for the flow to build.
                 expected_state: "nonce.54321".to_string(),
                 prefer_id_token: false,
+                issuer_kind: IssuerKind::Oidc,
             })),
         };
         let runtime = tokio::runtime::Builder::new_multi_thread()

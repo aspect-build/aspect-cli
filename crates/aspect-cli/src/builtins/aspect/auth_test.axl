@@ -11,7 +11,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "aspect_cloud_heading", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "shadowed_warning", "status_line", "use_command")
+load("@aspect//auth.axl", "aspect_cloud_heading", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "organization_label", "shadowed_warning", "status_line", "use_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -194,6 +194,17 @@ def _test_shadowed_warning(_):
     if "Rename or delete" not in repo:
         fail("repo warning should say to edit the file: %s" % repo)
 
+def _org(id = "0b1c-2d3e", name = "Acme", active = False):
+    return struct(id = id, name = name, active = active)
+
+def _test_organization_label(_):
+    _eq("named → name (id)", organization_label(_org()), "Acme (0b1c-2d3e)")
+    _eq("current → marked", organization_label(_org(active = True)), "Acme (0b1c-2d3e) [current]")
+
+    # No name came back for the organization, so the id stands in for it and is
+    # not repeated in parentheses.
+    _eq("id only → id once", organization_label(_org(name = "0b1c-2d3e")), "0b1c-2d3e")
+
 _UNIT_TESTS = [
     _test_aspect_cloud_heading,
     _test_default_marker_line,
@@ -201,6 +212,7 @@ _UNIT_TESTS = [
     _test_login_command,
     _test_login_options,
     _test_login_target_label,
+    _test_organization_label,
     _test_shadowed_warning,
     _test_status_line,
     _test_use_command,
