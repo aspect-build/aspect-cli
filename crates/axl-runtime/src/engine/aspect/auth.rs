@@ -2683,10 +2683,15 @@ async fn select_tenant(
             "this login has no refresh token to re-mint with"
         ));
     }
-    if let Ok(refreshed) = frontegg_tenant_refresh(entry, auth_domain, client_id, tenant_id).await {
-        if refreshed.tenant_id == tenant_id {
-            return Ok(refreshed);
-        }
+    match frontegg_tenant_refresh(entry, auth_domain, client_id, tenant_id).await {
+        Ok(refreshed) if refreshed.tenant_id == tenant_id => return Ok(refreshed),
+        Ok(refreshed) => tracing::debug!(
+            "tenant-scoped refresh minted for {} rather than {tenant_id}; switching the active organization instead",
+            refreshed.tenant_id
+        ),
+        Err(e) => tracing::debug!(
+            "tenant-scoped refresh refused; switching the active organization instead: {e:#}"
+        ),
     }
     switch_frontegg_active_tenant(auth_domain, &entry.access_token, tenant_id).await?;
     let refreshed = refresh_with_grant(entry, auth_domain, client_id).await?;
