@@ -19,7 +19,10 @@ permissions:
 jobs:
   build:
     name: Build MacOS and Linux release artifacts
-    runs-on: ubuntu-22.04-32core
+    # Only reachable via workflow_dispatch and the release workflows, never from
+    # a fork PR, so no GitHub-hosted fallback is needed.
+    runs-on: [self-hosted, aspect-workflows, aspect-large]
+    timeout-minutes: 120
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     env:
