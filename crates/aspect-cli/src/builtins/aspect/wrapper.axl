@@ -1,7 +1,7 @@
-"""`aspect wrapper install` / `aspect wrapper uninstall` — vendor the
-`tools/bazel` Bazelisk wrapper (and `tools/bazel.md`) into a Bazel workspace,
-downloaded from a ref of aspect-build/aspect-cli. See the task descriptions
-below for the flags and tools/bazel.md for what the wrapper does.
+"""`aspect setup tools-bazel-wrapper` — vendor the `tools/bazel` Bazelisk
+wrapper (and `tools/bazel.md`) into a Bazel workspace, downloaded from a ref of
+aspect-build/aspect-cli; `--uninstall` removes it again. See the task
+description below for the flags and tools/bazel.md for what the wrapper does.
 """
 
 load("./private/lib/environment.axl", "error", "info")
@@ -77,7 +77,7 @@ def _print_shell_instructions(ctx: TaskContext) -> None:
 def _install_impl(ctx: TaskContext) -> int:
     root = find_workspace_root(ctx.std)
     if root == None:
-        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect wrapper install` from your workspace.")
+        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect setup tools-bazel-wrapper` from your workspace.")
         return 1
 
     script_path = root + "/" + WRAPPER_SCRIPT_PATH
@@ -110,13 +110,13 @@ def _install_impl(ctx: TaskContext) -> int:
 
     if ctx.args.check:
         if action == InstallAction("install"):
-            error(ctx.std, "%s is missing. Run `aspect wrapper install` to add it." % WRAPPER_SCRIPT_PATH)
+            error(ctx.std, "%s is missing. Run `aspect setup tools-bazel-wrapper` to add it." % WRAPPER_SCRIPT_PATH)
             return 1
         if action == InstallAction("upgrade"):
             if is_repair:
-                error(ctx.std, "%s has the right contents but is not executable. Run `aspect wrapper install` to repair it." % WRAPPER_SCRIPT_PATH)
+                error(ctx.std, "%s has the right contents but is not executable. Run `aspect setup tools-bazel-wrapper` to repair it." % WRAPPER_SCRIPT_PATH)
             else:
-                error(ctx.std, "%s is stale (local %s; %s ships %s). Run `aspect wrapper install` to update." % (
+                error(ctx.std, "%s is stale (local %s; %s ships %s). Run `aspect setup tools-bazel-wrapper` to update." % (
                     WRAPPER_SCRIPT_PATH,
                     local_version,
                     ref,
@@ -190,7 +190,7 @@ def _install_impl(ctx: TaskContext) -> int:
 def _uninstall_impl(ctx: TaskContext) -> int:
     root = find_workspace_root(ctx.std)
     if root == None:
-        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect wrapper uninstall` from your workspace.")
+        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect setup tools-bazel-wrapper --uninstall` from your workspace.")
         return 1
 
     script_path = root + "/" + WRAPPER_SCRIPT_PATH
@@ -228,10 +228,20 @@ def _uninstall_impl(ctx: TaskContext) -> int:
         print("Removed %s." % WRAPPER_DOC_PATH)
     return 0
 
-install = task(
-    group = ["wrapper"],
-    summary = "Install the tools/bazel Bazelisk wrapper into this workspace.",
-    implementation = _install_impl,
+def _impl(ctx: TaskContext) -> int:
+    if ctx.args.uninstall:
+        # `--check` promises to write nothing; refusing the pair keeps that
+        # promise instead of letting it fall through to a deletion.
+        if ctx.args.check:
+            error(ctx.std, "--check and --uninstall cannot be combined: --check verifies the installed wrapper and writes nothing, while --uninstall removes it. Use --uninstall --dry-run to preview a removal.")
+            return 1
+        return _uninstall_impl(ctx)
+    return _install_impl(ctx)
+
+tools_bazel_wrapper = task(
+    group = ["setup"],
+    summary = "Install (or, with --uninstall, remove) the tools/bazel Bazelisk wrapper in this workspace.",
+    implementation = _impl,
     args = {
         "version": args.string(
             default = "latest",
@@ -243,7 +253,7 @@ install = task(
         ),
         "dry_run": args.boolean(
             default = False,
-            description = "Print what would change (install / upgrade / no-op, plus the doc and shell snippets) without writing any files.",
+            description = "Print what would change (install / upgrade / no-op, plus the doc and shell snippets; with --uninstall, what would be removed) without writing or deleting any files.",
         ),
         "all_shells": args.boolean(
             default = False,
@@ -251,23 +261,11 @@ install = task(
         ),
         "yes": args.boolean(
             default = False,
-            description = "Skip the interactive confirmation prompt when upgrading an existing tools/bazel.",
+            description = "Skip the interactive confirmation prompt when upgrading an existing tools/bazel, or when removing it with --uninstall.",
         ),
-    },
-)
-
-uninstall = task(
-    group = ["wrapper"],
-    summary = "Remove the Aspect tools/bazel wrapper from this workspace.",
-    implementation = _uninstall_impl,
-    args = {
-        "dry_run": args.boolean(
+        "uninstall": args.boolean(
             default = False,
-            description = "Print what would be removed without deleting any files.",
-        ),
-        "yes": args.boolean(
-            default = False,
-            description = "Skip the interactive confirmation prompt before removing tools/bazel.",
+            description = "Remove the Aspect tools/bazel wrapper (and tools/bazel.md) from this workspace instead of installing it. Refuses to delete a tools/bazel that is not the Aspect wrapper. Only --dry-run and --yes apply alongside it; --check is rejected.",
         ),
     },
 )
