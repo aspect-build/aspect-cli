@@ -51,6 +51,29 @@ pub struct RcOption {
     pub version_condition: Option<String>,
 }
 
+/// Caller-supplied flags become synthetic rc entries under the section each
+/// names, or `always` when it names none, so a task can scope a flag to the
+/// commands that accept it (`build` reaches test/run/coverage/cquery/aquery
+/// through `command_ancestors`, never `query`).
+fn push_caller_flags(
+    options: &mut HashMap<String, Vec<RcOption>>,
+    flags: &[RcOption],
+    source_index: usize,
+) {
+    for flag in flags {
+        let command = if flag.command.is_empty() {
+            "always".to_owned()
+        } else {
+            flag.command.clone()
+        };
+        options.entry(command.clone()).or_default().push(RcOption {
+            source_index,
+            command,
+            ..flag.clone()
+        });
+    }
+}
+
 impl fmt::Display for RcOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.command, self.value)?;
@@ -176,19 +199,13 @@ impl BazelRC {
             )?;
         }
 
-        // Append caller-supplied flags as synthetic `always` options so they participate in
-        // options_for() and expand_configs() like any rc-file entry.
+        // Append caller-supplied flags as synthetic rc entries so they participate in
+        // options_for() and expand_configs() like any rc-file entry: under `always`
+        // unless the flag names its own command section.
         if !flags.is_empty() {
             let cli_source_index = sources.len();
             sources.push(PathBuf::from("<command line>"));
-            let always_opts = options.entry("always".to_owned()).or_default();
-            for flag in flags {
-                always_opts.push(RcOption {
-                    source_index: cli_source_index,
-                    command: "always".to_owned(),
-                    ..flag.clone()
-                });
-            }
+            push_caller_flags(&mut options, flags, cli_source_index);
         }
 
         Ok(BazelRC {
@@ -244,14 +261,7 @@ impl BazelRC {
         if !flags.is_empty() {
             let cli_source_index = 0;
             sources.push(PathBuf::from("<command line>"));
-            let always_opts = options.entry("always".to_owned()).or_default();
-            for flag in flags {
-                always_opts.push(RcOption {
-                    source_index: cli_source_index,
-                    command: "always".to_owned(),
-                    ..flag.clone()
-                });
-            }
+            push_caller_flags(&mut options, flags, cli_source_index);
         }
         BazelRC {
             options,
@@ -881,9 +891,14 @@ impl<'v> UnpackValue<'v> for RcOption {
         {
             let mut items = tup.items.into_iter();
             if let Some(flag) = items.next() {
+                // `(flag, version_condition)` or `(flag, version_condition, command)`;
+                // an empty condition means none, an empty command means `always`.
+                let version_condition = items.next().filter(|cond| !cond.is_empty());
+                let command = items.next().unwrap_or_default();
                 return Ok(Some(RcOption {
                     value: flag,
-                    version_condition: items.next(),
+                    version_condition,
+                    command,
                     ..RcOption::default()
                 }));
             }
@@ -1890,6 +1905,33 @@ build --build-flag
             .map(|o| o.value.as_str())
             .collect();
         assert_eq!(opts, vec!["--always-flag", "--common-flag", "--build-flag"]);
+    }
+
+    #[test]
+    fn caller_flag_scoped_to_build_skips_query() {
+        // A caller flag naming its section applies where an rc-file entry in that
+        // section would: `build` reaches test but not query. Unscoped flags stay
+        // `always` and reach both.
+        let scoped = RcOption {
+            value: "--execution_log_compact_file=/tmp/exec.log".to_owned(),
+            command: "build".to_owned(),
+            ..RcOption::default()
+        };
+        let unscoped = RcOption {
+            value: "--remote_timeout=3600".to_owned(),
+            ..RcOption::default()
+        };
+        let rc = BazelRC::blank(&[scoped, unscoped]);
+        let values = |command: &str| -> Vec<String> { rc.resolve_for_command(command).unwrap().1 };
+        assert_eq!(
+            values("test"),
+            vec![
+                "--execution_log_compact_file=/tmp/exec.log",
+                "--remote_timeout=3600"
+            ]
+        );
+        assert_eq!(values("query"), vec!["--remote_timeout=3600"]);
+        assert_eq!(values("build").len(), 2);
     }
 
     #[test]

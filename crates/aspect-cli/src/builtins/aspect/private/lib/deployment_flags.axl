@@ -55,6 +55,10 @@ Failures:
   - An unrecognized capability token, a value naming no capabilities at all, or
     `none` combined with anything else.
   - `--deployment` with no `--remote` (nothing to wire).
+  - `--remote` where the `ASPECT_WORKFLOWS_*` environment already names this
+    machine's deployment (a Workflows runner, or the endpoint variables set by
+    hand): the Workflows feature wires that deployment, and a second one would
+    route the build off it. `REMOTE_REFUSED_BY_ENV` is the message.
   - `--remote` with no deployment to draw from — no `--deployment` and no default
     Aspect Workflows deployment configured (the target resolves to Aspect Cloud
     before discovery has recorded its endpoints).
@@ -66,11 +70,26 @@ Failures:
 Auth attaches automatically: the injected hosts are the deployment's own, so they
 match the endpoint-auth host gate and receive its login JWT (see
 `aspect_endpoint_auth.axl`).
+
+The wired endpoints also bring the `aspect_flags.axl` tuning they justify (cache
+tuning, BES enrichment, the keepalive) and, with BES, the build-diagnostics
+upload and the `--build_metadata` the Web UI reads — the same flags the
+`--config=aspect-*` sections of `aspect setup bazelrc` carry, so `aspect build
+--remote` and `bazel build --config=aspect-<name>` run alike. The user's
+`--bazel-flags:omit` applies to them like any injected flag.
 """
 
+load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
-load("./environment.axl", "info")
+load("./aspect_flags.axl", "endpoint_flags", "independent_flags", "temp_diagnostics_upload_flags")
+load("./environment.axl", "env_names_deployment", "info")
+
+REMOTE_REFUSED_BY_ENV = (
+    "--remote would wire a configured deployment, but the ASPECT_WORKFLOWS_* environment already names this machine's deployment, " +
+    "which every task here builds against without --remote. Unset ASPECT_WORKFLOWS_RUNNER and the ASPECT_WORKFLOWS_REMOTE_CACHE / " +
+    "BES_BACKEND / REMOTE_EXECUTOR variables to build against a configured deployment instead."
+)
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -166,6 +185,8 @@ DeploymentFlags = record(
     capabilities = field(list, default = []),
     results_url = field(str, default = ""),
     bes_uri = field(str, default = ""),
+    # The capability names actually wired, for the tuning flags they justify.
+    wired = field(list, default = []),
 )
 
 # Which capabilities `--remote` resolved to: `on` maps every capability in
@@ -279,6 +300,9 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     if not any(spec.on.values()):
         return DeploymentFlags(base_flags = [], bes_backends = [])
 
+    if env_names_deployment(ctx.std.env):
+        ctx.std.process.exit(1, REMOTE_REFUSED_BY_ENV)
+
     endpoints = ctx.aspect.auth.deployment_endpoints(deployment = ctx.args.deployment)
 
     # --remote needs a deployment to draw endpoints from. With no --deployment the
@@ -295,6 +319,7 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     base_flags = []
     bes_backends = []
     capabilities = []
+    wired = []
     for (name, capability) in _CAPABILITY_SPECS.items():
         if not spec.on[name]:
             continue
@@ -314,6 +339,7 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
             bes_backends.append(uri)
         if capability.announced:
             capabilities.append((capability.label, uri))
+        wired.append(name)
 
     return DeploymentFlags(
         base_flags = base_flags,
@@ -322,6 +348,20 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
         capabilities = capabilities,
         results_url = endpoints.results_url,
         bes_uri = _endpoint_uri(endpoints, _CAPABILITY_SPECS["bes"]),
+        wired = wired,
+    )
+
+def deployment_tuning_flags(flags: DeploymentFlags) -> list:
+    """The `aspect_flags.axl` flags the wired capabilities justify: the
+    endpoint-independent ones plus cache tuning, BES enrichment, and the
+    keepalive as applicable. Empty when nothing was wired. Public so
+    `deployment_flags_test.axl` can assert the pairing."""
+    if not flags.wired:
+        return []
+    return independent_flags() + endpoint_flags(
+        cache = "cache" in flags.wired,
+        bes = "bes" in flags.wired,
+        exec = "exec" in flags.wired,
     )
 
 def _advertised_bes_sources(ctx, flags: DeploymentFlags) -> list[(str, str)]:
@@ -428,6 +468,10 @@ def _deployment_impl(ctx):
     t.bes_backends.extend(dep.bes_backends)
     t.bes_results_sources.extend(_advertised_bes_sources(ctx, dep))
     t.rc_flags.append(deployment_auth_flags)
+    t.extra_flags.extend(deployment_tuning_flags(dep))
+    if "bes" in dep.wired:
+        register_bes_metadata(ctx, t)
+        t.task_flags.append(temp_diagnostics_upload_flags)
     if dep.capabilities:
         t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))
 

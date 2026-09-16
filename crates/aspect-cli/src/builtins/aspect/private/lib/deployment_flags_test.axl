@@ -15,7 +15,7 @@ when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
 `bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -24,16 +24,20 @@ def _eq(label, got, want):
 def _endpoints(name, cache = "", bes = "", exec = "", results_url = ""):
     return struct(name = name, cache = cache, bes = bes, exec = exec, results_url = results_url)
 
-def _ctx(endpoints, deployment = "", remote = "", env = {}):
+def _ctx(endpoints, deployment = "", remote = "", env = {}, exits = []):
     """A fake ctx: fixed deployment_endpoints, args carrying --deployment/--remote,
-    and an env map for the ASPECT_WORKFLOWS_BES_RESULTS_URL lookup. Pass
+    an env map for the ASPECT_WORKFLOWS_* lookups, and a `process.exit` that
+    records `(code, message)` into `exits` instead of unwinding. Pass
     `remote = BARE` for a valueless `--remote`, matching what clap substitutes."""
     return struct(
         args = struct(
             deployment = deployment,
             remote = remote,
         ),
-        std = struct(env = struct(var = lambda name: env.get(name, ""))),
+        std = struct(
+            env = struct(var = lambda name: env.get(name, "")),
+            process = struct(exit = lambda code, message: exits.append((code, message))),
+        ),
         aspect = struct(auth = struct(
             deployment_endpoints = lambda deployment: endpoints,
         )),
@@ -214,7 +218,38 @@ def _test_join_and(ctx):
     _eq("two (oxford)", join_and(["remote cache", "bes backend"], oxford = True), "remote cache, and bes backend")
     _eq("three", join_and(["remote cache", "remote execution", "bes backend"]), "remote cache, remote execution, and bes backend")
 
+def _test_tuning_follows_wired_capabilities(ctx):
+    # `--remote` brings the same catalog tuning the rc's `--config` sections get,
+    # for exactly the capabilities it wired; nothing when nothing was wired.
+    _eq("nothing wired", deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL))), [])
+
+    both = deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL, remote = BARE)))
+    texts = [f[0] if type(f) == "tuple" else f for f in both]
+    _eq("independent", "--heap_dump_on_oom" in texts, True)
+    _eq("cache tuning", "--remote_timeout=3600" in texts, True)
+    _eq("bes enrichment", "--noslim_profile" in texts, True)
+
+    cache_only = [f[0] if type(f) == "tuple" else f for f in deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL, remote = "no-bes")))]
+    _eq("no bes enrichment without bes", "--noslim_profile" in cache_only, False)
+    _eq("cache tuning stays", "--remote_accept_cached" in cache_only, True)
+
+def _test_remote_refused_where_env_names_deployment(_ctx_unused):
+    # A runner, or hand-set endpoint variables, already answer which deployment
+    # this machine is on; --remote would route the build off it and is refused.
+    for var in ["ASPECT_WORKFLOWS_RUNNER", "ASPECT_WORKFLOWS_REMOTE_CACHE", "ASPECT_WORKFLOWS_BES_BACKEND", "ASPECT_WORKFLOWS_REMOTE_EXECUTOR"]:
+        exits = []
+        deployment_endpoint_flags(_ctx(_ALL, remote = BARE, env = {var: "x"}, exits = exits))
+        _eq("refused with " + var, exits, [(1, REMOTE_REFUSED_BY_ENV)])
+
+    # Wiring nothing is fine anywhere, and a silent environment never refuses.
+    exits = []
+    deployment_endpoint_flags(_ctx(_ALL, remote = "none", env = {"ASPECT_WORKFLOWS_RUNNER": "1"}, exits = exits))
+    deployment_endpoint_flags(_ctx(_ALL, remote = BARE, env = {"GITHUB_ACTIONS": "true"}, exits = exits))
+    _eq("no refusal", exits, [])
+
 _UNIT_TESTS = [
+    _test_remote_refused_where_env_names_deployment,
+    _test_tuning_follows_wired_capabilities,
     _test_parse_defaults,
     _test_parse_omitted_is_off,
     _test_parse_exec_is_additive,
