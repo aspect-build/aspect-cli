@@ -1,8 +1,18 @@
-"""Build metadata flag generation.
+"""Build metadata collection and rendering.
 
-Generates --build_metadata=KEY=VALUE flags consumed by both the Aspect Web UI
-(`build_metadata` BES event) and status checks (results["metadata"] in
-bazel_results.axl). Key names match the Web UI schema (silo
+`get_build_metadata` collects the {KEY: value} pairs; the two renderers put
+them where a consumer reads them:
+
+  - `get_build_metadata_flags` → --build_metadata=KEY=VALUE, what
+    `aspect <task>` passes on the command line.
+  - `workspace_status_lines` → `KEY value`, what `aspect setup workspace-data`
+    prints for Bazel's `--workspace_status_command`, so a vanilla `bazel` call
+    reports the same facts.
+
+Both are consumed by the Aspect Web UI (the `build_metadata` and
+`workspace_status` BES events, merged with `build_metadata` winning — see
+`lib/bazel_results.axl::merged_meta`) and by status checks (results["metadata"]
+in bazel_results.axl). Key names match the Web UI schema (silo
 kilgore/app/layout/header/ExecutionContext.tsx); values are uppercase enum
 strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
@@ -549,8 +559,11 @@ def get_task_metadata_flags(ctx):
 
 # Public entry point
 
-def get_build_metadata_flags(std):
-    """Generate --build_metadata=KEY=VALUE flags (empty values skipped)."""
+def get_build_metadata(std) -> dict:
+    """The build metadata for this checkout and CI environment, as {KEY: value}
+    with empty values dropped. Rendered as `--build_metadata` flags by
+    `get_build_metadata_flags` and as workspace status by
+    `workspace_status_lines`."""
     meta = {}
 
     # 1: CI-host-specific metadata.
@@ -580,10 +593,21 @@ def get_build_metadata_flags(std):
         elif std.env.var("USER"):
             meta["USER"] = std.env.var("USER")
 
-    # 5: Emit strings, skipping empty values.
-    flags = []
-    for key, value in meta.items():
-        if value:
-            flags.append("--build_metadata=" + key + "=" + value)
+    return {key: value for (key, value) in meta.items() if value}
 
-    return flags
+def get_build_metadata_flags(std):
+    """Generate --build_metadata=KEY=VALUE flags (empty values skipped)."""
+    return ["--build_metadata=" + key + "=" + value for (key, value) in get_build_metadata(std).items()]
+
+def workspace_status_lines(meta: dict) -> list:
+    """`KEY value` lines for Bazel's `--workspace_status_command`, which takes
+    the rest of the line as the value — so nothing needs quoting, but a value's
+    own newline would start a bogus key and is collapsed to a space. Keys are
+    left unprefixed so they land in volatile-status.txt: a `STABLE_` key
+    invalidates every stamped action when it changes, which is the wrong
+    trade for attribution data that changes every commit."""
+    return [
+        key + " " + value.replace("\r", " ").replace("\n", " ")
+        for (key, value) in meta.items()
+        if key and value
+    ]
