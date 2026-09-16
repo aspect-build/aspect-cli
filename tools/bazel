@@ -127,7 +127,7 @@ for arg in "$@"; do
         [[ "$arg" != *=* ]] && has "$arg" "${BAZEL_STARTUP_VALUE_FLAGS[@]}" && skip=1
         continue
     fi
-    if (( skip )); then
+    if ((skip)); then
         skip=0
         continue
     fi
