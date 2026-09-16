@@ -24,7 +24,7 @@ Run with:
   aspect dev test-build-metadata
 """
 
-load("@aspect//bazel/build_metadata.axl", "detect_build_commit_sha", "get_build_metadata_flags")
+load("@aspect//bazel/build_metadata.axl", "detect_build_commit_sha", "get_build_metadata_flags", "is_commit_sha")
 
 _HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _MERGE = "cccccccccccccccccccccccccccccccccccccccc"
@@ -193,6 +193,40 @@ def _test_commit_sha_resolution(ctx):
     # Off CI there is nothing to resolve; the caller falls back to HEAD.
     _expect_sha("no CI host: empty, leaving HEAD in charge", {}, {}, "")
 
+# ── is_commit_sha ─────────────────────────────────────────
+
+def _test_commit_sha_shape(_ctx):
+    _eq("40 hex", is_commit_sha(_HEAD), True)
+    _eq("abbreviated", is_commit_sha("9f2c1ae"), True)
+    _eq("uppercase", is_commit_sha("ABCDEF0"), True)
+
+    # `git show` reads these as its own options, not as revisions.
+    _eq("output option", is_commit_sha("--output=/tmp/pwn"), False)
+    _eq("short option", is_commit_sha("-O/tmp/pwn"), False)
+
+    # Real revisions that are not SHAs: the CI host never reported these.
+    _eq("HEAD", is_commit_sha("HEAD"), False)
+    _eq("ref name", is_commit_sha("refs/heads/main"), False)
+    _eq("ancestor", is_commit_sha("HEAD~1"), False)
+
+    _eq("empty", is_commit_sha(""), False)
+    _eq("too short", is_commit_sha("9f2c1a"), False)
+    _eq("too long", is_commit_sha("a" * 41), False)
+
+def _test_a_non_sha_never_reaches_git_show(ctx):
+    """A `--output=<path>` in the environment would have `git show` truncate
+    that path. The guard sends HEAD instead, so the file is untouched and the
+    build is still described."""
+    repo, _head_sha, merge_sha = _pull_request_repo(ctx)
+    victim = repo + "/victim.txt"
+    ctx.std.fs.write(victim, "untouched\n")
+
+    std = _hybrid_std(ctx, {"BUILDKITE": "true", "BUILDKITE_COMMIT": "--output=" + victim})
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("victim file intact", ctx.std.fs.read_to_string(victim), "untouched\n")
+    _eq("described HEAD instead", meta.get("COMMIT_SHA"), merge_sha)
+
 # ── get_build_metadata_flags against a real repo ────────────────────
 
 def _git_ok(ctx, repo, args, env = {}):
@@ -335,7 +369,7 @@ def _test_unfetched_head_yields_the_sha_alone(ctx):
 def _test_non_pr_build_still_describes_head(ctx):
     """The hosts that check out a real commit must be unaffected: the
     resolved SHA is HEAD, so the `git show` read is the same one as before."""
-    repo, head_sha, _merge_sha = _pull_request_repo(ctx)
+    repo, head_sha, merge_sha = _pull_request_repo(ctx)
     _git_ok(ctx, repo, ["checkout", "-q", head_sha])
 
     std = _hybrid_std(ctx, {"BUILDKITE": "true", "BUILDKITE_COMMIT": head_sha})
@@ -351,10 +385,12 @@ def _test_non_pr_build_still_describes_head(ctx):
 
 def _test_impl(ctx):
     _test_commit_sha_resolution(ctx)
+    _test_commit_sha_shape(ctx)
+    _test_a_non_sha_never_reaches_git_show(ctx)
     _test_pull_request_describes_the_head_commit(ctx)
     _test_unfetched_head_yields_the_sha_alone(ctx)
     _test_non_pr_build_still_describes_head(ctx)
-    print("build_metadata.axl: OK (4 sections)")
+    print("build_metadata.axl: OK (6 sections)")
     return 0
 
 build_metadata_tests = task(

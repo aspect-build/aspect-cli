@@ -77,6 +77,27 @@ def parse_git_remote_url(url):
         return {"host": host}
     return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
 
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+def is_commit_sha(value: str) -> bool:
+    """True for the 7-40 character hex string a commit SHA is.
+
+    Gates what reaches `git show` as a revision. Every source
+    `detect_build_commit_sha` draws on — `GITHUB_SHA`, `BUILDKITE_COMMIT`,
+    `CIRCLE_SHA1`, `CI_COMMIT_SHA`, `ASPECT_GITLAB_SHA`, the GitHub event
+    payload — is environment anyone who can trigger a build controls, and
+    `git show` reads a leading `-` as one of its own options: `--output=<path>`
+    overwrites that path. A value that is merely not a SHA (Buildkite sets
+    `BUILDKITE_COMMIT=HEAD` for a build with no commit pinned) would also name
+    a revision the CI host never reported.
+    """
+    if len(value) < 7 or len(value) > 40:
+        return False
+    for i in range(len(value)):
+        if value[i] not in _HEX_DIGITS:
+            return False
+    return True
+
 def _git_show(process, rev, cwd = None):
     """Run `git show <rev>` and return a dict of commit fields.
 
@@ -596,7 +617,7 @@ def get_build_metadata_flags(std, cwd = None):
     head_sha = detect_build_commit_sha(std)
     if head_sha:
         meta["COMMIT_SHA"] = head_sha
-    git_data = _git_show(std.process, head_sha or "HEAD", cwd = cwd)
+    git_data = _git_show(std.process, head_sha if is_commit_sha(head_sha) else "HEAD", cwd = cwd)
     for k, v in git_data.items():
         meta[k] = v
 
