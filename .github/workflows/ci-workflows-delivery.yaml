@@ -66,7 +66,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task
         # --force-target re-delivers every run so the manifest always
         # carries at least one `ok` outcome to exercise the per-target
@@ -95,7 +95,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
         # --warn-unresolved-digest for the same reason as delivery-gha: the
         # deliverable set includes the stamped, uncacheable py_deliverable.
@@ -124,7 +124,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery unresolvable-digest must hard-fail
         run: |
           set -uo pipefail
@@ -173,7 +173,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: no-remote-exec deliverable must resolve a digest on every run
         run: |
           set -uo pipefail

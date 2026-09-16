@@ -33,7 +33,7 @@ env:
   DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN != '' }}
+  ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN != '' }}
   ASPECT_WORKSPACE: ${{ github.workspace }}
 jobs:
   # Pure-bash unit tests for the tools/bazel wrapper. No aspect, no bazel, no
@@ -133,7 +133,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Buildifier Task
         run: aspect buildifier --task:name buildifier-gha
   buildifier-debug-task:
@@ -146,7 +146,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Buildifier Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-gha-debug
   format-task:
@@ -159,7 +159,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Format Task
         run: bazel format --task:name format-gha
   format-debug-task:
@@ -172,7 +172,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Format Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 bazel format --task:name format-gha-debug
   format-repeat-task:
@@ -185,7 +185,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       # Test repeat tasks without --task:name flags
       - name: Format Task
         run: bazel format
@@ -205,7 +205,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Gazelle Task
         run: aspect gazelle --task:name gazelle-gha
   gazelle-debug-task:
@@ -218,7 +218,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Gazelle Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect gazelle --task:name gazelle-gha-debug
   gazelle-from-source-task:
@@ -231,7 +231,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       # Regression test for the build-from-source gazelle path —
       # upstream `gazelle()` macro + rules_go toolchain compiling a
       # bespoke gazelle binary, instead of the prebuilt artifact.
@@ -249,7 +249,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha-debug
   lint-task:
@@ -262,7 +262,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Lint Task
         run: aspect lint --task:name lint-gha
   lint-debug-task:
@@ -275,7 +275,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Lint Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect lint --task:name lint-gha-debug
   build-task:
@@ -287,7 +287,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task
         run: bazel build --task:name build-gha
   build-debug-task:
@@ -299,7 +299,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 bazel build --task:name build-gha-debug
   test-task:
@@ -311,7 +311,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task
         run: aspect test --task:name test-gha
   test-debug-task:
@@ -323,7 +323,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect test --task:name test-gha-debug
   # Build/test on an EPHEMERAL GitHub-hosted runner (no Aspect Workflows
@@ -348,7 +348,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task (ephemeral)
         run: |
           aspect build --task:name build-gha-ephemeral \
@@ -365,7 +365,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task (ephemeral)
         # --keep_going comes from `--config=ci` (injected by .aspect/config.axl on
         # CI), so a build-action failure (demo_build_fail genrule) doesn't abort
@@ -411,7 +411,7 @@ jobs:
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           launcher-install: false
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Scaffold preset
         run: |
           aspect init "$RUNNER_TEMP/proj" --task:name init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
@@ -454,7 +454,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task
         run: aspect cache diff --task:name cache-diff-gha
   cache-diff-debug-task:
@@ -466,7 +466,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect cache diff --task:name cache-diff-gha-debug
   # Workflows runner smoke test: the freshly-built CLI starts, prints version /
@@ -483,7 +483,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Runner smoke test
         run: |
           aspect --version
@@ -554,7 +554,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
           task-name: axl-tests-gha-bootstrap
@@ -574,7 +574,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
           task-name: axl-smoke-gha-bootstrap
@@ -685,7 +685,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task — new flags
         run: |
           echo "--- aspect test --target-pattern-file"
