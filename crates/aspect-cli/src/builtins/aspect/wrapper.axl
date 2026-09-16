@@ -230,6 +230,11 @@ def _uninstall_impl(ctx: TaskContext) -> int:
 
 def _impl(ctx: TaskContext) -> int:
     if ctx.args.uninstall:
+        # `--check` promises to write nothing; refusing the pair keeps that
+        # promise instead of letting it fall through to a deletion.
+        if ctx.args.check:
+            error(ctx.std, "--check and --uninstall cannot be combined: --check verifies the installed wrapper and writes nothing, while --uninstall removes it. Use --uninstall --dry-run to preview a removal.")
+            return 1
         return _uninstall_impl(ctx)
     return _install_impl(ctx)
 
@@ -260,7 +265,7 @@ tools_bazel_wrapper = task(
         ),
         "uninstall": args.boolean(
             default = False,
-            description = "Remove the Aspect tools/bazel wrapper (and tools/bazel.md) from this workspace instead of installing it. Refuses to delete a tools/bazel that is not the Aspect wrapper. Only --dry-run and --yes apply alongside it.",
+            description = "Remove the Aspect tools/bazel wrapper (and tools/bazel.md) from this workspace instead of installing it. Refuses to delete a tools/bazel that is not the Aspect wrapper. Only --dry-run and --yes apply alongside it; --check is rejected.",
         ),
     },
 )
