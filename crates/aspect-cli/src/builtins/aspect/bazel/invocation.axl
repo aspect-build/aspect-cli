@@ -136,7 +136,7 @@ def _resolve(ctx, command: str) -> _Invocation:
     # id), so the flag rides only that path — the CLI-streamed path announces
     # the URL itself. A value the user already set is never overridden.
     results_url = advertised_results_url(trait.bes_results_sources, rc, sinks, command)
-    rc_flags.extend(bes_results_url_flag(trait.bes_results_sources, rc, sinks, command))
+    rc_flags.extend(bes_results_url_flag(trait.bes_results_sources, rc, command))
 
     requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
 

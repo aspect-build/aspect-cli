@@ -859,10 +859,14 @@ impl Build {
         // find the path when it opens the BEP file. The reader-side thread
         // is started later — once we have the spawned child's pid in hand
         // for the per-invocation liveness check.
+        //
+        // Bazel's default action publishing (failed actions only) is all any
+        // consumer of the stream reads; per-action data comes from the
+        // execution log, so `--build_event_publish_all_actions` is not asked
+        // for.
         let bes_path = if build_events {
             let p = BuildEventStream::reserve_path()?;
-            cmd.arg("--build_event_publish_all_actions")
-                .arg("--build_event_binary_file_upload_mode=fully_async")
+            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
                 .arg(&p);
             Some(p)
