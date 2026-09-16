@@ -82,7 +82,7 @@ run() {
 
 # A PATH dir holding only `bazel` (no `aspect`), to exercise the
 # aspect-not-installed branches. BAZEL_REAL still points at the stub bazel, so
-# resolve_bazel_real succeeds without PATH lookup.
+# the wrapper needs no PATH lookup to find it.
 NO_ASPECT_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" "$NO_ASPECT_DIR"' EXIT
 cp "$STUB_DIR/bazel" "$NO_ASPECT_DIR/bazel"
@@ -711,7 +711,7 @@ ARG://..." \
 # Bypass should fire BEFORE the trace logic. Even with TRACE=1, the bypass
 # runs and we get straight bazel — no aspect-route trace line.
 actual="$(ASPECT_CLI_RUNNING=1 ASPECT_WRAPPER_TRACE=1 "$WRAPPER" build //... 2>&1 | strip_ansi)"
-# Bypass exec's bazel directly without calling trace_exec, so TRACE has
+# Bypass exec's bazel directly without tracing, so TRACE has
 # no effect. This is intentional: in the inception case the trace would
 # fire INSIDE aspect's output stream and confuse the user.
 check "inception: bypass runs before trace, even TRACE=1 is silent" \
@@ -761,7 +761,7 @@ ARG://..." \
 # Section 14: PATH fallback when BAZEL_REAL is unset (type -aP, not zsh)
 # =====================================================================
 
-# With BAZEL_REAL unset, resolve_bazel_real must find the stub bazel on PATH
+# With BAZEL_REAL unset, the wrapper must find the stub bazel on PATH
 # (skipping the wrapper itself). Regression test for the old `command -v -a`
 # zsh-ism that exits non-zero under bash and found nothing.
 check "path: BAZEL_REAL unset → finds real bazel on PATH" \
@@ -779,7 +779,7 @@ ARG://..." \
 # Section 16: aspect not installed — install hint + graceful fallback
 # =====================================================================
 
-# The verb-specific install hint, mirroring aspect_missing_hint in the wrapper.
+# The verb-specific install hint, mirroring the wrapper's heredoc.
 hint() {
     printf '[tools/bazel] `bazel %s` runs through the Aspect CLI (`aspect`), which is not on your PATH.
 
