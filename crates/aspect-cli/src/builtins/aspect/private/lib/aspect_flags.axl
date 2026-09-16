@@ -1,0 +1,458 @@
+"""The Bazel flags Aspect sets on the user's behalf, in one place.
+
+Three surfaces set them: the Workflows feature injects them into every
+`aspect <task>` Bazel call on an Aspect Workflows runner, the Deployment feature
+into a task told `--remote`, and `aspect setup bazelrc` writes them to an rc for
+vanilla `bazel` calls. All compose from the same selections here, so a flag is
+set the same way — and for the same reason — wherever it appears.
+
+Every flag is tied to what it presumes (`Needs`). A flag that tunes the remote
+cache is set only where a remote cache is wired, a flag that enriches the BES
+stream only where a BES backend reads it. A runner or deployment with no cache,
+no BES, or no executor gets none of the flags that presume the missing one, so
+every line Aspect writes is accounted for by an endpoint that is present. In the
+rc the same keying becomes named `--config` groups (`rc_groups.axl`), one per
+thing presumed.
+
+`CATALOG`, `WORKFLOWS_CACHE_FLAGS`, and `NO_COMPRESSION_FLAGS` are the maintained
+tables: each entry says what the flag does, why we set it, and what it presumes.
+Read them as the documentation; the functions only select from them. Flags whose values come
+from the environment or a deployment — the endpoints themselves, the runner's
+paths, the diagnostics file locations — are built by the functions below and
+documented there.
+
+Users may opt out of individual flags, per surface: `--bazel-flags:omit` for
+tasks (`feature/bazel_flags.axl`) and `--omit-bazel-flag` on `aspect setup bazelrc`.
+Both use `omit_flags`, which applies only to what Aspect injects, and
+`PROTECTED_FLAGS`, the flags that cannot be dropped: endpoints, credentials, and
+the runner's paths, without which the build stops talking to Aspect or breaks
+the runner.
+
+A flag is a plain string, a `(flag, constraint)` tuple carrying a Bazel semver
+constraint, or a `(flag, constraint, command)` tuple that also names the rc
+section the flag belongs to — `"build"` for an option only build-like commands
+accept, which the bazelrc runtime then withholds from `query` and its kin the
+way an rc file's `build` line is. All three are the shape `ctx.bazel.parse_rc`
+/ `new_rc` take and the trait's flag lists accept.
+"""
+
+load("./environment.axl", "WorkflowsEnvironment", "sanitize_filename")
+
+# What a flag presumes before it is worth setting. `cache` is satisfied by a
+# remote executor as well: Bazel routes CAS/AC through `--remote_executor` when
+# no `--remote_cache` is set. `channel` is any gRPC endpoint at all.
+Needs = enum("nothing", "cache", "bes", "channel")
+
+InjectedFlag = record(
+    flag = field(str),
+    why = field(str),
+    needs = field(Needs, default = Needs("nothing")),
+    # Semver constraint on the Bazel version, "" for every version.
+    bazel = field(str, default = ""),
+)
+
+def _entry(flag: str, why: str, needs: str = "nothing", bazel: str = "") -> InjectedFlag:
+    return InjectedFlag(flag = flag, why = why, needs = Needs(needs), bazel = bazel)
+
+# The tuning and reporting flags Aspect sets wherever their endpoint is wired.
+CATALOG = [
+    _entry(
+        "--heap_dump_on_oom",
+        "A heap dump when the server runs out of memory. CI OOMs cannot be reproduced interactively; the dump is the only post-mortem.",
+    ),
+    _entry(
+        "--experimental_repository_cache_hardlinks",
+        "Hardlink archives out of the repository cache instead of copying them; saves disk and time on every external fetch.",
+    ),
+    _entry(
+        "--remote_upload_local_results",
+        "CI populates the cache: outputs built locally are written back so later jobs and developers hit them.",
+        needs = "cache",
+    ),
+    _entry(
+        "--remote_accept_cached",
+        "Reuse cached action results; stated explicitly so a workspace rc cannot leave the cache write-only.",
+        needs = "cache",
+    ),
+    _entry(
+        "--remote_timeout=3600",
+        "Bazel's 60s default fails large artifacts on slow links mid-transfer.",
+        needs = "cache",
+    ),
+    _entry(
+        "--remote_retries=360",
+        "Ride out cache restarts and network blips instead of failing the build; Bazel defaults to 5.",
+        needs = "cache",
+    ),
+    _entry(
+        "--grpc_keepalive_timeout=30s",
+        "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it.",
+        needs = "channel",
+    ),
+    _entry(
+        "--generate_json_trace_profile",
+        "The JSON trace profile the Aspect backend analyzes.",
+        needs = "bes",
+    ),
+    _entry(
+        "--noslim_profile",
+        "Keep every profile event; the slim profile merges short ones and loses the per-action detail the backend needs.",
+        needs = "bes",
+    ),
+    _entry(
+        "--experimental_profile_include_target_label",
+        "Attribute profile time to targets.",
+        needs = "bes",
+    ),
+    _entry(
+        "--experimental_profile_include_primary_output",
+        "Tell apart the several actions of one target in the profile.",
+        needs = "bes",
+    ),
+    _entry(
+        "--experimental_profile_include_target_configuration",
+        "Separate the exec- and target-configuration builds of one label in the profile.",
+        needs = "bes",
+        bazel = ">=8.0.0",
+    ),
+    _entry(
+        "--legacy_important_outputs",
+        "Keep `important_output` on TargetComplete events, which the Aspect Web UI reads and Bazel intends to stop emitting by default.",
+        needs = "bes",
+    ),
+]
+
+# Set on a runner whose cache does not accept compressed blobs
+# (ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION unset): Bazel errors when a
+# repository rc asks such a cache for compression, so the runner forces it off.
+# A cache that declares support leaves the choice to the repository. Drop once no
+# Workflows deployment without compression is left in the wild.
+NO_COMPRESSION_FLAGS = [
+    _entry(
+        "--noexperimental_remote_cache_compression",
+        "This Workflows remote cache does not support compressed blobs.",
+        bazel = "<8.0.0",
+    ),
+    _entry(
+        "--noremote_cache_compression",
+        "This Workflows remote cache does not support compressed blobs; Bazel 8 renamed the flag.",
+        bazel = ">=8.0.0",
+    ),
+]
+
+# Flags specific to the Aspect Workflows runner's own remote cache, set only on a
+# runner with that cache wired. They presume the Workflows cache implementation,
+# not just any cache, so they are not in `CATALOG`.
+WORKFLOWS_CACHE_FLAGS = [
+    _entry(
+        "--incompatible_remote_results_ignore_disk",
+        "Give Bazel 6 the combined-cache semantics Bazel 7 made the default.",
+        bazel = "<7.0.0",
+    ),
+    _entry(
+        "--disk_cache=",
+        "With the runner's remote cache set, a disk cache from a workspace rc would only fill the runner's disk with a second copy of what the remote cache holds. Elsewhere a disk cache is left as the user set it.",
+    ),
+]
+
+# Flag names (no value) that the opt-outs may not drop. Each is an endpoint, a
+# credential, an rc chain, or a path the runner's isolation depends on; without
+# it the build stops talking to Aspect or lands in the wrong place. The BES pair
+# (`--bes_backend`, `--bes_results_url`) is deliberately absent: it is the one
+# endpoint a repository may legitimately route elsewhere for vanilla `bazel`,
+# and the opt-out is how the runner's rc yields to that.
+PROTECTED_FLAGS = [
+    "--remote_cache",
+    "--remote_executor",
+    "--remote_bytestream_uri_prefix",
+    "--credential_helper",
+    "--experimental_credential_helper",
+    "--remote_header",
+    "--bes_header",
+    "--config",
+    "--output_base",
+    "--output_user_root",
+    "--repository_cache",
+    "--nohome_rc",
+    "--nosystem_rc",
+    "--aspect:disable_plugins",
+    "--aspect:lock_version",
+]
+
+# The value-bearing flags the functions below build, by name.
+_REMOTE_CACHE = "--remote_cache"
+_REMOTE_EXECUTOR = "--remote_executor"
+_BYTESTREAM_URI_PREFIX = "--remote_bytestream_uri_prefix"
+_REPOSITORY_CACHE = "--repository_cache"
+_OUTPUT_USER_ROOT = "--output_user_root"
+_OUTPUT_BASE = "--output_base"
+_NOHOME_RC = "--nohome_rc"
+_NOSYSTEM_RC = "--nosystem_rc"
+_COLOR = "--color"
+_BES_BACKEND = "--bes_backend"
+_BES_RESULTS_URL = "--bes_results_url"
+_PROFILE = "--profile"
+_REMOTE_BUILD_EVENT_UPLOAD = "--remote_build_event_upload"
+_EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
+
+def flag_text(flag) -> str:
+    """The flag text of a plain or `(flag, constraint)` entry."""
+    return flag[0] if type(flag) == "tuple" else flag
+
+def flag_name(flag) -> str:
+    """The name of a flag without its value: `--remote_timeout=3600` → `--remote_timeout`."""
+    return flag_text(flag).split("=")[0]
+
+def unscoped(flag):
+    """`flag` without a command scope: a `(flag, constraint, command)` entry
+    becomes `(flag, constraint)`, or the bare flag when the constraint is empty.
+    For the rc `aspect setup bazelrc` writes, whose `common` sections Bazel already
+    applies only where the option is accepted."""
+    if type(flag) != "tuple" or len(flag) < 3:
+        return flag
+    return (flag[0], flag[1]) if flag[1] else flag[0]
+
+def _as_flag(entry: InjectedFlag):
+    return (entry.flag, entry.bazel) if entry.bazel else entry.flag
+
+def independent_flags() -> list:
+    """The `CATALOG` flags that presume no endpoint. Kept apart from
+    `endpoint_flags` so each surface places them once: the head of a task's
+    injected flags, the `aspect-common` group of the rc."""
+    return [_as_flag(e) for e in CATALOG if e.needs == Needs("nothing")]
+
+def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:
+    """The `CATALOG` flags the wired endpoints justify: cache tuning with a cache
+    or an executor, BES enrichment with a BES backend, channel tuning with any of
+    the three. Nothing when none is wired; `independent_flags` are separate so
+    each surface places them once."""
+    satisfied = {
+        Needs("nothing"): False,
+        Needs("cache"): cache or exec,
+        Needs("bes"): bes,
+        Needs("channel"): cache or bes or exec,
+    }
+    return [_as_flag(e) for e in CATALOG if satisfied[e.needs]]
+
+def omit_flags(flags: list, omitted: list) -> list:
+    """`flags` minus those whose name is in `omitted`. Names compare without a
+    value, so `--remote_timeout` drops `--remote_timeout=3600`, and an omitted
+    entry may itself carry a value."""
+    names = [flag_name(o) for o in omitted]
+    return [f for f in flags if flag_name(f) not in names]
+
+def protected_omissions(omitted: list) -> list:
+    """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user
+    spelled them; empty when every omission is allowed."""
+    return [o for o in omitted if flag_name(o) in PROTECTED_FLAGS]
+
+def color_flags(misdetected: bool) -> list:
+    """`--color=yes` where Bazel's `--color=auto` would wrongly say no: a CI host
+    whose log viewer renders ANSI but runs the job with no TTY for Bazel to see
+    (`environment.bazel_misdetects_color`). Presumes no endpoint — the host, not
+    a deployment, decides — so in the rc it lives in the group named for that
+    host (`aspect-github-actions`, …)."""
+    return [_COLOR + "=yes"] if misdetected else []
+
+def env_endpoint_flags(environment: WorkflowsEnvironment) -> list:
+    """The remote-cache endpoint the runner environment names: `--remote_cache`
+    and, when surfaced, `--remote_bytestream_uri_prefix`, which makes the
+    `bytestream://` URIs in BEP addressable across caches."""
+    remote_cache = environment.remote_cache
+    if remote_cache == None:
+        return []
+    flags = []
+    if remote_cache.endpoint:
+        flags.append(_REMOTE_CACHE + "=" + remote_cache.endpoint)
+    if remote_cache.bytestream_uri_prefix:
+        flags.append(_BYTESTREAM_URI_PREFIX + "=" + remote_cache.bytestream_uri_prefix)
+    return flags
+
+def env_flags(environment: WorkflowsEnvironment) -> list:
+    """The task flags the `ASPECT_WORKFLOWS_*` env justifies: the cache endpoint
+    it names and the `CATALOG` selection for its cache and BES. Empty when the
+    env names neither. Nothing tied to a runner's mounts or its cache
+    implementation; `runner_cache_flags` adds those."""
+    return endpoint_flags(
+        cache = environment.remote_cache != None,
+        bes = environment.build_events != None,
+    ) + env_endpoint_flags(environment)
+
+def env_task_flags(environment: WorkflowsEnvironment) -> list:
+    """The task flags a hand-set `ASPECT_WORKFLOWS_*` environment justifies off a
+    runner: the endpoint-independent flags and `env_flags`, the same set a
+    runner's task gets minus what its mounts add. Empty when the env names no
+    cache and no BES, so plain CI and developer machines get nothing. On a
+    runner `runner_flags` covers this."""
+    if environment.remote_cache == None and environment.build_events == None:
+        return []
+    return independent_flags() + env_flags(environment)
+
+def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
+    """The BES backend the runner environment names, for vanilla `bazel` on the
+    runner: `--bes_backend` and, when surfaced, `--bes_results_url`. Tasks never
+    take these — they run with `--nohome_rc` and the CLI streams their build
+    events from its own sink — so only `aspect setup bazelrc` writes them. A
+    repository routing vanilla calls to another backend opts out with
+    `--omit-bazel-flag=--bes_backend`, which is why the pair is not in
+    `PROTECTED_FLAGS`. Empty when the env names no BES backend."""
+    build_events = environment.build_events
+    if build_events == None or not build_events.backend:
+        return []
+    flags = [_BES_BACKEND + "=" + build_events.backend]
+    if build_events.results_url:
+        flags.append(_BES_RESULTS_URL + "=" + build_events.results_url)
+    return flags
+
+def runner_executor_flags(environment: WorkflowsEnvironment) -> list:
+    """The remote executor the runner environment names, for a build that opted in:
+    `--remote_executor` plus, when the env names no separate cache, the tuning an
+    executor justifies (it doubles as the cache). Never part of `runner_flags`
+    or `env_flags` — remote execution relocates every action, so it is reached
+    only by naming it: `--workflows:remote-exec` on a task, `--config=aspect-exec`
+    in the rc. Empty when the env names no executor."""
+    endpoint = runner_executor_endpoint(environment)
+    if not endpoint:
+        return []
+    return endpoint + ([] if environment.remote_cache != None else endpoint_flags(cache = False, bes = False, exec = True))
+
+def runner_executor_endpoint(environment: WorkflowsEnvironment) -> list:
+    """Just `--remote_executor=<value>` from the environment, or empty. The rc's
+    `aspect-exec` group takes this and chains the cache tuning by name."""
+    executor = environment.remote_executor
+    if executor == None or not executor.endpoint:
+        return []
+    return [_REMOTE_EXECUTOR + "=" + executor.endpoint]
+
+def workflows_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """The Workflows cache's specifics: `NO_COMPRESSION_FLAGS` unless the cache
+    declares compression support, then `WORKFLOWS_CACHE_FLAGS`. Presumes the
+    runner's own cache, so callers gate on the runner marker; fails without
+    `environment.remote_cache`."""
+    remote_cache = environment.remote_cache
+    if remote_cache == None:
+        fail("workflows_cache_flags called without a remote cache — gate on environment.remote_cache != None")
+    compression = [] if remote_cache.supports_compression else NO_COMPRESSION_FLAGS
+    return [_as_flag(e) for e in compression + WORKFLOWS_CACHE_FLAGS]
+
+def runner_repository_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """`--repository_cache` at the runner's warmed repository cache. Presumes
+    the runner marker."""
+    runner = environment.runner
+    if runner == None:
+        fail("runner_repository_cache_flags called without a Workflows runner — gate on environment.runner != None")
+    return [_REPOSITORY_CACHE + "=" + runner.repository_cache_dir]
+
+def runner_cache_flags(environment: WorkflowsEnvironment) -> list:
+    """The runner's own cache specifics for a task: `workflows_cache_flags` when
+    the env names the runner's cache, plus `runner_repository_cache_flags`.
+    Presumes the runner marker."""
+    if environment.runner == None:
+        fail("runner_cache_flags called without a Workflows runner — gate on environment.runner != None")
+    specifics = workflows_cache_flags(environment) if environment.remote_cache != None else []
+    return specifics + runner_repository_cache_flags(environment)
+
+def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> list:
+    """The startup flags that give each repository its own Bazel server on the
+    runner's storage. `--output_user_root` holds the install base and external
+    repos, shared across that repo's jobs; `--output_base` holds the server and
+    its analysis cache, so a persistent runner keeps it warm between jobs
+    (`apply_output_base_suffix` moves a task to a sibling server).
+    `--nohome_rc`/`--nosystem_rc` make the workspace rc plus the injected flags
+    the whole configuration; they are command-line only, and `aspect setup bazelrc`
+    drops them. Presumes the runner marker."""
+    runner = environment.runner
+    if runner == None:
+        fail("runner_startup_flags called without a Workflows runner — gate on environment.runner != None")
+    repo_name = environment.ci.scm_repo_name if environment.ci else ""
+    subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
+    scope = sanitize_filename(repo_name) + "/" + subdir if repo_name else subdir
+    return [
+        _NOHOME_RC,
+        _NOSYSTEM_RC,
+        _OUTPUT_USER_ROOT + "=" + runner.bazel_root_dir + "/" + scope,
+        _OUTPUT_BASE + "=" + runner.output_root_dir + "/" + scope,
+    ]
+
+def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
+    """The full flag set the Workflows feature injects into a task on a runner:
+    the endpoint-independent flags, `env_flags`, and `runner_cache_flags` as
+    build flags, and `runner_startup_flags` as startup flags. Caller must have
+    verified `environment.runner != None`. Returns `(startup_flags, build_flags)`."""
+    return (
+        runner_startup_flags(environment, aspect_root_dir),
+        independent_flags() + env_flags(environment) + runner_cache_flags(environment),
+    )
+
+_OUTPUT_BASE_FLAG_PREFIX = _OUTPUT_BASE + "="
+
+def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
+    """A copy of `startup_flags` with `suffix` appended to the `--output_base=`
+    value; every other flag passes through. `--output_base` names the Bazel
+    server, so this moves the invocation to a sibling server (`…/aspect-cli` →
+    `…/aspect-cli-delivery`), isolating a task whose options (`--stamp`) would
+    otherwise discard the shared warm analysis cache. `--output_user_root` stays
+    shared so the install base and external repos are not duplicated.
+
+    A no-op copy when `suffix` is empty or no `--output_base` is present. The
+    suffix becomes a path segment; callers sanitize it (`sanitize_filename`)."""
+    if not suffix:
+        return list(startup_flags)
+    return [flag + suffix if flag.startswith(_OUTPUT_BASE_FLAG_PREFIX) else flag for flag in startup_flags]
+
+def diagnostics_upload_flags() -> list:
+    """The switch that carries build diagnostics to the BES backend: every
+    BEP-referenced local file — the JSON profile, and the execution log when
+    `exec_log_flags` writes one — uploaded to the remote cache so the backend
+    can read it. Set wherever a BES backend is wired; the upload needs a remote
+    cache to land in, so with a BES alone it is inert. Version-gated: Bazel 7
+    renamed `--remote_build_event_upload` and flipped its default to `minimal`
+    (Bazel 6 only knows the `experimental_` spelling, whose default is already
+    `all`)."""
+    return [(_REMOTE_BUILD_EVENT_UPLOAD + "=all", ">=7.0.0")]
+
+def exec_log_flags(exec_log_path: str) -> list:
+    """Write the compact execution log at `exec_log_path`, so it rides the
+    diagnostics upload. Per-action cache and timing data in the Web UI comes
+    from this log, which is also why the per-action BEP events behind
+    `--build_event_publish_all_actions` are not requested. Bazel 7.1 added the
+    compact log; an execution option, so scoped to `build` and never reaching a
+    task's `query`. The rc keeps it in its own `aspect-exec-log` group, the
+    upload being slow on a thin link, so a repository can drop just this."""
+    return [(_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.1.0", "build")]
+
+def temp_exec_log_path(std, run_id: str) -> str:
+    """A place for a task's compact execution log off a Workflows runner: under
+    the OS temp dir so nothing lands in the checkout, namespaced by `run_id`
+    since concurrent tasks on one machine share that dir. Creates the directory,
+    at the task's own run — never for an rc, which outlives the directory."""
+    dir = std.env.temp_dir().rstrip("/") + "/aspect-bazel-" + (run_id or "exec")
+    std.fs.create_dir_all(dir)
+    return dir + "/exec.log.zstd"
+
+def temp_diagnostics_upload_flags(ctx) -> list:
+    """The diagnostics upload with the execution log at `temp_exec_log_path` for
+    this run — a `BazelTrait.task_flags` hook, since only the task knows its run
+    id. For a BES wired off a runner (`--remote`, or a hand-set env)."""
+    return diagnostics_upload_flags() + exec_log_flags(temp_exec_log_path(ctx.std, ctx.task.id))
+
+def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
+    """`--profile` placed under the runner's job tmpdir, keeping the
+    `command.profile.gz` name the backend's ingest matches on. Empty off a runner
+    or without a BES backend to upload it to."""
+    runner = environment.runner
+    if runner == None or environment.build_events == None:
+        return []
+    return [_PROFILE + "=" + runner.job_tmpdir + "/command.profile.gz"]
+
+def runner_exec_log_path(environment: WorkflowsEnvironment) -> str:
+    """Where a runner's compact execution log is written: the job tmpdir."""
+    return environment.runner.job_tmpdir + "/exec.log.zstd"
+
+def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
+    """`runner_profile_flags`, the diagnostics upload, and the execution log at
+    `runner_exec_log_path`, for a task on a runner whose env names a BES backend.
+    Empty off a runner or without one."""
+    if environment.runner == None or environment.build_events == None:
+        return []
+    return runner_profile_flags(environment) + diagnostics_upload_flags() + exec_log_flags(runner_exec_log_path(environment))

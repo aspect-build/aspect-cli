@@ -282,12 +282,12 @@ def _test_bes_flag_only_when_bazel_uploads(_):
     URL itself instead)."""
     _eq(
         "bazel-side upload → wired",
-        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.gcp"}), []),
+        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.gcp"})),
         ["--bes_results_url=https://app.gcp/i/"],
     )
     _eq(
         "cli internal client → no flag for Bazel to read",
-        bes_results_url_flag([_GCP], _fake_rc({}), _sinks("grpcs://bes.gcp")),
+        bes_results_url_flag([_GCP], _fake_rc({})),
         [],
     )
 
@@ -296,10 +296,21 @@ def _test_bes_flag_needs_an_advertised_backend(_):
     it."""
     _eq(
         "third-party bazel backend → not wired",
-        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.elsewhere"}), []),
+        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.elsewhere"})),
         [],
     )
-    _eq("no forwarding at all → not wired", bes_results_url_flag([_GCP], _fake_rc({}), []), [])
+    _eq("no forwarding at all → not wired", bes_results_url_flag([_GCP], _fake_rc({})), [])
+
+    # Dual write: Bazel uploads to a third party while the CLI streams to the
+    # deployment. Only Bazel's own backend decides the flag — the deployment's
+    # viewer would name an invocation indexed under the sink's id, not Bazel's.
+    # (The CLI's sinks are not an input here; `advertised_results_url` takes them
+    # for the CLI's own announce line.)
+    _eq(
+        "dual write → Bazel's third party gets no Aspect viewer",
+        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.elsewhere"})),
+        [],
+    )
 
 def _test_bes_flag_yields_to_user_flag(_):
     _eq(
@@ -307,7 +318,6 @@ def _test_bes_flag_yields_to_user_flag(_):
         bes_results_url_flag(
             [_GCP],
             _fake_rc({"--bes_results_url": "https://mine.example", "--bes_backend": "grpcs://bes.gcp"}),
-            _sinks("grpcs://bes.gcp"),
         ),
         [],
     )
