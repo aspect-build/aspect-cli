@@ -20,6 +20,7 @@ use crate::engine::feature_map::FeatureMap;
 use crate::engine::passthrough;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
+use crate::engine::task_hooks::TaskHooks;
 use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
@@ -29,7 +30,7 @@ use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
 use crate::eval::load::AxlLoader;
-use crate::eval::outcome::Outcome;
+use crate::eval::outcome::{Ending, Outcome};
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
@@ -156,19 +157,22 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
     /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
     telemetry_value: Value<'v>,
+    /// The run's `TaskHooks`, shared between FeatureContext and TaskContext
+    /// as `ctx.hooks`; phase 4 runs what was registered into it.
+    hooks_value: Value<'v>,
 }
 
 impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn new(env: &'l ModuleEnv<'v>, loader: &'l AxlLoader<'l>) -> Self {
         let heap = env.heap();
-        let telemetry_value = Telemetry::alloc(heap);
         MultiPhaseEval {
             env,
             loader,
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
             trait_map_value: None,
-            telemetry_value,
+            telemetry_value: Telemetry::alloc(heap),
+            hooks_value: TaskHooks::alloc(heap),
         }
     }
 
@@ -470,6 +474,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 attrs_value,
                 trait_map_value,
                 self.telemetry_value,
+                self.hooks_value,
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
@@ -493,9 +498,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// the CLI when building the command tree). `args_builder` returns the
     /// fully-merged `Arguments` (callers handle CLI/override/default precedence).
     ///
-    /// Returns the task's exit code: what `_impl` returned, or the code of a
-    /// [`TaskExit`] it raised, which is reported without a traceback. Any other
-    /// error propagates.
+    /// Runs, in order: the pre-task hooks, `_impl`, the post-task hooks with
+    /// the resolved conclusion, the `ctx.defer` callbacks, and the closing
+    /// bookend (see [`TaskHooks`]). Returns the task's exit code: what `_impl`
+    /// returned, or the code of a [`TaskExit`] it or a pre-task hook raised,
+    /// which is reported without a traceback. Any other error propagates once
+    /// the hooks and defers have run, with no bookend.
     #[tracing::instrument(
         name = "execute.task",
         skip_all,
@@ -600,6 +608,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_trait_map,
             task_info_val,
             bazel,
+            self.hooks_value,
         ));
 
         let mut eval = Evaluator::new(&self.env.0);
@@ -607,20 +616,31 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
 
-        let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
-        run_deferred(context, &mut eval);
-        let (outcome, raised) = match impl_result {
-            Ok(ret) => (Outcome::from_return(ret), None),
-            // `ctx.std.process.exit` and a builtin's `TaskExit` end the task
-            // like `return TaskConclusion(exit_code, message)`: no traceback.
-            Err(e) => match TaskExit::from_starlark(&e) {
-                Some(exit) => (Outcome::from_exit(exit), Some(e)),
-                None => return Err(e.into()),
-            },
+        let hooks = self
+            .hooks_value
+            .downcast_ref::<TaskHooks>()
+            .expect("hooks_value is a TaskHooks");
+        hooks.start();
+        let body_result = match hooks.run_pre(context, &mut eval) {
+            Ok(()) => eval.eval_function(task.implementation(), &[context], &[]),
+            Err(e) => Err(e),
         };
-        outcome.report_message();
-        if let Some(e) = &raised {
-            TaskExit::debug_traceback(e);
+        let (mut outcome, ending) = Outcome::resolve(body_result);
+        // A hard error prints itself, traceback and all, once it propagates
+        // below; an exit or return is reported here like a conclusion.
+        if !matches!(ending, Ending::Failed(_)) {
+            outcome.report_message();
+            if let Ending::Exited(e) = &ending {
+                TaskExit::debug_traceback(e);
+            }
+            outcome.exit_code =
+                apply_unclaimed_flags(task, &task_kind, task_args_val, outcome.exit_code);
+        }
+        let conclusion = heap.alloc(outcome.to_conclusion());
+        hooks.run_post(context, conclusion, &mut eval);
+        run_deferred(context, &mut eval);
+        if let Ending::Failed(e) = ending {
+            return Err(e.into());
         }
         let Outcome {
             exit_code,
@@ -628,34 +648,6 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             text: conclusion,
             ..
         } = outcome;
-
-        // The task has had its chance to act on the flags the CLI could not
-        // attribute to a declared arg.
-        let unclaimed = passthrough::unclaimed(&passthrough::bucket_names(task), task_args_val);
-        let exit_code = if unclaimed.is_empty() {
-            exit_code
-        } else {
-            // A task that concluded with its own non-zero code has the more
-            // informative story, so it keeps it; only an otherwise-successful
-            // run fails over dropped flags. A hard error never reaches here at
-            // all (propagated from `impl_result` above), and an early exit is
-            // treated like the return it stands in for, so a real failure is
-            // never masked.
-            let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
-            for (bucket, flags) in &unclaimed {
-                let message = passthrough::message(&task_kind, "return", bucket, flags);
-                if failed_on_its_own {
-                    diag::warn(&message);
-                } else {
-                    diag::error(&message);
-                }
-            }
-            if failed_on_its_own {
-                exit_code
-            } else {
-                Some(passthrough::EXIT_UNCLAIMED)
-            }
-        };
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
         // any phase still active when `_impl` returned so the breakdown
@@ -747,6 +739,37 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     pub fn finish(self) -> FinishedEval {
         FinishedEval
+    }
+}
+
+/// The exit code once the passthrough-flag check has had its say. A task that
+/// declared a bucket promised to act on what the CLI routed into it, so
+/// unclaimed flags fail an otherwise-successful run; a task that failed on its
+/// own has the more informative story and keeps its code, with the flags only
+/// warned about. An early exit is treated like the return it stands in for.
+fn apply_unclaimed_flags<'v>(
+    task: &dyn TaskLike<'v>,
+    task_kind: &str,
+    task_args_val: Value<'v>,
+    exit_code: Option<u8>,
+) -> Option<u8> {
+    let unclaimed = passthrough::unclaimed(&passthrough::bucket_names(task), task_args_val);
+    if unclaimed.is_empty() {
+        return exit_code;
+    }
+    let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
+    for (bucket, flags) in &unclaimed {
+        let message = passthrough::message(task_kind, "return", bucket, flags);
+        if failed_on_its_own {
+            diag::warn(&message);
+        } else {
+            diag::error(&message);
+        }
+    }
+    if failed_on_its_own {
+        exit_code
+    } else {
+        Some(passthrough::EXIT_UNCLAIMED)
     }
 }
 

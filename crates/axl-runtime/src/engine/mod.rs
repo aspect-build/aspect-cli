@@ -35,6 +35,7 @@ pub mod feature_map;
 pub mod store;
 pub mod task;
 pub mod task_context;
+pub mod task_hooks;
 pub mod task_info;
 pub mod task_map;
 pub mod telemetry;
@@ -53,6 +54,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Arg: StarlarkValueAsType<arg::Arg> = StarlarkValueAsType::new();
     const Arguments: StarlarkValueAsType<arguments::Arguments> = StarlarkValueAsType::new();
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
+    const TaskHooks: StarlarkValueAsType<task_hooks::TaskHooks> = StarlarkValueAsType::new();
     const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
     const Telemetry: StarlarkValueAsType<telemetry::Telemetry> = StarlarkValueAsType::new();

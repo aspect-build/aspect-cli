@@ -19,6 +19,7 @@ use super::std::Std;
 /// - `ctx.traits` — the full mutable fragment map (inject hooks into fragments)
 /// - `ctx.std` — standard library
 /// - `ctx.http` — HTTP client
+/// - `ctx.hooks` — pre-task and post-task hooks around the task body
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<FeatureContext>")]
 pub struct FeatureContext<'v> {
@@ -29,6 +30,8 @@ pub struct FeatureContext<'v> {
     /// Telemetry handle: `ctx.telemetry.exporters.add(...)` registers OTLP
     /// exporters that the runtime installs after phase 3 completes.
     pub(crate) telemetry: Value<'v>,
+    /// The run's `TaskHooks`, shared with the task body's context.
+    pub(crate) hooks: Value<'v>,
 }
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
@@ -36,15 +39,22 @@ unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
         self.args.trace(tracer);
         self.fragments.trace(tracer);
         self.telemetry.trace(tracer);
+        self.hooks.trace(tracer);
     }
 }
 
 impl<'v> FeatureContext<'v> {
-    pub fn new(args: Value<'v>, fragments: Value<'v>, telemetry: Value<'v>) -> Self {
+    pub fn new(
+        args: Value<'v>,
+        fragments: Value<'v>,
+        telemetry: Value<'v>,
+        hooks: Value<'v>,
+    ) -> Self {
         Self {
             args,
             fragments,
             telemetry,
+            hooks,
         }
     }
 }
@@ -63,6 +73,7 @@ impl<'v> Freeze for FeatureContext<'v> {
             args: self.args.freeze(freezer)?,
             fragments: self.fragments.freeze(freezer)?,
             telemetry: self.telemetry.freeze(freezer)?,
+            hooks: self.hooks.freeze(freezer)?,
         })
     }
 }
@@ -84,6 +95,8 @@ pub struct FrozenFeatureContext {
     fragments: FrozenValue,
     #[allocative(skip)]
     telemetry: FrozenValue,
+    #[allocative(skip)]
+    hooks: FrozenValue,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
@@ -148,6 +161,20 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
         }
         if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
             return Ok(c.telemetry.to_value());
+        }
+        Err(anyhow::anyhow!("expected FeatureContext"))
+    }
+
+    /// Hooks around the task body: `ctx.hooks.pre_task(fn)` runs `fn(ctx)`
+    /// before it, `ctx.hooks.post_task(fn)` runs `fn(ctx, conclusion)` after
+    /// it, however it ended.
+    #[starlark(attribute)]
+    fn hooks<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
+        if let Some(c) = this.downcast_ref::<FeatureContext>() {
+            return Ok(c.hooks);
+        }
+        if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
+            return Ok(c.hooks.to_value());
         }
         Err(anyhow::anyhow!("expected FeatureContext"))
     }
