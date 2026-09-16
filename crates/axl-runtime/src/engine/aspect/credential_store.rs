@@ -33,7 +33,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,8 +94,68 @@ impl CredentialStore {
         }
     }
 
-    /// Replace the entire stored set with `map`.
-    pub(crate) fn save_all<T: Serialize>(&self, map: &HashMap<String, T>) -> anyhow::Result<()> {
+    /// Serialize the entire read/modify/write transaction, including a rotating
+    /// refresh grant. All writers share this lock, across threads and processes.
+    /// The sidecar is never deleted: replacing it would split the lock domain.
+    pub(crate) fn update<T: Serialize + DeserializeOwned, R>(
+        &self,
+        update: impl FnOnce(&mut HashMap<String, T>) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        let path = match self {
+            Self::Keyring => default_file_path()?.with_file_name("keyring-credentials.lock"),
+            Self::File(path) => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                fs::create_dir_all(parent)?;
+                // Resolve aliases of an existing file before choosing its lock.
+                let path = if path.exists() {
+                    fs::canonicalize(path)?
+                } else {
+                    fs::canonicalize(parent)?
+                        .join(path.file_name().context("credential file has no name")?)
+                };
+                let mut name = path.as_os_str().to_os_string();
+                name.push(".lock");
+                PathBuf::from(name)
+            }
+        };
+        fs::create_dir_all(path.parent().context("credential lock has no parent")?)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .context("opening credential store lock")?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let _guard = loop {
+            match lock.try_write() {
+                Ok(guard) => break guard,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    anyhow::ensure!(
+                        Instant::now() < deadline,
+                        "timed out waiting for another process to update credentials; retry the command"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => return Err(e).context("locking credential store"),
+            }
+        };
+        let mut map = self.load_all()?;
+        let result = update(&mut map)?;
+        self.save_all(&map)
+            .context("saving credentials after update")?;
+        Ok(result)
+    }
+
+    /// Only call while holding the update lock (or setting up a test fixture).
+    fn save_all<T: Serialize>(&self, map: &HashMap<String, T>) -> anyhow::Result<()> {
         match self {
             Self::Keyring => keyring_save_all(map),
             Self::File(path) => file_save_all(path, map),
@@ -166,26 +230,115 @@ fn file_load_all<T: DeserializeOwned>(path: &Path) -> anyhow::Result<HashMap<Str
 }
 
 fn file_save_all<T: Serialize>(path: &Path, map: &HashMap<String, T>) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| anyhow::anyhow!("failed to serialize credentials: {e}"))?;
-    fs::write(path, &json)
-        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("failed to set credentials permissions: {e}"))?;
-    }
+    // Follow an existing symlink consistently with the lock path, then replace
+    // atomically so unlocked readers see either complete version. NamedTempFile
+    // is private (0600 on Unix) from creation, before any credentials are written.
+    let destination = if path.exists() {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(json.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&destination)
+        .map_err(|e| e.error)
+        .with_context(|| format!("replacing credentials in {}", destination.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_updates_preserve_other_profiles_and_deployments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let path = &path;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    CredentialStore::File(path.clone())
+                        .update(|map: &mut HashMap<String, HashMap<String, String>>| {
+                            // Widen the lost-update window; these are separate opens,
+                            // just as independent processes use separate file handles.
+                            std::thread::sleep(Duration::from_millis(10));
+                            map.entry(format!("profile-{}", index % 2))
+                                .or_default()
+                                .insert(format!("deployment-{index}"), format!("rotated-{index}"));
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        let map: HashMap<String, HashMap<String, String>> =
+            CredentialStore::File(path).load_all().unwrap();
+        for index in 0..8 {
+            assert_eq!(
+                map[&format!("profile-{}", index % 2)][&format!("deployment-{index}")],
+                format!("rotated-{index}")
+            );
+        }
+    }
+
+    #[test]
+    fn failed_update_does_not_replace_credentials_and_releases_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::File(dir.path().join("credentials.json"));
+        store
+            .update(|map: &mut HashMap<String, String>| {
+                map.insert("session".into(), "original".into());
+                Ok(())
+            })
+            .unwrap();
+        let result = store.update(|map: &mut HashMap<String, String>| -> anyhow::Result<()> {
+            map.clear();
+            anyhow::bail!("simulated network failure")
+        });
+        assert!(result.is_err());
+        store
+            .update(|map: &mut HashMap<String, String>| {
+                assert_eq!(map["session"], "original");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn updating_a_symlink_preserves_the_link_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("credentials.json");
+        let alias = dir.path().join("alias.json");
+        let store = CredentialStore::File(target.clone());
+        store
+            .save_all(&HashMap::from([("session".to_string(), "original")]))
+            .unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        CredentialStore::File(alias.clone())
+            .update(|map: &mut HashMap<String, String>| {
+                map.insert("session".into(), "rotated".into());
+                Ok(())
+            })
+            .unwrap();
+        assert!(alias.is_symlink());
+        assert_eq!(store.load_all::<String>().unwrap()["session"], "rotated");
+    }
 
     #[test]
     fn file_backend_round_trips_and_is_empty_when_absent() {
