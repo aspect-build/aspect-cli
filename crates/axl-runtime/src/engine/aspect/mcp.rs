@@ -509,7 +509,8 @@ fn tool_defs() -> &'static [ToolDef] {
                           cached records unless cache=miss. Optional daily buckets use UTC and omit \
                           empty days. Empty results can reflect retention or pending ingestion. \
                           Results may be cached for 30 seconds. If HTTP 503 reports action history \
-                          is busy, wait at least one second before retrying.",
+                          is busy, wait at least one second before retrying. Queries may wait up to two \
+                          seconds for capacity before returning 503.",
             schema: || {
                 obj(
                     serde_json::json!({
