@@ -507,7 +507,9 @@ fn tool_defs() -> &'static [ToolDef] {
                           Summary counts, total execution-wall time and p50/p90/p99 cover the whole \
                           filtered window; percentiles measure per-invocation label totals, including \
                           cached records unless cache=miss. Optional daily buckets use UTC and omit \
-                          empty days. Empty results can reflect retention or pending ingestion.",
+                          empty days. Empty results can reflect retention or pending ingestion. \
+                          Results may be cached for 30 seconds. If HTTP 503 reports action history \
+                          is busy, wait at least one second before retrying.",
             schema: || {
                 obj(
                     serde_json::json!({
