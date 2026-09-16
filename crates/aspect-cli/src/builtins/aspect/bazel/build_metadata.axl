@@ -8,6 +8,8 @@ strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
 load("../private/lib/ci.axl", "detect_buildkite_build_url")
+load("../private/lib/github.axl", "detect_commit_sha")
+load("../private/lib/gitlab_detect.axl", "detect_gitlab_commit_sha")
 
 _VCS_HOST_TO_ENUM = {
     "github.com": "GITHUB",
@@ -75,17 +77,26 @@ def parse_git_remote_url(url):
         return {"host": host}
     return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
 
-def _git_show(process):
-    """Run `git show HEAD` and return a dict of commit fields.
+def _git_show(process, rev, cwd = None):
+    """Run `git show <rev>` and return a dict of commit fields.
 
     Produces COMMIT_SHA, COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL, COMMIT_AUTHOR
     ("Name <email>"), COMMIT_MESSAGE, COMMIT_TIMESTAMP, TAG.
-    """
-    out = process.command("git").arg("show").arg("HEAD") \
-        .arg("--format=%H%n%aN%n%aE%n%s%n%aI%n%D").arg("--no-patch") \
-        .stdout("piped").stderr("piped").spawn().wait_with_output()
 
-    if not out.stdout:
+    `{}` when `rev` is not in the local object store. That is routine, not an
+    error: on a `fetch-depth: 1` merge-ref checkout the only commit fetched is
+    the synthesized merge itself, so the PR head `rev` resolves to nothing.
+    Callers keep the SHA they asked about and go without the description
+    rather than fall back to describing a different commit.
+    """
+    cmd = process.command("git").arg("show").arg(rev) \
+        .arg("--format=%H%n%aN%n%aE%n%s%n%aI%n%D").arg("--no-patch") \
+        .stdout("piped").stderr("piped")
+    if cwd:
+        cmd = cmd.current_dir(cwd)
+    out = cmd.spawn().wait_with_output()
+
+    if not out.status.success or not out.stdout:
         return {}
 
     lines = out.stdout.strip().split("\n")
@@ -536,8 +547,32 @@ def get_task_metadata_flags(ctx):
 
 # Public entry point
 
-def get_build_metadata_flags(std):
-    """Generate --build_metadata=KEY=VALUE flags (empty values skipped)."""
+def detect_build_commit_sha(std):
+    """The commit the build is *about* — the branch or PR head, never a
+    forge-synthesized merge commit. `""` when nothing in the environment
+    names a commit, which off CI is every time.
+
+    On GitHub Actions `pull_request` / `pull_request_target` and on GitLab
+    merged-result / merge-train pipelines, both `GITHUB_SHA` / `CI_COMMIT_SHA`
+    and the checkout itself are an ephemeral merge of the head onto the base.
+    That commit is authored by the forge, has a "Merge <head> into <base>"
+    subject, and is in neither branch's history — reporting it as the build's
+    commit misattributes the build and gives the Web UI a SHA that resolves to
+    nothing. Both hosts expose the real head elsewhere, which is what
+    `detect_commit_sha` (event payload) and `detect_gitlab_commit_sha`
+    (`CI_MERGE_REQUEST_SOURCE_BRANCH_SHA`) read.
+
+    GitLab is consulted first: `detect_commit_sha` falls through to a bare
+    `CI_COMMIT_SHA`, which is the synthesized merge on those pipelines.
+    """
+    return detect_gitlab_commit_sha(std) or detect_commit_sha(std)
+
+def get_build_metadata_flags(std, cwd = None):
+    """Generate --build_metadata=KEY=VALUE flags (empty values skipped).
+
+    `cwd` is the directory git runs in; production passes None (the process
+    dir) and tests point it at a scratch repo.
+    """
     meta = {}
 
     # 1: CI-host-specific metadata.
@@ -550,9 +585,18 @@ def get_build_metadata_flags(std):
     elif std.env.var("GITLAB_CI"):
         _collect_gitlab(std.env, meta)
 
-    # 2: Overlay `git show` commit data — authoritative for COMMIT_* (works
-    # offline and off-CI).
-    git_data = _git_show(std.process)
+    # 2: Overlay commit data for the head commit — authoritative for COMMIT_*
+    # (works offline and off-CI).
+    #
+    # Read by SHA, not from HEAD: on a PR build HEAD is usually the
+    # forge-synthesized merge, so `git show HEAD` would describe that merge
+    # (its "Merge x into y" subject, its noreply@ forge author) no matter what
+    # step 1 resolved. Where there is no synthesized merge the resolved SHA is
+    # HEAD anyway, so this is the same read. `""` off CI falls back to HEAD.
+    head_sha = detect_build_commit_sha(std)
+    if head_sha:
+        meta["COMMIT_SHA"] = head_sha
+    git_data = _git_show(std.process, head_sha or "HEAD", cwd = cwd)
     for k, v in git_data.items():
         meta[k] = v
 
