@@ -37,6 +37,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         with_loader: false,
         with_fake_bazel: false,
         features: vec![],
+        config: None,
         string_list_args: vec![],
     }
 }
@@ -46,6 +47,7 @@ pub struct EvalBuilder {
     with_loader: bool,
     with_fake_bazel: bool,
     features: Vec<String>,
+    config: Option<String>,
     string_list_args: Vec<(String, Vec<String>)>,
 }
 
@@ -59,10 +61,18 @@ impl EvalBuilder {
 
     /// Register the snippet's `feature(...)` exports named in `symbols`, as a
     /// `use_feature` in MODULE.aspect would, and run Phase 2 and Phase 3 in
-    /// [`EvalBuilder::run_task`] with no config files and empty feature
-    /// `Arguments`, so those implementations execute before the task does.
+    /// [`EvalBuilder::run_task`] with empty feature `Arguments`, so those
+    /// implementations execute before the task does.
     pub fn with_features(mut self, symbols: &[&str]) -> Self {
         self.features = symbols.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// Evaluate `code` as the project's `config.axl` (it must define
+    /// `config(ctx)`) in Phase 2 of [`EvalBuilder::run_task`], which then also
+    /// runs Phase 3.
+    pub fn with_config(mut self, code: &str) -> Self {
+        self.config = Some(code.to_string());
         self
     }
 
@@ -167,9 +177,9 @@ impl EvalBuilder {
 
     /// Drive `MultiPhaseEval` Phase 1 (discover tasks) + Phase 4 (execute).
     /// Phase 2 (configs) and Phase 3 (features) are skipped unless
-    /// [`EvalBuilder::with_features`] opted in — the snippet must be
-    /// self-contained. Task `idx` runs with empty `Arguments` unless
-    /// [`EvalBuilder::with_string_list_args`] seeded some.
+    /// [`EvalBuilder::with_features`] or [`EvalBuilder::with_config`] opted in
+    /// — the snippet must be self-contained. Task `idx` runs with empty
+    /// `Arguments` unless [`EvalBuilder::with_string_list_args`] seeded some.
     ///
     /// Snippets that call `ctx.bazel.build` should opt in via
     /// `.with_fake_bazel()` so the runtime spawns the basil fake-bazel
@@ -208,8 +218,14 @@ impl EvalBuilder {
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)
                 .map_err(anyhow::Error::from)?;
-            if !self.features.is_empty() {
-                mpe.execute_configs(&[]).map_err(anyhow::Error::from)?;
+            if !self.features.is_empty() || self.config.is_some() {
+                let config_path = tmp.path().join("config.axl");
+                let mut configs: Vec<(&std::path::Path, &Mod)> = vec![];
+                if let Some(code) = &self.config {
+                    std::fs::write(&config_path, code)?;
+                    configs.push((&config_path, &root_mod));
+                }
+                mpe.execute_configs(&configs).map_err(anyhow::Error::from)?;
                 mpe.execute_features_with_args(|_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }

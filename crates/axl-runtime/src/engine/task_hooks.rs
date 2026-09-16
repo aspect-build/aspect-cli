@@ -1,9 +1,10 @@
 //! Runtime-invoked hooks around a task body: `ctx.hooks.pre_task(fn)` runs
 //! before `_impl`, `ctx.hooks.post_task(fn)` after it, however it ended.
 //!
-//! One `TaskHooks` value lives on the shared heap for the whole run, so a
-//! feature impl (phase 3) and the task body (phase 4) register into the same
-//! lists. The task runner in `eval/multi_phase.rs` drives them:
+//! One `TaskHooks` value lives on the shared heap for the whole run, so
+//! `config.axl` (phase 2), a feature impl (phase 3), and the task body
+//! (phase 4) register into the same lists. The task runner in
+//! `eval/multi_phase.rs` drives them:
 //!
 //! 1. pre-task hooks, in registration order, each called as `hook(ctx)`;
 //! 2. the task body;
@@ -368,5 +369,41 @@ t = task(implementation = _impl)
         .expect("run_task");
         assert_eq!(exit, Some(0));
         assert_eq!(std::fs::read_to_string(&trace).unwrap(), "good\n");
+    }
+
+    #[test]
+    fn hooks_registered_from_config_axl_run() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let trace = dir.path().join("trace");
+        let path = trace.to_string_lossy();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    ctx.std.fs.try_append("{path}", "body\n")
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .with_config(&format!(
+            r#"
+def _pre(ctx):
+    ctx.std.fs.try_append("{path}", "pre\n")
+
+def _post(ctx, outcome):
+    ctx.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + "\n")
+
+def config(ctx):
+    ctx.hooks.pre_task(_pre)
+    ctx.hooks.post_task(_post)
+"#
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(&trace).unwrap(),
+            "pre\nbody\npost:0\n"
+        );
     }
 }

@@ -124,8 +124,8 @@ impl to run opts in with `.with_features(&["Name"])` on the test harness.
 
 ## Task hooks
 
-`ctx.hooks` (`engine/task_hooks.rs`) is one `TaskHooks` value shared by every
-feature impl and the task body. `pre_task(fn)` runs `fn(ctx)` before the body;
+`ctx.hooks` (`engine/task_hooks.rs`) is one `TaskHooks` value shared by
+`config.axl`, every feature impl, and the task body. `pre_task(fn)` runs `fn(ctx)` before the body;
 `post_task(fn)` runs `fn(ctx, conclusion)` after it, however it ended,
 including a hard error, whose conclusion carries exit code 1 and the error's
 summary before the error propagates. The runner's order is pre-task hooks,

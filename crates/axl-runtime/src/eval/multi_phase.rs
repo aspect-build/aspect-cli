@@ -378,6 +378,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.trait_map_value.unwrap(),
             self.features,
             self.telemetry_value,
+            self.hooks_value,
         ));
 
         for (config_path, scope) in configs {

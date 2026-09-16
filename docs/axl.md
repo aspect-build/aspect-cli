@@ -210,8 +210,8 @@ a status surface still has to close it: `results.build` / `results.test` do so
 from a post-task hook (§14), so an early exit in `build` or `test` reports the
 real status and message. A surface you wire yourself needs the same hook.
 
-**§14 Task hooks.** `ctx.hooks` is shared by every feature impl and the task
-body. `ctx.hooks.pre_task(fn)` runs `fn(ctx)` before the body;
+**§14 Task hooks.** `ctx.hooks` is shared by `config.axl`, every feature impl,
+and the task body. `ctx.hooks.pre_task(fn)` runs `fn(ctx)` before the body;
 `ctx.hooks.post_task(fn)` runs `fn(ctx, conclusion)` after it, however it
 ended: a return, an `exit`, or an error. `conclusion` is the runtime's
 `TaskConclusion` (`exit_code`, `text`, `flagged`, `message`). Order is
@@ -219,8 +219,8 @@ pre-task hooks, body, post-task hooks, `ctx.defer` callbacks, bookend, each
 list in registration order. A pre-task hook that exits or fails stands in for
 the body, which never runs; post-task hooks still see that conclusion. A
 post-task hook that fails is reported as a warning and changes nothing.
-Register pre-task hooks from a feature; once the body has started they are
-refused.
+Register pre-task hooks from `config.axl` or a feature; once the body has
+started they are refused.
 
 ```python
 def _close_surface(ctx: TaskContext, outcome: TaskConclusion):
