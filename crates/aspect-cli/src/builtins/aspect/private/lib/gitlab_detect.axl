@@ -54,6 +54,31 @@ def _resolve_sha(env):
         ""
     )
 
+def detect_gitlab_commit_sha(std):
+    """The real source-branch commit on a GitLab MR pipeline, or `""` when
+    nothing in the environment names a GitLab commit. See `_resolve_sha` for
+    why `CI_COMMIT_SHA` alone is wrong on merged-result pipelines.
+
+    The standalone counterpart to the `sha` field of `detect_gitlab_mr`, for
+    callers that want the commit without the rest of the MR context (build
+    metadata, which runs on branch pipelines too).
+
+    The `ASPECT_GITLAB_MR_IID` override path is honored on the same terms
+    `detect_gitlab_mr` honors it — `ASPECT_GITLAB_SHA` first, then the native
+    vars, and only once the IID marks this as a GitLab MR build. That keeps a
+    runner on a non-GitLab CI host reporting one commit rather than the
+    override's SHA on the MR and the host's own in the metadata. Reading
+    `ASPECT_GITLAB_SHA` without the IID would let a stray variable displace
+    the real commit on every host, which is why the gate is the IID and not
+    the SHA.
+    """
+    env = std.env
+    if env.var("ASPECT_GITLAB_MR_IID"):
+        return env.var("ASPECT_GITLAB_SHA") or _resolve_sha(env)
+    if not env.var("GITLAB_CI"):
+        return ""
+    return _resolve_sha(env)
+
 def detect_gitlab_mr(std):
     """Detect GitLab merge-request context from CI environment variables.
 

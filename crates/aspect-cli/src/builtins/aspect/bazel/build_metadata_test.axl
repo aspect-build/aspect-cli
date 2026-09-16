@@ -1,0 +1,366 @@
+"""Tests for `bazel/build_metadata.axl` commit resolution.
+
+The commit fields are the part of the metadata a human reads first in the
+Web UI, and the part a PR build gets wrong by default: on GitHub Actions
+`pull_request` and GitLab merged-result pipelines both the CI env var and
+the checkout are a forge-synthesized merge of the head onto the base, so
+anything that trusts `GITHUB_SHA` or `git show HEAD` reports a commit that
+is in neither branch, written by `noreply@github.com`, subject
+"Merge x into y".
+
+Covers:
+  - `detect_build_commit_sha` — the per-host resolution, including the two
+    synthesized-merge cases and the hosts (Buildkite, CircleCI, GHA push,
+    GitLab detached) where the plain env var is already the head.
+  - `get_build_metadata_flags` end to end against real scratch git repos
+    built into the GHA `pull_request` shape: a feature commit, a merge
+    commit standing in for `refs/pull/N/merge`, and an event payload
+    naming the feature commit as `pull_request.head.sha`. Asserts the
+    emitted COMMIT_* describe the feature commit, and that a head SHA
+    absent from a shallow checkout degrades to the SHA alone rather than
+    to the merge commit's description.
+
+Run with:
+  aspect dev test-build-metadata
+"""
+
+load("@aspect//bazel/build_metadata.axl", "detect_build_commit_sha", "get_build_metadata_flags")
+
+_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_MERGE = "cccccccccccccccccccccccccccccccccccccccc"
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _env_std(vars, files = {}):
+    """Stub std with env + fs; enough for `detect_build_commit_sha`."""
+    return struct(
+        env = struct(var = lambda name: vars.get(name, "")),
+        fs = struct(
+            exists = lambda path: path in files,
+            read_to_string = lambda path: files[path],
+        ),
+    )
+
+def _hybrid_std(ctx, vars):
+    """A fake env over the real fs and process, so `get_build_metadata_flags`
+    can run against a scratch repo under a synthesized CI environment."""
+    return struct(
+        env = struct(var = lambda name: vars.get(name, "")),
+        fs = ctx.std.fs,
+        process = ctx.std.process,
+    )
+
+def _pr_event(head_sha, base_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
+    return '{"pull_request": {"head": {"sha": "%s"}, "base": {"sha": "%s"}}}' % (head_sha, base_sha)
+
+def _expect_sha(label, vars, files, expected):
+    _eq(label, detect_build_commit_sha(_env_std(vars, files)), expected)
+
+# ── detect_build_commit_sha ─────────────────────────────────────────
+
+def _test_commit_sha_resolution(ctx):
+    event_path = "/tmp/event.json"
+    pr_files = {event_path: _pr_event(_HEAD)}
+
+    # The bug this module exists to prevent: GITHUB_SHA on `pull_request` is
+    # the refs/pull/N/merge commit, and the event payload holds the real head.
+    _expect_sha(
+        "GHA pull_request: head.sha, not the synthesized GITHUB_SHA",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_SHA": _MERGE,
+            "GITHUB_EVENT_PATH": event_path,
+        },
+        pr_files,
+        _HEAD,
+    )
+
+    # `pull_request_target` runs in the base-repo context, so GITHUB_SHA is
+    # the base tip — not a merge, but not the PR's commit either.
+    _expect_sha(
+        "GHA pull_request_target: head.sha, not the base tip",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request_target",
+            "GITHUB_SHA": _MERGE,
+            "GITHUB_EVENT_PATH": event_path,
+        },
+        pr_files,
+        _HEAD,
+    )
+
+    # No payload on disk (self-hosted runner quirks, a stripped env): the
+    # synthesized SHA is still better than nothing.
+    _expect_sha(
+        "GHA pull_request without an event payload: falls back to GITHUB_SHA",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_SHA": _MERGE,
+            "GITHUB_EVENT_PATH": "/does/not/exist",
+        },
+        {},
+        _MERGE,
+    )
+
+    # Non-PR GHA events check out a real commit; GITHUB_SHA is it.
+    _expect_sha(
+        "GHA push: GITHUB_SHA",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": _HEAD},
+        {},
+        _HEAD,
+    )
+    _expect_sha(
+        "GHA merge_group: GITHUB_SHA (the queue ref is the commit being built)",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "merge_group", "GITHUB_SHA": _HEAD},
+        {},
+        _HEAD,
+    )
+
+    # GitLab's equivalent: CI_COMMIT_SHA is the synthesized merge on
+    # merged_result / merge_train, and the source-branch SHA is the head.
+    _expect_sha(
+        "GitLab merged_result: CI_MERGE_REQUEST_SOURCE_BRANCH_SHA wins over CI_COMMIT_SHA",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+            "CI_COMMIT_SHA": _MERGE,
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA": _HEAD,
+        },
+        {},
+        _HEAD,
+    )
+    _expect_sha(
+        "GitLab detached: CI_COMMIT_SHA is already the source-branch head",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "detached", "CI_COMMIT_SHA": _HEAD},
+        {},
+        _HEAD,
+    )
+
+    # The mirror setup: an Aspect-Workflows runner on a non-GitLab host that
+    # posts status to a GitLab MR. The status surface attaches to
+    # ASPECT_GITLAB_SHA, so the metadata has to name the same commit.
+    _expect_sha(
+        "ASPECT_GITLAB_SHA override: wins over the host's own SHA",
+        {
+            "BUILDKITE": "true",
+            "BUILDKITE_COMMIT": _MERGE,
+            "ASPECT_GITLAB_MR_IID": "7",
+            "ASPECT_GITLAB_SHA": _HEAD,
+        },
+        {},
+        _HEAD,
+    )
+
+    # ASPECT_GITLAB_MR_IID is the gate, matching `detect_gitlab_mr`: a stray
+    # ASPECT_GITLAB_SHA with no MR to attach to must not displace the host.
+    _expect_sha(
+        "ASPECT_GITLAB_SHA without the MR IID: the host's own SHA stands",
+        {"BUILDKITE": "true", "BUILDKITE_COMMIT": _HEAD, "ASPECT_GITLAB_SHA": _MERGE},
+        {},
+        _HEAD,
+    )
+
+    # Buildkite and CircleCI check out the PR head, so their env var is the
+    # head already — and must not be displaced by the GitLab probe.
+    _expect_sha(
+        "Buildkite: BUILDKITE_COMMIT",
+        {"BUILDKITE": "true", "BUILDKITE_COMMIT": _HEAD},
+        {},
+        _HEAD,
+    )
+    _expect_sha(
+        "CircleCI: CIRCLE_SHA1",
+        {"CIRCLECI": "true", "CIRCLE_SHA1": _HEAD},
+        {},
+        _HEAD,
+    )
+
+    # Off CI there is nothing to resolve; the caller falls back to HEAD.
+    _expect_sha("no CI host: empty, leaving HEAD in charge", {}, {}, "")
+
+# ── get_build_metadata_flags against a real repo ────────────────────
+
+def _git_ok(ctx, repo, args, env = {}):
+    """`env` overrides entries of `_GIT_ENV`. It has to go through the
+    environment: `git -c user.name=...` loses to `GIT_AUTHOR_NAME` and
+    `GIT_COMMITTER_NAME`, so config alone cannot change who a commit is by."""
+    git_env = dict(_GIT_ENV)
+    git_env.update(env)
+    cmd = ctx.std.process.command("git").args(args).current_dir(repo)
+    for k, v in git_env.items():
+        cmd = cmd.env(k, v)
+    out = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        fail("git %s failed in %s: %s" % (" ".join(args), repo, out.stderr.strip()))
+    return out.stdout.strip()
+
+def _commit_file(ctx, repo, name, content, message, author = None):
+    ctx.std.fs.write(repo + "/" + name, content)
+    _git_ok(ctx, repo, ["add", name])
+    args = ["commit", "-m", message]
+    if author:
+        args += ["--author", author]
+    _git_ok(ctx, repo, args)
+    return _git_ok(ctx, repo, ["rev-parse", "HEAD"])
+
+def _pull_request_repo(ctx):
+    """A repo in the shape `actions/checkout` leaves on a `pull_request`:
+    HEAD is a merge of the PR head onto the base, authored by the forge.
+    Returns `(repo, head_sha, merge_sha)`."""
+    repo = ctx.std.fs.mkdtemp(prefix = "axl-build-metadata-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(repo) if ctx.std.fs.exists(repo) else None)
+    _git_ok(ctx, repo, ["init", "-q", "--initial-branch=main"])
+    _commit_file(ctx, repo, "base.txt", "base\n", "base")
+
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    head_sha = _commit_file(
+        ctx,
+        repo,
+        "feature.txt",
+        "feature\n",
+        "feat: the commit a human would recognize",
+        author = "Real Author <real@example.com>",
+    )
+
+    _git_ok(ctx, repo, ["checkout", "-q", "main"])
+    _git_ok(
+        ctx,
+        repo,
+        ["merge", "-q", "--no-ff", "feature", "-m", "Merge %s into main" % head_sha],
+        env = {
+            "GIT_AUTHOR_NAME": "GitHub",
+            "GIT_AUTHOR_EMAIL": "noreply@github.com",
+            "GIT_COMMITTER_NAME": "GitHub",
+            "GIT_COMMITTER_EMAIL": "noreply@github.com",
+        },
+    )
+    merge_sha = _git_ok(ctx, repo, ["rev-parse", "HEAD"])
+    if merge_sha == head_sha:
+        fail("fixture: --no-ff merge should have created a new commit")
+    merge_author = _git_ok(ctx, repo, ["show", merge_sha, "--no-patch", "--format=%aE"])
+    if merge_author != "noreply@github.com":
+        fail("fixture: the merge should be forge-authored, got %r" % merge_author)
+    return repo, head_sha, merge_sha
+
+def _flags_map(flags):
+    """`--build_metadata=K=V` list → {K: V}."""
+    out = {}
+    prefix = "--build_metadata="
+    for flag in flags:
+        if not flag.startswith(prefix):
+            fail("unexpected flag shape: %r" % flag)
+        body = flag[len(prefix):]
+        if "=" not in body:
+            fail("flag missing a value: %r" % flag)
+        key, value = body.split("=", 1)
+        out[key] = value
+    return out
+
+def _test_pull_request_describes_the_head_commit(ctx):
+    repo, head_sha, merge_sha = _pull_request_repo(ctx)
+    event_path = repo + "/event.json"
+    ctx.std.fs.write(event_path, _pr_event(head_sha))
+
+    std = _hybrid_std(ctx, {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REF": "refs/pull/42/merge",
+        "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+        "GITHUB_HEAD_REF": "feature",
+        "GITHUB_BASE_REF": "main",
+        "GITHUB_SHA": merge_sha,
+        "GITHUB_EVENT_PATH": event_path,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("PR build — COMMIT_SHA is the PR head", meta.get("COMMIT_SHA"), head_sha)
+    _eq(
+        "PR build — COMMIT_MESSAGE is the author's subject, not the merge's",
+        meta.get("COMMIT_MESSAGE"),
+        "feat: the commit a human would recognize",
+    )
+    _eq("PR build — COMMIT_AUTHOR_NAME is the author", meta.get("COMMIT_AUTHOR_NAME"), "Real Author")
+    _eq(
+        "PR build — COMMIT_AUTHOR_EMAIL is the author, not the forge",
+        meta.get("COMMIT_AUTHOR_EMAIL"),
+        "real@example.com",
+    )
+    _eq(
+        "PR build — COMMIT_AUTHOR is the 'Name <email>' form",
+        meta.get("COMMIT_AUTHOR"),
+        "Real Author <real@example.com>",
+    )
+
+    # The surrounding CI metadata still comes from step 1.
+    _eq("PR build — PR_NUMBER from GITHUB_REF", meta.get("PR_NUMBER"), "42")
+    _eq("PR build — RUN_TYPE", meta.get("RUN_TYPE"), "PULL_REQUEST")
+
+def _test_unfetched_head_yields_the_sha_alone(ctx):
+    """`fetch-depth: 1` on a merge ref fetches only the merge commit, so the
+    PR head SHA names an object that is not there. The SHA is still right and
+    still worth emitting; the description is not available, and falling back
+    to HEAD would substitute the merge commit's."""
+    repo, head_sha, merge_sha = _pull_request_repo(ctx)
+    missing = "1234567890123456789012345678901234567890"
+    event_path = repo + "/event.json"
+    ctx.std.fs.write(event_path, _pr_event(missing))
+
+    std = _hybrid_std(ctx, {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_SHA": merge_sha,
+        "GITHUB_EVENT_PATH": event_path,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("unfetched head — COMMIT_SHA is still the PR head", meta.get("COMMIT_SHA"), missing)
+    _eq("unfetched head — no COMMIT_MESSAGE rather than the merge's", meta.get("COMMIT_MESSAGE"), None)
+    _eq("unfetched head — no COMMIT_AUTHOR rather than the forge's", meta.get("COMMIT_AUTHOR"), None)
+
+def _test_non_pr_build_still_describes_head(ctx):
+    """The hosts that check out a real commit must be unaffected: the
+    resolved SHA is HEAD, so the `git show` read is the same one as before."""
+    repo, head_sha, _merge_sha = _pull_request_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", head_sha])
+
+    std = _hybrid_std(ctx, {"BUILDKITE": "true", "BUILDKITE_COMMIT": head_sha})
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("branch build — COMMIT_SHA is HEAD", meta.get("COMMIT_SHA"), head_sha)
+    _eq(
+        "branch build — COMMIT_MESSAGE from the checked-out commit",
+        meta.get("COMMIT_MESSAGE"),
+        "feat: the commit a human would recognize",
+    )
+    _eq("branch build — USER falls back to the git author", meta.get("USER"), "Real Author")
+
+def _test_impl(ctx):
+    _test_commit_sha_resolution(ctx)
+    _test_pull_request_describes_the_head_commit(ctx)
+    _test_unfetched_head_yields_the_sha_alone(ctx)
+    _test_non_pr_build_still_describes_head(ctx)
+    print("build_metadata.axl: OK (4 sections)")
+    return 0
+
+build_metadata_tests = task(
+    summary = "Run the build metadata AXL unit tests.",
+    kind = "test-build-metadata",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
