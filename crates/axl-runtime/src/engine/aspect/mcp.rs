@@ -72,6 +72,20 @@ fn not_logged_in_message(deployment: &str) -> String {
     )
 }
 
+fn not_found_hint(tool: &str, deployment: &str) -> String {
+    if tool == "get_action_history" {
+        // An empty history is a 200. A 404 here means the deployment lacks the route,
+        // not that the label is unknown. CLI and Workflows releases ship independently.
+        format!(
+            " — deployment '{deployment}' does not expose /api/v1/action-history. \
+             Ask your Workflows operator to upgrade to a release that includes action-history \
+             support, then retry. See {DOCS_URL}#action-performance-history"
+        )
+    } else {
+        format!(" — no such resource on deployment '{deployment}'; ids come from list_invocations")
+    }
+}
+
 /// One tool the server publishes: the curated MCP-facing contract plus how it
 /// maps onto the REST route. Descriptions are written for the calling agent —
 /// they are the tool's entire documentation, so they carry the non-obvious
@@ -685,10 +699,7 @@ impl BuildResultsServer {
                     auth::login_hint(&self.deployment)
                 )
             }
-            404 => format!(
-                " — no such resource on deployment '{}'; ids come from list_invocations",
-                self.deployment
-            ),
+            404 => not_found_hint(def.name, &self.deployment),
             _ => String::new(),
         };
         Err(format!("HTTP {status} from {path}{hint}: {detail}"))
@@ -1025,6 +1036,35 @@ mod tests {
             path,
             "/action-history?label=%2F%2Fa%3Ab&start=2026-09-01T00%3A00%3A00Z&end=2026-09-02T00%3A00%3A00Z&daily=false"
         );
+    }
+
+    #[test]
+    fn missing_action_history_endpoint_explains_the_deployment_upgrade() {
+        let hint = not_found_hint("get_action_history", "silo-aws");
+        for expected in [
+            "silo-aws",
+            "/api/v1/action-history",
+            "Workflows operator",
+            "upgrade",
+            "then retry",
+            "#action-performance-history",
+        ] {
+            assert!(hint.contains(expected), "missing {expected}: {hint}");
+        }
+        assert!(!hint.contains("list_invocations"));
+    }
+
+    #[test]
+    fn other_tools_keep_the_resource_not_found_hint() {
+        for def in tool_defs()
+            .iter()
+            .filter(|d| d.name != "get_action_history")
+        {
+            assert_eq!(
+                not_found_hint(def.name, "silo-aws"),
+                " — no such resource on deployment 'silo-aws'; ids come from list_invocations"
+            );
+        }
     }
 
     #[test]
