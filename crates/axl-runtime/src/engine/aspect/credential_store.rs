@@ -55,6 +55,48 @@ fn default_file_path() -> anyhow::Result<PathBuf> {
     Ok(home.join(".aspect").join("credentials.json"))
 }
 
+/// The OS keyring is scoped to the OS user, not HOME. In particular, a
+/// hermetic wrapper can change HOME/TMPDIR without changing the macOS keychain.
+/// Do not use temp_dir(), cache_dir(), or an environment-selected runtime path.
+#[cfg(unix)]
+fn keyring_lock_path() -> anyhow::Result<PathBuf> {
+    // SAFETY: geteuid has no preconditions and always succeeds.
+    let uid = unsafe { nix::libc::geteuid() };
+    let directory = PathBuf::from(format!("/tmp/aspect-keyring-{uid}"));
+    prepare_keyring_lock_directory(&directory, uid)?;
+    Ok(directory.join("credentials.lock"))
+}
+
+#[cfg(unix)]
+fn prepare_keyring_lock_directory(directory: &Path, uid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    match fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).context("creating private keyring lock directory"),
+    }
+    // A predictable path in /tmp must not trust a pre-existing symlink or a
+    // directory another user owns/can modify. Never repair or delete it: that
+    // could separate callers already holding a lock from later callers.
+    let metadata = fs::symlink_metadata(directory)?;
+    anyhow::ensure!(
+        metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o777 == 0o700,
+        "keyring lock directory {} must be a private directory owned by OS user {uid}",
+        directory.display()
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn keyring_lock_path() -> anyhow::Result<PathBuf> {
+    // dirs uses the Windows known-folder API here, independently of HOME/TMPDIR.
+    Ok(dirs::data_local_dir()
+        .context("unable to determine OS user application-data directory")?
+        .join("Aspect")
+        .join("keyring-credentials.lock"))
+}
+
 /// Where credentials for a profile are persisted. One value type (`T`) is stored
 /// per profile name; `T` is (de)serialized as JSON.
 pub(crate) enum CredentialStore {
@@ -102,7 +144,7 @@ impl CredentialStore {
         update: impl FnOnce(&mut HashMap<String, T>) -> anyhow::Result<R>,
     ) -> anyhow::Result<R> {
         let path = match self {
-            Self::Keyring => default_file_path()?.with_file_name("keyring-credentials.lock"),
+            Self::Keyring => keyring_lock_path()?,
             Self::File(path) => {
                 let parent = path
                     .parent()
@@ -127,7 +169,7 @@ impl CredentialStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
         }
         let file = options
             .open(&path)
@@ -260,6 +302,93 @@ fn file_save_all<T: Serialize>(path: &Path, map: &HashMap<String, T>) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Invoked in a subprocess so HOME/TMPDIR overrides never mutate the test
+    /// runner's environment. A separate lock name avoids blocking real users.
+    #[cfg(unix)]
+    #[test]
+    fn keyring_lock_subprocess_probe() {
+        let Some(report) = std::env::var_os("ASPECT_KEYRING_LOCK_TEST_REPORT") else {
+            return;
+        };
+        let name = std::env::var_os("ASPECT_KEYRING_LOCK_TEST_NAME").unwrap();
+        let path = keyring_lock_path().unwrap().with_file_name(name);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        assert_eq!(
+            lock.try_write().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        fs::write(report, path.to_str().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keyring_lock_is_shared_across_home_and_temp_overrides() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let production_path = keyring_lock_path().unwrap();
+        let test_file = tempfile::NamedTempFile::new_in(production_path.parent().unwrap()).unwrap();
+        let path = test_file.path();
+        let name = path.file_name().unwrap();
+        let mut lock = fd_lock::RwLock::new(test_file.reopen().unwrap());
+        let _guard = lock.write().unwrap();
+        for index in 0..2 {
+            // HOME is a regular file, so trying to create HOME/.aspect fails even
+            // when this test runs with permissions that bypass read-only bits.
+            let home = dir.path().join(format!("unwritable-home-{index}"));
+            fs::write(&home, "not a directory").unwrap();
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o400)).unwrap();
+            let report = dir.path().join(format!("report-{index}"));
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::aspect::credential_store::tests::keyring_lock_subprocess_probe",
+                    "--nocapture",
+                ])
+                .env("HOME", home)
+                .env("TMPDIR", dir.path().join(format!("different-temp-{index}")))
+                .env(
+                    "XDG_RUNTIME_DIR",
+                    dir.path().join(format!("different-runtime-{index}")),
+                )
+                .env("ASPECT_KEYRING_LOCK_TEST_REPORT", &report)
+                .env("ASPECT_KEYRING_LOCK_TEST_NAME", name)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read_to_string(report).unwrap(), path.to_str().unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keyring_lock_directory_rejects_symlinks_and_unsafe_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { nix::libc::geteuid() };
+        prepare_keyring_lock_directory(&private, uid).unwrap();
+        prepare_keyring_lock_directory(&private, uid).unwrap();
+        assert!(prepare_keyring_lock_directory(&private, uid.wrapping_add(1)).is_err());
+        let alias = dir.path().join("alias");
+        symlink(&private, &alias).unwrap();
+        assert!(prepare_keyring_lock_directory(&alias, uid).is_err());
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(prepare_keyring_lock_directory(&private, uid).is_err());
+    }
 
     #[test]
     fn concurrent_updates_preserve_other_profiles_and_deployments() {
