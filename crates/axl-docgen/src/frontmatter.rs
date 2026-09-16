@@ -12,7 +12,9 @@ pub fn render(title: &str, extra_lines: &[String], og_image_url_template: Option
     let mut out = String::from("---\n");
     out.push_str(&format!("title: {}\n", yaml_quote(title)));
     for line in extra_lines {
-        out.push_str(line.trim());
+        // Keep leading whitespace: it is YAML nesting. Only a stray trailing
+        // newline from the shell is dropped.
+        out.push_str(line.trim_end());
         out.push('\n');
     }
     if let Some(template) = og_image_url_template {
@@ -86,6 +88,16 @@ mod tests {
              og:image: \"https://aspect.build/_og?title=aspect.auth&category=Docs\"\n\
              ---\n\n"
         );
+    }
+
+    #[test]
+    fn render_keeps_indentation_of_extra_lines() {
+        let got = render(
+            "T",
+            &["seo:".to_string(), "  noindex: true\n".to_string()],
+            None,
+        );
+        assert_eq!(got, "---\ntitle: \"T\"\nseo:\n  noindex: true\n---\n\n");
     }
 
     #[test]
