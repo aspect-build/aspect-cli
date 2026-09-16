@@ -485,6 +485,48 @@ fn tool_defs() -> &'static [ToolDef] {
             },
         },
         ToolDef {
+            name: "get_action_history",
+            description: "Execution-log history for one action-owner label, including private or \
+                          transitive labels without target completion records. Requires a deployment \
+                          exposing GET /api/v1/action-history; older deployments return 404. \
+                          Entries are per-invocation label aggregates, not individual spawns. \
+                          Summary counts, total execution-wall time and p50/p90/p99 cover the whole \
+                          filtered window; percentiles measure per-invocation label totals, including \
+                          cached records unless cache=miss. Optional daily buckets use UTC and omit \
+                          empty days. Empty results can reflect retention or pending ingestion.",
+            schema: || {
+                obj(
+                    serde_json::json!({
+                        "label": label_prop(),
+                        "start": prop("Inclusive invocation-received timestamp in RFC 3339 (e.g. 2026-09-01T00:00:00Z).", "string"),
+                        "end": prop("Exclusive invocation-received timestamp in RFC 3339; must be after start and at most 31 days later.", "string"),
+                        "repo": prop("Exact repository name. Omit for all repositories in your organization.", "string"),
+                        "branch": prop("Exact branch name. Omit for all branches.", "string"),
+                        "cache": prop("Record-level cache filter: hit (all spawns cached or locally cached), miss (any noncached spawn, including mixed records). Omit for both.", "string"),
+                        "daily": {"type": "boolean", "description": "Include daily aggregates over the full filtered window (default false)."},
+                        "limit": limit_prop(20),
+                        "offset": offset_prop(),
+                    }),
+                    &["label", "start", "end"],
+                )
+            },
+            route: |args| {
+                let mut q = String::new();
+                for key in ["label", "start", "end"] {
+                    push_param(&mut q, key, args.required_str(key)?);
+                }
+                push_common(
+                    args,
+                    &mut q,
+                    &["repo", "branch", "cache", "limit", "offset"],
+                );
+                if let Some(daily) = args.bool("daily") {
+                    push_param(&mut q, "daily", if daily { "true" } else { "false" });
+                }
+                Ok(format!("/action-history{q}"))
+            },
+        },
+        ToolDef {
             name: "get_target_stats",
             description: "Cross-invocation statistics for the organization's targets over a \
                           lookback window: build counts, failure and flake rates, durations. With \
@@ -945,6 +987,43 @@ mod tests {
         assert_eq!(
             path,
             "/target-stats?range=d7&repos=org%2Frepo+%26+tools&is_test=false&limit=5"
+        );
+    }
+
+    #[test]
+    fn action_history_preserves_filters_and_encodes_timestamps() {
+        let path = route(
+            "get_action_history",
+            serde_json::json!({
+                "label": "//private:action", "start": "2026-09-01T00:00:00+02:00",
+                "end": "2026-09-15T00:00:00Z", "repo": "org/repo", "branch": "fix/a&b",
+                "cache": "miss", "daily": true, "limit": 1000, "offset": 20,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/action-history?label=%2F%2Fprivate%3Aaction&start=2026-09-01T00%3A00%3A00%2B02%3A00&end=2026-09-15T00%3A00%3A00Z&repo=org%2Frepo&branch=fix%2Fa%26b&cache=miss&limit=100&offset=20&daily=true"
+        );
+    }
+
+    #[test]
+    fn action_history_requires_label_and_both_time_bounds() {
+        for missing in ["label", "start", "end"] {
+            let mut args = serde_json::json!({"label": "//a:b", "start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z"});
+            args.as_object_mut().unwrap().remove(missing);
+            assert!(
+                route("get_action_history", args)
+                    .unwrap_err()
+                    .contains(missing)
+            );
+        }
+        let path = route("get_action_history", serde_json::json!({
+            "label": "//a:b", "start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z", "daily": false
+        })).unwrap();
+        assert_eq!(
+            path,
+            "/action-history?label=%2F%2Fa%3Ab&start=2026-09-01T00%3A00%3A00Z&end=2026-09-02T00%3A00%3A00Z&daily=false"
         );
     }
 
