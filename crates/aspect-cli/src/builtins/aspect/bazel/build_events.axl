@@ -107,12 +107,32 @@ def bes_streamed_by_bazel(ctx, rc, command: str = "build") -> bool:
         return False
     return same_bes_endpoint(ctx.std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or "", bazel_backend)
 
+def _feature_backends(bazel_trait, extra_backends) -> list[str]:
+    """`BazelTrait.bes_backends` — the backend URIs features inject (the
+    `Deployment` feature's, from `--remote`) — plus any the caller passed, deduped.
+
+    Read off the trait rather than required from the caller. `bes_backends` is a
+    trait seam every bazel-driving task should honor, and threading it through
+    each call site instead meant only the one that remembered did: `--remote=bes`
+    reached `build`/`test` (which spawn through `bazel/invocation.axl`) and was
+    silently dropped by `format`, `gazelle`, `lint`, `run`, `warming`, and
+    `delivery`, which build their own sinks. The `extra_backends` parameter stays
+    for a caller with a backend of its own, and passing one the trait already
+    holds is harmless.
+    """
+    backends = list(bazel_trait.bes_backends)
+    for b in extra_backends:
+        if b not in backends:
+            backends.append(b)
+    return backends
+
 def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list:
     """Every CLI-streamed BES sink for one bazel spawn, in the order a task
     splices them into `build_events`: those built from `--bes-backend` /
-    `--bes-header` and `extra_backends`, then the ones features already pushed
-    onto `BazelTrait.build_event_sinks` (a Workflows runner's env-injected
-    backend, a `--bep-file` dump).
+    `--bes-header`, the feature-injected `BazelTrait.bes_backends` and
+    `extra_backends`, then the ones features already pushed onto
+    `BazelTrait.build_event_sinks` (a Workflows runner's env-injected backend, a
+    `--bep-file` dump).
 
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
     both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
@@ -123,7 +143,11 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     """
     bazel_backend = bazel_bes_backend(rc, command)
     return (
-        collect_bes_from_args(ctx, extra_backends = extra_backends, bazel_backend = bazel_backend) +
+        collect_bes_from_args(
+            ctx,
+            extra_backends = _feature_backends(bazel_trait, extra_backends),
+            bazel_backend = bazel_backend,
+        ) +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
 
@@ -137,7 +161,11 @@ def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_bac
     if not bazel_backend:
         return []
 
-    candidates = list(ctx.args.bes_backends) + list(extra_backends) + [s.uri for s in bazel_trait.build_event_sinks]
+    candidates = (
+        list(ctx.args.bes_backends) +
+        _feature_backends(bazel_trait, extra_backends) +
+        [s.uri for s in bazel_trait.build_event_sinks]
+    )
     dropped = []
     for uri in candidates:
         if uri and same_bes_endpoint(uri, bazel_backend) and uri not in dropped:
