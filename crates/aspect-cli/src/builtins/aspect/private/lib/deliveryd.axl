@@ -14,6 +14,7 @@ version.
     dd.delete(digest)                  # after it failed
 """
 
+load("@std//time.axl", "sleep")
 load("./text.axl", "format_bytes_iec")
 
 # Where an Aspect Workflows runner publishes the daemon's Unix socket.
@@ -28,6 +29,13 @@ _V2 = 2
 _VERSION_HEADER = "deliveryd-version"
 
 _JSON_HEADERS = {"Content-Type": "application/json"}
+
+# The startup probe is the daemon's first request on a fresh runner, and its
+# Redis client dials lazily with a 2s timeout. One failed dial must not fail the
+# delivery, so a 503 (backing store unreachable) or a transport error is
+# re-probed a few times. Any other status is a real answer and is not retried.
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_MS = 1000
 
 # Usable before the version is negotiated — the /health probe rides it.
 _Conn = record(
@@ -156,6 +164,20 @@ def _negotiate(conn: _Conn) -> tuple:
     if not advertised.isdigit():
         return (_V1, res)
     return (max(_V1, int(advertised)), res)
+
+def _retryable(res: _Response) -> bool:
+    return res.status == 0 or res.status == 503
+
+def _negotiate_with_retry(conn: _Conn, attempts: int, pause) -> tuple:
+    """`_negotiate`, re-probing a retryable failure up to `attempts` times with
+    `pause(ms)` between tries. Returns the last probe's result."""
+    (version, res) = _negotiate(conn)
+    for _ in range(attempts - 1):
+        if not _retryable(res):
+            break
+        pause(_PROBE_RETRY_MS)
+        (version, res) = _negotiate(conn)
+    return (version, res)
 
 def _to_health(res: _Response, version: int) -> Health:
     if res.status == 0:
@@ -292,7 +314,7 @@ def _do_delete(c: _Client, digest: str) -> None:
         })
     _check(c.conn, "delete", res)
 
-def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = ""):
+def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep):
     """Connect to deliveryd and negotiate the API version, once.
 
     `host` is the CI host label ("gh", "bk", …) and `prefix` the change-detection
@@ -302,7 +324,9 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
 
     The negotiation probe doubles as a reachability check, reported through
     `.status` rather than raised — a dead daemon is a startup error the caller
-    concludes its own surface for, not a mid-run write failure.
+    concludes its own surface for, not a mid-run write failure. A 503 or a
+    transport error is re-probed up to `probe_attempts` times; `pause` is the
+    sleep between tries, replaceable in tests.
     """
     endpoint = endpoint or ctx.std.env.var(ENDPOINT_ENV)
     if not endpoint:
@@ -310,7 +334,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
 
     (base_url, socket) = _parse_endpoint(endpoint)
     conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
-    (version, res) = _negotiate(conn)
+    (version, res) = _negotiate_with_retry(conn, probe_attempts, pause)
 
     c = _Client(
         conn = conn,
