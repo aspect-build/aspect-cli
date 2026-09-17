@@ -1,9 +1,11 @@
 //! How a task ended, resolved to one shape whichever way `_impl` finished.
 //!
-//! `_impl` can return a bare `int`, return a `TaskConclusion`, or raise a
-//! [`TaskExit`]. Everything the runtime does afterwards, from printing the
-//! message to choosing the bookend verdict, reads an [`Outcome`], so the three
-//! endings cannot drift apart in how they render.
+//! `_impl` can return a bare `int`, return a `TaskConclusion`, raise a
+//! [`TaskExit`], or fail outright. Everything the runtime does afterwards,
+//! from printing the message and calling the post-task hooks to choosing the
+//! bookend verdict, reads an [`Outcome`], so the endings cannot drift apart in
+//! how they render. The [`Ending`] beside it keeps what only the error itself
+//! can provide: the traceback, and whether the error still has to propagate.
 
 use starlark::values::Value;
 use starlark::values::ValueLike;
@@ -24,7 +26,27 @@ pub(crate) struct Outcome {
     pub(crate) message: Option<String>,
 }
 
+/// How the body stopped.
+pub(crate) enum Ending {
+    Returned,
+    /// A [`TaskExit`]; the error is kept so `ASPECT_DEBUG` can show its trace.
+    Exited(starlark::Error),
+    /// Anything else. Propagated once the post-task hooks and defers have run.
+    Failed(starlark::Error),
+}
+
 impl Outcome {
+    /// Resolve the body's result into an outcome and how it ended.
+    pub(crate) fn resolve(result: Result<Value<'_>, starlark::Error>) -> (Self, Ending) {
+        match result {
+            Ok(ret) => (Self::from_return(ret), Ending::Returned),
+            Err(e) => match TaskExit::from_starlark(&e) {
+                Some(exit) => (Self::from_exit(exit), Ending::Exited(e)),
+                None => (Self::from_error(&e), Ending::Failed(e)),
+            },
+        }
+    }
+
     /// The outcome of `_impl` returning `ret`: a `TaskConclusion` verbatim, a
     /// bare `int` as the exit code, anything else a pass with nothing to say.
     pub(crate) fn from_return(ret: Value<'_>) -> Self {
@@ -51,6 +73,27 @@ impl Outcome {
             flagged: false,
             text: String::new(),
             message: exit.message.clone(),
+        }
+    }
+
+    /// The outcome of the body failing with `err`: exit code 1 and the error's
+    /// one-line summary, without the traceback, as the message.
+    pub(crate) fn from_error(err: &starlark::Error) -> Self {
+        Self {
+            exit_code: Some(1),
+            flagged: false,
+            text: String::new(),
+            message: Some(err.without_diagnostic().to_string()),
+        }
+    }
+
+    /// The `TaskConclusion` handed to post-task hooks.
+    pub(crate) fn to_conclusion(&self) -> TaskConclusion {
+        TaskConclusion {
+            exit_code: i32::from(self.exit_code.unwrap_or(0)),
+            text: self.text.clone(),
+            flagged: self.flagged,
+            message: self.message.clone(),
         }
     }
 

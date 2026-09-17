@@ -59,6 +59,8 @@ pub struct TaskContext<'v> {
     pub traits: values::Value<'v>,
     pub task: values::Value<'v>,
     bazel: values::Value<'v>,
+    /// The run's `TaskHooks`, shared with every feature's context.
+    hooks: values::Value<'v>,
     #[allocative(skip)]
     pub defers: RefCell<Vec<Defer<'v>>>,
 }
@@ -69,6 +71,7 @@ unsafe impl<'v> Trace<'v> for TaskContext<'v> {
         self.traits.trace(tracer);
         self.task.trace(tracer);
         self.bazel.trace(tracer);
+        self.hooks.trace(tracer);
         for d in self.defers.get_mut().iter_mut() {
             d.trace(tracer);
         }
@@ -81,12 +84,14 @@ impl<'v> TaskContext<'v> {
         traits: values::Value<'v>,
         task: values::Value<'v>,
         bazel: values::Value<'v>,
+        hooks: values::Value<'v>,
     ) -> Self {
         Self {
             args,
             traits,
             task,
             bazel,
+            hooks,
             defers: RefCell::new(Vec::new()),
         }
     }
@@ -121,6 +126,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
             traits: self.traits.freeze(freezer)?,
             task: self.task.freeze(freezer)?,
             bazel: self.bazel.freeze(freezer)?,
+            hooks: self.hooks.freeze(freezer)?,
         })
     }
 }
@@ -196,10 +202,21 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(Http::new())
     }
 
+    /// Hooks around the task body. From inside the body only
+    /// `ctx.hooks.post_task(fn)` is useful: `fn(ctx, conclusion)` runs after
+    /// `_impl` ends, however it ended, before `ctx.defer` callbacks.
+    #[starlark(attribute)]
+    fn hooks<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ctx.hooks)
+    }
+
     /// Register a callable to run after `_impl` returns, modeled on Go's
     /// `defer`: args bound at the defer site, LIFO order, fires even when
-    /// `_impl` aborts. Per-defer errors are logged and do not change the
-    /// task's exit code.
+    /// `_impl` aborts, after the post-task hooks. A failing defer is reported
+    /// as a `WARNING:` and does not change the task's exit code. Use
+    /// `ctx.hooks.post_task` instead when the callback needs to know how the
+    /// task ended.
     fn defer<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] callable: values::Value<'v>,
@@ -223,6 +240,7 @@ pub struct FrozenTaskContext {
     traits: values::FrozenValue,
     task: values::FrozenValue,
     bazel: values::FrozenValue,
+    hooks: values::FrozenValue,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -297,6 +315,13 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     fn bazel<'v>(this: values::Value<'v>) -> starlark::Result<FrozenValueTyped<'v, FrozenBazel>> {
         let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
         Ok(FrozenValueTyped::new_err(ctx.bazel)?)
+    }
+
+    /// Hooks around the task body; see `TaskContext.hooks`.
+    #[starlark(attribute)]
+    fn hooks<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(ctx.hooks.to_value())
     }
 
     /// HTTP client for issuing requests to remote services.

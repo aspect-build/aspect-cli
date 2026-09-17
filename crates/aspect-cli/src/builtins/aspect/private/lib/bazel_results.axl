@@ -4780,7 +4780,8 @@ def _elapsed_ms(since_monotonic):
 def _results_new(ctx, command):
     """Shared constructor for `results.build` / `results.test`. Owns
     `phases.new(ctx, init_data())`, a small heartbeat/attempt state cell, and a
-    deferred abort guard so a fatal error still concludes the surface."""
+    post-task hook that concludes the surface when the task ended before
+    `conclude()` did, with the exit code and message the runtime resolved."""
     ph = phases.new(ctx, init_data())
     data = ph.data
 
@@ -4788,7 +4789,7 @@ def _results_new(ctx, command):
     # last_monotonic: monotonic seconds at the last emit (0 → first tick emits).
     # attempts: count of spawned attempts (human-numbered). label: current
     # spawn-phase body, reused by `invocation()`'s link re-emit.
-    # concluded: set by conclude(); the abort guard stands down when True.
+    # concluded: set by conclude(); the post-task hook stands down when True.
     m = {
         "first": True,
         "last_monotonic": 0.0,
@@ -4945,21 +4946,29 @@ def _results_new(ctx, command):
         print_repro_and_fix(ctx.std, data, final_status)
         return TaskConclusion(exit_code = code, text = bookend, flagged = final_status == "warning")
 
-    def _abort_guard():
-        # Fatal error / interrupt before conclude(): flip the surface off
-        # "running" so it doesn't stick. ctx.defer runs even on a Starlark error.
+    def _close_surface(_ctx, outcome):
+        """Post-task hook: the task ended before `conclude()` ran (an early
+        exit, a hard error, a `return` above it), so close the surface with the
+        runtime's verdict instead of leaving it on "running"."""
         if m["concluded"]:
             return
+        if outcome.exit_code != 0:
+            status = "failed"
+        elif outcome.flagged:
+            status = "warning"
+        else:
+            status = "passed"
+        text = outcome.message.split("\n")[0] if outcome.message else conclusion(status, data)
         ph.dispatch(phases.Update(
             kind = "bazel_results",
-            status = "aborted",
+            status = status,
             final = True,
-            conclusion = conclusion("aborted", data),
+            conclusion = text,
             data = data,
-            progress = _live_progress(data, command, "aborted"),
+            progress = _live_progress(data, command, status),
         ))
 
-    ctx.defer(_abort_guard)
+    ctx.hooks.post_task(_close_surface)
 
     return struct(
         ph = ph,

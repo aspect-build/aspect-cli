@@ -102,10 +102,9 @@ still run. `ASPECT_DEBUG=1` appends the traceback for anyone debugging.
 | A bug, anywhere | `fail("...")`, which keeps the traceback |
 
 `exit` takes any code 0..=255 and unwinds through every caller like an error,
-so whatever the body had yet to run is skipped. A task with a status surface
-therefore uses neither shortcut and ends through its final `phases.update`,
-which closes the surface with the real status. `docs/axl.md` §13 has the
-examples.
+so whatever the body had yet to run is skipped. Anything that must happen
+regardless goes in a post-task hook (below); `results.build` / `results.test`
+close their status surface that way. `docs/axl.md` §13 has the examples.
 
 **From Rust**, a `#[starlark_module]` fn returns
 `axl_runtime::TaskExit::error(msg)` as its `anyhow::Error` instead of a plain
@@ -122,3 +121,19 @@ config impl never reaches the runner; the top-level error arm in
 `eval/exit.rs` for the runtime, and `crates/aspect-cli/tests/task_exit.rs`
 for the real binary, one command per path. A runtime test that needs a feature
 impl to run opts in with `.with_features(&["Name"])` on the test harness.
+
+## Task hooks
+
+`ctx.hooks` (`engine/task_hooks.rs`) is one `TaskHooks` value shared by
+`config.axl`, every feature impl, and the task body. `pre_task(fn)` runs
+`fn(ctx)` before the body; `post_task(fn)` runs `fn(ctx, conclusion)` after
+it, however it ended, including a hard error, whose conclusion carries exit
+code 1 and the error's summary before the error propagates. The runner's
+order is pre-task hooks, body, post-task hooks, `ctx.defer` callbacks,
+bookend. Post-task hooks see the exit code after the unclaimed-passthrough-flag
+check. A failing post-task hook or `ctx.defer` callback is a `WARNING:` and
+changes nothing; both go through `task_hooks::report_callback_failure`.
+
+Use a post-task hook, not `ctx.defer`, for anything that needs to know how the
+task ended. `bazel_results.axl` closes its status surface this way when
+`conclude()` did not run. `docs/axl.md` §14 has the AXL-facing description.

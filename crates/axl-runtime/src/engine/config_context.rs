@@ -30,7 +30,7 @@ use super::task_map::TaskMap;
 /// Config context for evaluating config.axl files.
 ///
 /// This context holds the task map, the trait map, and the feature map that
-/// config functions can modify.
+/// config functions can modify, plus the run's task hooks.
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
@@ -38,22 +38,25 @@ pub struct ConfigContext<'v> {
     trait_map: values::Value<'v>,
     feature_map: values::Value<'v>,
     telemetry: values::Value<'v>,
+    hooks: values::Value<'v>,
 }
 
 impl<'v> ConfigContext<'v> {
     /// Create a new ConfigContext from a pre-allocated `TaskMap` value plus the
-    /// trait, feature, and telemetry values.
+    /// trait, feature, telemetry, and task-hooks values.
     pub fn new(
         tasks: values::Value<'v>,
         trait_map: values::Value<'v>,
         feature_map: values::Value<'v>,
         telemetry: values::Value<'v>,
+        hooks: values::Value<'v>,
     ) -> Self {
         Self {
             tasks,
             trait_map,
             feature_map,
             telemetry,
+            hooks,
         }
     }
 
@@ -96,6 +99,7 @@ impl<'v> Freeze for ConfigContext<'v> {
             trait_map: self.trait_map.freeze(freezer)?,
             feature_map: self.feature_map.freeze(freezer)?,
             telemetry: self.telemetry.freeze(freezer)?,
+            hooks: self.hooks.freeze(freezer)?,
         })
     }
 }
@@ -112,6 +116,8 @@ pub struct FrozenConfigContext {
     feature_map: FrozenValue,
     #[allocative(skip)]
     telemetry: FrozenValue,
+    #[allocative(skip)]
+    hooks: FrozenValue,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenConfigContext {
@@ -206,6 +212,30 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
         }
         if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
             return Ok(c.telemetry.to_value());
+        }
+        Err(anyhow::anyhow!("expected ConfigContext"))
+    }
+
+    /// Hooks around the task body, for every task this run may execute:
+    /// `ctx.hooks.pre_task(fn)` runs `fn(ctx)` before it,
+    /// `ctx.hooks.post_task(fn)` runs `fn(ctx, conclusion)` after it, however
+    /// it ended.
+    ///
+    /// Usage:
+    /// ```starlark
+    /// def _announce(ctx, outcome):
+    ///     print(ctx.task.friendly_name + " exited " + str(outcome.exit_code))
+    ///
+    /// def config(ctx):
+    ///     ctx.hooks.post_task(_announce)
+    /// ```
+    #[starlark(attribute)]
+    fn hooks<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        if let Some(c) = this.downcast_ref::<ConfigContext>() {
+            return Ok(c.hooks);
+        }
+        if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
+            return Ok(c.hooks.to_value());
         }
         Err(anyhow::anyhow!("expected ConfigContext"))
     }
