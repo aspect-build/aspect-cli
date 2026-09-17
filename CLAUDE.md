@@ -103,8 +103,8 @@ still run. `ASPECT_DEBUG=1` appends the traceback for anyone debugging.
 
 `exit` takes any code 0..=255 and unwinds through every caller like an error,
 so whatever the body had yet to run is skipped. Anything that must happen
-regardless goes in a post-task hook (below); `results.build` / `results.test`
-close their status surface that way. `docs/axl.md` §13 has the examples.
+regardless goes in a post-task hook (below); every `phases.new` handle closes
+its status surface that way. `docs/axl.md` §13 has the examples.
 
 **From Rust**, a `#[starlark_module]` fn returns
 `axl_runtime::TaskExit::error(msg)` as its `anyhow::Error` instead of a plain
@@ -135,5 +135,8 @@ check. A failing post-task hook or `ctx.defer` callback is a `WARNING:` and
 changes nothing; both go through `task_hooks::report_callback_failure`.
 
 Use a post-task hook, not `ctx.defer`, for anything that needs to know how the
-task ended. `bazel_results.axl` closes its status surface this way when
-`conclude()` did not run. `docs/axl.md` §14 has the AXL-facing description.
+task ended. `lifecycle.axl`'s `phases.new` registers one per handle: if the
+task ends before its own final `phases.update`, the hook sends a terminal
+update with the runtime's verdict, so no GitHub check, Buildkite annotation,
+or GitLab status is left on "running". `docs/axl.md` §14 has the AXL-facing
+description.

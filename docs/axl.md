@@ -205,10 +205,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return TaskConclusion(exit_code = 1, message = "Provide a target, e.g. `aspect build //...`.")
 ```
 
-Either shortcut skips whatever the body had yet to run. A task that reports to
-a status surface still has to close it: `results.build` / `results.test` do so
-from a post-task hook (§14), so an early exit in `build` or `test` reports the
-real status and message. A surface you wire yourself needs the same hook.
+Either shortcut skips whatever the body had yet to run. A status surface opened
+through `phases.new` is still closed: the handle's post-task hook (§14) sends
+the terminal update with the runtime's verdict and the message the task ended
+on. A surface you wire without `phases` needs the same hook.
 
 **§14 Task hooks.** `ctx.hooks` is shared by `config.axl`, every feature impl,
 and the task body. `ctx.hooks.pre_task(fn)` runs `fn(ctx)` before the body;
@@ -223,13 +223,13 @@ Register pre-task hooks from `config.axl` or a feature; once the body has
 started they are refused.
 
 ```python
-def _close_surface(ctx: TaskContext, outcome: TaskConclusion):
-    if state["concluded"]:
-        return
-    status = "passed" if outcome.exit_code == 0 else "failed"
-    surface.finish(status, outcome.message or "")
+def _keep_scratch_on_failure(ctx: TaskContext, outcome: TaskConclusion):
+    if outcome.exit_code == 0:
+        ctx.std.fs.remove_dir_all(work)
+    else:
+        print("kept " + work + " for inspection")
 
-ctx.hooks.post_task(_close_surface)
+ctx.hooks.post_task(_keep_scratch_on_failure)
 ```
 
 Use `ctx.defer` for cleanup that needs no knowledge of how the task ended;
