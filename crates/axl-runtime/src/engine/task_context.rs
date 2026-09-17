@@ -213,8 +213,10 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
 
     /// Register a callable to run after `_impl` returns, modeled on Go's
     /// `defer`: args bound at the defer site, LIFO order, fires even when
-    /// `_impl` aborts. Per-defer errors are logged and do not change the
-    /// task's exit code.
+    /// `_impl` aborts, after the post-task hooks. A failing defer is reported
+    /// as a `WARNING:` and does not change the task's exit code. Use
+    /// `ctx.hooks.post_task` instead when the callback needs to know how the
+    /// task ended.
     fn defer<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] callable: values::Value<'v>,

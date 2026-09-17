@@ -24,6 +24,7 @@ load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_te
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
+load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
@@ -51,6 +52,7 @@ load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
+load("@std//time.axl", "time")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -178,9 +180,29 @@ images:
 {% endif %}{% endfor %}
 """
 
+def _dogfood_task_hooks(ctx: ConfigContext) -> None:
+    """Exercise `ctx.hooks` on every task this repo runs: the pre-task hook
+    stamps the start, the post-task hook reports how the task ended and how
+    long it took, whichever way it ended."""
+    started = {}
+
+    def _pre(tctx: TaskContext) -> None:
+        started[tctx.task.id] = time.now_ms()
+
+    def _post(tctx: TaskContext, outcome: TaskConclusion) -> None:
+        elapsed = time.now_ms() - started.get(tctx.task.id, time.now_ms())
+        verdict = "exit code " + str(outcome.exit_code) + (" (flagged)" if outcome.flagged else "")
+        why = ": " + outcome.message.split("\n")[0] if outcome.message else ""
+        info(tctx.std, "post-task hook: " + tctx.task.kind + " ended with " + verdict + " after " + str(elapsed) + "ms" + why)
+
+    ctx.hooks.pre_task(_pre)
+    ctx.hooks.post_task(_post)
+
 def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
+
+    _dogfood_task_hooks(ctx)
 
     # Dogfood telemetry.exporters: when DASH0_ENDPOINT/DASH0_TOKEN are injected
     # (CI), ship aspect-cli's own traces/logs to Dash0 via OTLP + Bearer auth.

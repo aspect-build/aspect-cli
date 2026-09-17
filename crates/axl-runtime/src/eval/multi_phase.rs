@@ -20,7 +20,7 @@ use crate::engine::feature_map::FeatureMap;
 use crate::engine::passthrough;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
-use crate::engine::task_hooks::TaskHooks;
+use crate::engine::task_hooks::{self, TaskHooks};
 use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
@@ -781,7 +781,7 @@ fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
     let defers = ctx.drain_defers();
     for defer in defers {
         if let Err(e) = eval.eval_function(defer.callable, &defer.args, &defer.kwargs) {
-            tracing::error!(error = %e, "ctx.defer callable failed");
+            task_hooks::report_callback_failure("ctx.defer callback", &e);
         }
     }
 }

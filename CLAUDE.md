@@ -131,7 +131,8 @@ it, however it ended, including a hard error, whose conclusion carries exit
 code 1 and the error's summary before the error propagates. The runner's
 order is pre-task hooks, body, post-task hooks, `ctx.defer` callbacks,
 bookend. Post-task hooks see the exit code after the unclaimed-passthrough-flag
-check. A failing post-task hook is a `WARNING:` and changes nothing.
+check. A failing post-task hook or `ctx.defer` callback is a `WARNING:` and
+changes nothing; both go through `task_hooks::report_callback_failure`.
 
 Use a post-task hook, not `ctx.defer`, for anything that needs to know how the
 task ended. `bazel_results.axl` closes its status surface this way when

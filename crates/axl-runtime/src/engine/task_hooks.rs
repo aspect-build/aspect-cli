@@ -90,14 +90,19 @@ impl<'v> TaskHooks<'v> {
         let hooks = self.post.borrow().clone();
         for hook in hooks {
             if let Err(e) = eval.eval_function(hook, &[ctx, conclusion], &[]) {
-                diag::warn(&format!(
-                    "post-task hook failed: {}",
-                    e.without_diagnostic()
-                ));
-                TaskExit::debug_traceback(&e);
+                report_callback_failure("post-task hook", &e);
             }
         }
     }
+}
+
+/// Report a failure in a callback that runs after the task body ended, such
+/// as a post-task hook or a `ctx.defer` callback: a `WARNING:` line with the
+/// error's summary, and the traceback under `ASPECT_DEBUG`. The task's exit
+/// code is already decided, so the failure changes nothing else.
+pub fn report_callback_failure(what: &str, e: &starlark::Error) {
+    diag::warn(&format!("{what} failed: {}", e.without_diagnostic()));
+    TaskExit::debug_traceback(e);
 }
 
 unsafe impl<'v> Trace<'v> for TaskHooks<'v> {
