@@ -1,6 +1,5 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
-load("@aspect//bazel/build_metadata.axl", "get_build_metadata_flags")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
@@ -535,30 +534,6 @@ def config(ctx: ConfigContext):
         ctx.traits[BazelTrait].extra_flags.append(
             "--credential_helper=cache.aspect.build=aspect",
         )
-
-        # What the Web UI needs beyond the event stream itself. The Workflows
-        # feature sets these too, but keys them on ASPECT_WORKFLOWS_BES_BACKEND —
-        # a runner-injected variable — so a `--remote` build reaches a BES
-        # backend by a route that variable knows nothing about and arrives
-        # unenriched: an invocation with no commit, branch, PR, or link back to
-        # the Actions run.
-        #
-        # The commit/CI metadata is the same call the runner path makes.
-        # `--remote_build_event_upload=all` makes BEP-referenced outputs (test
-        # logs above all) resolvable from the UI as bytestream refs instead of
-        # file:// paths on a runner that no longer exists; it needs the cache,
-        # which this branch has just wired. The profile flags enrich the trace
-        # the ArtifactUpload feature already generates.
-        #
-        # Deliberately not here: --execution_log_compact_file, which stays off
-        # repo-wide until on-disk redaction lands (see the ArtifactUpload block).
-        ctx.traits[BazelTrait].extra_flags.extend(get_build_metadata_flags(ctx.std) + [
-            "--remote_build_event_upload=all",
-            "--noslim_profile",
-            "--experimental_profile_include_primary_output",
-            "--experimental_profile_include_target_configuration",
-            "--legacy_important_outputs",
-        ])
 
     # Configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
