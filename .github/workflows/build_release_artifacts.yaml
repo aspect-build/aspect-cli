@@ -60,23 +60,36 @@ jobs:
         # remote-only and the cp fails with "cannot stat". Same reasoning for
         # aspect-cli's `:debug_bins`, which `:release` copies but which is not
         # reachable from `:bins`.
+        #
+        # The assets are written under $RUNNER_TEMP, outside the checkout,
+        # on purpose. `--config=release` stamps with bazel/workspace_status.sh,
+        # whose STABLE_BUILD_SCM_LOCAL_CHANGES key runs `git status`. Copying
+        # into the checkout leaves untracked files, so from the second
+        # `bazel run :release` on the key flips clean -> dirty, the
+        # stable-status file changes, and every stamped rustc action (all
+        # first-party crates, via bazel/rust/defs.bzl) is rebuilt from
+        # scratch: ~13 minutes of the job, and binaries stamped as a dirty
+        # build. Outside the checkout the tree stays clean and those runs
+        # are pure cache hits.
         run: |
-          mkdir -p upload_root/assets
+          mkdir -p "${RUNNER_TEMP}/upload_root/assets"
           bazel build --config=release --config=ci --remote_download_outputs=toplevel \
             //crates/aspect-launcher:bins \
             //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
             //crates/aspect-cli:debug_bins \
             //crates/axl-docgen:bins
-          bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
-          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
-          bazel run --config=release --config=ci //crates/axl-docgen:release -- "${PWD}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${RUNNER_TEMP}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${RUNNER_TEMP}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/axl-docgen:release -- "${RUNNER_TEMP}/upload_root/assets"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-path: "upload_root/assets/*"
+          subject-path: "${{ runner.temp }}/upload_root/assets/*"
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
-          path: upload_root/
+          # The artifact root is the common ancestor of the matched files, so
+          # this still uploads `assets/...` exactly as before.
+          path: ${{ runner.temp }}/upload_root/
           retention-days: 1
