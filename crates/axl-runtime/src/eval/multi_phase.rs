@@ -157,8 +157,8 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
     /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
     telemetry_value: Value<'v>,
-    /// The run's `TaskHooks`, shared between FeatureContext and TaskContext
-    /// as `ctx.hooks`; phase 4 runs what was registered into it.
+    /// The run's `TaskHooks`, shared by ConfigContext, FeatureContext, and
+    /// TaskContext as `ctx.hooks`; phase 4 runs what was registered into it.
     hooks_value: Value<'v>,
 }
 

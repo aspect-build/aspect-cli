@@ -31,8 +31,8 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::none::NoneType;
 use starlark::values::{
-    AllocValue, Freeze, FreezeError, Freezer, FrozenValue, Heap, NoSerialize, ProvidesStaticType,
-    StarlarkValue, Trace, Tracer, Value, ValueLike, starlark_value,
+    AllocValue, Freeze, FreezeError, Freezer, Heap, NoSerialize, ProvidesStaticType, StarlarkValue,
+    Trace, Tracer, Value, ValueLike, starlark_value,
 };
 
 use crate::diag;
@@ -58,8 +58,9 @@ impl<'v> TaskHooks<'v> {
         })
     }
 
-    /// Mark the body as about to run; pre-task registration is refused from
-    /// here on.
+    /// Mark the task as started, just before the pre-task hooks run. Pre-task
+    /// registration is refused from here on: a hook registered now, even by a
+    /// pre-task hook, would never run.
     pub fn start(&self) {
         self.started.set(true);
     }
@@ -118,14 +119,8 @@ impl<'v> AllocValue<'v> for TaskHooks<'v> {
 
 impl<'v> Freeze for TaskHooks<'v> {
     type Frozen = FrozenTaskHooks;
-    fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
-        let freeze_all = |hooks: Vec<Value<'v>>| -> Result<Vec<FrozenValue>, FreezeError> {
-            hooks.into_iter().map(|h| h.freeze(freezer)).collect()
-        };
-        Ok(FrozenTaskHooks {
-            pre: freeze_all(self.pre.into_inner())?,
-            post: freeze_all(self.post.into_inner())?,
-        })
+    fn freeze(self, _freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        Ok(FrozenTaskHooks)
     }
 }
 
@@ -137,16 +132,12 @@ impl<'v> StarlarkValue<'v> for TaskHooks<'v> {
     }
 }
 
-/// The frozen view keeps the registered hooks for inspection but accepts no
-/// more: a frozen module has no run to register into.
+/// What a `ctx.hooks` reference becomes if a module holding one is frozen. It
+/// has no run to register into, so both methods refuse; the live value keeps
+/// the hooks the run will execute.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<TaskHooks>")]
-pub struct FrozenTaskHooks {
-    #[allocative(skip)]
-    pre: Vec<FrozenValue>,
-    #[allocative(skip)]
-    post: Vec<FrozenValue>,
-}
+pub struct FrozenTaskHooks;
 
 starlark::starlark_simple_value!(FrozenTaskHooks);
 
@@ -160,6 +151,7 @@ impl<'v> StarlarkValue<'v> for FrozenTaskHooks {
     }
 }
 
+/// The live hooks behind `this`, or the error a frozen reference gets.
 fn live<'v>(this: Value<'v>) -> starlark::Result<&'v TaskHooks<'v>> {
     this.downcast_ref::<TaskHooks>().ok_or_else(|| {
         starlark::Error::new_other(anyhow::anyhow!(
@@ -182,7 +174,8 @@ fn task_hooks_methods(registry: &mut MethodsBuilder) {
         let hooks = live(this)?;
         if hooks.started.get() {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
-                "pre_task: the task body has already started; use post_task or ctx.defer"
+                "pre_task: the task has already started; register pre-task hooks from \
+                 config.axl or a feature, or use post_task"
             )));
         }
         hooks.pre.borrow_mut().push(callable);
@@ -206,19 +199,47 @@ fn task_hooks_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    /// A task whose body appends `body` to `path`, with a feature registering
-    /// a pre-task hook that appends `pre` and a post-task hook that appends
-    /// `post:<exit_code>:<message>`. `body` is the AXL statement the body runs
-    /// after its append.
-    fn script(path: &str, body: &str) -> String {
+    use crate::engine::passthrough;
+
+    /// A file the AXL under test appends one line per event to, so a test can
+    /// assert on the order things ran in. Snippets reference it as `{path}`
+    /// and append with `ctx.std.fs.try_append`.
+    struct Trace {
+        _dir: tempfile::TempDir,
+        path: String,
+    }
+
+    impl Trace {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("trace").to_string_lossy().into_owned();
+            Self { _dir: dir, path }
+        }
+
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.path).unwrap_or_default()
+        }
+    }
+
+    /// AXL for a post-task hook that appends `post:<exit_code>:<message>`.
+    fn post_hook(path: &str) -> String {
+        format!(
+            r#"
+def _post(ctx, outcome):
+    ctx.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + ":" + (outcome.message or "") + "\n")
+"#
+        )
+    }
+
+    /// A task whose body appends `body` then runs the AXL statement `tail`,
+    /// with a feature registering a pre-task hook that appends `pre` and the
+    /// [`post_hook`].
+    fn bracketed_task(path: &str, tail: &str) -> String {
         format!(
             r#"
 def _pre(ctx):
     ctx.std.fs.try_append("{path}", "pre\n")
-
-def _post(ctx, outcome):
-    ctx.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + ":" + (outcome.message or "") + "\n")
-
+{post}
 def _feature(ctx):
     ctx.hooks.pre_task(_pre)
     ctx.hooks.post_task(_post)
@@ -226,48 +247,48 @@ def _feature(ctx):
 def _impl(ctx):
     ctx.defer(ctx.std.fs.try_append, "{path}", "defer\n")
     ctx.std.fs.try_append("{path}", "body\n")
-    {body}
+    {tail}
 
 Hooks = feature(implementation = _feature)
 t = task(implementation = _impl)
-"#
+"#,
+            post = post_hook(path),
         )
     }
 
-    fn run(body: &str) -> (anyhow::Result<Option<u8>>, String) {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let trace = dir.path().join("trace");
-        let result = crate::test::eval(&script(&trace.to_string_lossy(), body))
+    fn run_bracketed(tail: &str) -> (anyhow::Result<Option<u8>>, String) {
+        let trace = Trace::new();
+        let result = crate::test::eval(&bracketed_task(&trace.path, tail))
             .with_features(&["Hooks"])
             .run_task(0);
-        let contents = std::fs::read_to_string(&trace).unwrap_or_default();
-        (result, contents)
+        (result, trace.read())
     }
 
     #[test]
     fn hooks_bracket_the_body_and_run_before_defers() {
-        let (result, trace) = run("return 0");
+        let (result, trace) = run_bracketed("return 0");
         assert_eq!(result.expect("run_task"), Some(0));
         assert_eq!(trace, "pre\nbody\npost:0:\ndefer\n");
     }
 
     #[test]
     fn a_returned_conclusion_reaches_the_post_hook() {
-        let (result, trace) = run(r#"return TaskConclusion(exit_code = 2, message = "nope")"#);
+        let (result, trace) =
+            run_bracketed(r#"return TaskConclusion(exit_code = 2, message = "nope")"#);
         assert_eq!(result.expect("run_task"), Some(2));
         assert_eq!(trace, "pre\nbody\npost:2:nope\ndefer\n");
     }
 
     #[test]
     fn an_exit_reaches_the_post_hook() {
-        let (result, trace) = run(r#"ctx.std.process.exit(3, "boom")"#);
+        let (result, trace) = run_bracketed(r#"ctx.std.process.exit(3, "boom")"#);
         assert_eq!(result.expect("run_task"), Some(3));
         assert_eq!(trace, "pre\nbody\npost:3:boom\ndefer\n");
     }
 
     #[test]
     fn a_hard_error_reaches_the_post_hook_and_still_propagates() {
-        let (result, trace) = run(r#"fail("kaboom")"#);
+        let (result, trace) = run_bracketed(r#"fail("kaboom")"#);
         let err = result.expect_err("fail() must propagate");
         assert!(err.to_string().contains("kaboom"), "{err}");
         assert_eq!(trace, "pre\nbody\npost:1:fail: kaboom\ndefer\n");
@@ -275,17 +296,12 @@ t = task(implementation = _impl)
 
     #[test]
     fn a_pre_hook_exit_skips_the_body() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let trace = dir.path().join("trace");
-        let path = trace.to_string_lossy();
+        let trace = Trace::new();
         let exit = crate::test::eval(&format!(
             r#"
 def _refuse(ctx):
     ctx.std.process.exit(4, "not today")
-
-def _post(ctx, outcome):
-    ctx.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + ":" + outcome.message + "\n")
-
+{post}
 def _feature(ctx):
     ctx.hooks.pre_task(_refuse)
     ctx.hooks.post_task(_post)
@@ -296,36 +312,35 @@ def _impl(ctx):
 
 Hooks = feature(implementation = _feature)
 t = task(implementation = _impl)
-"#
+"#,
+            path = trace.path,
+            post = post_hook(&trace.path),
         ))
         .with_features(&["Hooks"])
         .run_task(0)
         .expect("run_task");
         assert_eq!(exit, Some(4));
-        assert_eq!(
-            std::fs::read_to_string(&trace).unwrap(),
-            "post:4:not today\n"
-        );
+        assert_eq!(trace.read(), "post:4:not today\n");
     }
 
     #[test]
     fn a_post_hook_registered_from_the_body_runs() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let trace = dir.path().join("trace");
-        let path = trace.to_string_lossy();
+        let trace = Trace::new();
         let exit = crate::test::eval(&format!(
             r#"
+{post}
 def _impl(ctx):
-    ctx.hooks.post_task(lambda c, outcome: c.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + "\n"))
+    ctx.hooks.post_task(_post)
     return 5
 
 t = task(implementation = _impl)
-"#
+"#,
+            post = post_hook(&trace.path),
         ))
         .run_task(0)
         .expect("run_task");
         assert_eq!(exit, Some(5));
-        assert_eq!(std::fs::read_to_string(&trace).unwrap(), "post:5\n");
+        assert_eq!(trace.read(), "post:5:\n");
     }
 
     #[test]
@@ -346,9 +361,7 @@ t = task(implementation = _impl)
 
     #[test]
     fn a_failing_post_hook_changes_nothing_and_the_rest_still_run() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let trace = dir.path().join("trace");
-        let path = trace.to_string_lossy();
+        let trace = Trace::new();
         let exit = crate::test::eval(&format!(
             r#"
 def _bad(ctx, outcome):
@@ -363,47 +376,78 @@ def _impl(ctx):
     return 0
 
 t = task(implementation = _impl)
-"#
+"#,
+            path = trace.path,
         ))
         .run_task(0)
         .expect("run_task");
         assert_eq!(exit, Some(0));
-        assert_eq!(std::fs::read_to_string(&trace).unwrap(), "good\n");
+        assert_eq!(trace.read(), "good\n");
     }
 
+    /// `config.axl` evaluates before features, so its hooks come first in
+    /// each list.
     #[test]
-    fn hooks_registered_from_config_axl_run() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let trace = dir.path().join("trace");
-        let path = trace.to_string_lossy();
+    fn config_hooks_run_before_feature_hooks() {
+        let trace = Trace::new();
         let exit = crate::test::eval(&format!(
             r#"
+def _feature(ctx):
+    ctx.hooks.pre_task(lambda c: c.std.fs.try_append("{path}", "feature-pre\n"))
+    ctx.hooks.post_task(lambda c, o: c.std.fs.try_append("{path}", "feature-post\n"))
+
 def _impl(ctx):
     ctx.std.fs.try_append("{path}", "body\n")
     return 0
 
+Hooks = feature(implementation = _feature)
 t = task(implementation = _impl)
-"#
+"#,
+            path = trace.path,
         ))
         .with_config(&format!(
             r#"
-def _pre(ctx):
-    ctx.std.fs.try_append("{path}", "pre\n")
-
-def _post(ctx, outcome):
-    ctx.std.fs.try_append("{path}", "post:" + str(outcome.exit_code) + "\n")
-
 def config(ctx):
-    ctx.hooks.pre_task(_pre)
-    ctx.hooks.post_task(_post)
-"#
+    ctx.hooks.pre_task(lambda c: c.std.fs.try_append("{path}", "config-pre\n"))
+    ctx.hooks.post_task(lambda c, o: c.std.fs.try_append("{path}", "config-post\n"))
+"#,
+            path = trace.path,
         ))
+        .with_features(&["Hooks"])
         .run_task(0)
         .expect("run_task");
         assert_eq!(exit, Some(0));
         assert_eq!(
-            std::fs::read_to_string(&trace).unwrap(),
-            "pre\nbody\npost:0\n"
+            trace.read(),
+            "config-pre\nfeature-pre\nbody\nconfig-post\nfeature-post\n"
+        );
+    }
+
+    /// The conclusion a post-task hook sees is final: a task that returned 0
+    /// but left routed passthrough flags unclaimed has already been failed
+    /// over them by the time the hook runs.
+    #[test]
+    fn post_hooks_see_the_exit_code_after_the_unclaimed_flag_check() {
+        let trace = Trace::new();
+        let exit = crate::test::eval(&format!(
+            r#"
+{post}
+def _impl(ctx):
+    ctx.hooks.post_task(_post)
+    _ = ctx.args.rest
+    return 0
+
+t = task(implementation = _impl, args = {{"rest": args.passthrough(position = "post_command")}})
+"#,
+            post = post_hook(&trace.path),
+        ))
+        .with_string_list_args([("rest", vec!["--jobs=8"])])
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(passthrough::EXIT_UNCLAIMED));
+        assert_eq!(
+            trace.read(),
+            format!("post:{}:\n", passthrough::EXIT_UNCLAIMED)
         );
     }
 }
