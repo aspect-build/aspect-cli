@@ -13,7 +13,7 @@ HTTP failure contract (every helper below):
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
-load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_url")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
@@ -250,6 +250,13 @@ _AUTH_KIND_DENIED = "access-denied"
 _AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
 _AUTH_KIND_API_ERROR = "aspect-api-error"
 
+# Fallback for a 404 whose body carried no message. "Not linked" rather than
+# "not installed": the app can be installed on the org and the request still
+# fail because the *Aspect account* the CLI authenticated as has no
+# installation linked to it, which is the likelier of the two and the one a
+# reader cannot diagnose from "not installed".
+_APP_NOT_LINKED = "GitHub App not linked to your Aspect account (see https://aspect.build/docs/cli/authentication)"
+
 def _set_auth_reason(_reason, kind, msg):
     """Populate `_reason` with both the structured `kind` and the
     human-readable `reason`. No-op when the caller didn't pass a dict."""
@@ -460,12 +467,12 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     if resp.status == 401:
         _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
     elif resp.status == 403:
-        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % resp.body)
+        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % (aspect_cloud_error(resp) or resp.body))
     elif resp.status == 404:
         _set_auth_reason(
             _reason,
             _AUTH_KIND_APP_NOT_INSTALLED,
-            "GitHub App not installed (see https://aspect.build/docs/cli/authentication)",
+            aspect_cloud_error(resp) or _APP_NOT_LINKED,
         )
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))

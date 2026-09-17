@@ -11,7 +11,7 @@ OAuth bearer); `auth_kind` picks the header convention:
     project access tokens; opt-in).
 """
 
-load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_url")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./rate_limit.axl", "BUCKET_APP", "record_from_headers")
 
 DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
@@ -437,6 +437,9 @@ _AUTH_KIND_BAD_RESPONSE = "aspect-api-bad-response"
 _AUTH_KIND_EXPIRED = "credentials-expired"
 _AUTH_KIND_DENIED = "access-denied"
 _AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
+
+# Fallback for a 404 whose body carried no message; see the GitHub twin.
+_APP_NOT_LINKED = "GitLab App not linked to your Aspect account for this project (see https://aspect.build/docs/cli/authentication)"
 _AUTH_KIND_API_ERROR = "aspect-api-error"
 
 def _set_auth_reason(_reason, kind, msg):
@@ -546,12 +549,12 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
     if resp.status == 401:
         _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
     elif resp.status == 403:
-        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % resp.body)
+        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % (aspect_cloud_error(resp) or resp.body))
     elif resp.status == 404:
         _set_auth_reason(
             _reason,
             _AUTH_KIND_APP_NOT_INSTALLED,
-            "GitLab App not installed for this project (see https://aspect.build/docs/cli/authentication)",
+            aspect_cloud_error(resp) or _APP_NOT_LINKED,
         )
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))

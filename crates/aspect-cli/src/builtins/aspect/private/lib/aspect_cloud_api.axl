@@ -20,6 +20,23 @@ def aspect_cloud_url(ctx, path: str) -> str:
     """Aspect Cloud's API base with `path` appended (`"/github/token"`)."""
     return ctx.aspect.auth.aspect_cloud_api_url + path
 
+def aspect_cloud_error(resp) -> str:
+    """The message Aspect Cloud sent with a failed response, or `""`.
+
+    Every route reports a failure as `{"error": "<message>"}`, and the server
+    names the specific condition and the fix: a 404 from `/github/token` is
+    "No GitHub App installations linked to this account" when the account has
+    none, and "the installation ... no longer exists on GitHub" when a linked
+    one was uninstalled. A client that renders its own text for the status code
+    has to pick one of those and is wrong the rest of the time, so prefer this
+    and keep a client-side string only as the fallback for an empty body.
+    """
+    parsed = json.try_decode(resp.body, None)
+    if type(parsed) != "dict":
+        return ""
+    message = parsed.get("error")
+    return message.strip() if type(message) == "string" else ""
+
 def aspect_cloud_credentials(ctx, profile = None, required: bool = True):
     """Aspect Cloud's credential, or `None` when the profile holds none.
 
