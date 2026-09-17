@@ -664,9 +664,10 @@ def _new_surface():
     final update is still owed."""
     return {"opened": False, "kind": "", "final": False}
 
-def _emit(ctx, surface, update):
-    """Deliver `update` and record it on `surface`. Every update a handle sends
-    goes through here, so the surface record is complete."""
+def _track_and_dispatch(ctx, surface, update):
+    """Record `update` on `surface`, then `_dispatch` it to the task's `Phases`
+    handlers. Every update a handle sends goes through here, so the surface
+    record is complete; `_dispatch` alone is the handler-list primitive."""
     surface["opened"] = True
     if update.kind:
         surface["kind"] = update.kind
@@ -854,7 +855,7 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
         data = data if data != None else {},
         subject = subject,
     )
-    _emit(ctx, surface, update)
+    _track_and_dispatch(ctx, surface, update)
 
     if final:
         return TaskConclusion(
@@ -1032,7 +1033,7 @@ def _fail_health_check(ctx, surface, kind, data, reason):
     runner is an expected refusal, and the health check has already printed
     what it found and tried. Emits the terminal update itself so the surface
     reads "Health check failed" rather than the exit's message."""
-    _emit(ctx, surface, TaskUpdate(
+    _track_and_dispatch(ctx, surface, TaskUpdate(
         kind = kind,
         status = "failed",
         final = True,
@@ -1098,7 +1099,7 @@ def _new(ctx, data):
         )
 
     def dispatch(update):
-        _emit(ctx, surface, update)
+        _track_and_dispatch(ctx, surface, update)
 
     def close(_tctx, outcome):
         """Post-task hook: close a surface that was opened but never concluded
@@ -1112,7 +1113,7 @@ def _new(ctx, data):
         else:
             status = "passed"
         text = outcome.message.split("\n")[0] if outcome.message else outcome.text
-        _emit(ctx, surface, TaskUpdate(
+        _track_and_dispatch(ctx, surface, TaskUpdate(
             kind = surface["kind"],
             status = status,
             final = True,
