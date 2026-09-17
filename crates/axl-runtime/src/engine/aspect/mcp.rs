@@ -1043,9 +1043,9 @@ mod tests {
 
     #[test]
     fn missing_action_history_endpoint_explains_the_deployment_upgrade() {
-        let hint = not_found_hint("get_action_history", "silo-aws");
+        let hint = not_found_hint("get_action_history", "example-deployment");
         for expected in [
-            "silo-aws",
+            "example-deployment",
             "/api/v1/action-history",
             "Workflows operator",
             "upgrade",
@@ -1064,8 +1064,8 @@ mod tests {
             .filter(|d| d.name != "get_action_history")
         {
             assert_eq!(
-                not_found_hint(def.name, "silo-aws"),
-                " — no such resource on deployment 'silo-aws'; ids come from list_invocations"
+                not_found_hint(def.name, "example-deployment"),
+                " — no such resource on deployment 'example-deployment'; ids come from list_invocations"
             );
         }
     }
