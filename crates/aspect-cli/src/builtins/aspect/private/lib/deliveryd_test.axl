@@ -47,7 +47,8 @@ def _health_res(version = "2"):
 
 def _ctx(responses, calls):
     """Fake ctx whose http serves `responses` ({"<METHOD> <path>": res | None},
-    None meaning a transport error) and appends each request to `calls`."""
+    None meaning a transport error) and appends each request to `calls`. A list
+    value is served in order, one element per request, repeating the last."""
 
     def respond(method, url, data):
         path = url[len(_BASE):]
@@ -56,6 +57,9 @@ def _ctx(responses, calls):
         if key not in responses:
             fail("unexpected deliveryd request: " + key)
         res = responses[key]
+        if type(res) == "list":
+            n = len([c for c in calls if c.method == method and c.path == path])
+            res = res[min(n, len(res)) - 1]
         if res == None:
             return _error_future("connection refused")
         return _future(res)
@@ -71,13 +75,16 @@ def _ctx(responses, calls):
         std = struct(env = struct(var = lambda name: _SOCKET)),
     )
 
-def _client(responses, calls, **kwargs):
+def _client(responses, calls, pauses = None, **kwargs):
+    """`pauses` collects the ms of each retry pause instead of sleeping."""
+    recorded = pauses if pauses != None else []
     return deliveryd.new(
         _ctx(responses, calls),
         host = kwargs.pop("host", "gh"),
         prefix = kwargs.pop("prefix", "deliver"),
         commit = kwargs.pop("commit", "abc123"),
         signature = kwargs.pop("signature", "https://ci/build/7"),
+        pause = lambda ms: recorded.append(ms),
         **kwargs
     )
 
@@ -110,9 +117,45 @@ def _test_negotiates_from_health_header(ctx):
     _eq("endpoint from env", dd.endpoint, _SOCKET)
 
 def _test_unreachable_reports_status(ctx):
-    dd = _client({"GET /health": None}, [])
+    calls = []
+    pauses = []
+    dd = _client({"GET /health": None}, calls, pauses)
     _eq("unreachable → not ok", dd.status.ok, False)
     _eq("unreachable → error carries the transport reason", dd.status.error, "connection refused")
+    _eq("unreachable → probed three times", [c.path for c in calls], ["/health", "/health", "/health"])
+    _eq("unreachable → paused between probes", pauses, [1000, 1000])
+
+def _test_probe_retries_a_503_then_succeeds(ctx):
+    calls = []
+    pauses = []
+    dd = _client({"GET /health": [_res(503, "unhealthy: redis connection failed"), _health_res("2")]}, calls, pauses)
+    _eq("503 then 200 → ok", dd.status.ok, True)
+    _eq("503 then 200 → v2 from the successful probe", dd.version, 2)
+    _eq("503 then 200 → two probes", len(calls), 2)
+    _eq("503 then 200 → one pause", pauses, [1000])
+
+def _test_probe_gives_up_after_persistent_503(ctx):
+    calls = []
+    pauses = []
+    dd = _client({"GET /health": _res(503, "unhealthy: redis connection failed")}, calls, pauses)
+    _eq("persistent 503 → not ok", dd.status.ok, False)
+    _eq("persistent 503 → error names the last answer", dd.status.error, "HTTP 503: unhealthy: redis connection failed")
+    _eq("persistent 503 → three probes", len(calls), 3)
+    _eq("persistent 503 → two pauses", pauses, [1000, 1000])
+
+def _test_probe_does_not_retry_other_errors(ctx):
+    calls = []
+    pauses = []
+    dd = _client({"GET /health": _res(500, "boom")}, calls, pauses)
+    _eq("500 → not ok", dd.status.ok, False)
+    _eq("500 → one probe", len(calls), 1)
+    _eq("500 → no pause", pauses, [])
+
+def _test_probe_attempts_is_configurable(ctx):
+    calls = []
+    dd = _client({"GET /health": None}, calls, probe_attempts = 1)
+    _eq("one attempt → one probe", len(calls), 1)
+    _eq("one attempt → not ok", dd.status.ok, False)
 
 def _test_v2_record_is_a_noop(ctx):
     calls = []
@@ -263,6 +306,10 @@ _UNIT_TESTS = [
     _test_parse_endpoint,
     _test_negotiates_from_health_header,
     _test_unreachable_reports_status,
+    _test_probe_retries_a_503_then_succeeds,
+    _test_probe_gives_up_after_persistent_503,
+    _test_probe_does_not_retry_other_errors,
+    _test_probe_attempts_is_configurable,
     _test_v2_record_is_a_noop,
     _test_v1_record_posts_legacy_fields,
     _test_v2_query_batches_and_maps_back,
