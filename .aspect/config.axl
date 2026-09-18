@@ -11,6 +11,7 @@ load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
+load("@aspect//private/lib/aspect_cloud_api_test.axl", "aspect_cloud_api_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
@@ -418,6 +419,10 @@ def config(ctx: ConfigContext):
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth
     ctx.tasks.add(aspect_endpoint_auth_tests)
+
+    # aspect_cloud_api.axl: surfacing the server's own failure message.
+    # Run with: aspect dev test-aspect-cloud-api
+    ctx.tasks.add(aspect_cloud_api_tests)
 
     # deployment_flags.axl: --deployment / --aspect-* capability resolution.
     # Run with: aspect dev test-deployment-flags
