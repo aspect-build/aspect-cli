@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::stream;
+use super::watch;
 
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -784,6 +785,39 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<stream::Writable> {
         let file = fs::File::create(path.as_str())?;
         Ok(stream::Writable::from(file))
+    }
+
+    /// Starts a recursive file watch over `roots` and returns a `fs.Watch`.
+    ///
+    /// Poll it with `try_pop()`, which returns None until pending changes have
+    /// settled for `debounce_ms` (capped at `max_delay_ms` under sustained
+    /// churn), then a batch with `changes` (list of `struct(path, kind)`,
+    /// kind one of `"created"`/`"modified"`/`"removed"`) and `rescan` (True
+    /// when the watcher lost track of state and anything may have changed).
+    /// Events under any of the `ignore` path prefixes are dropped, as are —
+    /// with `ignore_root_symlinks = True` — changes to symlinks sitting
+    /// directly in a watched root (bazel convenience links under any
+    /// --symlink_prefix). Use `drain()` to discard pending changes caused by
+    /// our own writes.
+    ///
+    /// The watch backend is chosen automatically: watchman when every watched
+    /// root contains a `.watchmanconfig` file, otherwise an in-process OS
+    /// watcher.
+    fn watch<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] roots: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] ignore: UnpackList<String>,
+        #[starlark(require = named, default = false)] ignore_root_symlinks: bool,
+        #[starlark(require = named, default = 100)] debounce_ms: i32,
+        #[starlark(require = named, default = 2000)] max_delay_ms: i32,
+    ) -> anyhow::Result<watch::Watch> {
+        watch::start(
+            roots.items,
+            ignore.items,
+            ignore_root_symlinks,
+            debounce_ms.max(0) as u64,
+            max_delay_ms.max(0) as u64,
+        )
     }
 }
 

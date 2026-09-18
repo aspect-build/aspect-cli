@@ -2,18 +2,519 @@
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
+load("@aspect//bazel/build_metadata.axl", "version_gte")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
+load("./private/lib/runfiles_delta.axl", "runfiles_delta")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/tips.axl", "tips")
+load("./private/lib/watch.axl", "watch")
+
+_WATCH_TICK_MS = 100
+
+# Target tag opting into the ibazel notify protocol: instead of a restart, the
+# child is spawned with IBAZEL_NOTIFY_CHANGES=y and piped stdin, and each watch
+# cycle writes IBAZEL_BUILD_STARTED / IBAZEL_BUILD_COMPLETED <verdict> lines so
+# the process (e.g. a devserver) reloads in place.
+# https://github.com/bazelbuild/bazel-watcher#running-a-target
+_IBAZEL_TAG = "ibazel_notify_changes"
+
+# Additional tag for the versioned protocol: after the legacy completed line,
+# the child also receives `IBAZEL_EVENT {json}` describing the build and the
+# filesystem changes that triggered it.
+_IBAZEL_V1_TAG = "ibazel_notify_changes_v1"
+
+# Files whose change alters the build graph rather than a target's sources,
+# reported as kind "graph" in v1 events.
+_GRAPH_FILES = ["BUILD", "BUILD.bazel", "MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+
+def _v1_event(build_success: bool, batch) -> str:
+    changes = []
+    for c in batch.changes:
+        name = c.path.rsplit("/", 1)[-1]
+        kind = "graph" if name in _GRAPH_FILES or name.endswith(".bzl") else "source"
+        changes.append({"path": c.path, "kind": kind})
+    return "IBAZEL_EVENT " + json.encode({
+        "version": 1,
+        "type": "build_completed",
+        "success": build_success,
+        "changes": changes,
+    }) + "\n"
+
+def _notify_write(stdin, line: str) -> bool:
+    """Deliver one whole protocol frame over the child's nonblocking stdin.
+
+    try_write reports bytes accepted and may take a short prefix; a partial
+    frame corrupts the notify framing, so retry the unwritten suffix briefly
+    and report False on a closed or persistently full pipe. Frames are ASCII
+    (json.encode escapes non-ASCII), so character and byte offsets agree.
+    """
+    remaining = line
+    n = stdin.try_write(remaining)
+    if n >= len(remaining):
+        return True
+    if n > 0:
+        remaining = remaining[n:]
+    for tick in sleep_iter(10):
+        n = stdin.try_write(remaining)
+        if n >= len(remaining):
+            return True
+        if n > 0:
+            remaining = remaining[n:]
+        if tick >= 50:
+            break
+    return False
+
+def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase, label: str, execution_log = False):
+    """One `bazel build` of `target` with BES drained into `ph.data` and the
+    runnable tracker `r`. Returns the BuildStatus."""
+    bazel_trait = ctx.traits[BazelTrait]
+    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
+    ph.data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    events = bazel.build_events.iterator()
+    build_events = [events] + bes_sinks
+
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
+    ph.update(
+        "running",
+        phases.ProgressStyles(
+            body = label + "...",
+            stream = label,
+        ),
+        kind = "bazel_results",
+        phase = phase,
+    )
+
+    # After the phase line, so the streams are announced under the spawn they
+    # belong to.
+    announce_bes_sinks(ctx, bes_sinks)
+
+    build = ctx.bazel.build(
+        target,
+        build_events = build_events,
+        flags = flags,
+        aspects = r.aspects,
+        announce_version = announce_version,
+        announce_command = announce_command,
+        execution_log = execution_log,
+    )
+
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            r.event(event)
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            process_event(ph.data, event)
+        if events.done:
+            break
+
+    build_status = build.wait()
+    for sink in bes_sinks:
+        sink.wait()
+    summarize_bes_upload(ctx, bes_sinks)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
+    return build_status
+
+def _stop_child(child: std.process.Child) -> None:
+    """Graceful stop with a bounded grace: SIGTERM, poll up to ~5s for exit,
+    then SIGKILL. Always reaps. A SIGTERM-ignoring child must not freeze the
+    watch loop. Watch children run in their own process group, so both
+    signals reach the target's whole tree."""
+    child.terminate()
+    for tick in sleep_iter(100):
+        if child.try_wait() != None:
+            return
+        if tick >= 50:
+            break
+    child.kill()
+    child.wait()
+
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_env: dict = {}) -> struct | None:
+    """Resolve the entrypoint and spawn the target; None when unresolvable.
+
+    Returns `struct(child, stdin)`: `stdin` is the child's piped stdin when the
+    target opted into the ibazel notify protocol under `--watch`, else None."""
+    entrypoint = r.determine_entrypoint(target)
+    if entrypoint == None:
+        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+        return None
+    notify = watching and _IBAZEL_TAG in entrypoint.tags
+    structured = notify and _IBAZEL_V1_TAG in entrypoint.tags
+    body = "Running %s (watching for changes)..." if watching else "Running %s..."
+    ph.update(
+        "running",
+        phases.ProgressStyles(
+            body = body % target,
+            stream = "Running %s" % target,
+        ),
+        phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
+    )
+    child = r.spawn(
+        entrypoint,
+        forward_args,
+        cwd = spawn_cwd,
+        stdin = "piped" if notify else None,
+        env = extra_env | ({"IBAZEL_NOTIFY_CHANGES": "y"} if notify else {}),
+        # Its own process group: stops and restarts must catch the target's
+        # whole tree (a wrapper's real server included), and the watch loop —
+        # not the terminal — owns this child's lifecycle.
+        process_group = watching,
+    )
+    return struct(
+        child = child,
+        stdin = child.stdin() if notify else None,
+        structured = structured,
+        ep = entrypoint,
+    )
+
+def _merge_batch(merged: dict | None, batch) -> dict:
+    """Fold a watcher batch into the accumulator held while a change cycle is
+    outstanding or after a failed rebuild. Last kind per path wins; rescan is
+    sticky."""
+    if merged == None:
+        merged = {"paths": {}, "rescan": False}
+    for c in batch.changes:
+        merged["paths"][c.path] = c.kind
+    merged["rescan"] = merged["rescan"] or batch.rescan
+    return merged
+
+def _take_batch(merged: dict) -> struct:
+    return struct(
+        changes = [struct(path = p, kind = k) for p, k in merged["paths"].items()],
+        rescan = merged["rescan"],
+    )
+
+def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool, refresh):
+    """Watch loop: rebuild on each settled batch of workspace changes, then
+    tell the running target — preferring the Incremental Build Protocol (a
+    connected client gets change cycles over its socket), then the ibazel
+    stdin protocol (targets tagged `ibazel_notify_changes`), then a terminate
+    and respawn. Batches arriving while a change cycle is outstanding are
+    merged and dispatched when it reaches a terminal state; a failed rebuild
+    keeps its batch for the next attempt. Runs until Ctrl-C (the OS shutdown
+    handler SIGTERMs the child)."""
+    ws = watch.new(ctx)
+    srv = ctx.bazel.ibp_server()
+    ctx.defer(srv.exit, "aspect-cli shutting down")
+    delta = runfiles_delta.new(ctx)
+    execlog_dir = ctx.std.fs.mkdtemp(prefix = "aspect-watch-execlog")
+    ctx.defer(ctx.std.fs.remove_dir_all, execlog_dir)
+
+    # --execution_log_compact_file needs Bazel >= 7.1; without it, runfiles
+    # cycles still carry manifest and source-join changes, just not
+    # content-only changes of generated outputs.
+    bazel_version = ctx.bazel.version()
+    execlog_supported = bazel_version != None and version_gte(bazel_version, "7.1.0")
+
+    def spawn():
+        p = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_env = srv.env())
+        if p != None:
+            # Diff the first cycle against the manifest this process actually
+            # sees, so a pre-first-cycle deletion isn't lost.
+            delta.baseline(p.ep)
+        return p
+
+    def pick_scope(p) -> str | None:
+        if p == None or srv.state != "connected":
+            return None
+        if "sources" in srv.scopes:
+            return "sources"
+        if "runfiles" in srv.scopes:
+            return "runfiles"
+        return None
+
+    def reset_or_restart(p):
+        """The client's incremental state is stale or unknown: resynchronize
+        it (CYCLE_RESET on v2 with a fresh tracker baseline, a full fresh
+        cycle pre-v2), else terminate and respawn. Returns
+        (proc, pending_cycle); a non-None pending_cycle is a recovery cycle —
+        the caller restarts outright if the client fails that one too."""
+        scope = pick_scope(p)
+        if scope == "runfiles":
+            if srv.has_reset:
+                # The client resyncs from disk; rebaseline so later deltas
+                # diff against the state it now holds.
+                delta.baseline(p.ep)
+                pc = srv.cycle_reset()
+            else:
+                # A pre-v2 client rebuilds its state from the cycle's sources
+                # list; empty sources would wipe it.
+                full = delta.full(p.ep)
+                pc = srv.cycle(full, scope = "runfiles", fresh = True) if full != None else None
+            if pc != None:
+                return p, pc
+        elif scope == "sources":
+            pc = srv.cycle_reset() if srv.has_reset else srv.cycle({}, scope = "sources", fresh = True)
+            if pc != None:
+                return p, pc
+        if p != None:
+            _stop_child(p.child)
+        return spawn(), None
+
+    build_status = _build_once(
+        ctx,
+        ph,
+        r,
+        target,
+        flags,
+        rc,
+        announce_version,
+        announce_command,
+        phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        "Building %s" % target,
+    )
+
+    proc = None
+    if build_status.success:
+        proc = spawn()
+    else:
+        ph.update(
+            "running",
+            phases.ProgressStyles(body = "Build failed — watching %s for changes..." % ws.root),
+            kind = "bazel_results",
+        )
+
+    cycle = 0
+    pending_cycle = None
+    merged = None
+    # Retained changes only dispatch once a new watcher event arrives —
+    # otherwise a failing build would rerun in a tight loop instead of
+    # pausing until the user edits again.
+    dirty = False
+    # Handshake count of the last connection seen; a replacement client can
+    # disconnect and reconnect within one tick (e.g. during _stop_child in a
+    # recovery restart), so connection identity — not a connected boolean —
+    # decides when a client owes its initialization cycle.
+    seen_generation = 0
+    needs_init = False
+    pending_recovery = False
+    for _tick in sleep_iter(_WATCH_TICK_MS):
+        # A client completing its handshake blocks on the first cycle (e.g.
+        # js_run_devserver populates its sandbox from it), so a fresh
+        # connection owes one resynchronization cycle.
+        if srv.state == "connected" and srv.generation != seen_generation:
+            seen_generation = srv.generation
+            needs_init = True
+        if needs_init and proc != None and pending_cycle == None and srv.state == "connected":
+            needs_init = False
+            proc, pending_cycle = reset_or_restart(proc)
+            pending_recovery = pending_cycle != None
+            if pending_cycle != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Sent initial change cycle %d to %s (watching for changes)..." % (pending_cycle, target),
+                        stream = "Sent initial change cycle %d to %s" % (pending_cycle, target),
+                    ),
+                )
+
+        if pending_cycle != None:
+            cycle_state = srv.cycle_state(pending_cycle)
+            if cycle_state in ["completed", "failed", "aborted"]:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Target %s change cycle %d — watching for changes..." % (cycle_state, pending_cycle),
+                        stream = "Target %s change cycle %d" % (cycle_state, pending_cycle),
+                    ),
+                )
+                failed_recovery = pending_recovery and cycle_state != "completed"
+                pending_cycle = None
+                pending_recovery = False
+                if failed_recovery:
+                    # The resynchronization itself failed: the client is
+                    # beyond incremental repair, restart it.
+                    if proc != None:
+                        _stop_child(proc.child)
+                    proc = spawn()
+                elif cycle_state != "completed":
+                    # The client didn't apply that cycle; anything it covered
+                    # would otherwise be suppressed by our delta state.
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+
+        if proc != None:
+            status = proc.child.try_wait()
+            if status != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "%s exited with code %s — watching for changes..." % (target, status.code),
+                        stream = "%s exited with code %s" % (target, status.code),
+                    ),
+                )
+                proc = None
+
+        popped = ws.try_pop()
+        if popped != None:
+            merged = _merge_batch(merged, popped)
+            dirty = True
+        if merged == None or not dirty or pending_cycle != None:
+            continue
+        batch = _take_batch(merged)
+        merged = None
+        dirty = False
+
+        # Scope is sampled before the build only to decide whether to capture
+        # an execution log; the dispatch decision below re-samples. The
+        # generation pins the connection this rebuild serves: a different one
+        # afterwards is a new client instance that owes an initialization
+        # cycle before any delta.
+        scope = pick_scope(proc)
+        pre_generation = srv.generation
+
+        # The notify path is only taken while every stdin write lands; a failed
+        # write means the child closed its end, and the cycle falls back to a
+        # restart.
+        notify = scope == None and proc != None and proc.stdin != None
+        if notify:
+            notify = _notify_write(proc.stdin, "IBAZEL_BUILD_STARTED\n")
+
+        cycle += 1
+        # Reparse the rc so .bazelrc edits and refreshed endpoint auth apply
+        # to this rebuild rather than the startup snapshot.
+        flags, rc = refresh()
+        execlog_path = None
+        if scope == "runfiles" and execlog_supported:
+            execlog_path = execlog_dir + "/cycle_%d.binpb" % cycle
+        ph.reset(init_data())
+        build_status = _build_once(
+            ctx,
+            ph,
+            r,
+            target,
+            flags,
+            rc,
+            False,
+            announce_command,
+            phases.Phase(
+                name = "rebuild_%d" % cycle,
+                description = "Rebuild run target",
+                emoji = "🔨",
+            ),
+            "Rebuilding %s" % target,
+            execution_log = [bazel.execution_log.file(path = execlog_path)] if execlog_path != None else False,
+        )
+        # Deliberately no drain: bazel writes its outputs outside the
+        # workspace (the ignore list covers the convenience symlinks), so
+        # pending events here are the user's own mid-build edits — dropping
+        # them would silently miss a rebuild.
+
+        if not build_status.success:
+            # Keep the batch (without marking it dispatchable): the eventual
+            # successful rebuild must deliver these changes too, even if the
+            # fixing edit touches other files — but the retry itself waits
+            # for that edit.
+            merged = _merge_batch(merged, batch)
+            if execlog_path != None and ctx.std.fs.exists(execlog_path):
+                ctx.std.fs.remove_file(execlog_path)
+            if notify:
+                _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED FAILURE\n")
+                if proc.structured:
+                    _notify_write(proc.stdin, _v1_event(False, batch))
+            ph.update(
+                "running",
+                phases.ProgressStyles(body = "Build failed — watching for changes..."),
+                kind = "bazel_results",
+            )
+            continue
+
+        # Re-sample so a client that finished its handshake during the rebuild
+        # gets a cycle instead of a restart. Consume-then-delete the execution
+        # log on every path so a long watch can't accumulate logs. Without a
+        # log (pre-7.1 Bazel) the delta still carries manifest and source-join
+        # changes, just not content-only changes of generated outputs.
+        scope = pick_scope(proc)
+        same_client = scope != None and srv.generation == pre_generation
+        delta_sources = None
+        delta_computed = False
+        if scope == "runfiles" and same_client and proc != None and not batch.rescan:
+            delta_sources = delta.compute(proc.ep, execlog_path, batch.changes)
+            delta_computed = True
+        if execlog_path != None and ctx.std.fs.exists(execlog_path):
+            ctx.std.fs.remove_file(execlog_path)
+
+        if scope != None and not same_client:
+            # The client connected during the rebuild and still owes its
+            # initialization cycle: deliver that first (next tick) and keep
+            # the batch for the dispatch after it.
+            merged = _merge_batch(merged, batch)
+            dirty = True
+            continue
+
+        if scope != None and notify:
+            # An IBP client connected between the STARTED line and now; close
+            # the ibazel pair before switching transports.
+            _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+
+        if scope != None:
+            if batch.rescan:
+                proc, pending_cycle = reset_or_restart(proc)
+                pending_recovery = pending_cycle != None
+            elif scope == "runfiles":
+                if not delta_computed or delta_sources == None:
+                    # No usable delta: the manifest is gone — delta state
+                    # is lost.
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+                elif not delta_sources:
+                    ph.update(
+                        "running",
+                        phases.ProgressStyles(body = "No runfiles changed — watching for changes..."),
+                    )
+                    continue
+                else:
+                    pending_cycle = srv.cycle(delta_sources, scope = "runfiles")
+                    if pending_cycle == None:
+                        # The connection dropped mid-dispatch; the client
+                        # never saw this cycle.
+                        proc, pending_cycle = reset_or_restart(proc)
+                        pending_recovery = pending_cycle != None
+            else:
+                sources = {c.path: (None if c.kind == "removed" else "source") for c in batch.changes}
+                pending_cycle = srv.cycle(sources)
+                if pending_cycle == None:
+                    proc, pending_cycle = reset_or_restart(proc)
+                    pending_recovery = pending_cycle != None
+            if pending_cycle != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Sent change cycle %d to %s (watching for changes)..." % (pending_cycle, target),
+                        stream = "Sent change cycle %d to %s" % (pending_cycle, target),
+                    ),
+                )
+            continue
+
+        if notify:
+            delivered = _notify_write(proc.stdin, "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+            if delivered and proc.structured:
+                delivered = _notify_write(proc.stdin, _v1_event(True, batch))
+            if delivered:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "Notified %s (watching for changes)..." % target,
+                        stream = "Notified %s of completed build" % target,
+                    ),
+                )
+                continue
+
+        if proc != None:
+            _stop_child(proc.child)
+        proc = spawn()
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    bazel_trait = ctx.traits[BazelTrait]
-
     target = ctx.args.target[0]
     forward_args = list(ctx.args.run_args)
 
@@ -22,8 +523,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # and before the build spends time.
     spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
-    data = init_data()
-    ph = phases.new(ctx, data)
+    ph = phases.new(ctx, init_data())
 
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
@@ -39,10 +539,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # flags + aspect injection that capture the executable, the `args` attribute,
     # and the target env so `r.spawn` replays them the way `bazel run` does.
     r = runnable(ctx, [target], rc = rc)
-    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
-    events = bazel.build_events.iterator()
-    build_events = [events] + bes_sinks
+    flags = r.flags + endpoint_auth_flags
 
     def _conclude(status, code, text):
         """Emit the terminal `task_update` and return the task's conclusion.
@@ -57,81 +554,46 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             status = status,
             final = True,
             conclusion = text,
-            data = data,
+            data = ph.data,
             progress = phases.ProgressStyles(body = text),
         ))
         return TaskConclusion(exit_code = code, text = text, flagged = False)
 
-    for hook in bazel_trait.build_start:
-        hook(ctx)
+    # The watch loop never concludes: it runs until Ctrl-C ends the process.
+    if ctx.args.watch:
+        def refresh():
+            fresh_rc = bzl.setup_command(ctx, "build")
+            return r.flags_for(fresh_rc) + bzl.rc_flags(ctx, fresh_rc, "build"), fresh_rc
 
-    ph.update(
-        "running",
-        phases.ProgressStyles(
-            body = "Building %s..." % target,
-            stream = "Building %s" % target,
-        ),
-        kind = "bazel_results",
-        phase = phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
-    )
+        return _watch_loop(ctx, ph, r, target, forward_args, spawn_cwd, flags, rc, announce_version, announce_command, refresh)
 
-    # After the phase line, so the streams are announced under the spawn they
-    # belong to.
-    announce_bes_sinks(ctx, bes_sinks)
-
-    build = ctx.bazel.build(
+    build_status = _build_once(
+        ctx,
+        ph,
+        r,
         target,
-        build_events = build_events,
-        flags = r.flags + endpoint_auth_flags,
-        aspects = r.aspects,
-        announce_version = announce_version,
-        announce_command = announce_command,
+        flags,
+        rc,
+        announce_version,
+        announce_command,
+        phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        "Building %s" % target,
     )
-
-    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
-        for _ in range(10000):
-            event = events.try_pop()
-            if event == None:
-                break
-            r.event(event)
-            for handler in bazel_trait.build_event:
-                handler(ctx, event)
-            process_event(data, event)
-        if events.done:
-            break
-
-    build_status = build.wait()
-    for sink in bes_sinks:
-        sink.wait()
-    summarize_bes_upload(ctx, bes_sinks)
-    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
-    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
-
     if not build_status.success:
-        return _conclude("failed", build_status.code, conclusion("failed", data))
+        return _conclude("failed", build_status.code, conclusion("failed", ph.data))
 
-    entrypoint = r.determine_entrypoint(target)
-    if entrypoint == None:
-        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+    proc = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = False)
+    if proc == None:
         return _conclude("failed", 1, "Could not determine the run entrypoint for %s" % target)
 
-    ph.update(
-        "running",
-        phases.ProgressStyles(
-            body = "Running %s..." % target,
-            stream = "Running %s" % target,
-        ),
-        phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
-    )
-
-    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
+    code = proc.child.wait().code
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 
     # The build succeeded and the program failed. Record that so the renderer
     # reports a run failure rather than falling back to "Failed to build",
     # which is what a failed status with no failure buckets otherwise means.
-    data["run"] = {"exit_code": code}
+    ph.data["run"] = {"exit_code": code}
     return _conclude("failed", code, "%s exited %d" % (target, code))
 
 run = task(
@@ -157,7 +619,7 @@ run = task(
                 "this flag as a no-op."
             ),
         ),
-    } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
+    } | watch.ARGS | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

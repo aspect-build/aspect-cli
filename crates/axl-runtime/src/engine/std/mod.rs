@@ -23,6 +23,7 @@ pub(crate) mod live;
 mod net;
 mod process;
 pub mod stream;
+mod watch;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]
