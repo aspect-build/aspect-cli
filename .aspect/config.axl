@@ -52,6 +52,7 @@ load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
+load("@aspect//workspace_data_test.axl", "workspace_data_tests")
 load("@std//time.axl", "time")
 load("./lambda.axl", "lambda_with_global_bind")
 
@@ -363,6 +364,11 @@ def config(ctx: ConfigContext):
     # env compositions, and the opt-out with its protected set.
     # Run with: aspect dev test-aspect-flags
     ctx.tasks.add(aspect_flags_tests)
+
+    # The `KEY value` workspace status `aspect setup workspace-data` prints
+    # for Bazel's --workspace_status_command.
+    # Run with: aspect dev test-workspace-data
+    ctx.tasks.add(workspace_data_tests)
 
     # The rc `aspect setup bazelrc` writes as a document — rendering (startup vs
     # common sections, `--config` groups) and the `try-import` placement.

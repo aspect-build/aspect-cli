@@ -283,18 +283,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // No-op (and disables further OTel work for the rest of the run)
             // if no exporter was registered.
             let mut exporters = mpe.drain_exporters();
-            // The mcp task's stdout carries its JSON-RPC protocol stream, so
-            // a configured stdout telemetry sink would interleave with it and
-            // corrupt the session. Redirect such sinks to stderr for this
-            // task; every other configuration is untouched.
-            if dispatch.task_kind == "mcp" {
+            // These tasks' stdout carries a protocol payload another program
+            // parses, so a configured stdout telemetry sink would interleave
+            // with it and corrupt it. Redirect such sinks to stderr for them;
+            // every other configuration is untouched.
+            if let Some(owner) = stdout_protocol_owner(&dispatch.task_kind) {
                 use axl_runtime::engine::telemetry::{ExporterSpec, FileDestination};
                 for spec in &mut exporters {
                     if let ExporterSpec::File(file) = spec {
                         if file.destination == FileDestination::Stdout {
                             errln!(
-                                "warning: a stdout telemetry exporter is configured, but `aspect \
-                                 mcp` owns stdout for the MCP protocol — redirecting it to stderr."
+                                "warning: a stdout telemetry exporter is configured, but \
+                                 {owner} — redirecting it to stderr."
                             );
                             file.destination = FileDestination::Stderr;
                         }
@@ -328,6 +328,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             result
         }
         Err(err) => panic!("{:?}", err),
+    }
+}
+
+/// For a task whose stdout is a machine-parsed protocol payload rather than
+/// console output, a phrase naming what owns it — otherwise `None`.
+fn stdout_protocol_owner(task_kind: &str) -> Option<&'static str> {
+    match task_kind {
+        "mcp" => Some("`aspect mcp` owns stdout for the MCP protocol"),
+        "workspace-data" => {
+            Some("`aspect setup workspace-data` owns stdout for Bazel's workspace status")
+        }
+        _ => None,
     }
 }
 
