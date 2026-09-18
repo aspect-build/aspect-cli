@@ -3,6 +3,19 @@ metadata as Bazel workspace status, for `--workspace_status_command`.
 
     bazel build //... --workspace_status_command="aspect setup workspace-data"
 
+Bazel takes one status command, so a repo that already has a status script of
+its own calls this from inside that script rather than replacing it:
+
+    #!/usr/bin/env bash
+    echo "MY_OWN_KEY $(...)"
+    aspect setup workspace-data || true
+
+The `|| true` covers what this task cannot: it exits 0 by design, but an
+`aspect` missing from PATH fails before the task runs, and under `set -e` that
+would take the whole script — and with it the build — down. Both sets of lines
+land in the same `volatile-status.txt`, so pick keys that do not collide with
+the ones this prints (`bazel/build_metadata.axl`).
+
 Bazel runs the command itself at the start of every invocation and reads `KEY
 value` lines from its stdout, so the values are computed per build rather than
 written somewhere and left to go stale. That is what makes this safe where a
