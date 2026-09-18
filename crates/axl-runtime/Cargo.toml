@@ -74,6 +74,8 @@ dirs = "6.0.0"
 # it needs no system libdbus/libssl at build time, so the CLI builds on any Linux
 # host. Headless/CI use the 0600 file fallback (ASPECT_CREDENTIALS_FILE) anyway.
 keyring = { version = "3.6.1", features = ["apple-native", "windows-native", "linux-native"] }
+fd-lock = "4.0.4"
+tempfile = "3"
 fibre = "0.5.0"
 flate2 = "1.1.2"
 rand = "0.8.5"
@@ -86,6 +88,3 @@ tonic = "0.14.2"
 tracing = "0.1.41"
 uuid = { version = "1.18.1", features = ["v4"] }
 rmcp = { version = "3.1.4", features = ["server", "transport-io"] }
-
-[dev-dependencies]
-tempfile = "3"
