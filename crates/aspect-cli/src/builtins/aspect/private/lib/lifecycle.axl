@@ -29,7 +29,10 @@ every handler so non-template observers see it.
 The closing `→ Completed/Failed <Task> task in <duration>` line is
 emitted automatically by the runtime after `implementation` returns.
 Status surfaces flip to the verdict via the task's own terminal
-`phases.update(..., "passed"|"failed", ...)`.
+`phases.update(..., "passed"|"failed", ...)`. If the task ends before it
+sends one — an early `exit`, a hard error, a `return` above it — the handle's
+post-task hook sends a terminal update with the runtime's verdict and the
+message the task ended on, so no surface is left on "running".
 """
 
 # Record, trait, and emitter sit together here; the `phases` namespace at
@@ -466,6 +469,8 @@ Phases = trait(
     # run / BK annotation, read `update.subject` for the title); `phases.setup`
     # emits it (Setup phase mark) at task start. The `final = True` update is
     # the last — handlers conclude there. No separate started/complete hook.
+    # Every handle guarantees exactly one final update: the task's own, or the
+    # one its post-task hook sends when the task ended without it.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
 
     # `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`, called
@@ -652,6 +657,32 @@ def _dispatch(ctx, lifecycle, update):
     for handler in lifecycle.task_update:
         handler(ctx, update)
 
+def _new_surface():
+    """What a handle's status surfaces have seen so far: whether any update
+    opened them, the last non-empty `kind`, and whether a final update
+    concluded them. The handle's post-task hook reads it to decide whether a
+    final update is still owed."""
+    return {"opened": False, "kind": "", "final": False}
+
+def _track_and_dispatch(ctx, surface, update):
+    """Record `update` on `surface`, then `_dispatch` it to the task's `Phases`
+    handlers. Every update a handle sends goes through here, so the surface
+    record is complete; `_dispatch` alone is the handler-list primitive."""
+    surface["opened"] = True
+    if update.kind:
+        surface["kind"] = update.kind
+    if update.final:
+        surface["final"] = True
+    _dispatch(ctx, ctx.traits[Phases], update)
+
+# Progress body for a surface closed by the post-task hook with no message
+# to show, keyed by the terminal status.
+_ENDED_EARLY = {
+    "passed": "Passed",
+    "warning": "Passed with warnings",
+    "failed": "Failed",
+}
+
 # `Phase.emoji` fallback: a Buildkite shortcode rendering the Aspect
 # brand glyph on BK (literal text elsewhere), so custom phases without an
 # emoji still get a section marker.
@@ -731,7 +762,7 @@ def _resolve_progress_styles(progress):
     # Wrong type → downstream field access raises with the offending value.
     return progress
 
-def _update(ctx, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
+def _update(ctx, surface, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
     """Emit a TaskUpdate to all `Phases.task_update` handlers and print
     `→ <progress>` to stderr. When `final = True`, returns a
     `TaskConclusion(exit_code, text=conclusion, flagged=(status=="warning"))`
@@ -739,6 +770,7 @@ def _update(ctx, status, progress, kind = "", data = None, priority = True, phas
 
     Args:
         ctx:       The TaskContext; `Phases` handler list read from `ctx.traits`.
+        surface:   The handle's surface record (see `_new_surface`).
         status:    Required lifecycle status (Status enum value).
         progress:  str (same everywhere) or `ProgressStyles` (per-style).
         kind:      Template dispatch key (e.g. "bazel_results"). Empty (default)
@@ -823,7 +855,7 @@ def _update(ctx, status, progress, kind = "", data = None, priority = True, phas
         data = data if data != None else {},
         subject = subject,
     )
-    _dispatch(ctx, ctx.traits[Phases], update)
+    _track_and_dispatch(ctx, surface, update)
 
     if final:
         return TaskConclusion(
@@ -869,7 +901,7 @@ def pick_task_status(data, kind_key, had_failure, terminal):
             return "failed" if terminal else "failing"
     return "passed" if terminal else "running"
 
-def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
+def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []):
     """Run the `setup` phase — all pre-task work — and return the resolved
     Bazel command flags (or `None` for a non-building task).
 
@@ -894,6 +926,7 @@ def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
 
     Args:
       ctx:         TaskContext (source of the trait handlers).
+      surface:     The handle's surface record (see `_new_surface`).
       subject:     Task subject for the first `phases.update`; may be refined
                    later (see `TaskUpdate.subject`).
       kind:        result-library kind (e.g. `"bazel_results"`) for renderer dispatch.
@@ -913,6 +946,7 @@ def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
     # both init the surfaces and render their first body.
     _update(
         ctx,
+        surface,
         "running",
         ProgressStyles(
             body = "Running setup...",
@@ -939,11 +973,11 @@ def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
     hc_trait = ctx.traits[HealthCheckTrait] if HealthCheckTrait in ctx.traits else None
     health_error = run_health_checks(ctx, hc_trait)
     if health_error != None:
-        _fail_health_check(ctx, kind, data, health_error)
+        _fail_health_check(ctx, surface, kind, data, health_error)
 
     return rc
 
-def _setup_surface(ctx, subject, kind, data):
+def _setup_surface(ctx, surface, subject, kind, data):
     """Surface half of `_setup`: everything except the Bazel rc parse.
 
     For tasks that resolve the active `RunCommand` themselves BEFORE the
@@ -968,6 +1002,7 @@ def _setup_surface(ctx, subject, kind, data):
 
     _update(
         ctx,
+        surface,
         "running",
         ProgressStyles(
             body = "Running setup...",
@@ -986,19 +1021,19 @@ def _setup_surface(ctx, subject, kind, data):
     hc_trait = ctx.traits[HealthCheckTrait] if HealthCheckTrait in ctx.traits else None
     health_error = run_health_checks(ctx, hc_trait)
     if health_error != None:
-        _fail_health_check(ctx, kind, data, health_error)
+        _fail_health_check(ctx, surface, kind, data, health_error)
 
 # Uniform surface body/conclusion on health-check failure; the detailed
 # reason goes to the CLI/log instead.
 _HEALTH_CHECK_FAILED = "Health check failed"
 
-def _fail_health_check(ctx, kind, data, reason):
+def _fail_health_check(ctx, surface, kind, data, reason):
     """Conclude the surface for a failed `phases.setup` health check, then end
     the task with `reason` as an `ERROR:` line and no traceback: an unhealthy
     runner is an expected refusal, and the health check has already printed
-    what it found and tried. Emits a terminal `phases.update` first so the
-    surface flips to failed instead of sticking at "running"."""
-    _dispatch(ctx, ctx.traits[Phases], TaskUpdate(
+    what it found and tried. Emits the terminal update itself so the surface
+    reads "Health check failed" rather than the exit's message."""
+    _track_and_dispatch(ctx, surface, TaskUpdate(
         kind = kind,
         status = "failed",
         final = True,
@@ -1018,6 +1053,12 @@ def _new(ctx, data):
     The health-check / bazel traits (for `setup`) and the `Phases` handler list
     (for `update`/`dispatch`/`suggest_fixes`) are read from `ctx.traits`.
 
+    The handle registers a post-task hook that closes any surface it opened
+    but never concluded — the task hit an early `exit`, a hard error, or a
+    `return` before its final update — with the runtime's verdict, so no
+    surface is left on "running". A task that sends its own final update is
+    unaffected.
+
     Methods:
       ph.ctx  — the bound TaskContext (for helpers that also need ctx directly).
       ph.data — the bound data dict. Kept a stable reference across `reset`.
@@ -1033,15 +1074,18 @@ def _new(ctx, data):
                          retries where each attempt re-inits `data`.
     """
 
+    surface = _new_surface()
+
     def setup(subject, kind, command = "build", base_flags = []):
-        return _setup(ctx, subject, kind, data, command, base_flags)
+        return _setup(ctx, surface, subject, kind, data, command, base_flags)
 
     def setup_surface(subject, kind):
-        _setup_surface(ctx, subject, kind, data)
+        _setup_surface(ctx, surface, subject, kind, data)
 
     def update(status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
         return _update(
             ctx,
+            surface,
             status,
             progress,
             kind = kind,
@@ -1055,7 +1099,30 @@ def _new(ctx, data):
         )
 
     def dispatch(update):
-        _dispatch(ctx, ctx.traits[Phases], update)
+        _track_and_dispatch(ctx, surface, update)
+
+    def close(_tctx, outcome):
+        """Post-task hook: close a surface that was opened but never concluded
+        with the runtime's verdict and the message the task ended on."""
+        if not surface["opened"] or surface["final"]:
+            return
+        if outcome.exit_code != 0:
+            status = "failed"
+        elif outcome.flagged:
+            status = "warning"
+        else:
+            status = "passed"
+        text = outcome.message.split("\n")[0] if outcome.message else outcome.text
+        _track_and_dispatch(ctx, surface, TaskUpdate(
+            kind = surface["kind"],
+            status = status,
+            final = True,
+            conclusion = text,
+            data = _data,
+            progress = ProgressStyles(body = text if text else _ENDED_EARLY[status]),
+        ))
+
+    ctx.hooks.post_task(close)
 
     def suggest_fixes(kind, status, exit_code = 0, bazel_subcommand = "", targets = [], failed_targets = [], extras = {}):
         _suggest_fixes(
