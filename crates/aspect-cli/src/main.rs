@@ -287,7 +287,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // a configured stdout telemetry sink would interleave with it and
             // corrupt the session. Redirect such sinks to stderr for this
             // task; every other configuration is untouched.
-            if dispatch.task_name == "mcp" {
+            if dispatch.task_kind == "mcp" {
                 use axl_runtime::engine::telemetry::{ExporterSpec, FileDestination};
                 for spec in &mut exporters {
                     if let ExporterSpec::File(file) = spec {
