@@ -534,6 +534,27 @@ def get_task_metadata_flags(ctx):
             flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     return flags
 
+# USER resolution
+
+# Unix accounts that name a container rather than a person. A build running as
+# one of these tells us nothing about who started it, so the commit author is
+# the better guess there.
+_GENERIC_USERS = ["root", "nobody", "unknown"]
+
+def resolve_user(ci_user, env_user, commit_author_name):
+    """Who ran this build, for the `USER` metadata key.
+
+    The CI actor when a collector found one, else the account at the keyboard.
+    The commit author is a last resort: it answers "who wrote the code", which
+    off CI is the same person only by coincidence — a local build sitting on
+    someone else's HEAD would otherwise be attributed to them.
+    """
+    if ci_user:
+        return ci_user
+    if env_user and env_user.lower() not in _GENERIC_USERS:
+        return env_user
+    return commit_author_name or env_user or ""
+
 # Public entry point
 
 def get_build_metadata_flags(std):
@@ -560,12 +581,12 @@ def get_build_metadata_flags(std):
     # so it can correct where the code actually lives.
     _apply_vcs_override(std.env, meta)
 
-    # 4: USER fallback (non-CI): git author name, then $USER.
-    if not meta.get("USER"):
-        if meta.get("COMMIT_AUTHOR_NAME"):
-            meta["USER"] = meta["COMMIT_AUTHOR_NAME"]
-        elif std.env.var("USER"):
-            meta["USER"] = std.env.var("USER")
+    # 4: USER — CI actor, else the local account; see resolve_user.
+    # USERNAME is the Windows spelling of $USER.
+    env_user = std.env.var("USER") or std.env.var("USERNAME") or ""
+    user = resolve_user(meta.get("USER", ""), env_user, meta.get("COMMIT_AUTHOR_NAME", ""))
+    if user:
+        meta["USER"] = user
 
     # 5: Emit strings, skipping empty values.
     flags = []

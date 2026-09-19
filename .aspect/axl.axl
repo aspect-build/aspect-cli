@@ -6,6 +6,7 @@ load(
     "@aspect//bazel/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
+    "resolve_user",
     "version_gte",
     "version_tuple",
 )
@@ -2001,6 +2002,20 @@ def test_build_metadata_lib(tc: int) -> int:
     tc = test_case(tc, version_gte("6.0.0", "5.99.99"), "version_gte: major greater")
     tc = test_case(tc, not version_gte("5.17.99", "5.18.0"), "version_gte: less")
     tc = test_case(tc, version_gte("5.18.0-rc1", "5.18.0"), "version_gte: pre-release tolerant (treated equal)")
+
+    # resolve_user
+    cases = [
+        ("octocat", "cristi", "peskycow", "octocat", "CI actor wins"),
+        ("", "cristi", "peskycow", "cristi", "local build attributed to the builder, not HEAD's author"),
+        ("", "", "peskycow", "peskycow", "no account → commit author"),
+        ("", "root", "peskycow", "peskycow", "container account → commit author"),
+        ("", "ROOT", "peskycow", "peskycow", "generic account match is case-insensitive"),
+        ("", "root", "", "root", "container account kept when there is no commit author"),
+        ("", "", "", "", "nothing known → empty"),
+    ]
+    for (ci_user, env_user, author, expected, desc) in cases:
+        got = resolve_user(ci_user, env_user, author)
+        tc = test_case(tc, got == expected, "resolve_user: %s → %r (got %r)" % (desc, expected, got))
 
     return tc
 
