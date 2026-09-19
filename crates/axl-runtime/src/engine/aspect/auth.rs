@@ -213,6 +213,22 @@ const DEFAULT_API_URL: &str = "https://api.aspect.build";
 /// nowhere to relay through and fail outright.
 const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/callback";
 
+/// Aspect Cloud's Bazel-facing endpoints, as the seed states them.
+///
+/// The same role [`DEFAULT_LOGIN_REDIRECT_URI`] plays: discovery records what the
+/// deployment actually advertises and [`merge_into_seed`] takes that over these,
+/// so an edge can be renamed without a CLI release. Stating them is what makes
+/// Aspect Cloud a usable deployment before anything has been discovered, so
+/// `aspect setup bazelrc` has somewhere to point on a machine that has never
+/// logged in and the rc it writes works as soon as there is a credential.
+///
+/// No `exec`: Aspect Cloud serves no remote executor today, and a seeded one
+/// would put an `--config=aspect-cloud-exec` in every rc pointing nowhere. The
+/// day it ships, discovery advertises it before this constant would.
+const DEFAULT_CACHE_HOST: &str = "cache.aspect.build";
+const DEFAULT_BES_HOST: &str = "bes.aspect.build";
+const DEFAULT_RESULTS_URL: &str = "https://app.aspect.build/i/";
+
 /// The host a bare `aspect auth login` probes to discover the Aspect Cloud
 /// endpoints, so a fresh install has a working `--remote` without anyone running
 /// `aspect auth configure` by hand — see [`configure_default`].
@@ -323,6 +339,11 @@ fn reserved_name_error(name: &str) -> anyhow::Error {
 /// The built-in Aspect Cloud entry, re-created on every config load and enriched
 /// from `config.json` by [`merge_into_seed`]. Never read from disk: `builtin` is
 /// `#[serde(skip)]`, so this is the only thing that can produce one.
+///
+/// Complete enough to use as it stands — it states Aspect Cloud's login client,
+/// its API, and its Bazel-facing endpoints — so everything that reads a
+/// deployment works before a first `aspect auth login`. Only the credential is
+/// genuinely missing then, and that is the error the user gets.
 fn aspect_cloud_deployment() -> Deployment {
     Deployment {
         name: ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(),
@@ -342,7 +363,13 @@ fn aspect_cloud_deployment() -> Deployment {
         // asking for the token.
         scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
-        endpoints: Endpoints::default(),
+        endpoints: Endpoints {
+            cache: DEFAULT_CACHE_HOST.to_string(),
+            bes: DEFAULT_BES_HOST.to_string(),
+            api: DEFAULT_DISCOVERY_HOST.to_string(),
+            results_url: DEFAULT_RESULTS_URL.to_string(),
+            ..Endpoints::default()
+        },
     }
 }
 
@@ -480,7 +507,13 @@ fn overlay_config_sources(
 /// than compiled in, so `configure_default` records them under that name and this
 /// puts them back on the entry they belong to.
 ///
-/// The endpoints are taken unconditionally. The PKCE client and login redirect are
+/// The endpoints are taken wholesale whenever the entry advertises any, so a
+/// discovery record replaces the seeded set rather than merging into it: an edge
+/// the deployment has dropped has to be able to disappear. An entry advertising
+/// none leaves the seed's standing, so a hand-written `aspect-cloud` entry that
+/// only pins, say, a client cannot blank out Aspect Cloud's hosts.
+///
+/// The PKCE client and login redirect are
 /// taken only from an entry naming Aspect Cloud's own issuer, which is the whole
 /// safety argument: each is only ever exercised against the issuer it was
 /// discovered from, so one taken from a document on [`DEFAULT_ISSUER`] cannot send
@@ -504,7 +537,9 @@ fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
         }
     }
     seed.hosts = entry.hosts;
-    seed.endpoints = entry.endpoints;
+    if !entry.endpoints.is_empty() {
+        seed.endpoints = entry.endpoints;
+    }
 }
 
 /// `value` unless it is empty, so an advertised-but-blank field reads as absent.
@@ -5712,6 +5747,53 @@ mod tests {
             resolve_deployment_name(None, "bes.aspect.build", &parsed),
             (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
         );
+    }
+
+    /// Aspect Cloud is usable before a first login: the seed alone advertises the
+    /// endpoints Bazel needs, so `aspect setup bazelrc` on a fresh machine has a
+    /// deployment to point at and `--remote` has somewhere to go. Only the
+    /// credential is missing until someone logs in.
+    #[test]
+    fn the_seed_advertises_aspect_clouds_endpoints_with_nothing_configured() {
+        let (merged, shadowed) = overlay_config_sources(vec![]);
+
+        assert_eq!(merged.len(), 1);
+        let seed = &merged[0];
+        assert!(seed.builtin && seed.default);
+        assert_eq!(seed.endpoints.cache, DEFAULT_CACHE_HOST);
+        assert_eq!(seed.endpoints.bes, DEFAULT_BES_HOST);
+        assert_eq!(seed.endpoints.results_url, DEFAULT_RESULTS_URL);
+        // No remote executor to point an `-exec` config at, and the API host it
+        // advertises is the one the compiled-in default already names.
+        assert!(seed.endpoints.exec.is_empty());
+        assert_eq!(
+            deployment_api_base(seed).as_deref(),
+            Some(DEFAULT_API_URL),
+            "the advertised API host and the compiled-in API url must agree"
+        );
+        assert!(shadowed.is_empty());
+    }
+
+    /// Discovery replaces the seeded endpoints wholesale, so an edge Aspect Cloud
+    /// has dropped disappears — but an entry that advertises none is not a
+    /// discovery record, and must not blank out hosts the CLI knows.
+    #[test]
+    fn an_endpointless_entry_leaves_the_seeded_endpoints_alone() {
+        let mut discovered = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        discovered.endpoints.cache = "cache.eu.aspect.build".to_string();
+        let (merged, _) = overlay_config_sources(vec![src("/config.json", vec![discovered], true)]);
+        assert_eq!(merged[0].endpoints.cache, "cache.eu.aspect.build");
+        assert!(
+            merged[0].endpoints.bes.is_empty(),
+            "a discovery record replaces the set rather than merging into it"
+        );
+
+        let mut endpointless = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        endpointless.endpoints = Endpoints::default();
+        let (merged, _) =
+            overlay_config_sources(vec![src("/config.json", vec![endpointless], true)]);
+        assert_eq!(merged[0].endpoints.cache, DEFAULT_CACHE_HOST);
+        assert_eq!(merged[0].endpoints.bes, DEFAULT_BES_HOST);
     }
 
     /// A `config.json` entry under the alias must fold into the seed rather than

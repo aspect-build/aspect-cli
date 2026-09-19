@@ -6,9 +6,13 @@ an endpoint:
     --config=aspect-<name>         a configured Aspect Workflows deployment
     --config=aspect-<name>-exec    the same, plus its remote execution
 
-No section names "the default deployment": the rc is committed and shared, and
-the default (`aspect auth use`) is one machine's setting that could change
-under it. A deployment is chosen by its own name.
+No section names "the default deployment": a checkout's rc is committed and
+shared, and the default (`aspect auth use`) is one machine's setting that could
+change under it. A deployment is chosen by its own name.
+
+Aspect Cloud always has a section. Its endpoints are the built-in deployment's
+(`engine/aspect/auth.rs`), stated rather than discovered, so they are there on a
+machine that has never logged in.
 
 Aspect Cloud's section takes its own name; a configured deployment `<name>`
 gets `aspect-<name>`. A cache or BES gives a base section, an executor an
@@ -18,11 +22,12 @@ a deployment with neither gets nothing.
 Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
-chains `rc_groups.axl` groups rather than repeating flags: first the groups the
-rc would otherwise enable for every command (`aspect-common`, the CI host's) —
-the rc that carries sections enables nothing, so it is inert until a section is
-named — then the tuning groups its endpoints justify (`aspect-cache`,
-`aspect-bes`). Remote execution is never part of the base section: it relocates
+chains `rc_groups.axl` groups rather than repeating flags: first the groups that
+presume no endpoint (`aspect-common`, the CI host's), which a checkout's rc does
+not enable — so naming a section is what turns anything on there — then the
+tuning groups its endpoints justify (`aspect-cache`, `aspect-bes`). A machine's
+rc enables that first pair itself; chaining it again costs nothing, every flag
+in it being a last-wins `--flag=value`. Remote execution is never part of the base section: it relocates
 every action, so it is only ever reached by naming `-exec`, mirroring
 `--remote=exec` on `aspect <task>`.
 

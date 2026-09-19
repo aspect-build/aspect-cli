@@ -15,16 +15,25 @@ The startup options are the exception, since Bazel gives them no `--config`.
     aspect-runner     the runner's storage (`--repository_cache`); only with the runner marker
     aspect-exec       the runner's remote executor; only where the env names one
 
-The rc has two shapes, decided by `environment.env_names_deployment`. Where the environment
-names the deployment — the runner marker, or any `ASPECT_WORKFLOWS_*` endpoint —
-every group but `aspect-exec` is enabled (`aspect-cache` / `aspect-bes` only
-where the env names their endpoint) and no deployment sections are written.
-Where it is silent, the rc is the checkout's, committed and shared by every
-host that builds it: the host group is left out, nothing is enabled, and the
-deployment sections of `deployment_rc.axl` are written, each chaining
-`section_chains` (`aspect-common`) and then the tuning groups its endpoints
-justify, so the file is inert until a section is named. Either way `aspect-exec` is reached only
-by name, since remote execution relocates every action.
+Two independent facts shape the rc. `machine_rc` is whether the file belongs to
+this machine — a runner's or a `--home` rc, never committed — or to the checkout,
+shared by every host that builds it. Only a machine's rc may hold the host group
+and may enable anything: `section_chains` (`aspect-common`, and the host group
+where there is one) goes on at the top, since that tuning presumes no endpoint.
+A checkout's rc defines no host group and enables nothing.
+
+`names_deployment` (`environment.env_names_deployment`) is whether the
+environment itself names the endpoints — the runner marker, or any
+`ASPECT_WORKFLOWS_*` endpoint. Then the endpoint groups are enabled too
+(`aspect-cache` / `aspect-bes` only where the env names their endpoint, and
+`aspect-runner` with the marker) and `bazelrc.axl` writes no deployment
+sections. Where the env is silent the endpoints come from the opt-in deployment
+sections of `deployment_rc.axl`, each chaining `section_chains` and then the
+tuning groups its endpoints justify. A machine's rc that the env says nothing
+about — `--home` on a stock CI runner — is the mixed case: the common and host
+tuning apply to every `bazel` call, the endpoints wait for `--config=aspect-*`.
+Either way `aspect-exec` is reached only by name, since remote execution
+relocates every action.
 
 The host group is named for the detected CI host — `aspect-github-actions`,
 `aspect-circleci`, `aspect-gitlab`, `aspect-buildkite` — and exists only when
@@ -96,8 +105,8 @@ def bes_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
 
 def exec_log_group(exec_log_path: str) -> list:
     """`aspect-exec-log`: the compact execution log at `exec_log_path` — a
-    runner's job tmpdir, or `%workspace%/.aspect/generated/…` in a checkout's
-    rc — for the diagnostics upload to carry. Its own group, enabled or chained
+    runner's job tmpdir, or `<base>/.aspect/generated/…` (through `%workspace%`
+    in a checkout) — for the diagnostics upload to carry. Its own group, enabled or chained
     beside `aspect-bes`, so a repository on a thin link can drop the upload of
     this one large file by removing the lines that name the group. Empty (no
     group) without a path."""
@@ -135,19 +144,21 @@ def exec_group(environment: WorkflowsEnvironment) -> list:
     chain = [] if environment.remote_cache != None else ["--config=" + GROUP_CACHE]
     return [_group(GROUP_EXEC, "The runner's remote execution (ASPECT_WORKFLOWS_REMOTE_EXECUTOR); opt in per call.", chain + endpoint, source = "the runner's remote executor")]
 
-def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str, names_deployment: bool) -> (list, list):
+def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_color: bool, exec_log_path: str, names_deployment: bool, machine_rc: bool) -> (list, list):
     """Every group the rc defines, in the order written, and the names among
-    them it enables with `common --config=<group>` lines. Where the env names
-    the deployment (`names_deployment`, from `environment.env_names_deployment`)
-    the rc is this machine's: every group but `aspect-exec` is enabled, with
-    `aspect-cache` / `aspect-bes` (and `aspect-exec-log` with the latter) only
-    where the env names their endpoint.
-    Elsewhere the rc is the checkout's, shared by every host that builds it, so
-    the CI host's group is not defined at all and nothing is enabled; the
-    deployment sections chain `section_chains` instead. Returns
-    `(groups, enabled)`."""
+    them it enables with `common --config=<group>` lines.
+
+    `machine_rc` — a runner's rc or a `--home` one — admits the CI host's group
+    and enables `section_chains`, the tuning that presumes no endpoint. A
+    checkout's rc is shared by every host that builds it, so it defines no host
+    group and enables nothing, leaving the deployment sections to chain what
+    they need. `names_deployment` (`environment.env_names_deployment`) adds the
+    endpoint groups to what is enabled: `aspect-runner` with the marker, and
+    `aspect-cache` / `aspect-bes` (with `aspect-exec-log` alongside the latter)
+    where the env names their endpoint. It implies `machine_rc`; the reverse
+    does not hold. Returns `(groups, enabled)`."""
     groups = [_group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags())]
-    if names_deployment:
+    if machine_rc:
         groups.extend(host_group(environment, misdetects_color))
     groups.extend(runner_group(environment, on_runner))
     groups.append(cache_group(environment, on_runner))
@@ -155,9 +166,9 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     groups.extend(exec_log_group(exec_log_path))
     groups.extend(exec_group(environment))
 
+    enabled = section_chains(groups) if machine_rc else []
     if not names_deployment:
-        return (groups, [])
-    enabled = section_chains(groups)
+        return (groups, enabled)
     enabled.extend([g.name for g in groups if g.name == GROUP_RUNNER])
     if environment.remote_cache != None:
         enabled.append(GROUP_CACHE)
