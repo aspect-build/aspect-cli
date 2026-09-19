@@ -45,7 +45,19 @@ how a recommendation is overridden.
     keeps it in step with the runner's environment; tasks run with `--nohome_rc`
     and stream BES from the CLI, so nothing in it reaches them. Its execution
     log is the exception to the base: the job tmpdir, swept with the job, so
-    concurrent jobs on a persistent runner do not share one.
+    concurrent jobs on a persistent runner do not share one. Both files land in
+    a clean home: the Workflows agent removes `~/.aspect` outright and deletes
+    `~/.bazelrc` before every job, so each job writes them from nothing and
+    nothing carries over.
+
+An rc this command wrote whole is replaced rather than imported into
+(`is_generated_rc`). The importing rc has not always been a separate file, so
+where one survives from an older CLI — a self-hosted runner nobody sweeps, a
+developer's machine, a repository whose committed `.bazelrc` was generated
+outright — the superseded body would otherwise sit below the new `try-import`,
+where Bazel's last-wins would give it the final say over the file it now
+imports. Anything a person put there is kept, below the import, for exactly
+that reason.
 
 A machine's rc — either home case — also *enables* the tuning that presumes no
 endpoint, so a plain `bazel build` on a CI runner picks up `aspect-common` and
@@ -119,6 +131,7 @@ load(
     "ensure_import",
     "import_line",
     "is_config_chain",
+    "is_generated_rc",
     "prune_configs",
     "rc_paths",
     "render_bazelrc",
@@ -274,6 +287,11 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     import_result = None
     if paths.importer:
         existing = ctx.std.fs.read_to_string(paths.importer) if ctx.std.fs.exists(paths.importer) else None
+
+        # An rc an older CLI wrote whole is superseded by the one it now
+        # imports, so it is replaced rather than left below the import where
+        # Bazel's last-wins would give the stale copy the final say.
+        existing = None if is_generated_rc(existing) else existing
         import_result = ensure_import(existing, import_line(paths.imported))
         if import_result.action != ImportAction("unchanged"):
             _write(ctx, paths.importer, import_result.content)
