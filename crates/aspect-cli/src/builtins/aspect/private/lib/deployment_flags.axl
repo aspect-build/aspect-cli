@@ -59,9 +59,9 @@ Failures:
     machine's deployment (a Workflows runner, or the endpoint variables set by
     hand): the Workflows feature wires that deployment, and a second one would
     route the build off it. `REMOTE_REFUSED_BY_ENV` is the message.
-  - `--remote` with no deployment to draw from — no `--deployment` and no default
-    Aspect Workflows deployment configured (the target resolves to Aspect Cloud
-    before discovery has recorded its endpoints).
+  - `--remote` with no `--deployment` where the default advertises no Bazel
+    endpoint at all. Aspect Cloud always advertises, so this is a configured
+    deployment recorded before it served one.
   - A capability the user *named* that the deployment doesn't advertise (e.g.
     `--remote=exec` against a deployment with no remote execution). A defaulted
     capability is skipped silently instead: bare `--remote` means "use what this
@@ -306,14 +306,15 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     endpoints = ctx.aspect.auth.deployment_endpoints(deployment = ctx.args.deployment)
 
     # --remote needs a deployment to draw endpoints from. With no --deployment the
-    # target is the current default; if that resolves to something with no
-    # endpoints (the built-in Aspect Cloud entry — i.e. no default deployment is
-    # configured), fail clearly rather than blaming a capability.
+    # target is the current default; if that advertises nothing at all, fail
+    # clearly rather than blaming a capability. Aspect Cloud always advertises —
+    # the built-in entry states its endpoints — so this is a configured
+    # deployment that serves no Bazel endpoint, recorded before it had any.
     advertises_none = not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
     if advertises_none and not ctx.args.deployment:
-        fail("--remote requires an Aspect Workflows deployment, but no default is set. " +
-             "Run `aspect auth configure <host>` to add one. " +
-             "If you already have deployments (see `aspect auth status`), set a default with " +
+        fail("--remote requires a deployment that serves a Bazel endpoint, but the default (%s) advertises none. " % endpoints.name +
+             "Run `aspect auth configure <host>` to refresh what it advertises. " +
+             "If you already have other deployments (see `aspect auth status`), choose one with " +
              "`aspect auth use <name>` or pass an explicit --deployment <name>.")
 
     base_flags = []
