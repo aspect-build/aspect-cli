@@ -92,8 +92,10 @@ the lines that named it); the endpoints, credentials, and runner paths in
 (`feature/bazel_flags.axl`), since vanilla `bazel` and tasks may want different
 omissions.
 
-How the rc renders and how the import line is placed live in
-`lib/bazelrc_file.axl`. Version-gated flags are resolved against the detected
+The layout above is `rc_paths` in `lib/bazelrc_file.axl`, a pure function of the
+base directory and this task's flags; how the rc renders and how the import line
+is placed live there too. This file resolves the base — the only part that needs
+the filesystem — and writes what comes back. Version-gated flags are resolved against the detected
 Bazel version (assumed-latest when undetectable) before writing. Only file
 output is supported — there is no stdout mode.
 """
@@ -118,6 +120,7 @@ load(
     "import_line",
     "is_config_chain",
     "prune_configs",
+    "rc_paths",
     "render_bazelrc",
     "startup_flags_for_rc",
 )
@@ -125,15 +128,6 @@ load("./private/lib/deployment_rc.axl", "config_collisions", "deployment_configs
 load("./private/lib/environment.axl", "bazel_misdetects_color", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "bes_chains", "rc_groups", "section_chains")
 
-# The same three paths under either base directory — the home directory in home
-# mode, the workspace root otherwise: the generated rc, the rc that imports it
-# (`~/.bazelrc` or the workspace `.bazelrc`, both of which Bazel reads on its
-# own), and the directory build-time outputs land in.
-_GENERATED_RC = ".aspect/bazelrc"
-_IMPORTING_RC = ".bazelrc"
-_GENERATED_DIR = ".aspect/generated"
-_EXEC_LOG_NAME = "exec.log.zstd"
-_WORKSPACE_EXEC_LOG = "%workspace%/" + _GENERATED_DIR + "/" + _EXEC_LOG_NAME
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
 
 _HELPER_NAME = "aspect"
@@ -162,19 +156,14 @@ def _workspace(ctx: TaskContext) -> str:
         ctx.std.process.exit(1, "No Bazel workspace above %s (no MODULE.bazel, REPO.bazel, or WORKSPACE), so there is no .bazelrc for vanilla bazel to read. Run this from inside the workspace, or pass --output=<path> and --import-into=<rc>." % ctx.std.env.current_dir())
     return root
 
-def _dirname(path: str) -> str:
-    return path.rsplit("/", 1)[0] if "/" in path else "."
-
-def _generated_dir(ctx: TaskContext, base: str, home_mode: bool) -> list:
-    """Create `<base>/.aspect/generated/`, the execution log's parent, which
-    Bazel will not create itself. In a checkout it also gets a `.gitignore` of
-    everything but itself: committed, that makes the directory exist in every
-    clone while nothing written there is ever tracked. A home directory is not
-    a checkout, so there it is the bare directory. Returns the paths written,
-    for the report."""
-    dir = base + "/" + _GENERATED_DIR
+def _create_generated_dir(ctx: TaskContext, dir: str, gitignore: bool) -> list:
+    """Create `dir`, the execution log's parent, which Bazel will not create
+    itself. A checkout's also gets a `.gitignore` of everything but itself:
+    committed, that makes the directory exist in every clone while nothing
+    written there is ever tracked. A home directory is not a checkout, so there
+    it is the bare directory. Returns the files written, for the report."""
     ctx.std.fs.create_dir_all(dir)
-    if home_mode:
+    if not gitignore:
         return []
     ctx.std.fs.write(dir + "/.gitignore", "*\n!.gitignore\n")
     return [dir + "/.gitignore"]
@@ -225,52 +214,41 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     if blocked:
         return TaskConclusion(exit_code = 1, message = "--omit-bazel-flag cannot drop %s: endpoints, credentials, and the runner's paths are what make the build Aspect's." % ", ".join(blocked))
 
-    environment = get_workflows_environment(ctx.std)
-    on_runner = is_aspect_workflows_runner(ctx.std.env)
-    home_mode = ctx.args.home or on_runner
     if ctx.args.home and ctx.args.output:
         return TaskConclusion(exit_code = 1, message = "--home and --output both choose where the rc goes. Pass one: --home writes ~/.aspect/bazelrc, --output writes the path you name.")
 
+    environment = get_workflows_environment(ctx.std)
+    on_runner = is_aspect_workflows_runner(ctx.std.env)
+    home_mode = ctx.args.home or on_runner
+
     startup_flags = []
-    if on_runner and environment.runner == None:
-        return TaskConclusion(exit_code = 1, message = "Running on an Aspect Workflows runner but the runner metadata env vars are missing, so the cache flags cannot be generated. This usually means an older runner image; upgrade the runner.")
+    runner_log = ""
     if on_runner:
+        if environment.runner == None:
+            return TaskConclusion(exit_code = 1, message = "Running on an Aspect Workflows runner but the runner metadata env vars are missing, so the cache flags cannot be generated. This usually means an older runner image; upgrade the runner.")
         startup_flags = startup_flags_for_rc(runner_startup_flags(environment, ctx.std.env.aspect_root_dir()))
 
-    # The base directory holds all three default paths. `--output` and
-    # `--import-into` together name every path the command would otherwise
-    # derive, so neither base has to exist to honor them.
-    if home_mode:
-        base = "" if ctx.args.output and ctx.args.import_into else _home(ctx)
-    else:
-        base = "" if ctx.args.output and ctx.args.import_into else _workspace(ctx)
+        # Per job rather than per machine, and swept with the job, so concurrent
+        # jobs on a persistent runner do not share one log.
+        runner_log = runner_exec_log_path(environment)
 
-    if on_runner:
-        # The job tmpdir, not the base: it is per job and swept with the job,
-        # so concurrent jobs on a persistent runner do not share one log.
-        exec_log_path = runner_exec_log_path(environment)
-    elif ctx.args.output:
-        # An explicit rc may live anywhere; keep its log beside it.
-        exec_log_path = _dirname(ctx.args.output) + "/" + _EXEC_LOG_NAME
-    elif home_mode:
-        exec_log_path = base + "/" + _GENERATED_DIR + "/" + _EXEC_LOG_NAME
-    else:
-        # The committed rc places the log through `%workspace%`, the one
-        # variable Bazel expands in an rc value, so it stays checkout-relative.
-        exec_log_path = _WORKSPACE_EXEC_LOG
+    # `--output` and `--import-into` together name every path `rc_paths` would
+    # otherwise derive, so neither base has to exist to honor them.
+    overridden = ctx.args.output and ctx.args.import_into
+    base = "" if overridden else (_home(ctx) if home_mode else _workspace(ctx))
+    paths = rc_paths(base, output = ctx.args.output, import_into = ctx.args.import_into, home_mode = home_mode, exec_log = runner_log)
 
     env_deployment = env_names_deployment(ctx.std.env)
 
     # The rc is this machine's when it is written outside the checkout, and also
     # when the env names the endpoints, which are this machine's either way.
     machine_rc = home_mode or env_deployment
-    (groups, enabled) = _groups(ctx, environment, on_runner, env_deployment, machine_rc, exec_log_path)
+    (groups, enabled) = _groups(ctx, environment, on_runner, env_deployment, machine_rc, paths.exec_log)
     sections = [] if env_deployment else _sections(ctx, groups)
 
     # A backstop: the built-in Aspect Cloud entry states its own endpoints, so
-    # there is always at least one section to write. Without it the report below
-    # would divide by an empty list, and an rc naming no endpoint would be a
-    # silent no-op.
+    # there is always at least one section. Without it an rc naming no endpoint
+    # would be a silent no-op, and the report would take `max()` of nothing.
     if not env_deployment and not sections:
         return TaskConclusion(exit_code = 1, message = "No deployment here advertises an endpoint for the rc to point `bazel` at. Run `aspect auth configure <host>` for the deployment you build against, then rerun `aspect setup bazelrc`.")
     configs = groups + sections
@@ -286,48 +264,33 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     ]
     (configs, enabled) = prune_configs(configs, enabled)
 
-    # The rc is a generated file that the rc Bazel already reads imports: the
-    # workspace `.bazelrc` for a checkout's, `~/.bazelrc` for a machine's.
     written = []
-    if ctx.args.output:
-        output = ctx.args.output
-    else:
-        output = base + "/" + _GENERATED_RC
-
-        # A runner writes its log to the job tmpdir, which already exists, so
-        # its base is the one that needs no generated directory.
-        if not on_runner:
-            written.extend(_generated_dir(ctx, base, home_mode))
+    if paths.generated_dir:
+        written.extend(_create_generated_dir(ctx, paths.generated_dir, gitignore = not home_mode))
     header = RUNNER_HEADER if on_runner else (HOME_HEADER if home_mode else GENERATED_HEADER)
-    _write(ctx, output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs, header = header))
-    written.insert(0, output)
+    _write(ctx, paths.output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs, header = header))
+    written.insert(0, paths.output)
 
-    importer = ctx.args.import_into or (base + "/" + _IMPORTING_RC if base else output)
     import_result = None
-    if importer != output:
-        # A checkout's rc is imported through `%workspace%` so the committed
-        # line holds for every clone; a home rc and an explicit --output are
-        # imported by the path they were written to.
-        line = import_line(output if home_mode or ctx.args.output else "%workspace%/" + _GENERATED_RC)
-        existing = ctx.std.fs.read_to_string(importer) if ctx.std.fs.exists(importer) else None
-        import_result = ensure_import(existing, line)
+    if paths.importer:
+        existing = ctx.std.fs.read_to_string(paths.importer) if ctx.std.fs.exists(paths.importer) else None
+        import_result = ensure_import(existing, import_line(paths.imported))
         if import_result.action != ImportAction("unchanged"):
-            _write(ctx, importer, import_result.content)
+            _write(ctx, paths.importer, import_result.content)
 
     shown = lambda path: _relative(path, base, home_mode)
     if env_deployment:
         optional = [c.name for c in configs if c.name not in enabled]
-        summary = "Wrote %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (shown(output), ", ".join(enabled), ", ".join(optional) or "none")
+        summary = "Wrote %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (shown(paths.output), ", ".join(enabled), ", ".join(optional) or "none")
         if import_result != None:
-            summary += "; " + _IMPORT_VERBS[import_result.action] % shown(importer)
+            summary += "; " + _IMPORT_VERBS[import_result.action] % shown(paths.importer)
         info(ctx.std, summary + ".")
         return 0
 
     group_names = [g.name for g in groups]
     sections = [c for c in configs if c.name not in group_names]
-    imported = output if home_mode or ctx.args.output else "%workspace%/" + _GENERATED_RC
-    info(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(output))
-    for line in _report(written, import_result, importer, imported, shown, sections, enabled, home_mode):
+    info(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(paths.output))
+    for line in _report(written, import_result, paths, shown, sections, enabled, home_mode):
         print(line)
     return 0
 
@@ -340,7 +303,7 @@ def _relative(path: str, base: str, home_mode: bool) -> str:
         return path
     return ("~/" if home_mode else "") + path[len(prefix):]
 
-def _report(written: list, import_result, importer: str, imported: str, shown, sections: list, enabled: list, home_mode: bool) -> list:
+def _report(written: list, import_result, paths, shown, sections: list, enabled: list, home_mode: bool) -> list:
     """What the command did and how to use the result, printed after the lead
     line: the files written, whether the import was added or already there, and
     whether they belong to the repository or to this machine, then any groups
@@ -352,9 +315,9 @@ def _report(written: list, import_result, importer: str, imported: str, shown, s
         lines.append("  wrote  " + shown(path))
     if import_result != None:
         if import_result.action == ImportAction("unchanged"):
-            lines.append("  kept   %s (already imports %s)" % (shown(importer), imported))
+            lines.append("  kept   %s (already imports %s)" % (shown(paths.importer), paths.imported))
         else:
-            lines.append("  added  try-import %s at the top of %s" % (imported, shown(importer)))
+            lines.append("  added  try-import %s at the top of %s" % (paths.imported, shown(paths.importer)))
     lines.append("These are this machine's, outside the checkout." if home_mode else "Commit these with your repository.")
 
     if enabled:

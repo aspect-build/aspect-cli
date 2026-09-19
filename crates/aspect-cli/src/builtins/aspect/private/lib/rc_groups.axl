@@ -105,8 +105,8 @@ def bes_group(environment: WorkflowsEnvironment, on_runner: bool) -> RcConfig:
 
 def exec_log_group(exec_log_path: str) -> list:
     """`aspect-exec-log`: the compact execution log at `exec_log_path` — a
-    runner's job tmpdir, or `%workspace%/.aspect/generated/…` in a checkout's
-    rc — for the diagnostics upload to carry. Its own group, enabled or chained
+    runner's job tmpdir, or `<base>/.aspect/generated/…` (through `%workspace%`
+    in a checkout) — for the diagnostics upload to carry. Its own group, enabled or chained
     beside `aspect-bes`, so a repository on a thin link can drop the upload of
     this one large file by removing the lines that name the group. Empty (no
     group) without a path."""

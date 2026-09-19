@@ -218,11 +218,9 @@ const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/call
 /// The same role [`DEFAULT_LOGIN_REDIRECT_URI`] plays: discovery records what the
 /// deployment actually advertises and [`merge_into_seed`] takes that over these,
 /// so an edge can be renamed without a CLI release. Stating them is what makes
-/// Aspect Cloud usable before anything has been discovered — `aspect setup
-/// bazelrc` on a fresh machine writes a working `--config=aspect-cloud` instead
-/// of refusing for want of a configured deployment, and it starts working the
-/// moment there is a credential rather than needing a login first to learn
-/// hosts the CLI already knows.
+/// Aspect Cloud a usable deployment before anything has been discovered, so
+/// `aspect setup bazelrc` has somewhere to point on a machine that has never
+/// logged in and the rc it writes works as soon as there is a credential.
 ///
 /// No `exec`: Aspect Cloud serves no remote executor today, and a seeded one
 /// would put an `--config=aspect-cloud-exec` in every rc pointing nowhere. The
@@ -514,6 +512,7 @@ fn overlay_config_sources(
 /// the deployment has dropped has to be able to disappear. An entry advertising
 /// none leaves the seed's standing, so a hand-written `aspect-cloud` entry that
 /// only pins, say, a client cannot blank out Aspect Cloud's hosts.
+///
 /// The PKCE client and login redirect are
 /// taken only from an entry naming Aspect Cloud's own issuer, which is the whole
 /// safety argument: each is only ever exercised against the issuer it was

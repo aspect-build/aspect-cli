@@ -141,8 +141,7 @@ fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, args: &[&str]) -> Output 
 }
 
 /// Aspect Cloud is among the sections on a machine that has never logged in,
-/// because the built-in entry states its own endpoints. Before that the command
-/// refused for want of a configured deployment.
+/// because the built-in entry states its own endpoints.
 #[test]
 fn a_machine_that_has_never_logged_in_still_gets_an_aspect_cloud_section() {
     let home = tempfile::tempdir().expect("temp home");
