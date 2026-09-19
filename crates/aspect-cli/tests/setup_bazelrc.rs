@@ -240,11 +240,28 @@ fn a_hand_written_home_rc_is_kept_below_the_import() {
     );
 }
 
-/// Run without the `ASPECT_WORKFLOWS_*` endpoints, so the rc carries the opt-in
-/// deployment sections rather than taking its endpoints from the environment.
-fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(aspect_cli())
-        .args(["setup", "bazelrc"])
+/// Every variable a CI host is detected by, cleared so a test decides for itself
+/// whether it is on CI — these tests themselves run on one.
+const CI_VARS: &[&str] = &[
+    "CI",
+    "GITHUB_ACTIONS",
+    "BUILDKITE",
+    "BUILDKITE_REPO",
+    "BUILDKITE_AGENT_ACCESS_TOKEN",
+    "CIRCLECI",
+    "GITLAB_CI",
+    "GITHUB_REPOSITORY",
+    "CI_JOB_TOKEN",
+    "CIRCLE_PROJECT_REPONAME",
+    "CI_PROJECT_NAME",
+];
+
+/// Run without the `ASPECT_WORKFLOWS_*` endpoints, so the rc takes its endpoints
+/// from the default deployment rather than from the environment. `ci` decides
+/// whether the run looks like CI, which is what `--remote=auto` keys off.
+fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Output {
+    let mut cmd = Command::new(aspect_cli());
+    cmd.args(["setup", "bazelrc"])
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
@@ -252,8 +269,23 @@ fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, args: &[&str]) -> Output 
         .env_remove("ASPECT_AUTH_PROFILE")
         .env_remove("ASPECT_API_TOKEN")
         .env_remove("ASPECT_DEBUG")
-        .output()
-        .expect("running `aspect setup bazelrc`")
+        .env_remove("ASPECT_WORKFLOWS_RUNNER");
+    for var in CI_VARS {
+        cmd.env_remove(var);
+    }
+    if ci {
+        cmd.env("CI", "true")
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_REPOSITORY", "acme/widgets");
+    }
+    cmd.output().expect("running `aspect setup bazelrc`")
+}
+
+/// The `common --config=<group>` names the rc turns on for every `bazel` call.
+fn enabled_groups(rc: &str) -> Vec<&str> {
+    rc.lines()
+        .filter_map(|l| l.strip_prefix("common --config="))
+        .collect()
 }
 
 /// Aspect Cloud is among the sections on a machine that has never logged in,
@@ -264,7 +296,7 @@ fn a_machine_that_has_never_logged_in_still_gets_an_aspect_cloud_section() {
     let workspace = tempfile::tempdir().expect("temp workspace");
     std::fs::write(workspace.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
 
-    let output = setup_bazelrc_unconfigured(home.path(), workspace.path(), &[]);
+    let output = setup_bazelrc_unconfigured(home.path(), workspace.path(), false, &[]);
     assert_success(&output);
     assert!(
         !home.path().join(".aspect/config.json").exists(),
@@ -281,16 +313,128 @@ fn a_machine_that_has_never_logged_in_still_gets_an_aspect_cloud_section() {
     assert!(!rc.contains("aspect-cloud-exec"), "in:\n{rc}");
 }
 
-/// The CI shape `--home` exists for: a stock runner whose environment names no
-/// endpoint. The rc is this machine's, so unlike a checkout's it *enables* the
-/// tuning that presumes no endpoint — a plain `bazel build` picks that up with no
-/// `--config` — while the endpoints stay behind the deployment sections.
+/// The shape `--home` exists for: a stock CI runner whose environment names no
+/// endpoint. `--remote` defaults to `auto`, which on CI is the accelerators that
+/// cannot change build semantics, taken from the default deployment — here the
+/// built-in Aspect Cloud entry — so a plain `bazel build` is cached and reports
+/// without naming a `--config`. Remote execution is never among them.
+#[test]
+fn on_ci_the_default_deployments_cache_and_bes_are_enabled() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+
+    assert_success(&setup_bazelrc_unconfigured(
+        home.path(),
+        cwd.path(),
+        true,
+        &["--home"],
+    ));
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert_eq!(
+        enabled_groups(&rc),
+        vec![
+            "aspect-common",
+            "aspect-github-actions",
+            "aspect-cache",
+            "aspect-bes",
+            "aspect-exec-log"
+        ],
+        "in:\n{rc}"
+    );
+    // Aspect Cloud's endpoints reach the groups, with the credential helper that
+    // authenticates them — the environment's own endpoints need no helper, these
+    // do.
+    assert!(
+        rc.contains("common:aspect-cache --remote_cache=grpcs://cache.aspect.build")
+            && rc.contains("common:aspect-bes --bes_backend=grpcs://bes.aspect.build")
+            && rc.contains("common:aspect-cache --credential_helper=cache.aspect.build=aspect"),
+        "in:\n{rc}"
+    );
+}
+
+/// `--remote` is the same grammar as `aspect build --remote`, and selects what
+/// the rc turns on. A capability the deployment does not advertise cannot be
+/// turned on by asking for it.
+#[test]
+fn remote_selects_which_endpoints_the_rc_enables() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    let enabled = |args: &[&str]| {
+        let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, args);
+        assert_success(&out);
+        enabled_groups(&read(&home.path().join(".aspect/bazelrc")))
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        enabled(&["--home", "--remote=none"]),
+        ["aspect-common", "aspect-github-actions"]
+    );
+    assert_eq!(
+        enabled(&["--home", "--remote=no-bes"]),
+        ["aspect-common", "aspect-github-actions", "aspect-cache"]
+    );
+    // Aspect Cloud advertises no executor, so naming `exec` adds nothing.
+    assert_eq!(
+        enabled(&["--home", "--remote=exec"]),
+        [
+            "aspect-common",
+            "aspect-github-actions",
+            "aspect-cache",
+            "aspect-bes",
+            "aspect-exec-log"
+        ]
+    );
+
+    let bad =
+        setup_bazelrc_unconfigured(home.path(), cwd.path(), true, &["--home", "--remote=nope"]);
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("unknown capability 'nope'"),
+        "expected the shared --remote grammar error"
+    );
+}
+
+/// A committed rc is shared by every host that builds the repository, so the
+/// default deployment — this machine's setting — never reaches it, on CI or not.
+#[test]
+fn a_checkout_rc_enables_nothing_even_on_ci() {
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    std::fs::write(workspace.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+
+    assert_success(&setup_bazelrc_unconfigured(
+        home.path(),
+        workspace.path(),
+        true,
+        &[],
+    ));
+
+    let rc = read(&workspace.path().join(".aspect/bazelrc"));
+    assert_eq!(enabled_groups(&rc), Vec::<&str>::new(), "in:\n{rc}");
+    assert!(
+        !rc.contains("aspect-github-actions"),
+        "the CI host's group is this machine's, not the repository's:\n{rc}"
+    );
+    // The endpoints stay where a checkout can only reach them by name.
+    assert!(
+        !rc.contains("common:aspect-cache --remote_cache=")
+            && rc.contains("common:aspect-cloud --remote_cache="),
+        "in:\n{rc}"
+    );
+}
+
+/// Off CI `auto` turns nothing on: a developer's rc stays inert until a
+/// `--config` names something, so it cannot silently redirect a local build.
 #[test]
 fn home_mode_enables_the_endpointless_tuning_and_says_the_files_are_this_machines() {
     let home = tempfile::tempdir().expect("temp home");
     let cwd = tempfile::tempdir().expect("temp cwd");
 
-    let output = setup_bazelrc_unconfigured(home.path(), cwd.path(), &["--home"]);
+    let output = setup_bazelrc_unconfigured(home.path(), cwd.path(), false, &["--home"]);
     assert_success(&output);
 
     let rc = read(&home.path().join(".aspect/bazelrc"));

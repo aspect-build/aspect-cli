@@ -39,7 +39,8 @@ refuse.
 
 load("./aspect_endpoint_auth.axl", "endpoint_host")
 load("./bazelrc_file.axl", "RcConfig")
-load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE")
+load("./environment.axl", "BuildEvents", "RemoteCache", "RemoteExecutor", "WorkflowsEnvironment")
+load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE", "GROUP_EXEC")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -56,6 +57,42 @@ def config_name(deployment) -> str:
     """The `--config` name for a deployment row: Aspect Cloud's own name for the
     built-in entry, `aspect-<name>` for a configured deployment."""
     return deployment.name if deployment.builtin else _CONFIG_PREFIX + deployment.name
+
+def deployment_environment(deployment, ci) -> WorkflowsEnvironment:
+    """`deployment`'s endpoints in the shape `rc_groups.axl` reads them from the
+    environment.
+
+    A machine's rc wants its endpoints enabled for every `bazel` call, and there
+    are two places they can come from: `ASPECT_WORKFLOWS_*`, which a runner sets,
+    and the default deployment, which is all a stock CI runner has. Rather than
+    teach the groups a second source, the deployment is presented as the
+    environment it would have been, so one code path fills and enables
+    `aspect-cache` / `aspect-bes` / `aspect-exec` either way.
+
+    A deployment advertises bare hosts and Aspect's Bazel-facing endpoints are
+    TLS gRPC, hence the scheme. `ci` is carried through because the host group is
+    the CI host's, not the deployment's. What this does *not* carry is anything
+    runner-shaped (`runner`): those paths are a runner's own, and a deployment
+    never stands in for one."""
+    return WorkflowsEnvironment(
+        ci = ci,
+        remote_cache = RemoteCache(endpoint = _SCHEME + deployment.cache) if deployment.cache else None,
+        build_events = BuildEvents(backend = _SCHEME + deployment.bes, results_url = deployment.results_url) if deployment.bes else None,
+        remote_executor = RemoteExecutor(endpoint = _SCHEME + deployment.exec) if deployment.exec else None,
+    )
+
+def deployment_group_auth(deployment, helper: str) -> dict:
+    """The credential-helper flags each endpoint group needs when
+    `deployment_environment` filled it, keyed by group name.
+
+    The environment's own endpoints carry no helper — a runner authenticates its
+    services itself — so this is only ever added alongside a deployment's, and
+    only for the hosts that deployment actually advertises."""
+    auth = {}
+    for (group, host) in [(GROUP_CACHE, deployment.cache), (GROUP_BES, deployment.bes), (GROUP_EXEC, deployment.exec)]:
+        if host:
+            auth[group] = credential_helper_flags([host], helper)
+    return auth
 
 def credential_helper_flags(hosts: list, helper: str) -> list:
     """`--credential_helper=<host>=<helper>` for each host, scoped so the helper is
