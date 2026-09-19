@@ -117,9 +117,10 @@ def _unique_hosts(uris: list) -> list:
 def _label(deployment) -> str:
     return "Aspect Cloud" if deployment.builtin else "Aspect Workflows deployment '" + deployment.name + "'"
 
-def _login_hint(deployment) -> str:
-    """How CI authenticates this deployment's section: its API-token variable,
-    or the login command for a machine with a browser."""
+def login_hint(deployment) -> str:
+    """How CI authenticates this deployment: its API-token variable, or the login
+    command for a machine with a browser. Read by the section comments and by the
+    task, where `--remote=auto` declines a deployment nothing can authenticate."""
     login = "aspect auth login" if deployment.builtin else "aspect auth login --deployment " + deployment.name
     if deployment.api_token_env:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
@@ -147,7 +148,7 @@ def _base_config(d, name: str, credential_helper: str, host_groups: list, bes_gr
     return RcConfig(
         name = name,
         source = _label(d),
-        comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
+        comment = _label(d) + ": " + " + ".join(wired) + "; " + login_hint(d) + ".",
         flags = flags,
     )
 
@@ -170,7 +171,7 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_grou
     return RcConfig(
         name = name + _EXEC_SUFFIX,
         source = _label(d) + " (remote execution)",
-        comment = ("--config=" + name + " plus its" if has_base else _label(d) + ":") + " remote execution" + ("" if has_base else "; " + _login_hint(d)) + ".",
+        comment = ("--config=" + name + " plus its" if has_base else _label(d) + ":") + " remote execution" + ("" if has_base else "; " + login_hint(d)) + ".",
         flags = flags,
     )
 

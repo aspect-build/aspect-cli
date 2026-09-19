@@ -260,6 +260,14 @@ const CI_VARS: &[&str] = &[
 /// from the default deployment rather than from the environment. `ci` decides
 /// whether the run looks like CI, which is what `--remote=auto` keys off.
 fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Output {
+    unconfigured_cmd(home, cwd, ci, args)
+        .output()
+        .expect("running `aspect setup bazelrc`")
+}
+
+/// The same run, unspawned, for a test that adds to its environment — a
+/// credential, say, which is what `--remote=auto` looks for.
+fn unconfigured_cmd(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Command {
     let mut cmd = Command::new(aspect_cli());
     cmd.args(["setup", "bazelrc"])
         .args(args)
@@ -278,7 +286,7 @@ fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, ci: bool, args: &[&str]) 
             .env("GITHUB_ACTIONS", "true")
             .env("GITHUB_REPOSITORY", "acme/widgets");
     }
-    cmd.output().expect("running `aspect setup bazelrc`")
+    cmd
 }
 
 /// The `common --config=<group>` names the rc turns on for every `bazel` call.
@@ -323,12 +331,11 @@ fn on_ci_the_default_deployments_cache_and_bes_are_enabled() {
     let home = tempfile::tempdir().expect("temp home");
     let cwd = tempfile::tempdir().expect("temp cwd");
 
-    assert_success(&setup_bazelrc_unconfigured(
-        home.path(),
-        cwd.path(),
-        true,
-        &["--home"],
-    ));
+    let out = unconfigured_cmd(home.path(), cwd.path(), true, &["--home"])
+        .env("ASPECT_API_TOKEN", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&out);
 
     let rc = read(&home.path().join(".aspect/bazelrc"));
     assert_eq!(
@@ -350,6 +357,55 @@ fn on_ci_the_default_deployments_cache_and_bes_are_enabled() {
             && rc.contains("common:aspect-bes --bes_backend=grpcs://bes.aspect.build")
             && rc.contains("common:aspect-cache --credential_helper=cache.aspect.build=aspect"),
         "in:\n{rc}"
+    );
+}
+
+/// Bazel treats a credential helper that cannot produce a token as fatal —
+/// `Failed to get credentials … from helper` fails the command rather than
+/// building locally — so `auto` declines a deployment nothing here can
+/// authenticate. Without this a tokenless CI job would get an rc that breaks
+/// every `bazel` command, which is worse than the cache it was meant to add.
+#[test]
+fn auto_declines_a_deployment_with_no_credential() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+
+    let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, &["--home"]);
+    assert_success(&out);
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert_eq!(
+        enabled_groups(&rc),
+        vec!["aspect-common", "aspect-github-actions"],
+        "no endpoint should be enabled with nothing to authenticate it:\n{rc}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing here can authenticate it"),
+        "the reason must be said out loud"
+    );
+    // The section stays, so the rc works the moment there is a credential.
+    assert!(
+        rc.contains("common:aspect-cloud --remote_cache="),
+        "in:\n{rc}"
+    );
+
+    // An API token is a credential, so the same run enables them.
+    let with_token = unconfigured_cmd(home.path(), cwd.path(), true, &["--home"])
+        .env("ASPECT_API_TOKEN", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&with_token);
+    assert!(
+        enabled_groups(&read(&home.path().join(".aspect/bazelrc"))).contains(&"aspect-cache"),
+        "a token is a credential"
+    );
+
+    // An explicit --remote is the caller's call: they may be arranging
+    // credentials some other way, so it is honored either way.
+    let forced = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, &["--home", "--remote"]);
+    assert_success(&forced);
+    assert!(
+        enabled_groups(&read(&home.path().join(".aspect/bazelrc"))).contains(&"aspect-cache"),
+        "an explicit --remote is not second-guessed"
     );
 }
 
@@ -398,8 +454,44 @@ fn remote_selects_which_endpoints_the_rc_enables() {
     );
 }
 
+/// CI selects the home layout on its own: a CI checkout is a throwaway that some
+/// jobs commit from, so nothing of this machine's belongs in it. The integrations
+/// pass `--home` explicitly anyway, and the two must agree.
+#[test]
+fn ci_chooses_the_home_layout_without_being_asked() {
+    let auto = tempfile::tempdir().expect("temp home");
+    let explicit = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    std::fs::write(workspace.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+
+    assert_success(&setup_bazelrc_unconfigured(
+        auto.path(),
+        workspace.path(),
+        true,
+        &[],
+    ));
+    assert_success(&setup_bazelrc_unconfigured(
+        explicit.path(),
+        workspace.path(),
+        true,
+        &["--home"],
+    ));
+
+    // A workspace was right there and neither run touched it.
+    assert!(auto.path().join(".aspect/bazelrc").is_file());
+    assert!(!workspace.path().join(".aspect").exists());
+    assert_eq!(
+        read(&auto.path().join(".aspect/bazelrc"))
+            .replace(&auto.path().to_string_lossy().to_string(), "<home>"),
+        read(&explicit.path().join(".aspect/bazelrc"))
+            .replace(&explicit.path().to_string_lossy().to_string(), "<home>"),
+        "--home and the CI default must produce the same rc"
+    );
+}
+
 /// A committed rc is shared by every host that builds the repository, so the
-/// default deployment — this machine's setting — never reaches it, on CI or not.
+/// default deployment — this machine's setting — never reaches it. `--home=false`
+/// is how a job whose purpose is regenerating that file opts back into it.
 #[test]
 fn a_checkout_rc_enables_nothing_even_on_ci() {
     let home = tempfile::tempdir().expect("temp home");
@@ -410,7 +502,7 @@ fn a_checkout_rc_enables_nothing_even_on_ci() {
         home.path(),
         workspace.path(),
         true,
-        &[],
+        &["--home=false"],
     ));
 
     let rc = read(&workspace.path().join(".aspect/bazelrc"));

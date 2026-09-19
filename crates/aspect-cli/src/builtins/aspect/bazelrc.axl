@@ -20,7 +20,7 @@ importing rc under a comment, a blank line apart from its other content — at t
 top so that file's own lines come after and win where they disagree, which is
 how a recommendation is overridden.
 
-  - The checkout is the base by default, and both files are meant to be
+  - The checkout is the base off CI, and both files are meant to be
     committed, so everyone who builds the repository gets the same rc. The
     generated file is a starting point the repository then owns: edit it freely;
     a rerun of the command restores the generated version. Nothing in it may be
@@ -33,14 +33,16 @@ how a recommendation is overridden.
     log's parent. The workspace root is `ctx.std.env.bazel_root_dir()`, found by
     the boundary files Bazel finds `%workspace%` by, and the command refuses
     where none is.
-  - `--home` makes the home directory the base instead, and then the rc is this
-    machine's: never committed, rewritten whole on every run, free to name the
-    CI host's group and to hold absolute paths, and written without a workspace
-    to write into. It is the CI shape — a stock ephemeral runner (GitHub-hosted,
-    say) throws the home directory away with the job, and the CI integration
-    passing `--home` leaves the checkout untouched. `~/.aspect/generated/` is
+  - The home directory is the base on CI, `--home`'s `auto`, and then the rc is
+    this machine's: never committed, rewritten whole on every run, free to name
+    the CI host's group and to hold absolute paths, and written without a
+    workspace to write into. A CI checkout is a throwaway that some jobs commit
+    from, so nothing of this machine's belongs in it; an ephemeral runner throws
+    the home directory away with the job anyway. `~/.aspect/generated/` is
     created for the execution log, without the `.gitignore` a checkout gets.
-  - An Aspect Workflows runner is always `--home`. The runner is ours and
+    `--home=false` writes the checkout's rc on CI even so, for a job whose
+    purpose is to regenerate the committed file.
+  - An Aspect Workflows runner is always home mode. The runner is ours and
     nothing else configures Bazel on it, so rewriting the file every job is what
     keeps it in step with the runner's environment; tasks run with `--nohome_rc`
     and stream BES from the CLI, so nothing in it reaches them. Its execution
@@ -156,7 +158,7 @@ load(
     "startup_flags_for_rc",
 )
 load("./private/lib/deployment_flags.axl", "BARE", "parse_remote")
-load("./private/lib/deployment_rc.axl", "config_collisions", "deployment_configs", "deployment_environment", "deployment_group_auth")
+load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "bes_chains", "rc_groups", "section_chains")
 
@@ -220,7 +222,20 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 
-_REMOTE_AUTO = "auto"
+_AUTO = "auto"
+
+def _home_mode(value: str, on_ci: bool) -> bool:
+    """Whether to write the machine's rc rather than the checkout's.
+
+    `auto` — the default — is CI, where the checkout is a throwaway a job may
+    well commit from and the home directory is the safe place for a machine's
+    own configuration. Off CI it is the checkout, which is what someone setting
+    a repository up wants. `--home=false` forces that even on CI."""
+    if value == _AUTO or not value:
+        return on_ci
+    if value not in ["true", "false"]:
+        fail("--home: expected true, false, or auto; got '%s'." % value)
+    return value == "true"
 
 def _remote_spec(value: str, on_ci: bool):
     """The `--remote` capability set this rc enables, with `auto` resolved.
@@ -231,7 +246,7 @@ def _remote_spec(value: str, on_ci: bool):
     other value is the same grammar as `aspect build --remote`, down to the
     `no-` forms and `none`."""
     tokens = [t.strip() for t in value.split(",")]
-    if _REMOTE_AUTO in tokens:
+    if _AUTO in tokens:
         if len(tokens) > 1:
             fail("--remote: 'auto' cannot be combined with other capabilities; got '%s'." % value)
         return parse_remote(BARE if on_ci else "none")
@@ -243,6 +258,18 @@ def _default_deployment(deployments: list):
         if d.default:
             return d
     return None
+
+def _authenticated(ctx: TaskContext, deployment) -> bool:
+    """Whether a `bazel` call here could actually authenticate `deployment`:
+    its API-token variable is set, or someone logged in.
+
+    Bazel treats a credential helper that cannot produce a token as fatal, not
+    as a reason to build locally — `Failed to get credentials … from helper`
+    fails the command outright — so enabling an endpoint with no credential
+    behind it does not slow a build down, it stops it."""
+    if deployment.api_token_env and ctx.std.env.var(deployment.api_token_env):
+        return True
+    return any([row.logged_in for row in ctx.aspect.auth.list() if row.name == deployment.name])
 
 def _groups(ctx: TaskContext, environment, on_runner: bool, machine_rc: bool, remote_on: dict, auth: dict, exec_log_path: str) -> (list, list):
     """`rc_groups` for this host: every group defined, and the names enabled."""
@@ -269,12 +296,20 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     if blocked:
         return TaskConclusion(exit_code = 1, message = "--omit-bazel-flag cannot drop %s: endpoints, credentials, and the runner's paths are what make the build Aspect's." % ", ".join(blocked))
 
-    if ctx.args.home and ctx.args.output:
+    if ctx.args.home == "true" and ctx.args.output:
         return TaskConclusion(exit_code = 1, message = "--home and --output both choose where the rc goes. Pass one: --home writes ~/.aspect/bazelrc, --output writes the path you name.")
 
     environment = get_workflows_environment(ctx.std)
     on_runner = is_aspect_workflows_runner(ctx.std.env)
-    home_mode = ctx.args.home or on_runner
+
+    # One answer to "is a `bazel` call here nobody's to configure by hand", which
+    # both `auto` defaults read: `detect_ci`, not `environment.ci`, since that
+    # names only the four hosts with their own branches and a generic `CI` is
+    # still CI. The env naming the endpoints counts too — setting them is the
+    # same answer by another means.
+    env_deployment = env_names_deployment(ctx.std.env)
+    on_ci = on_runner or env_deployment or detect_ci(ctx.std.env) != None
+    home_mode = _home_mode(ctx.args.home, on_ci)
 
     startup_flags = []
     runner_log = ""
@@ -293,17 +328,11 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     base = "" if overridden else (_home(ctx) if home_mode else _workspace(ctx))
     paths = rc_paths(base, output = ctx.args.output, import_into = ctx.args.import_into, home_mode = home_mode, exec_log = runner_log)
 
-    env_deployment = env_names_deployment(ctx.std.env)
-
     # The rc is this machine's when it is written outside the checkout, and also
-    # when the env names the endpoints, which are this machine's either way.
+    # when the env names the endpoints, which are this machine's either way —
+    # reachable now only by forcing the checkout with `--home=false`.
     machine_rc = home_mode or env_deployment
-
-    # `auto` turns the endpoints on where a `bazel` call has no one to ask.
-    # `detect_ci`, not `environment.ci`, which names only the four hosts with
-    # their own branches — a generic `CI` is still CI. The env naming the
-    # endpoints counts too: setting them is the same answer by another means.
-    spec = _remote_spec(ctx.args.remote, on_runner or env_deployment or detect_ci(ctx.std.env) != None)
+    spec = _remote_spec(ctx.args.remote, on_ci)
 
     # Where the env names the endpoints they are already in hand; otherwise a
     # machine's rc takes them from the default deployment, which is what a
@@ -315,6 +344,15 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     endpoint_env = environment
     auth = {}
     if default != None:
+        # `auto` declines a deployment nothing here can authenticate: its
+        # endpoints would be reached through the credential helper, and a helper
+        # with no token to give fails the `bazel` command rather than letting it
+        # build locally. An explicit `--remote` is the caller's to make — they
+        # may be arranging credentials another way — so it is left alone.
+        if ctx.args.remote in ["", _AUTO] and not _authenticated(ctx, default):
+            spec = parse_remote("none")
+            info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
+                          (default.name, login_hint(default), config_name(default)))
         endpoint_env = deployment_environment(default, environment.ci)
         auth = deployment_group_auth(default, helper)
 
@@ -419,22 +457,24 @@ def _report(written: list, import_result, paths, shown, sections: list, enabled:
     return lines
 
 _BAZELRC_ARGS = {
-    "home": args.boolean(
-        default = False,
-        description = "Write the machine's rc under the home directory — `~/.aspect/bazelrc`, imported by `~/.bazelrc` — instead of the checkout's `.aspect/bazelrc`. For a CI runner whose home directory is thrown away with the job: nothing lands in the checkout, so the rc cannot be committed by accident and needs no workspace to write into. Always on when running on an Aspect Workflows runner. Cannot be combined with --output, which names the path itself.",
+    "home": args.string(
+        long = "home",
+        default = _AUTO,
+        bare = "true",
+        description = "Write the machine's rc under the home directory — `~/.aspect/bazelrc`, imported by `~/.bazelrc` — instead of the checkout's `.aspect/bazelrc`, which is meant to be committed. `auto`, the default, is on for CI (an Aspect Workflows runner, the ASPECT_WORKFLOWS_* environment, or any CI host) and off elsewhere: a CI checkout is a throwaway a job may commit from, the home directory is where a machine's own configuration belongs, and only a machine's rc enables anything. Pass --home=false to write the checkout's rc anyway. Cannot be combined with --output, which names the path itself.",
     ),
     "output": args.string(
         default = "",
-        description = "Rc file to write, rewritten on every run, instead of the default `<base>/.aspect/bazelrc` — the base being the home directory under --home or on an Aspect Workflows runner, and the workspace root elsewhere. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
+        description = "Rc file to write, rewritten on every run, instead of the default `<base>/.aspect/bazelrc` — the base being the home directory on CI and the workspace root elsewhere, per --home. Parent directories are created if needed. Only file output is supported — there is no stdout mode.",
     ),
     "import_into": args.string(
         long = "import-into",
         default = "",
-        description = "Rc that receives the `try-import` line for the written rc, added at its top only when not already present, so the file's own lines override the import. Defaults to the `.bazelrc` of whichever base the rc was written under: the workspace one, importing `%workspace%/.aspect/bazelrc`, or `~/.bazelrc` under --home and on an Aspect Workflows runner, importing the written path.",
+        description = "Rc that receives the `try-import` line for the written rc, added at its top only when not already present, so the file's own lines override the import. Defaults to the `.bazelrc` of whichever base the rc was written under: the workspace one, importing `%workspace%/.aspect/bazelrc`, or `~/.bazelrc` on CI, importing the written path.",
     ),
     "remote": args.string(
         long = "remote",
-        default = _REMOTE_AUTO,
+        default = _AUTO,
         bare = BARE,
         description = "Which of the deployment's remote endpoints this rc turns on for every `bazel` call, in the same grammar as `aspect build --remote`: bare --remote enables its remote cache and BES backend, `exec` adds remote execution (never implied), `no-cache` / `no-bes` / `no-exec` subtract, and `none` enables nothing. The default, `auto`, is bare --remote on CI — where a `bazel` call has no one to ask — and `none` elsewhere, leaving a developer's rc inert until a --config names something. Endpoints come from the ASPECT_WORKFLOWS_* environment where it names them, and from the default deployment otherwise. Only a machine's rc enables anything: a checkout's is shared by every host that builds it, so its sections stay opt-in whatever this says.",
     ),
@@ -447,7 +487,7 @@ _BAZELRC_ARGS = {
 bazelrc = task(
     group = ["setup"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. The rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. With --home, always on an Aspect Workflows runner, the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, rewritten whole on every run and never committed, for a CI runner that is thrown away with the job. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables at the top the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that is the recommended tuning plus a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Off CI the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. On CI the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, rewritten whole on every run and never committed, so nothing of this machine's lands in a checkout a job may commit from. That is --home's `auto`; --home=false writes the checkout's rc on CI even so. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables at the top the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that is the recommended tuning plus a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
     implementation = _bazelrc_impl,
     args = _BAZELRC_ARGS,
 )
