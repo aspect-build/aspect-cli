@@ -128,6 +128,7 @@ Bazel version (assumed-latest when undetectable) before writing. Only file
 output is supported — there is no stdout mode.
 """
 
+load("./private/lib/aspect_endpoint_auth.axl", "can_authenticate")
 load(
     "./private/lib/aspect_flags.axl",
     "omit_flags",
@@ -155,7 +156,7 @@ load(
     "render_bazelrc",
     "startup_flags_for_rc",
 )
-load("./private/lib/deployment_flags.axl", "BARE", "parse_remote")
+load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "parse_remote")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "GROUP_COMMON", "HOST_GROUPS", "bes_chains", "rc_groups", "section_chains")
@@ -253,8 +254,6 @@ def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     rc = ctx.bazel.new_rc(flags = rest, version = bazel_version)
     return chain + rc.expand(command = "common")
 
-_AUTO = "auto"
-
 def _home_mode(value: str, on_ci: bool) -> bool:
     """Whether to write the machine's rc rather than the checkout's.
 
@@ -262,7 +261,7 @@ def _home_mode(value: str, on_ci: bool) -> bool:
     well commit from and the home directory is the safe place for a machine's
     own configuration. Off CI it is the checkout, which is what someone setting
     a repository up wants. `--home=false` forces that even on CI."""
-    if value == _AUTO or not value:
+    if value == AUTO or not value:
         return on_ci
     if value not in ["true", "false"]:
         fail("--home: expected true, false, or auto; got '%s'." % value)
@@ -277,7 +276,7 @@ def _remote_spec(value: str, on_ci: bool):
     other value is the same grammar as `aspect build --remote`, down to the
     `no-` forms and `none`."""
     tokens = [t.strip() for t in value.split(",")]
-    if _AUTO in tokens:
+    if AUTO in tokens:
         if len(tokens) > 1:
             fail("--remote: 'auto' cannot be combined with other capabilities; got '%s'." % value)
         return parse_remote(BARE if on_ci else "none")
@@ -313,18 +312,6 @@ def _default_deployment(deployments: list):
         if d.default:
             return d
     return None
-
-def _authenticated(ctx: TaskContext, deployment) -> bool:
-    """Whether a `bazel` call here could actually authenticate `deployment`:
-    its API-token variable is set, or someone logged in.
-
-    Bazel treats a credential helper that cannot produce a token as fatal, not
-    as a reason to build locally — `Failed to get credentials … from helper`
-    fails the command outright — so enabling an endpoint with no credential
-    behind it does not slow a build down, it stops it."""
-    if deployment.api_token_env and ctx.std.env.var(deployment.api_token_env):
-        return True
-    return any([row.logged_in for row in ctx.aspect.auth.list() if row.name == deployment.name])
 
 def _groups(ctx: TaskContext, environment, on_runner: bool, machine_rc: bool, remote_on: dict, auth: dict, exec_log_path: str) -> (list, list):
     """`rc_groups` for this host: every group defined, and the names enabled."""
@@ -415,7 +402,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         # `auto` declines a deployment nothing here can authenticate, since the
         # helper reaching its endpoints would have no token to give and Bazel
         # treats that as fatal. An explicit `--remote` is the caller's to make.
-        if ctx.args.remote in ["", _AUTO] and not _authenticated(ctx, default):
+        if ctx.args.remote in ["", AUTO] and not can_authenticate(ctx, default):
             spec = parse_remote("none")
             info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
                           (default.name, login_hint(default), config_name(default)))
@@ -546,7 +533,7 @@ def _report(written: list, import_result, paths, shown, sections: list, enabled:
 _BAZELRC_ARGS = {
     "home": args.string(
         long = "home",
-        default = _AUTO,
+        default = AUTO,
         bare = "true",
         description = "Write the machine's rc under the home directory — `~/.aspect/bazelrc`, imported by `~/.bazelrc` — instead of the checkout's `.aspect/bazelrc`, which is meant to be committed. `auto`, the default, is on for CI (an Aspect Workflows runner, the ASPECT_WORKFLOWS_* environment, or any CI host) and off elsewhere: a CI checkout is a throwaway a job may commit from, the home directory is where a machine's own configuration belongs, and only a machine's rc enables anything. Pass --home=false to write the checkout's rc anyway. Cannot be combined with --output, which names the path itself.",
     ),
@@ -561,7 +548,7 @@ _BAZELRC_ARGS = {
     ),
     "remote": args.string(
         long = "remote",
-        default = _AUTO,
+        default = AUTO,
         bare = BARE,
         description = "Which of the deployment's remote endpoints this rc turns on for every `bazel` call, in the same grammar as `aspect build --remote`: bare --remote enables its remote cache and BES backend, `exec` adds remote execution (never implied), `no-cache` / `no-bes` / `no-exec` subtract, and `none` enables nothing. The default, `auto`, is bare --remote on CI — where a `bazel` call has no one to ask — and `none` elsewhere, leaving a developer's rc inert until a --config names something. Endpoints come from the ASPECT_WORKFLOWS_* environment where it names them, and from the default deployment otherwise. Only a machine's rc enables anything: a checkout's is shared by every host that builds it, so its sections stay opt-in whatever this says.",
     ),

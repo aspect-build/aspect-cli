@@ -95,7 +95,7 @@ upload and the `--build_metadata` the Web UI reads — the same flags the
 
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
-load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
+load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./aspect_flags.axl", "endpoint_flags", "independent_flags", "temp_diagnostics_upload_flags")
 load("./environment.axl", "detect_ci", "env_names_deployment", "info")
 
@@ -208,6 +208,9 @@ DeploymentFlags = record(
     wired = field(list, default = []),
 )
 
+# What every path that decides against a deployment hands back.
+_NOTHING = DeploymentFlags(base_flags = [], bes_backends = [])
+
 # Which capabilities `--remote` resolved to: `on` maps every capability in
 # `REMOTE_CAPABILITIES` to whether to wire it, and `named` holds the subset the user
 # asked for by name (and didn't later negate). The split drives error handling — a
@@ -253,31 +256,24 @@ def deployment_flag_args() -> dict:
         ),
     }
 
-def _auto_declined(ctx, endpoints) -> str:
-    """Why `auto` wires nothing from `endpoints`, or `""` to go ahead.
+def _advertises_nothing(endpoints) -> bool:
+    """Whether `endpoints` serves no Bazel endpoint at all — an error to name
+    `--remote` against, and nothing for `auto` to wire."""
+    return not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
 
-    Only ever consulted for a defaulted `--remote`: each of these is an error
-    when a capability was named, and silence when it was assumed."""
-    if not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()]):
-        return "%s advertises no Bazel endpoint" % endpoints.name
-    if not _authenticated(ctx, endpoints):
-        return "nothing here can authenticate %s" % endpoints.name
-    return ""
-
-def _authenticated(ctx, endpoints) -> bool:
-    """Whether this build could authenticate `endpoints`: its API-token variable
-    is set, or someone logged in. Bazel treats a credential helper that cannot
-    produce a token as fatal, so wiring an endpoint with no credential behind it
-    does not slow a build down, it stops it."""
-    if endpoints.api_token_env and ctx.std.env.var(endpoints.api_token_env):
-        return True
-    return any([row.logged_in for row in ctx.aspect.auth.list() if row.name == endpoints.name])
+def _auto_wires(ctx, endpoints) -> bool:
+    """Whether `auto` goes ahead with `endpoints`. Each of these is an error when
+    a capability was named and silence when it was assumed, which is the whole
+    difference between a default and a request."""
+    return not _advertises_nothing(endpoints) and can_authenticate(ctx, endpoints)
 
 def parse_remote(value: str) -> RemoteSpec:
     """Parse a `--remote` value into a [`RemoteSpec`].
 
     An empty `value` means the flag was omitted (→ nothing wired); a bare `--remote`
-    arrives as `BARE` (→ the default capabilities).
+    arrives as `BARE` (→ the default capabilities). `AUTO` is resolved by the
+    caller, which has the environment to resolve it against, and reaching here
+    would be read as a capability named `auto`.
 
     `cache`/`bes` start on and `exec` off; each token turns its capability on and each
     `no-` token turns it off, applied left to right so the last mention of a
@@ -288,10 +284,7 @@ def parse_remote(value: str) -> RemoteSpec:
     defaults), and on `none` combined with anything else. Public so
     `deployment_flags_test.axl` can assert the grammar.
     """
-    if not value or value == AUTO:
-        # `auto` is resolved by `deployment_endpoint_flags`, which has the
-        # environment to resolve it against; anything else here is the flag
-        # absent, which is the same nothing.
+    if not value:
         return _OFF
     if value == BARE:
         # A bare `--remote` carries no tokens, leaving the defaults in place.
@@ -324,55 +317,57 @@ def parse_remote(value: str) -> RemoteSpec:
 def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     """Resolve `--deployment` + `--remote` into the [`DeploymentFlags`] to inject.
 
+    `--remote`'s default, `auto`, is resolved here, against the one thing only a
+    running task knows: the environment. It wires the default deployment on CI
+    and nothing elsewhere, and steps aside — rather than failing — wherever a
+    named capability could not be satisfied (see the module docstring).
+
     `fail`s when `--deployment` is passed without `--remote`, when no deployment is
     available to draw endpoints from, and when a *named* capability can't be satisfied;
-    a defaulted capability the deployment doesn't advertise is skipped (see module
-    docstring).
+    a defaulted capability the deployment doesn't advertise is skipped.
     """
     if not hasattr(ctx.args, "remote"):
-        return DeploymentFlags(base_flags = [], bes_backends = [])
+        return _NOTHING
 
+    # Empty is `auto` too: clap always supplies the default, so an empty value is
+    # a `config.axl` override that named no capabilities.
     auto = ctx.args.remote in ["", AUTO]
     spec = parse_remote(BARE if auto else ctx.args.remote)
 
-    # Selecting a deployment with no `--remote` at all wires nothing, which reads as a
+    # `--deployment` says where to wire from, not what, so on its own it would be a
     # silent no-op; make it a clear error. `--remote=none` (or an all-negated list)
-    # asks for nothing deliberately and is left alone. `auto` does not answer the
-    # question either: it says where to wire from, not what.
+    # asks for nothing deliberately and is left alone.
     if ctx.args.deployment and auto:
         fail("--deployment=%s selects a deployment but wires nothing on its own. " % ctx.args.deployment +
              "Add --remote for its remote cache and BES backend, or --remote=exec to add remote execution.")
 
     if not any(spec.on.values()):
-        return DeploymentFlags(base_flags = [], bes_backends = [])
+        return _NOTHING
 
     # The Workflows feature wires the deployment the environment names, and a
     # second one would route the build off it. Naming `--remote` there is a
     # mistake worth reporting; defaulting into it is not.
     if env_names_deployment(ctx.std.env):
         if auto:
-            return DeploymentFlags(base_flags = [], bes_backends = [])
+            return _NOTHING
         ctx.std.process.exit(1, REMOTE_REFUSED_BY_ENV)
 
     # Off CI a build stays local unless asked: a developer's `aspect build` should
     # not start uploading to a shared cache because a token happens to be around.
     if auto and not detect_ci(ctx.std.env):
-        return DeploymentFlags(base_flags = [], bes_backends = [])
+        return _NOTHING
 
     endpoints = ctx.aspect.auth.deployment_endpoints(deployment = ctx.args.deployment)
 
-    if auto:
-        declined = _auto_declined(ctx, endpoints)
-        if declined:
-            return DeploymentFlags(base_flags = [], bes_backends = [])
+    if auto and not _auto_wires(ctx, endpoints):
+        return _NOTHING
 
     # --remote needs a deployment to draw endpoints from. With no --deployment the
     # target is the current default; if that advertises nothing at all, fail
     # clearly rather than blaming a capability. Aspect Cloud always advertises —
     # the built-in entry states its endpoints — so this is a configured
     # deployment that serves no Bazel endpoint, recorded before it had any.
-    advertises_none = not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
-    if advertises_none and not ctx.args.deployment and not auto:
+    if _advertises_nothing(endpoints) and not ctx.args.deployment and not auto:
         fail("--remote requires a deployment that serves a Bazel endpoint, but the default (%s) advertises none. " % endpoints.name +
              "Run `aspect auth configure <host>` to refresh what it advertises. " +
              "If you already have other deployments (see `aspect auth status`), choose one with " +

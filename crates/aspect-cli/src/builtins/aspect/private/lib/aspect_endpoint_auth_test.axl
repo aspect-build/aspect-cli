@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_authority", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token", "same_bes_endpoint")
+load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_authority", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token", "same_bes_endpoint")
 
 def _eq(label, got, want):
     if got != want:
@@ -19,6 +19,61 @@ def _fake_ctx(owned_hosts = []):
     return struct(aspect = struct(auth = struct(
         deployment_for_host = lambda host: owned.get(host),
     )))
+
+def _auth_ctx(env = {}, rows = []):
+    """Stand-in for `ctx` as `can_authenticate` reads it: an environment map and
+    the `aspect auth list` rows, each `(name, logged_in)`."""
+    return struct(
+        std = struct(env = struct(var = lambda name: env.get(name, ""))),
+        aspect = struct(auth = struct(
+            list = lambda: [struct(name = n, logged_in = l) for (n, l) in rows],
+        )),
+    )
+
+def _deployment(name, api_token_env = ""):
+    return struct(name = name, api_token_env = api_token_env)
+
+def _test_can_authenticate(_):
+    """Either credential is enough, and neither is not. A defaulted `--remote`
+    and a defaulted rc section both hang off this: Bazel fails a build outright
+    when a credential helper cannot produce a token, so an endpoint nobody named
+    is only wired where there is something to authenticate it with."""
+    gcp = _deployment("gcp", api_token_env = "ASPECT_API_TOKEN_GCP")
+
+    _eq(
+        "token variable set",
+        can_authenticate(_auth_ctx(env = {"ASPECT_API_TOKEN_GCP": "client:secret"}), gcp),
+        True,
+    )
+    _eq(
+        "logged in",
+        can_authenticate(_auth_ctx(rows = [("gcp", True)]), gcp),
+        True,
+    )
+    _eq("neither", can_authenticate(_auth_ctx(), gcp), False)
+
+    # The variable has to hold something; named but empty is not a credential.
+    _eq(
+        "token variable empty",
+        can_authenticate(_auth_ctx(env = {"ASPECT_API_TOKEN_GCP": ""}), gcp),
+        False,
+    )
+
+    # Rows are per deployment: another one's login says nothing about this one.
+    _eq(
+        "another deployment logged in",
+        can_authenticate(_auth_ctx(rows = [("aws", True), ("gcp", False)]), gcp),
+        False,
+    )
+
+    # A deployment with no token variable can still be logged in.
+    tokenless = _deployment("silo")
+    _eq("no token variable, no login", can_authenticate(_auth_ctx(), tokenless), False)
+    _eq(
+        "no token variable, logged in",
+        can_authenticate(_auth_ctx(rows = [("silo", True)]), tokenless),
+        True,
+    )
 
 def _test_endpoint_host(_):
     """Host extraction strips scheme, userinfo, port, and path, and lowercases."""
@@ -158,6 +213,7 @@ def _test_login_hint(_):
     _eq("deployment names itself", login_hint("gcp.acme"), "aspect auth login --deployment gcp.acme")
 
 def _test_impl(ctx):
+    _test_can_authenticate(ctx)
     _test_endpoint_host(ctx)
     _test_endpoint_authority(ctx)
     _test_same_bes_endpoint(ctx)
@@ -166,7 +222,7 @@ def _test_impl(ctx):
     _test_headers_have_auth(ctx)
     _test_credential_helper_covers_host(ctx)
     _test_login_hint(ctx)
-    print("aspect_endpoint_auth_test.axl: OK (8 sections)")
+    print("aspect_endpoint_auth_test.axl: OK (9 sections)")
     return 0
 
 aspect_endpoint_auth_tests = task(
