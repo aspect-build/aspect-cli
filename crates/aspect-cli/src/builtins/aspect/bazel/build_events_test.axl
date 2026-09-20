@@ -7,7 +7,7 @@ Run with:
   aspect dev test-bes-sinks
 """
 
-load("@aspect//bazel/build_events.axl", "advertised_results_url", "bazel_bes_backend", "bes_results_line", "bes_results_url_flag", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
+load("@aspect//bazel/build_events.axl", "advertised_results_url", "bazel_bes_backend", "bes_link_data", "bes_results_line", "bes_results_url_flag", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -43,10 +43,15 @@ def _sinks(*uris):
 _GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
 _RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
-def _fake_trait(sinks, backends = []):
+def _fake_trait(sinks, backends = [], results_sources = []):
     """Stand-in for `BazelTrait`: the collectors read its sink list and the
-    backend URIs features injected on it (`--remote`'s deployment BES)."""
-    return struct(build_event_sinks = sinks, bes_backends = backends)
+    backend URIs features injected on it (`--remote`'s deployment BES), and the
+    link helpers read its `(backend, viewer)` pairs."""
+    return struct(
+        build_event_sinks = sinks,
+        bes_backends = backends,
+        bes_results_sources = results_sources,
+    )
 
 def _test_clean_stream(_):
     """A clean stream reports the sent count and names the backend."""
@@ -284,6 +289,26 @@ def _test_trait_backends_are_collected(_):
     _eq("dropped when bazel has it", [s.uri for s in collect_bes_sinks(ctx, trait, bazel_rc)], [])
     _eq("and named for the disclosure", dropped_bes_backends(ctx, trait, bazel_rc), [deployment])
 
+def _test_bes_link_data(_):
+    """Both keys at once, for the tasks that spawn their own bazel: the viewer of
+    whatever this invocation reports to, and whether the link keys on Bazel's id."""
+    trait = _fake_trait([], backends = [_GCP[0]], results_sources = [_GCP])
+    sinks = _sinks(_GCP[0])
+
+    # The CLI streams it: the viewer resolves and the link keys on the sink id.
+    data = bes_link_data(trait, _fake_rc({}), sinks)
+    _eq("viewer from the reporting backend", data["aspect_results_url"], _GCP[1])
+    _eq("cli streamed → not bazel's id", data["bes_streamed_by_bazel"], False)
+
+    # Bazel streams it: same viewer, and the link falls back to Bazel's id.
+    data = bes_link_data(trait, _fake_rc({"--bes_backend": _GCP[0]}), [])
+    _eq("viewer from bazel's backend", data["aspect_results_url"], _GCP[1])
+    _eq("bazel streamed → bazel's id", data["bes_streamed_by_bazel"], True)
+
+    # Nothing reported anywhere: no viewer to offer.
+    data = bes_link_data(trait, _fake_rc({}), [])
+    _eq("nothing reporting → no viewer", data["aspect_results_url"], "")
+
 def _test_bes_streamed_by_bazel(_):
     """True only when Bazel's `--bes_backend` is a backend with an advertised
     viewer — the case where the Web UI still holds the invocation (under Bazel's
@@ -415,6 +440,7 @@ _UNIT_TESTS = [
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
     _test_trait_backends_are_collected,
+    _test_bes_link_data,
     _test_bes_streamed_by_bazel,
     _test_bes_flag_only_when_bazel_uploads,
     _test_bes_flag_needs_an_advertised_backend,

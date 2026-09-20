@@ -111,9 +111,10 @@ def bes_streamed_by_bazel(sources: list[(str, str)], rc, command: str = "build")
         return False
     return any([same_bes_endpoint(backend, bazel_backend) for (backend, _) in sources])
 
-def _trait_backends(bazel_trait, extra_backends: list) -> list:
-    """The backend URIs to stream to: the ones features injected on the trait,
-    then the caller's own, each listed once."""
+def _backends_to_stream(bazel_trait, extra_backends: list) -> list:
+    """The backend URIs to stream to: the ones features injected on the trait
+    (`--remote`'s deployment BES, a Workflows runner's), then the caller's own,
+    each listed once."""
     seen = []
     for uri in list(bazel_trait.bes_backends) + list(extra_backends):
         if uri and uri not in seen:
@@ -131,16 +132,29 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
     both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
 
-    The one call a bazel-spawning task makes, and it reads the trait's backends
-    itself: a task that forgot to pass them streamed nothing to the deployment,
-    which is silent. Pair it with `bes_streamed_by_bazel` to keep the Aspect Web
-    UI link resolvable. The caller `wait()`s the returned sinks after the build.
+    The one call a bazel-spawning task makes; pair it with `bes_link_data` for
+    the keys the results surface needs. The caller `wait()`s the returned sinks
+    after the build.
     """
     bazel_backend = bazel_bes_backend(rc, command)
     return (
-        collect_bes_from_args(ctx, extra_backends = _trait_backends(bazel_trait, extra_backends), bazel_backend = bazel_backend) +
+        collect_bes_from_args(ctx, extra_backends = _backends_to_stream(bazel_trait, extra_backends), bazel_backend = bazel_backend) +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
+
+def bes_link_data(bazel_trait, rc, sinks: list, command: str = "build") -> dict:
+    """The `data` keys a task's results surface resolves the Aspect Web UI link
+    from: `aspect_results_url`, the viewer advertised for whatever backend this
+    invocation reports to, and `bes_streamed_by_bazel`, which says to key the
+    link on Bazel's own `invocation_id` because the CLI streamed no sink of its
+    own. `data.update(bes_link_data(...))` right after `collect_bes_sinks`.
+
+    A task that resolves its invocation through `bazel/invocation.axl` gets both
+    from there instead; this is for the tasks that spawn bazel themselves."""
+    return {
+        "aspect_results_url": advertised_results_url(bazel_trait.bes_results_sources, rc, sinks, command),
+        "bes_streamed_by_bazel": bes_streamed_by_bazel(bazel_trait.bes_results_sources, rc, command),
+    }
 
 def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list[str]:
     """The BES endpoints `collect_bes_sinks` skipped because Bazel uploads to them
@@ -152,7 +166,7 @@ def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_bac
     if not bazel_backend:
         return []
 
-    candidates = (list(ctx.args.bes_backends) + _trait_backends(bazel_trait, extra_backends) +
+    candidates = (list(ctx.args.bes_backends) + _backends_to_stream(bazel_trait, extra_backends) +
                   [s.uri for s in bazel_trait.build_event_sinks])
     dropped = []
     for uri in candidates:
