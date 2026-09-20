@@ -1,5 +1,5 @@
 # Tag HEAD `<iso-year>.<iso-week>` at the start of each week. bazel/workspace_status.sh
-# turns these into semver release versions like 2025.44.123+abc1234.
+# turns these into semver release versions like 2026.38.123+abc1234.
 # Follows https://aspect.build/blog/versioning-releases-from-a-monorepo
 name: Weekly Monorepo Tag
 on:

@@ -391,7 +391,7 @@ mod tests {
     fn test_parse_version_with_pinned_version_and_github_source() {
         let content = r#"
 version(
-    "2026.11.6",
+    "2026.38.30",
     sources = [
         github(
             org = "aspect-build",
@@ -401,7 +401,7 @@ version(
 )
 "#;
         let config = parse_version_axl(content).unwrap();
-        assert_eq!(config.aspect_cli.version(), Some("2026.11.6"));
+        assert_eq!(config.aspect_cli.version(), Some("2026.38.30"));
         assert_eq!(config.aspect_cli.sources().len(), 1);
         match &config.aspect_cli.sources()[0] {
             ToolSource::GitHub {

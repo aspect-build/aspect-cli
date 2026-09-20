@@ -81,6 +81,6 @@ To manually override the release tag for a particular commit run,
 choose a version and do something like:
 
 ```
-git tag v2025.42.5
-git push origin v2025.42.5
+git tag v2026.38.30
+git push origin v2026.38.30
 ```

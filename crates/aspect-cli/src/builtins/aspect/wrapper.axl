@@ -245,7 +245,7 @@ tools_bazel_wrapper = task(
     args = {
         "version": args.string(
             default = "latest",
-            description = "Ref of aspect-build/aspect-cli to vendor the wrapper from. Defaults to `latest`, which resolves the newest published release tag (never HEAD). Pass a tag or commit SHA for a reproducible pin (e.g. --version=v2026.25.2); a branch name also works but is not reproducible.",
+            description = "Ref of aspect-build/aspect-cli to vendor the wrapper from. Defaults to `latest`, which resolves the newest published release tag (never HEAD). Pass a tag or commit SHA for a reproducible pin (e.g. --version=v2026.38.30); a branch name also works but is not reproducible.",
         ),
         "check": args.boolean(
             default = False,

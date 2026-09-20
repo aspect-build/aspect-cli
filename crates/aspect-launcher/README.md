@@ -22,18 +22,18 @@ provisions. It uses Starlark syntax and contains a single `version()` call.
 ### Pinned version (recommended)
 
 ```starlark
-version("2026.11.6")
+version("2026.38.30")
 ```
 
 This pins the project to a specific `aspect-cli` release. The launcher downloads
-directly from `https://github.com/aspect-build/aspect-cli/releases/download/v2026.11.6/<artifact>`
+directly from `https://github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/<artifact>`
 with no GitHub API call needed.
 
 ### Pinned version with custom sources
 
 ```starlark
 version(
-    "2026.11.6",
+    "2026.38.30",
     sources = [
         local("bazel-bin/cli/aspect"),
         github(
@@ -84,7 +84,7 @@ version(<version_string>?, sources = [...]?)
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| *(positional)* | No | Version string (e.g. `"2026.11.6"`). If omitted, the GitHub releases API is queried to find the latest available release. |
+| *(positional)* | No | Version string (e.g. `"2026.38.30"`). If omitted, the GitHub releases API is queried to find the latest available release. |
 | `sources` | No | List of source specifiers, tried in order. If omitted, defaults to `[github(org = "aspect-build", repo = "aspect-cli")]`. |
 
 ### Source types
@@ -125,7 +125,7 @@ The `tag`, `artifact`, and `url` fields support these placeholders:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `{version}` | The version string from `version()` | `2026.11.6` |
+| `{version}` | The version string from `version()` | `2026.38.30` |
 | `{os}` | Operating system | `darwin`, `linux` |
 | `{arch}` | CPU architecture (Bazel naming) | `aarch64`, `x86_64` |
 | `{target}` | LLVM target triple | `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` |
@@ -135,13 +135,13 @@ The `tag`, `artifact`, and `url` fields support these placeholders:
 ### Pinned version (version specified in version.axl)
 
 ```
-version.axl: version("2026.11.6", sources = [github(org = "aspect-build", repo = "aspect-cli")])
+version.axl: version("2026.38.30", sources = [github(org = "aspect-build", repo = "aspect-cli")])
 ```
 
-1. Tag is computed: `v2026.11.6`
+1. Tag is computed: `v2026.38.30`
 2. Cache is checked — if the binary is already cached, it is used immediately
 3. Direct download from
-   `https://github.com/aspect-build/aspect-cli/releases/download/v2026.11.6/aspect-cli-{target}`
+   `https://github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/aspect-cli-{target}`
 4. If the download fails, the error is reported — **no fallback to a different
    version**. When you pin, you are guaranteed to get exactly that version or
    an error.

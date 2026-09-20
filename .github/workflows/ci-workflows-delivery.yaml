@@ -64,7 +64,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task
@@ -93,7 +93,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
@@ -122,7 +122,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery unresolvable-digest must hard-fail
@@ -171,7 +171,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: no-remote-exec deliverable must resolve a digest on every run

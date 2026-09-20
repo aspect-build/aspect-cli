@@ -38,7 +38,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
           disk-cache: ${{ github.workflow }}

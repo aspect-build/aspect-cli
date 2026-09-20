@@ -1134,7 +1134,7 @@ mod tests {
         use crate::config::CDN_MIRROR_URL;
 
         let m = MirroredRelease {
-            version: "2026.35.9".to_owned(),
+            version: "2026.38.30".to_owned(),
             artifact: default_artifact("aspect-cli", false),
             fallback: None,
         };
@@ -1142,7 +1142,7 @@ mod tests {
         assert_eq!(
             replace_url_vars(CDN_MIRROR_URL, &m.version, &choice.name),
             format!(
-                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{}",
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/{}",
                 default_artifact("aspect-cli", false)
             )
         );
@@ -1154,13 +1154,13 @@ mod tests {
     fn test_mirrored_release_carries_the_debug_fallback() {
         let source = ArtifactChoice::derived("aspect-cli", true);
         let m = MirroredRelease {
-            version: "2026.31.1".to_owned(),
+            version: "2026.38.30".to_owned(),
             artifact: source.name.clone(),
             fallback: source.fallback.clone(),
         };
         let choice = ArtifactChoice::from(&m);
         let (primary, _) = choice
-            .debug_fallback("2026.31.1")
+            .debug_fallback("2026.38.30")
             .expect("fallback carried");
         assert_eq!(primary, default_artifact("aspect-cli", false));
     }
@@ -1185,18 +1185,18 @@ mod tests {
 
         let primary = default_artifact("aspect-cli", false);
         assert_eq!(
-            replace_url_vars(CDN_MIRROR_URL, "2026.35.9", &primary),
+            replace_url_vars(CDN_MIRROR_URL, "2026.38.30", &primary),
             format!(
-                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{primary}"
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/{primary}"
             )
         );
 
         let debug = default_artifact("aspect-cli", true);
         assert!(debug.contains("-debug-"));
         assert_eq!(
-            replace_url_vars(CDN_MIRROR_URL, "2026.35.9", &debug),
+            replace_url_vars(CDN_MIRROR_URL, "2026.38.30", &debug),
             format!(
-                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{debug}"
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/{debug}"
             )
         );
     }
@@ -1226,12 +1226,12 @@ mod tests {
     fn test_cdn_mirror_debug_fallback_url_targets_the_primary() {
         use crate::config::CDN_MIRROR_URL;
 
-        let choice = ArtifactChoice::resolve("aspect-cli", "", "2026.31.1", true);
-        let (primary, _) = choice.debug_fallback("2026.31.1").expect("fallback");
+        let choice = ArtifactChoice::resolve("aspect-cli", "", "2026.38.30", true);
+        let (primary, _) = choice.debug_fallback("2026.38.30").expect("fallback");
         assert_eq!(
-            replace_url_vars(CDN_MIRROR_URL, "2026.31.1", primary),
+            replace_url_vars(CDN_MIRROR_URL, "2026.38.30", primary),
             format!(
-                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.31.1/{}",
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/{}",
                 default_artifact("aspect-cli", false)
             )
         );
@@ -1280,10 +1280,10 @@ mod tests {
             release_asset_url(
                 "aspect-build",
                 "aspect-cli",
-                "v2026.31.10",
+                "v2026.38.30",
                 "aspect-cli-linux"
             ),
-            "https://github.com/aspect-build/aspect-cli/releases/download/v2026.31.10/aspect-cli-linux"
+            "https://github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/aspect-cli-linux"
         );
     }
 
@@ -1291,7 +1291,7 @@ mod tests {
     /// not collide.
     #[test]
     fn test_release_asset_url_distinguishes_variants() {
-        let url = |a: &str| release_asset_url("aspect-build", "aspect-cli", "v2026.31.10", a);
+        let url = |a: &str| release_asset_url("aspect-build", "aspect-cli", "v2026.38.30", a);
         assert_ne!(
             url(&default_artifact("aspect-cli", false)),
             url(&default_artifact("aspect-cli", true))
@@ -1452,7 +1452,7 @@ mod tests {
         let org = "aspect-build";
         let repo = "aspect-cli";
         let artifact = "aspect-cli-aarch64-apple-darwin";
-        let tag = "v2026.15.2";
+        let tag = "v2026.38.30";
 
         // Write the tag hint (as the production code does after a successful API call).
         let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
@@ -1489,7 +1489,7 @@ mod tests {
         let org = "aspect-build";
         let repo = "aspect-cli";
         let artifact = "aspect-cli-aarch64-apple-darwin";
-        let tag = "v2026.15.2";
+        let tag = "v2026.38.30";
 
         // Write a hint that is immediately stale (zero max-age).
         let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
@@ -1528,7 +1528,7 @@ mod tests {
             "aspect-cli-aarch64-apple-darwin",
         );
         std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
-        std::fs::write(&hint, "v2026.35.9").unwrap();
+        std::fs::write(&hint, "v2026.38.30").unwrap();
 
         // The hand-off the http() branch performs: hint tag -> mirrored version.
         let recorded = std::fs::read_to_string(&hint).unwrap();
@@ -1538,12 +1538,12 @@ mod tests {
             artifact: choice.name.clone(),
             fallback: choice.fallback.clone(),
         };
-        assert_eq!(m.version, "2026.35.9");
+        assert_eq!(m.version, "2026.38.30");
         assert_ne!(m.version, cargo_pkg_short_version());
         assert_eq!(
             replace_url_vars(CDN_MIRROR_URL, &m.version, &ArtifactChoice::from(&m).name),
             format!(
-                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.35.9/{}",
+                "https://cdn.aspect.build/github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/{}",
                 default_artifact("aspect-cli", false)
             )
         );
@@ -1559,7 +1559,7 @@ mod tests {
         let org = "aspect-build";
         let repo = "aspect-cli";
         let artifact = "aspect-cli-aarch64-apple-darwin";
-        let tag = "v2026.15.2";
+        let tag = "v2026.38.30";
 
         // Write the tag hint but do NOT create the binary.
         let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
@@ -1605,8 +1605,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.14.0");
 
         // Simulate a newer resolution overwriting the old hint.
-        std::fs::write(&hint, "v2026.15.2").unwrap();
-        assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.15.2");
+        std::fs::write(&hint, "v2026.38.30").unwrap();
+        assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.38.30");
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

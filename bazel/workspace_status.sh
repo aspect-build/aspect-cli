@@ -5,7 +5,7 @@ set -o errexit -o nounset -o pipefail
 git_commit=$(git rev-parse HEAD)
 readonly git_commit
 
-# Monorepo version as semver, e.g. 2025.34.1+201b9a8:
+# Monorepo version as semver, e.g. 2026.38.1+201b9a8:
 # - major = year (2025), minor = ISO week (34),
 # - patch = commits since the week's tag (1), +build = short commit (201b9a8).
 # The two --match globs cover single- and double-digit week tags (2025.1-2025.59).
@@ -28,10 +28,10 @@ else
     monorepo_version="${year}.${week}.0+${git_commit:0:8}"
 fi
 
-# A short variant of the monorepo version that drops the +build metadata. For example, 2025.34.0.
+# A short variant of the monorepo version that drops the +build metadata. For example, 2026.38.0.
 monorepo_short_version=$(sed 's/+.*//' <<<"$monorepo_version")
 
-# Registry-tag-safe variant, e.g. 2025.34.1-201b9a8: registries like AWS ECR
+# Registry-tag-safe variant, e.g. 2026.38.1-201b9a8: registries like AWS ECR
 # disallow `+` in tags, so swap it for `-`.
 monorepo_image_tag_version="${monorepo_version//+/-}"
 

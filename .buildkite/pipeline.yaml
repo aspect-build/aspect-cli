@@ -4,7 +4,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     command: |
       aspect --version
       aspect version
@@ -66,7 +66,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -170,7 +170,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -215,7 +215,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 20
     retry:
       automatic:
@@ -231,7 +231,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -249,7 +249,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -265,7 +265,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -290,7 +290,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -306,7 +306,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -336,7 +336,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -370,7 +370,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 20
     retry:
       automatic:
@@ -415,7 +415,7 @@ steps:
     agents:
       queue: aspect-default
     plugins:
-      - aspect-build/setup-aspect#df30d0f3914adfd55c84652c27c908426e6d05a0: ~ # v2026.38.0
+      - aspect-build/setup-aspect#0c824000c1aa02feac3d0b62d04efe7e2dc8d9d6: ~ # v2026.38.1
     timeout_in_minutes: 10
     retry:
       automatic:
