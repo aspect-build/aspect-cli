@@ -5,15 +5,15 @@ use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
 
-/// The Aspect project root this process resolved, recorded by [`Env::new`] for
-/// the code that needs it without an evaluator to read [`Env`] from.
 static ASPECT_ROOT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// The Aspect project root this process resolved at startup, or `None` in a
-/// process that never built an [`Env`] — the `aspect get` credential helper,
-/// which Bazel spawns as a bare subprocess and which deliberately skips
-/// workspace discovery. Callers that still want an answer there resolve one
-/// themselves with [`crate::project_root`].
+/// The Aspect project root this process resolved at startup, recorded by
+/// [`Env::new`] for code that has no evaluator to read [`Env`] from.
+///
+/// `None` in a process that builds no [`Env`]: the `aspect get` credential
+/// helper, which Bazel spawns as a bare subprocess and which skips workspace
+/// discovery to stay fast. A caller that still wants an answer there resolves
+/// one with [`crate::project_root`].
 pub fn resolved_aspect_root() -> Option<&'static Path> {
     ASPECT_ROOT_DIR.get().map(PathBuf::as_path)
 }

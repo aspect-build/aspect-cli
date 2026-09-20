@@ -74,10 +74,8 @@ use tokio::task::spawn_blocking;
 use tracing::info_span;
 
 use crate::cmd::Cmd;
-use crate::helpers::{
-    find_aspect_root, find_bazel_root, find_git_root, find_user_config,
-    get_default_axl_search_paths, search_sources,
-};
+use crate::helpers::{find_user_config, get_default_axl_search_paths, search_sources};
+use axl_runtime::project_root::{find_aspect_root, find_bazel_root, find_git_root};
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -135,13 +133,10 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let current_work_dir = std::env::current_dir()?;
     // `Env` requires both roots; cwd is the last-resort fallback when no
     // marker file exists anywhere up the tree.
-    let aspect_root = find_aspect_root(&current_work_dir)
-        .await
-        .unwrap_or_else(|| current_work_dir.clone());
-    let bazel_root = find_bazel_root(&current_work_dir)
-        .await
-        .unwrap_or_else(|| current_work_dir.clone());
-    let git_root = find_git_root(&current_work_dir).await;
+    let aspect_root =
+        find_aspect_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone());
+    let bazel_root = find_bazel_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone());
+    let git_root = find_git_root(&current_work_dir);
 
     let disk_store = DiskStore::new(aspect_root.clone());
     let mode = ModEvaluator::new(aspect_root.clone());

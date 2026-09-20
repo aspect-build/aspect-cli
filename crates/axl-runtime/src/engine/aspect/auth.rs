@@ -345,12 +345,12 @@ fn reserved_name_error(name: &str) -> anyhow::Error {
 /// deployment works before a first `aspect auth login`. Only the credential is
 /// genuinely missing then, and that is the error the user gets.
 ///
-/// Its `hosts` are the hosts it states, as [`deployment_from_discovery`] does
-/// for a discovered deployment, so [`deployment_for_host`] recognizes Aspect
-/// Cloud's own cache, BES and API as Aspect Cloud's. Everything that attaches a
+/// Its `hosts` come from the endpoints it states ([`endpoint_hosts`]), as they
+/// do for a discovered deployment, so [`deployment_for_host`] recognizes Aspect
+/// Cloud's own cache and BES as Aspect Cloud's. Everything that attaches a
 /// credential gates on that ownership — the `aspect get` credential helper, the
 /// endpoint auth in `lib/aspect_endpoint_auth.axl` — and a host owned by nobody
-/// is talked to unauthenticated, so these must stay in step with `endpoints`.
+/// is talked to unauthenticated.
 fn aspect_cloud_deployment() -> Deployment {
     let endpoints = Endpoints {
         cache: DEFAULT_CACHE_HOST.to_string(),
@@ -381,24 +381,28 @@ fn aspect_cloud_deployment() -> Deployment {
     }
 }
 
-/// The bare hosts a deployment's endpoints name, deduped and in a stable order:
-/// what `hosts` must carry for [`deployment_for_host`] to recognize them as that
-/// deployment's. `results_url` is left out — it is a viewer URL passed to
-/// `--bes_results_url`, never dialed, so it is not part of the auth gate.
+/// The bare hosts of the Bazel-facing endpoints a deployment serves — cache,
+/// BES, executor — deduped and in a stable order: what `hosts` must carry for
+/// [`deployment_for_host`] to recognize them as that deployment's.
+///
+/// Those three and no more, because ownership decides which endpoints receive
+/// the login. `api` is the CLI's own, reached with the credential directly
+/// rather than through Bazel, and `results_url` is a viewer URL passed to
+/// `--bes_results_url` and never dialed.
 fn endpoint_hosts(endpoints: &Endpoints) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
-    for value in [
-        &endpoints.cache,
-        &endpoints.bes,
-        &endpoints.exec,
-        &endpoints.api,
-    ] {
-        let host = endpoint_host_str(value);
-        if !host.is_empty() && !hosts.contains(&host) {
-            hosts.push(host);
-        }
+    for value in [&endpoints.cache, &endpoints.bes, &endpoints.exec] {
+        push_host(&mut hosts, value);
     }
     hosts
+}
+
+/// Append `value`'s bare host to `hosts`, unless it is empty or already there.
+fn push_host(hosts: &mut Vec<String>, value: &str) {
+    let host = endpoint_host_str(value);
+    if !host.is_empty() && !hosts.contains(&host) {
+        hosts.push(host);
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1170,29 +1174,21 @@ fn deployment_from_discovery(
     selected: Option<&AuthServer>,
 ) -> Deployment {
     let mut hosts: Vec<String> = Vec::new();
-    let mut push = |h: &str| {
-        let h = endpoint_host_str(h);
-        if !h.is_empty() && !hosts.contains(&h) {
-            hosts.push(h);
-        }
-    };
-    push(configured_host);
-    push(&info.resource);
-    // The endpoint hosts share the same credential, so they extend the auth gate
-    // too (normalized to bare hosts, matching `hosts`).
+    push_host(&mut hosts, configured_host);
+    push_host(&mut hosts, &info.resource);
     let endpoints = Endpoints {
         cache: endpoint_host_str(&info.aspect_endpoints.cache),
         bes: endpoint_host_str(&info.aspect_endpoints.bes),
         exec: endpoint_host_str(&info.aspect_endpoints.exec),
         api: endpoint_host_str(&info.aspect_endpoints.api),
         // A viewer URL, kept verbatim: it is passed to --bes_results_url, not
-        // dialed as a gRPC endpoint, so it is neither host-normalized nor pushed
-        // onto the auth gate below.
+        // dialed as a gRPC endpoint, so it is neither host-normalized nor
+        // part of the auth gate.
         results_url: info.aspect_bes_results_url.clone(),
     };
-    push(&endpoints.cache);
-    push(&endpoints.bes);
-    push(&endpoints.exec);
+    for host in endpoint_hosts(&endpoints) {
+        push_host(&mut hosts, &host);
+    }
     Deployment {
         name,
         default: false,
@@ -6260,7 +6256,7 @@ mod tests {
     #[test]
     fn aspect_cloud_owns_the_endpoints_it_states() {
         let seed = [aspect_cloud_deployment()];
-        for host in [DEFAULT_CACHE_HOST, DEFAULT_BES_HOST, DEFAULT_DISCOVERY_HOST] {
+        for host in [DEFAULT_CACHE_HOST, DEFAULT_BES_HOST] {
             let owner = deployment_for_host(&seed, host)
                 .unwrap_or_else(|| panic!("{host} is Aspect Cloud's own endpoint"));
             assert_eq!(owner.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
@@ -6268,8 +6264,24 @@ mod tests {
         // Exactly those hosts. A single-tenant deployment sits on the same domain,
         // and a suffix match would hand Aspect Cloud's credential to its cache.
         assert!(deployment_for_host(&seed, "remote.acme.aspect.build").is_none());
-        // The viewer URL is not an endpoint anything dials, so it is not owned.
-        assert!(!seed[0].hosts.iter().any(|h| h.contains("app.aspect.build")));
+    }
+
+    /// Ownership covers what Bazel dials and nothing else: the API host is
+    /// reached with the credential directly, and the viewer URL is not dialed at
+    /// all, so neither belongs to the gate that decides what receives a token.
+    #[test]
+    fn endpoint_hosts_are_the_bazel_facing_ones() {
+        let hosts = endpoint_hosts(&Endpoints {
+            cache: "shared.example".to_string(),
+            bes: "shared.example".to_string(),
+            exec: "exec.example".to_string(),
+            api: "api.example".to_string(),
+            results_url: "https://app.example/i/".to_string(),
+        });
+
+        // Deduped, in the order stated.
+        assert_eq!(hosts, vec!["shared.example", "exec.example"]);
+        assert!(endpoint_hosts(&Endpoints::default()).is_empty());
     }
 
     /// A config entry that says nothing about hosts leaves the seed's own in
