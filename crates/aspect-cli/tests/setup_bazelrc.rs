@@ -18,17 +18,24 @@
 //! Every test runs against a temporary `$HOME`, since that is what decides where
 //! the rc goes and which deployments are on record; the credential store is
 //! redirected as well so none can reach a keyring.
+//!
+//! Every run gets `stub_bazel_dir()` at the front of its PATH. The command asks
+//! Bazel its version, and the Workflows feature probes for the legacy CLI, so a
+//! real `bazel` on PATH means `bazel info` starting a server per invocation
+//! under a throwaway `HOME` — tens of seconds each, seventeen tests at once. The
+//! stub answers both in microseconds, and pins the version the rc is rendered
+//! for rather than leaving it to whatever the host has.
 
 mod common;
 
 use common::aspect_cli;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Run `aspect setup bazelrc <args>` with `home` as the home directory and a cwd
 /// of `cwd`, against an environment that names the endpoints itself.
 fn setup_bazelrc(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(aspect_cli())
+    with_stub_bazel(&mut Command::new(aspect_cli()))
         .arg("setup")
         .arg("bazelrc")
         .args(args)
@@ -43,6 +50,48 @@ fn setup_bazelrc(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove("ASPECT_WORKFLOWS_RUNNER")
         .output()
         .expect("running `aspect setup bazelrc`")
+}
+
+/// A `bazel` that answers without starting one.
+///
+/// `ctx.bazel.version()` runs `bazel info server_pid release` and the Workflows
+/// feature runs `bazel --version`; both are spawned in the test's throwaway cwd
+/// with a throwaway `HOME`, so a real binary resolves a release, downloads it
+/// and starts a server before either can answer. This prints what those two
+/// parse and exits, so the version the rc is rendered for is the same on every
+/// machine.
+///
+/// One directory per test process, kept for the process's life — the harness
+/// runs tests as threads, so the first caller builds it and the rest reuse it.
+fn stub_bazel_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("temp bin dir").keep();
+        let bazel = dir.join("bazel");
+        std::fs::write(
+            &bazel,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             --version) echo 'bazel 9.0.0' ;;\n\
+             *) echo 'server_pid: 1'; echo 'release: release 9.0.0' ;;\n\
+             esac\n",
+        )
+        .expect("writing the bazel stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bazel, std::fs::Permissions::from_mode(0o755))
+                .expect("making the bazel stub executable");
+        }
+        dir
+    })
+    .as_path()
+}
+
+/// `cmd` with the stub ahead of whatever `bazel` the host has.
+fn with_stub_bazel(cmd: &mut Command) -> &mut Command {
+    let path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}:{}", stub_bazel_dir().display(), path))
 }
 
 fn assert_success(output: &Output) {
@@ -141,7 +190,7 @@ fn a_workflows_runner_leaves_only_the_rc_pair_behind() {
     let job_tmpdir = tempfile::tempdir().expect("temp job tmpdir");
 
     let run = || {
-        Command::new(aspect_cli())
+        with_stub_bazel(&mut Command::new(aspect_cli()))
             .args(["setup", "bazelrc"])
             .current_dir(cwd.path())
             .env("HOME", home.path())
@@ -240,6 +289,7 @@ fn setup_bazelrc_unconfigured(home: &Path, cwd: &Path, ci: bool, args: &[&str]) 
 /// credential, say, which is what `--remote=auto` looks for.
 fn unconfigured_cmd(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Command {
     let mut cmd = Command::new(aspect_cli());
+    with_stub_bazel(&mut cmd);
     cmd.args(["setup", "bazelrc"])
         .args(args)
         .current_dir(cwd)
@@ -621,7 +671,7 @@ fn a_workflows_runner_writes_its_rc_even_when_the_checkout_owns_one() {
     let job_tmpdir = tempfile::tempdir().expect("temp job tmpdir");
     checkout_owning_its_rc(workspace.path());
 
-    let out = Command::new(aspect_cli())
+    let out = with_stub_bazel(&mut Command::new(aspect_cli()))
         .args(["setup", "bazelrc"])
         .current_dir(workspace.path())
         .env("HOME", home.path())
