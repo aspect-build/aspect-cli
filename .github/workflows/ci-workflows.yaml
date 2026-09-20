@@ -412,6 +412,15 @@ jobs:
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+      # This job is the one that builds a second workspace, and `~/.aspect/bazelrc`
+      # is read in all of them. Generated from this checkout, it only *enables*
+      # aspect-common and aspect-cloud, whose definitions are in the checkout's
+      # own committed rc — so `bazel` in the scaffolded project fails on a
+      # `--config` nothing there defines. Regenerating it from outside any
+      # workspace leaves it carrying its own definitions, valid in both.
+      - name: Regenerate the machine rc outside this checkout
+        working-directory: ${{ runner.temp }}
+        run: aspect setup bazelrc --force
       - name: Scaffold preset
         run: |
           aspect init "$RUNNER_TEMP/proj" --task:name init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
