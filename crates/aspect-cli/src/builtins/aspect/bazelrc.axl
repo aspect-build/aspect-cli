@@ -156,7 +156,7 @@ load(
     "render_bazelrc",
     "startup_flags_for_rc",
 )
-load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "parse_remote")
+load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "parse_remote")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "GROUP_COMMON", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups", "section_chains")
@@ -282,6 +282,46 @@ def _remote_spec(value: str, on_ci: bool):
         return parse_remote(BARE if on_ci else "none")
     return parse_remote(value or (BARE if on_ci else "none"))
 
+def _ci_reason(on_runner: bool, env_deployment: bool, ci_host) -> str:
+    """Why the `auto` defaults believe this is CI, or `""` when they do not.
+    Named so the rc's two decisions can attribute themselves to the same
+    evidence — the runner, the environment naming a deployment, or the CI host
+    `detect_ci` recognized."""
+    if on_runner:
+        return "this is an Aspect Workflows runner"
+    if env_deployment:
+        return "the ASPECT_WORKFLOWS_* environment names a deployment"
+    if ci_host != None:
+        return "this is CI (%s)" % ci_host
+    return ""
+
+def _announce_home_mode(ctx: TaskContext, value: str, home_mode: bool, reason: str):
+    """Say which rc `--home=auto` chose and on what evidence, so a file written
+    outside the checkout — or inside it — is never a surprise."""
+    if value not in ["", AUTO]:
+        return
+    if home_mode:
+        info(ctx.std, "--home=auto: %s, so this machine's rc under ~/.aspect is written rather than the checkout's. `--home=false` writes the checkout's pair instead." % reason)
+    else:
+        info(ctx.std, "--home=auto: not CI, so the checkout's %s pair is written rather than this machine's. `--home=true` writes ~/.aspect/bazelrc instead." % GENERATED_RC)
+
+def _announce_remote_spec(ctx: TaskContext, value: str, spec, reason: str, machine_rc: bool):
+    """Say what `--remote=auto` turned on and on what evidence. The endpoints are
+    defined either way; this is about what the rc enables without a `--config`,
+    which only a machine's rc does."""
+    if value not in ["", AUTO]:
+        return
+    if not machine_rc:
+        info(ctx.std, "--remote=auto: a checkout's rc enables nothing — it is shared by every host that builds here, so its sections stay behind a --config. `--home=true` writes this machine's rc, where --remote decides what is on.")
+        return
+    wanted = [capability_label(name) for name in REMOTE_CAPABILITIES if spec.on[name]]
+    if wanted:
+        info(ctx.std, "--remote=auto: %s, so the deployment's %s %s enabled for every `bazel` build here. `--remote=none` leaves them defined but off." %
+                      (reason, join_and(wanted), "is" if len(wanted) == 1 else "are"))
+    elif not reason:
+        # On CI with nothing enabled, the decline said why in its own words.
+        info(ctx.std, "--remote=auto: not CI, so no endpoint is enabled — a developer's rc stays inert until a --config names one. `--remote` enables the remote cache and BES backend here.")
+
 def _sections_to_enable(default, spec) -> list:
     """The deployment sections a machine's rc would turn on for `spec`: the
     deployment's own where the cache or BES is wanted, and its `-exec` companion
@@ -350,6 +390,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     env_deployment = env_names_deployment(ctx.std.env)
     on_ci = on_runner or env_deployment or detect_ci(ctx.std.env) != None
     home_mode = _home_mode(ctx.args.home, on_ci)
+    ci_reason = _ci_reason(on_runner, env_deployment, detect_ci(ctx.std.env))
+    _announce_home_mode(ctx, ctx.args.home, home_mode, ci_reason)
 
     startup_flags = []
     runner_log = ""
@@ -415,6 +457,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     if machine_rc and spec.on["exec"] and not _serves_remote_execution(endpoint_env, default):
         warn(ctx.std, "Not enabling remote execution: %s. `--remote=exec` adds nothing to this rc; the remote cache and BES are unaffected." %
                       ("%s advertises no remote executor" % default.name if default != None else "nothing here advertises a remote executor"))
+
+    _announce_remote_spec(ctx, ctx.args.remote, spec, ci_reason, machine_rc)
 
     (groups, enabled) = _groups(ctx, endpoint_env, on_runner, machine_rc, spec.on, auth, paths.exec_log)
     if chain_to_repo:

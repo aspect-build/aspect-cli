@@ -15,7 +15,7 @@ when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
 `bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "AUTO", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "AUTO", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "auto_remote_explanation", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -286,6 +286,26 @@ def _test_auto_leaves_an_env_named_deployment_to_the_feature(ctx):
     _eq("named --remote → refused", [code for (code, _) in exits], [1])
     _eq("with the env message", [message for (_, message) in exits], [REMOTE_REFUSED_BY_ENV])
 
+def _test_auto_remote_explanation(ctx):
+    """A build nobody pointed anywhere is talking to a deployment; the line says
+    what decided that, how to decide otherwise here, and how to ask for the same
+    off CI. Only on the defaulted path — a named `--remote` explains itself."""
+    env = dict(_ON_CI)
+    env["ASPECT_API_TOKEN_GCP"] = "client:secret"
+
+    wired = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = env))
+    line = auto_remote_explanation(wired)
+    _eq("says what decided it", "--remote defaulted to `auto`" in line, True)
+    _eq("says how to opt out here", "--remote=none" in line, True)
+    _eq("says how to opt out for good", "config.axl" in line, True)
+    _eq("says how to get it off CI", "pass --remote off CI" in line, True)
+
+    # Named: the user knows why it is on.
+    _eq("named --remote", auto_remote_explanation(deployment_endpoint_flags(_ctx(_TOKENED, remote = BARE, env = env))), "")
+
+    # Defaulted but declined: nothing was wired, so there is nothing to explain.
+    _eq("auto off CI", auto_remote_explanation(deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO))), "")
+
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
     _eq("one", join_and(["remote cache"]), "remote cache")
@@ -349,6 +369,7 @@ _UNIT_TESTS = [
     _test_auto_declines_what_it_cannot_authenticate,
     _test_auto_declines_a_deployment_advertising_nothing,
     _test_auto_leaves_an_env_named_deployment_to_the_feature,
+    _test_auto_remote_explanation,
     _test_join_and,
 ]
 
