@@ -540,7 +540,7 @@ def _report(written: list, import_result, paths, shown, sections: list, enabled:
     lines.append("An existing file is left as it is; `aspect setup bazelrc --force` regenerates it." if home_mode else "The file is a starting point: edit it as your repository needs. `aspect setup bazelrc --force` regenerates it, discarding those edits.")
 
     lines.append("")
-    lines.append("Aspect Workflows tasks need no --config: pass --remote (`aspect build --remote`, `aspect test --remote`) and the default deployment is used automatically.")
+    lines.append("`aspect <task>` needs no --config and no rc: it reaches the default deployment itself, on CI without a flag and elsewhere with --remote (`aspect build --remote`).")
     return lines
 
 _BAZELRC_ARGS = {
