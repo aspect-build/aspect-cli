@@ -435,7 +435,7 @@ struct ConfigSource {
 }
 
 /// The config files overlaying the built-in seed, read in precedence order: the
-/// repo's `.aspect/config.json` (when `$ASPECT_WORKSPACE` names one), then the
+/// repo's `.aspect/config.json` (when the working directory is in a project), then the
 /// user's `~/.aspect/config.json`. A missing file reads as no entries.
 fn config_sources() -> anyhow::Result<Vec<ConfigSource>> {
     let mut sources = Vec::new();
@@ -594,11 +594,23 @@ fn reconcile_seed_default(deployments: &mut [Deployment]) {
 }
 
 /// The repo-level `.aspect/config.json`, checked in so a team shares a
-/// deployment. Located via `$ASPECT_WORKSPACE` (the CLI's workspace root); absent
-/// when the CLI runs outside a workspace.
+/// deployment. It sits under the Aspect project root — the one the process
+/// already resolved for axl and config loading — and is absent when the caller
+/// is outside a project.
+///
+/// The `aspect get` credential helper is the one caller with no resolved root to
+/// reuse: Bazel spawns it as a bare subprocess and it skips workspace discovery
+/// to stay fast. It walks for one itself, which is the same few `stat`s startup
+/// would have done.
 fn repo_config_path() -> Option<PathBuf> {
-    let root = std::env::var_os("ASPECT_WORKSPACE")?;
-    Some(PathBuf::from(root).join(".aspect").join("config.json"))
+    let root = match crate::engine::store::resolved_aspect_root() {
+        Some(root) => root.to_path_buf(),
+        None => crate::project_root::aspect_root_from_cwd()?,
+    };
+    Some(
+        root.join(crate::project_root::DOT_ASPECT_FOLDER)
+            .join("config.json"),
+    )
 }
 
 /// Select a deployment by name, or the default when `name` is `None`.

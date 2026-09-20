@@ -1,97 +1,32 @@
 use std::path::{Path, PathBuf};
 
-use axl_runtime::module::{
-    AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION, AXL_VERSION_EXTENSION,
-};
+use axl_runtime::module::{AXL_CONFIG_EXTENSION, AXL_SCRIPT_EXTENSION, AXL_VERSION_EXTENSION};
+use axl_runtime::project_root;
 use tokio::fs;
 use tracing::instrument;
 
 /// Conventional name of the `.aspect` directory under an Aspect project root.
-pub const DOT_ASPECT_FOLDER: &str = ".aspect";
+pub const DOT_ASPECT_FOLDER: &str = project_root::DOT_ASPECT_FOLDER;
 
-/// Markers identifying an Aspect project root.
-const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, ".aspect/version.axl"];
-
-/// Markers identifying a Bazel workspace root (see
-/// https://bazel.build/external/overview#repository).
-const BAZEL_BOUNDARY_FILES: &[&str] = &[
-    "MODULE.bazel",
-    "MODULE.bazel.lock",
-    "REPO.bazel",
-    "WORKSPACE",
-    "WORKSPACE.bazel",
-];
-
-/// Aspect project root for axl / config loading.
-///
-/// Deepest ancestor of `current_work_dir` containing `.aspect/version.axl`
-/// or `MODULE.aspect`. Falls back to the deepest Bazel workspace marker so
-/// a pure-Bazel monorepo still resolves to a sane project anchor. Returns
-/// `None` only when neither marker exists anywhere in the ancestry.
+/// Aspect project root for axl / config loading. The markers and the walk live
+/// in [`project_root`], so every part of the CLI — this, and the deployment
+/// config loader that runs without the task runtime — resolves the same root.
 #[instrument]
 pub async fn find_aspect_root(current_work_dir: &Path) -> Option<PathBuf> {
-    find_root_with_fallback(
-        current_work_dir,
-        ASPECT_BOUNDARY_FILES,
-        BAZEL_BOUNDARY_FILES,
-    )
-    .await
+    project_root::find_aspect_root(current_work_dir)
 }
 
-/// Git repository root — the directory containing the `.git` entry.
-///
-/// Walks upward from `current_work_dir` looking for `.git` (a directory for
-/// normal repos or a file for git worktrees). Returns `None` when not inside
-/// a git repository.
+/// Git repository root — see [`project_root::find_git_root`].
 #[instrument]
 pub async fn find_git_root(current_work_dir: &Path) -> Option<PathBuf> {
-    find_ancestor_with_any(current_work_dir, &[".git"]).await
+    project_root::find_git_root(current_work_dir)
 }
 
-/// Bazel workspace root for bazelrc discovery, `bazel info workspace`, and
-/// BES output paths.
-///
-/// Deepest ancestor of `current_work_dir` containing a Bazel marker. Falls
-/// back to the deepest Aspect marker so a pure-Aspect workspace still
-/// resolves. Returns `None` only when neither marker exists.
-///
-/// Diverges from [`find_aspect_root`] when both markers exist in the
-/// ancestry: with `/proj/.aspect/version.axl` and `/proj/e2e/MODULE.bazel`,
-/// invoking from `/proj/e2e/sub/` puts the Aspect root at `/proj` and the
-/// Bazel root at `/proj/e2e`.
+/// Bazel workspace root for bazelrc discovery, `bazel info workspace`, and BES
+/// output paths — see [`project_root::find_bazel_root`].
 #[instrument]
 pub async fn find_bazel_root(current_work_dir: &Path) -> Option<PathBuf> {
-    find_root_with_fallback(
-        current_work_dir,
-        BAZEL_BOUNDARY_FILES,
-        ASPECT_BOUNDARY_FILES,
-    )
-    .await
-}
-
-/// Walk ancestors of `start` looking for `primary` markers; on miss, walk
-/// again looking for `fallback`. Returns `None` if neither set is found.
-async fn find_root_with_fallback(
-    start: &Path,
-    primary: &[&str],
-    fallback: &[&str],
-) -> Option<PathBuf> {
-    if let Some(root) = find_ancestor_with_any(start, primary).await {
-        return Some(root);
-    }
-    find_ancestor_with_any(start, fallback).await
-}
-
-/// Walk ancestors of `start` and return the deepest one containing any of `markers`.
-async fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
-    for ancestor in start.ancestors() {
-        for marker in markers {
-            if fs::try_exists(ancestor.join(marker)).await.unwrap_or(false) {
-                return Some(ancestor.to_path_buf());
-            }
-        }
-    }
-    None
+    project_root::find_bazel_root(current_work_dir)
 }
 
 /// User-global config file: `<home_dir>/.aspect/config.axl`, if it exists.
@@ -256,7 +191,7 @@ mod tests {
     /// silent drift in `BAZEL_BOUNDARY_FILES`.
     #[tokio::test]
     async fn bazel_root_recognizes_every_marker() {
-        for marker in BAZEL_BOUNDARY_FILES {
+        for marker in project_root::BAZEL_BOUNDARY_FILES {
             let (_tmp, root) = setup(&[marker]).await;
             let cwd = root.join("sub");
             tokio_fs::create_dir_all(&cwd).await.unwrap();
