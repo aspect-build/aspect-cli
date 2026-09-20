@@ -1,0 +1,132 @@
+"""Post a message to a Slack incoming webhook.
+
+Deliberately small. Slack's Block Kit is a large surface and almost none of it
+earns its place in a build notification, so this covers the shape that does: a
+headline, a short set of labelled fields, and a link back to the build.
+
+Two rules the rest of the code depends on:
+
+  - **A webhook URL is a secret.** It is never printed, never rendered into a
+    message, and never included in an error. `redact` is what every error path
+    goes through.
+  - **Delivery failure is not build failure.** `post` returns a `Delivery`
+    saying what happened; nothing in here raises. A Slack outage must not turn
+    a green build red.
+"""
+
+
+Delivery = record(
+    ok = field(bool),
+    status = field(int, default = 0),
+    detail = field(str, default = ""),
+)
+
+Field = record(
+    label = field(str),
+    value = field(str),
+)
+
+def _redact(url: str) -> str:
+    """A webhook URL reduced to something safe to print.
+
+    Slack webhooks are bearer credentials in a URL: anyone holding one can post
+    as your app. The host is enough to tell a misconfigured hook from a network
+    problem, and the path is the part that must never reach a log.
+    """
+    if not url:
+        return "<unset>"
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return "<malformed webhook URL>"
+    host, _, _ = rest.partition("/")
+    return scheme + "://" + host + "/…"
+
+def _escape(value: str) -> str:
+    """Slack's three mandatory escapes for message text.
+
+    Only these three; escaping more would mangle the `<url|label>` links this
+    module builds itself.
+    """
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _link(url: str, label: str) -> str:
+    if not url:
+        return _escape(label)
+    return "<{}|{}>".format(url, _escape(label))
+
+def _blocks(headline: str, body: str, fields: list, actions: list) -> list:
+    """Render to Block Kit.
+
+    Fields go two per row, which is Slack's own layout for a `fields` section
+    and the reason the field values here are kept to a few words.
+    """
+    blocks = [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": headline},
+    }]
+
+    if body:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+
+    if fields:
+        rendered = []
+        for f in fields:
+            rendered.append({"type": "mrkdwn", "text": "*{}*\n{}".format(_escape(f.label), f.value)})
+        # Slack caps a fields section at 10; more than that is a wall of text
+        # nobody reads anyway.
+        blocks.append({"type": "section", "fields": rendered[:10]})
+
+    if actions:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": " · ".join(actions)}],
+        })
+
+    return blocks
+
+def _message(headline: str, body: str = "", fields: list = [], actions: list = []) -> dict:
+    """The JSON body of a webhook post.
+
+    `text` is set as well as `blocks` because that is what Slack shows in a
+    notification preview and in clients that do not render blocks.
+    """
+    return {
+        "text": headline,
+        "blocks": _blocks(headline, body, fields, actions),
+    }
+
+def _post(ctx, webhook: str, message: dict) -> Delivery:
+    if not webhook:
+        return Delivery(ok = False, detail = "no webhook configured")
+
+    response = ctx.http().post(
+        url = webhook,
+        headers = {"Content-Type": "application/json"},
+        data = json.encode(message),
+    ).block()
+
+    if response.status < 200 or response.status >= 300:
+        # Slack answers a bad hook with a plain-text reason ("no_service",
+        # "invalid_payload"), which is worth passing through; the URL is not.
+        return Delivery(
+            ok = False,
+            status = response.status,
+            detail = "{} answered HTTP {}: {}".format(
+                _redact(webhook),
+                response.status,
+                response.body[:200],
+            ),
+        )
+
+    return Delivery(ok = True, status = response.status)
+
+slack = struct(
+    Delivery = Delivery,
+    Field = Field,
+    message = _message,
+    post = _post,
+    redact = _redact,
+    link = _link,
+    escape = _escape,
+    testonly_blocks = _blocks,
+)

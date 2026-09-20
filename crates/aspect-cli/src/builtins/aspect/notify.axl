@@ -1,0 +1,29 @@
+"""Public facade for writing your own notification rules.
+
+    load("@aspect//notify.axl", "notify")
+    load("@aspect//traits.axl", "Phases", "TaskUpdate")
+
+    def _cold_cache(ctx: TaskContext, update: TaskUpdate) -> None:
+        if not update.final:
+            return
+        bazel = update.data["bazel"]
+        total = bazel["actions_executed"] + bazel["actions_cached"]
+        if total > 100 and bazel["actions_cached"] * 100 // total < 20:
+            notify.send(
+                ctx,
+                headline = "Cache hit rate under 20% on " + ctx.task.friendly_name,
+                body = "Usually a --config changed. See go/bazel-cache.",
+            )
+
+    def config(ctx: ConfigContext):
+        ctx.traits[Phases].task_update.append(_cold_cache)
+
+`send` reads the webhook from `ASPECT_SLACK_WEBHOOK` (or an explicit
+`webhook = ...`), and is a silent no-op when neither is set, so a rule shared
+across repositories needs no guard of its own. Configuring the built-in rules
+lives on `@aspect//feature/notify.axl`.
+"""
+
+load("./private/lib/notify.axl", _notify = "notify")
+
+notify = _notify

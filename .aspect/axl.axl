@@ -16,7 +16,11 @@ load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", 
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
+load("@aspect//private/lib/build_results.axl", "build_results")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
+load("@aspect//private/lib/notify.axl", "notify")
+load("@aspect//private/lib/slack.axl", "slack")
+load("@aspect//private/lib/time_window.axl", "time_window")
 load(
     "@aspect//private/lib/gazelle_results.axl",
     "dedupe_subtrees",
@@ -4139,6 +4143,10 @@ def impl(ctx: TaskContext) -> int:
     tc = test_result_cell_text(tc)
     tc = test_results_subset_carries_progress(tc)
     tc = test_denied_terminal_post_warning(tc)
+    tc = test_time_window(tc)
+    tc = test_build_results_lib(tc)
+    tc = test_slack_lib(tc)
+    tc = test_notify_rules(tc)
 
     print(tc, "tests passed")
     return 0
@@ -4239,3 +4247,298 @@ axl = task(
     # the test run sees at most one fire per id.
     traits = tips.TRAITS,
 )
+
+
+def test_time_window(tc: int) -> int:
+    """RFC 3339 conversion, computed rather than shelled out to `date`.
+
+    The dates here are the ones that catch an off-by-one in a civil-from-days
+    implementation: the epoch, a leap day, the century that is not a leap year,
+    and the one that is."""
+    tc = test_case(tc, time_window.rfc3339(0) == "1970-01-01T00:00:00Z", "rfc3339: the epoch")
+    tc = test_case(tc, time_window.rfc3339(1000) == "1970-01-01T00:00:01Z", "rfc3339: one second in")
+    tc = test_case(
+        tc,
+        time_window.rfc3339(951782400000) == "2000-02-29T00:00:00Z",
+        "rfc3339: 2000 was a leap year (divisible by 400)",
+    )
+    tc = test_case(
+        tc,
+        time_window.rfc3339(1709164800000) == "2024-02-29T00:00:00Z",
+        "rfc3339: 2024 leap day",
+    )
+    tc = test_case(
+        tc,
+        time_window.rfc3339(1788912000000) == "2026-09-09T00:00:00Z",
+        "rfc3339: an ordinary date",
+    )
+    tc = test_case(
+        tc,
+        time_window.rfc3339(1788998399000) == "2026-09-09T23:59:59Z",
+        "rfc3339: last second of a day",
+    )
+    tc = test_case(tc, time_window.testonly_civil_from_days(0) == (1970, 1, 1), "civil_from_days: day zero")
+    tc = test_case(tc, time_window.testonly_civil_from_days(-1) == (1969, 12, 31), "civil_from_days: before the epoch")
+    return tc
+
+def test_build_results_lib(tc: int) -> int:
+    """URL construction for the build-results API.
+
+    Label encoding is the load-bearing part: a label is `//pkg/dir:target`, and
+    a half-encoded one selects a different target rather than erroring."""
+    tc = test_case(
+        tc,
+        build_results.testonly_origin("https://app.example.com/invocations/abc") == "https://app.example.com",
+        "origin drops the path",
+    )
+    tc = test_case(
+        tc,
+        build_results.testonly_origin("https://app.example.com:8443/x") == "https://app.example.com:8443",
+        "origin keeps a port",
+    )
+    tc = test_case(tc, build_results.testonly_origin("") == "", "origin of nothing is nothing")
+    tc = test_case(tc, build_results.testonly_origin("not a url") == "", "origin of a non-URL is nothing")
+
+    tc = test_case(
+        tc,
+        build_results.testonly_encode("//services/api:server_test") == "%2F%2Fservices%2Fapi%3Aserver_test",
+        "encode escapes the label separators",
+    )
+    tc = test_case(
+        tc,
+        build_results.testonly_encode("a-b_c.d~e") == "a-b_c.d~e",
+        "encode leaves the unreserved set alone",
+    )
+    tc = test_case(
+        tc,
+        build_results.testonly_encode("caf\u00e9") == "caf%C3%A9",
+        "encode emits UTF-8 bytes, not codepoints",
+    )
+    tc = test_case(tc, build_results.testonly_utf8(0x41) == [0x41], "utf8: ASCII is one byte")
+    tc = test_case(tc, build_results.testonly_utf8(0xE9) == [0xC3, 0xA9], "utf8: two-byte sequence")
+    tc = test_case(tc, build_results.testonly_utf8(0x4E2D) == [0xE4, 0xB8, 0xAD], "utf8: three-byte sequence")
+    tc = test_case(tc, build_results.testonly_utf8(0x1F600) == [0xF0, 0x9F, 0x98, 0x80], "utf8: four-byte sequence")
+
+    tc = test_case(
+        tc,
+        build_results.testonly_query({"range": "d7", "label": "//a:b"}) == "?label=%2F%2Fa%3Ab&range=d7",
+        "query sorts its parameters and encodes each value",
+    )
+    tc = test_case(
+        tc,
+        build_results.testonly_query({"repo": "", "range": "d7"}) == "?range=d7",
+        "query drops empty values rather than sending repo=",
+    )
+    tc = test_case(tc, build_results.testonly_query({}) == "", "query of nothing is nothing")
+
+    # A baseline of zero or None means "no history", which must read as no
+    # opinion rather than as an infinite regression.
+    tc = test_case(tc, build_results.slower_than(100, None, 20) == None, "slower_than: no baseline, no opinion")
+    tc = test_case(tc, build_results.slower_than(100, 0, 20) == None, "slower_than: zero baseline, no opinion")
+    tc = test_case(tc, build_results.slower_than(100, 100, 20) == None, "slower_than: unchanged is not a regression")
+    tc = test_case(tc, build_results.slower_than(119, 100, 20) == None, "slower_than: under the threshold")
+    tc = test_case(tc, build_results.slower_than(120, 100, 20) == 20, "slower_than: exactly at the threshold")
+    tc = test_case(tc, build_results.slower_than(300, 100, 20) == 200, "slower_than: reports the percentage")
+    tc = test_case(tc, build_results.slower_than(50, 100, 20) == None, "slower_than: faster is not a regression")
+
+    unavailable = build_results.Response(ok = False, unavailable = "no deployment")
+    tc = test_case(tc, build_results.percentile(unavailable, "exec_wall_ms_p50") == None, "percentile of an unavailable response")
+    empty = build_results.Response(ok = True, data = {"summary": {}})
+    tc = test_case(tc, build_results.percentile(empty, "exec_wall_ms_p50") == None, "percentile missing from the summary")
+    present = build_results.Response(ok = True, data = {"summary": {"exec_wall_ms_p50": 1234}})
+    tc = test_case(tc, build_results.percentile(present, "exec_wall_ms_p50") == 1234, "percentile read from the summary")
+    return tc
+
+def test_slack_lib(tc: int) -> int:
+    """Webhook redaction and message rendering.
+
+    Redaction is the one with teeth: a webhook URL is a bearer credential, and
+    a warning that prints it hands posting rights to anyone reading CI logs."""
+    tc = test_case(
+        tc,
+        slack.redact("https://hooks.slack.com/services/T000/B000/XXXXSECRET") == "https://hooks.slack.com/\u2026",
+        "redact keeps the host and drops the secret path",
+    )
+    tc = test_case(tc, slack.redact("") == "<unset>", "redact names an unset webhook")
+    tc = test_case(tc, slack.redact("nonsense") == "<malformed webhook URL>", "redact refuses a non-URL")
+    tc = test_case(
+        tc,
+        "XXXXSECRET" not in slack.redact("https://hooks.slack.com/services/T000/B000/XXXXSECRET"),
+        "redact never leaks the token",
+    )
+
+    tc = test_case(tc, slack.escape("a & b < c > d") == "a &amp; b &lt; c &gt; d", "escape covers Slack's three")
+    tc = test_case(tc, slack.link("https://x/y", "Job") == "<https://x/y|Job>", "link renders Slack's link syntax")
+    tc = test_case(tc, slack.link("", "Job") == "Job", "link with no URL is just the label")
+
+    blocks = slack.testonly_blocks("head", "body", [slack.Field(label = "Task", value = "test")], ["<u|Job>"])
+    tc = test_case(tc, len(blocks) == 4, "blocks renders headline, body, fields and context")
+    tc = test_case(tc, blocks[0]["text"]["text"] == "head", "the first block is the headline")
+    tc = test_case(tc, blocks[2]["fields"][0]["text"] == "*Task*\ntest", "a field renders label over value")
+
+    lean = slack.testonly_blocks("head", "", [], [])
+    tc = test_case(tc, len(lean) == 1, "an empty body, fields and actions render nothing")
+
+    many = slack.testonly_blocks("h", "", [slack.Field(label = "L", value = str(i)) for i in range(20)], [])
+    tc = test_case(tc, len(many[1]["fields"]) == 10, "fields are capped at Slack's limit of 10")
+
+    message = slack.message(headline = "head", body = "body")
+    tc = test_case(tc, message["text"] == "head", "the message carries a plain-text fallback for previews")
+    return tc
+
+def _fake_task(kind: str, elapsed_ms: int):
+    return struct(
+        kind = kind,
+        friendly_kind = kind.capitalize(),
+        friendly_name = kind,
+        name = kind,
+        id = "id",
+        elapsed_ms = elapsed_ms,
+        group = [],
+    )
+
+def _fake_update(status: str, bazel: dict):
+    base = {
+        "failed_targets": [],
+        "failed_tests": [],
+        "flaky_tests": [],
+        "passed_tests": [],
+        "actions_executed": 0,
+        "actions_cached": 0,
+    }
+    return struct(
+        status = status,
+        final = True,
+        data = {"bazel": dict(base, **bazel)},
+    )
+
+def _cfg(**kwargs):
+    base = {
+        "webhook": "https://hooks.example.com/x",
+        "rules": [],
+        "branches": ["main", "release/*"],
+        "test_budget_ms": 0,
+        "build_budget_ms": 0,
+        "regression_pct": 0,
+        "baseline": "p50",
+        "mention": "",
+        "dry_run": True,
+        "max_items": 10,
+    }
+    return notify.testonly_Config(**dict(base, **kwargs))
+
+def test_notify_rules(tc: int) -> int:
+    """The rules that decide whether to interrupt somebody.
+
+    Exercised against fabricated task updates rather than a real build: the
+    point of the test is which combinations fire, and a rule that fires on a
+    green build is the bug that gets the whole feature muted."""
+
+    tc = test_case(tc, notify.testonly_matches_branch("main", ["main"]), "branch: exact match")
+    tc = test_case(tc, not notify.testonly_matches_branch("mainline", ["main"]), "branch: exact match is not a prefix")
+    tc = test_case(tc, notify.testonly_matches_branch("release/1.2", ["release/*"]), "branch: trailing star matches a prefix")
+    tc = test_case(tc, not notify.testonly_matches_branch("feature/x", ["main", "release/*"]), "branch: no match")
+    tc = test_case(tc, not notify.testonly_matches_branch("", ["main"]), "branch: an unknown branch matches nothing")
+
+    tc = test_case(tc, notify.testonly_ms(999) == "999ms", "duration under a second")
+    tc = test_case(tc, notify.testonly_ms(1500) == "1.5s", "duration in seconds")
+    tc = test_case(tc, notify.testonly_ms(125000) == "2m 5s", "duration in minutes")
+
+    tc = test_case(
+        tc,
+        notify.testonly_bullets(["a", "b"], 10) == "\u2022 a\n\u2022 b",
+        "bullets renders one item per line",
+    )
+    tc = test_case(
+        tc,
+        notify.testonly_bullets(["a", "b", "c"], 2).endswith("\u2022 \u2026and 1 more"),
+        "bullets says how many it left out",
+    )
+    tc = test_case(
+        tc,
+        "&lt;script&gt;" in notify.testonly_bullets(["<script>"], 10),
+        "bullets escapes item text",
+    )
+
+    ctx = struct(task = _fake_task("test", 1000), std = struct(env = struct(var = lambda name: "")))
+    meta = {"BRANCH_NAME": "main", "COMMIT_SHA": "abc123def456789", "REPO_URL": "https://github.com/acme/demo"}
+
+    # Nothing enabled means nothing fires, whatever happened.
+    failing = _fake_update("failed", {"failed_tests": [{"label": "//a:t", "duration_ms": 10, "cached": False, "kind": "sh_test"}]})
+    tc = test_case(tc, notify.testonly_evaluate(ctx, _cfg(), failing, meta) == [], "no rules enabled, nothing fires")
+
+    # build-failure fires on a protected branch and not on a feature branch.
+    cfg = _cfg(rules = ["build-failure"])
+    notes = notify.testonly_evaluate(ctx, cfg, failing, meta)
+    tc = test_case(tc, len(notes) == 1, "build-failure fires on a failure on main")
+    tc = test_case(tc, notes[0].rule == "build-failure", "build-failure identifies itself")
+    tc = test_case(tc, "//a:t" in notes[0].body, "build-failure names the failing test")
+    tc = test_case(
+        tc,
+        notify.testonly_evaluate(ctx, cfg, failing, {"BRANCH_NAME": "feature/x"}) == [],
+        "build-failure stays quiet on an unprotected branch",
+    )
+    passing = _fake_update("passed", {})
+    tc = test_case(tc, notify.testonly_evaluate(ctx, cfg, passing, meta) == [], "build-failure stays quiet on a pass")
+
+    # A mention is prefixed only when configured, so a channel is not pinged by default.
+    notes = notify.testonly_evaluate(ctx, _cfg(rules = ["build-failure"], mention = "<!here>"), failing, meta)
+    tc = test_case(tc, notes[0].headline.startswith("<!here> "), "mention prefixes the headline when set")
+    tc = test_case(
+        tc,
+        not notify.testonly_evaluate(ctx, cfg, failing, meta)[0].headline.startswith("<!"),
+        "no mention means no ping",
+    )
+
+    # flaky-test fires on a *passing* build, which is the point: Bazel retried
+    # and got green, so nothing else in the pipeline will say anything.
+    flaky = _fake_update("passed", {"flaky_tests": [{"label": "//a:flake", "duration_ms": 2000, "cached": False, "kind": "sh_test"}]})
+    notes = notify.testonly_evaluate(ctx, _cfg(rules = ["flaky-test"]), flaky, meta)
+    tc = test_case(tc, len(notes) == 1 and notes[0].rule == "flaky-test", "flaky-test fires on a green build with a retry")
+    tc = test_case(tc, "//a:flake" in notes[0].body, "flaky-test names the test")
+    tc = test_case(
+        tc,
+        notify.testonly_evaluate(ctx, _cfg(rules = ["flaky-test"]), passing, meta) == [],
+        "flaky-test stays quiet when nothing flaked",
+    )
+
+    # slow-test budgets uncached tests only.
+    slow = _fake_update("passed", {"passed_tests": [
+        {"label": "//a:slow", "duration_ms": 9000, "cached": False, "kind": "sh_test"},
+        {"label": "//a:quick", "duration_ms": 100, "cached": False, "kind": "sh_test"},
+    ]})
+    notes = notify.testonly_evaluate(ctx, _cfg(rules = ["slow-test"], test_budget_ms = 5000), slow, meta)
+    tc = test_case(tc, len(notes) == 1, "slow-test fires once for the run, not once per test")
+    tc = test_case(tc, "//a:slow" in notes[0].body, "slow-test names the offender")
+    tc = test_case(tc, "//a:quick" not in notes[0].body, "slow-test leaves a fast test alone")
+
+    cached_slow = _fake_update("passed", {"passed_tests": [
+        {"label": "//a:slow", "duration_ms": 9000, "cached": True, "kind": "sh_test"},
+    ]})
+    tc = test_case(
+        tc,
+        notify.testonly_evaluate(ctx, _cfg(rules = ["slow-test"], test_budget_ms = 5000), cached_slow, meta) == [],
+        "slow-test ignores a cached result, which times a download not a test",
+    )
+
+    # slow-build measures the task, and reports the cache hit rate with it
+    # because that is what explains most slow builds.
+    slow_ctx = struct(task = _fake_task("build", 300000), std = ctx.std)
+    build = _fake_update("passed", {"actions_executed": 90, "actions_cached": 10})
+    notes = notify.testonly_evaluate(slow_ctx, _cfg(rules = ["slow-build"], build_budget_ms = 120000), build, meta)
+    tc = test_case(tc, len(notes) == 1 and notes[0].rule == "slow-build", "slow-build fires over its budget")
+    tc = test_case(tc, "10%" in notes[0].body, "slow-build reports the cache hit rate")
+    tc = test_case(
+        tc,
+        notify.testonly_evaluate(ctx, _cfg(rules = ["slow-build"], build_budget_ms = 120000), build, meta) == [],
+        "slow-build stays quiet under its budget",
+    )
+
+    # Two rules can fire on one update, and each is its own message.
+    both = _fake_update("failed", {
+        "failed_tests": [{"label": "//a:t", "duration_ms": 10, "cached": False, "kind": "sh_test"}],
+        "flaky_tests": [{"label": "//a:flake", "duration_ms": 20, "cached": False, "kind": "sh_test"}],
+    })
+    notes = notify.testonly_evaluate(ctx, _cfg(rules = ["build-failure", "flaky-test"]), both, meta)
+    tc = test_case(tc, len(notes) == 2, "two rules on one update produce two notes")
+    return tc

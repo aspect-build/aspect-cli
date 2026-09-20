@@ -190,6 +190,7 @@ Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tabl
 | `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / build-failure logs / profile / BEP / execlog to the host CI; populates `ArtifactsTrait`. |
 | `Telemetry`              | [feature/telemetry.axl](feature/telemetry.axl)                             | `ctx.telemetry.exporters.add(...)` in config            | OTLP traces / logs / metrics export. |
 | `Tips`                   | [feature/tips.axl](feature/tips.axl)                                       | `enabled = True` (default)                              | Collects per-task tips and surfaces them on the terminal, check-runs, and PR comments. Disable or silence ids via `ctx.features[Tips]` in config. |
+| `Notify`                 | [feature/notify.axl](feature/notify.axl)                                   | Opt-in: needs both `args.on` and a webhook              | Posts build failures on protected branches, flaky tests, and tests or builds over budget to a Slack incoming webhook. See [Slack notifications](#slack-notifications). |
 
 `GithubStatusChecks` and `BuildkiteAnnotations` delegate per-kind rendering through [`lib/check_dispatch.axl`](lib/check_dispatch.axl) so adding a new task kind is a single dispatch-table entry rather than an N×2 update. `GithubStatusComments` aggregates *across* tasks (one PR comment per run); `GithubLintComments` posts at the diagnostic-anchor level inside the PR's Files Changed view.
 
@@ -209,6 +210,90 @@ Behavior notes:
 
 - **De-duplicates across reruns.** Re-running the lint task replaces stale annotations at the same position rather than stacking duplicate discussions.
 - **Auto-resolves on a clean pass.** On a genuinely clean lint pass (no findings), prior Aspect-owned lint threads are auto-resolved — a GitLab-only affordance the GitHub path lacks (GitHub PR review comments have no native resolve).
+
+
+### Slack notifications
+
+`Notify` ([lib/notify.axl](private/lib/notify.axl)) subscribes to `Phases.task_update` and
+posts to a Slack incoming webhook when a terminal update matches an enabled rule. It has no
+command of its own, so one entry in `config.axl` covers every task including user-defined ones.
+
+Nothing fires until both a rule and a webhook are configured; a rule list with no webhook warns
+once rather than going quiet.
+
+```python
+load("@aspect//feature/notify.axl", "Notify")
+
+def config(ctx: ConfigContext):
+    ctx.features[Notify].args.on = ["build-failure", "flaky-test"]
+    ctx.features[Notify].args.branches = ["main", "release/*"]
+    ctx.features[Notify].args.mention = "<!here>"
+```
+
+| Rule | Fires when |
+|---|---|
+| `build-failure` | a task fails and the branch matches `args.branches` (trailing `*` matches a prefix) |
+| `flaky-test` | Bazel reported a test as flaky, which happens on a *green* build and is otherwise invisible |
+| `slow-test` | an uncached test exceeded `args.test_budget_ms`, or regressed past `args.regression_pct` against its own history |
+| `slow-build` | the task exceeded `args.build_budget_ms`; the message leads with the action cache hit rate |
+
+The webhook comes from `args.webhook` (config only, since it is a credential) or from the
+environment variable named by `args.webhook_env`, default `ASPECT_SLACK_WEBHOOK`. It is redacted
+to `scheme://host/…` everywhere it is printed.
+
+`--notify:dry-run` renders each message to stderr instead of posting it, which is how a rule is
+developed without a webhook.
+
+**Delivery never fails a build.** A missing webhook, a Slack outage, or an unreachable deployment
+is a `WARNING:` line and nothing else.
+
+#### Rules of your own
+
+The four built-ins are the common ones, not the complete set. `@aspect//notify.axl` exposes the
+same primitive so a repo-specific rule is a function rather than a feature request:
+
+```python
+load("@aspect//notify.axl", "notify")
+load("@aspect//traits.axl", "Phases", "TaskUpdate")
+
+def _cold_cache(ctx: TaskContext, update: TaskUpdate) -> None:
+    if not update.final:
+        return
+    bazel = update.data["bazel"]
+    total = bazel["actions_executed"] + bazel["actions_cached"]
+    if total > 100 and bazel["actions_cached"] * 100 // total < 20:
+        notify.send(ctx, headline = "Cache hit rate under 20% on " + ctx.task.friendly_name)
+
+def config(ctx: ConfigContext):
+    ctx.traits[Phases].task_update.append(_cold_cache)
+```
+
+`notify.send` resolves its webhook from `ASPECT_SLACK_WEBHOOK` (or an explicit `webhook =`) and is
+a silent no-op without one. It reads the environment rather than the feature's own arg because a
+feature's args are not reachable from a `config.axl` hook, and a trait would have to be declared by
+every task — including the ones you wrote.
+
+### Trend data
+
+[lib/build_results.axl](private/lib/build_results.axl) reads the deployment's `/api/v1`
+build-results REST API — the same surface the Build & Test UI and `aspect mcp` read — so an
+extension can ask questions no single invocation can answer: how long this target usually takes,
+whether it is flaky, when it started failing.
+
+```python
+load("@aspect//private/lib/build_results.axl", "build_results")
+load("@aspect//private/lib/time_window.axl", "time_window")
+
+window = time_window.last_days(ctx, 14)
+history = build_results.action_history(ctx, label = "//web:bundle", start = window.start, end = window.end, cache = "miss")
+baseline = build_results.percentile(history, "exec_wall_ms_p50")
+```
+
+Authentication is the deployment credential the CLI already holds. Every call degrades rather than
+raises: no deployment, no login, a deployment too old for the route, or a network failure each come
+back as a `Response` with `ok = False` and an `unavailable` reason. This is what `Notify`'s
+`regression_pct` rule reads, and why that rule falls back to its fixed budget rather than failing
+when there is no deployment.
 
 ## Per-kind result libraries
 
