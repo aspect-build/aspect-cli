@@ -55,7 +55,7 @@ jobs:
       # via bootstrap.sh; no point installing a launcher we'd immediately
       # shadow. aspect-api-token is also omitted: auth login would run
       # before any `aspect` binary exists.
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
       - name: Pre-build CLI
@@ -130,7 +130,7 @@ jobs:
       # run before setup-aspect. That order also lets setup-aspect's
       # built-in `aspect auth login` find the prebuilt `aspect` on PATH.
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -143,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -156,7 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -169,7 +169,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -182,7 +182,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -202,7 +202,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -215,7 +215,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -228,7 +228,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -246,7 +246,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -259,7 +259,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -272,7 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -285,7 +285,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task
@@ -297,7 +297,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task (ASPECT_DEBUG=1)
@@ -309,7 +309,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task
@@ -321,7 +321,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task (ASPECT_DEBUG=1)
@@ -345,7 +345,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -362,7 +362,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -408,7 +408,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
@@ -452,7 +452,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task
@@ -464,7 +464,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
@@ -481,7 +481,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Runner smoke test
@@ -552,7 +552,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
@@ -572,7 +572,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
@@ -683,7 +683,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@6067df673a334c103489b12d582a3ba4133997de # v2026.38.0
+      - uses: aspect-build/setup-aspect@60664fabf0aa15152c69d0ee72c9a660416c7a36 # v2026.38.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task — new flags
