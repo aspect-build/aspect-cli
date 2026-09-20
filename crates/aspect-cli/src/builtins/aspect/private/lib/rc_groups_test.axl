@@ -17,6 +17,8 @@ load(
     "GROUP_RUNNER",
     "HOST_GROUPS",
     "bes_chains",
+    "enable_lines",
+    "enable_sections",
     "host_group",
     "rc_groups",
     "section_chains",
@@ -218,7 +220,38 @@ def _test_enabled_are_defined(_ctx):
         for name in enabled:
             _eq(name + " defined", name in defined, True)
 
+def _test_enable_sections(_ctx):
+    """Which commands a group is turned on for. A group that presumes no
+    endpoint is wanted everywhere — a `bazel query` gets the same heap settings
+    as a build. One that carries an endpoint goes under `build`, which Bazel
+    applies to build, test, run, coverage, cquery and aquery but not to `query`:
+    a query reads no cache, and a `--bes_backend` there uploads a stream of its
+    own."""
+    _eq("tuning stays common", enable_sections(GROUP_COMMON, ["common"]), ["common"])
+    _eq("the host group too", enable_sections(HOST_GROUPS["github"], ["common"]), ["common"])
+    _eq("and the runner's storage", enable_sections(GROUP_RUNNER, ["common"]), ["common"])
+
+    _eq("the cache is build-only", enable_sections(GROUP_CACHE, ["common"]), ["build"])
+    _eq("so is the BES", enable_sections(GROUP_BES, ["common"]), ["build"])
+    _eq("so is the execution log", enable_sections(GROUP_EXEC_LOG, ["common"]), ["build"])
+    _eq("so is a deployment's section", enable_sections("aspect-cloud", ["common"]), ["build"])
+
+    # Bazel too old for `common` spells the same split as build + query.
+    _eq("old bazel keeps both for tuning", enable_sections(GROUP_COMMON, ["build", "query"]), ["build", "query"])
+    _eq("and drops query for endpoints", enable_sections(GROUP_CACHE, ["build", "query"]), ["build"])
+
+def _test_enable_lines(_ctx):
+    """Each enabled group paired with its sections, in the order given."""
+    _eq(
+        "pairs in order",
+        enable_lines([GROUP_COMMON, GROUP_CACHE], ["common"]),
+        [(GROUP_COMMON, ["common"]), (GROUP_CACHE, ["build"])],
+    )
+    _eq("nothing enabled", enable_lines([], ["common"]), [])
+
 _UNIT_TESTS = [
+    _test_enable_sections,
+    _test_enable_lines,
     _test_bare_host,
     _test_home_rc_without_env,
     _test_remote_selects_what_is_enabled,

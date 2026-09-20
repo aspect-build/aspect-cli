@@ -121,7 +121,7 @@ fn home_mode_writes_the_rc_pair_under_the_home_directory() {
     let generated = home.join(".aspect/bazelrc");
     let rc = read(&generated);
     assert!(
-        rc.contains("common --config=aspect-cache")
+        enabled_under(&rc, "aspect-cache") == Some("build")
             && rc.contains("--bes_backend=grpcs://bes.example:443"),
         "the env's endpoints should be enabled in:\n{rc}"
     );
@@ -310,11 +310,26 @@ fn unconfigured_cmd(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Command
     cmd
 }
 
-/// The `common --config=<group>` names the rc turns on for every `bazel` call.
+/// The `--config=<group>` names the rc turns on, whichever command section
+/// enables them: the endpointless tuning under `common`, the groups carrying an
+/// endpoint under `build`, which Bazel applies to build-like commands but not to
+/// `query` (see `rc_groups.enable_sections`).
 fn enabled_groups(rc: &str) -> Vec<&str> {
     rc.lines()
-        .filter_map(|l| l.strip_prefix("common --config="))
+        .filter_map(|l| {
+            l.strip_prefix("common --config=")
+                .or_else(|| l.strip_prefix("build --config="))
+        })
         .collect()
+}
+
+/// The command section a group's enable line sits under, or `None` when nothing
+/// enables it.
+fn enabled_under<'a>(rc: &'a str, group: &str) -> Option<&'a str> {
+    rc.lines().find_map(|l| {
+        let (section, config) = l.split_once(" --config=")?;
+        (config == group).then_some(section)
+    })
 }
 
 /// Aspect Cloud is among the sections on a machine that has never logged in,
@@ -633,7 +648,7 @@ fn a_checkout_is_not_asked_for_an_exec_section_that_cannot_exist() {
 
     let rc = read(&home.path().join(".aspect/bazelrc"));
     assert!(
-        rc.contains("common --config=aspect-cloud"),
+        enabled_under(&rc, "aspect-cloud") == Some("build"),
         "and the checkout's own sections are still enabled:\n{rc}"
     );
 }
@@ -880,11 +895,11 @@ fn home_mode_enables_the_endpointless_tuning_and_says_the_files_are_this_machine
 
     let rc = read(&home.path().join(".aspect/bazelrc"));
     assert!(
-        rc.contains("common --config=aspect-common"),
+        enabled_under(&rc, "aspect-common") == Some("common"),
         "the endpointless tuning should be on for every call in:\n{rc}"
     );
     assert!(
-        !rc.contains("common --config=aspect-cloud"),
+        enabled_under(&rc, "aspect-cloud").is_none(),
         "choosing a deployment stays the caller's in:\n{rc}"
     );
     assert!(

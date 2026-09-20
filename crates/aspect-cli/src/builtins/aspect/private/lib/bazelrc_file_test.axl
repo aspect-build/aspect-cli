@@ -90,7 +90,7 @@ def _test_command_sections(_ctx):
 _COMMON = RcConfig(name = "aspect-common", source = "common", comment = "Common tuning.", flags = ["--heap_dump_on_oom"])
 
 def _test_render_common_section(_ctx):
-    out = render_bazelrc(["--output_base=/mnt/output"], ["aspect-common"], ["common"], [_COMMON])
+    out = render_bazelrc(["--output_base=/mnt/output"], [("aspect-common", ["common"])], ["common"], [_COMMON])
     lines = out.split("\n")
     _eq("header first", lines[0], GENERATED_HEADER)
     _eq("startup line", "startup --output_base=/mnt/output" in lines, True)
@@ -104,13 +104,29 @@ def _test_render_common_section(_ctx):
 def _test_render_pre_common_sections(_ctx):
     # < 6.3.0: each enable and group line is emitted once per section (build +
     # query); startup flags are emitted once regardless of the command sections.
-    lines = render_bazelrc(["--output_base=/o"], ["aspect-common"], ["build", "query"], [_COMMON]).split("\n")
+    lines = render_bazelrc(["--output_base=/o"], [("aspect-common", ["build", "query"])], ["build", "query"], [_COMMON]).split("\n")
     _eq("build enable", "build --config=aspect-common" in lines, True)
     _eq("query enable", "query --config=aspect-common" in lines, True)
     _eq("build group", "build:aspect-common --heap_dump_on_oom" in lines, True)
     _eq("query group", "query:aspect-common --heap_dump_on_oom" in lines, True)
     _eq("no common", any([ln.startswith("common") for ln in lines]), False)
     _eq("startup once", len([ln for ln in lines if ln == "startup --output_base=/o"]), 1)
+
+def _test_render_enable_sections(_ctx):
+    """An enable line goes under the sections it was paired with, so a group that
+    carries an endpoint can be turned on for build-like commands while the
+    tuning beside it stays on for every command. The definitions are unaffected:
+    a `--config` naming one by hand works whatever the command."""
+    lines = render_bazelrc(
+        [],
+        [("aspect-common", ["common"]), ("aspect-x", ["build"])],
+        ["common"],
+        [_COMMON, _SECTION],
+    ).split("\n")
+    _eq("tuning enabled everywhere", "common --config=aspect-common" in lines, True)
+    _eq("endpoints enabled for build", "build --config=aspect-x" in lines, True)
+    _eq("and not for every command", "common --config=aspect-x" in lines, False)
+    _eq("definition stays common", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
 
 def _test_render_configs(_ctx):
     # Config flags go under `<section>:<name>`, tuples unwrapped, chain lines
@@ -200,6 +216,7 @@ _UNIT_TESTS = [
     _test_command_sections,
     _test_render_common_section,
     _test_render_pre_common_sections,
+    _test_render_enable_sections,
     _test_render_configs,
     _test_prune_configs,
     _test_import_line,
