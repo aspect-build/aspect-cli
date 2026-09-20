@@ -117,12 +117,12 @@ jobs:
       - name: "Test 5: Pinned version downloads directly without API call"
         run: |
           mkdir -p /tmp/axl-test-pinned/.aspect
-          printf 'version("2026.15.2")\n' > /tmp/axl-test-pinned/.aspect/version.axl
+          printf 'version("2026.38.30")\n' > /tmp/axl-test-pinned/.aspect/version.axl
           touch /tmp/axl-test-pinned/MODULE.bazel
           output=$(cd /tmp/axl-test-pinned && ASPECT_DEBUG=1 \
             cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
           echo "$output"
-          echo "$output" | grep -q 'pinned to tag "v2026.15.2", skipping API' \
+          echo "$output" | grep -q 'pinned to tag "v2026.38.30", skipping API' \
             || { echo "FAIL: expected pinned tag message"; exit 1; }
           if echo "$output" | grep -q "querying releases"; then
             echo "FAIL: pinned version should not query API"; exit 1
@@ -140,12 +140,12 @@ jobs:
             echo "FAIL: should not re-download on cache hit"; exit 1
           fi
       # ── Test 7: Debug variant ─────────────────────────────────────────────────
-      # ASPECT_DEBUG_CLI → download aspect-cli-debug-<triple>. Pinned to the first
-      # release that published the variant, so no fallback should occur.
+      # ASPECT_DEBUG_CLI → download aspect-cli-debug-<triple>. Pinned to a release
+      # that publishes the variant, so no fallback should occur.
       - name: "Test 7: ASPECT_DEBUG_CLI downloads the debug variant"
         run: |
           mkdir -p /tmp/axl-test-debug/.aspect
-          printf 'version("2026.31.10")\n' > /tmp/axl-test-debug/.aspect/version.axl
+          printf 'version("2026.38.30")\n' > /tmp/axl-test-debug/.aspect/version.axl
           touch /tmp/axl-test-debug/MODULE.bazel
           output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 ASPECT_DEBUG_CLI=1 \
             cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
@@ -188,8 +188,8 @@ jobs:
           if echo "$output" | grep -qE "^downloading .* file aspect-cli-debug-"; then
             echo "FAIL: the fallback must not download the debug artifact"; exit 1
           fi
-          # The primary binary for this pin may already be cached by test 5, so the
-          # fallback either downloads it or serves it from cache. Assert on the binary it
+          # The primary binary for this pin may already be cached, so the fallback
+          # either downloads it or serves it from cache. Assert on the binary it
           # provisioned instead, which holds either way: cache paths are keyed on the
           # download URL, so the debug entry it first tried and the primary entry it
           # settled on are different directories.
