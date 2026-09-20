@@ -1,6 +1,7 @@
 """Unit tests for `deployment_rc.axl`: the `--config=aspect-*` sections built from
 deployment rows — naming, credential helpers per distinct host, the flags each
-endpoint combination justifies, and name collisions.
+endpoint combination justifies, and name collisions — plus the stand-in
+environment a deployment presents to `rc_groups.axl`.
 Run with: aspect dev test-deployment-rc
 """
 
@@ -10,7 +11,11 @@ load(
     "config_name",
     "credential_helper_flags",
     "deployment_configs",
+    "deployment_environment",
+    "deployment_group_auth",
 )
+load("./environment.axl", "CI")
+load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE", "GROUP_EXEC")
 
 def _eq(label, got, want):
     if got != want:
@@ -157,6 +162,47 @@ def _test_config_collisions(_ctx):
     clash = deployment_configs([_SILO, _summary("silo-gcp-exec", cache = "c")], _HELPER)
     _eq("exec suffix collision", [m.split(" ")[0] for m in config_collisions(clash)], ["--config=aspect-silo-gcp-exec"])
 
+def _test_deployment_environment(_ctx):
+    # A deployment advertises bare hosts; the groups read gRPC URIs off a
+    # `WorkflowsEnvironment`, so the scheme is added and the CI host carried
+    # through. Nothing runner-shaped comes along: a deployment is not a runner.
+    env = deployment_environment(_SILO, CI(host = "github"))
+    _eq("cache", env.remote_cache.endpoint, "grpcs://remote.silo-gcp.aspect.build")
+    _eq("bes", env.build_events.backend, "grpcs://remote.silo-gcp.aspect.build")
+    _eq("results url verbatim", env.build_events.results_url, "https://app.silo-gcp.aspect.build/i/")
+    _eq("exec", env.remote_executor.endpoint, "grpcs://remote.silo-gcp.aspect.build")
+    _eq("ci carried", env.ci.host, "github")
+    _eq("no runner", env.runner, None)
+
+    # A capability the deployment does not advertise stays absent rather than
+    # becoming an empty endpoint, which is what the groups gate on.
+    cloud = deployment_environment(_CLOUD, None)
+    _eq("cloud serves no executor", cloud.remote_executor, None)
+    _eq("and no CI host", cloud.ci, None)
+
+    # A deployment advertising nothing yields an environment naming nothing.
+    bare = deployment_environment(_summary("empty"), None)
+    _eq("no cache", bare.remote_cache, None)
+    _eq("no bes", bare.build_events, None)
+
+def _test_deployment_group_auth(_ctx):
+    # The helper is scoped per group, and only for hosts the deployment has:
+    # endpoints filled from a deployment are reached through it, unlike a
+    # runner's own, which need none.
+    auth = deployment_group_auth(_CLOUD, _HELPER)
+    _eq("groups keyed", sorted(auth.keys()), sorted([GROUP_CACHE, GROUP_BES]))
+    _has("cache host scoped", auth[GROUP_CACHE], "--credential_helper=cache.aspect.build=" + _HELPER)
+    _has("bes host scoped", auth[GROUP_BES], "--credential_helper=bes.aspect.build=" + _HELPER)
+    _eq("no exec group", GROUP_EXEC in auth, False)
+
+    # One host serving every capability still gets its own entry per group, so
+    # a group enabled alone still carries the helper it needs.
+    silo = deployment_group_auth(_SILO, _HELPER)
+    _eq("all three", sorted(silo.keys()), sorted([GROUP_CACHE, GROUP_BES, GROUP_EXEC]))
+    _has("exec host scoped", silo[GROUP_EXEC], "--credential_helper=remote.silo-gcp.aspect.build=" + _HELPER)
+
+    _eq("nothing advertised", deployment_group_auth(_summary("empty"), _HELPER), {})
+
 _UNIT_TESTS = [
     _test_config_name,
     _test_cloud_section,
@@ -166,6 +212,8 @@ _UNIT_TESTS = [
     _test_no_default_alias,
     _test_credential_helper_scope,
     _test_config_collisions,
+    _test_deployment_environment,
+    _test_deployment_group_auth,
 ]
 
 def _test_impl(ctx):

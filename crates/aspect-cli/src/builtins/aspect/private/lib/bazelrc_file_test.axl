@@ -1,6 +1,6 @@
-"""Unit tests for `bazelrc_file.axl`: `command_sections`, `render_bazelrc`,
-`prune_configs`, `startup_flags_for_rc`, `import_line`, and `ensure_import` (the
-one-time `try-import` block).
+"""Unit tests for `bazelrc_file.axl`: `rc_paths` (where each file goes),
+`command_sections`, `render_bazelrc`, `prune_configs`, `startup_flags_for_rc`,
+`import_line` and `ensure_import` (the one-time `try-import` block).
 Run with: aspect dev test-bazelrc-file
 """
 
@@ -11,9 +11,11 @@ load(
     "ImportAction",
     "RcConfig",
     "command_sections",
+    "defined_configs",
     "ensure_import",
     "import_line",
     "prune_configs",
+    "rc_paths",
     "render_bazelrc",
     "startup_flags_for_rc",
 )
@@ -24,6 +26,51 @@ def _eq(label, got, want):
 
 _SECTION = RcConfig(name = "aspect-x", source = "x", comment = "x: remote cache.", flags = ["--remote_cache=grpcs://x", ("--credential_helper=x=h", ">=6.4.0")])
 _CHAIN = RcConfig(name = "aspect-x-exec", source = "x exec", flags = ["--config=aspect-x", "--remote_executor=grpcs://x"])
+
+def _test_rc_paths_in_a_checkout(_ctx):
+    # The default: everything under the workspace root, and the committed lines
+    # address the checkout through `%workspace%` so they hold in every clone.
+    got = rc_paths("/w")
+    _eq("output", got.output, "/w/.aspect/bazelrc")
+    _eq("imported by the workspace rc", got.importer, "/w/.bazelrc")
+    _eq("through %workspace%", got.imported, "%workspace%/.aspect/bazelrc")
+    _eq("log through %workspace% too", got.exec_log, "%workspace%/.aspect/generated/exec.log.zstd")
+    _eq("the log's parent is ours to create", got.generated_dir, "/w/.aspect/generated")
+
+def _test_rc_paths_in_home_mode(_ctx):
+    # The same shape rooted at the home directory. Nothing outside a checkout
+    # can be addressed through `%workspace%`, so the paths are absolute.
+    got = rc_paths("/h", home_mode = True)
+    _eq("output", got.output, "/h/.aspect/bazelrc")
+    _eq("imported by the home rc", got.importer, "/h/.bazelrc")
+    _eq("by the path written", got.imported, "/h/.aspect/bazelrc")
+    _eq("log under the home base", got.exec_log, "/h/.aspect/generated/exec.log.zstd")
+    _eq("its parent is ours to create", got.generated_dir, "/h/.aspect/generated")
+
+    # A runner overrides the log with its job tmpdir, which it already owns, so
+    # there is no generated directory to create under the base.
+    got = rc_paths("/h", home_mode = True, exec_log = "/wf/exec.log.zstd")
+    _eq("the override wins", got.exec_log, "/wf/exec.log.zstd")
+    _eq("nothing of ours to create", got.generated_dir, "")
+    _eq("the rc is still the home one", got.output, "/h/.aspect/bazelrc")
+
+def _test_rc_paths_overrides(_ctx):
+    # `--output` may point anywhere, so its log sits beside it rather than under
+    # a base, the import names it as written, and no directory is ours to create.
+    got = rc_paths("/w", output = "/elsewhere/my.bazelrc")
+    _eq("output", got.output, "/elsewhere/my.bazelrc")
+    _eq("still imported by the base's rc", got.importer, "/w/.bazelrc")
+    _eq("imported as written", got.imported, "/elsewhere/my.bazelrc")
+    _eq("log beside it", got.exec_log, "/elsewhere/exec.log.zstd")
+    _eq("nothing of ours to create", got.generated_dir, "")
+
+    # Both overrides name every derived path, so no base is needed.
+    got = rc_paths("", output = "/o/rc", import_into = "/i/rc")
+    _eq("output", got.output, "/o/rc")
+    _eq("importer", got.importer, "/i/rc")
+
+    # Importing a file into itself is nothing to do, not a self-import.
+    _eq("no import needed", rc_paths("", output = "/o/rc", import_into = "/o/rc").importer, "")
 
 def _test_startup_flags_for_rc(_ctx):
     # The `--no*_rc` suppression flags must all be dropped: Bazel fatals on any of
@@ -122,7 +169,33 @@ def _test_ensure_import_appends_once(_ctx):
     _eq("unchanged", second.action, ImportAction("unchanged"))
     _eq("mid-file", _ensure(_LINE + "\nbuild --later\n").action, ImportAction("unchanged"))
 
+def _test_defined_configs(_ctx):
+    # Read off the `<command>:<name>` heads, in order, once each.
+    rc = "\n".join([
+        "# a comment",
+        "startup --output_base=/o",
+        "common --config=aspect-cloud",
+        "common:aspect-common --heap_dump_on_oom",
+        "common:aspect-cloud --remote_cache=grpcs://c",
+        "common:aspect-cloud --bes_backend=grpcs://b",
+        "build:aspect-cloud-exec --remote_executor=grpcs://e",
+        "try-import %workspace%/.aspect/bazelrc",
+        "build --flag_alias=x=//y:z",
+    ])
+    _eq("names", defined_configs(rc), ["aspect-common", "aspect-cloud", "aspect-cloud-exec"])
+
+    # An enable line names a config but does not define one, and neither does a
+    # flag whose *value* holds a colon.
+    _eq("no enable line", "aspect-cloud" in defined_configs("common --config=aspect-cloud"), False)
+    _eq("no value colon", defined_configs("build --flag_alias=x=//y:z"), [])
+    _eq("commented out", defined_configs("# common:aspect-cloud --remote_cache=grpcs://c"), [])
+    _eq("empty", defined_configs(""), [])
+    _eq("missing", defined_configs(None), [])
+
 _UNIT_TESTS = [
+    _test_rc_paths_in_a_checkout,
+    _test_rc_paths_in_home_mode,
+    _test_rc_paths_overrides,
     _test_startup_flags_for_rc,
     _test_command_sections,
     _test_render_common_section,
@@ -132,6 +205,7 @@ _UNIT_TESTS = [
     _test_import_line,
     _test_ensure_import_new_file,
     _test_ensure_import_appends_once,
+    _test_defined_configs,
 ]
 
 def _test_impl(ctx):

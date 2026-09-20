@@ -6,9 +6,13 @@ an endpoint:
     --config=aspect-<name>         a configured Aspect Workflows deployment
     --config=aspect-<name>-exec    the same, plus its remote execution
 
-No section names "the default deployment": the rc is committed and shared, and
-the default (`aspect auth use`) is one machine's setting that could change
-under it. A deployment is chosen by its own name.
+No section names "the default deployment": a checkout's rc is committed and
+shared, and the default (`aspect auth use`) is one machine's setting that could
+change under it. A deployment is chosen by its own name.
+
+Aspect Cloud always has a section. Its endpoints are the built-in deployment's
+(`engine/aspect/auth.rs`), stated rather than discovered, so they are there on a
+machine that has never logged in.
 
 Aspect Cloud's section takes its own name; a configured deployment `<name>`
 gets `aspect-<name>`. A cache or BES gives a base section, an executor an
@@ -18,11 +22,12 @@ a deployment with neither gets nothing.
 Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
-chains `rc_groups.axl` groups rather than repeating flags: first the groups the
-rc would otherwise enable for every command (`aspect-common`, the CI host's) —
-the rc that carries sections enables nothing, so it is inert until a section is
-named — then the tuning groups its endpoints justify (`aspect-cache`,
-`aspect-bes`). Remote execution is never part of the base section: it relocates
+chains `rc_groups.axl` groups rather than repeating flags: first the groups that
+presume no endpoint (`aspect-common`, the CI host's), which a checkout's rc does
+not enable — so naming a section is what turns anything on there — then the
+tuning groups its endpoints justify (`aspect-cache`, `aspect-bes`). A machine's
+rc enables that first pair itself; chaining it again costs nothing, every flag
+in it being a last-wins `--flag=value`. Remote execution is never part of the base section: it relocates
 every action, so it is only ever reached by naming `-exec`, mirroring
 `--remote=exec` on `aspect <task>`.
 
@@ -34,7 +39,8 @@ refuse.
 
 load("./aspect_endpoint_auth.axl", "endpoint_host")
 load("./bazelrc_file.axl", "RcConfig")
-load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE")
+load("./environment.axl", "BuildEvents", "RemoteCache", "RemoteExecutor", "WorkflowsEnvironment")
+load("./rc_groups.axl", "GROUP_BES", "GROUP_CACHE", "GROUP_EXEC")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -51,6 +57,42 @@ def config_name(deployment) -> str:
     """The `--config` name for a deployment row: Aspect Cloud's own name for the
     built-in entry, `aspect-<name>` for a configured deployment."""
     return deployment.name if deployment.builtin else _CONFIG_PREFIX + deployment.name
+
+def deployment_environment(deployment, ci) -> WorkflowsEnvironment:
+    """`deployment`'s endpoints in the shape `rc_groups.axl` reads them from the
+    environment.
+
+    A machine's rc wants its endpoints enabled for every `bazel` call, and there
+    are two places they can come from: `ASPECT_WORKFLOWS_*`, which a runner sets,
+    and the default deployment, which is all a stock CI runner has. Rather than
+    teach the groups a second source, the deployment is presented as the
+    environment it would have been, so one code path fills and enables
+    `aspect-cache` / `aspect-bes` / `aspect-exec` either way.
+
+    A deployment advertises bare hosts and Aspect's Bazel-facing endpoints are
+    TLS gRPC, hence the scheme. `ci` is carried through because the host group is
+    the CI host's, not the deployment's. What this does *not* carry is anything
+    runner-shaped (`runner`): those paths are a runner's own, and a deployment
+    never stands in for one."""
+    return WorkflowsEnvironment(
+        ci = ci,
+        remote_cache = RemoteCache(endpoint = _SCHEME + deployment.cache) if deployment.cache else None,
+        build_events = BuildEvents(backend = _SCHEME + deployment.bes, results_url = deployment.results_url) if deployment.bes else None,
+        remote_executor = RemoteExecutor(endpoint = _SCHEME + deployment.exec) if deployment.exec else None,
+    )
+
+def deployment_group_auth(deployment, helper: str) -> dict:
+    """The credential-helper flags each endpoint group needs when
+    `deployment_environment` filled it, keyed by group name.
+
+    The environment's own endpoints carry no helper — a runner authenticates its
+    services itself — so this is only ever added alongside a deployment's, and
+    only for the hosts that deployment actually advertises."""
+    auth = {}
+    for (group, host) in [(GROUP_CACHE, deployment.cache), (GROUP_BES, deployment.bes), (GROUP_EXEC, deployment.exec)]:
+        if host:
+            auth[group] = credential_helper_flags([host], helper)
+    return auth
 
 def credential_helper_flags(hosts: list, helper: str) -> list:
     """`--credential_helper=<host>=<helper>` for each host, scoped so the helper is
@@ -75,9 +117,10 @@ def _unique_hosts(uris: list) -> list:
 def _label(deployment) -> str:
     return "Aspect Cloud" if deployment.builtin else "Aspect Workflows deployment '" + deployment.name + "'"
 
-def _login_hint(deployment) -> str:
-    """How CI authenticates this deployment's section: its API-token variable,
-    or the login command for a machine with a browser."""
+def login_hint(deployment) -> str:
+    """How CI authenticates this deployment: its API-token variable, or the login
+    command for a machine with a browser. Read by the section comments and by the
+    task, where `--remote=auto` declines a deployment nothing can authenticate."""
     login = "aspect auth login" if deployment.builtin else "aspect auth login --deployment " + deployment.name
     if deployment.api_token_env:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
@@ -105,7 +148,7 @@ def _base_config(d, name: str, credential_helper: str, host_groups: list, bes_gr
     return RcConfig(
         name = name,
         source = _label(d),
-        comment = _label(d) + ": " + " + ".join(wired) + "; " + _login_hint(d) + ".",
+        comment = _label(d) + ": " + " + ".join(wired) + "; " + login_hint(d) + ".",
         flags = flags,
     )
 
@@ -128,7 +171,7 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_grou
     return RcConfig(
         name = name + _EXEC_SUFFIX,
         source = _label(d) + " (remote execution)",
-        comment = ("--config=" + name + " plus its" if has_base else _label(d) + ":") + " remote execution" + ("" if has_base else "; " + _login_hint(d)) + ".",
+        comment = ("--config=" + name + " plus its" if has_base else _label(d) + ":") + " remote execution" + ("" if has_base else "; " + login_hint(d)) + ".",
         flags = flags,
     )
 
