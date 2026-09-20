@@ -14,7 +14,6 @@ Two rules the rest of the code depends on:
     a green build red.
 """
 
-
 Delivery = record(
     ok = field(bool),
     status = field(int, default = 0),
@@ -72,6 +71,7 @@ def _blocks(headline: str, body: str, fields: list, actions: list) -> list:
         rendered = []
         for f in fields:
             rendered.append({"type": "mrkdwn", "text": "*{}*\n{}".format(_escape(f.label), f.value)})
+
         # Slack caps a fields section at 10; more than that is a wall of text
         # nobody reads anyway.
         blocks.append({"type": "section", "fields": rendered[:10]})

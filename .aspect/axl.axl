@@ -14,13 +14,10 @@ load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warnin
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
+load("@aspect//private/lib/build_results.axl", "build_results")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
-load("@aspect//private/lib/build_results.axl", "build_results")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
-load("@aspect//private/lib/notify.axl", "notify")
-load("@aspect//private/lib/slack.axl", "slack")
-load("@aspect//private/lib/time_window.axl", "time_window")
 load(
     "@aspect//private/lib/gazelle_results.axl",
     "dedupe_subtrees",
@@ -31,13 +28,16 @@ load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand", "phases")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
+load("@aspect//private/lib/notify.axl", "notify")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
 load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/slack.axl", "slack")
 load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
+load("@aspect//private/lib/time_window.axl", "time_window")
 load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
 load("@std//base64.axl", "base64")
@@ -4247,7 +4247,6 @@ axl = task(
     # the test run sees at most one fire per id.
     traits = tips.TRAITS,
 )
-
 
 def test_time_window(tc: int) -> int:
     """RFC 3339 conversion, computed rather than shelled out to `date`.

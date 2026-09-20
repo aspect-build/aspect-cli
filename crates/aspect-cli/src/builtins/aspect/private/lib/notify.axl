@@ -46,10 +46,10 @@ cannot be reached. Each is reported once on stderr and the task's own verdict is
 untouched. A notification system that can redden a green build gets turned off.
 """
 
-load("../../bazel/build_metadata.axl", "get_build_metadata")
-load("./lifecycle.axl", "Phases")
+load("@aspect//bazel/build_metadata.axl", "get_build_metadata")
 load("./build_results.axl", "build_results")
 load("./ci.axl", "detect_build_url")
+load("./lifecycle.axl", "Phases")
 load("./slack.axl", "slack")
 load("./time_window.axl", "time_window")
 
@@ -101,6 +101,7 @@ def _branch(ctx, meta: dict) -> str:
     if result.status.code != 0:
         return ""
     branch = result.stdout.strip()
+
     # A detached HEAD reports "HEAD", which is not a branch and must not be
     # matched against a protected-branch pattern.
     return "" if branch == "HEAD" else branch
