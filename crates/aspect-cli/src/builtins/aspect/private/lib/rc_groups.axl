@@ -73,6 +73,28 @@ HOST_GROUPS = {
     "gitlab": "aspect-gitlab",
 }
 
+# The groups that presume no endpoint, and so stay enabled for every command:
+# a `bazel query` wants the same heap and repository-cache settings a build gets.
+# Everything else carries an endpoint or a build-only artifact.
+_ENDPOINTLESS_GROUPS = [GROUP_COMMON, GROUP_RUNNER] + list(HOST_GROUPS.values())
+
+def enable_sections(group: str, sections: list) -> list:
+    """The rc command sections whose `--config=<group>` line turns `group` on.
+
+    `sections` is where a group with no endpoint goes — `common`, or `build` and
+    `query` on Bazel too old for the `common` pseudo-command. A group that
+    carries an endpoint goes under `build` alone: Bazel applies those lines to
+    build, test, run, coverage, cquery and aquery but not to `query`, which
+    reads no cache and would upload a build-event stream of its own."""
+    if group in _ENDPOINTLESS_GROUPS:
+        return sections
+    return [("build" if section == "common" else section) for section in sections if section != "query"]
+
+def enable_lines(enabled: list, sections: list) -> list:
+    """Each group in `enabled` paired with the sections that enable it, in order.
+    What `render_bazelrc` writes its `--config` lines from."""
+    return [(group, enable_sections(group, sections)) for group in enabled]
+
 _GROUP_SOURCE = "the %s group"
 
 def _group(name: str, comment: str, flags: list, source: str = "") -> RcConfig:

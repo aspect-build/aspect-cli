@@ -159,7 +159,7 @@ load(
 load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "parse_remote")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
-load("./private/lib/rc_groups.axl", "GROUP_COMMON", "HOST_GROUPS", "bes_chains", "rc_groups", "section_chains")
+load("./private/lib/rc_groups.axl", "GROUP_COMMON", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups", "section_chains")
 
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
 
@@ -453,7 +453,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     kept = not ctx.args.force and ctx.std.fs.exists(paths.output)
     if not kept:
         header = RUNNER_HEADER if on_runner else (HOME_HEADER if home_mode else GENERATED_HEADER)
-        _write(ctx, paths.output, render_bazelrc(startup_flags, enabled, command_sections(bazel_version), configs, header = header))
+        sections = command_sections(bazel_version)
+        _write(ctx, paths.output, render_bazelrc(startup_flags, enable_lines(enabled, sections), sections, configs, header = header))
     written.insert(0, paths.output)
     verb = "Kept" if kept else "Wrote"
 
@@ -550,7 +551,7 @@ _BAZELRC_ARGS = {
         long = "remote",
         default = AUTO,
         bare = BARE,
-        description = "Which of the deployment's remote endpoints this rc turns on for every `bazel` call, in the same grammar as `aspect build --remote`: bare --remote enables its remote cache and BES backend, `exec` adds remote execution (never implied), `no-cache` / `no-bes` / `no-exec` subtract, and `none` enables nothing. The default, `auto`, is bare --remote on CI — where a `bazel` call has no one to ask — and `none` elsewhere, leaving a developer's rc inert until a --config names something. Endpoints come from the ASPECT_WORKFLOWS_* environment where it names them, and from the default deployment otherwise. Only a machine's rc enables anything: a checkout's is shared by every host that builds it, so its sections stay opt-in whatever this says.",
+        description = "Which of the deployment's remote endpoints this rc turns on for every `bazel` build, test or run, in the same grammar as `aspect build --remote`: bare --remote enables its remote cache and BES backend, `exec` adds remote execution (never implied), `no-cache` / `no-bes` / `no-exec` subtract, and `none` enables nothing. The default, `auto`, is bare --remote on CI — where a `bazel` call has no one to ask — and `none` elsewhere, leaving a developer's rc inert until a --config names something. Endpoints come from the ASPECT_WORKFLOWS_* environment where it names them, and from the default deployment otherwise. Only a machine's rc enables anything: a checkout's is shared by every host that builds it, so its sections stay opt-in whatever this says.",
     ),
     "force": args.boolean(
         default = False,

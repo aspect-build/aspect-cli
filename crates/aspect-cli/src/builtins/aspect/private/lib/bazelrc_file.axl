@@ -152,25 +152,32 @@ def command_sections(bazel_version: str | None) -> list:
         return ["common"]
     return _PRE_COMMON_COMMANDS
 
-def render_bazelrc(startup_flags: list, enabled: list, command_sections: list, configs: list, header: str = GENERATED_HEADER) -> str:
-    """Render the rc: `header`, a `startup` line per startup flag, a
-    `<section> --config=<group>` line per group in `enabled`, then each
-    `RcConfig` in `configs` as a commented `<section>:<name>` group. Every
-    section is written once per entry in `command_sections` (`["common"]` on
-    modern Bazel, `["build", "query"]` on Bazel < 6.3.0). Flags may be
-    `(flag, condition)` tuples (the shape `rc.expand` yields for surviving
-    version-gated options); only the flag text is written."""
+def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: list, configs: list, header: str = GENERATED_HEADER) -> str:
+    """Render the rc: `header`, a `startup` line per startup flag, the
+    `--config` lines that turn groups on, then each `RcConfig` in `configs` as a
+    commented `<section>:<name>` group.
+
+    `enable_lines` pairs each enabled group with the command sections that
+    enable it (`rc_groups.enable_lines`), since a group carrying an endpoint is
+    turned on for build-like commands rather than for every command. Definitions
+    are written once per entry in `command_sections` (`["common"]` on modern
+    Bazel, `["build", "query"]` on Bazel < 6.3.0), so a `--config` naming one by
+    hand works whatever the command. Flags may be `(flag, condition)` tuples
+    (the shape `rc.expand` yields for surviving version-gated options); only the
+    flag text is written."""
     lines = [
         header,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
         "# Flags are grouped by what they presume; the groups that apply here are enabled at the",
-        "# top, the rest reached by chaining or by name. `bazel build --announce_rc` shows which group set what.",
+        "# top, the rest reached by chaining or by name. A group naming an endpoint is enabled for",
+        "# `build`, which Bazel applies to test/run/coverage/cquery/aquery but not to `query`.",
+        "# `bazel build --announce_rc` shows which group set what.",
         "",
     ]
     for flag in startup_flags:
         lines.append("startup " + flag_text(flag))
-    for group in enabled:
-        for section in command_sections:
+    for (group, sections) in enable_lines:
+        for section in sections:
             lines.append(section + " --config=" + group)
     for config in configs:
         lines.append("")
