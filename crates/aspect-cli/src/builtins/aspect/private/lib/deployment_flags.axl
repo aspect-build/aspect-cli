@@ -157,6 +157,11 @@ REMOTE_CAPABILITIES = list(_CAPABILITY_SPECS)
 # What bare `--remote` wires: the accelerators that can't change build semantics.
 REMOTE_DEFAULT_CAPS = ["cache", "bes"]
 
+def capability_label(name: str) -> str:
+    """One capability's label as users see it (`cache` → "remote cache"), for a
+    message about capabilities rather than about a deployment's endpoints."""
+    return _CAPABILITY_SPECS[name].label
+
 def capability_labels(endpoints, only: list[str] = []) -> list[str]:
     """The capabilities `endpoints` advertises, as the labels users see, in
     [`REMOTE_CAPABILITIES`] order. Reads each capability's own endpoint field, so a new
@@ -206,6 +211,9 @@ DeploymentFlags = record(
     bes_uri = field(str, default = ""),
     # The capability names actually wired, for the tuning flags they justify.
     wired = field(list, default = []),
+    # Whether `--remote` defaulted to `auto` rather than being named, so the
+    # announcement can say what decided this and how to decide otherwise.
+    auto = field(bool, default = False),
 )
 
 # What every path that decides against a deployment hands back.
@@ -406,6 +414,7 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
         results_url = endpoints.results_url,
         bes_uri = _endpoint_uri(endpoints, _CAPABILITY_SPECS["bes"]),
         wired = wired,
+        auto = auto,
     )
 
 def deployment_tuning_flags(flags: DeploymentFlags) -> list:
@@ -455,11 +464,22 @@ def deployment_announcement(flags: DeploymentFlags) -> str:
     parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
     return "Using deployment '" + flags.deployment + "' for " + join_and(parts, oxford = True)
 
+def auto_remote_explanation(flags: DeploymentFlags) -> str:
+    """Why a build nobody pointed anywhere is talking to a deployment, or `""`
+    when `--remote` was named. Public so `deployment_flags_test.axl` can assert
+    the wording."""
+    if not flags.auto or not flags.wired:
+        return ""
+    return ("--remote defaulted to `auto`, which wires the default deployment on CI and nothing off it. " +
+            "Pass --remote=none here to build without it, or set ctx.tasks[\"<task>\"].args.remote in config.axl; " +
+            "pass --remote off CI to get this.")
+
 def announce_deployment_flags(ctx, flags: DeploymentFlags):
     """Tell the user, in one line, which deployment's base-flag capabilities this
     bazel call is wired to (`--remote`) and the endpoint each uses, so the
-    injected --remote_cache / --remote_executor aren't silent. (BES is announced
-    separately by `announce_bes_sinks`.) No-op when nothing was injected.
+    injected --remote_cache / --remote_executor aren't silent, and on the
+    defaulted path what decided that. (BES is announced separately by
+    `announce_bes_sinks`.) No-op when nothing was injected.
 
     Call *after* the spawning phase's `task_update`, not before: the flags belong
     to the bazel call, so announcing at resolve time strands this line above the
@@ -468,6 +488,9 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     line = deployment_announcement(flags)
     if line:
         info(ctx.std, line)
+        explanation = auto_remote_explanation(flags)
+        if explanation:
+            info(ctx.std, explanation)
 
 def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag: str, what: str) -> list:
     """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an

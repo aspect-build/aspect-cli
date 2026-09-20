@@ -546,6 +546,82 @@ fn an_existing_rc_is_kept_until_force() {
 
 /// Write a checkout that already carries its own generated rc, as committing the
 /// output of an off-CI run leaves it.
+/// Both defaults read the same thing — is this CI — and a rc written somewhere
+/// the caller did not expect, with endpoints they did not expect, is the whole
+/// surprise this command can hand someone. So each says what it decided and on
+/// what evidence.
+#[test]
+fn the_auto_defaults_say_what_they_decided() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+
+    let out = unconfigured_cmd(home.path(), cwd.path(), true, &[])
+        .env("ASPECT_API_TOKEN", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains(
+            "--home=auto: this is CI (github), so this machine's rc under ~/.aspect is written"
+        ),
+        "the layout and its evidence:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--remote=auto: this is CI (github), so the deployment's remote cache and BES backend are enabled"),
+        "what it turned on and why:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("`--remote=none` leaves them defined but off"),
+        "and how to turn it off:\n{stderr}"
+    );
+}
+
+/// Off CI each default goes the other way, and says so — including that a
+/// checkout's rc enables nothing whatever `--remote` says.
+#[test]
+fn the_auto_defaults_say_what_they_decided_off_ci() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    std::fs::write(cwd.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+
+    let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), false, &[]);
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains("--home=auto: not CI, so the checkout's"),
+        "the layout:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--remote=auto: a checkout's rc enables nothing"),
+        "and that --remote decides nothing here:\n{stderr}"
+    );
+}
+
+/// A named flag explains itself, so neither line appears.
+#[test]
+fn a_named_flag_gets_no_auto_explanation() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+
+    let out = setup_bazelrc_unconfigured(
+        home.path(),
+        cwd.path(),
+        true,
+        &["--home=true", "--remote=none"],
+    );
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!stderr.contains("--home=auto:"), "no home line:\n{stderr}");
+    assert!(
+        !stderr.contains("--remote=auto:"),
+        "no remote line:\n{stderr}"
+    );
+}
+
 /// A deployment's `~/.aspect/config.json`, as `aspect auth configure` leaves it.
 /// `exec` is present only where the deployment serves remote execution, which is
 /// what decides whether `--remote=exec` has anything to enable.
