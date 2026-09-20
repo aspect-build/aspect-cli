@@ -311,7 +311,10 @@ impl ExecLogStream {
         // `failure`, because that cannot be known without reading it all.
         let mut magic = [0u8; 4];
         File::open(&path)?.read_exact(&mut magic).map_err(|e| {
-            io::Error::new(e.kind(), format!("{path:?} is too short to be a zstd frame"))
+            io::Error::new(
+                e.kind(),
+                format!("{path:?} is too short to be a zstd frame"),
+            )
         })?;
         if magic != ZSTD_MAGIC {
             return Err(io::Error::new(
@@ -466,7 +469,9 @@ mod tests {
     fn reads_every_entry_of_a_complete_log() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.binpb.zst");
-        let entries: Vec<_> = (1..=250).map(|i| file_entry(i, &format!("f{i}.txt"))).collect();
+        let entries: Vec<_> = (1..=250)
+            .map(|i| file_entry(i, &format!("f{i}.txt")))
+            .collect();
         write_log(&path, &entries);
 
         let (got, err) = drain(path);
@@ -517,7 +522,9 @@ mod tests {
     fn a_truncated_log_yields_a_prefix_rather_than_every_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.binpb.zst");
-        let entries: Vec<_> = (1..=200).map(|i| file_entry(i, &format!("f{i}.txt"))).collect();
+        let entries: Vec<_> = (1..=200)
+            .map(|i| file_entry(i, &format!("f{i}.txt")))
+            .collect();
         write_log(&path, &entries);
 
         // Lop off the tail, keeping the header so the magic check still passes.
@@ -538,7 +545,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.binpb.zst");
         let entries: Vec<_> = (1..=2000)
-            .map(|i| file_entry(i, &format!("some/deep/path/to/a/source/file/number/{i}.txt")))
+            .map(|i| {
+                file_entry(
+                    i,
+                    &format!("some/deep/path/to/a/source/file/number/{i}.txt"),
+                )
+            })
             .collect();
         write_log(&path, &entries);
 

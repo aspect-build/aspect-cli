@@ -4242,7 +4242,6 @@ axl = task(
     traits = tips.TRAITS,
 )
 
-
 def test_execlog_lib(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     """Covers the three pieces of `private/lib/execlog.axl` that are pure
     functions of their inputs: input-set flattening, and the two differs that

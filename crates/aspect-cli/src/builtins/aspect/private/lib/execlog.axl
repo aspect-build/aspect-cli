@@ -67,6 +67,7 @@ def _hash(parts: list) -> str:
     h = sha256()
     for part in parts:
         h.update(str(part))
+
         # Length-prefixing would be tidier, but a NUL cannot appear in an
         # argv entry or an env name, so it is already unambiguous here.
         h.update("\x00")
@@ -141,6 +142,7 @@ def _index(ctx: TaskContext, log_path: str) -> Index:
             sets[entry.id] = ([], [payload.input_set_id])
         elif kind == _SPAWN:
             fp = _fingerprint(payload, sets, paths, digests, count)
+
             # Two spawns can share a key when an action is retried. The last one
             # is the one whose outputs the build kept.
             spawns[fp.key] = fp
