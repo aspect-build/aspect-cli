@@ -1606,7 +1606,10 @@ mod tests {
 
         // Simulate a newer resolution overwriting the old hint.
         std::fs::write(&hint, "v2026.38.30").unwrap();
-        assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.38.30");
+        assert_eq!(
+            std::fs::read_to_string(&hint).unwrap().trim(),
+            "v2026.38.30"
+        );
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

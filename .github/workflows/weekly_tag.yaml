@@ -6,11 +6,9 @@ on:
   schedule:
     # Mondays at 5am UTC / midnight EST
     - cron: "0 5 * * 1"
-
 # Creating the tag ref requires write access to repo contents.
 permissions:
   contents: write
-
 jobs:
   tagger:
     runs-on: ubuntu-latest
