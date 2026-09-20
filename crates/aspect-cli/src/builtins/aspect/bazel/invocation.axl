@@ -150,7 +150,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         dropped = dropped,
         rc_flags = rc_flags,
         results_url = results_url,
-        bazel_streams_bes = bes_streamed_by_bazel(ctx, rc, command),
+        bazel_streams_bes = bes_streamed_by_bazel(trait.bes_results_sources, rc, command),
         announce_version = announce_version,
         announce_command = announce_command,
         max_attempts = max(1, requested),

@@ -820,7 +820,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         hook(ctx)
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(bazel_trait.bes_results_sources, rc)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 

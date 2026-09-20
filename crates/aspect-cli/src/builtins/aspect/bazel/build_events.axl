@@ -90,22 +90,26 @@ def _drop_bazel_streamed(items: list, uri_of, bazel_backend: str) -> list:
         if not (uri_of(item) and same_bes_endpoint(uri_of(item), bazel_backend))
     ]
 
-def bes_streamed_by_bazel(ctx, rc, command: str = "build") -> bool:
-    """Whether Bazel's own `--bes_backend` is the Aspect BES backend this runner
-    reports results for, so the CLI streams no sink of its own to it.
+def bes_streamed_by_bazel(sources: list[(str, str)], rc, command: str = "build") -> bool:
+    """Whether Bazel's own `--bes_backend` is a backend with an advertised viewer,
+    so the CLI streams no sink of its own to it.
 
     Tasks store this as `data["bes_streamed_by_bazel"]`, which tells
     `resolve_aspect_url` to key the Web UI link on Bazel's `invocation_id`: with
     no sink there is no sink id, but the backend still holds the invocation —
     indexed under Bazel's UUID, since Bazel uploaded it.
 
-    Gated on the runner's own `ASPECT_WORKFLOWS_BES_BACKEND`, because suppressing
-    a third-party BES says nothing about what the Aspect Web UI has.
+    `sources` are `BazelTrait.bes_results_sources`, the same `(backend, viewer)`
+    pairs `advertised_results_url` and `bes_results_url_flag` resolve against: a
+    runner's `ASPECT_WORKFLOWS_BES_BACKEND`, and the deployment `--remote` wired.
+    Either can be the backend the rc points Bazel at, and only the pairing knows
+    which backends have a viewer at all — a third-party BES is in none of them,
+    so suppressing one still says nothing about what the Aspect Web UI has.
     """
     bazel_backend = bazel_bes_backend(rc, command)
     if not bazel_backend:
         return False
-    return same_bes_endpoint(ctx.std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or "", bazel_backend)
+    return any([same_bes_endpoint(backend, bazel_backend) for (backend, _) in sources])
 
 def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list:
     """Every CLI-streamed BES sink for one bazel spawn, in the order a task

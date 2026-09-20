@@ -1206,7 +1206,7 @@ def _delivery_impl(ctx):
     # first phase header below rather than here, so the lines land inside a
     # phase instead of ahead of the task's first one.
     build_events = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(bazel_trait.bes_results_sources, rc)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
