@@ -18,7 +18,8 @@ server's own rejection then surfaces downstream).
 
 It also owns endpoint identity — `endpoint_authority` / `same_bes_endpoint`,
 used by `bazel/build_events.axl` to recognize when a CLI-streamed backend is the same
-endpoint Bazel's own `--bes_backend` already uploads to.
+endpoint Bazel's own `--bes_backend` already uploads to — and `can_authenticate`,
+the question both defaulted paths ask before wiring an endpoint at all.
 """
 
 load("./environment.axl", "warn")
@@ -47,6 +48,20 @@ _DEFAULT_PORTS = {
 # Bazel documents `--bes_backend` / `--remote_cache` as `[SCHEME://]HOST[:PORT]`
 # and assumes TLS gRPC when the scheme is omitted.
 _DEFAULT_SCHEME = "grpcs"
+
+def can_authenticate(ctx, deployment) -> bool:
+    """Whether this machine holds a credential for `deployment`: its API-token
+    variable is set, or someone logged in. Takes anything carrying `name` and
+    `api_token_env` — a `DeploymentSummary` or a `DeploymentEndpoints`.
+
+    Asked before wiring an endpoint that nobody named. Bazel treats a credential
+    helper that cannot produce a token as fatal, not as a reason to build
+    locally, so an endpoint with no credential behind it does not slow a build
+    down, it stops it — and a default that stops the build is worse than no
+    default. A named endpoint is the caller's to insist on."""
+    if deployment.api_token_env and ctx.std.env.var(deployment.api_token_env):
+        return True
+    return any([row.logged_in for row in ctx.aspect.auth.list() if row.name == deployment.name])
 
 def _split_endpoint(uri: str) -> tuple:
     """Split an endpoint URI into its `(scheme, host, port)`.

@@ -15,20 +15,22 @@ when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
 `bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "AUTO", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _endpoints(name, cache = "", bes = "", exec = "", results_url = ""):
-    return struct(name = name, cache = cache, bes = bes, exec = exec, results_url = results_url)
+def _endpoints(name, cache = "", bes = "", exec = "", results_url = "", api_token_env = ""):
+    return struct(name = name, cache = cache, bes = bes, exec = exec, results_url = results_url, api_token_env = api_token_env)
 
-def _ctx(endpoints, deployment = "", remote = "", env = {}, exits = []):
+def _ctx(endpoints, deployment = "", remote = "", env = {}, exits = [], logged_in = False):
     """A fake ctx: fixed deployment_endpoints, args carrying --deployment/--remote,
-    an env map for the ASPECT_WORKFLOWS_* lookups, and a `process.exit` that
-    records `(code, message)` into `exits` instead of unwinding. Pass
-    `remote = BARE` for a valueless `--remote`, matching what clap substitutes."""
+    an env map for the ASPECT_WORKFLOWS_* and CI lookups, a `process.exit` that
+    records `(code, message)` into `exits` instead of unwinding, and an auth
+    listing whose one row says whether this deployment is logged in. Pass
+    `remote = BARE` for a valueless `--remote`, matching what clap substitutes,
+    and `remote = AUTO` for the default."""
     return struct(
         args = struct(
             deployment = deployment,
@@ -40,8 +42,14 @@ def _ctx(endpoints, deployment = "", remote = "", env = {}, exits = []):
         ),
         aspect = struct(auth = struct(
             deployment_endpoints = lambda deployment: endpoints,
+            list = lambda: [struct(name = endpoints.name, logged_in = logged_in)],
         )),
     )
+
+# A CI host, as `detect_ci` recognizes one, and a deployment whose token variable
+# a CI job would set.
+_ON_CI = {"GITHUB_ACTIONS": "true"}
+_TOKENED = _endpoints("gcp", cache = "cache.gcp", bes = "bes.gcp", results_url = "https://app.gcp/i/", api_token_env = "ASPECT_API_TOKEN_GCP")
 
 _ALL = _endpoints("gcp", cache = "cache.gcp", bes = "bes.gcp", exec = "remote.gcp", results_url = "https://app.gcp/i/")
 
@@ -211,6 +219,73 @@ def _test_announcement_line(ctx):
         "",
     )
 
+def _test_auto_wires_the_default_deployment_on_ci(ctx):
+    """The point of `auto`: a CI job needs no flag, the way a Workflows runner
+    needs none. The credential is what a CI job sets, so the token variable
+    being set is what makes the endpoints reachable."""
+    env = dict(_ON_CI)
+    env["ASPECT_API_TOKEN_GCP"] = "client:secret"
+    got = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = env))
+    _eq("auto on CI → cache", got.base_flags, ["--remote_cache=grpcs://cache.gcp"])
+    _eq("auto on CI → bes", got.bes_backends, ["grpcs://bes.gcp"])
+    _eq("and it is the default deployment", got.deployment, "gcp")
+
+def _test_auto_is_what_an_omitted_flag_means(ctx):
+    """An absent `--remote` and an explicit `--remote=auto` are the same thing,
+    so a `config.axl` that spells the default out changes nothing."""
+    env = dict(_ON_CI)
+    env["ASPECT_API_TOKEN_GCP"] = "client:secret"
+    _eq(
+        "omitted == auto",
+        deployment_endpoint_flags(_ctx(_TOKENED, remote = "", env = env)).base_flags,
+        deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = env)).base_flags,
+    )
+
+def _test_auto_stays_off_a_developers_build(ctx):
+    """Off CI nothing is wired, token or no token: a local build does not start
+    uploading to a shared cache because a credential happens to be around."""
+    got = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = {"ASPECT_API_TOKEN_GCP": "client:secret"}))
+    _eq("off CI → nothing", got.base_flags, [])
+    _eq("off CI → no bes", got.bes_backends, [])
+
+def _test_auto_declines_what_it_cannot_authenticate(ctx):
+    """Bazel treats a credential helper that cannot produce a token as fatal, so
+    an endpoint with nothing behind it would stop the build rather than slow it."""
+    got = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = _ON_CI))
+    _eq("no credential → nothing", got.base_flags, [])
+
+    # A login is the other credential, and enough on its own.
+    got = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = _ON_CI, logged_in = True))
+    _eq("logged in → wired", got.base_flags, ["--remote_cache=grpcs://cache.gcp"])
+
+def _test_auto_declines_a_deployment_advertising_nothing(ctx):
+    """A named `--remote` fails here, naming the deployment. A defaulted one has
+    nothing to report: the build is simply local."""
+    bare_deployment = _endpoints("gcp", api_token_env = "ASPECT_API_TOKEN_GCP")
+    env = dict(_ON_CI)
+    env["ASPECT_API_TOKEN_GCP"] = "client:secret"
+    got = deployment_endpoint_flags(_ctx(bare_deployment, remote = AUTO, env = env))
+    _eq("nothing advertised → nothing wired", got.base_flags, [])
+
+def _test_auto_leaves_an_env_named_deployment_to_the_feature(ctx):
+    """`--remote` against a machine whose environment already names its
+    deployment is refused, since a second one would route the build off it.
+    Defaulting into that is not a mistake to report — it is every task on a
+    Workflows runner — so `auto` steps aside quietly."""
+    env = dict(_ON_CI)
+    env["ASPECT_WORKFLOWS_REMOTE_CACHE"] = "grpcs://cache.runner:443"
+    env["ASPECT_API_TOKEN_GCP"] = "client:secret"
+
+    exits = []
+    got = deployment_endpoint_flags(_ctx(_TOKENED, remote = AUTO, env = env, exits = exits))
+    _eq("auto → nothing wired", got.base_flags, [])
+    _eq("auto → no refusal", exits, [])
+
+    exits = []
+    deployment_endpoint_flags(_ctx(_TOKENED, remote = BARE, env = env, exits = exits))
+    _eq("named --remote → refused", [code for (code, _) in exits], [1])
+    _eq("with the env message", [message for (_, message) in exits], [REMOTE_REFUSED_BY_ENV])
+
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
     _eq("one", join_and(["remote cache"]), "remote cache")
@@ -268,6 +343,12 @@ _UNIT_TESTS = [
     _test_capability_labels,
     _test_announcement_line,
     _test_results_url_carried_off_discovery,
+    _test_auto_wires_the_default_deployment_on_ci,
+    _test_auto_is_what_an_omitted_flag_means,
+    _test_auto_stays_off_a_developers_build,
+    _test_auto_declines_what_it_cannot_authenticate,
+    _test_auto_declines_a_deployment_advertising_nothing,
+    _test_auto_leaves_an_env_named_deployment_to_the_feature,
     _test_join_and,
 ]
 

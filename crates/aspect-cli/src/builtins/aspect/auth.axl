@@ -179,8 +179,8 @@ def _print_default_usage_hint(summary, others: int = 0):
     print("")
     if caps:
         subject = "Aspect Cloud's" if summary.builtin else "the default deployment's"
-        print("Pass --remote to a task (e.g. `aspect build --remote`) to use")
-        print(subject + " " + join_and(caps) + ".")
+        print("A task on CI uses " + subject + " " + join_and(caps) + " with no flag;")
+        print("off CI, pass --remote (e.g. `aspect build --remote`) to use them.")
         if summary.exec:
             print("Remote execution is opt-in: use --remote=exec to enable it.")
     else:
