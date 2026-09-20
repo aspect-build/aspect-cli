@@ -254,12 +254,13 @@ def _login_impl(ctx: TaskContext) -> int:
         error(ctx.std, "--org applies to the browser login only; a token read from stdin is already minted for one organization.")
         return 1
 
-    # A bare interactive login also records the Aspect Cloud deployment, so
-    # --remote works without a separate `auth configure`. Skipped when the user
-    # named a deployment, and for the stdin-token flows: those are the CI paths,
-    # where a discovery probe would add a network round trip to a login that makes
-    # none, and where the deployment is normally declared in the repo's own
-    # .aspect/config.json instead.
+    # A bare interactive login also records the Aspect Cloud deployment, picking
+    # up a client id or redirect URI it advertises. Skipped when the user named a
+    # deployment, and for the stdin-token flows: those are the CI paths, where a
+    # discovery probe would add a network round trip to a login that makes none.
+    # Nothing is lost by skipping it — the built-in entry states Aspect Cloud's
+    # endpoints and owns their hosts, so `--remote` and the `aspect get`
+    # credential helper both work from a token login alone.
     #
     # Not skipped for --profile: that names who is logging in, and a second
     # identity wants the same endpoints recorded as the first.

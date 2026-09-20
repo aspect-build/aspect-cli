@@ -344,7 +344,21 @@ fn reserved_name_error(name: &str) -> anyhow::Error {
 /// its API, and its Bazel-facing endpoints — so everything that reads a
 /// deployment works before a first `aspect auth login`. Only the credential is
 /// genuinely missing then, and that is the error the user gets.
+///
+/// Its `hosts` are the hosts it states, as [`deployment_from_discovery`] does
+/// for a discovered deployment, so [`deployment_for_host`] recognizes Aspect
+/// Cloud's own cache, BES and API as Aspect Cloud's. Everything that attaches a
+/// credential gates on that ownership — the `aspect get` credential helper, the
+/// endpoint auth in `lib/aspect_endpoint_auth.axl` — and a host owned by nobody
+/// is talked to unauthenticated, so these must stay in step with `endpoints`.
 fn aspect_cloud_deployment() -> Deployment {
+    let endpoints = Endpoints {
+        cache: DEFAULT_CACHE_HOST.to_string(),
+        bes: DEFAULT_BES_HOST.to_string(),
+        api: DEFAULT_DISCOVERY_HOST.to_string(),
+        results_url: DEFAULT_RESULTS_URL.to_string(),
+        ..Endpoints::default()
+    };
     Deployment {
         name: ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(),
         default: true,
@@ -352,7 +366,7 @@ fn aspect_cloud_deployment() -> Deployment {
         issuer: Some(DEFAULT_ISSUER.to_string()),
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
-        hosts: Vec::new(),
+        hosts: endpoint_hosts(&endpoints),
         login_redirect_uri: Some(DEFAULT_LOGIN_REDIRECT_URI.to_string()),
         // The same set a deployment gets when it advertises nothing: this seed is
         // not discovered from anywhere, so it states what that fallback would give
@@ -363,14 +377,28 @@ fn aspect_cloud_deployment() -> Deployment {
         // asking for the token.
         scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
-        endpoints: Endpoints {
-            cache: DEFAULT_CACHE_HOST.to_string(),
-            bes: DEFAULT_BES_HOST.to_string(),
-            api: DEFAULT_DISCOVERY_HOST.to_string(),
-            results_url: DEFAULT_RESULTS_URL.to_string(),
-            ..Endpoints::default()
-        },
+        endpoints,
     }
+}
+
+/// The bare hosts a deployment's endpoints name, deduped and in a stable order:
+/// what `hosts` must carry for [`deployment_for_host`] to recognize them as that
+/// deployment's. `results_url` is left out — it is a viewer URL passed to
+/// `--bes_results_url`, never dialed, so it is not part of the auth gate.
+fn endpoint_hosts(endpoints: &Endpoints) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for value in [
+        &endpoints.cache,
+        &endpoints.bes,
+        &endpoints.exec,
+        &endpoints.api,
+    ] {
+        let host = endpoint_host_str(value);
+        if !host.is_empty() && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -536,7 +564,12 @@ fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
             seed.login_redirect_uri = Some(uri);
         }
     }
-    seed.hosts = entry.hosts;
+    // Only what the entry states replaces what the seed states. An entry with no
+    // hosts (or no endpoints) is saying nothing about them, and taking that as
+    // "Aspect Cloud owns no hosts" would un-own its own cache and BES.
+    if !entry.hosts.is_empty() {
+        seed.hosts = entry.hosts;
+    }
     if !entry.endpoints.is_empty() {
         seed.endpoints = entry.endpoints;
     }
@@ -4997,11 +5030,12 @@ mod tests {
         assert_eq!(shadowed.len(), 1);
         assert_eq!(shadowed[0].name, "default");
 
-        // Exactly one account, carrying the seed's own issuer and no hosts.
+        // Exactly one account, carrying the seed's own issuer and its own hosts —
+        // the impostor's `remote.aspect.foo.com` reaches neither.
         let accounts: Vec<_> = merged.iter().filter(|d| d.builtin).collect();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].issuer.as_deref(), Some(DEFAULT_ISSUER));
-        assert!(accounts[0].hosts.is_empty());
+        assert_eq!(accounts[0].hosts, aspect_cloud_deployment().hosts);
         // The impostor is dropped rather than silently taking Aspect Cloud's slot.
         assert!(!merged.iter().any(|d| d.name == "default"));
         // A legitimate deployment sharing that issuer is unaffected.
@@ -6192,10 +6226,9 @@ mod tests {
     #[test]
     fn an_endpoint_resolves_to_the_key_its_deployment_filed_under() {
         let _guard = profile_env_guard();
-        let mut seed = aspect_cloud_deployment();
-        seed.endpoints.cache = "cache.aspect.build".to_string();
-        seed.hosts = vec!["cache.aspect.build".to_string()];
-        let deployments = vec![seed, dep("acme", false)];
+        // The seed as it comes, with no config file behind it: it states its own
+        // cache, so it owns it.
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
 
         let cloud = deployment_for_host(&deployments, "cache.aspect.build").expect("owned");
         assert_eq!(cloud.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
@@ -6206,6 +6239,42 @@ mod tests {
         assert_eq!(login_profile_for(acme), acme.name);
 
         assert!(deployment_for_host(&deployments, "cache.example.com").is_none());
+    }
+
+    /// Aspect Cloud owns the endpoints it states, with nothing configured — the
+    /// whole of what a CI runner has after an `--with-api-token` login. Unowned,
+    /// they are a third party's: the credential helper hands them nothing and the
+    /// build talks to them with no Authorization header.
+    #[test]
+    fn aspect_cloud_owns_the_endpoints_it_states() {
+        let seed = [aspect_cloud_deployment()];
+        for host in [DEFAULT_CACHE_HOST, DEFAULT_BES_HOST, DEFAULT_DISCOVERY_HOST] {
+            let owner = deployment_for_host(&seed, host)
+                .unwrap_or_else(|| panic!("{host} is Aspect Cloud's own endpoint"));
+            assert_eq!(owner.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        }
+        // Exactly those hosts. A single-tenant deployment sits on the same domain,
+        // and a suffix match would hand Aspect Cloud's credential to its cache.
+        assert!(deployment_for_host(&seed, "remote.acme.aspect.build").is_none());
+        // The viewer URL is not an endpoint anything dials, so it is not owned.
+        assert!(!seed[0].hosts.iter().any(|h| h.contains("app.aspect.build")));
+    }
+
+    /// A config entry that says nothing about hosts leaves the seed's own in
+    /// place, so an entry naming Aspect Cloud to set one field — a rotated
+    /// `client_id`, say — cannot un-own its cache and BES as a side effect.
+    #[test]
+    fn a_config_entry_that_names_no_hosts_keeps_the_seeds_own() {
+        let mut entry = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        entry.issuer = Some(DEFAULT_ISSUER.to_string());
+        entry.client_id = Some("rotated-client-id".to_string());
+        entry.hosts = Vec::new();
+
+        let mut seed = aspect_cloud_deployment();
+        merge_into_seed(&mut seed, entry);
+
+        assert_eq!(seed.client_id.as_deref(), Some("rotated-client-id"));
+        assert_eq!(seed.hosts, aspect_cloud_deployment().hosts);
     }
 
     /// `$ASPECT_API_TOKEN` is exchanged against Aspect Cloud's issuer, so it stands
@@ -6404,9 +6473,15 @@ mod tests {
             deployment_name_for_host(&deployments, "remote.acme.aspect.build.").as_deref(),
             Some("acme")
         );
-        // A host no configured deployment claims → None (no token attached).
+        // Aspect Cloud's own BES is Aspect Cloud's, stated by the seed rather than
+        // configured anywhere.
         assert_eq!(
-            deployment_name_for_host(&deployments, "bes.aspect.build"),
+            deployment_name_for_host(&deployments, "bes.aspect.build").as_deref(),
+            Some(ASPECT_CLOUD_DEPLOYMENT_NAME)
+        );
+        // A host nothing claims → None (no token attached).
+        assert_eq!(
+            deployment_name_for_host(&deployments, "bes.example.com"),
             None
         );
     }

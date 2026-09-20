@@ -22,19 +22,11 @@ concurrency:
 # --with-api-token` and leaves only the short-lived JWT on disk, and an
 # ASPECT_API_TOKEN in the environment would override that stored credential
 # on every invocation.
-#
-# ASPECT_WORKSPACE is how the CLI finds the checked-in `.aspect/config.json`
-# that tells it `cache.aspect.build` is Aspect Cloud's. Without it the file is
-# never looked for, the `aspect get` credential helper treats the cache as an
-# unknown third party, and Bazel talks to it with no credentials. The CI login
-# (`--with-api-token`) records a credential but no endpoints, so nothing else
-# in the job supplies this.
 env:
   DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN != '' }}
-  ASPECT_WORKSPACE: ${{ github.workspace }}
 jobs:
   # Pure-bash unit tests for the tools/bazel wrapper. No aspect, no bazel, no
   # pre-build — runs on a stock ephemeral runner in seconds and guards the
