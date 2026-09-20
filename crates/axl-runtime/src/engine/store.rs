@@ -1,8 +1,22 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
+
+static ASPECT_ROOT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The Aspect project root this process resolved at startup, recorded by
+/// [`Env::new`] for code that has no evaluator to read [`Env`] from.
+///
+/// `None` in a process that builds no [`Env`]: the `aspect get` credential
+/// helper, which Bazel spawns as a bare subprocess and which skips workspace
+/// discovery to stay fast. A caller that still wants an answer there resolves
+/// one with [`crate::project_root`].
+pub fn resolved_aspect_root() -> Option<&'static Path> {
+    ASPECT_ROOT_DIR.get().map(PathBuf::as_path)
+}
 
 /// Process-wide environment passed to every Starlark evaluator via `eval.extra`.
 ///
@@ -31,6 +45,9 @@ impl Env {
         bazel_root_dir: PathBuf,
         git_root_dir: Option<PathBuf>,
     ) -> Self {
+        // First one wins: a process resolves the root once, and a later `Env`
+        // (the test harness builds several) does not move it.
+        let _ = ASPECT_ROOT_DIR.set(aspect_root_dir.clone());
         Self {
             cli_version,
             aspect_root_dir,
