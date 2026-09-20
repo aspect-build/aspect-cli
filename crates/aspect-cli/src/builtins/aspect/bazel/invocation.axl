@@ -100,13 +100,10 @@ def _resolve(ctx, command: str) -> _Invocation:
 
     (announce_version, announce_command) = resolve_announce(ctx)
 
-    # CLI-streamed BES sinks: `--bes-backend` + feature-injected backend URIs
-    # (`trait.bes_backends`) + the trait's own (feature-injected) sinks. Endpoints
-    # Bazel's own `--bes_backend` uploads to are dropped so the invocation is
-    # streamed once; `dropped` names them for the spawn-time disclosure.
-    extra_backends = list(trait.bes_backends)
-    sinks = collect_bes_sinks(ctx, trait, rc, command, extra_backends = extra_backends)
-    dropped = dropped_bes_backends(ctx, trait, rc, command, extra_backends = extra_backends)
+    # `dropped` names the endpoints Bazel uploads to itself, which
+    # `collect_bes_sinks` has already left out, for the spawn-time disclosure.
+    sinks = collect_bes_sinks(ctx, trait, rc, command)
+    dropped = dropped_bes_backends(ctx, trait, rc, command)
 
     # Post-rc flag hooks: features (e.g. deployment auth) inject flags computed
     # from the resolved rc; appended to each spawn after rc expansion.
@@ -150,7 +147,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         dropped = dropped,
         rc_flags = rc_flags,
         results_url = results_url,
-        bazel_streams_bes = bes_streamed_by_bazel(ctx, rc, command),
+        bazel_streams_bes = bes_streamed_by_bazel(trait.bes_results_sources, rc, command),
         announce_version = announce_version,
         announce_command = announce_command,
         max_attempts = max(1, requested),

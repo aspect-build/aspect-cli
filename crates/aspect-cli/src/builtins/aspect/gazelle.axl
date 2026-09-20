@@ -81,7 +81,7 @@ incompatible with non-recursive mode — test first.
 https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update
 """
 
-load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
+load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
@@ -457,7 +457,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     r = runnable(ctx, [ctx.args.gazelle_target], rc = rc)
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    data.update(bes_link_data(bazel_trait, rc, bes_sinks))
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 
