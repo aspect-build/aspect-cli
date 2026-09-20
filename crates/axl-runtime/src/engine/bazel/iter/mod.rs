@@ -1,4 +1,4 @@
-mod execlog;
+pub mod execlog;
 mod workspace_event;
 
 pub use execlog::ExecutionLogIterator;

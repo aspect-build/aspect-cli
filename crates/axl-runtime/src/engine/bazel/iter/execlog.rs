@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use allocative::Allocative;
 use fibre::RecvError;
@@ -23,17 +25,34 @@ use axl_proto::tools::protos::ExecLogEntry;
 use derive_more::Display;
 use fibre::spmc::Receiver;
 
+/// Set by a decoder thread when it stops early. `None` means the stream ended
+/// because it ran out of entries, which is the only clean way for it to end.
+pub type DecodeFailure = Arc<Mutex<Option<String>>>;
+
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
 #[display("<execlog_iterator>")]
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
     recv: RefCell<Receiver<ExecLogEntry>>,
+    /// Only populated when the entries come from a file read that owns its own
+    /// decoder thread. The live build path reports its errors through the build.
+    #[allocative(skip)]
+    failure: Option<DecodeFailure>,
 }
 
 impl ExecutionLogIterator {
     pub fn new(recv: Receiver<ExecLogEntry>) -> Self {
         Self {
             recv: RefCell::new(recv),
+            failure: None,
+        }
+    }
+
+    /// An iterator whose producer reports decode failures through `failure`.
+    pub fn with_failure_slot(recv: Receiver<ExecLogEntry>, failure: DecodeFailure) -> Self {
+        Self {
+            recv: RefCell::new(recv),
+            failure: Some(failure),
         }
     }
 }
@@ -66,6 +85,35 @@ pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
             .downcast_ref_err::<ExecutionLogIterator>()
             .into_anyhow_result()?;
         Ok(this.recv.borrow().is_closed())
+    }
+
+    /// Why the stream stopped early, or `None` if it ran to the end of the log.
+    ///
+    /// Iteration ends silently when the decoder gives up, so a caller that must not
+    /// act on a partial log checks this once the loop is over. Always `None` for a
+    /// stream attached to a running build, where a decode failure fails the build.
+    ///
+    /// ```python
+    /// entries = bazel.execution_log.read(path = "a.binpb.zst")
+    /// for entry in entries:
+    ///     ...
+    /// if entries.error() != None:
+    ///     ctx.std.process.exit(1, "a.binpb.zst: " + entries.error())
+    /// ```
+    fn error<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<String>> {
+        let this = this
+            .downcast_ref_err::<ExecutionLogIterator>()
+            .into_anyhow_result()?;
+        let Some(failure) = this.failure.as_ref() else {
+            return Ok(NoneOr::None);
+        };
+        let failure = failure
+            .lock()
+            .map_err(|e| anyhow::anyhow!("execution log decoder state was poisoned: {e}"))?;
+        Ok(match failure.as_ref() {
+            Some(msg) => NoneOr::Other(msg.clone()),
+            None => NoneOr::None,
+        })
     }
 }
 

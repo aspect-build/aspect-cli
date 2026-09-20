@@ -14,6 +14,7 @@ Aspect-CLI ships with six built-in tasks that drive Bazel for the most common CI
 | [format](#format) | `bazel run` of a `format_multirun` | `aspect format [--scope=changed\|all]`                       | `format_results`     |
 | [gazelle](#gazelle) | `bazel run` of a `gazelle()` / `aspect_gazelle()` target | `aspect gazelle [--check]`                                   | `gazelle_results`    |
 | [delivery](#delivery) | Multi-phase delivery flow | `aspect delivery //pkg/foo:release //pkg/bar:release`        | `delivery_results`   |
+| [execlog](#execlog) | Reads a compact execution log | `aspect execlog diff before.binpb.zst after.binpb.zst`        | none (no Bazel run)  |
 
 Every task:
 
@@ -176,6 +177,93 @@ Phase 1 builds the user's targets with the `hashsum_aspect` to compute action di
 Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tables (label / hash / context), failed deliveries open by default, plus the shared bazel detail body from phase 1.
 
 ---
+
+
+---
+
+## execlog
+
+[`execlog.axl`](execlog.axl) · offline analysis of `--execution_log_compact_file` artifacts.
+The only built-in tasks that run no Bazel command: they read logs a previous build produced.
+
+### `aspect execlog diff <before> <after>`
+
+Two builds that should have been identical were not. This says which actions moved and why.
+
+```
+$ aspect execlog diff /tmp/before.binpb.zst /tmp/after.binpb.zst
+2 action(s) changed and would not have been a cache hit:
+
+Genrule  //gen:banner
+  output: bazel-out/darwin_arm64-fastbuild/bin/gen/banner.txt
+  inputs: 1 changed, 0 added, 0 removed
+      changed  gen/greeting.txt
+
+Genrule  //gen:report
+  output: bazel-out/darwin_arm64-fastbuild/bin/gen/report.txt
+  inputs: 1 changed, 0 added, 0 removed
+      changed  bazel-out/darwin_arm64-fastbuild/bin/gen/banner.txt
+```
+
+That is the propagation chain you want: a source file changed, so the action reading it changed,
+so the action reading *its* output changed. An action whose key did not move is not listed.
+
+Five dimensions of the action key are compared — `args`, `env`, `inputs`, `tools`, `platform` —
+and every one that moved is reported, not just the first, because an action with two problems
+sends the reader round the loop twice otherwise. `env` is the one that finds non-hermeticity:
+
+```
+Genrule  //gen:stable
+  env: 1 changed, 0 added, 0 removed
+      changed  DEMO_TOKEN
+```
+
+Exits 0 by default: a changed action is a finding, not an error. `--fail-on-change` makes it fail
+a CI step asserting two builds are identical.
+
+### `aspect execlog list <log>`
+
+One line per action: mnemonic, label, runner, cache hit. `--output=json` adds each action's
+computed key, which is what `diff` compares. `--mnemonic=` and `--cached=` filter.
+
+### How it fits in memory
+
+A 20 MB compact log expands to gigabytes once every input set is flattened, and a diff needs two.
+So [`lib/execlog.axl`](private/lib/execlog.axl) never holds a flattened log:
+
+1. **Index** each log once, keeping three id-keyed maps and one `Fingerprint` per spawn. A
+   fingerprint is five hashes and a label, so it scales with the number of actions rather than
+   the number of files.
+2. **Detail** only the spawns whose fingerprints differ, by walking the logs again. On a healthy
+   build that is a handful of actions out of tens of thousands, and it is skipped entirely when
+   nothing differs.
+
+Two passes over a compressed file are much cheaper than one flattened log in memory.
+`--summary-only` stops after the first pass when even that is too much.
+
+Ported from the Go `execlog-diff` tool, which streams and diffs concurrently; this is the same
+analysis with a bounded working set instead of a pipeline.
+
+### Reading a log from your own task
+
+`bazel.execution_log.read(path = ...)` returns an iterator of `ExecLogEntry` decoded from a
+compact log on disk, on a background thread, so a log larger than memory can be walked as long as
+the loop body does not keep every entry.
+
+```python
+entries = bazel.execution_log.read(path = "before.binpb.zst")
+spawns = 0
+for entry in entries:
+    if type(entry.type) == "spawn":
+        spawns += 1
+if entries.error() != None:
+    ctx.std.process.exit(1, "before.binpb.zst: " + entries.error())
+```
+
+A missing file, or one that is not a zstd frame, fails immediately with a traceback. A log that is
+truncated or corrupt part-way through ends the iteration early and sets `error()`, so check it when
+a partial read would give a wrong answer. See `spawn_from_path` for the one truncation case zstd
+cannot report.
 
 ## Cross-cutting features
 

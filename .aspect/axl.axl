@@ -17,6 +17,7 @@ load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_repro
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
+load("@aspect//private/lib/execlog.axl", "execlog")
 load(
     "@aspect//private/lib/gazelle_results.axl",
     "dedupe_subtrees",
@@ -4139,6 +4140,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_result_cell_text(tc)
     tc = test_results_subset_carries_progress(tc)
     tc = test_denied_terminal_post_warning(tc)
+    tc = test_execlog_lib(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
     return 0
@@ -4239,3 +4241,89 @@ axl = task(
     # the test run sees at most one fire per id.
     traits = tips.TRAITS,
 )
+
+
+def test_execlog_lib(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """Covers the three pieces of `private/lib/execlog.axl` that are pure
+    functions of their inputs: input-set flattening, and the two differs that
+    turn a pair of resolved spawns into the lines a reader sees.
+
+    The end-to-end path (reading a real compact log) is exercised by
+    `aspect execlog diff` in CI, not here — it needs a build to produce a log."""
+
+    # A set whose members are files, keyed by entry id, resolves to sorted
+    # `path@digest` strings.
+    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
+    digests = {1: "aaa", 2: "bbb", 3: "ccc"}
+    sets = {10: ([1, 2], []), 11: ([3], [10])}
+
+    flat = execlog.testonly_flatten(sets, paths, digests, 10, 100)
+    tc = test_case(tc, flat == ["a.txt@aaa", "b.txt@bbb"], "flatten resolves a flat input set")
+
+    # A nested set contributes its own members and everything below it, once.
+    flat = execlog.testonly_flatten(sets, paths, digests, 11, 100)
+    tc = test_case(
+        tc,
+        flat == ["a.txt@aaa", "b.txt@bbb", "c.txt@ccc"],
+        "flatten walks transitive sets",
+    )
+
+    # Input set id 0 is Bazel's "no inputs", not a set to look up.
+    tc = test_case(tc, execlog.testonly_flatten(sets, paths, digests, 0, 100) == [], "flatten treats id 0 as empty")
+
+    # A cycle cannot hang the walk. Bazel does not emit one, but a truncated
+    # log can leave a dangling id, and a wedged CLI is a worse failure than a
+    # wrong answer.
+    cyclic = {20: ([1], [21]), 21: ([2], [20])}
+    flat = execlog.testonly_flatten(cyclic, paths, digests, 20, 100)
+    tc = test_case(tc, flat == ["a.txt@aaa", "b.txt@bbb"], "flatten terminates on a cyclic set")
+
+    # An id with no entry (a log that references something it never recorded)
+    # is skipped rather than failing the whole diff.
+    flat = execlog.testonly_flatten({30: ([1, 999], [])}, paths, digests, 30, 100)
+    tc = test_case(tc, flat == ["a.txt@aaa"], "flatten skips an unknown id")
+
+    # The maps differ reports changed, added and removed separately, because
+    # the three have different causes: a rebuilt input, a new dep, a dropped one.
+    reason = execlog.testonly_diff_maps(
+        "inputs",
+        {"same.txt": "h1", "moved.txt": "h2", "gone.txt": "h3"},
+        {"same.txt": "h1", "moved.txt": "CHANGED", "new.txt": "h4"},
+    )
+    tc = test_case(tc, reason.kind == "inputs", "diff_maps keeps its kind")
+    tc = test_case(tc, reason.summary == "1 changed, 1 added, 1 removed", "diff_maps counts each bucket")
+    tc = test_case(
+        tc,
+        reason.items == ["changed  moved.txt", "added    new.txt", "removed  gone.txt"],
+        "diff_maps orders changed, then added, then removed",
+    )
+
+    # Identical maps produce no items, which is what suppresses the section.
+    reason = execlog.testonly_diff_maps("env", {"A": "1"}, {"A": "1"})
+    tc = test_case(tc, reason.items == [], "diff_maps is empty when nothing moved")
+
+    # Args are positional, so the differ reports the index: an inserted flag
+    # shifts everything after it, and saying so is more useful than a set diff.
+    reason = execlog.testonly_diff_lists(["cc", "-c", "a.c"], ["cc", "-O2", "-c", "a.c"])
+    tc = test_case(tc, len(reason.items) == 3, "diff_lists reports every shifted position")
+    tc = test_case(tc, reason.items[0] == "[1] -c -> -O2", "diff_lists names the index that changed")
+    tc = test_case(
+        tc,
+        reason.items[2] == "[3] <missing> -> a.c",
+        "diff_lists marks a position the shorter side does not have",
+    )
+
+    # The hash is order-sensitive and separator-safe: two lists that concatenate
+    # to the same string must not collide, or a diff misses a real change.
+    tc = test_case(
+        tc,
+        execlog.testonly_hash(["ab", "c"]) != execlog.testonly_hash(["a", "bc"]),
+        "hash does not collide across element boundaries",
+    )
+    tc = test_case(
+        tc,
+        execlog.testonly_hash(["a", "b"]) == execlog.testonly_hash(["a", "b"]),
+        "hash is stable",
+    )
+
+    return tc

@@ -1,0 +1,219 @@
+"""`aspect execlog diff` and `aspect execlog list`.
+
+Answers the question a cache-miss investigation actually starts with: two builds
+that should have been identical were not, and which action moved first?
+
+`diff` compares two compact execution logs and, for every action present in
+both whose action key changed, names the dimension that changed and the exact
+arguments, environment variables, or input files behind it.
+"""
+
+load("./private/lib/execlog.axl", "execlog")
+
+_MAX_ITEMS = 12
+
+def _require_file(ctx: TaskContext, path: str, what: str) -> None:
+    if not ctx.std.fs.exists(path):
+        ctx.std.process.exit(1, "{} not found: {}".format(what, path))
+
+def _render(ctx: TaskContext, result, verbose: bool) -> None:
+    out = ctx.std.io.stdout
+
+    for warning in result.truncated:
+        print("WARNING: execution log ended early, the comparison is partial. " + warning)
+
+    if not result.changed:
+        out.write("No action in both logs changed its action key.\n")
+    else:
+        out.write("{} action(s) changed and would not have been a cache hit:\n\n".format(len(result.changed)))
+
+    for change in result.changed:
+        out.write("{}  {}\n".format(change.mnemonic, change.label))
+        out.write("  output: {}\n".format(change.key))
+        for reason in change.reasons:
+            out.write("  {}: {}\n".format(reason.kind, reason.summary))
+            shown = reason.items if verbose else reason.items[:_MAX_ITEMS]
+            for item in shown:
+                out.write("      {}\n".format(item))
+            hidden = len(reason.items) - len(shown)
+            if hidden > 0:
+                out.write("      ... and {} more (pass --verbose)\n".format(hidden))
+        out.write("\n")
+
+    if result.only_before or result.only_after:
+        out.write("{} action(s) ran only in the first log, {} only in the second.\n".format(
+            len(result.only_before),
+            len(result.only_after),
+        ))
+        if verbose:
+            for key in result.only_before:
+                out.write("  only in first:  {}\n".format(key))
+            for key in result.only_after:
+                out.write("  only in second: {}\n".format(key))
+
+def _diff_impl(ctx: TaskContext) -> int | TaskConclusion:
+    logs = ctx.args.logs
+    if len(logs) != 2:
+        return TaskConclusion(
+            exit_code = 1,
+            message = "Pass exactly two compact execution logs, e.g. " +
+                      "`aspect execlog diff before.binpb.zst after.binpb.zst`.",
+        )
+
+    _require_file(ctx, logs[0], "first execution log")
+    _require_file(ctx, logs[1], "second execution log")
+
+    ctx.task.phase("read", description = "Reading both execution logs", emoji = "📖")
+    result = execlog.diff(ctx, logs[0], logs[1], not ctx.args.summary_only)
+
+    ctx.task.phase("report", description = "Explaining the differences", emoji = "🔍")
+    _render(ctx, result, ctx.args.verbose)
+
+    scanned = "{} and {} entries, {} and {} actions, {} in both".format(
+        result.before_entries,
+        result.after_entries,
+        result.before_spawns,
+        result.after_spawns,
+        result.matched,
+    )
+
+    if result.truncated:
+        return TaskConclusion(exit_code = 1, text = "Partial logs, " + scanned)
+
+    if not result.changed:
+        return TaskConclusion(exit_code = 0, text = "No action changed, " + scanned)
+
+    return TaskConclusion(
+        exit_code = 1 if ctx.args.fail_on_change else 0,
+        text = "{} action(s) changed, {}".format(len(result.changed), scanned),
+        flagged = not ctx.args.fail_on_change,
+    )
+
+def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
+    logs = ctx.args.logs
+    if len(logs) != 1:
+        return TaskConclusion(
+            exit_code = 1,
+            message = "Pass one compact execution log, e.g. `aspect execlog list build.binpb.zst`.",
+        )
+
+    _require_file(ctx, logs[0], "execution log")
+
+    index = execlog.index(ctx, logs[0])
+    out = ctx.std.io.stdout
+
+    rows = []
+    for key in sorted(index.spawns):
+        fp = index.spawns[key]
+        if ctx.args.mnemonic and fp.mnemonic != ctx.args.mnemonic:
+            continue
+        if ctx.args.cached == "only" and not fp.cache_hit:
+            continue
+        if ctx.args.cached == "exclude" and fp.cache_hit:
+            continue
+        rows.append(fp)
+
+    if ctx.args.output == "json":
+        out.write(json.encode([{
+            "label": fp.label,
+            "mnemonic": fp.mnemonic,
+            "runner": fp.runner,
+            "cache_hit": fp.cache_hit,
+            "output": fp.key,
+            "action_key": fp.overall,
+        } for fp in rows]) + "\n")
+    else:
+        for fp in rows:
+            out.write("{}  {}  {}{}\n".format(
+                fp.mnemonic,
+                fp.label,
+                fp.runner,
+                " (cached)" if fp.cache_hit else "",
+            ))
+
+    if index.truncated != None:
+        print("WARNING: execution log ended early, the listing is partial. " + index.truncated)
+        return TaskConclusion(exit_code = 1, text = "Partial log, {} action(s)".format(len(rows)))
+
+    return TaskConclusion(
+        exit_code = 0,
+        text = "{} action(s) of {} entries".format(len(rows), index.entries),
+    )
+
+diff = task(
+    group = ["execlog"],
+    summary = "Compare two compact execution logs and explain every action that changed.",
+    description = (
+        "Takes two `--execution_log_compact_file` artifacts from builds that should " +
+        "have been identical, and reports every action present in both whose action " +
+        "key moved, so it would have missed the cache the second time.\n\n" +
+        "For each one it names which part of the key changed — arguments, environment, " +
+        "inputs, tool inputs, or the execution platform — and for inputs it lists the " +
+        "files whose digests differ and the ones added or removed.\n\n" +
+        "Produce the logs with:\n" +
+        "  bazel build --execution_log_compact_file=before.binpb.zst //...\n" +
+        "  bazel build --execution_log_compact_file=after.binpb.zst //...\n\n" +
+        "or from an AXL task with `execution_log = [bazel.execution_log.compact_file(" +
+        "path = ...)]`.\n\n" +
+        "Exits 0 by default even when actions changed, because a changed action is a " +
+        "finding rather than an error. Pass --fail-on-change to make it fail a CI step " +
+        "that asserts two builds are identical."
+    ),
+    implementation = _diff_impl,
+    args = {
+        "verbose": args.boolean(
+            default = False,
+            short = "v",
+            description = "List every differing item rather than the first {}.".format(_MAX_ITEMS),
+        ),
+        "summary_only": args.boolean(
+            default = False,
+            description = "Report which dimension changed without the second pass that " +
+                          "resolves the individual files. Faster on very large logs.",
+        ),
+        "fail_on_change": args.boolean(
+            default = False,
+            description = "Exit non-zero when any action changed.",
+        ),
+        "logs": args.positional(
+            minimum = 0,
+            maximum = 2,
+            default = [],
+            description = "The two compact execution logs to compare.",
+        ),
+    },
+)
+
+list_actions = task(
+    group = ["execlog"],
+    kind = "list",
+    summary = "List the actions recorded in a compact execution log.",
+    description = (
+        "One line per action: mnemonic, label, runner, and whether it was a cache hit. " +
+        "Use --output=json for a machine-readable listing that includes each action's " +
+        "computed key, which is what `aspect execlog diff` compares."
+    ),
+    implementation = _list_impl,
+    args = {
+        "mnemonic": args.string(
+            default = "",
+            description = "Only list actions with this mnemonic, e.g. CppCompile.",
+        ),
+        "cached": args.string(
+            default = "all",
+            values = ["all", "only", "exclude"],
+            description = "Filter by cache hit.",
+        ),
+        "output": args.string(
+            default = "lines",
+            values = ["lines", "json"],
+            description = "Output format.",
+        ),
+        "logs": args.positional(
+            minimum = 0,
+            maximum = 1,
+            default = [],
+            description = "The compact execution log to list.",
+        ),
+    },
+)

@@ -1351,6 +1351,40 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<sink::execlog::ExecLogSink> {
         Ok(sink::execlog::ExecLogSink::CompactFile { path })
     }
+
+    /// Read a compact execution log that is already on disk.
+    ///
+    /// `path` is a finished `--execution_log_compact_file` artifact, the same thing
+    /// `bazel.execution_log.compact_file(path = ...)` writes. Returns an iterator of
+    /// `ExecLogEntry`, decoded on a background thread, so a log far larger than memory
+    /// can be walked as long as the loop body does not keep every entry.
+    ///
+    /// A missing file, or one that is not zstd, fails here. A log that is truncated or
+    /// corrupt part-way through ends the iteration early and sets `error()`; check it
+    /// after the loop when a partial read would give a wrong answer.
+    ///
+    /// ```python
+    /// entries = bazel.execution_log.read(path = "before.binpb.zst")
+    /// spawns = 0
+    /// for entry in entries:
+    ///     if entry.type != None and hasattr(entry.type, "mnemonic"):
+    ///         spawns += 1
+    /// if entries.error() != None:
+    ///     ctx.std.process.exit(1, "before.binpb.zst: " + entries.error())
+    /// ```
+    fn read(
+        #[starlark(require = named)] path: String,
+    ) -> anyhow::Result<iter::ExecutionLogIterator> {
+        let failure: iter::execlog::DecodeFailure = Default::default();
+        let stream = stream::ExecLogStream::spawn_from_path(path.clone().into(), failure.clone())
+            .map_err(|e| anyhow::anyhow!("reading execution log '{path}': {e}"))?;
+        let recv = stream.receiver();
+        // The decoder thread owns the file and ends itself at EOF or on error, so the
+        // stream handle has nothing left to do once the receiver is cloned out of it.
+        // Dropping it here detaches the thread; failures come back through `failure`.
+        drop(stream);
+        Ok(iter::ExecutionLogIterator::with_failure_slot(recv, failure))
+    }
 }
 
 #[starlark_module]

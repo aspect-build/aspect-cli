@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::{env, thread};
 
+use super::super::iter::execlog::DecodeFailure;
 use super::super::sink::retry::SinkOutcome;
 use super::util::{MultiTeeReader, read_varint};
 use thiserror::Error;
@@ -48,6 +49,9 @@ impl<R: Read> Read for RetryRead<R> {
         }
     }
 }
+
+/// Leading bytes of every zstd frame, little-endian 0xFD2FB528.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 #[derive(Debug)]
 pub struct ExecLogStream {
@@ -272,6 +276,104 @@ impl ExecLogStream {
         ))
     }
 
+    /// Decode a compact execution log that already exists on disk.
+    ///
+    /// Unlike [`spawn`](Self::spawn) and [`spawn_with_file`](Self::spawn_with_file), which
+    /// follow a file Bazel is still writing, this reads a finished
+    /// `--execution_log_compact_file` artifact: a plain zstd frame of
+    /// varint-length-prefixed `ExecLogEntry` messages. The end of the file is the end of
+    /// the stream, so EOF terminates rather than `BrokenPipe`.
+    ///
+    /// Sends block. A file this is pointed at was produced by a build that already
+    /// finished, so there is no build to slow down, and silently dropping entries the way
+    /// the live path does would make a diff wrong rather than slow.
+    ///
+    /// ## Truncation is usually, not always, detected
+    ///
+    /// A log cut off part-way through sets `failure` and ends the stream early, so a
+    /// caller that checks it does not compare a prefix and call it a clean result. The
+    /// detection comes from zstd, which reports `incomplete frame` when it runs out of
+    /// input mid-block. When the cut lands exactly on a block boundary, the decoder sees
+    /// a clean end of input and the entries before it are a structurally valid stream, so
+    /// the read looks successful. Measured against a real 134 KB log, cuts at 40% and
+    /// beyond were reported; cuts at 10% and 25% were not.
+    ///
+    /// Closing that last gap means checking zstd's end-of-frame marker, which the `zstd`
+    /// crate's `Decoder` does not expose; it needs `zstd_safe::DCtx` directly. Worth doing
+    /// if a partial log is ever mistaken for a real answer in practice.
+    pub fn spawn_from_path(path: PathBuf, failure: DecodeFailure) -> io::Result<Self> {
+        // Fail here, on the caller's thread, for the mistakes worth a traceback: a
+        // path that does not exist, or a file that is not a zstd frame at all.
+        // `Decoder::new` reads lazily, so it accepts a text file and only complains
+        // once the consumer starts iterating; checking the magic number is what makes
+        // "you pointed this at your BEP file" an error rather than an empty result.
+        // A log that is truncated or corrupt part-way through still surfaces through
+        // `failure`, because that cannot be known without reading it all.
+        let mut magic = [0u8; 4];
+        File::open(&path)?.read_exact(&mut magic).map_err(|e| {
+            io::Error::new(e.kind(), format!("{path:?} is too short to be a zstd frame"))
+        })?;
+        if magic != ZSTD_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{path:?} is not a zstd frame, so it is not a compact execution log. \
+                     Pass the file written by --execution_log_compact_file."
+                ),
+            ));
+        }
+
+        let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
+        let report = failure.clone();
+        let handle = thread::spawn(move || {
+            let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
+            // 10 is the maximum size of a varint so start with that size.
+            buf.resize(10, 0);
+
+            let mut out_raw = Decoder::new(File::open(&path)?)?;
+
+            let mut read = || -> Result<bool, ExecLogStreamError> {
+                let (size, _) = match read_varint(&mut out_raw) {
+                    Ok(it) => it,
+                    // A clean end of file between entries: the log is fully read.
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+                    Err(err) => return Err(err.into()),
+                };
+                if size > buf.len() {
+                    buf.resize(size, 0);
+                }
+                out_raw.read_exact(&mut buf[0..size])?;
+                sender.send(ExecLogEntry::decode(&buf[0..size])?)?;
+                Ok(true)
+            };
+
+            loop {
+                match read() {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        sender.close()?;
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        // Record before closing: a consumer blocked in `recv` wakes on
+                        // the close and may read `error()` immediately afterwards.
+                        if let Ok(mut slot) = report.lock() {
+                            *slot = Some(err.to_string());
+                        }
+                        let _ = sender.close();
+                        return Err(err);
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            handle,
+            recv: Some(recv),
+            file_sink_handles: vec![],
+        })
+    }
+
     pub fn receiver(&self) -> Receiver<ExecLogEntry> {
         self.recv
             .as_ref()
@@ -309,5 +411,158 @@ impl ExecLogStream {
             }
         }
         reader_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axl_proto::tools::protos::exec_log_entry;
+
+    /// Write `entries` as a compact execution log: one zstd frame over
+    /// varint-length-prefixed `ExecLogEntry` messages, which is the format
+    /// `--execution_log_compact_file` produces.
+    fn write_log(path: &std::path::Path, entries: &[ExecLogEntry]) {
+        let file = File::create(path).unwrap();
+        let mut encoder = zstd::Encoder::new(file, 0).unwrap();
+        for entry in entries {
+            encoder
+                .write_all(&entry.encode_length_delimited_to_vec())
+                .unwrap();
+        }
+        encoder.finish().unwrap().flush().unwrap();
+    }
+
+    fn file_entry(id: u32, path: &str) -> ExecLogEntry {
+        ExecLogEntry {
+            id,
+            r#type: Some(exec_log_entry::Type::File(exec_log_entry::File {
+                path: path.to_string(),
+                digest: None,
+            })),
+        }
+    }
+
+    fn drain(path: PathBuf) -> (Vec<ExecLogEntry>, Option<String>) {
+        let failure: DecodeFailure = Default::default();
+        let stream = ExecLogStream::spawn_from_path(path, failure.clone()).unwrap();
+        let recv = stream.receiver();
+        // Drop the stream's own receiver clone before consuming, exactly as the
+        // Starlark `read()` does. In fibre's SPMC every clone is an independent
+        // subscriber the sender must not lap, so an unconsumed one deadlocks the
+        // producer on any log longer than the channel bound.
+        drop(stream);
+        let mut out = vec![];
+        while let Ok(entry) = recv.recv() {
+            out.push(entry);
+        }
+        // The reader thread records the failure before closing the channel, so
+        // by the time recv() reports disconnection the slot is already set.
+        let err = failure.lock().unwrap().clone();
+        (out, err)
+    }
+
+    #[test]
+    fn reads_every_entry_of_a_complete_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.binpb.zst");
+        let entries: Vec<_> = (1..=250).map(|i| file_entry(i, &format!("f{i}.txt"))).collect();
+        write_log(&path, &entries);
+
+        let (got, err) = drain(path);
+        assert_eq!(err, None, "a complete log should not report a failure");
+        assert_eq!(got.len(), 250);
+        assert_eq!(got[0].id, 1);
+        assert_eq!(got[249].id, 250);
+    }
+
+    #[test]
+    fn rejects_a_file_that_is_not_zstd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-log.zst");
+        std::fs::write(&path, b"this is plainly not a zstd frame").unwrap();
+
+        let failure: DecodeFailure = Default::default();
+        let err = ExecLogStream::spawn_from_path(path, failure).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a zstd frame"),
+            "expected the magic-number check to name the problem, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_file_too_short_to_have_a_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.zst");
+        std::fs::write(&path, b"ab").unwrap();
+
+        let failure: DecodeFailure = Default::default();
+        let err = ExecLogStream::spawn_from_path(path, failure).unwrap_err();
+        assert!(
+            err.to_string().contains("too short"),
+            "expected a length complaint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_fails_on_the_calling_thread() {
+        let failure: DecodeFailure = Default::default();
+        let err =
+            ExecLogStream::spawn_from_path(PathBuf::from("/definitely/not/here.zst"), failure)
+                .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_truncated_log_yields_a_prefix_rather_than_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.binpb.zst");
+        let entries: Vec<_> = (1..=200).map(|i| file_entry(i, &format!("f{i}.txt"))).collect();
+        write_log(&path, &entries);
+
+        // Lop off the tail, keeping the header so the magic check still passes.
+        let bytes = std::fs::read(&path).unwrap();
+        let truncated = dir.path().join("truncated.binpb.zst");
+        std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+
+        let (got, _) = drain(truncated);
+        assert!(
+            got.len() < 200,
+            "expected fewer than every entry back from a truncated log, got {}",
+            got.len()
+        );
+    }
+
+    #[test]
+    fn a_corrupt_frame_reports_why_it_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.binpb.zst");
+        let entries: Vec<_> = (1..=2000)
+            .map(|i| file_entry(i, &format!("some/deep/path/to/a/source/file/number/{i}.txt")))
+            .collect();
+        write_log(&path, &entries);
+
+        // Flip bytes in the middle of the compressed payload. Unlike truncation,
+        // which can land on a block boundary and look like a clean end, this is
+        // always a frame zstd refuses, so it pins the reporting path itself.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let middle = bytes.len() / 2;
+        for b in &mut bytes[middle..middle + 32] {
+            *b ^= 0xFF;
+        }
+        let corrupt = dir.path().join("corrupt.binpb.zst");
+        std::fs::write(&corrupt, &bytes).unwrap();
+
+        let (got, err) = drain(corrupt);
+        assert!(
+            err.is_some(),
+            "a corrupt frame must set the failure slot, or a diff silently compares \
+             a prefix; got {} entries and no error",
+            got.len()
+        );
+        assert!(
+            got.len() < 2000,
+            "expected the stream to stop short, got every entry back"
+        );
     }
 }
