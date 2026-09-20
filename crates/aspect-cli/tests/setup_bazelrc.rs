@@ -531,6 +531,113 @@ fn an_existing_rc_is_kept_until_force() {
 
 /// Write a checkout that already carries its own generated rc, as committing the
 /// output of an off-CI run leaves it.
+/// A deployment's `~/.aspect/config.json`, as `aspect auth configure` leaves it.
+/// `exec` is present only where the deployment serves remote execution, which is
+/// what decides whether `--remote=exec` has anything to enable.
+fn deployment_config(home: &Path, exec: bool) {
+    std::fs::create_dir_all(home.join(".aspect")).expect(".aspect");
+    let exec = if exec {
+        r#""exec":"remote.silo-aws.aspect.build","#
+    } else {
+        ""
+    };
+    std::fs::write(
+        home.join(".aspect/config.json"),
+        format!(
+            concat!(
+                r#"{{"deployments":[{{"name":"silo-aws","default":true,"#,
+                r#""issuer":"https://auth.aspect.build","endpoints":{{"#,
+                r#""cache":"remote.silo-aws.aspect.build","#,
+                r#""bes":"remote.silo-aws.aspect.build",{exec}"#,
+                r#""results_url":"https://app.silo-aws.aspect.build/i/"}}}}]}}"#,
+            ),
+            exec = exec,
+        ),
+    )
+    .expect("config.json");
+}
+
+/// Remote execution is opt-in, and a deployment that serves no executor has
+/// nothing to opt into: no group names one, no section defines one, and the rc
+/// comes out as though the flag had not been passed. Aspect Cloud is that case
+/// today, so a job that sets `remote: exec` in one of the CI integrations gets
+/// the cache and BES and no word about the rest — unless this says so.
+#[test]
+fn remote_exec_warns_when_the_deployment_serves_no_executor() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+
+    let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, &["--remote=exec"]);
+    assert_success(&out);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr
+            .contains("Not enabling remote execution: aspect-cloud advertises no remote executor"),
+        "the deployment is named:\n{stderr}"
+    );
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert!(
+        !rc.contains("--remote_executor="),
+        "and nothing routes actions anywhere:\n{rc}"
+    );
+}
+
+/// The other side of it: a deployment that does serve one enables it, with the
+/// credential helper for its host, and says nothing.
+#[test]
+fn remote_exec_enables_the_executor_a_deployment_serves() {
+    let home = tempfile::tempdir().expect("temp home");
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    deployment_config(home.path(), true);
+
+    let out = unconfigured_cmd(home.path(), cwd.path(), true, &["--remote=exec"])
+        .env("ASPECT_API_TOKEN_SILO_AWS", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&out);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Not enabling remote execution"),
+        "nothing to warn about:\n{stderr}"
+    );
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert!(
+        rc.contains("--remote_executor=grpcs://remote.silo-aws.aspect.build"),
+        "the executor is enabled:\n{rc}"
+    );
+}
+
+/// The section check does not ask a checkout for an `-exec` section the
+/// deployment could never have. Without that, `--remote=exec` against a
+/// deployment with no executor reported the checkout as missing
+/// `aspect-cloud-exec` — a section neither it nor this command ever writes —
+/// and dropped to carrying its own copies of endpoints the checkout had.
+#[test]
+fn a_checkout_is_not_asked_for_an_exec_section_that_cannot_exist() {
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    checkout_owning_its_rc(workspace.path());
+
+    let out = setup_bazelrc_unconfigured(home.path(), workspace.path(), true, &["--remote=exec"]);
+    assert_success(&out);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("aspect-cloud-exec"),
+        "no section is reported missing:\n{stderr}"
+    );
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert!(
+        rc.contains("common --config=aspect-cloud"),
+        "and the checkout's own sections are still enabled:\n{rc}"
+    );
+}
+
 fn checkout_owning_its_rc(workspace: &Path) {
     std::fs::write(workspace.join("MODULE.bazel"), "").expect("MODULE.bazel");
     std::fs::create_dir_all(workspace.join(".aspect")).expect(".aspect");

@@ -70,7 +70,9 @@ nothing elsewhere, so a developer's `--home` rc does not quietly route their
 local builds. Remote execution is never in `auto`, on a runner or off it: a
 cluster may serve it while most jobs still want their actions local, so it waits
 to be named. A capability the endpoints do not advertise cannot be turned on by
-asking for it.
+asking for it, and asking is said out loud: `--remote=exec` where the deployment
+serves no executor — Aspect Cloud today — warns and leaves the rc as the rest of
+the spec asked for.
 
 One thing neither base solves: the execution log path is fixed per base, so two
 concurrent builds of one checkout under different `--output_base`s overwrite
@@ -284,13 +286,26 @@ def _remote_spec(value: str, on_ci: bool):
 def _sections_to_enable(default, spec) -> list:
     """The deployment sections a machine's rc would turn on for `spec`: the
     deployment's own where the cache or BES is wanted, and its `-exec` companion
-    where remote execution is. Empty when `--remote` enables nothing."""
+    where remote execution is. Empty when `--remote` enables nothing.
+
+    A deployment that serves no executor has no `-exec` section for anything to
+    define, so it is not asked for: a checkout's rc would be reported as missing
+    a section neither it nor this command ever writes."""
     wanted = []
     if spec.on["cache"] or spec.on["bes"]:
         wanted.append(config_name(default))
-    if spec.on["exec"]:
+    if spec.on["exec"] and _serves_remote_execution(None, default):
         wanted.append(config_name(default) + "-exec")
     return wanted
+
+def _serves_remote_execution(endpoint_env, default) -> bool:
+    """Whether anything here can route actions to an executor: the environment's
+    own (a runner's `ASPECT_WORKFLOWS_REMOTE_EXECUTOR`), or the default
+    deployment's `exec` endpoint. `endpoint_env` may be `None` to ask about the
+    deployment alone."""
+    if endpoint_env != None and endpoint_env.remote_executor != None:
+        return True
+    return default != None and default.exec != ""
 
 def _default_deployment(deployments: list):
     """The deployment a `bazel` call reaches without naming one, or `None`."""
@@ -406,6 +421,13 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
                           (default.name, login_hint(default), config_name(default)))
         endpoint_env = deployment_environment(default, environment.ci)
         auth = deployment_group_auth(default, helper)
+
+    # Asked for an executor where there is none. Nothing downstream fails over
+    # it — no group is enabled and no section names one — so the rc would come
+    # out as if the flag had not been passed.
+    if machine_rc and spec.on["exec"] and not _serves_remote_execution(endpoint_env, default):
+        warn(ctx.std, "Not enabling remote execution: %s. `--remote=exec` adds nothing to this rc; the remote cache and BES are unaffected." %
+                      ("%s advertises no remote executor" % default.name if default != None else "nothing here advertises a remote executor"))
 
     (groups, enabled) = _groups(ctx, endpoint_env, on_runner, machine_rc, spec.on, auth, paths.exec_log)
     if chain_to_repo:
