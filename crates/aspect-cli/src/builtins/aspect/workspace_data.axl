@@ -1,5 +1,6 @@
-"""`aspect setup workspace-data` — print this build's commit, branch, PR and CI
-metadata as Bazel workspace status, for `--workspace_status_command`.
+"""`aspect setup workspace-data` — print this build's commit, branch, PR, CI
+and build-account metadata as Bazel workspace status, for
+`--workspace_status_command`.
 
     bazel build //... --workspace_status_command="aspect setup workspace-data"
 
@@ -30,6 +31,12 @@ The keys are the same ones `aspect <task>` sends as `--build_metadata`
 `--build_metadata` winning on a clash (`lib/bazel_results.axl::merged_meta`).
 So a vanilla `bazel` reaches the same Web UI fields — commit, branch, PR,
 actor, repository, run URL — that a task does.
+
+Bazel takes one status command, and the one this replaces is Bazel's own
+default, the sole source of `BUILD_USER`, `BUILD_HOST` and `BUILD_TIMESTAMP`.
+`BUILD_USER` is reported here too, so the Web UI's "User" row survives the
+swap; a repo that needs the other two re-emits them from the wrapper script
+above.
 
 Keys are written unprefixed, which puts them in `volatile-status.txt`. A
 `STABLE_` key invalidates every stamped action whenever it changes, and
@@ -62,7 +69,7 @@ def _workspace_data_impl(ctx: TaskContext) -> int:
 
 workspace_data = task(
     group = ["setup"],
-    summary = "Print this build's commit, branch, PR and CI metadata as Bazel workspace status.",
-    description = "Print the current commit, branch, pull request, actor, repository and CI run as Bazel workspace status — `KEY value` lines on stdout, for `bazel --workspace_status_command=\"aspect setup workspace-data\"`. Bazel runs it at the start of every invocation, so the values are always this build's; pointing at it from a shared rc is what lets a vanilla `bazel` in any workspace on a CI runner reach the Aspect Web UI with full attribution, without any per-build file to go stale. The keys match the `--build_metadata` an `aspect <task>` sends, which the Web UI merges with these. They are unprefixed, so they land in volatile-status.txt and never invalidate a stamped action. Prints nothing and exits 0 where there is no metadata to report.",
+    summary = "Print this build's commit, branch, PR, CI and build-account metadata as Bazel workspace status.",
+    description = "Print the current commit, branch, pull request, actor, repository, CI run and build account as Bazel workspace status — `KEY value` lines on stdout, for `bazel --workspace_status_command=\"aspect setup workspace-data\"`. Bazel runs it at the start of every invocation, so the values are always this build's; pointing at it from a shared rc is what lets a vanilla `bazel` in any workspace on a CI runner reach the Aspect Web UI with full attribution, without any per-build file to go stale. The keys match the `--build_metadata` an `aspect <task>` sends, which the Web UI merges with these. They are unprefixed, so they land in volatile-status.txt and never invalidate a stamped action. Prints nothing and exits 0 where there is no metadata to report.",
     implementation = _workspace_data_impl,
 )

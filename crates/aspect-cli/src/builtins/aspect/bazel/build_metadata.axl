@@ -461,6 +461,20 @@ def _collect_gitlab(env, meta):
     if build_url:
         meta["BUILD_URL"] = build_url
 
+_BUILD_USER_VARS = ["USER", "LOGNAME", "USERNAME"]
+
+def _build_user(env) -> str:
+    """The OS account the build runs under, which Bazel's own default workspace
+    status script reports as BUILD_USER. `aspect setup workspace-data` replaces
+    that script, so it has to supply the key itself or the Web UI's "User" row
+    goes blank. LOGNAME covers a session that leaves USER unset, USERNAME
+    Windows."""
+    for name in _BUILD_USER_VARS:
+        value = env.var(name)
+        if value:
+            return value
+    return ""
+
 # Task-identity metadata (depends on TaskContext, not just env)
 
 def version_tuple(s):
@@ -560,9 +574,9 @@ def get_task_metadata_flags(ctx):
 # Public entry point
 
 def get_build_metadata(std) -> dict:
-    """The build metadata for this checkout and CI environment, as {KEY: value}
-    with empty values dropped. Rendered as `--build_metadata` flags by
-    `get_build_metadata_flags` and as workspace status by
+    """The build metadata for this checkout, CI environment and build account,
+    as {KEY: value} with empty values dropped. Rendered as `--build_metadata`
+    flags by `get_build_metadata_flags` and as workspace status by
     `workspace_status_lines`."""
     meta = {}
 
@@ -592,6 +606,10 @@ def get_build_metadata(std) -> dict:
             meta["USER"] = meta["COMMIT_AUTHOR_NAME"]
         elif std.env.var("USER"):
             meta["USER"] = std.env.var("USER")
+
+    # 5: BUILD_USER — where the build physically ran, as opposed to USER, which
+    # prefers the commit author or CI actor.
+    meta["BUILD_USER"] = _build_user(std.env)
 
     return {key: value for (key, value) in meta.items() if value}
 
