@@ -49,10 +49,13 @@ impl Issuer {
         let worker_grants = grants.clone();
         let worker_stop = stop.clone();
         let worker_bearer = bearer.clone();
+        // The issuer runs off the main thread because the test drives the other
+        // half of the exchange: it holds the first grant open (below, on
+        // `release_rx`) while it starts the competing processes, then releases
+        // it. Serving one connection at a time is deliberate. Requests arriving
+        // during that pause queue on the listener, which is what exposes an
+        // uncoordinated client.
         let thread = std::thread::spawn(move || {
-            // The first grant blocks here while additional real clients start.
-            // Requests arriving meanwhile queue on the listener, exposing an
-            // uncoordinated client even though responses are served serially.
             while !worker_stop.load(Ordering::SeqCst) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,
@@ -117,7 +120,11 @@ impl Drop for Issuer {
         }
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
+            // A worker panic (a malformed request, or the read timeout in
+            // `read_request`) must not be re-raised here: this drop runs while
+            // unwinding from the test's own failure, and a second panic aborts
+            // the process with the original assertion unreported.
+            let _ = thread.join();
         }
     }
 }
