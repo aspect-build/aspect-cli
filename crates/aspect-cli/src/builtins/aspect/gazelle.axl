@@ -94,6 +94,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/runnable.axl", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -410,6 +411,7 @@ def _emit_final(ph, exit_code):
         progress = _progress(status, data),
     ))
     print_repro_and_fix(ctx.std, data, status)
+    results_json.emit(ctx, data, "gazelle", status, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -490,6 +492,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         directory = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
+        stdout = results_json.bazel_stdout(ctx),
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns. Populate
@@ -732,7 +735,7 @@ gazelle = task(
             maximum = 4096,
             description = "Directories gazelle should update BUILD files in. When empty (default), gazelle considers every directory in the workspace. Combine with --scope=changed to take the intersection with directories that contain changed files. Useful for scoping to a sub-workspace within a monorepo. CAUTION: under --scope=changed, supplying narrow dirs intersection-filters the derived set. Changed dirs that fall outside the listed roots are dropped, so the BUILD updates those changes would have triggered are silently missed. NOTE: positional dirs only narrow the BUILD-regeneration step. Under gazelle's default `-index=all`, gazelle still traverses every workspace directory, parses every BUILD, and re-determines target exports (often re-parsing source) repo-wide. Pair with `--gazelle-flag=-index=lazy` (plus `# gazelle:go_search` / `# gazelle:proto_search` directives) to also narrow that traversal + parse + indexing work. Optionally also pass `--gazelle-flag=-r=false` to skip recursion on top of that, but some gazelle language extensions are incompatible with non-recursive mode — test against your plugin set first. See https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update.",
         ),
-    } | bzl.flags.args("the gazelle build") | bzl.announce.args("the gazelle build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the gazelle build") | bzl.announce.args("the gazelle build") | bes_args() | repro_flavor_args(include_fix = True) | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

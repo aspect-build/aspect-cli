@@ -30,6 +30,7 @@ load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_sever
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -276,6 +277,7 @@ def _emit_final(ph, exit_code):
         progress = _progress(status, data),
     ))
     print_repro_and_fix(ctx.std, data, status)
+    results_json.emit(ctx, data, "format", status, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -346,6 +348,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         directory = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
+        stdout = results_json.bazel_stdout(ctx),
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns. Populate
@@ -697,7 +700,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | bzl.flags.args("the formatter build") | bzl.announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the formatter build") | bzl.announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True) | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

@@ -50,6 +50,14 @@ _Invocation = record(
     announce_version = field(bool),
     announce_command = field(bool),
     max_attempts = field(int),
+    # Where Bazel's own stdout goes, always a `Writable` so `_do_spawn` needs no
+    # conditional (the builtin distinguishes "not passed" = inherit from `None` =
+    # discard). Defaults to our own stdout, which duplicates the fd and is
+    # therefore the same thing as inheriting. A task whose stdout carries a
+    # machine payload passes `ctx.std.io.stderr` instead: Bazel writes its result
+    # summary and test output to stdout — only its progress goes to stderr — and
+    # that would otherwise land in the middle of the payload.
+    stdout = field(typing.Any),
 )
 
 def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: str, rc, command: str) -> list[str]:
@@ -83,7 +91,7 @@ def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: st
         return []
     return cli_targets
 
-def _resolve(ctx, command: str) -> _Invocation:
+def _resolve(ctx, command: str, stdout = None) -> _Invocation:
     """Shared constructor for `build` / `test`. Reads everything a feature injected
     on the trait (BES backends, the `rc_flags` hooks); the bazel core knows
     nothing about deployments or Aspect auth."""
@@ -151,6 +159,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         announce_version = announce_version,
         announce_command = announce_command,
         max_attempts = max(1, requested),
+        stdout = stdout if stdout != None else ctx.std.io.stdout,
     )
 
 def _do_start(inv: _Invocation) -> None:
@@ -200,6 +209,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
+            stdout = inv.stdout,
             *inv.patterns
         )
     else:
@@ -210,6 +220,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
             aspects = aspects,
+            stdout = inv.stdout,
             *inv.patterns
         )
 
@@ -258,9 +269,9 @@ def _do_finish(inv: _Invocation, w) -> None:
     for handler in inv.trait.build_end:
         handler(inv.ctx, code)
 
-def _handle(ctx, command: str):
+def _handle(ctx, command: str, stdout = None):
     """Build the immutable config, then a handle of thin forwarders over it."""
-    inv = _resolve(ctx, command)
+    inv = _resolve(ctx, command, stdout = stdout)
     return struct(
         rc = inv.rc,
         targets = inv.patterns,
@@ -276,10 +287,14 @@ def _handle(ctx, command: str):
         finish = lambda w: _do_finish(inv, w),
     )
 
-def build(ctx):
-    """High-level `bazel build` invocation handle. See module docstring."""
-    return _handle(ctx, "build")
+def build(ctx, stdout = None):
+    """High-level `bazel build` invocation handle. See module docstring.
 
-def test(ctx):
-    """High-level `bazel test` invocation handle. See module docstring."""
-    return _handle(ctx, "test")
+    `stdout` redirects Bazel's own stdout (see `_Invocation.stdout`)."""
+    return _handle(ctx, "build", stdout = stdout)
+
+def test(ctx, stdout = None):
+    """High-level `bazel test` invocation handle. See module docstring.
+
+    `stdout` redirects Bazel's own stdout (see `_Invocation.stdout`)."""
+    return _handle(ctx, "test", stdout = stdout)
