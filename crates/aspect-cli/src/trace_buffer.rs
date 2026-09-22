@@ -123,12 +123,10 @@ impl SpanExporter for BufferingSpanExporter {
         Ok(())
     }
 
-    fn shutdown_with_timeout(&mut self, timeout: Duration) -> OTelSdkResult {
-        let mut st = self.inner.lock().expect("span buffer mutex poisoned");
-        for ex in st.late.iter_mut() {
-            if let Some(ex) = Arc::get_mut(ex) {
-                let _ = ex.shutdown_with_timeout(timeout);
-            }
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        let st = self.inner.lock().expect("span buffer mutex poisoned");
+        for ex in st.late.iter() {
+            let _ = ex.shutdown_with_timeout(timeout);
         }
         Ok(())
     }
