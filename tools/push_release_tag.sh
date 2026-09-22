@@ -2,8 +2,14 @@
 set -o errexit -o nounset -o pipefail
 
 # Determine the script path
-SCRIPTPATH="$(cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit; pwd -P)"
-if [ -z "$SCRIPTPATH" ]; then echo "Error: Could not determine script path"; exit 1; fi
+SCRIPTPATH="$(
+    cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit
+    pwd -P
+)"
+if [ -z "$SCRIPTPATH" ]; then
+    echo "Error: Could not determine script path"
+    exit 1
+fi
 
 # Run the workspace_status script and capture its output
 output=$("${SCRIPTPATH}/../bazel/workspace_status.sh")
@@ -13,8 +19,8 @@ version=$(echo "$output" | grep '^STABLE_MONOREPO_SHORT_VERSION ' | awk '{print 
 
 # Check if the version was found (optional, but good practice to avoid errors)
 if [ -z "$version" ]; then
-  echo "Error: STABLE_MONOREPO_SHORT_VERSION not found in output."
-  exit 1
+    echo "Error: STABLE_MONOREPO_SHORT_VERSION not found in output."
+    exit 1
 fi
 
 # Push the release tag
