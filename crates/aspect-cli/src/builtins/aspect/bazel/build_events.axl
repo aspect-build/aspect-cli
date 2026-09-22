@@ -294,20 +294,25 @@ def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
       - failed with events left unconfirmed → `Uploaded <acked> of <sent> … before
         the stream failed`
 
-    Public so `build_events_test.axl` can assert the message shapes."""
+    Public so `build_events_test.axl` can assert the message shapes.
+
+    A line that ends on the backend URL takes no full stop — GitHub Actions
+    autolinks a bare URL in the log and swallows the trailing period into the
+    href — so `stop` supplies one only for the generic-name fallback."""
     backend = uri or "the BES backend"
     plural = "" if sent == 1 else "s"
+    stop = "" if uri else "."
 
     if not failed:
-        return "Streamed %d build event%s to %s." % (sent, plural, backend)
+        return "Streamed %d build event%s to %s%s" % (sent, plural, backend, stop)
 
     # Failed. A stream that never sent an event failed to connect; one that acked
     # everything it sent delivered its events (the failure was the post-stream
     # lifecycle close), so report the plain count; otherwise it's a partial upload.
     if sent == 0:
-        return "Failed to stream build events to %s." % backend
+        return "Failed to stream build events to %s%s" % (backend, stop)
     if acked >= sent:
-        return "Streamed %d build event%s to %s." % (sent, plural, backend)
+        return "Streamed %d build event%s to %s%s" % (sent, plural, backend, stop)
     return "Uploaded %d of %d build event%s to %s before the stream failed." % (acked, sent, plural, backend)
 
 def grpc_backends(sinks: list) -> list:
@@ -326,16 +331,21 @@ def announce_bes_sinks(ctx, sinks: list):
     Call *after* the spawning phase's `task_update`, not before: the streams
     belong to the spawn, so announcing first strands these lines above the phase
     header they describe. Callers with a retry loop announce on the first attempt
-    only — a retry reuses the same sinks."""
+    only — a retry reuses the same sinks.
+
+    The line ends on the URI with no full stop: GitHub Actions autolinks a bare
+    URL in the log and swallows the trailing period into the href."""
     for sink in grpc_backends(sinks):
-        info(ctx.std, "Streaming build events to %s." % sink.uri)
+        info(ctx.std, "Streaming build events to %s" % sink.uri)
 
 def bes_results_line(results_url: str, invocation_id: str) -> str:
     """The "Streaming build results to …" line for a CLI-streamed invocation, or `""`
-    when either half is missing. Public so `bes_sinks_test.axl` can assert the shape."""
+    when either half is missing. Public so `bes_sinks_test.axl` can assert the shape.
+
+    Ends on the URL with no full stop, for the same reason as `announce_bes_sinks`."""
     if not results_url or not invocation_id:
         return ""
-    return "Streaming build results to %s." % join_url(results_url, invocation_id)
+    return "Streaming build results to %s" % join_url(results_url, invocation_id)
 
 def announce_bes_results_url(ctx, results_url: str, invocation_id: str):
     """Announce where the invocation the CLI just streamed is viewable, the companion
