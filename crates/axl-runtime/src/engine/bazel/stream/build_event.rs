@@ -1,5 +1,6 @@
 use axl_proto::build_event_stream::BuildEvent;
 use prost::Message;
+use prost::bytes::Bytes;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::ErrorKind;
@@ -26,6 +27,30 @@ pub enum BuildEventStreamError {
     ProstDecode(#[from] prost::DecodeError),
     #[error("prost encode error: {0}")]
     ProstEncode(#[from] prost::EncodeError),
+}
+
+/// One build event as the reader thread hands it to subscribers: decoded,
+/// and with it the exact bytes it was decoded from (re-encoded when redaction
+/// changed it). A subscriber that only forwards events — the gRPC sink —
+/// takes the bytes and never touches the proto, so a backlog behind a slow
+/// backend costs what bazel wrote and no more; subscribers that read fields
+/// share the one decode behind the `Arc`.
+#[derive(Debug)]
+pub struct BuildEventEnvelope {
+    pub event: BuildEvent,
+    /// The serialized `BuildEvent` message, without its length prefix.
+    pub encoded: Bytes,
+}
+
+impl BuildEventEnvelope {
+    /// The decoded event, moved out when this was the last reference and
+    /// cloned otherwise.
+    pub fn into_event(this: Arc<Self>) -> BuildEvent {
+        match Arc::try_unwrap(this) {
+            Ok(envelope) => envelope.event,
+            Err(shared) => shared.event.clone(),
+        }
+    }
 }
 
 /// How often to re-check for a writer on the FIFO — while the watchdog waits
@@ -107,7 +132,7 @@ fn spawn_open_watchdog(path: PathBuf, writer_pid: u32) -> Arc<AtomicBool> {
 pub struct BuildEventStream {
     /// Thread handle, stored in Option so we can take() it to join without consuming self.
     handle: Option<JoinHandle<Result<(), BuildEventStreamError>>>,
-    broadcaster: Option<Broadcaster<BuildEvent>>,
+    broadcaster: Option<Broadcaster<Arc<BuildEventEnvelope>>>,
 }
 
 impl BuildEventStream {
@@ -216,41 +241,44 @@ impl BuildEventStream {
             // bytes straight through).
             let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
 
-            let read_event = |buf: &mut Vec<u8>,
-                              reencode_buf: &mut Vec<u8>,
-                              raw_out: &mut MultiWriter<BufWriter<File>>,
-                              reader: &mut PendingWriterReader|
-             -> Result<BuildEvent, BuildEventStreamError> {
-                let (size, vbuf) = read_varint(reader)?;
-                if size > buf.len() {
-                    buf.resize(size, 0);
-                }
-                reader.read_exact(&mut buf[0..size])?;
-                let mut event = BuildEvent::decode(&buf[0..size])?;
-                // Redact secrets (headers, env passthrough, URL creds) BEFORE
-                // anything downstream sees the event. Raw file sinks, gRPC
-                // forwarders, and AXL iterators all read from the post-redact
-                // stream — secrets never leave this process.
-                //
-                // `redact_event` only mutates a small set of payload kinds
-                // (StructuredCommandLine, UnstructuredCommandLine, BuildMetadata,
-                // etc.); for the common case it returns false and we write the
-                // original bytes straight through with no re-encode cost.
-                let modified = redact_event(&mut event);
-                // These can be extremely slow and expensive calls depending
-                // on the destination that we are writing to.
-                // TODO: Ensure we have a dedicated thread where the writing
-                // happens to avoid stalling.
-                if modified {
-                    reencode_buf.clear();
-                    event.encode_length_delimited(reencode_buf)?;
-                    raw_out.write_all(reencode_buf.as_slice())?;
-                } else {
-                    raw_out.write(vbuf.as_slice())?;
-                    raw_out.write_all(&buf[0..size])?;
-                }
-                Ok(event)
-            };
+            let read_event =
+                |buf: &mut Vec<u8>,
+                 reencode_buf: &mut Vec<u8>,
+                 raw_out: &mut MultiWriter<BufWriter<File>>,
+                 reader: &mut PendingWriterReader|
+                 -> Result<Arc<BuildEventEnvelope>, BuildEventStreamError> {
+                    let (size, vbuf) = read_varint(reader)?;
+                    if size > buf.len() {
+                        buf.resize(size, 0);
+                    }
+                    reader.read_exact(&mut buf[0..size])?;
+                    let mut event = BuildEvent::decode(&buf[0..size])?;
+                    // Redact secrets (headers, env passthrough, URL creds) BEFORE
+                    // anything downstream sees the event. Raw file sinks, gRPC
+                    // forwarders, and AXL iterators all read from the post-redact
+                    // stream — secrets never leave this process.
+                    //
+                    // `redact_event` only mutates a small set of payload kinds
+                    // (StructuredCommandLine, UnstructuredCommandLine, BuildMetadata,
+                    // etc.); for the common case it returns false and we write the
+                    // original bytes straight through with no re-encode cost.
+                    let modified = redact_event(&mut event);
+                    // These can be extremely slow and expensive calls depending
+                    // on the destination that we are writing to.
+                    // TODO: Ensure we have a dedicated thread where the writing
+                    // happens to avoid stalling.
+                    let encoded = if modified {
+                        reencode_buf.clear();
+                        event.encode_length_delimited(reencode_buf)?;
+                        raw_out.write_all(reencode_buf.as_slice())?;
+                        Bytes::from(event.encode_to_vec())
+                    } else {
+                        raw_out.write(vbuf.as_slice())?;
+                        raw_out.write_all(&buf[0..size])?;
+                        Bytes::copy_from_slice(&buf[0..size])
+                    };
+                    Ok(Arc::new(BuildEventEnvelope { event, encoded }))
+                };
 
             // Set when BuildFinished arrives with REMOTE_CACHE_EVICTED (code 39).
             // While true, a BrokenPipe (attempt N's writer closing) is swallowed
@@ -261,11 +289,11 @@ impl BuildEventStream {
 
             loop {
                 match read_event(&mut buf, &mut reencode_buf, &mut raw_out, &mut reader) {
-                    Ok(event) => {
-                        let last_message = event.last_message;
+                    Ok(envelope) => {
+                        let last_message = envelope.event.last_message;
 
                         use axl_proto::build_event_stream::build_event::Payload;
-                        match &event.payload {
+                        match &envelope.event.payload {
                             Some(Payload::Finished(finished)) => {
                                 if finished
                                     .exit_code
@@ -305,7 +333,7 @@ impl BuildEventStream {
                         }
 
                         // Fan-out to all subscribers (non-blocking)
-                        broadcaster.send(event);
+                        broadcaster.send(envelope);
 
                         if last_message && !expecting_retry {
                             return finish(&mut raw_out);
@@ -361,19 +389,19 @@ impl BuildEventStream {
     /// This is for internal use by sinks that subscribe at stream creation time
     /// and don't need history replay. Use `subscribe()` for user-facing APIs
     /// where late subscription support is needed.
-    pub fn subscribe(&self) -> Subscriber<BuildEvent> {
+    pub fn subscribe(&self) -> Subscriber<Arc<BuildEventEnvelope>> {
         self.subscribe_filtered(None)
     }
 
     /// Subscribe with an optional send-side filter (see
     /// [`Broadcaster::subscribe_filtered`]). A filtered subscriber's buffer
     /// only holds events the filter accepts — the reader thread skips the rest
-    /// before cloning them, so a `kinds=`-scoped AXL iterator never pays for
-    /// the event kinds it doesn't consume.
+    /// before they reach this subscriber, so a `kinds=`-scoped AXL iterator
+    /// never pays for the event kinds it doesn't consume.
     pub fn subscribe_filtered(
         &self,
-        filter: Option<SubscriberFilter<BuildEvent>>,
-    ) -> Subscriber<BuildEvent> {
+        filter: Option<SubscriberFilter<Arc<BuildEventEnvelope>>>,
+    ) -> Subscriber<Arc<BuildEventEnvelope>> {
         match self.broadcaster.as_ref() {
             Some(b) => b.subscribe_filtered(filter),
             // Stream has already been joined.
@@ -436,7 +464,9 @@ mod tests {
     /// `ASPECT_BES_BENCH_LAG=request|event|bytes|wire` makes the gRPC-shaped
     /// subscriber hold every event until the producer is done — what a backend
     /// that acks slower than the build produces events does to this process —
-    /// in each of the shapes the retry buffer could retain.
+    /// in each of the shapes the sink could retain: a built publish request,
+    /// the decoded event, the serialized request, or the envelope's own wire
+    /// bytes (what the sink keeps).
     #[test]
     #[ignore = "benchmark; needs ASPECT_BES_BENCH_FILE"]
     fn bench_stream_fanout() {
@@ -444,9 +474,8 @@ mod tests {
             eprintln!("skipped: set ASPECT_BES_BENCH_FILE to a recorded bep.binpb");
             return;
         };
-        // What a lagging sink retains: "request" is today's shape (a fully
-        // built publish request per event), "event" the decoded event behind
-        // an Arc, "bytes" the serialized request. Empty drains promptly.
+        // What a lagging sink retains; see the doc comment. Empty drains
+        // promptly.
         let lag = std::env::var("ASPECT_BES_BENCH_LAG").unwrap_or_default();
 
         let path = temp_fifo_path();
@@ -461,24 +490,23 @@ mod tests {
         // request, and every request is retained until the server acks it.
         let grpc = std::thread::spawn(move || {
             let mut held_requests = Vec::new();
-            let mut held_events: Vec<std::sync::Arc<BuildEvent>> = Vec::new();
-            let mut held_bytes: Vec<(i64, Vec<u8>)> = Vec::new();
+            let mut held_events: Vec<BuildEvent> = Vec::new();
+            let mut held_bytes: Vec<(i64, Bytes)> = Vec::new();
             let mut n = 0u64;
-            while let Ok(event) = grpc_sub.recv() {
-                let req = build_event_stream::build_tool::bazel_event(
+            while let Ok(envelope) = grpc_sub.recv() {
+                let req = build_event_stream::build_tool::bazel_event_encoded(
                     "bench-build".to_string(),
                     "bench-invocation".to_string(),
                     n as i64 + 1,
-                    &event,
+                    envelope.encoded.clone(),
+                    Default::default(),
                 );
                 n += 1;
                 match lag.as_str() {
                     "request" => held_requests.push(req),
-                    "event" => held_events.push(std::sync::Arc::new(event)),
-                    "bytes" => held_bytes.push((n as i64, req.encode_to_vec())),
-                    // What the sink would hold if it carried the event's own
-                    // wire bytes and built the request at send time.
-                    "wire" => held_bytes.push((n as i64, event.encode_to_vec())),
+                    "event" => held_events.push(envelope.event.clone()),
+                    "bytes" => held_bytes.push((n as i64, Bytes::from(req.encode_to_vec()))),
+                    "wire" => held_bytes.push((n as i64, envelope.encoded.clone())),
                     _ => {}
                 }
             }
@@ -666,7 +694,7 @@ mod tests {
             1,
             "a late writer's events must not be dropped"
         );
-        assert!(events[0].last_message);
+        assert!(events[0].event.last_message);
     }
 
     // -------------------------------------------------------------------------
@@ -697,9 +725,9 @@ mod tests {
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         assert_eq!(events.len(), 3);
-        assert!(!events[0].last_message);
-        assert!(!events[1].last_message);
-        assert!(events[2].last_message);
+        assert!(!events[0].event.last_message);
+        assert!(!events[1].event.last_message);
+        assert!(events[2].event.last_message);
     }
 
     // -------------------------------------------------------------------------
@@ -731,7 +759,7 @@ mod tests {
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         assert_eq!(events.len(), 1);
-        assert!(!events[0].last_message);
+        assert!(!events[0].event.last_message);
     }
 
     // -------------------------------------------------------------------------
@@ -810,7 +838,11 @@ mod tests {
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
             let _ = holder.kill();
-            (joined, events.len(), events.first().map(|e| e.last_message))
+            (
+                joined,
+                events.len(),
+                events.first().map(|e| e.event.last_message),
+            )
         });
         assert_eq!(
             outcome,
@@ -1004,19 +1036,19 @@ mod tests {
         assert_eq!(events.len(), 4);
         // attempt 1
         assert!(matches!(
-            events[0].payload,
+            events[0].event.payload,
             Some(axl_proto::build_event_stream::build_event::Payload::Started(_))
         ));
         assert!(matches!(
-            events[1].payload,
+            events[1].event.payload,
             Some(axl_proto::build_event_stream::build_event::Payload::Finished(_))
         ));
         // attempt 2
         assert!(matches!(
-            events[2].payload,
+            events[2].event.payload,
             Some(axl_proto::build_event_stream::build_event::Payload::Started(_))
         ));
-        assert!(events[3].last_message);
+        assert!(events[3].event.last_message);
     }
 
     /// Bazel may set last_message=true on the BuildFinished(REMOTE_CACHE_EVICTED)
@@ -1055,8 +1087,8 @@ mod tests {
         // Receiving all 4 events proves the stream did not terminate when it saw
         // last_message=true on attempt 1's REMOTE_CACHE_EVICTED BuildFinished.
         assert_eq!(events.len(), 4);
-        assert!(events[1].last_message); // attempt 1's BuildFinished had last_message=true ...
-        assert!(events[3].last_message); // ... but only attempt 2's actually closed the stream
+        assert!(events[1].event.last_message); // attempt 1's BuildFinished had last_message=true ...
+        assert!(events[3].event.last_message); // ... but only attempt 2's actually closed the stream
     }
 
     // -------------------------------------------------------------------------

@@ -589,6 +589,7 @@ dependencies = [
  "axl-proto",
  "futures 0.3.31",
  "http",
+ "prost",
  "prost-types",
  "thiserror 2.0.18",
  "tokio",

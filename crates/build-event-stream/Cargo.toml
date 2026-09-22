@@ -13,6 +13,7 @@ rust-version.workspace = true
 axl-proto = {path="../axl-proto"}
 futures = "0.3.31"
 http = "1.3.1"
+prost = "0.14.1"
 prost-types = "0.14.1"
 thiserror = "2.0.17"
 tokio-stream = "0.1.17"

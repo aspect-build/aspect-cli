@@ -1,17 +1,17 @@
 use std::{
-    sync::mpsc::RecvError,
+    sync::{Arc, mpsc::RecvError},
     thread::{self, JoinHandle},
     time::SystemTime,
 };
 
 use axl_proto::{
     Timestamp,
-    build_event_stream::{BuildEvent, TestStatus, build_event::Payload, build_event_id::Id},
+    build_event_stream::{TestStatus, build_event::Payload, build_event_id::Id},
 };
 
 use tracing::{Level, span::EnteredSpan};
 
-use super::super::stream::Subscriber;
+use super::super::stream::{BuildEventEnvelope, Subscriber};
 use super::retry::SinkOutcome;
 
 #[derive(Debug)]
@@ -63,22 +63,23 @@ fn test_status_code(status: TestStatus) -> &'static str {
 }
 
 impl Tracing {
-    pub fn spawn(recv: Subscriber<BuildEvent>) -> JoinHandle<SinkOutcome> {
+    pub fn spawn(recv: Subscriber<Arc<BuildEventEnvelope>>) -> JoinHandle<SinkOutcome> {
         let events_span = tracing::info_span!("events");
         thread::spawn(move || {
             let _events_guard = events_span.enter();
             let mut build_span: Option<EnteredSpan> = None;
 
             loop {
-                let event = match recv.recv() {
+                let envelope = match recv.recv() {
                     Ok(e) => e,
                     Err(RecvError) => break,
                 };
+                let event = &envelope.event;
 
                 let Some(id) = event.id.as_ref().and_then(|w| w.id.as_ref()) else {
                     continue;
                 };
-                let Some(payload) = event.payload else {
+                let Some(payload) = event.payload.as_ref() else {
                     continue;
                 };
 
