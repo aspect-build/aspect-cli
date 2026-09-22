@@ -13,13 +13,13 @@ jobs:
       - name: Get a full history so all commits are present
         uses: actions/checkout@v6
         with:
-            path: fresh-clone
-            fetch-depth: 0
+          path: fresh-clone
+          fetch-depth: 0
       - working-directory: fresh-clone
         run: |
-            mkdir -p ~/.ssh
-            ssh-keyscan -t rsa gitlab.com >> ~/.ssh/known_hosts
-            eval $(ssh-agent -s)
-            ssh-add - <<< '${{ secrets.ASPECT_CLI_GL_DEPLOY_TOKEN }}'
-            git push --force git@gitlab.com:aspect-build/aspect-cli.git HEAD:main
-            git push --tags --force git@gitlab.com:aspect-build/aspect-cli.git
+          mkdir -p ~/.ssh
+          ssh-keyscan -t rsa gitlab.com >> ~/.ssh/known_hosts
+          eval $(ssh-agent -s)
+          ssh-add - <<< '${{ secrets.ASPECT_CLI_GL_DEPLOY_TOKEN }}'
+          git push --force git@gitlab.com:aspect-build/aspect-cli.git HEAD:main
+          git push --tags --force git@gitlab.com:aspect-build/aspect-cli.git
