@@ -8,6 +8,7 @@ load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -16,7 +17,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # immutable record. Deployment endpoints/auth are injected by the Deployment
     # feature through the trait (see `feature/deployment.axl`). The whole flow is
     # visible below as thin verbs over the handle.
-    bz = bzl.build(ctx)
+    bz = bzl.build(ctx, stdout = results_json.bazel_stdout(ctx))
     rs = results.build(ctx)
 
     # Surface init + health checks (rc already active); also seeds the resolved
@@ -37,10 +38,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     bz.finish(w)  # BES summary + build_end + code coercion
-    return rs.conclude(w, bz.targets)
+    conclusion = rs.conclude(w, bz.targets)
+    results_json.emit(ctx, rs.data, "build", rs.final_status(), conclusion.exit_code)
+    return conclusion
 
 build = task(
-    args = bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args(),
+    args = bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args() | results_json.output_arg(),
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [
         BazelTrait,

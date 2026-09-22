@@ -627,6 +627,19 @@ The Aspect Web UI exposes three tabs per invocation: *Targets / Logs / Details*.
 
 Plus task-level sections at the top (primary task data, Artifacts, Task timing) and a separate `### Runner metadata` section for Aspect Workflows runner identity (`data["bazel"]` is the *invocation* it ran; the runner metadata is the *machine* — kept distinct).
 
+### `--output=json`: the machine-readable consumer
+
+`lib/results_json.axl` renders the same `data` as one JSON document on stdout at the terminal emit, for callers that parse rather than read (`build`, `test`, `lint`, `format`, `gazelle`). It is a *renderer*, not a dump: `document()` maps the accumulator onto a versioned shape (`SCHEMA_VERSION`) and never serializes `data` directly. Three rules make that necessary, and all three are covered by `results_json_test.axl`:
+
+- **Redaction.** `data["bazel"]["options_parsed"]` holds raw tokens (`--remote_header=Authorization=…`). Only `redacted_explicit_command(data)` crosses into the document; the resolved `startup_options` / `cmd_line` lists never do.
+- **Bounded size.** `test_details`, `target_kinds`, `passed_tests` and `built_targets` scale with the build. Failures cross in full (up to the accumulator's own `MAX_*` caps, with `failures.truncated` saying when a list is short of its uncapped total); passes cross only as counts.
+- **A stable contract.** Keys in `data` move freely; keys in the document do not.
+
+Two consequences for task code that adopts it:
+
+- The task declares `results_json.output_arg()` in its `args` and calls `results_json.emit(...)` beside its `final = True` dispatch.
+- **stdout must be exclusively the document.** Bazel writes its result summary and test output to *stdout* (only progress goes to stderr), so `build`/`test` pass `stdout = ctx.std.io.stderr` to `bzl.build` / `bzl.test` under `--output=json`, and any other child the task spawns (e.g. `test`'s `--coverage-tool`) needs the same treatment. A task whose stdout already belongs to something else registers no `--output` at all — which is why `run`, whose stdout belongs to the target binary, has none.
+
 ---
 
 ## Status checks and annotations

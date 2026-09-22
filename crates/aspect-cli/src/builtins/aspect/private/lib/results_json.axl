@@ -1,0 +1,226 @@
+"""Machine-readable task results: the `--output=json` document.
+
+One document on stdout at the task's terminal emit, built from the same `data`
+accumulator (`lib/bazel_results.axl`) the status surfaces render. Three rules
+separate it from a plain `json.encode(data)`:
+
+  - **Redaction.** `data["bazel"]["options_parsed"]` holds raw tokens, among
+    them `--remote_header=Authorization=...`. Only the redacted explicit
+    command crosses into the document; the resolved flag lists never do.
+  - **Bounded size.** `test_details`, `target_kinds` and `passed_tests` grow
+    with the build — a 5,000-test run carries ~5,000 entries in each. Failures
+    are reported in full (up to the accumulator's own caps, with `truncated`
+    saying so); passes are counts only.
+  - **A stable contract.** The accumulator's key names are internal and move
+    freely; these do not. `SCHEMA_VERSION` changes when they do.
+
+Per-kind blocks (`data["lint"]`, `data["format"]`, …) are deliberately absent
+from v1: each needs its own bounded shape, and lint diagnostics in particular
+need a cap of their own.
+
+`aspect run` registers no `--output`. Its stdout belongs to the target binary —
+running the program *is* the task — so a results document cannot share it, and
+redirecting the target's output to make room would defeat the command. Tasks
+whose stdout is already spoken for stay text-only.
+
+`emit` is the terminal-time counterpart to `repro_commands.print_repro_and_fix`
+— called once beside the `final = True` dispatch, and a no-op under the default
+`--output=text`.
+"""
+
+load("./bazel_results.axl", "aspect_web_ui_url", "redacted_explicit_command", "render_bes_url")
+
+# Bumped whenever a key in `document()` is renamed, removed, or changes meaning.
+# Additive keys do not bump it — consumers must tolerate unknown fields.
+SCHEMA_VERSION = 1
+
+_OUTPUT_TEXT = "text"
+_OUTPUT_JSON = "json"
+
+def output_arg() -> dict:
+    """The `--output` arg every task emitting a results document registers.
+    Splat into `task(args)` alongside the task's own args."""
+    return {
+        "output": args.string(
+            default = _OUTPUT_TEXT,
+            values = [_OUTPUT_TEXT, _OUTPUT_JSON],
+            description = (
+                "stdout format. `text` (default): stdout stays empty and the " +
+                "human-readable result goes to stderr as usual. `json`: one " +
+                "result document on stdout when the task finishes, carrying the " +
+                "invocation ids, counts, every failure with its local log path, " +
+                "and the reproducer commands. Bazel's own output is unaffected — " +
+                "it stays on stderr either way."
+            ),
+        ),
+    }
+
+def _commands(entries: list) -> list:
+    """`ReproFixCommand` records as JSON objects. `_hooked` is producer
+    bookkeeping and stays out of the document."""
+    return [
+        {
+            "command": c.command,
+            "description": c.description,
+            "slug": c.slug,
+            "target": c.target,
+        }
+        for c in entries or []
+    ]
+
+def _test_entries(entries: list, details: dict) -> list:
+    """Failed/flaky test rows joined to their `test_details` paths.
+
+    The local `log_path` / `xml_path` are the point of the document: a reader
+    opens the testlog directly instead of scraping the build log. Both are ""
+    when the test ran remotely and its outputs were never downloaded.
+    """
+    out = []
+    for t in entries or []:
+        label = t.get("label", "")
+        detail = (details or {}).get(label, {}) or {}
+        out.append({
+            "label": label,
+            "status": t.get("status", ""),
+            "kind": t.get("kind", ""),
+            "cached": t.get("cached", False),
+            "duration_ms": t.get("duration_ms", 0),
+            "log_path": detail.get("log_path", ""),
+            "xml_path": detail.get("xml_path", ""),
+        })
+    return out
+
+def _action_entries(entries: list) -> list:
+    """Failed build actions. `stderr_path` is the action's captured stderr on
+    disk ("" when the BES event carried no local URI)."""
+    return [
+        {
+            "label": a.get("label", ""),
+            "mnemonics": a.get("mnemonics", []) or [],
+            "stderr_path": a.get("stderr_path", ""),
+        }
+        for a in entries or []
+    ]
+
+def document(env: std.Env, data: dict, task: str, status: str, exit_code: int) -> dict:
+    """Build the result document. Pure: reads `data` and `env`, writes nothing.
+
+    `task` is the command path without the leading `aspect` ("build", "test",
+    "lint", …). `status` is the lifecycle status of the terminal emit
+    ("passed", "failed", "warning", "aborted"). Takes `env` rather than the
+    whole `ctx` because that is all it reads — the Web UI base URL — which also
+    lets the unit tests drive it with a real `ctx.std.env`.
+    """
+    bz = data.get("bazel", {}) or {}
+    started = data.get("start_time_ms", 0) or 0
+    finished = data.get("finish_time_ms", 0) or 0
+
+    doc = {
+        "schema_version": SCHEMA_VERSION,
+        "task": task,
+        "status": status,
+        "exit_code": exit_code,
+        "target_pattern": data.get("target_pattern", ""),
+        "started_at_ms": started,
+        "finished_at_ms": finished,
+        "duration_ms": (finished - started) if (started and finished) else 0,
+        "invocation": {
+            "invocation_id": bz.get("invocation_id", ""),
+            "sink_invocation_id": data.get("sink_invocation_id", ""),
+            "web_ui_url": aspect_web_ui_url(env, data),
+            "bes_results_url": render_bes_url(data),
+            "bazel_version": bz.get("build_tool_version", ""),
+            "command": bz.get("build_command", ""),
+            "compilation_mode": bz.get("compilation_mode", ""),
+            "cpu": bz.get("cpu_arch", ""),
+            # Redacted and shell-quoted by the same helper the rendered
+            # surfaces use; the raw `options_parsed` lists never appear here.
+            "explicit_command": redacted_explicit_command(data),
+        },
+        "counts": {
+            "targets_configured": bz.get("targets_configured", 0),
+            "targets_completed": bz.get("targets_total", 0),
+            "actions_executed": bz.get("actions_executed", 0),
+            "actions_cached": bz.get("actions_cached", 0),
+            "actions_total": bz.get("actions_total", 0),
+            "tests_configured": bz.get("test_targets_configured", 0),
+            "tests_passed": bz.get("passed_test_total", 0),
+            "tests_failed": bz.get("failed_test_total", 0),
+            "tests_flaky": bz.get("flaky_test_total", 0),
+            "tests_cached": bz.get("cached_test_total", 0),
+            "tests_executed": bz.get("executed_test_total", 0),
+        },
+        "failures": {
+            "targets": [
+                {"label": t.get("label", ""), "kind": t.get("kind", "")}
+                for t in bz.get("failed_targets", []) or []
+            ],
+            "actions": _action_entries(bz.get("failed_actions", [])),
+            "tests": _test_entries(bz.get("failed_tests", []), bz.get("test_details", {})),
+            "flaky_tests": _test_entries(bz.get("flaky_tests", []), bz.get("test_details", {})),
+            # The accumulator caps its detail lists for rendering; the counts
+            # above are uncapped. Say which lists are short of their total
+            # rather than letting a reader see 25 of 400 failures as 25.
+            "truncated": {
+                "actions": bz.get("failed_actions_total", 0) > len(bz.get("failed_actions", []) or []),
+                "tests": bz.get("failed_test_total", 0) > len(bz.get("failed_tests", []) or []),
+                "flaky_tests": bz.get("flaky_test_total", 0) > len(bz.get("flaky_tests", []) or []),
+            },
+        },
+        "timing": {
+            "wall_time_ms": bz.get("wall_time_ms", 0),
+            "cpu_time_ms": bz.get("cpu_time_ms", 0),
+            "analysis_phase_time_ms": bz.get("analysis_phase_time_ms", 0),
+            "execution_phase_time_ms": bz.get("execution_phase_time_ms", 0),
+            "critical_path_ms": bz.get("critical_path_ms", 0),
+        },
+        "repro_commands": _commands(data.get("repro_commands", [])),
+        "fix_commands": _commands(data.get("fix_commands", [])),
+    }
+
+    # Only present when Bazel actually aborted; an absent key is the common case
+    # and keeps the document from implying a termination reason it doesn't have.
+    if bz.get("aborted"):
+        doc["aborted"] = {
+            "reason": bz.get("abort_reason", ""),
+            "description": bz.get("abort_description", ""),
+        }
+    return doc
+
+def wants_json(args) -> bool:
+    """True when this invocation asked for the JSON document. `args` is
+    `ctx.args`, whose type is not expressible here. False for a task that
+    declares no `--output` at all, so callers need no guard of their own."""
+    return getattr(args, "output", _OUTPUT_TEXT) == _OUTPUT_JSON
+
+def bazel_stdout(ctx: TaskContext):
+    """The `stdout` to hand a Bazel spawn: our stderr when the document owns
+    stdout, our own stdout otherwise.
+
+    Bazel writes its result summary and its test output to *stdout* — only the
+    progress rendering goes to stderr — so a spawn that inherited would land in
+    the middle of the document. Returning our own stdout for the text path
+    duplicates the fd, which is what inheriting does anyway, so every call site
+    passes a handle and none needs a conditional of its own.
+    """
+    return ctx.std.io.stderr if wants_json(ctx.args) else ctx.std.io.stdout
+
+def emit(ctx: TaskContext, data: dict, task: str, status: str, exit_code: int) -> None:
+    """Write the result document to stdout, or nothing under `--output=text`.
+
+    Call once, beside the task's `final = True` dispatch. Indented because the
+    output is read by people at least as often as it is piped.
+    """
+    if not wants_json(ctx.args):
+        return
+    doc = document(ctx.std.env, data, task, status, exit_code)
+    ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
+
+results_json = namespace(
+    SCHEMA_VERSION = SCHEMA_VERSION,
+    bazel_stdout = bazel_stdout,
+    document = document,
+    emit = emit,
+    output_arg = output_arg,
+    wants_json = wants_json,
+)
