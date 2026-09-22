@@ -491,36 +491,53 @@ def _github_lint_impl(ctx: FeatureContext):
     # CI-run identity for cross-run cleanup (see `_ci_run_id`); "" off CI.
     run_id = _ci_run_id(ctx.std.env)
 
-    pr, gh_inactive_reason = github.detect_pr(ctx.std)
-    gh = None
-
-    if pr:
-        auth_reason = {}
-        token = github.authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.write"], _reason = auth_reason)
-        if token:
-            gh = {
-                "token": token,
-                "owner": pr["owner"],
-                "repo": pr["repo"],
-                "head_sha": pr["sha"],
-                "pr_number": pr["pr_number"],
-                "window": lc_diff_window([]),
-                "prefix": "",
-                "stale": False,
-            }
-        else:
-            gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
-
-            # In a PR context but auth failed — log it so the user knows why no
-            # comments appear. Non-PR contexts stay silent (feature just doesn't apply).
-            _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
-                pr["owner"],
-                pr["repo"],
-                auth_reason.get("reason", "unknown"),
-            ))
-
-    if not gh:
+    # A run outside a PR registers nothing: there is nowhere to post, and the
+    # reason `detect_pr` gives describes a PR it did not find.
+    pr, _ = github.detect_pr(ctx.std)
+    if not pr:
         return
+
+    gh = {
+        # Filled by `_ensure_token` the first time something is posted.
+        "token": "",
+        "owner": pr["owner"],
+        "repo": pr["repo"],
+        "head_sha": pr["sha"],
+        "pr_number": pr["pr_number"],
+        "window": lc_diff_window([]),
+        "prefix": "",
+        "stale": False,
+        # Why authentication failed, once it has; "" while it has not been
+        # tried or has succeeded. Keeps a run that reaches a second posting
+        # point from asking again, or warning twice.
+        "auth_failure": "",
+    }
+
+    def _ensure_token(ctx) -> bool:
+        """Resolve the GitHub App token, on the first call that needs it.
+
+        Not resolved when the feature loads: it loads for *every* task in the
+        job, and most never post a comment — a task with no lint findings, or
+        `aspect auth login`, whose own body is what creates the Aspect
+        credential this exchange would ask for. Asking there cost an Aspect API
+        round trip per task and warned about a login that was about to succeed.
+
+        Returns whether a token is in hand, warning once when it is not: in a PR
+        context that is worth saying, since it is why no comments appear.
+        """
+        if gh["token"]:
+            return True
+        if gh["auth_failure"]:
+            return False
+
+        auth_reason = {}
+        gh["token"] = github.authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.write"], _reason = auth_reason)
+        if gh["token"]:
+            return True
+
+        gh["auth_failure"] = auth_reason.get("reason", "unknown")
+        _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (pr["owner"], pr["repo"], gh["auth_failure"]))
+        return False
 
     max_pr_comments = ctx.args.max_pr_comments
     state = {
@@ -553,19 +570,17 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_due_to_cap"] += 1
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
-    if gh:
+    def _lint_start(ctx):
         # Workspace prefix relative to the git root. _post_individually prepends it
         # (SARIF paths are workspace-relative, GitHub wants repo-relative); the
-        # diff window strips it to canonicalize changed-file keys.
+        # diff window strips it to canonicalize changed-file keys. Resolved here,
+        # with the window it feeds, so loading the feature spawns no subprocess.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 
-    def _lint_start(ctx):
         # Read changed_files from the trait (already computed by the task impl) to
         # avoid a duplicate PR Files API call / git diff.
-        if not gh:
-            return
         gh["window"] = lc_diff_window(
             lint_trait.changed_files,
             prefix = gh["prefix"],
@@ -576,7 +591,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # Per-SARIF-file callback. Errors stream immediately (fast feedback);
         # warnings/notes buffer and post in _lint_end so the cap remainder fills
         # in priority/stable order, not per-file arrival order.
-        if gh and gh["stale"]:
+        if gh["stale"]:
             return
         comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
 
@@ -585,7 +600,7 @@ def _github_lint_impl(ctx: FeatureContext):
         state["all_comments_count"] += len(comments)
         comments = _postable(gh, comments)
 
-        cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
+        cap_exhausted = state["posted"] >= max_pr_comments
 
         # Cap already hit: count by severity and skip buffering.
         if cap_exhausted:
@@ -593,7 +608,8 @@ def _github_lint_impl(ctx: FeatureContext):
             return
 
         state["all_comments"].extend(comments)
-        if not gh:
+
+        if not _ensure_token(ctx):
             return
 
         # Lazy-init existing markers on first stream for prior-run dedup.
@@ -644,7 +660,7 @@ def _github_lint_impl(ctx: FeatureContext):
         `name` retains the `.AspectRulesLint<Tool>.patch` mnemonic (the resolved
         filepath is content-hashed on CI) for `_tool_name_from_patch_path`.
         """
-        if gh and gh["stale"]:
+        if gh["stale"]:
             return
         state["pending_patches"].append({"path": filepath, "name": name})
 
@@ -780,7 +796,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # summary explains why `posted comments: N`.
         outcome = ""
 
-        if gh:
+        if _ensure_token(ctx):
             if gh["stale"] or _check_staleness(ctx, gh):
                 gh["stale"] = True
                 outcome = "PR head moved during the run (stale); skipped posting"
@@ -907,21 +923,20 @@ def _github_lint_impl(ctx: FeatureContext):
                         breakdown,
                     ))
         else:
-            outcome = "skipped — no GitHub PR context (see `inactive reason` above)"
+            outcome = "skipped — no GitHub token (see `inactive reason` above)"
 
         if trace.enabled:
             trace.log("github lint comment summary:")
-            if gh_inactive_reason:
-                trace.log("inactive reason:  %s" % gh_inactive_reason)
+            if gh["auth_failure"]:
+                trace.log("inactive reason:  authentication failed: %s" % gh["auth_failure"])
             trace.log("found comments:   %s" % state["all_comments_count"])
-            if gh:
-                trace.log("git prefix:       %r" % gh["prefix"])
-                lines_by_path = gh["window"].lines_by_path
-                changed_line_count = 0
-                for v in lines_by_path.values():
-                    changed_line_count += len(v)
-                trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
-                trace.log("destination:      %s" % destination)
+            trace.log("git prefix:       %r" % gh["prefix"])
+            lines_by_path = gh["window"].lines_by_path
+            changed_line_count = 0
+            for v in lines_by_path.values():
+                changed_line_count += len(v)
+            trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
+            trace.log("destination:      %s" % destination)
             trace.log("posted comments:  %s" % state["posted"])
             if outcome:
                 trace.log("outcome:          %s" % outcome)
