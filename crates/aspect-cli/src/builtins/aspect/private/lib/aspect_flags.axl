@@ -194,6 +194,7 @@ _BES_RESULTS_URL = "--bes_results_url"
 _PROFILE = "--profile"
 _REMOTE_BUILD_EVENT_UPLOAD = "--remote_build_event_upload"
 _EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
+_WORKSPACE_STATUS_COMMAND = "--workspace_status_command"
 
 def flag_text(flag) -> str:
     """The flag text of a plain or `(flag, constraint)` entry."""
@@ -410,6 +411,23 @@ def diagnostics_upload_flags() -> list:
     (Bazel 6 only knows the `experimental_` spelling, whose default is already
     `all`)."""
     return [(_REMOTE_BUILD_EVENT_UPLOAD + "=all", ">=7.0.0")]
+
+def workspace_data_flags() -> list:
+    """`aspect setup workspace-data` as Bazel's `--workspace_status_command`, so
+    a vanilla `bazel` call reaches the BES backend carrying the commit, branch,
+    pull request and CI run an `aspect <task>` sends as `--build_metadata`.
+    Bazel runs the command at the start of every invocation, so the line itself
+    is the same for every job, commit and workspace — which is what lets one
+    shared rc attribute builds whose data is never shared. Tasks never take it:
+    they send the metadata directly, and the Web UI merges the two sources.
+    The rc it lands in outranks a workspace rc's own `--workspace_status_command`
+    (Bazel reads the home rc last), so a repository or machine whose own status
+    command must win drops this one with
+    `--omit-bazel-flag=--workspace_status_command`, which is why it is not in
+    `PROTECTED_FLAGS`. Version-gated past Bazel 6.3.0: below it the rc has no
+    `common` pseudo-command and spells every flag out under `query` too, which
+    rejects this one as unrecognized."""
+    return [('%s="aspect setup workspace-data"' % _WORKSPACE_STATUS_COMMAND, ">=6.3.0")]
 
 def exec_log_flags(exec_log_path: str) -> list:
     """Write the compact execution log at `exec_log_path`, so it rides the
