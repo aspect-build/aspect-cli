@@ -17,9 +17,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use axl_proto::google::devtools::build::v1::PublishBuildToolEventStreamRequest;
+use axl_proto::Timestamp;
 use build_event_stream::client::ClientError;
-use prost::Message;
+use prost::bytes::Bytes;
 use rand::Rng;
 
 /// Built-in byte budget for the unacked replay buffer (256 MiB). Sized to hold
@@ -219,13 +219,22 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 pub struct RetryBuffer {
     /// Byte budget for retained (unacked) events.
     cap_bytes: usize,
-    /// Sum of `encoded_len()` over `items`, maintained incrementally.
+    /// Sum of `encoded.len()` over `items`, maintained incrementally.
     bytes: usize,
     /// Events evicted since the last [`Self::take_evicted`].
     evicted: u64,
-    /// `(sequence number, encoded size, request)`, oldest first. The size is
-    /// cached so eviction and pruning adjust `bytes` without re-encoding.
-    items: VecDeque<(i64, usize, PublishBuildToolEventStreamRequest)>,
+    /// `(sequence number, encoded size, event)`, oldest first.
+    items: VecDeque<(i64, usize, RetainedEvent)>,
+}
+
+/// A sent event the buffer holds for replay: its wire bytes and the time it
+/// was first sent, from which its publish request is rebuilt on a reconnect.
+/// The request itself is never retained — it is several small allocations
+/// around these bytes, and a long stream has hundreds of thousands of them.
+#[derive(Debug, Clone)]
+pub struct RetainedEvent {
+    pub encoded: Bytes,
+    pub event_time: Timestamp,
 }
 
 impl RetryBuffer {
@@ -245,8 +254,8 @@ impl RetryBuffer {
     /// An event larger than the whole budget is not retained at all — evicting
     /// everything else to hold one oversized event would forfeit more replay
     /// coverage than it buys.
-    pub fn push(&mut self, seq: i64, req: PublishBuildToolEventStreamRequest) {
-        let size = req.encoded_len();
+    pub fn push(&mut self, seq: i64, event: RetainedEvent) {
+        let size = event.encoded.len();
 
         // `size <= cap_bytes` bounds the loop: an empty buffer has `bytes == 0`,
         // so the condition is false by the time everything has been evicted.
@@ -260,7 +269,7 @@ impl RetryBuffer {
         }
 
         self.bytes += size;
-        self.items.push_back((seq, size, req));
+        self.items.push_back((seq, size, event));
     }
 
     fn evict_oldest(&mut self) {
@@ -307,8 +316,8 @@ impl RetryBuffer {
         self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&i64, &PublishBuildToolEventStreamRequest)> {
-        self.items.iter().map(|(seq, _, req)| (seq, req))
+    pub fn iter(&self) -> impl Iterator<Item = (&i64, &RetainedEvent)> {
+        self.items.iter().map(|(seq, _, event)| (seq, event))
     }
 }
 
@@ -396,18 +405,16 @@ impl SinkStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axl_proto::google::devtools::build::v1::PublishBuildToolEventStreamRequest;
 
-    fn req() -> PublishBuildToolEventStreamRequest {
-        PublishBuildToolEventStreamRequest::default()
+    fn retained() -> RetainedEvent {
+        retained_sized(0)
     }
 
-    /// A request whose encoded size is at least `n` bytes, for byte-budget
-    /// tests. Payload goes in `project_id`, a plain string field.
-    fn req_sized(n: usize) -> PublishBuildToolEventStreamRequest {
-        PublishBuildToolEventStreamRequest {
-            project_id: "x".repeat(n),
-            ..Default::default()
+    /// An event whose encoded size is `n` bytes, for byte-budget tests.
+    fn retained_sized(n: usize) -> RetainedEvent {
+        RetainedEvent {
+            encoded: Bytes::from(vec![b'x'; n]),
+            event_time: Timestamp::default(),
         }
     }
 
@@ -443,7 +450,7 @@ mod tests {
     fn buffer_retains_many_small_events() {
         let mut b = RetryBuffer::new(1024 * 1024);
         for i in 1..=20_000 {
-            b.push(i, req());
+            b.push(i, retained());
         }
         assert_eq!(b.len(), 20_000);
         assert_eq!(b.take_evicted(), 0);
@@ -453,17 +460,17 @@ mod tests {
     /// failing.
     #[test]
     fn buffer_evicts_oldest_when_over_budget() {
-        let one = req_sized(100).encoded_len();
+        let one = retained_sized(100).encoded.len();
         let mut b = RetryBuffer::new(one * 3);
 
         for i in 1..=3 {
-            b.push(i, req_sized(100));
+            b.push(i, retained_sized(100));
         }
         assert_eq!(seqs(&b), vec![1, 2, 3]);
         assert_eq!(b.take_evicted(), 0);
 
         // Fourth event exceeds the budget: seq 1 is evicted to make room.
-        b.push(4, req_sized(100));
+        b.push(4, retained_sized(100));
         assert_eq!(seqs(&b), vec![2, 3, 4]);
         assert_eq!(b.take_evicted(), 1);
         assert!(b.bytes() <= one * 3);
@@ -473,14 +480,14 @@ mod tests {
     /// bytes, not entry count.
     #[test]
     fn buffer_large_event_evicts_multiple_small() {
-        let small = req_sized(10).encoded_len();
+        let small = retained_sized(10).encoded.len();
         let mut b = RetryBuffer::new(small * 10);
         for i in 1..=10 {
-            b.push(i, req_sized(10));
+            b.push(i, retained_sized(10));
         }
         assert_eq!(b.len(), 10);
 
-        b.push(11, req_sized(small * 5));
+        b.push(11, retained_sized(small * 5));
         assert_eq!(*seqs(&b).last().unwrap(), 11);
         assert!(
             b.len() < 10,
@@ -494,8 +501,8 @@ mod tests {
     #[test]
     fn buffer_oversized_event_is_not_retained() {
         let mut b = RetryBuffer::new(1024);
-        b.push(1, req_sized(10));
-        b.push(2, req_sized(4096));
+        b.push(1, retained_sized(10));
+        b.push(2, retained_sized(4096));
 
         assert!(b.is_empty(), "oversized event must not be retained");
         assert_eq!(b.bytes(), 0);
@@ -506,7 +513,7 @@ mod tests {
         );
 
         // The buffer stays usable afterwards.
-        b.push(3, req_sized(10));
+        b.push(3, retained_sized(10));
         assert_eq!(seqs(&b), vec![3]);
     }
 
@@ -514,17 +521,17 @@ mod tests {
     /// was evicted since the last one rather than re-announcing old losses.
     #[test]
     fn buffer_take_evicted_drains() {
-        let one = req_sized(100).encoded_len();
+        let one = retained_sized(100).encoded.len();
         let mut b = RetryBuffer::new(one * 2);
         assert_eq!(b.take_evicted(), 0, "nothing evicted yet");
 
         for i in 1..=4 {
-            b.push(i, req_sized(100));
+            b.push(i, retained_sized(100));
         }
         assert_eq!(b.take_evicted(), 2);
         assert_eq!(b.take_evicted(), 0, "second read must not repeat the count");
 
-        b.push(5, req_sized(100));
+        b.push(5, retained_sized(100));
         assert_eq!(b.take_evicted(), 1, "only the newly evicted event");
     }
 
@@ -532,7 +539,7 @@ mod tests {
     fn buffer_prune_removes_only_le_ack() {
         let mut b = RetryBuffer::new(1024 * 1024);
         for i in 1..=5 {
-            b.push(i, req());
+            b.push(i, retained());
         }
         b.prune_until(3);
         assert_eq!(seqs(&b), vec![4, 5]);
@@ -542,10 +549,10 @@ mod tests {
     /// spuriously after a long healthy stream.
     #[test]
     fn buffer_prune_reclaims_bytes() {
-        let one = req_sized(100).encoded_len();
+        let one = retained_sized(100).encoded.len();
         let mut b = RetryBuffer::new(1024 * 1024);
         for i in 1..=10 {
-            b.push(i, req_sized(100));
+            b.push(i, retained_sized(100));
         }
         assert_eq!(b.bytes(), one * 10);
 
@@ -561,10 +568,10 @@ mod tests {
     /// pushing indefinitely without ever evicting.
     #[test]
     fn buffer_acked_stream_never_evicts() {
-        let one = req_sized(100).encoded_len();
+        let one = retained_sized(100).encoded.len();
         let mut b = RetryBuffer::new(one * 4);
         for i in 1..=100 {
-            b.push(i, req_sized(100));
+            b.push(i, retained_sized(100));
             b.prune_until(i);
         }
         assert!(b.is_empty());

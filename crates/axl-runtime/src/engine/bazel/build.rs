@@ -41,11 +41,11 @@ use super::sink::execlog::ExecLogSink;
 use super::sink::grpc;
 use super::sink::retry::{RetryConfig, SinkOutcome, SinkStats};
 use super::sink::tracing as tracing_sink;
-use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::Subscriber;
 use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
+use super::stream::{BuildEventEnvelope, BuildEventStream};
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
 /// as a child's stdio slot.
@@ -444,7 +444,9 @@ enum IterState {
     /// Created but not yet bound to a build.
     Pending,
     /// `Build::spawn` subscribed us; iteration reads from `recv`.
-    Live { recv: Subscriber<BuildEvent> },
+    Live {
+        recv: Subscriber<Arc<BuildEventEnvelope>>,
+    },
     /// Stream ended (clean close or caller drained).
     Done,
 }
@@ -495,10 +497,12 @@ impl BuildEventIter {
         let mut state = self.state.lock().unwrap();
         match *state {
             IterState::Pending => {
-                let filter: Option<SubscriberFilter<BuildEvent>> =
+                let filter: Option<SubscriberFilter<Arc<BuildEventEnvelope>>> =
                     self.config.kinds.clone().map(|kinds| {
-                        let f: SubscriberFilter<BuildEvent> =
-                            Arc::new(move |event: &BuildEvent| event_kind_in(event, &kinds));
+                        let f: SubscriberFilter<Arc<BuildEventEnvelope>> =
+                            Arc::new(move |envelope: &Arc<BuildEventEnvelope>| {
+                                event_kind_in(&envelope.event, &kinds)
+                            });
                         f
                     });
                 let recv = stream.subscribe_filtered(filter);
@@ -573,9 +577,9 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
             // Heartbeat mode: yield an event, or a Starlark `None` when the
             // stream goes quiet for `ms`, so the caller's loop keeps ticking.
             Some(ms) => match recv.recv_timeout(Duration::from_millis(ms)) {
-                Ok(event) => {
+                Ok(envelope) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(event.alloc_value(heap))
+                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
@@ -588,9 +592,9 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
             },
             // Blocking mode: yield events until the stream closes.
             None => match recv.recv() {
-                Ok(event) => {
+                Ok(envelope) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(event.alloc_value(heap))
+                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
                 }
                 Err(_) => {
                     *self.state.lock().unwrap() = IterState::Done;
@@ -629,7 +633,7 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
             _ => return Ok(NoneOr::None),
         };
         match recv.try_recv() {
-            Ok(event) => Ok(NoneOr::Other(event)),
+            Ok(envelope) => Ok(NoneOr::Other(BuildEventEnvelope::into_event(envelope))),
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(NoneOr::None),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 *state = IterState::Done;

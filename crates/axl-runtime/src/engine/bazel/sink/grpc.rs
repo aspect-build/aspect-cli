@@ -1,12 +1,12 @@
 use crate::errln;
 use std::{
     collections::HashMap,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     thread::{self, JoinHandle},
 };
 
 use axl_proto::{
-    build_event_stream::BuildEvent,
+    Timestamp,
     google::devtools::build::v1::{
         BuildStatus, PublishBuildToolEventStreamRequest, PublishBuildToolEventStreamResponse,
         PublishLifecycleEventRequest,
@@ -19,15 +19,17 @@ use build_event_stream::{
 };
 
 use futures::FutureExt;
+use prost::bytes::Bytes;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Streaming;
 
 use crate::diag;
 use crate::engine::r#async::rt::AsyncRuntime;
 
-use super::super::stream::Subscriber;
+use super::super::stream::{BuildEventEnvelope, Subscriber};
 use super::retry::{
-    RetryBuffer, RetryConfig, SinkError, SinkOutcome, SinkStats, backoff, is_retryable,
+    RetainedEvent, RetryBuffer, RetryConfig, SinkError, SinkOutcome, SinkStats, backoff,
+    is_retryable,
 };
 
 #[derive(Debug)]
@@ -68,7 +70,7 @@ impl Grpc {
     /// for the caller's `sink.wait()` to inspect.
     pub fn spawn(
         rt: AsyncRuntime,
-        recv: Subscriber<BuildEvent>,
+        recv: Subscriber<Arc<BuildEventEnvelope>>,
         endpoint: String,
         headers: HashMap<String, String>,
         invocation_id: String,
@@ -145,6 +147,49 @@ async fn send_lifecycle_logged(
     Ok(())
 }
 
+/// What the sink keeps of a build event once it leaves the broadcaster: the
+/// wire bytes and the one flag the stream lifecycle reads. The decoded proto
+/// is dropped at intake, so a backlog behind a slow backend costs the bytes
+/// bazel wrote and nothing more.
+struct SinkEvent {
+    encoded: Bytes,
+    last_message: bool,
+}
+
+/// The publish request for a retained event. Requests are built as they are
+/// sent — first send and replay alike — and never retained themselves.
+fn publish_request(
+    build_id: &str,
+    invocation_id: &str,
+    seq: i64,
+    retained: &RetainedEvent,
+) -> PublishBuildToolEventStreamRequest {
+    build_tool::bazel_event_encoded(
+        build_id.to_string(),
+        invocation_id.to_string(),
+        seq,
+        retained.encoded.clone(),
+        retained.event_time,
+    )
+}
+
+/// Retain a newly received event under `seq` and build its first request.
+fn intake(
+    build_id: &str,
+    invocation_id: &str,
+    seq: i64,
+    event: SinkEvent,
+    buffer: &mut RetryBuffer,
+) -> PublishBuildToolEventStreamRequest {
+    let retained = RetainedEvent {
+        encoded: event.encoded,
+        event_time: Timestamp::from(std::time::SystemTime::now()),
+    };
+    let req = publish_request(build_id, invocation_id, seq, &retained);
+    buffer.push(seq, retained);
+    req
+}
+
 /// Per-sink stream state that survives across `drive_stream` reconnect
 /// attempts: the unacked-event replay buffer plus the sequence/ack counters
 /// every attempt shares.
@@ -169,7 +214,7 @@ impl StreamState {
 }
 
 async fn work(
-    recv: Subscriber<BuildEvent>,
+    recv: Subscriber<Arc<BuildEventEnvelope>>,
     endpoint: String,
     headers: HashMap<String, String>,
     invocation_id: String,
@@ -191,9 +236,14 @@ async fn work(
     // The forwarder runs once for the whole sink lifetime — events
     // queue up on `event_rx` even when no bidi stream is open, ready
     // for the next `drive_stream` iteration to drain.
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
     let _forwarder = tokio::task::spawn_blocking(move || {
-        while let Ok(ev) = recv.recv() {
+        while let Ok(envelope) = recv.recv() {
+            let ev = SinkEvent {
+                encoded: envelope.encoded.clone(),
+                last_message: envelope.event.last_message,
+            };
+            drop(envelope);
             if event_tx.send(ev).is_err() {
                 break;
             }
@@ -466,12 +516,12 @@ async fn preload_first_event(
     build_id: &str,
     invocation_id: &str,
     endpoint: &str,
-    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SinkEvent>,
     state: &mut StreamState,
 ) -> Result<Option<i64>, DriveOutcome> {
-    if let Some((seq, req)) = state.buffer.iter().next() {
+    if let Some((seq, retained)) = state.buffer.iter().next() {
         let seq = *seq;
-        let req = req.clone();
+        let req = publish_request(build_id, invocation_id, seq, retained);
         if sender.send(req).await.is_err() {
             return Err(DriveOutcome::Transient(ClientError::Status(
                 tonic::Status::unavailable("request stream closed before bidi open"),
@@ -495,13 +545,7 @@ async fn preload_first_event(
             let seq = state.next_seq;
             state.next_seq += 1;
             let last = event.last_message;
-            let req = build_tool::bazel_event(
-                build_id.to_string(),
-                invocation_id.to_string(),
-                seq,
-                &event,
-            );
-            state.buffer.push(seq, req.clone());
+            let req = intake(build_id, invocation_id, seq, event, &mut state.buffer);
             if sender.send(req).await.is_err() {
                 return Err(DriveOutcome::Transient(ClientError::Status(
                     tonic::Status::unavailable("request stream closed before bidi open"),
@@ -645,7 +689,7 @@ async fn drive_stream(
     client: &mut Client,
     build_id: &str,
     invocation_id: &str,
-    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SinkEvent>,
     state: &mut StreamState,
     endpoint: &str,
     retry: &RetryConfig,
@@ -762,13 +806,13 @@ async fn drive_stream(
     let mut replayed_acks: Vec<i64> = Vec::new();
     let mut replay_failure = None;
     let mut replay_response_end = None;
-    for (seq, req) in state.buffer.iter() {
+    for (seq, retained) in state.buffer.iter() {
         if Some(*seq) == preloaded_seq {
             continue;
         }
         if let Err(outcome) = send_bounded(
             &sender,
-            req.clone(),
+            publish_request(build_id, invocation_id, *seq, retained),
             retry.send_stall_timeout,
             "during replay",
         )
@@ -861,14 +905,7 @@ async fn drive_stream(
                 let seq = state.next_seq;
                 state.next_seq += 1;
                 let last = event.last_message;
-                let req = build_tool::bazel_event(
-                    build_id.to_string(),
-                    invocation_id.to_string(),
-                    seq,
-                    &event,
-                );
-
-                state.buffer.push(seq, req.clone());
+                let req = intake(build_id, invocation_id, seq, event, &mut state.buffer);
                 ack_deadline.get_or_insert_with(|| {
                     tokio::time::Instant::now() + retry.ack_progress_timeout
                 });
@@ -1084,10 +1121,11 @@ mod tests {
     use std::pin::Pin;
     use std::time::Duration;
 
-    use axl_proto::build_event_stream::{Progress, build_event::Payload};
+    use axl_proto::build_event_stream::{BuildEvent, Progress, build_event::Payload};
     use axl_proto::google::devtools::build::v1::publish_build_event_server::{
         PublishBuildEvent, PublishBuildEventServer,
     };
+    use prost::Message;
 
     use crate::engine::bazel::stream::broadcaster::Broadcaster;
     use futures::Stream;
@@ -1212,6 +1250,25 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn sink_event(event: &BuildEvent) -> SinkEvent {
+        SinkEvent {
+            encoded: Bytes::from(event.encode_to_vec()),
+            last_message: event.last_message,
+        }
+    }
+
+    fn envelope(event: BuildEvent) -> Arc<BuildEventEnvelope> {
+        let encoded = Bytes::from(event.encode_to_vec());
+        Arc::new(BuildEventEnvelope { event, encoded })
+    }
+
+    fn retained(event: &BuildEvent) -> RetainedEvent {
+        RetainedEvent {
+            encoded: Bytes::from(event.encode_to_vec()),
+            event_time: Timestamp::from(std::time::SystemTime::now()),
+        }
+    }
+
     fn progress_event(stderr_bytes: usize) -> BuildEvent {
         BuildEvent {
             payload: Some(Payload::Progress(Progress {
@@ -1265,9 +1322,9 @@ mod tests {
         retry: RetryConfig,
     ) -> DriveOutcome {
         let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
-        let (tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+        let (tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
         for ev in events {
-            tx.send(ev).unwrap();
+            tx.send(sink_event(&ev)).unwrap();
         }
         // `tx` stays alive across the call: upstream must look open, since a
         // closed upstream arms the (already bounded) half-close path instead.
@@ -1392,7 +1449,7 @@ mod tests {
         let broadcaster = Broadcaster::new();
         let recv = broadcaster.subscribe();
         for ev in events {
-            broadcaster.send(ev);
+            broadcaster.send(envelope(ev));
         }
         broadcaster.close();
         tokio::time::timeout(
@@ -1473,7 +1530,7 @@ mod tests {
         };
         let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
         // Upstream stays open but produces nothing; only the replay runs.
-        let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+        let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
         let mut state = StreamState {
             buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
             next_seq: 101,
@@ -1484,13 +1541,9 @@ mod tests {
         // request channel once the server stops reading, so the replay
         // blocks mid-buffer with the 10 acks still unread.
         for seq in 1..=100 {
-            let req = build_tool::bazel_event(
-                "test-build".to_string(),
-                "test-invocation".to_string(),
-                seq,
-                &progress_event(128 * 1024),
-            );
-            state.buffer.push(seq, req);
+            state
+                .buffer
+                .push(seq, retained(&progress_event(128 * 1024)));
         }
         let outcome = tokio::time::timeout(
             Duration::from_secs(30),
