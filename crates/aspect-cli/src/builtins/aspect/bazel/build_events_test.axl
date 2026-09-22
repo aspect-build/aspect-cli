@@ -117,7 +117,7 @@ def _test_missing_uri(_):
     _eq(
         "empty uri, clean",
         bes_upload_line("", 3, 3, False),
-        "Streamed 3 build events to the BES backend.",
+        "Streamed 3 build events to the BES backend",
     )
     _eq(
         "empty uri, failed",
