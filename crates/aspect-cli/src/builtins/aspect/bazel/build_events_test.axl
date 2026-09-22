@@ -58,17 +58,17 @@ def _test_clean_stream(_):
     _eq(
         "many events",
         bes_upload_line("grpcs://bes.acme.aspect.build", 1284, 1284, False),
-        "Streamed 1284 build events to grpcs://bes.acme.aspect.build.",
+        "Streamed 1284 build events to grpcs://bes.acme.aspect.build",
     )
     _eq(
         "singular event",
         bes_upload_line("grpcs://bes.acme.aspect.build", 1, 1, False),
-        "Streamed 1 build event to grpcs://bes.acme.aspect.build.",
+        "Streamed 1 build event to grpcs://bes.acme.aspect.build",
     )
     _eq(
         "zero events",
         bes_upload_line("grpcs://bes.acme.aspect.build", 0, 0, False),
-        "Streamed 0 build events to grpcs://bes.acme.aspect.build.",
+        "Streamed 0 build events to grpcs://bes.acme.aspect.build",
     )
 
 def _test_failed_stream(_):
@@ -100,7 +100,7 @@ def _test_failed_after_full_ack(_):
     _eq(
         "all acked despite failure",
         bes_upload_line("grpcs://bes.acme.aspect.build", 1284, 1284, True),
-        "Streamed 1284 build events to grpcs://bes.acme.aspect.build.",
+        "Streamed 1284 build events to grpcs://bes.acme.aspect.build",
     )
 
 def _test_connect_failure(_):
@@ -109,7 +109,7 @@ def _test_connect_failure(_):
     _eq(
         "nothing sent, failed",
         bes_upload_line("grpcs://localhost:1", 0, 0, True),
-        "Failed to stream build events to grpcs://localhost:1.",
+        "Failed to stream build events to grpcs://localhost:1",
     )
 
 def _test_missing_uri(_):
@@ -117,7 +117,7 @@ def _test_missing_uri(_):
     _eq(
         "empty uri, clean",
         bes_upload_line("", 3, 3, False),
-        "Streamed 3 build events to the BES backend.",
+        "Streamed 3 build events to the BES backend",
     )
     _eq(
         "empty uri, failed",
@@ -131,12 +131,12 @@ def _test_bes_results_line(_):
     _eq(
         "joins base + sink invocation id",
         bes_results_line("https://app.acme/i", "sink-1"),
-        "Streaming build results to https://app.acme/i/sink-1.",
+        "Streaming build results to https://app.acme/i/sink-1",
     )
     _eq(
         "tolerates a trailing slash on the base",
         bes_results_line("https://app.acme/i/", "sink-1"),
-        "Streaming build results to https://app.acme/i/sink-1.",
+        "Streaming build results to https://app.acme/i/sink-1",
     )
 
     # Either half missing → no line, so nothing half-formed is printed.
