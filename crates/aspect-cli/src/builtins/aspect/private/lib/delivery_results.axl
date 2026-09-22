@@ -99,6 +99,13 @@ def init_data():
         "dry_run": False,
         "track_state": True,
 
+        # Whether the delivery build ran under `--dry-run`. False (the default)
+        # means it was skipped, so every entry's on-disk path fields
+        # (`entrypoint_path`, `runfiles_dir`, …) are empty because nothing was
+        # built — not because the target had no entrypoint. Meaningless when
+        # `dry_run` is False, where the build always runs.
+        "dry_run_build": False,
+
         # Aggregated counts populated by add_result().
         "counts": {},  # {"ok": int, "skip": int, "warn": int, "fail": int, "pending": int}
     }
@@ -163,6 +170,7 @@ def build_manifest(data):
         "prefix": d.get("prefix", ""),
         "mode": d.get("mode", "selective"),
         "dry_run": bool(d.get("dry_run", False)),
+        "dry_run_build": bool(d.get("dry_run_build", False)),
         "track_state": bool(d.get("track_state", True)),
         "counts": dict(d.get("counts", {}) or {}),
         "deliveries": [dict(e) for e in (d.get("deliveries", []) or [])],
