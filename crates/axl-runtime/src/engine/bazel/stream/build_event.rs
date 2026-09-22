@@ -419,6 +419,113 @@ mod tests {
         out
     }
 
+    /// Replay a recorded BEP file through the stream with the production
+    /// subscriber shape (gRPC sink + AXL iterator + tracing sink) and report
+    /// what the fan-out costs.
+    ///
+    /// Ignored: it needs a recorded stream, e.g. the `bep.binpb` a lint task
+    /// uploads. Measure peak RSS from outside, since the interesting number is
+    /// how much of the stream is resident, not how fast it decodes:
+    ///
+    /// ```text
+    /// ASPECT_BES_BENCH_FILE=/path/to/bep.binpb \
+    ///   /usr/bin/time -l cargo test -p axl-runtime --release \
+    ///   bench_stream_fanout -- --ignored --nocapture
+    /// ```
+    ///
+    /// `ASPECT_BES_BENCH_LAG=request|event|bytes|wire` makes the gRPC-shaped
+    /// subscriber hold every event until the producer is done — what a backend
+    /// that acks slower than the build produces events does to this process —
+    /// in each of the shapes the retry buffer could retain.
+    #[test]
+    #[ignore = "benchmark; needs ASPECT_BES_BENCH_FILE"]
+    fn bench_stream_fanout() {
+        let Ok(input) = std::env::var("ASPECT_BES_BENCH_FILE") else {
+            eprintln!("skipped: set ASPECT_BES_BENCH_FILE to a recorded bep.binpb");
+            return;
+        };
+        // What a lagging sink retains: "request" is today's shape (a fully
+        // built publish request per event), "event" the decoded event behind
+        // an Arc, "bytes" the serialized request. Empty drains promptly.
+        let lag = std::env::var("ASPECT_BES_BENCH_LAG").unwrap_or_default();
+
+        let path = temp_fifo_path();
+        let pid = std::process::id();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
+        let grpc_sub = stream.subscribe();
+        let axl_sub = stream.subscribe();
+        let tracing_sub = stream.subscribe();
+        wait_for_fifo(&path);
+
+        // Mirrors the gRPC sink: every event is re-encoded into a publish
+        // request, and every request is retained until the server acks it.
+        let grpc = std::thread::spawn(move || {
+            let mut held_requests = Vec::new();
+            let mut held_events: Vec<std::sync::Arc<BuildEvent>> = Vec::new();
+            let mut held_bytes: Vec<(i64, Vec<u8>)> = Vec::new();
+            let mut n = 0u64;
+            while let Ok(event) = grpc_sub.recv() {
+                let req = build_event_stream::build_tool::bazel_event(
+                    "bench-build".to_string(),
+                    "bench-invocation".to_string(),
+                    n as i64 + 1,
+                    &event,
+                );
+                n += 1;
+                match lag.as_str() {
+                    "request" => held_requests.push(req),
+                    "event" => held_events.push(std::sync::Arc::new(event)),
+                    "bytes" => held_bytes.push((n as i64, req.encode_to_vec())),
+                    // What the sink would hold if it carried the event's own
+                    // wire bytes and built the request at send time.
+                    "wire" => held_bytes.push((n as i64, event.encode_to_vec())),
+                    _ => {}
+                }
+            }
+            (
+                n,
+                held_requests.len() + held_events.len() + held_bytes.len(),
+            )
+        });
+        let axl = std::thread::spawn(move || {
+            let mut n = 0u64;
+            while axl_sub.recv().is_ok() {
+                n += 1;
+            }
+            n
+        });
+        let tracing = std::thread::spawn(move || {
+            let mut n = 0u64;
+            while tracing_sub.recv().is_ok() {
+                n += 1;
+            }
+            n
+        });
+
+        let start = std::time::Instant::now();
+        let writer = std::thread::spawn(move || {
+            let mut src = std::io::BufReader::new(std::fs::File::open(&input).unwrap());
+            let mut fifo = OpenOptions::new().write(true).open(&path).unwrap();
+            std::io::copy(&mut src, &mut fifo).unwrap()
+        });
+
+        let bytes = writer.join().unwrap();
+        stream.join().unwrap();
+        let (grpc_n, held) = grpc.join().unwrap();
+        let axl_n = axl.join().unwrap();
+        let tracing_n = tracing.join().unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(grpc_n, axl_n, "every subscriber sees the whole stream");
+        assert_eq!(axl_n, tracing_n, "every subscriber sees the whole stream");
+        eprintln!(
+            "replayed {grpc_n} events ({bytes} bytes) in {elapsed:?} \
+             = {:.0} events/s, {} requests retained",
+            grpc_n as f64 / elapsed.as_secs_f64(),
+            held,
+        );
+    }
+
     fn make_event(last_message: bool) -> BuildEvent {
         BuildEvent {
             last_message,
