@@ -21,6 +21,18 @@ bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.2")
 
 register_toolchains("@toolchains_llvm_bootstrapped//toolchain:all")
 
+# Any osx.framework tag replaces the extension's default framework list, so the
+# defaults are repeated here. CoreServices is required by fsevent-sys (notify).
+osx = use_extension("@toolchains_llvm_bootstrapped//extensions:osx.bzl", "osx")
+osx.framework(name = "CFNetwork")  # re-exported by the CoreServices umbrella
+osx.framework(name = "CoreFoundation")
+osx.framework(name = "CoreServices")
+osx.framework(name = "Foundation")
+osx.framework(name = "Kernel")
+osx.framework(name = "OSLog")
+osx.framework(name = "Security")
+osx.framework(name = "SystemConfiguration")
+
 bazel_dep(name = "rules_rs", version = "0.0.27")
 
 # Special toolchains branch

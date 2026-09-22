@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::stream;
+use super::watch;
 
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -784,6 +785,38 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<stream::Writable> {
         let file = fs::File::create(path.as_str())?;
         Ok(stream::Writable::from(file))
+    }
+
+    /// Starts a recursive file watch over `root` (an absolute path) and
+    /// returns a `fs.Watch`.
+    ///
+    /// Poll it with `try_pop()`, which returns None until pending changes have
+    /// settled for `debounce_ms` (capped at `max_delay_ms` under sustained
+    /// churn), then a batch with `events` (a list) and `rescan` (True when the
+    /// watcher lost track of state and anything may have changed). Each event
+    /// is a `fs.watch.CreatedEvent`, `fs.watch.ModifiedEvent`, or
+    /// `fs.watch.RemovedEvent`, each carrying `path` relative to `root`.
+    /// Discriminate them with `isinstance(event,
+    /// std.fs.watch.CreatedEvent)`, etc. Events under any of the `ignore` path
+    /// prefixes (absolute) are dropped — pass the bazel convenience-symlink
+    /// paths (bazel-bin, bazel-out, …) there. Use `drain()` to discard pending
+    /// changes caused by our own writes.
+    ///
+    /// The backend is chosen automatically: watchman when `root` contains a
+    /// `.watchmanconfig` file, otherwise an in-process OS watcher.
+    fn watch<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] root: String,
+        #[starlark(require = named, default = UnpackList::default())] ignore: UnpackList<String>,
+        #[starlark(require = named, default = 100)] debounce_ms: i32,
+        #[starlark(require = named, default = 2000)] max_delay_ms: i32,
+    ) -> anyhow::Result<watch::Watch> {
+        watch::Watch::new(
+            root,
+            ignore.items,
+            watch::duration_ms(debounce_ms, "debounce_ms")?,
+            watch::duration_ms(max_delay_ms, "max_delay_ms")?,
+        )
     }
 }
 
