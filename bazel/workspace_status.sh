@@ -52,3 +52,11 @@ STABLE_MONOREPO_VERSION ${monorepo_version}
 STABLE_MONOREPO_SHORT_VERSION ${monorepo_short_version}
 STABLE_MONOREPO_IMAGE_TAG_VERSION ${monorepo_image_tag_version}
 EOF
+
+# The attribution keys `aspect <task>` sends as --build_metadata, so a
+# --config=release build reaches the Web UI with the same commit, branch, PR
+# and actor. They are unprefixed and land in volatile-status.txt, so they never
+# invalidate the stamped actions the STABLE_ keys above feed.
+# `|| true`: set -o errexit is on, and Bazel fails the build outright when the
+# status command exits non-zero.
+aspect setup workspace-data || true

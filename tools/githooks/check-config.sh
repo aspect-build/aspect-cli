@@ -19,3 +19,10 @@ EOF
 if [ "${inside_work_tree}" = "true" ] && [ "$EUID" -ne 0 ] && [ -z "$(git config core.hooksPath)" ]; then
     echo >&2 "${GITHOOKS_MSG}"
 fi
+
+# Bazel takes one status command, so the attribution keys are emitted from
+# inside this script rather than replacing it (crates/aspect-cli/src/builtins/aspect/workspace_data.axl).
+# The nag above goes to stderr, leaving stdout to carry only `KEY value` lines.
+# `|| true`: an `aspect` missing from PATH would otherwise leave this script
+# exiting non-zero, and Bazel fails the build when the status command does.
+aspect setup workspace-data || true
