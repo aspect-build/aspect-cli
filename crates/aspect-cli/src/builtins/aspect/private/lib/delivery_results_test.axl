@@ -426,6 +426,7 @@ def _test_init_data_shape(ctx):
         "deliveries",
         "mode",
         "dry_run",
+        "dry_run_build",
         "track_state",
         "counts",
     ]:
@@ -433,7 +434,7 @@ def _test_init_data_shape(ctx):
             fail("init_data: missing 'delivery.%s'" % k)
     if d["mode"] != "selective":
         fail("init_data: default mode should be 'selective', got %r" % d["mode"])
-    if d["dry_run"] != False or d["track_state"] != True:
+    if d["dry_run"] != False or d["dry_run_build"] != False or d["track_state"] != True:
         fail("init_data: default run-shape flags drifted")
     if d["deliveries"] != [] or d["counts"] != {}:
         fail("init_data: deliveries/counts should start empty")
@@ -483,6 +484,7 @@ def _test_build_manifest_required_top_level_fields(ctx):
         "prefix",
         "mode",
         "dry_run",
+        "dry_run_build",
         "track_state",
         "counts",
         "deliveries",
@@ -500,6 +502,7 @@ def _test_build_manifest_carries_metadata(ctx):
     r["delivery"]["prefix"] = "my-task"
     r["delivery"]["mode"] = "always"
     r["delivery"]["dry_run"] = True
+    r["delivery"]["dry_run_build"] = True
     r["delivery"]["track_state"] = False
     m = build_manifest(r)
     if m["ci_host"] != "bk" or m["build_url"] != "https://example/123":
@@ -508,6 +511,8 @@ def _test_build_manifest_carries_metadata(ctx):
         fail("build_manifest: commit/prefix drifted: %r" % m)
     if m["mode"] != "always" or m["dry_run"] != True or m["track_state"] != False:
         fail("build_manifest: run-shape flags drifted: %r" % m)
+    if m["dry_run_build"] != True:
+        fail("build_manifest: dry_run_build drifted: %r" % m)
 
 def _test_build_manifest_required_entry_fields(ctx):
     """Every per-entry field documented in add_result()'s docstring must
