@@ -608,10 +608,15 @@ enum SendWithAcks {
 ///
 /// The drain matters because `tokio::select!` runs a chosen branch's body to
 /// completion: a bare `send().await` blinds the caller's ack arm for the whole
-/// stall, and a status arriving in that window would be dropped by
-/// [`drain_acks`] and masked by this function's own `deadline_exceeded`. Acks
-/// land in `acks` rather than being applied, so the replay loop can share this
-/// while holding its borrow of `state.buffer`.
+/// stall, and a status arriving in that window would be masked by this
+/// function's own `deadline_exceeded`. Acks land in `acks` rather than being
+/// applied, so the replay loop can share this while holding its borrow of
+/// `state.buffer`.
+///
+/// Both failure modes here — the stall deadline, and a request channel the
+/// ended RPC closed — only guess at a cause the server is often about to
+/// state outright. `Failed` is therefore the caller's fallback, not its
+/// verdict: [`drain_acks`] gets the last word.
 async fn send_draining_acks(
     sender: &tokio::sync::mpsc::Sender<PublishBuildToolEventStreamRequest>,
     req: PublishBuildToolEventStreamRequest,
@@ -680,7 +685,8 @@ fn response_end_outcome(end: ResponseEnd, state: &StreamState, context: &str) ->
 const DRAIN_ACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Harvest acks already queued on the response stream after a request-side
-/// send failure, before the stream is torn down.
+/// send failure, before the stream is torn down, and report the response
+/// stream's own ending when it reaches one.
 ///
 /// The replay loop and the mid-send path await channel sends without polling
 /// the response stream, so when a server acks some events and then ends the
@@ -689,13 +695,28 @@ const DRAIN_ACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 /// leave the replay buffer and — via `max_acked` — count as progress toward
 /// the retry-budget reset. Best-effort and bounded; anything missed is
 /// replayed and deduped by the server.
-async fn drain_acks(
-    response_stream: &mut Streaming<PublishBuildToolEventStreamResponse>,
-    state: &mut StreamState,
-) {
+///
+/// A status reaching this window is the send failure's cause, not a detail
+/// beside it: the server stopped reading because it was rejecting the call.
+/// It therefore outranks the retryable error the send side reports, and
+/// returning it lets the caller classify a `PermissionDenied` as fatal
+/// instead of retrying it to the end of the budget under the wrong error.
+/// `None` means the window closed with nothing to add and the send-side
+/// outcome stands.
+async fn drain_acks<S>(response_stream: &mut S, state: &mut StreamState) -> Option<ResponseEnd>
+where
+    S: futures::Stream<Item = Result<PublishBuildToolEventStreamResponse, tonic::Status>> + Unpin,
+{
     let deadline = tokio::time::Instant::now() + DRAIN_ACKS_TIMEOUT;
-    while let Ok(Some(Ok(resp))) = tokio::time::timeout_at(deadline, response_stream.next()).await {
-        state.record_ack(resp.sequence_number);
+    loop {
+        match tokio::time::timeout_at(deadline, response_stream.next()).await {
+            Ok(Some(Ok(resp))) => {
+                state.record_ack(resp.sequence_number);
+            }
+            Ok(Some(Err(status))) => return Some(ResponseEnd::Status(status)),
+            Ok(None) => return Some(ResponseEnd::Closed),
+            Err(_) => return None,
+        }
     }
 }
 
@@ -738,7 +759,9 @@ where
 /// the post-half-close drain (`retry.half_close_timeout`).
 ///
 /// Send-side failures call [`drain_acks`] before returning so acks the
-/// server already wrote still prune the buffer and count as progress.
+/// server already wrote still prune the buffer and count as progress, and
+/// so a status the server sent alongside the teardown decides the outcome
+/// instead of the send side's `unavailable`.
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
@@ -897,7 +920,9 @@ async fn drive_stream(
         return response_end_outcome(end, state, "during replay");
     }
     if let Some(outcome) = replay_failure {
-        drain_acks(&mut response_stream, state).await;
+        if let Some(end) = drain_acks(&mut response_stream, state).await {
+            return response_end_outcome(end, state, "during replay");
+        }
         return outcome;
     }
 
@@ -979,7 +1004,9 @@ async fn drive_stream(
                 match sent {
                     SendWithAcks::Sent => {}
                     SendWithAcks::Failed(outcome) => {
-                        drain_acks(&mut response_stream, state).await;
+                        if let Some(end) = drain_acks(&mut response_stream, state).await {
+                            return response_end_outcome(end, state, "mid-send");
+                        }
                         return outcome;
                     }
                     SendWithAcks::ResponseEnded(end) => {
@@ -1226,6 +1253,10 @@ mod tests {
         /// Ack the first N requests, then hold the request stream open but
         /// unread: no further acks, no close, the client's writes stall.
         AckThenStopReading(u32),
+        /// Ack the first N requests, stop reading, and reject the stream
+        /// only after the client's send has already given up — the status
+        /// lands while the client is draining the last acks.
+        StopReadingThenFatalLate(u32),
     }
 
     struct TestServer {
@@ -1284,6 +1315,35 @@ mod tests {
                         }
                         // Long enough for the client's writes to stall.
                         tokio::time::sleep(Duration::from_millis(300)).await;
+                        let _ = ack_tx
+                            .send(Err(Status::permission_denied("bad credentials")))
+                            .await;
+                        let _unread = inbound;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::StopReadingThenFatalLate(n) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < n {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        // Past the client's send-stall timeout, but inside
+                        // the window it drains acks in afterwards.
+                        tokio::time::sleep(Duration::from_millis(600)).await;
                         let _ = ack_tx
                             .send(Err(Status::permission_denied("bad credentials")))
                             .await;
@@ -1422,6 +1482,70 @@ mod tests {
             Some(ResponseEnd::Status(status))
                 if status.code() == tonic::Code::PermissionDenied
         ));
+    }
+
+    fn drained_state() -> StreamState {
+        StreamState {
+            buffer: RetryBuffer::new(1),
+            next_seq: 1,
+            max_acked: 0,
+            last_message_sent: false,
+        }
+    }
+
+    fn ack(seq: i64) -> PublishBuildToolEventStreamResponse {
+        PublishBuildToolEventStreamResponse {
+            stream_id: None,
+            sequence_number: seq,
+        }
+    }
+
+    /// A status already queued when the drain starts is the one case the
+    /// end-to-end tests cannot stage: it needs the send to have failed while
+    /// the server's rejection sat unread. Whichever `tokio::select!` arm won
+    /// the race that put us here, the drain must surface the status rather
+    /// than record acks past it.
+    #[tokio::test]
+    async fn ack_drain_prefers_a_queued_status() {
+        let mut responses = futures::stream::iter([
+            Ok(ack(1)),
+            Ok(ack(2)),
+            Err(Status::permission_denied("denied")),
+        ]);
+        let mut state = drained_state();
+
+        let end = drain_acks(&mut responses, &mut state).await;
+
+        assert!(matches!(
+            end,
+            Some(ResponseEnd::Status(status))
+                if status.code() == tonic::Code::PermissionDenied
+        ));
+        assert_eq!(state.max_acked, 2, "acks before the status still count");
+    }
+
+    /// A response stream that simply ends is reported too, so the caller can
+    /// tell a clean close from the send side's guess.
+    #[tokio::test]
+    async fn ack_drain_reports_a_clean_close() {
+        let mut responses = futures::stream::iter([Ok(ack(1))]);
+        let mut state = drained_state();
+
+        let end = drain_acks(&mut responses, &mut state).await;
+
+        assert!(matches!(end, Some(ResponseEnd::Closed)));
+        assert_eq!(state.max_acked, 1);
+    }
+
+    /// Nothing more arrives within the window: the send-side outcome stands.
+    /// Costs one `DRAIN_ACKS_TIMEOUT` of real time, the same bound the
+    /// production path already waits out.
+    #[tokio::test]
+    async fn ack_drain_without_an_ending_defers_to_the_send_failure() {
+        let mut responses = futures::stream::pending();
+        let mut state = drained_state();
+
+        assert!(drain_acks(&mut responses, &mut state).await.is_none());
     }
 
     #[test]
@@ -1582,6 +1706,27 @@ mod tests {
         let retry = RetryConfig {
             // Deliberately long: the status must short-circuit it.
             send_stall_timeout: Duration::from_secs(10),
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let events: Vec<BuildEvent> = (0..400).map(|_| progress_event(16 * 1024)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Fatal(ClientError::Status(status)) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            }
+            other => panic!("expected Fatal(PermissionDenied), got {}", other.label()),
+        }
+    }
+
+    /// The same status, arriving just after the send gave up rather than
+    /// during it: the stall's retryable `deadline_exceeded` is only the
+    /// fallback, so a status reaching the post-failure ack drain must still
+    /// decide the outcome instead of being swallowed by it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_status_reaching_the_ack_drain_outranks_the_send_failure() {
+        let endpoint = start_server(ServerMode::StopReadingThenFatalLate(5)).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_millis(450),
             ack_progress_timeout: Duration::from_secs(60),
             ..Default::default()
         };
