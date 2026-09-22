@@ -897,7 +897,10 @@ impl Build {
             }
         }
 
-        let mut execlog_stream = if execution_logs {
+        // Reserved before the spawn so bazel can be told where to write, but the
+        // reader is started after it — once the client pid exists (see the BES
+        // reader below for the same split, and why).
+        let execlog_path = if execution_logs {
             // If there is a CompactFile sink, let Bazel write directly to its path
             // so no separate temp file or tee step is needed for that copy.
             let direct_path = if compact_paths.is_empty() {
@@ -905,14 +908,9 @@ impl Build {
             } else {
                 Some(std::path::PathBuf::from(compact_paths.remove(0)))
             };
-            let (out, stream) = ExecLogStream::spawn_with_file(
-                pid,
-                direct_path,
-                compact_paths,
-                !decoded_sinks.is_empty(),
-            )?;
+            let out = ExecLogStream::reserve_path(direct_path);
             cmd.arg("--execution_log_compact_file").arg(&out);
-            Some(stream)
+            Some(out)
         } else {
             None
         };
@@ -945,6 +943,19 @@ impl Build {
         // end-of-build, which is why we want a separate per-invocation pid.
         let build_event_stream = match bes_path {
             Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            None => None,
+        };
+
+        // Same two-pid split for the execution log: the daemon writes the file, but
+        // only the client can say the invocation is over and none is coming.
+        let mut execlog_stream = match execlog_path {
+            Some(p) => Some(ExecLogStream::spawn_with_file(
+                p,
+                pid,
+                child.id(),
+                compact_paths,
+                !decoded_sinks.is_empty(),
+            )?),
             None => None,
         };
 
@@ -1251,6 +1262,68 @@ Test = task(implementation = _impl)
                 exit.expect("run_task"),
                 Some(0),
                 "expected an empty stream and bazel's exit code 2"
+            ),
+        }
+    }
+
+    /// The same rejected command line with the execution log stream on. Bazel
+    /// writes no execution log and exits, leaving its daemon idling behind it for
+    /// `--max_idle_secs`; the reader has to take the client's death as the answer,
+    /// because the daemon's is minutes away. `BASIL_SERVER_PID` stands a live
+    /// process in for that daemon — without it basil reports its own already-reaped
+    /// pid and the wait would end for the wrong reason, passing either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_rejected_command_line_does_not_hang_the_execlog_reader() {
+        use std::time::Duration;
+
+        let mut daemon = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn the daemon stand-in");
+        // SAFETY: process-wide env mutation. A concurrent bazel test reading this
+        // as its server pid gets a live process that holds none of its paths open
+        // — the same answer the dead pid it reads today produces.
+        unsafe {
+            std::env::set_var("BASIL_SERVER_PID", daemon.id().to_string());
+        }
+
+        // Generous: the timeout is here to catch a hang, not to bound a
+        // healthy run, which finishes in well under a second.
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=rejects_command_line"],
+        execution_log = True,
+        stderr = None,
+    )
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("BASIL_SERVER_PID");
+        }
+
+        match result {
+            None => panic!("timed out: a rejected command line hung the execlog reader"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "expected no execution log and bazel's exit code 2"
             ),
         }
     }
