@@ -19,6 +19,7 @@ pub use aspect::auth::{
     UriProfile, login_hint, profile_for_uri, resolve_access_token, resolve_profile,
 };
 
+pub mod error;
 pub mod feature;
 pub mod grpc;
 pub mod names;
@@ -66,6 +67,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     r#async::register_globals(globals);
+    // After the Starlark stdlib, so its `fail` replaces the builtin.
+    error::register_globals(globals);
     r#trait::register_globals(globals);
     task::register_globals(globals);
     task_info::register_globals(globals);

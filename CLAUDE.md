@@ -99,6 +99,7 @@ still run. `ASPECT_DEBUG=1` appends the traceback for anyone debugging.
 |---|---|
 | Top of `_impl` | `return TaskConclusion(exit_code = 1, message = "...")` |
 | Any nested helper | `ctx.std.process.exit(1, "...")` |
+| A refusal a library names | `fail(NotLoggedIn("..."))`, with `NotLoggedIn = error.type(traceback = False)` |
 | A bug, anywhere | `fail("...")`, which keeps the traceback |
 
 `exit` takes any code 0..=255 and unwinds through every caller like an error,
@@ -112,6 +113,12 @@ its status surface that way. `docs/axl.md` §13 has the examples.
 root of the error, not under `.context(...)`, or the downcast misses it and
 the error renders as a traceback. The `unknown deployment` refusals in
 `engine/aspect/auth.rs` are the pattern to copy.
+
+An AXL error value whose type has `traceback = False` is the third producer:
+`fail(e)` raises it as an `engine/error.rs` `RaisedError` carrying a
+`TaskExit` (code 1), and `TaskExit::from_starlark` / `from_anyhow` find it
+there, so everything below applies to it unchanged. `docs/axl.md` §15
+describes error values.
 
 **Where it is caught.** A `TaskExit` raised inside the task body is resolved
 by the task runner in `eval/multi_phase.rs` into the same `Outcome` a returned
