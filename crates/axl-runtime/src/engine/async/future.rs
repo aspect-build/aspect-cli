@@ -8,12 +8,14 @@ use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
+use starlark::values::tuple::AllocTuple;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, ValueLike};
 use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
 use std::cell::RefCell;
 use std::fmt::Debug;
 
+use crate::engine::error::{ErrorValueRef, callback_error, error_type_id, error_value_of};
 use crate::engine::store::Env;
 
 pub trait FutureAlloc: Send {
@@ -52,6 +54,10 @@ pub struct StarlarkFuture<'v> {
     inner: RefCell<Option<BoxFuture<'static, FutOutput>>>,
     #[allocative(skip)]
     transforms: RefCell<Vec<Transform<'v>>>,
+    /// The error types `catch(...)` turns into values; empty catches every
+    /// error. `None` until `catch` is called.
+    #[allocative(skip)]
+    catch: RefCell<Option<Vec<values::Value<'v>>>>,
 }
 
 impl<'v> StarlarkFuture<'v> {
@@ -65,6 +71,7 @@ impl<'v> StarlarkFuture<'v> {
                     .boxed(),
             )),
             transforms: RefCell::new(Vec::new()),
+            catch: RefCell::new(None),
         }
     }
 
@@ -77,14 +84,29 @@ impl<'v> StarlarkFuture<'v> {
         r.into_future()
     }
 
-    fn with_transform(&self, transform: Transform<'v>) -> Self {
+    fn with_transform(&self, transform: Transform<'v>) -> anyhow::Result<Self> {
+        if self.catch.borrow().is_some() {
+            anyhow::bail!("catch() must be the last call before block()");
+        }
         let mut new_transforms = self.transforms.borrow().clone();
         new_transforms.push(transform);
-        Self {
+        Ok(Self {
             // Move the inner future to the new chained future, consuming the original.
             inner: RefCell::new(self.inner.borrow_mut().take()),
             transforms: RefCell::new(new_transforms),
+            catch: RefCell::new(None),
+        })
+    }
+
+    fn with_catch(&self, types: Vec<values::Value<'v>>) -> anyhow::Result<Self> {
+        if self.catch.borrow().is_some() {
+            anyhow::bail!("catch() was already called on this future");
         }
+        Ok(Self {
+            inner: RefCell::new(self.inner.borrow_mut().take()),
+            transforms: RefCell::new(self.transforms.borrow().clone()),
+            catch: RefCell::new(Some(types)),
+        })
     }
 }
 
@@ -109,6 +131,11 @@ unsafe impl<'v> Trace<'v> for StarlarkFuture<'v> {
                     map_ok.trace(tracer);
                     map_err.trace(tracer);
                 }
+            }
+        }
+        if let Some(types) = self.catch.borrow_mut().as_mut() {
+            for t in types.iter_mut() {
+                t.trace(tracer);
             }
         }
     }
@@ -137,6 +164,7 @@ impl<'v> UnpackValue<'v> for StarlarkFuture<'v> {
             // Move the inner future out of the original, consuming it.
             inner: RefCell::new(fut.inner.borrow_mut().take()),
             transforms: RefCell::new(fut.transforms.borrow().clone()),
+            catch: RefCell::new(fut.catch.borrow().clone()),
         }))
     }
 }
@@ -160,25 +188,25 @@ fn apply_transforms<'v>(
 
     for transform in transforms {
         current = match (current, transform) {
-            (Ok(val), Transform::MapOk(f)) => eval
-                .eval_function(*f, &[val], &[])
-                .map_err(|e| anyhow::anyhow!("{}", e)),
+            (Ok(val), Transform::MapOk(f)) => {
+                eval.eval_function(*f, &[val], &[]).map_err(callback_error)
+            }
             (Err(e), Transform::MapOk(_)) => Err(e),
 
             (Err(e), Transform::MapErr(f)) => {
                 let err_str = heap.alloc_str(&e.to_string()).to_value();
                 eval.eval_function(*f, &[err_str], &[])
-                    .map_err(|e| anyhow::anyhow!("{}", e))
+                    .map_err(callback_error)
             }
             (Ok(v), Transform::MapErr(_)) => Ok(v),
 
             (Ok(val), Transform::MapOkOrElse { map_ok, .. }) => eval
                 .eval_function(*map_ok, &[val], &[])
-                .map_err(|e| anyhow::anyhow!("{}", e)),
+                .map_err(callback_error),
             (Err(e), Transform::MapOkOrElse { map_err, .. }) => {
                 let err_str = heap.alloc_str(&e.to_string()).to_value();
                 eval.eval_function(*map_err, &[err_str], &[])
-                    .map_err(|e| anyhow::anyhow!("{}", e))
+                    .map_err(callback_error)
             }
         };
     }
@@ -204,8 +232,73 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
         let transforms = this.transforms.borrow().clone();
 
+        let catch = this.catch.borrow().clone();
+
         let result = env.rt.block_on(fut);
-        apply_transforms(result, &transforms, eval)
+        let result = apply_transforms(result, &transforms, eval);
+        let Some(types) = catch else {
+            return result;
+        };
+        let none = values::Value::new_none();
+        match result {
+            Ok(value) => Ok(eval.heap().alloc(AllocTuple([none, value]))),
+            Err(err) => {
+                let error = error_value_of(&err, eval);
+                let caught = types.is_empty()
+                    || ErrorValueRef::of(error).is_some_and(|e| {
+                        types
+                            .iter()
+                            .filter_map(|t| error_type_id(*t))
+                            .any(|id| e.is_instance_of(id))
+                    });
+                if caught {
+                    Ok(eval.heap().alloc(AllocTuple([error, none])))
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    /// Turn the future's failure into a value instead of an error.
+    ///
+    /// `block()` on the returned future gives an `(err, value)` pair:
+    /// `(None, value)` when it succeeds, `(err, None)` when it fails with an
+    /// error of one of `types`. With no `types`, every failure is caught. A
+    /// failure of any other type still raises, unchanged.
+    ///
+    /// A failure raised by a runtime operation arrives as a plain `error`:
+    /// its `message` is the failure, its `cause` chain holds the underlying
+    /// reasons, and its `stacktrace` points at the `block()` call. An error
+    /// value raised with `fail(e)` in a `map_ok` callback arrives as that
+    /// same value.
+    ///
+    /// `catch` must be the last call before `block()`.
+    ///
+    /// ```starlark
+    /// err, resp = ctx.http().get(url = url).catch().block()
+    /// if err:
+    ///     print("request failed: " + err.message)
+    ///     return 1
+    /// print(resp.status)
+    /// ```
+    fn catch<'v>(
+        this: values::Value<'v>,
+        #[starlark(args)] types: starlark::values::tuple::UnpackTuple<values::Value<'v>>,
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let this_fut = this
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
+        for t in &types.items {
+            if error_type_id(*t).is_none() {
+                anyhow::bail!(
+                    "catch() takes error types, got `{}` of type `{}`",
+                    t,
+                    t.get_type()
+                );
+            }
+        }
+        this_fut.with_catch(types.items)
     }
 
     fn map_ok<'v>(
@@ -215,7 +308,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         let this_fut = this
             .downcast_ref_err::<StarlarkFuture>()
             .into_anyhow_result()?;
-        Ok(this_fut.with_transform(Transform::MapOk(callable)))
+        this_fut.with_transform(Transform::MapOk(callable))
     }
 
     fn map_err<'v>(
@@ -225,7 +318,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         let this_fut = this
             .downcast_ref_err::<StarlarkFuture>()
             .into_anyhow_result()?;
-        Ok(this_fut.with_transform(Transform::MapErr(callable)))
+        this_fut.with_transform(Transform::MapErr(callable))
     }
 
     fn map_ok_or_else<'v>(
@@ -236,6 +329,6 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         let this_fut = this
             .downcast_ref_err::<StarlarkFuture>()
             .into_anyhow_result()?;
-        Ok(this_fut.with_transform(Transform::MapOkOrElse { map_ok, map_err }))
+        this_fut.with_transform(Transform::MapOkOrElse { map_ok, map_err })
     }
 }

@@ -1,8 +1,10 @@
 //! The error a task raises to end early with a message and no traceback.
 //!
-//! Two producers: AXL calls `ctx.std.process.exit(code, message)`, and a Rust
+//! Three producers: AXL calls `ctx.std.process.exit(code, message)`, a Rust
 //! builtin refusing a request returns [`TaskExit::error`] as its
-//! `anyhow::Error`. Either unwinds through the evaluator like any other error,
+//! `anyhow::Error`, and AXL raises an error value whose type was declared with
+//! `traceback = False`, which carries its exit inside a
+//! [`RaisedError`](crate::engine::error::RaisedError). Either unwinds through the evaluator like any other error,
 //! so `ctx.defer` callbacks still run, and arrives wrapped in a
 //! `starlark::Error`. Two consumers downcast it: the task runner in
 //! `MultiPhaseEval::execute_tasks_with_args`, which reports it exactly like a
@@ -19,6 +21,7 @@
 
 use std::fmt;
 
+use crate::engine::error::RaisedError;
 use crate::errln;
 use crate::eval::EvalError;
 use crate::eval::outcome::Outcome;
@@ -44,9 +47,9 @@ impl TaskExit {
     /// builtin's error arrives; `Other` is how [`EvalError`] re-wraps one.
     pub fn from_starlark(err: &starlark::Error) -> Option<&TaskExit> {
         match err.kind() {
-            starlark::ErrorKind::Native(e) | starlark::ErrorKind::Other(e) => {
-                e.downcast_ref::<TaskExit>()
-            }
+            starlark::ErrorKind::Native(e) | starlark::ErrorKind::Other(e) => e
+                .downcast_ref::<TaskExit>()
+                .or_else(|| RaisedError::from_anyhow(e).and_then(RaisedError::exit)),
             _ => None,
         }
     }
@@ -65,6 +68,9 @@ impl TaskExit {
     pub fn from_anyhow(err: &anyhow::Error) -> Option<&TaskExit> {
         if let Some(exit) = err.downcast_ref::<TaskExit>() {
             return Some(exit);
+        }
+        if let Some(raised) = err.downcast_ref::<RaisedError>() {
+            return raised.exit();
         }
         err.downcast_ref::<EvalError>()
             .and_then(Self::from_eval_error)
@@ -214,6 +220,72 @@ t = task(implementation = _impl)
         .run_task(0)
         .expect_err("a feature impl exit is an error to the task runner");
         assert_eq!(TaskExit::from_anyhow(&err).map(|e| e.code), Some(4));
+    }
+
+    /// A task body that raises `error_type` from a helper, declared at the top
+    /// of the module like any error type.
+    fn raise(error_type: &str, raise: &str) -> anyhow::Result<Option<u8>> {
+        crate::test::eval(&format!(
+            r#"
+Raised = {error_type}
+
+def _refuse(ctx):
+    {raise}
+
+def _impl(ctx):
+    _refuse(ctx)
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .run_task(0)
+    }
+
+    #[test]
+    fn a_traceback_free_error_ends_the_task_with_code_one() {
+        let exit = raise(
+            "error.type(traceback = False)",
+            r#"fail(Raised("run `aspect auth login` first"))"#,
+        )
+        .expect("a refusal is reported, not propagated");
+        assert_eq!(exit, Some(1));
+    }
+
+    #[test]
+    fn an_error_with_a_traceback_stays_a_failure() {
+        let err = raise(
+            r#"error.type(fields = {"deployment": str})"#,
+            r#"fail(Raised("no ack", deployment = "prod"))"#,
+        )
+        .expect_err("an error that keeps its traceback propagates");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Raised: no ack"), "{msg}");
+        assert!(msg.contains("Traceback"), "{msg}");
+        assert_eq!(TaskExit::from_anyhow(&err), None);
+    }
+
+    #[test]
+    fn a_traceback_free_error_from_a_feature_impl_is_found_in_the_eval_error() {
+        let err = crate::test::eval(
+            r#"
+Refusal = error.type(traceback = False)
+
+def _feature(ctx):
+    fail(Refusal("not here"))
+
+def _impl(ctx):
+    return 0
+
+Guard = feature(implementation = _feature)
+t = task(implementation = _impl)
+"#,
+        )
+        .with_features(&["Guard"])
+        .run_task(0)
+        .expect_err("a feature impl refusal is an error to the task runner");
+        let exit = TaskExit::from_anyhow(&err).expect("the refusal's exit");
+        assert_eq!((exit.code, exit.message.as_deref()), (1, Some("not here")));
     }
 
     #[test]

@@ -193,7 +193,9 @@ ends the task with `code` (0..=255) and no traceback: the message prints as an
 `ERROR:` line, or `INFO:` for code 0, and `ctx.defer` callbacks still run. At
 the top of `_impl`, where a `return` can reach,
 `return TaskConclusion(exit_code = 1, message = ...)` renders the same way.
-Keep `fail()` for bugs, where the traceback is what you want.
+So does raising an error whose type was declared with `traceback = False`
+(§15), which exits with code 1. Keep a plain `fail("...")` for bugs, where the
+traceback is what you want.
 
 ```python
 def _require_target(ctx: TaskContext, targets: list[str]):
@@ -234,3 +236,80 @@ ctx.hooks.post_task(_keep_scratch_on_failure)
 
 Use `ctx.defer` for cleanup that needs no knowledge of how the task ended;
 use a post-task hook when the outcome matters.
+
+**§15 Errors.** An error is a value. `error` is the root error type:
+`error("message")` builds one, and `.type(...)` on any error type derives a
+new one. Every error has three attributes: `message`, `cause` (the error that
+led to it, or `None`) and `stacktrace` (where it was constructed, a list of
+frames with `name`, `path`, `line` and `column`, outermost first). A derived
+type adds its own fields and inherits its parent's.
+
+```python
+DeployError = error.type(fields = {
+    "deployment": str,
+    "attempt": attr(int, default = 1),
+})
+DeployTimeout = DeployError.type(fields = {"after_ms": int})
+NotLoggedIn = error.type(traceback = False)
+
+e = DeployTimeout("no ack", deployment = "prod", after_ms = 30000, cause = previous)
+```
+
+- **Declare error types at module top level.** A type is named by the
+  variable it is first assigned to, and that name is what `repr(e)`, type
+  errors and tracebacks show. Export only the types callers need to tell
+  apart (§11).
+- **Fields** take a type, or `attr(type, default = ...)` for an optional
+  field, the same specs `trait()` takes. The constructor takes the message
+  first, positionally or as `message = `, then `cause =` and the fields by
+  name, and checks each field against its type. `message`, `cause` and
+  `stacktrace` are reserved, and a child cannot redeclare an inherited field.
+- **Telling errors apart.** `type(e) == "error"` for every error.
+  `isinstance(e, T)` holds when `e` was built from `T` or from any type
+  derived from it, so `isinstance(e, DeployError)` is true for a
+  `DeployTimeout`, and `isinstance(e, error)` is true for all of them. An
+  annotation behaves the same way: `def retry(e: DeployError)` accepts a
+  `DeployTimeout`. `str(e)` is the message; `repr(e)` shows the type and every
+  field.
+- **Raising.** `fail(e)` raises `e` itself. Its type, fields, `cause` and
+  `stacktrace` survive, so a caller that catches it gets back the same value.
+  Re-raise a caught error the same way: `fail(err)`. `fail` with anything
+  other than a single error behaves as it always has.
+- **How an escaping error renders.** A type's `traceback` decides what the
+  user sees when an error of that type ends the task. `True` (the default)
+  shows the traceback and `TypeName: message`: right for bugs and failures
+  someone has to debug. `False` prints only the message as an `ERROR:` line
+  and exits with code 1, as `ctx.std.process.exit(1, message)` would: right
+  for expected refusals like a missing login. Post-task hooks, `ctx.defer`
+  callbacks and `ASPECT_DEBUG=1` behave as for any exit (§13, §14). A child
+  inherits its parent's setting unless it sets its own.
+
+**Catching: `err, value`.** A future's failure becomes a value with
+`catch()`. `block()` then gives a pair, error first: `(None, value)` on
+success, `(err, None)` on failure. Test `if err:` before touching `value`;
+errors are truthy.
+
+```python
+err, resp = ctx.http().get(url = url).catch().block()
+if err:
+    warn(ctx.std, "upload skipped: " + err.message)
+    return
+use(resp.status)
+```
+
+- **Name what you expect.** `catch(DeployError, ...)` catches only errors of
+  those types (and their subtypes); anything else still raises, unchanged. A
+  bare `catch()` catches every failure, including bugs raised with a plain
+  `fail`, so prefer naming the types where you can.
+- **Failures from the runtime** arrive as a plain `error`: `message` is the
+  failure, `cause` holds the underlying reasons one link at a time, and
+  `stacktrace` points at the `block()` call. An error raised with `fail(e)`
+  inside a `map_ok` callback arrives as `e`.
+- **`catch()` must be the last call before `block()`**, and can be called once.
+- **Keep the pair together.** Nothing checks that `err` was tested before
+  `value` was used; a forgotten check shows up as `None` has no attribute
+  `...` at the use site. Unpack both names on one line and test `err` right
+  after.
+- Standard-library calls that are not futures still raise; `catch()` is the
+  only way to receive an error as a value today.
+
