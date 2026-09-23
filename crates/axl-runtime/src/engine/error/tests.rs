@@ -14,7 +14,7 @@ fn err(code: &str) -> String {
 }
 
 const TYPES: &str = r#"
-DeployError = error.type(fields = {"deployment": str, "attempt": attr(int, default = 1)})
+DeployError = error.type(fields = {"deployment": str, "attempt": field(int, default = 1)})
 DeployTimeout = DeployError.type(fields = {"after_ms": int})
 Unrelated = error.type()
 "#;
@@ -96,6 +96,18 @@ assert_eq(dir(e), ["after_ms", "attempt", "cause", "deployment", "message", "sta
     assert!(msg.contains("unexpected field `nope`"), "{msg}");
     let msg = err(&with_types(r#"DeployError(deployment = "d")"#));
     assert!(msg.contains("missing its message"), "{msg}");
+}
+
+#[test]
+fn fields_take_field_specs_not_attrs() {
+    ok(r#"
+E = error.type(fields = {"tags": field(list[str], default = [])})
+a = E("a")
+a.tags.append("x")
+assert_eq(E("b").tags, [])
+"#);
+    let msg = err(r#"E = error.type(fields = {"x": attr(int, default = 1)})"#);
+    assert!(msg.contains("field `x`"), "{msg}");
 }
 
 #[test]
@@ -253,4 +265,167 @@ fn catch_must_come_last_once_and_take_error_types() {
     assert!(msg.contains("catch() was already called"), "{msg}");
     let msg = err(r#"__test_future(value = "x").catch(str).block()"#);
     assert!(msg.contains("catch() takes error types"), "{msg}");
+}
+
+#[test]
+fn generic_catch_passes_a_result_through_as_the_value() {
+    ok(r#"
+def _add(a, b, scale = 1):
+    return (a + b) * scale
+
+err, value = catch(_add, 1, 2, scale = 10)
+assert_eq(err, None)
+assert_eq(value, 30)
+"#);
+}
+
+#[test]
+fn generic_catch_turns_a_string_fail_into_a_plain_error() {
+    ok(r#"
+def _boom():
+    fail("it broke")
+
+err, value = catch(_boom)
+assert_eq(value, None)
+assert_eq(isinstance(err, error), True)
+assert_eq(err.message, "it broke")
+assert_eq([f.name for f in err.stacktrace][-1], "_boom")
+"#);
+}
+
+#[test]
+fn generic_catch_returns_a_raised_error_value_itself() {
+    ok(&with_types(
+        r#"
+raised = DeployTimeout("slow", deployment = "prod", after_ms = 9)
+
+def _raise():
+    fail(raised)
+
+err, _ = catch(_raise, types = [DeployError])
+assert_eq(err == raised, True)
+assert_eq(err.after_ms, 9)
+"#,
+    ));
+}
+
+#[test]
+fn generic_catch_with_types_reraises_other_errors_unchanged() {
+    let msg = err(&with_types(
+        r#"
+def _raise():
+    fail(Unrelated("not mine"))
+
+catch(_raise, types = (DeployError,))
+"#,
+    ));
+    assert!(msg.contains("Unrelated: not mine"), "{msg}");
+}
+
+#[test]
+fn generic_catch_catches_runtime_failures_of_builtins() {
+    ok(r#"
+err, value = catch(int, "not a number")
+assert_eq(value, None)
+assert_eq(type(err), "error")
+assert_eq("not a number" in err.message, True)
+"#);
+}
+
+#[test]
+fn generic_catch_takes_error_types_only() {
+    let msg = err(r#"catch(len, "x", types = [str])"#);
+    assert!(msg.contains("catch() takes error types"), "{msg}");
+}
+
+/// Static typechecking of `snippet` against the AXL globals: the errors it
+/// reports, rendered.
+fn type_errors(snippet: &str) -> Vec<String> {
+    use starlark::syntax::AstModule;
+    use starlark::typing::AstModuleTypecheck;
+
+    let ast = AstModule::parse(
+        "<snippet>",
+        snippet.to_owned(),
+        &crate::eval::api::dialect(),
+    )
+    .expect("snippet parses");
+    let globals = crate::eval::api::get_globals().build();
+    let (errors, ..) = ast.typecheck(&globals, &Default::default());
+    errors.iter().map(|e| e.to_string()).collect()
+}
+
+#[test]
+fn generic_catch_checks_the_call_it_makes() {
+    let errors = type_errors(
+        r#"
+def _parse(x: int) -> str:
+    return str(x)
+
+def _call():
+    catch(_parse, "not an int")
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("Expected type `int` but got `str`")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn generic_catch_types_its_value_as_the_function_result() {
+    let errors = type_errors(
+        r#"
+def _parse(x: int) -> str:
+    return str(x)
+
+def _wrong() -> int:
+    err, value = catch(_parse, 1)
+    return value
+"#,
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("None | str")),
+        "the value is the function's result or None: {errors:?}"
+    );
+    assert!(
+        type_errors(
+            r#"
+def _parse(x: int) -> str:
+    return str(x)
+
+def _right() -> str | None:
+    err, value = catch(_parse, 1)
+    return value
+"#
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_typed_future_types_block_and_catch() {
+    let errors = type_errors(
+        r#"
+def _block() -> int:
+    return __test_future(value = "x").block()
+"#,
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("`str`")),
+        "block() returns the future's value type: {errors:?}"
+    );
+    let errors = type_errors(
+        r#"
+def _caught() -> int:
+    err, value = __test_future(value = "x").catch().block()
+    return value
+"#,
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("None | str")),
+        "catch().block() pairs the value type: {errors:?}"
+    );
 }

@@ -34,7 +34,7 @@ enum BodyKind {
 }
 
 use super::r#async::future::FutureAlloc;
-use super::r#async::future::StarlarkFuture;
+use super::r#async::future::FutureOf;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<Http>")]
@@ -159,7 +159,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named)] integrity: Option<String>,
         #[starlark(require = named)] sha256: Option<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let client = &this.downcast_ref_err::<Http>().into_anyhow_result()?.client;
         let mut req = client.get(url.as_str().to_string());
         for (key, value) in headers.entries {
@@ -218,7 +218,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             Ok(response)
         };
 
-        Ok(StarlarkFuture::from_future::<HttpResponse>(fut))
+        Ok(FutureOf::from_future(fut))
     }
 
     fn get<'v>(
@@ -227,7 +227,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -280,7 +280,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut.boxed()))
+                Ok(FutureOf::from_future(fut.boxed()))
             }
             None => {
                 let client = this
@@ -297,7 +297,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut.boxed()))
+                Ok(FutureOf::from_future(fut.boxed()))
             }
         }
     }
@@ -309,7 +309,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -366,7 +366,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut.boxed()))
+                Ok(FutureOf::from_future(fut.boxed()))
             }
             None => {
                 let client = this
@@ -384,7 +384,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut.boxed()))
+                Ok(FutureOf::from_future(fut.boxed()))
             }
         }
     }
@@ -396,7 +396,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -453,7 +453,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
             None => {
                 let client = this
@@ -471,7 +471,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
         }
     }
@@ -483,7 +483,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -540,7 +540,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
             None => {
                 let client = this
@@ -558,7 +558,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
         }
     }
@@ -570,7 +570,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -627,7 +627,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
             None => {
                 let client = this
@@ -645,7 +645,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
         }
     }
@@ -660,7 +660,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> anyhow::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<FutureOf<'v, HttpResponse>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -722,7 +722,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         body,
                     })
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
             None => {
                 let client = this
@@ -740,7 +740,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
                 };
-                Ok(StarlarkFuture::from_future(fut))
+                Ok(FutureOf::from_future(fut))
             }
         }
     }

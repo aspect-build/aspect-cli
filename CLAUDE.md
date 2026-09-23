@@ -147,3 +147,44 @@ task ends before its own final `phases.update`, the hook sends a terminal
 update with the runtime's verdict, so no GitHub check, Buildkite annotation,
 or GitLab status is left on "running". `docs/axl.md` §14 has the AXL-facing
 description.
+
+## Patched crates
+
+`patches/<crate>+<version>.patch` are patches to crates.io releases, `-p1`
+from the crate root. Both build systems apply them, by different routes, so
+`Cargo.toml` and `Cargo.lock` keep naming the plain release:
+
+- **Bazel**: a `crate.annotation(crate = ..., patches = [...])` in
+  `MODULE.bazel` patches the crate when rules_rs fetches it.
+- **Cargo**: [`cargo patch-crate`](https://github.com/mokeyish/cargo-patch-crate)
+  (`cargo install patch-crate --locked`) applies the patches for the crates
+  listed in `[workspace.metadata.patch]` into `target/patch/<crate>-<version>`,
+  and the committed `.cargo/config.toml` points cargo there with a `paths`
+  override. Run it once after cloning, and with `--force` whenever a patch
+  changes. CI jobs that run cargo on starlark's dependents run it first
+  (`axl-api-watch.yml`).
+
+Why `paths` and not the `[patch.crates-io]` entry patch-crate's docs suggest:
+rules_rs reads `[patch]` from `Cargo.toml` and would treat the crate as a local
+package under `target/`, and a `[patch]` rewrites `Cargo.lock`, which Bazel
+reads. A `paths` override leaves both alone; the cost is that a patch must not
+change the crate's dependencies. rules_rs runs `cargo metadata --no-deps`, which
+ignores the override.
+
+A missing copy fails in cargo with "failed to update path override";
+`crates/axl-runtime/build.rs` stops a build whose copy is older than its patch.
+Neither can apply the patches: cargo picks each dependency's source before any
+build script runs. Bazel never runs that build script.
+
+To change a patch, edit `target/patch/<crate>-<version>/` and run
+`cargo patch-crate <crate>`, which writes the diff back to `patches/`, then
+`cargo patch-crate --force` so the copy is newer than the patch again. Build
+with Bazel too, since it applies the file independently. Adding a crate
+means listing it in `[workspace.metadata.patch]`, adding its path to
+`.cargo/config.toml`, and adding a `crate.annotation` to `MODULE.bazel`.
+
+`patches/starlark+0.14.2.patch` makes starlark's custom function typing hook
+(`TyCustomFunctionImpl`, `register_ty_custom_function!`) and `field()`'s
+`Field` usable outside the crate, and lets a `TyUser`'s declared fields
+override its base type's methods. `catch()` and `Future[T]` depend on the
+first and last; error types' `field()` specs on `Field`.

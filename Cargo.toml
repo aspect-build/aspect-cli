@@ -18,3 +18,9 @@ license = "Apache 2"
 edition = "2024"
 readme = "README.md"
 rust-version = "1.88.0"
+
+# Crates `cargo patch-crate` patches from patches/<crate>+<version>.patch into
+# target/patch/; .cargo/config.toml points cargo there. Bazel applies the same
+# patches through MODULE.bazel. See "Patched crates" in CLAUDE.md.
+[workspace.metadata.patch]
+crates = ["starlark"]

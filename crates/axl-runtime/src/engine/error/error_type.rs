@@ -16,6 +16,7 @@ use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_module;
 use starlark::typing::{Ty, TyBasic, TyStarlarkValue, TyUser, TyUserFields, TyUserParams};
 use starlark::values::none::NoneOr;
+use starlark::values::record::Field;
 use starlark::values::typing::{
     TypeCompiled, TypeInstanceId, TypeMatcher, TypeMatcherDyn, TypeMatcherFactory,
 };
@@ -26,9 +27,7 @@ use starlark::values::{
 use starlark_derive::type_matcher;
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::r#trait::{
-    ConfigAttrValue, FrozenConfigAttrValue, build_type_checkers, copy_default_value,
-};
+use crate::engine::r#trait::{build_type_checkers, copy_default_value};
 
 use super::value::{ERROR_METHODS, ErrorValue, ErrorValueRef};
 
@@ -395,20 +394,16 @@ fn construct<'v>(
     }))
 }
 
-/// A field spec from `.type(fields = ...)`: a bare type, or an `attr()`,
-/// exactly as `trait()` takes them.
+/// A field spec from `.type(fields = ...)`: a bare type, or a `field()`,
+/// exactly as `record()` takes them.
 fn field_spec<'v>(
     name: &str,
     spec: Value<'v>,
     heap: Heap<'v>,
 ) -> anyhow::Result<ErrorField<Value<'v>>> {
-    let (typ, default) = if let Some(attr) = spec.downcast_ref::<ConfigAttrValue>() {
-        (attr.typ_value, attr.default)
-    } else if let Some(attr) = spec.downcast_ref::<FrozenConfigAttrValue>() {
-        (
-            attr.typ_value.to_value(),
-            attr.default.map(FrozenValue::to_value),
-        )
+    let (typ, default) = if let Some(field) = Field::from_value(spec) {
+        // A compiled type is a type value in its own right.
+        (heap.alloc(field.typ().dupe()), field.default().copied())
     } else {
         TypeCompiled::new(spec, heap).map_err(|e| anyhow::anyhow!("field `{name}`: {e}"))?;
         (spec, None)
@@ -430,8 +425,8 @@ fn error_type_methods(builder: &mut MethodsBuilder) {
     /// from the variable the type is first assigned to, so declare error types
     /// at module top level.
     ///
-    /// `fields` maps each field name to a type, or to `attr(type, default = ...)`
-    /// for an optional field, as `trait()` does. `message`, `stacktrace` and
+    /// `fields` maps each field name to a type, or to `field(type, default = ...)`
+    /// for an optional field, as `record()` does. `message`, `stacktrace` and
     /// `cause` are reserved, and an inherited field cannot be redeclared.
     ///
     /// `traceback` decides how an error of this type renders when it escapes
@@ -441,7 +436,7 @@ fn error_type_methods(builder: &mut MethodsBuilder) {
     /// inherited; the root `error` has `True`.
     ///
     /// ```starlark
-    /// DeployError = error.type(fields = {"deployment": str, "attempt": attr(int, default = 1)})
+    /// DeployError = error.type(fields = {"deployment": str, "attempt": field(int, default = 1)})
     /// DeployTimeout = DeployError.type(fields = {"after_ms": int})
     /// NotLoggedIn = error.type(traceback = False)
     /// ```
@@ -492,6 +487,11 @@ fn error_type_methods(builder: &mut MethodsBuilder) {
             fields: all.into_boxed_slice(),
         })
     }
+}
+
+/// The type every error value has, as annotations and signatures show it.
+pub(crate) fn error_instance_ty() -> Ty {
+    instance_ty(&ROOT_META, "error")
 }
 
 /// The id of the error type `value`, if it is one.

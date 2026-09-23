@@ -1,0 +1,4 @@
+# Patches to crates.io releases, one `<crate>+<version>.patch` per crate.
+# Bazel applies them through the `crate.annotation`s in MODULE.bazel; cargo
+# through the copies `cargo patch-crate` prepares under target/patch/.
+exports_files(glob(["*.patch"]))

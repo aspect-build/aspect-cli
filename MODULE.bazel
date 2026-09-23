@@ -84,6 +84,13 @@ crate.annotation(
 
 inject_repo(crate, "zstd")
 
+# Patches to crates.io releases, one patches/<crate>+<version>.patch per crate.
+# Cargo builds get the same patches from `cargo patch-crate`.
+crate.annotation(
+    crate = "starlark",
+    patch_args = ["-p1"],
+    patches = ["//patches:starlark+0.14.2.patch"],
+)
 use_repo(crate, "crates")
 
 bazel_dep(name = "rules_multitool", version = "1.9.0")

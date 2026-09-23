@@ -247,7 +247,7 @@ type adds its own fields and inherits its parent's.
 ```python
 DeployError = error.type(fields = {
     "deployment": str,
-    "attempt": attr(int, default = 1),
+    "attempt": field(int, default = 1),
 })
 DeployTimeout = DeployError.type(fields = {"after_ms": int})
 NotLoggedIn = error.type(traceback = False)
@@ -259,8 +259,8 @@ e = DeployTimeout("no ack", deployment = "prod", after_ms = 30000, cause = previ
   variable it is first assigned to, and that name is what `repr(e)`, type
   errors and tracebacks show. Export only the types callers need to tell
   apart (§11).
-- **Fields** take a type, or `attr(type, default = ...)` for an optional
-  field, the same specs `trait()` takes. The constructor takes the message
+- **Fields** take a type, or `field(type, default = ...)` for an optional
+  field, the same specs `record()` takes (`attr()` is for traits). The constructor takes the message
   first, positionally or as `message = `, then `cause =` and the fields by
   name, and checks each field against its type. `message`, `cause` and
   `stacktrace` are reserved, and a child cannot redeclare an inherited field.
@@ -284,32 +284,48 @@ e = DeployTimeout("no ack", deployment = "prod", after_ms = 30000, cause = previ
   callbacks and `ASPECT_DEBUG=1` behave as for any exit (§13, §14). A child
   inherits its parent's setting unless it sets its own.
 
-**Catching: `err, value`.** A future's failure becomes a value with
-`catch()`. `block()` then gives a pair, error first: `(None, value)` on
-success, `(err, None)` on failure. Test `if err:` before touching `value`;
-errors are truthy.
+**Catching: `err, value`.** A failure becomes a value with `catch`, in one
+of two forms. Both give a pair, error first: `(None, value)` on success,
+`(err, None)` on failure. Test `if err:` before touching `value`; errors are
+truthy.
 
 ```python
+# A future: `catch(...)` right before `block()`.
 err, resp = ctx.http().get(url = url).catch().block()
 if err:
     warn(ctx.std, "upload skipped: " + err.message)
     return
 use(resp.status)
+
+# Any call: `catch(function, *args, **kwargs)` makes the call for you.
+err, config = catch(_load_config, ctx, path, types = [ConfigError])
+if err:
+    config = DEFAULT_CONFIG
 ```
 
-- **Name what you expect.** `catch(DeployError, ...)` catches only errors of
-  those types (and their subtypes); anything else still raises, unchanged. A
-  bare `catch()` catches every failure, including bugs raised with a plain
-  `fail`, so prefer naming the types where you can.
-- **Failures from the runtime** arrive as a plain `error`: `message` is the
-  failure, `cause` holds the underlying reasons one link at a time, and
-  `stacktrace` points at the `block()` call. An error raised with `fail(e)`
-  inside a `map_ok` callback arrives as `e`.
-- **`catch()` must be the last call before `block()`**, and can be called once.
+- **Name what you expect.** `fut.catch(DeployError)` and
+  `catch(fn, types = [DeployError])` catch only errors of those types (and
+  their subtypes); anything else still raises, unchanged. A bare `catch()`
+  catches every failure, including bugs raised with a plain `fail`, so prefer
+  naming the types where you can. `types` is `catch`'s own keyword; every other
+  argument goes to `function`.
+- **An exit is not caught.** `ctx.std.process.exit` inside the caught code
+  still ends the task as asked. A raised error value, even one whose type has
+  `traceback = False`, is caught like any other.
+- **What arrives.** An error raised with `fail(e)` arrives as `e`. Any other
+  failure arrives as a plain `error`: `message` is the failure, `cause` holds
+  the underlying reasons one link at a time, and `stacktrace` points at where
+  it was raised (for a future, the `block()` call).
+- **`fut.catch()` must be the last call before `block()`**, and can be called
+  once.
+- **Types follow the value.** A future is typed with what it resolves to, e.g.
+  `Future[HttpResponse]`, so `block()` is an `HttpResponse` and
+  `catch().block()` is `tuple[error | None, HttpResponse | None]`. `catch(fn,
+  ...)` is checked as the call `fn(...)` it makes, and its value is typed with
+  `fn`'s return type. Editors and the static typechecker see these; the
+  runtime does not narrow `value` after `if err:`.
 - **Keep the pair together.** Nothing checks that `err` was tested before
   `value` was used; a forgotten check shows up as `None` has no attribute
   `...` at the use site. Unpack both names on one line and test `err` right
   after.
-- Standard-library calls that are not futures still raise; `catch()` is the
-  only way to receive an error as a value today.
 

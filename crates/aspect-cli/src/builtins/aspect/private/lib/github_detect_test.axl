@@ -724,12 +724,12 @@ def _http_stub(responses):
         body = entry[1]
         resp_headers = entry[2] if len(entry) > 2 else []
 
-        # _do_request_once consumes `.map_err(...).block()` for transport-error
-        # normalization. The HTTP layer never errors here (we always return
-        # a status/body tuple) so `.map_err` is a passthrough.
+        # _do_request_once consumes `.catch().block()` for transport errors.
+        # The HTTP layer never errors here (we always return a status/body
+        # tuple), so `catch` always yields `(None, response)`.
         return struct(
-            map_err = lambda _f: struct(
-                block = lambda: struct(status = status, body = body, headers = resp_headers),
+            catch = lambda: struct(
+                block = lambda: (None, struct(status = status, body = body, headers = resp_headers)),
             ),
         )
 
