@@ -44,8 +44,8 @@ impl Process {
 #[starlark_value(type = "std.process.Process")]
 impl<'v> values::StarlarkValue<'v> for Process {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(process_methods)
+        static RES: MethodsStatic = MethodsStatic::new("process_methods", process_methods);
+        Some(RES.methods())
     }
 }
 
@@ -165,8 +165,8 @@ impl<'v> AllocValue<'v> for Command {
 #[starlark_value(type = "std.process.Command")]
 impl<'v> values::StarlarkValue<'v> for Command {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(command_methods)
+        static RES: MethodsStatic = MethodsStatic::new("command_methods", command_methods);
+        Some(RES.methods())
     }
 }
 
@@ -332,8 +332,8 @@ impl<'v> AllocValue<'v> for Child {
 #[starlark_value(type = "std.process.Child")]
 impl<'v> values::StarlarkValue<'v> for Child {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(child_methods)
+        static RES: MethodsStatic = MethodsStatic::new("child_methods", child_methods);
+        Some(RES.methods())
     }
 }
 
@@ -493,8 +493,8 @@ pub struct ExitStatus(#[allocative(skip)] pub process::ExitStatus);
 #[starlark_value(type = "std.process.ExitStatus")]
 impl<'v> values::StarlarkValue<'v> for ExitStatus {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(exit_status_methods)
+        static RES: MethodsStatic = MethodsStatic::new("exit_status_methods", exit_status_methods);
+        Some(RES.methods())
     }
 }
 starlark_simple_value!(ExitStatus);
@@ -570,8 +570,8 @@ pub struct Output(#[allocative(skip)] pub process::Output);
 #[starlark_value(type = "std.process.Output")]
 impl<'v> values::StarlarkValue<'v> for Output {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(output_methods)
+        static RES: MethodsStatic = MethodsStatic::new("output_methods", output_methods);
+        Some(RES.methods())
     }
 }
 starlark_simple_value!(Output);

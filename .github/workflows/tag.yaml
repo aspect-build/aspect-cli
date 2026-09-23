@@ -1,5 +1,4 @@
 # Tag a new release
-
 # This is easier than having to run manual `git` operations on a local clone,
 # and less error-prone (accidentally releasing with local state for example).
 name: Tag a Release

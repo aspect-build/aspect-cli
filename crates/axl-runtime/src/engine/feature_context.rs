@@ -81,8 +81,9 @@ impl<'v> Freeze for FeatureContext<'v> {
 #[starlark_value(type = "FeatureContext")]
 impl<'v> StarlarkValue<'v> for FeatureContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(feature_context_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("feature_context_methods", feature_context_methods);
+        Some(RES.methods())
     }
 }
 
@@ -108,8 +109,9 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureContext {
     type Canonical = FeatureContext<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(feature_context_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("feature_context_methods", feature_context_methods);
+        Some(RES.methods())
     }
 }
 

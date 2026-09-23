@@ -151,8 +151,9 @@ starlark_simple_value!(HealthCheckResult);
 #[starlark_value(type = "bazel.HealthCheckResult")]
 impl<'v> values::StarlarkValue<'v> for HealthCheckResult {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(health_check_result_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("health_check_result_methods", health_check_result_methods);
+        Some(RES.methods())
     }
 }
 

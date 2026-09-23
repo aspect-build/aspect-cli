@@ -107,8 +107,9 @@ impl<'v> TaskContext<'v> {
 #[starlark_value(type = "TaskContext")]
 impl<'v> values::StarlarkValue<'v> for TaskContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_context_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("task_context_methods", task_context_methods);
+        Some(RES.methods())
     }
 }
 
@@ -250,8 +251,9 @@ impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
     type Canonical = TaskContext<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(frozen_task_context_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("frozen_task_context_methods", frozen_task_context_methods);
+        Some(RES.methods())
     }
 }
 

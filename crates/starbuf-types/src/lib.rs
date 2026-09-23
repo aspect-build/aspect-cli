@@ -70,8 +70,8 @@ impl<'v> starlark::values::AllocValue<'v> for SBAny {
 impl<'v> starlark::values::StarlarkValue<'v> for SBAny {
     fn get_methods() -> Option<&'static starlark::environment::Methods> {
         static RES: starlark::environment::MethodsStatic =
-            starlark::environment::MethodsStatic::new();
-        RES.methods(sb_any_methods)
+            starlark::environment::MethodsStatic::new("sb_any_methods", sb_any_methods);
+        Some(RES.methods())
     }
 }
 

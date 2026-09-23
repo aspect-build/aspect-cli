@@ -26,8 +26,8 @@ starlark_simple_value!(Aspect);
 #[starlark_value(type = "aspect.Aspect")]
 impl<'v> values::StarlarkValue<'v> for Aspect {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(aspect_methods)
+        static RES: MethodsStatic = MethodsStatic::new("aspect_methods", aspect_methods);
+        Some(RES.methods())
     }
 }
 

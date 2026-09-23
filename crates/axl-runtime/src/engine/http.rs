@@ -82,8 +82,8 @@ impl Http {
 #[starlark_value(type = "Http")]
 impl<'v> StarlarkValue<'v> for Http {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(http_methods)
+        static RES: MethodsStatic = MethodsStatic::new("http_methods", http_methods);
+        Some(RES.methods())
     }
 }
 
@@ -874,8 +874,9 @@ impl From<&reqwest::Response> for HttpResponse {
 #[starlark_value(type = "HttpResponse")]
 impl<'v> values::StarlarkValue<'v> for HttpResponse {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(http_response_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("http_response_methods", http_response_methods);
+        Some(RES.methods())
     }
 }
 

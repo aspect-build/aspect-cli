@@ -262,8 +262,8 @@ impl<'v> Freeze for Telemetry<'v> {
 #[starlark_value(type = "Telemetry")]
 impl<'v> StarlarkValue<'v> for Telemetry<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(telemetry_methods)
+        static RES: MethodsStatic = MethodsStatic::new("telemetry_methods", telemetry_methods);
+        Some(RES.methods())
     }
 }
 
@@ -285,8 +285,8 @@ impl<'v> StarlarkValue<'v> for FrozenTelemetry {
     type Canonical = Telemetry<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(telemetry_methods)
+        static RES: MethodsStatic = MethodsStatic::new("telemetry_methods", telemetry_methods);
+        Some(RES.methods())
     }
 }
 
@@ -371,8 +371,8 @@ impl<'v> StarlarkValue<'v> for Exporters {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(exporters_methods)
+        static RES: MethodsStatic = MethodsStatic::new("exporters_methods", exporters_methods);
+        Some(RES.methods())
     }
 }
 

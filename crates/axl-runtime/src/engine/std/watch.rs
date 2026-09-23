@@ -95,8 +95,8 @@ impl<'v> values::AllocValue<'v> for Watch {
 #[starlark_value(type = "fs.Watch")]
 impl<'v> values::StarlarkValue<'v> for Watch {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(watch_methods)
+        static RES: MethodsStatic = MethodsStatic::new("watch_methods", watch_methods);
+        Some(RES.methods())
     }
 }
 

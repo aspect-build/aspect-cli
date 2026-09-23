@@ -144,8 +144,8 @@ impl<'v> UnpackValue<'v> for StarlarkFuture<'v> {
 #[starlark_value(type = "Future")]
 impl<'v> values::StarlarkValue<'v> for StarlarkFuture<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(future_methods)
+        static RES: MethodsStatic = MethodsStatic::new("future_methods", future_methods);
+        Some(RES.methods())
     }
 }
 

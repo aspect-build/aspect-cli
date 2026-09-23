@@ -3000,8 +3000,9 @@ starlark_simple_value!(AuthCredentials);
 #[starlark_value(type = "aspect.AuthCredentials")]
 impl<'v> values::StarlarkValue<'v> for AuthCredentials {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_credentials_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_credentials_methods", auth_credentials_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3154,8 +3155,9 @@ starlark_simple_value!(Organization);
 #[starlark_value(type = "aspect.Organization")]
 impl<'v> values::StarlarkValue<'v> for Organization {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(organization_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("organization_methods", organization_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3393,8 +3395,9 @@ starlark_simple_value!(AuthSession);
 #[starlark_value(type = "aspect.AuthSession")]
 impl<'v> values::StarlarkValue<'v> for AuthSession {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_session_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_session_methods", auth_session_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3441,8 +3444,9 @@ starlark_simple_value!(AuthServerInfo);
 #[starlark_value(type = "aspect.AuthServerInfo")]
 impl<'v> values::StarlarkValue<'v> for AuthServerInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_server_info_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_server_info_methods", auth_server_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3509,8 +3513,9 @@ starlark_simple_value!(DeploymentInfo);
 #[starlark_value(type = "aspect.DeploymentInfo")]
 impl<'v> values::StarlarkValue<'v> for DeploymentInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_info_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_info_methods", deployment_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3605,8 +3610,9 @@ starlark_simple_value!(DeploymentSummary);
 #[starlark_value(type = "aspect.DeploymentSummary")]
 impl<'v> values::StarlarkValue<'v> for DeploymentSummary {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_summary_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_summary_methods", deployment_summary_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3832,8 +3838,9 @@ starlark_simple_value!(DeploymentEndpoints);
 #[starlark_value(type = "aspect.DeploymentEndpoints")]
 impl<'v> values::StarlarkValue<'v> for DeploymentEndpoints {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_endpoints_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_endpoints_methods", deployment_endpoints_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3896,8 +3903,9 @@ starlark_simple_value!(ShadowedDeployment);
 #[starlark_value(type = "aspect.ShadowedDeployment")]
 impl<'v> values::StarlarkValue<'v> for ShadowedDeployment {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(shadowed_deployment_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("shadowed_deployment_methods", shadowed_deployment_methods);
+        Some(RES.methods())
     }
 }
 
@@ -3928,8 +3936,8 @@ starlark_simple_value!(Auth);
 #[starlark_value(type = "aspect.Auth")]
 impl<'v> values::StarlarkValue<'v> for Auth {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_methods)
+        static RES: MethodsStatic = MethodsStatic::new("auth_methods", auth_methods);
+        Some(RES.methods())
     }
 }
 

@@ -1121,8 +1121,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         impl<'v> ::starlark::values::StarlarkValue<'v> for #ident {
             fn get_methods() -> ::core::option::Option<&'static ::starlark::environment::Methods> {
                 static RES: ::starlark::environment::MethodsStatic =
-                    ::starlark::environment::MethodsStatic::new();
-                RES.methods(#methods_ident)
+                    ::starlark::environment::MethodsStatic::new(stringify!(#methods_ident), #methods_ident);
+                Some(RES.methods())
             }
 
             fn collect_repr(&self, collector: &mut String) {
@@ -1600,8 +1600,9 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
             #[::starlark::values::starlark_value(type = #stream_starlark_type)]
             impl<'v> ::starlark::values::StarlarkValue<'v> for #stream_ident {
                 fn get_methods() -> ::core::option::Option<&'static ::starlark::environment::Methods> {
-                    static RES: ::starlark::environment::MethodsStatic = ::starlark::environment::MethodsStatic::new();
-                    RES.methods(#stream_methods_ident)
+                    static RES: ::starlark::environment::MethodsStatic =
+                        ::starlark::environment::MethodsStatic::new(stringify!(#stream_methods_ident), #stream_methods_ident);
+                    Some(RES.methods())
                 }
 
                 unsafe fn iterate(
@@ -1836,8 +1837,9 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
         #[::starlark::values::starlark_value(type = #starlark_type)]
         impl<'v> ::starlark::values::StarlarkValue<'v> for #handle_ident {
             fn get_methods() -> ::core::option::Option<&'static ::starlark::environment::Methods> {
-                static RES: ::starlark::environment::MethodsStatic = ::starlark::environment::MethodsStatic::new();
-                RES.methods(#methods_ident)
+                static RES: ::starlark::environment::MethodsStatic =
+                    ::starlark::environment::MethodsStatic::new(stringify!(#methods_ident), #methods_ident);
+                Some(RES.methods())
             }
         }
 

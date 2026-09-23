@@ -127,8 +127,11 @@ starlark_simple_value!(SandboxRecoveryResult);
 #[starlark_value(type = "bazel.SandboxRecoveryResult")]
 impl<'v> values::StarlarkValue<'v> for SandboxRecoveryResult {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(sandbox_recovery_result_methods)
+        static RES: MethodsStatic = MethodsStatic::new(
+            "sandbox_recovery_result_methods",
+            sandbox_recovery_result_methods,
+        );
+        Some(RES.methods())
     }
 }
 

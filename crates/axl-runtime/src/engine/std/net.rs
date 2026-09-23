@@ -31,8 +31,8 @@ impl Net {
 #[starlark_value(type = "std.Net")]
 impl<'v> values::StarlarkValue<'v> for Net {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(net_methods)
+        static RES: MethodsStatic = MethodsStatic::new("net_methods", net_methods);
+        Some(RES.methods())
     }
 }
 
