@@ -7,7 +7,7 @@ use starlark::environment::MethodsStatic;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
 use starlark::values::none::{NoneOr, NoneType};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -193,22 +193,131 @@ impl<'v> values::StarlarkValue<'v> for Filesystem {
 starlark_simple_value!(Filesystem);
 
 /// A background read whose completion callers poll for. `state` is `None`
-/// while the reader thread is still running; `Some(result)` once it finished
+/// while a reader is still working on it; `Some(result)` once it finished
 /// (`result` is `None` on any I/O/UTF-8 error, `Some(content)` on success).
 struct ReadProbe {
     state: Mutex<Option<Option<String>>>,
     done: Condvar,
 }
 
+impl ReadProbe {
+    fn complete(&self, result: Option<String>) {
+        *self.state.lock().unwrap() = Some(result);
+        self.done.notify_all();
+    }
+}
+
 /// In-flight [`ReadProbe`]s keyed by path. Entries are removed when a poll
 /// consumes a completed probe; a probe whose read never returns (e.g. a FUSE
-/// request the filesystem daemon never answers) leaves its entry — and its
-/// stuck reader thread — in place for the life of the process, which is what
-/// bounds the leak to one thread per distinct stuck path.
+/// request the filesystem daemon never answers) leaves its entry — and the
+/// reader it pins — in place for the life of the process, which is what
+/// bounds the leak to one reader per distinct stuck path.
 static READ_PROBES: OnceLock<Mutex<HashMap<String, Arc<ReadProbe>>>> = OnceLock::new();
 
+struct ReadJob {
+    path: String,
+    expected_len: Option<u64>,
+    probe: Arc<ReadProbe>,
+}
+
+impl ReadJob {
+    fn run(self) {
+        let result = fs::read_to_string(&self.path)
+            .ok()
+            .filter(|c| match self.expected_len {
+                Some(want) => c.len() as u64 == want,
+                None => true,
+            });
+        self.probe.complete(result);
+    }
+}
+
+#[derive(Default)]
+struct PoolState {
+    queue: VecDeque<ReadJob>,
+    /// Reader threads started so far. They never exit.
+    workers: usize,
+    /// Readers currently inside a read, possibly one that never returns.
+    busy: usize,
+}
+
+/// The reader threads behind [`poll_read`]. A reader lives for the rest of the
+/// process, and a new one starts only when a job is queued with no reader free
+/// to take it, so a lint over hundreds of thousands of outputs runs on a
+/// handful of threads rather than creating and exiting one per read. A reader
+/// stuck in a read that never returns
+/// stays busy, so it never counts as free and later reads get a new reader
+/// instead of queueing behind it.
+struct ReaderPool {
+    state: Mutex<PoolState>,
+    work: Condvar,
+}
+
+static READER_POOL: OnceLock<Arc<ReaderPool>> = OnceLock::new();
+
+impl ReaderPool {
+    fn get() -> Arc<ReaderPool> {
+        READER_POOL
+            .get_or_init(|| {
+                Arc::new(ReaderPool {
+                    state: Mutex::new(PoolState::default()),
+                    work: Condvar::new(),
+                })
+            })
+            .clone()
+    }
+
+    /// Queue `job`, starting a reader when every existing one is busy. Keeping
+    /// queued jobs at or below the free readers is what guarantees a queued
+    /// job never waits behind a stuck read.
+    fn submit(self: &Arc<Self>, job: ReadJob) {
+        let mut st = self.state.lock().unwrap();
+        st.queue.push_back(job);
+        if st.queue.len() > st.workers - st.busy {
+            let pool = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("fs-read-probe".to_string())
+                .spawn(move || pool.serve());
+            match spawned {
+                Ok(_) => st.workers += 1,
+                // No reader could be started. Unless one is free to take the
+                // job, fail it rather than leave its poller waiting forever.
+                Err(_) if st.workers == st.busy => {
+                    if let Some(job) = st.queue.pop_back() {
+                        job.probe.complete(None);
+                    }
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+        drop(st);
+        self.work.notify_one();
+    }
+
+    fn serve(self: Arc<Self>) {
+        let mut st = self.state.lock().unwrap();
+        loop {
+            while st.queue.is_empty() {
+                st = self.work.wait(st).unwrap();
+            }
+            let job = st.queue.pop_front().expect("queue checked non-empty");
+            st.busy += 1;
+            drop(st);
+            job.run();
+            st = self.state.lock().unwrap();
+            st.busy -= 1;
+        }
+    }
+
+    #[cfg(test)]
+    fn workers(&self) -> usize {
+        self.state.lock().unwrap().workers
+    }
+}
+
 /// Poll a coalesced background read of `path` (see `poll_read_to_string` for
-/// the contract). Only the call that spawns the probe blocks (up to
+/// the contract). Only the call that queues the read blocks (up to
 /// `timeout`); later polls for the same path return its state immediately.
 ///
 /// `expected_len`, when `Some`, is the authoritative byte length the file must
@@ -218,7 +327,7 @@ static READ_PROBES: OnceLock<Mutex<HashMap<String, Arc<ReadProbe>>>> = OnceLock:
 /// retries rather than consuming a truncated file.
 fn poll_read(path: &str, timeout: Duration, expected_len: Option<u64>) -> Option<String> {
     let registry = READ_PROBES.get_or_init(Default::default);
-    let (probe, spawned_here) = {
+    let (probe, queued_here) = {
         let mut reg = registry.lock().unwrap();
         match reg.get(path) {
             Some(probe) => (probe.clone(), false),
@@ -228,31 +337,18 @@ fn poll_read(path: &str, timeout: Duration, expected_len: Option<u64>) -> Option
                     done: Condvar::new(),
                 });
                 reg.insert(path.to_string(), probe.clone());
-                let thread_probe = probe.clone();
-                let thread_path = path.to_string();
-                let spawned = std::thread::Builder::new()
-                    .name("fs-read-probe".to_string())
-                    .spawn(move || {
-                        let result =
-                            fs::read_to_string(&thread_path)
-                                .ok()
-                                .filter(|c| match expected_len {
-                                    Some(want) => c.len() as u64 == want,
-                                    None => true,
-                                });
-                        *thread_probe.state.lock().unwrap() = Some(result);
-                        thread_probe.done.notify_all();
-                    });
-                if spawned.is_err() {
-                    *probe.state.lock().unwrap() = Some(None);
-                }
+                ReaderPool::get().submit(ReadJob {
+                    path: path.to_string(),
+                    expected_len,
+                    probe: probe.clone(),
+                });
                 (probe, true)
             }
         }
     };
 
     let mut state = probe.state.lock().unwrap();
-    if spawned_here && state.is_none() {
+    if queued_here && state.is_none() {
         state = probe
             .done
             .wait_timeout_while(state, timeout, |s| s.is_none())
@@ -970,6 +1066,53 @@ mod tests {
             poll_read(missing.to_str().unwrap(), Duration::from_secs(5), None),
             None
         );
+    }
+
+    /// Readers are reused: sequential reads of many distinct files must not
+    /// start a thread per read.
+    #[test]
+    fn poll_read_reuses_reader_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..500 {
+            let path = dir.path().join(format!("f{i}.txt"));
+            fs::write(&path, i.to_string()).unwrap();
+            let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5), None);
+            assert_eq!(got, Some(i.to_string()));
+        }
+        // Other tests share the pool and may have pinned readers on stuck
+        // FIFOs, so bound rather than pin the count.
+        let workers = ReaderPool::get().workers();
+        assert!(
+            workers <= 8,
+            "500 sequential reads started {workers} readers"
+        );
+    }
+
+    /// A read stuck forever pins its reader, but must not hold up reads of
+    /// other paths.
+    #[cfg(unix)]
+    #[test]
+    fn poll_read_is_not_blocked_by_another_paths_stuck_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("pinned.fifo");
+        nix::unistd::mkfifo(&stuck, nix::sys::stat::Mode::from_bits(0o644).unwrap()).unwrap();
+        assert_eq!(
+            poll_read(stuck.to_str().unwrap(), Duration::from_millis(100), None),
+            None
+        );
+
+        for i in 0..20 {
+            let path = dir.path().join(format!("ok{i}.txt"));
+            fs::write(&path, "ok").unwrap();
+            assert_eq!(
+                poll_read(path.to_str().unwrap(), Duration::from_secs(5), None).as_deref(),
+                Some("ok"),
+                "a read queued behind the stuck one",
+            );
+        }
+
+        // Release the pinned reader so it returns to the pool.
+        fs::OpenOptions::new().write(true).open(&stuck).unwrap();
     }
 
     /// A FIFO with no writer blocks `open()` indefinitely — the same shape as
