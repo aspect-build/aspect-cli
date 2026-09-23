@@ -33,8 +33,8 @@ starlark_simple_value!(Std);
 #[starlark_value(type = "std.Std")]
 impl<'v> values::StarlarkValue<'v> for Std {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(std_methods)
+        static RES: MethodsStatic = MethodsStatic::new("std_methods", std_methods);
+        Some(RES.methods())
     }
 }
 

@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use starlark::collections::StarlarkHasher;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -13,7 +15,9 @@ use starlark::typing::{Ty, TyStarlarkValue, TyUser, TyUserFields, TyUserParams};
 use starlark::values::dict::AllocDict;
 use starlark::values::list::AllocList;
 use starlark::values::none::NoneOr;
-use starlark::values::typing::{TypeCompiled, TypeInstanceId, TypeMatcher, TypeMatcherFactory};
+use starlark::values::typing::{
+    TypeCompiled, TypeInstanceId, TypeMatcher, TypeMatcherDyn, TypeMatcherFactory,
+};
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
     NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
@@ -31,7 +35,8 @@ fn next_trait_type_id() -> u64 {
 }
 
 /// Matches instances of one trait type, frozen or not.
-#[derive(Hash, Debug, Eq, PartialEq, Clone, Dupe, Allocative)]
+#[derive(Hash, Debug, Eq, PartialEq, Clone, Dupe, Allocative, Pagable)]
+#[pagable_typetag(TypeMatcherDyn)]
 struct TraitInstanceMatcher {
     id: u64,
 }
@@ -375,8 +380,8 @@ impl<'v> StarlarkValue<'v> for TraitType<'v> {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(trait_type_methods)
+        static RES: MethodsStatic = MethodsStatic::new("trait_type_methods", trait_type_methods);
+        Some(RES.methods())
     }
 }
 
@@ -496,8 +501,8 @@ impl<'v> StarlarkValue<'v> for FrozenTraitType {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(trait_type_methods)
+        static RES: MethodsStatic = MethodsStatic::new("trait_type_methods", trait_type_methods);
+        Some(RES.methods())
     }
 }
 

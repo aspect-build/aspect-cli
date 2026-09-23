@@ -18,9 +18,10 @@ derive_more = { version = "2.0.1", features = ["full"] }
 display_container = "0.9.0"
 dupe = "0.9.1"
 either = "1.15.0"
-starlark = "0.13.0"
-starlark_derive = "0.13.0"
-starlark_map = "0.13.0"
+starlark = "0.14.2"
+starlark_derive = "0.14.2"
+starlark_map = "0.14.2"
+pagable = "0.4.1"
 
 anyhow = "1.0.98"
 serde = { version = "1", features = ["derive"] }

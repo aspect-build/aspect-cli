@@ -109,8 +109,9 @@ impl<'v> AllocValue<'v> for BuildStatus {
 #[starlark_value(type = "bazel.build.BuildStatus")]
 impl<'v> values::StarlarkValue<'v> for BuildStatus {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_status_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_status_methods", build_status_methods);
+        Some(RES.methods())
     }
 }
 
@@ -346,8 +347,9 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
 #[starlark_value(type = "bazel.build.BuildEventSink")]
 impl<'v> values::StarlarkValue<'v> for BuildEventSink {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_event_sink_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_event_sink_methods", build_event_sink_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
@@ -536,8 +538,9 @@ impl<'v> UnpackValue<'v> for BuildEventIter {
 #[starlark_value(type = "bazel.build.BuildEventIter")]
 impl<'v> values::StarlarkValue<'v> for BuildEventIter {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_event_iter_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_event_iter_methods", build_event_iter_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
@@ -1036,8 +1039,8 @@ impl<'v> AllocValue<'v> for Build {
 #[starlark_value(type = "bazel.build.Build")]
 impl<'v> values::StarlarkValue<'v> for Build {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_methods)
+        static RES: MethodsStatic = MethodsStatic::new("build_methods", build_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: values::Heap<'v>) -> Option<values::Value<'v>> {

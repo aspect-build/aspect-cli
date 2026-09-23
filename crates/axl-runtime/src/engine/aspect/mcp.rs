@@ -861,8 +861,8 @@ starlark_simple_value!(Mcp);
 #[starlark_value(type = "aspect.Mcp")]
 impl<'v> values::StarlarkValue<'v> for Mcp {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(mcp_methods)
+        static RES: MethodsStatic = MethodsStatic::new("mcp_methods", mcp_methods);
+        Some(RES.methods())
     }
 }
 

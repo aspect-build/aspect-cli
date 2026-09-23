@@ -132,8 +132,8 @@ impl<'v> Freeze for TaskHooks<'v> {
 #[starlark_value(type = "TaskHooks")]
 impl<'v> StarlarkValue<'v> for TaskHooks<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_hooks_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_hooks_methods", task_hooks_methods);
+        Some(RES.methods())
     }
 }
 
@@ -151,8 +151,8 @@ impl<'v> StarlarkValue<'v> for FrozenTaskHooks {
     type Canonical = TaskHooks<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_hooks_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_hooks_methods", task_hooks_methods);
+        Some(RES.methods())
     }
 }
 

@@ -46,8 +46,8 @@ impl Debug for Memory {
 #[starlark_value(type = "Memory")]
 impl<'v> values::StarlarkValue<'v> for Memory {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(memory_methods)
+        static RES: MethodsStatic = MethodsStatic::new("memory_methods", memory_methods);
+        Some(RES.methods())
     }
 }
 

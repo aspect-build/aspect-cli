@@ -276,8 +276,8 @@ impl<'v> values::Freeze for Bazel<'v> {
 #[starlark_value(type = "bazel.Bazel")]
 impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(bazel_methods)
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        Some(RES.methods())
     }
 }
 
@@ -294,8 +294,8 @@ starlark_simple_value!(FrozenBazel);
 impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     type Canonical = Bazel<'v>;
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(bazel_methods)
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        Some(RES.methods())
     }
 }
 

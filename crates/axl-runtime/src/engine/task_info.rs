@@ -94,8 +94,8 @@ starlark_simple_value!(TaskPhase);
 #[starlark_value(type = "TaskPhase")]
 impl<'v> StarlarkValue<'v> for TaskPhase {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_phase_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_phase_methods", task_phase_methods);
+        Some(RES.methods())
     }
 }
 
@@ -282,8 +282,8 @@ impl<'v> AllocValue<'v> for TaskInfo {
 #[starlark_value(type = "TaskInfo")]
 impl<'v> StarlarkValue<'v> for TaskInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_info_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_info_methods", task_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -520,8 +520,9 @@ starlark_simple_value!(TaskConclusion);
 #[starlark_value(type = "TaskConclusion")]
 impl<'v> StarlarkValue<'v> for TaskConclusion {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_conclusion_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("task_conclusion_methods", task_conclusion_methods);
+        Some(RES.methods())
     }
 }
 

@@ -185,8 +185,8 @@ impl Filesystem {
 #[starlark_value(type = "std.Filesystem")]
 impl<'v> values::StarlarkValue<'v> for Filesystem {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(filesystem_methods)
+        static RES: MethodsStatic = MethodsStatic::new("filesystem_methods", filesystem_methods);
+        Some(RES.methods())
     }
 }
 

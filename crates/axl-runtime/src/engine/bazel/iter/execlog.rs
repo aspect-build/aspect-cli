@@ -80,8 +80,8 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(execlog_methods)
+        static RES: MethodsStatic = MethodsStatic::new("execlog_methods", execlog_methods);
+        Some(RES.methods())
     }
 
     unsafe fn iterate(

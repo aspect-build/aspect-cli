@@ -79,8 +79,9 @@ impl<'v> ConfigContext<'v> {
 #[starlark_value(type = "ConfigContext")]
 impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(config_context_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("config_context_methods", config_context_methods);
+        Some(RES.methods())
     }
 }
 

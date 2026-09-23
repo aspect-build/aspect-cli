@@ -150,8 +150,8 @@ starlark_simple_value!(BazelRC);
 impl<'v> StarlarkValue<'v> for BazelRC {
     fn get_methods() -> Option<&'static starlark::environment::Methods> {
         static RES: starlark::environment::MethodsStatic =
-            starlark::environment::MethodsStatic::new();
-        RES.methods(runcommand_methods)
+            starlark::environment::MethodsStatic::new("runcommand_methods", runcommand_methods);
+        Some(RES.methods())
     }
 }
 
