@@ -115,7 +115,7 @@ the error renders as a traceback. The `unknown deployment` refusals in
 `engine/aspect/auth.rs` are the pattern to copy.
 
 An AXL error value whose type has `traceback = False` is the third producer:
-`fail(e)` raises it as an `engine/error.rs` `RaisedError` carrying a
+`fail(e)` raises it as an `engine/error/raise.rs` `RaisedError` carrying a
 `TaskExit` (code 1), and `TaskExit::from_starlark` / `from_anyhow` find it
 there, so everything below applies to it unchanged. `docs/axl.md` §15
 describes error values.
