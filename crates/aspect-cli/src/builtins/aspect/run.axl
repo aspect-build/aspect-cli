@@ -5,6 +5,7 @@ load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
+load("./private/lib/changedetector.axl", "changedetector")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -14,8 +15,10 @@ load("./private/lib/watch.axl", "watch")
 
 _WATCH_TICK_MS = 100
 
-def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase: phases.Phase, label: str) -> bazel.build.BuildStatus:
-    """Run one `bazel build` of `target`, draining BES into `ph.data` and `r`."""
+def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase: phases.Phase, label: str, execution_log_path: str | None = None, extra_aspects: list = []) -> struct:
+    """One `bazel build` of `target` with BES drained into `ph.data` and the
+    runnable tracker `r`. When `execution_log_path` is set, captures a complete
+    decoded log and returns the paths output by executed actions."""
     bazel_trait = ctx.traits[BazelTrait]
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     ph.data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -39,13 +42,18 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
+    execution_log = list(bazel_trait.execution_log_sinks)
+    if execution_log_path != None:
+        execution_log.append(bazel.execution_log.file(path = execution_log_path))
+
     build = ctx.bazel.build(
         target,
         build_events = build_events,
         flags = flags,
-        aspects = r.aspects,
+        aspects = r.aspects + extra_aspects,
         announce_version = announce_version,
         announce_command = announce_command,
+        execution_log = execution_log or False,
     )
 
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
@@ -66,7 +74,13 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
     summarize_bes_upload(ctx, bes_sinks)
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
-    return build_status
+    execution_outputs = []
+    if execution_log_path != None:
+        execution_outputs = watch.take_execution_outputs(ctx, execution_log_path, build_status.success)
+    return struct(
+        execution_outputs = execution_outputs,
+        status = build_status,
+    )
 
 def _stop_child(child: std.process.Child) -> None:
     """Stop the running target and reap it before the next spawn."""
@@ -98,6 +112,7 @@ def _child_supervisor(ctx: TaskContext) -> struct:
 
     ctx.defer(stop)
     return struct(
+        current = lambda: state["child"],
         poll = poll,
         restart = restart,
     )
@@ -123,7 +138,10 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
     """Restart-mode watch: rebuild on each settled batch of workspace changes,
     then terminate and respawn the target. Runs until Ctrl-C."""
     ws = watch.new(ctx, rc = rc)
-    build_status = _build_once(
+    detector = changedetector.new(ctx, r, target, ws.root)
+
+    detector.prepare_build()
+    build_result = _build_once(
         ctx,
         ph,
         r,
@@ -134,11 +152,15 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         announce_command,
         phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
         "Building %s" % target,
+        extra_aspects = detector.aspects,
     )
+    build_status = build_result.status
     supervisor = _child_supervisor(ctx)
     if build_status.success:
+        detector.initial_build_succeeded()
         supervisor.restart(lambda: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True))
     else:
+        detector.build_failed()
         ph.update(
             "running",
             phases.ProgressStyles(body = "Build failed — watching %s for changes..." % ws.root),
@@ -163,7 +185,8 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
         cycle += 1
         ph.reset(init_data())
-        build_status = _build_once(
+        detector.prepare_build()
+        build_result = _build_once(
             ctx,
             ph,
             r,
@@ -178,16 +201,35 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 emoji = "🔨",
             ),
             "Rebuilding %s" % target,
+            execution_log_path = detector.execution_log_path,
+            extra_aspects = detector.aspects,
         )
+        build_status = build_result.status
         # Deliberately no drain: bazel writes its outputs outside the
         # workspace (the ignore list covers the convenience symlinks), so
         # pending events here are the user's own mid-build edits — dropping
         # them would silently miss a rebuild.
 
         if not build_status.success:
+            detector.build_failed()
             ph.update(
                 "running",
                 phases.ProgressStyles(body = "Build failed — watching for changes..."),
+                kind = "bazel_results",
+            )
+            continue
+
+        # The target may have exited while the synchronous rebuild was in
+        # progress. Reap it before deciding whether an unchanged build can keep
+        # using the existing child.
+        supervisor.poll()
+        running_child = supervisor.current()
+        changed_runfiles = detector.changed_runfiles(batch, build_result.execution_outputs)
+        # None means the delta is unknown, so only [] can safely reuse the child.
+        if running_child != None and changed_runfiles == []:
+            ph.update(
+                "running",
+                phases.ProgressStyles(body = "%s unchanged — watching for changes..." % target),
                 kind = "bazel_results",
             )
             continue

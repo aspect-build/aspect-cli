@@ -173,6 +173,15 @@ def _make_target_event(bes_label, set_id):
         ),
     )
 
+def _make_output_group_target_event(bes_label, group, set_id):
+    return struct(
+        kind = "target_completed",
+        id = struct(label = bes_label),
+        payload = struct(
+            output_group = [struct(name = group, file_sets = [struct(id = set_id)])],
+        ),
+    )
+
 def _make_aborted_target_event(bes_label):
     """A `target_completed`-kinded BES event whose payload is the `aborted`
     union variant — it lacks `output_group`, matching what Bazel emits when a
@@ -547,6 +556,26 @@ def _test_get_default_outputs_strips_file_uri_prefix(ctx):
     if got[0].startswith("file://"):
         fail("file:// prefix not stripped: %r" % got[0])
 
+def _test_clear_default_outputs(ctx):
+    r = runnable(None, ["//apps:image_push"])
+    r.event(_make_fileset_event("s1", ["/out/bin/apps/image_push"]))
+    r.event(_make_target_event("//apps:image_push", "s1"))
+    r.clear_default_outputs("//apps:image_push")
+    _eq("cleared default outputs", r.get_default_outputs("//apps:image_push"), [])
+
+def _test_get_named_output_group(ctx):
+    r = runnable(None, ["//apps:image_push"])
+    r.event(_make_fileset_event("manifest", ["/out/bin/apps/image_push.runfiles_manifest"]))
+    r.event(_make_output_group_target_event("//apps:image_push", "aspect_watch_manifest", "manifest"))
+    _eq(
+        "named output group",
+        r.get_output_group_outputs("//apps:image_push", "aspect_watch_manifest"),
+        ["/out/bin/apps/image_push.runfiles_manifest"],
+    )
+    _eq("unknown output group", r.get_output_group_outputs("//apps:image_push", "missing"), [])
+    r.clear_output_group_outputs("//apps:image_push", "aspect_watch_manifest")
+    _eq("cleared output group", r.get_output_group_outputs("//apps:image_push", "aspect_watch_manifest"), [])
+
 # resolve_run_in — `--run-in=<choice>` cwd resolution
 
 def _make_env_ctx(cwd = "/user/cwd", bazel_root = "/repo", aspect_root = "/repo", git_root = "/repo"):
@@ -909,6 +938,8 @@ _UNIT_TESTS = [
     _test_get_default_outputs_walks_nested_filesets,
     _test_get_default_outputs_apparent_label_normalization,
     _test_get_default_outputs_strips_file_uri_prefix,
+    _test_clear_default_outputs,
+    _test_get_named_output_group,
     _test_runinfo_selects_executable_over_heuristic,
     _test_runinfo_attaches_args_and_env,
     _test_no_runinfo_yields_empty_args_env,

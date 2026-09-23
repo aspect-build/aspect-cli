@@ -2,6 +2,33 @@
 
 load("@std//time.axl", "sleep_iter")
 
+_MANIFEST_OUTPUT_GROUP = "aspect_watch_manifest"
+
+# Modernized port of aspect-cli-legacy's aspect_watch.bzl. The legacy aspect
+# copied target metadata to a global temp file so Go could locate the native
+# `<executable>.runfiles_manifest`. AXL already receives output paths through
+# BES, so expose that manifest directly as an aspect output group instead.
+_WATCH_MANIFEST_BZL = """def _watch_manifest_impl(target, ctx):
+    if DefaultInfo not in target:
+        return []
+    files_to_run = target[DefaultInfo].files_to_run
+    if files_to_run == None or files_to_run.executable == None:
+        return []
+    manifest = getattr(files_to_run, "runfiles_manifest", None)
+    if manifest == None:
+        return []
+    return [OutputGroupInfo(aspect_watch_manifest = depset([manifest]))]
+
+watch_manifest = aspect(implementation = _watch_manifest_impl)
+"""
+
+def _aspect(ctx: TaskContext):
+    return ctx.bazel.aspect(
+        implementation = _WATCH_MANIFEST_BZL,
+        symbol = "watch_manifest",
+        output_groups = [_MANIFEST_OUTPUT_GROUP],
+    )
+
 # Workspace entries never worth a rebuild: VCS internals and bazel's
 # convenience symlinks (bazel-bin, bazel-out,
 # bazel-<workspace>, ...) — outputs live in the output base outside the
@@ -57,6 +84,236 @@ def _run_pending(ws: struct, run_cycle) -> bool:
     run_cycle()
     return True
 
+def _execution_outputs(ctx: TaskContext, path: str) -> list[str]:
+    """Return output paths from a complete decoded execution log file.
+
+    Unlike the live iterator, the file sink applies backpressure and cannot
+    drop entries. File/directory records are keyed by ID; spawn records refer
+    to those IDs. Symlink actions carry their output path directly.
+    """
+    entries = bazel.build.execution_log.ExecLogEntry().parse_from_delimited(ctx.std.fs.open(path))
+    paths_by_id = {}
+    output_ids = []
+    direct_paths = []
+    for entry in entries:
+        payload = entry.type
+        if payload == None:
+            continue
+        kind = type(payload)
+        if kind in ["file", "directory", "unresolved_symlink"]:
+            paths_by_id[entry.id] = payload.path
+        elif kind == "spawn":
+            for output in payload.outputs:
+                output_id = output.type
+
+                # ExecLogEntry.Output's oneof is either an integer output ID or
+                # a string invalid-output path.
+                if type(output_id) == "int":
+                    output_ids.append(output_id)
+        elif kind == "symlink_action":
+            direct_paths.append(payload.output_path)
+
+    outputs = {path: True for path in direct_paths}
+    for output_id in output_ids:
+        path = paths_by_id.get(output_id)
+        if path != None:
+            outputs[path] = True
+    return outputs.keys()
+
+def _take_execution_outputs(ctx: TaskContext, path: str, successful: bool) -> list[str] | None:
+    """Read and remove one build's execution log when Bazel created it.
+
+    A failed build may exit before its file sink exists. A successful build
+    without a log returns None so restart filtering remains conservative.
+    """
+    if not ctx.std.fs.exists(path):
+        return None if successful else []
+    outputs = _execution_outputs(ctx, path) if successful else []
+    ctx.std.fs.remove_file(path)
+    return outputs
+
+def _normalize_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+def _manifest_unescape(value: str) -> str:
+    """Decode Bazel's escaped runfiles-manifest field representation."""
+    out = ""
+    i = 0
+    for _ in range(len(value) + 1):
+        if i >= len(value):
+            break
+        c = value[i]
+        i += 1
+        if c != "\\" or i >= len(value):
+            out += c
+            continue
+        escaped = value[i]
+        i += 1
+        if escaped == "s":
+            out += " "
+        elif escaped == "n":
+            out += "\n"
+        elif escaped == "b":
+            out += "\\"
+        else:
+            out += "\\" + escaped
+    return out
+
+def _manifest_fields(line: str) -> tuple | None:
+    if not line:
+        return None
+    escaped = line.startswith(" ")
+    text = line[1:] if escaped else line
+    split = text.find(" ")
+    if split < 0:
+        return (_manifest_unescape(text) if escaped else text, "")
+    logical = text[:split]
+    origin = text[split + 1:]
+    if escaped:
+        logical = _manifest_unescape(logical)
+        origin = _manifest_unescape(origin)
+    return (logical, origin)
+
+def _origin_keys(origin: str, root: str) -> list[str]:
+    """Forms by which watcher events or execution-log outputs name origin."""
+    if not origin:
+        return []
+    origin = _normalize_path(origin)
+    root = _normalize_path(root).rstrip("/")
+    absolute = origin.startswith("/") or (len(origin) >= 3 and origin[1] == ":" and origin[2] == "/")
+    if not absolute:
+        # Relative manifest origins are runfiles symlink targets, not paths
+        # reported by the workspace watcher or execution log.
+        return []
+
+    keys = {origin: True}
+    if origin.startswith(root + "/"):
+        keys[origin[len(root) + 1:]] = True
+
+    # Execution-log paths are execroot-relative (`bazel-out/...` or
+    # `external/...`) while manifests contain absolute physical paths.
+    execroot_marker = "/execroot/"
+    at = origin.find(execroot_marker)
+    if at >= 0:
+        rest = origin[at + len(execroot_marker):]
+        slash = rest.find("/")
+        if slash >= 0:
+            keys[rest[slash + 1:]] = True
+    external_marker = "/external/"
+    at = origin.find(external_marker)
+    if at >= 0:
+        keys["external/" + origin[at + len(external_marker):]] = True
+    return keys.keys()
+
+def _parse_manifest(content: str, root: str) -> struct:
+    """Parse a native runfiles manifest into logical entries and origin keys."""
+    entries = {}
+    origins = {}
+    for line in content.splitlines():
+        fields = _manifest_fields(line)
+        if fields == None:
+            continue
+        logical, origin = fields
+        entries[logical] = origin
+        for key in _origin_keys(origin, root):
+            origins[key] = logical
+    return struct(entries = entries, origins = origins)
+
+def _manifest_path(paths: list[str]) -> str | None:
+    for path in paths:
+        # Depending on Bazel/platform, FilesToRunProvider surfaces either the
+        # sibling `<executable>.runfiles_manifest` or the tree's `MANIFEST`.
+        if path.endswith(".runfiles_manifest") or path.endswith("/MANIFEST"):
+            return path
+    return None
+
+def _read_manifest(ctx: TaskContext, path: str | None, root: str):
+    if path == None or not ctx.std.fs.exists(path):
+        return None
+    return _parse_manifest(ctx.std.fs.read_to_string(path), root)
+
+def _paths_changed(paths: list[str], origins: dict) -> bool:
+    """Whether any changed path equals or descends from a tracked origin."""
+    for path in paths:
+        path = _normalize_path(path)
+        if path in origins:
+            return True
+
+        # An origin may itself be a directory. Events name the changed child,
+        # while manifests and execution logs name its root.
+        parts = path.split("/")
+        for i in range(len(parts) - 1, 0, -1):
+            if "/".join(parts[:i]) in origins:
+                return True
+    return False
+
+def _runfiles_for_paths(paths: list[str], origins: dict) -> list[str]:
+    """Logical runfile paths backed by the changed physical paths."""
+    changed = {}
+    for path in paths:
+        path = _normalize_path(path)
+        logical = origins.get(path)
+        if logical != None:
+            changed[logical] = True
+            continue
+
+        # A runfile origin may itself be a directory. Preserve the changed
+        # child's suffix so future consumers can receive a precise delta.
+        parts = path.split("/")
+        for i in range(len(parts) - 1, 0, -1):
+            logical = origins.get("/".join(parts[:i]))
+            if logical != None:
+                changed[logical.rstrip("/") + "/" + "/".join(parts[i:])] = True
+                break
+    return sorted(changed.keys())
+
+def _changed_runfiles(previous, current, source_paths: list[str], output_paths: list[str] | None, rescan: bool = False) -> list[str] | None:
+    """Changed logical runfile paths, or None when a precise delta is unsafe."""
+    if previous == None or current == None:
+        # Targets without a usable manifest cannot be filtered safely.
+        return None
+    if rescan:
+        # The watcher lost events, so direct-source paths are unknowable.
+        return None
+    if output_paths == None:
+        # A successful build without its execution log cannot be filtered.
+        return None
+
+    changed = {}
+    for logical, origin in previous.entries.items():
+        if current.entries.get(logical) != origin:
+            changed[logical] = True
+    for logical, origin in current.entries.items():
+        if previous.entries.get(logical) != origin:
+            changed[logical] = True
+    for logical in _runfiles_for_paths(source_paths + output_paths, current.origins):
+        changed[logical] = True
+    return sorted(changed.keys())
+
+def _outputs_changed(output_paths: list[str] | None, watched_paths: list[str], root: str) -> bool:
+    """Whether executed actions changed a target default output."""
+    if output_paths == None:
+        return True
+    origins = {}
+    for watched_path in watched_paths:
+        for key in _origin_keys(watched_path, root):
+            origins[key] = True
+    return _paths_changed(output_paths, origins)
+
+def _entrypoint_state(ep) -> tuple | None:
+    """Stable run state that can change without a spawn (the runinfo aspect
+    writes args and environment with ctx.actions.write)."""
+    if ep == None:
+        return None
+    return (
+        ep.path,
+        list(getattr(ep, "args", []) or []),
+        dict(getattr(ep, "environment", {}) or {}),
+        list(getattr(ep, "inherited_environment", []) or []),
+        getattr(ep, "runfiles_dir", None),
+        getattr(ep, "runfiles_workspace_dir", None),
+    )
+
 def _loop(ws: struct, run_cycle) -> None:
     """Re-run `run_cycle` on each settled batch of workspace changes — the
     simple watch shape for tasks whose cycle is just re-running a bazel
@@ -67,8 +324,18 @@ def _loop(ws: struct, run_cycle) -> None:
         _run_pending(ws, run_cycle)
 
 watch = namespace(
+    aspect = _aspect,
+    execution_outputs = _execution_outputs,
+    take_execution_outputs = _take_execution_outputs,
+    entrypoint_state = _entrypoint_state,
+    manifest_output_group = _MANIFEST_OUTPUT_GROUP,
+    manifest_path = _manifest_path,
     ignores = _ignores,
     new = _new,
+    outputs_changed = _outputs_changed,
+    parse_manifest = _parse_manifest,
+    read_manifest = _read_manifest,
     loop = _loop,
+    changed_runfiles = _changed_runfiles,
     run_pending = _run_pending,
 )
