@@ -1,6 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use allocative::Allocative;
 use anyhow::anyhow;
@@ -59,6 +62,7 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<Command> {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
+            process_group: Cell::new(None),
         })
     }
 
@@ -132,6 +136,8 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
+    #[allocative(skip)]
+    process_group: Cell<Option<i32>>,
 }
 
 impl Command {
@@ -242,6 +248,26 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Assign the command to process group `group`.
+    ///
+    /// On Unix, `0` starts the command as the leader of a new process group.
+    /// A grouped child can be terminated together with the other processes in
+    /// that group by calling [`Child.kill_all`]. This setting has no effect on
+    /// Windows.
+    fn process_group<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] group: i32,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        if group < 0 {
+            return Err(anyhow!("process group must be non-negative, got {group}"));
+        }
+        #[cfg(unix)]
+        cmd.inner.borrow_mut().process_group(group);
+        cmd.process_group.set(Some(group));
+        Ok(this)
+    }
+
     /// Configuration for the child process's standard input (stdin) handle.
     ///
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
@@ -301,6 +327,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         let child = cmd.try_spawn()?;
         Ok(Child {
             inner: RefCell::new(Some(child)),
+            process_group: cmd.process_group.get(),
         })
     }
 
@@ -321,6 +348,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
+    process_group: Option<i32>,
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -416,6 +444,27 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .as_mut()
             .ok_or(anyhow::anyhow!("child is no longer active"))?
             .kill()?;
+        Ok(NoneType)
+    }
+
+    /// Force the child and every process in its configured process group to exit.
+    ///
+    /// Use this with a command configured by [`Command.process_group`]. A
+    /// command without that configuration falls back to killing only the
+    /// immediate child.
+    ///
+    /// **Warning:** On Windows this is equivalent to calling [`Child.kill`].
+    fn kill_all<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        if let Some(process_group) = child.process_group {
+            kill_process_group(inner, process_group)?;
+        } else {
+            inner.kill()?;
+        }
         Ok(NoneType)
     }
 
@@ -609,6 +658,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_spawn().unwrap_err().to_string();
@@ -621,6 +671,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_status().unwrap_err().to_string();
@@ -632,6 +683,7 @@ mod tests {
     fn describe_excludes_env_vars() {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
+            process_group: Cell::new(None),
         };
         cmd.inner
             .borrow_mut()
@@ -639,6 +691,79 @@ mod tests {
             .env("SECRET_TOKEN", "super_secret");
         let description = cmd.describe();
         assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &mut process::Child, process_group: i32) -> anyhow::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let process_group = if process_group == 0 {
+        i32::try_from(child.id()).map_err(|_| anyhow!("child process ID is too large"))?
+    } else {
+        process_group
+    };
+    match signal::kill(Pid::from_raw(-process_group), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut process::Child, _process_group: i32) -> anyhow::Result<()> {
+    child.kill()?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod process_group_tests {
+    use super::kill_process_group;
+    use nix::errno::Errno;
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    use std::os::unix::process::CommandExt;
+    use std::process::{self, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn killing_process_group_terminates_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut command = process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$DESCENDANT_PID_FILE\"")
+            .env("DESCENDANT_PID_FILE", &pid_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid file was not created")
+            .trim()
+            .parse()
+            .unwrap();
+
+        child.wait().unwrap();
+        kill_process_group(&mut child, 0).unwrap();
+
+        let descendant = Pid::from_raw(descendant_pid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match signal::kill(descendant, None) {
+                Err(Errno::ESRCH) => break,
+                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                result => panic!("descendant survived process-group kill: {result:?}"),
+            }
+        }
     }
 }
 
