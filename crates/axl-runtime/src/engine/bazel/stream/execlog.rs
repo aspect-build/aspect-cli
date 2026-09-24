@@ -179,35 +179,63 @@ impl ExecLogStream {
         })
     }
 
-    /// Spawn the execlog reader thread for a regular file.
+    /// Mint the path Bazel will write `--execution_log_compact_file` to, without
+    /// starting a reader. Pass `Some(path)` to reuse an existing sink path (e.g. a
+    /// `CompactFile` sink, so Bazel writes straight to the caller's destination with
+    /// no tee step); `None` names a UUID temp file. Nothing is created on disk —
+    /// Bazel writes a regular file, so there is no inode to reserve.
     ///
-    /// `pid` is the Bazel server process ID, used to detect when Bazel has finished
-    /// writing the file. `out_path` is the file Bazel will write
-    /// `--execution_log_compact_file` to. Pass `Some(path)` to reuse an existing sink
-    /// path (e.g. a `CompactFile` sink so Bazel writes directly to the caller's
-    /// destination without a tee step). Pass `None` to have a UUID-named temp file
-    /// created automatically.
+    /// Pair with [`spawn_with_file`](Self::spawn_with_file) once the caller has the
+    /// bazel client pid in hand.
+    pub fn reserve_path(out_path: Option<PathBuf>) -> PathBuf {
+        out_path.unwrap_or_else(|| {
+            env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()))
+        })
+    }
+
+    /// Spawn the execlog reader thread for a regular file at `path`, as minted by
+    /// [`reserve_path`](Self::reserve_path).
+    ///
+    /// `server_pid` is the Bazel daemon: the process that holds the file open while
+    /// it writes, so it answers "are more bytes coming?".
+    ///
+    /// `client_pid` is the spawned bazel client — the per-invocation pid whose death
+    /// means no execution log is coming at all. It has to be asked separately,
+    /// because a Bazel that rejects its command line exits before writing anything
+    /// and leaves the daemon idling behind it for `--max_idle_secs`; keyed to
+    /// `server_pid` alone the open below waits out that whole idle period.
     ///
     /// The thread streams the file as Bazel writes it using [`galvanize::StreamingFile`],
     /// which busy-polls for file existence at open time and retries reads while Bazel
     /// holds the file open. It self-terminates when Bazel closes the file.
+    ///
+    /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
+    /// written before the reader opens are still there to be read.
     pub fn spawn_with_file(
-        pid: u32,
-        out_path: Option<PathBuf>,
+        path: PathBuf,
+        server_pid: u32,
+        client_pid: u32,
         compact_sink_paths: Vec<String>,
         has_file_sinks: bool,
-    ) -> io::Result<(PathBuf, Self)> {
-        let out = out_path.unwrap_or_else(|| {
-            env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()))
-        });
+    ) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
-        let path = out.clone();
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
             buf.resize(10, 0);
 
-            let out_raw = galvanize::StreamingFile::open(path.clone(), pid)?;
+            let out_raw = match galvanize::StreamingFile::open(path.clone(), server_pid, client_pid)
+            {
+                Ok(f) => f,
+                // Bazel exited without ever writing an execution log — a rejected
+                // command line, say. An empty stream, not a failure: the build's own
+                // exit code is the thing the caller wants to see.
+                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+                    sender.close()?;
+                    return Ok(());
+                }
+                Err(err) => return Err(err.into()),
+            };
             let writers = compact_sink_paths
                 .iter()
                 .map(|p| Ok(BufWriter::new(File::create(p)?)))
@@ -262,14 +290,11 @@ impl ExecLogStream {
             }
         });
 
-        Ok((
-            out,
-            Self {
-                handle,
-                recv: Some(recv),
-                file_sink_handles: vec![],
-            },
-        ))
+        Ok(Self {
+            handle,
+            recv: Some(recv),
+            file_sink_handles: vec![],
+        })
     }
 
     pub fn receiver(&self) -> Receiver<ExecLogEntry> {
