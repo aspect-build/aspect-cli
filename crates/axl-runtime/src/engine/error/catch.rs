@@ -23,6 +23,7 @@ use starlark::values::{AllocValue, Heap, StringValue, Value};
 use starlark_map::small_map::SmallMap;
 
 use super::error_type::{error_instance_ty, error_type_id};
+use super::native::NativeRaised;
 use super::raise::RaisedError;
 use super::value::{ErrorValue, ErrorValueRef};
 use crate::eval::TaskExit;
@@ -37,6 +38,9 @@ pub(crate) fn error_value_of<'v>(
     if let Some(value) = RaisedError::from_anyhow(err).and_then(|r| r.value(eval)) {
         return value;
     }
+    if let Some(native) = NativeRaised::from_anyhow(err) {
+        return native.to_value(eval);
+    }
     let links = err.chain().map(ToString::to_string).collect();
     let stack = eval.call_stack();
     plain_error(links, &stack, eval.heap())
@@ -50,6 +54,9 @@ fn starlark_error_value_of<'v>(
 ) -> Value<'v> {
     if let Some(value) = RaisedError::from_starlark(err).and_then(|r| r.value(eval)) {
         return value;
+    }
+    if let Some(native) = NativeRaised::from_starlark(err) {
+        return native.to_value(eval);
     }
     let links = match err.kind() {
         starlark::ErrorKind::Native(e)
@@ -148,10 +155,12 @@ pub(crate) fn callback_error(err: starlark::Error) -> anyhow::Error {
 
 /// The type of an `(err, value)` pair whose value, on success, is `value`.
 pub(crate) fn caught_ty(value: Ty) -> Ty {
-    Ty::tuple2(
-        Ty::union2(error_instance_ty(), Ty::none()),
-        Ty::union2(value, Ty::none()),
-    )
+    caught_ty_with(error_instance_ty(), value)
+}
+
+/// The type of an `(err, value)` pair that only catches errors typed `error`.
+pub(crate) fn caught_ty_with(error: Ty, value: Ty) -> Ty {
+    Ty::tuple2(Ty::union2(error, Ty::none()), Ty::union2(value, Ty::none()))
 }
 
 /// The `(err, value)` pair `catch` returns.

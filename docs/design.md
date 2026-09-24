@@ -49,6 +49,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.std.process` — subprocess execution
 - `ctx.std.env` — environment variables, platform info, paths
 - `ctx.std.io` — stdin/stdout/stderr streams
+- `ctx.std.net` — TCP, Unix-domain and TLS client streams and listeners
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
 - `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)

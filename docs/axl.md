@@ -329,3 +329,41 @@ if err:
   `...` at the use site. Unpack both names on one line and test `err` right
   after.
 
+
+**§16 Network streams.** `ctx.std.net.tcp`, `.unix` and `.tls` connect to
+and listen on sockets. Every call blocks. The three namespaces share their
+verbs, so a library can take the transport as a value and call
+`transport.connect(addr, timeout_ms = ...)` without caring which one it got.
+
+```python
+def _ask(ctx: TaskContext, addr: str) -> bytes | None:
+    err, s = ctx.std.net.tls.try_connect(addr, timeout_ms = 2000)
+    if err:
+        print("unreachable ({}): {}".format(err.kind, err.message))
+        return None
+    s.set_read_timeout(2000)
+    s.write_all("PING\r\n")
+    err, reply = s.try_read(512)
+    s.close()
+    return None if err else reply
+```
+
+- **Pass `timeout_ms` to anything outside the machine.** `None` means the
+  operating system's behavior: minutes for a connect, forever for a read.
+  `connect`'s timeout covers the name lookup and, for TLS, the handshake.
+  Reads and writes take theirs from `set_read_timeout` and
+  `set_write_timeout`.
+- **A failed operation raises `std.io.Error`**, an `error` (§15) with a
+  `kind` field: Rust's `ErrorKind` in snake case, such as `"timed_out"`,
+  `"connection_refused"` or `"not_found"`. Each method that can raise one has
+  a `try_` twin returning the `(err, value)` pair. Both forms still raise a
+  plain error for a mistake in the call itself, such as a closed stream or a
+  bad argument. When a helper makes several calls, catch the whole helper
+  with `catch(fn, types = [std.io.Error])`, never a bare `catch()`, which
+  would also swallow its bugs.
+- **Streams and listeners cannot be frozen.** Open them in a task or feature
+  body, not at module top level. A dropped stream closes by itself; closing
+  twice is harmless.
+- **`ca_pem` replaces the trusted roots.** Without it, `tls.connect` trusts the
+  operating system's certificate store. With it, only the certificates in that
+  PEM bundle are trusted, which is what you want for a private endpoint.

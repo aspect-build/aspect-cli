@@ -1,6 +1,7 @@
 //! Error types: the root `error`, the types `.type(...)` derives from it,
 //! and the constructor that builds their values.
 
+use std::convert::Infallible;
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -10,19 +11,22 @@ use dupe::Dupe;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use starlark::collections::StarlarkHasher;
-use starlark::docs::{DocItem, DocString, DocStringKind};
+use starlark::docs::{DocItem, DocMember, DocProperty, DocString, DocStringKind};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::{Arguments, Evaluator};
 use starlark::starlark_module;
 use starlark::typing::{Ty, TyBasic, TyStarlarkValue, TyUser, TyUserFields, TyUserParams};
 use starlark::values::none::NoneOr;
-use starlark::values::record::Field;
+use starlark::values::record::{Field, FrozenField};
+use starlark::values::type_repr::StarlarkTypeRepr;
+use starlark::values::typing::TypeType;
 use starlark::values::typing::{
     TypeCompiled, TypeInstanceId, TypeMatcher, TypeMatcherDyn, TypeMatcherFactory,
 };
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FrozenHeap, FrozenValue, Heap, NoSerialize,
-    ProvidesStaticType, StarlarkValue, Trace, Value, ValueLifetimeless, ValueLike, starlark_value,
+    ProvidesStaticType, StarlarkValue, Trace, UnpackValue, Value, ValueLifetimeless, ValueLike,
+    starlark_value,
 };
 use starlark_derive::type_matcher;
 use starlark_map::small_map::SmallMap;
@@ -51,6 +55,9 @@ pub(super) struct ErrorTypeMeta {
     /// parent type accepts a child.
     supertypes: Vec<TyBasic>,
     pub(super) traceback: bool,
+    /// What the type's documentation page says about it. A derived type
+    /// says what its parent says unless it was given its own.
+    docs: &'static str,
 }
 
 pub(super) static ROOT_META: LazyLock<Arc<ErrorTypeMeta>> = LazyLock::new(|| {
@@ -60,6 +67,7 @@ pub(super) static ROOT_META: LazyLock<Arc<ErrorTypeMeta>> = LazyLock::new(|| {
         ancestors: Box::new([ROOT_ID]),
         supertypes: Vec::new(),
         traceback: true,
+        docs: ERROR_DOCS,
     })
 });
 
@@ -95,13 +103,22 @@ fn instance_ty(meta: &ErrorTypeMeta, name: &str) -> Ty {
 }
 
 /// A declared field: its name, the type its values must match, and the
-/// default used when the constructor omits it.
+/// default used when the constructor omits it. `ty` and `docs` are what the
+/// type's documentation page shows for it.
 #[derive(Debug, Clone, Trace, Freeze, Allocative)]
 struct ErrorField<V: ValueLifetimeless> {
     #[trace(static)]
     name: String,
     typ: V,
     default: Option<V>,
+    #[trace(static)]
+    #[freeze(identity)]
+    #[allocative(skip)]
+    ty: Ty,
+    #[trace(static)]
+    #[freeze(identity)]
+    #[allocative(skip)]
+    docs: Option<&'static str>,
 }
 
 /// An error type: the root `error`, or one derived with `.type(...)`.
@@ -146,6 +163,91 @@ impl<'v> AllocValue<'v> for ErrorType<'v> {
 impl AllocFrozenValue for FrozenErrorType {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
+    }
+}
+
+/// The meta of a new type derived from `parent`, named `parent_name`.
+fn child_meta(
+    parent: &ErrorTypeMeta,
+    parent_name: &str,
+    traceback: bool,
+    docs: &'static str,
+) -> ErrorTypeMeta {
+    let id = ERROR_TYPE_ID.fetch_add(1, Ordering::SeqCst);
+    let mut supertypes = instance_ty(parent, parent_name).iter_union().to_vec();
+    supertypes.extend(parent.supertypes.iter().cloned());
+    ErrorTypeMeta {
+        id,
+        ty_id: TypeInstanceId::r#gen(),
+        ancestors: parent.ancestors.iter().copied().chain([id]).collect(),
+        supertypes,
+        traceback,
+        docs,
+    }
+}
+
+/// A field of an error type defined in Rust: its name, its type as a type
+/// value and as the typechecker sees it, and what its documentation says.
+#[derive(Clone)]
+pub(crate) struct NativeField {
+    pub(crate) name: &'static str,
+    pub(crate) typ: FrozenValue,
+    pub(crate) ty: Ty,
+    pub(crate) docs: &'static str,
+}
+
+/// An error type defined in Rust and derived from `error`, as `native_error!`
+/// declares one. It lives in a static, so every copy of the type built from
+/// it compares equal and matches the same instances.
+pub(crate) struct NativeErrorType {
+    meta: Arc<ErrorTypeMeta>,
+    name: &'static str,
+    fields: Vec<NativeField>,
+}
+
+impl NativeErrorType {
+    pub(crate) fn new(name: &'static str, docs: &'static str, fields: Vec<NativeField>) -> Self {
+        Self {
+            meta: Arc::new(child_meta(&ROOT_META, "error", true, docs)),
+            name,
+            fields,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The type as a value: what the globals register and what its errors'
+    /// values carry.
+    pub(crate) fn error_type(&self) -> FrozenErrorType {
+        let name = OnceLock::new();
+        let _ = name.set(self.name.to_owned());
+        FrozenErrorType {
+            meta: self.meta.dupe(),
+            name,
+            fields: self
+                .fields
+                .iter()
+                .map(|f| ErrorField {
+                    name: f.name.to_owned(),
+                    typ: f.typ,
+                    default: None,
+                    ty: f.ty.clone(),
+                    docs: Some(f.docs),
+                })
+                .collect(),
+        }
+    }
+
+    /// The type of its instances, as annotations and signatures show it.
+    pub(crate) fn instance_ty(&self) -> Ty {
+        instance_ty(&self.meta, self.name)
+    }
+
+    /// Whether an error of this type is also an instance of `other`.
+    pub(super) fn is_a(&self, other: &NativeErrorType) -> bool {
+        self.meta.ancestors.contains(&other.meta.id)
     }
 }
 
@@ -208,14 +310,25 @@ where
         Some(ERROR_TYPE_METHODS.methods())
     }
 
-    // One page for `error`: what errors are, deriving types, and the
-    // attributes every error value has.
+    // One page per error type: what it is, deriving types, the attributes
+    // every error value has, and the fields this type's values add.
     fn documentation(&self) -> DocItem {
         let ty = Self::get_type_starlark_repr();
         let mut doc = ERROR_TYPE_METHODS.methods().documentation(ty.clone());
         let values = ERROR_METHODS.methods().documentation(ty);
         doc.members.extend(values.members);
-        doc.docs = DocString::from_docstring(DocStringKind::Rust, ERROR_DOCS);
+        for field in &self.fields {
+            doc.members.insert(
+                field.name.clone(),
+                DocMember::Property(DocProperty {
+                    docs: field
+                        .docs
+                        .and_then(|d| DocString::from_docstring(DocStringKind::Rust, d)),
+                    typ: field.ty.clone(),
+                }),
+            );
+        }
+        doc.docs = DocString::from_docstring(DocStringKind::Rust, self.meta.docs);
         DocItem::Type(doc)
     }
 }
@@ -299,6 +412,22 @@ impl<'v> ErrorTypeRef<'v> {
                     f.default.map(FrozenValue::to_value),
                 )
             }
+        }
+    }
+
+    /// The `i`th field, as a type derived from this one inherits it.
+    fn inherit(self, i: usize) -> ErrorField<Value<'v>> {
+        let (name, typ, default) = self.field(i);
+        let (ty, docs) = match self {
+            Self::Live(t) => (&t.fields[i].ty, t.fields[i].docs),
+            Self::Frozen(t) => (&t.fields[i].ty, t.fields[i].docs),
+        };
+        ErrorField {
+            name: name.to_owned(),
+            typ,
+            default,
+            ty: ty.clone(),
+            docs,
         }
     }
 
@@ -401,18 +530,45 @@ fn field_spec<'v>(
     spec: Value<'v>,
     heap: Heap<'v>,
 ) -> anyhow::Result<ErrorField<Value<'v>>> {
-    let (typ, default) = if let Some(field) = Field::from_value(spec) {
+    let (typ, default, ty) = if let Some(field) = Field::from_value(spec) {
         // A compiled type is a type value in its own right.
-        (heap.alloc(field.typ().dupe()), field.default().copied())
+        let ty = field.typ().as_ty().clone();
+        (heap.alloc(field.typ().dupe()), field.default().copied(), ty)
     } else {
-        TypeCompiled::new(spec, heap).map_err(|e| anyhow::anyhow!("field `{name}`: {e}"))?;
-        (spec, None)
+        let compiled =
+            TypeCompiled::new(spec, heap).map_err(|e| anyhow::anyhow!("field `{name}`: {e}"))?;
+        (spec, None, compiled.as_ty().clone())
     };
     Ok(ErrorField {
         name: name.to_owned(),
         typ,
         default,
+        ty,
+        docs: None,
     })
+}
+
+/// A field spec as `.type(fields = ...)` takes it: a type, or a `field()`.
+/// Unpacking takes anything; `field_spec` says what is wrong with it.
+struct FieldSpec<'v>(Value<'v>);
+
+impl StarlarkTypeRepr for FieldSpec<'_> {
+    type Canonical = Self;
+
+    fn starlark_type_repr() -> Ty {
+        Ty::union2(
+            TypeType::starlark_type_repr(),
+            Ty::starlark_value::<FrozenField>(),
+        )
+    }
+}
+
+impl<'v> UnpackValue<'v> for FieldSpec<'v> {
+    type Error = Infallible;
+
+    fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Infallible> {
+        Ok(Some(Self(value)))
+    }
 }
 
 #[starlark_module]
@@ -442,23 +598,16 @@ fn error_type_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn r#type<'v>(
         this: Value<'v>,
-        #[starlark(require = named)] fields: Option<SmallMap<String, Value<'v>>>,
+        #[starlark(require = named)] fields: Option<SmallMap<String, FieldSpec<'v>>>,
         #[starlark(require = named, default = NoneOr::None)] traceback: NoneOr<bool>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<ErrorType<'v>> {
         let parent = ErrorTypeRef::of(this).expect("`type` is only bound on error types");
         let heap = eval.heap();
         let mut all: Vec<ErrorField<Value<'v>>> = (0..parent.field_count())
-            .map(|i| {
-                let (name, typ, default) = parent.field(i);
-                ErrorField {
-                    name: name.to_owned(),
-                    typ,
-                    default,
-                }
-            })
+            .map(|i| parent.inherit(i))
             .collect();
-        for (name, spec) in fields.unwrap_or_default() {
+        for (name, FieldSpec(spec)) in fields.unwrap_or_default() {
             if RESERVED_FIELDS.contains(&name.as_str()) {
                 anyhow::bail!("`{name}` is reserved: every error already has it");
             }
@@ -469,20 +618,14 @@ fn error_type_methods(builder: &mut MethodsBuilder) {
         }
 
         let parent_meta = parent.meta();
-        let id = ERROR_TYPE_ID.fetch_add(1, Ordering::SeqCst);
-        let mut supertypes = instance_ty(parent_meta, parent.name())
-            .iter_union()
-            .to_vec();
-        supertypes.extend(parent_meta.supertypes.iter().cloned());
-        let meta = ErrorTypeMeta {
-            id,
-            ty_id: TypeInstanceId::r#gen(),
-            ancestors: parent_meta.ancestors.iter().copied().chain([id]).collect(),
-            supertypes,
-            traceback: traceback.into_option().unwrap_or(parent_meta.traceback),
-        };
+        let traceback = traceback.into_option().unwrap_or(parent_meta.traceback);
         Ok(ErrorType {
-            meta: Arc::new(meta),
+            meta: Arc::new(child_meta(
+                parent_meta,
+                parent.name(),
+                traceback,
+                parent_meta.docs,
+            )),
             name: OnceLock::new(),
             fields: all.into_boxed_slice(),
         })

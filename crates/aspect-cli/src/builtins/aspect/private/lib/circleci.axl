@@ -43,12 +43,32 @@ load("./environment.axl", "warn")
 _UPLOAD_MAX_ATTEMPTS = 3
 _UPLOAD_BACKOFF_BASE_MS = 500
 
+# Where a CircleCI runner serves task tokens, and how long to wait on it.
+_TOKEN_SOCKET = "/tmp/circleci-ts.sock"
+_TOKEN_TIMEOUT_MS = 5000
+
+def _read_token_reply(sock):
+    """The runner's reply: it answers once the request side is closed."""
+    sock.set_read_timeout(_TOKEN_TIMEOUT_MS)
+    sock.shutdown("write")
+    return sock.read_to_string()
+
 def _get_token(ctx):
     """Read auth credentials from the CircleCI runner Unix socket.
 
     Returns a dict with "token" and optionally "runner_host", or None on failure.
     """
-    output = ctx.std.net.try_unix_request("/tmp/circleci-ts.sock").strip()
+
+    # The socket is only there on a CircleCI runner; anywhere else, or when
+    # the daemon is restarting, reading it fails and there is no token.
+    err, sock = ctx.std.net.unix.try_connect(_TOKEN_SOCKET, timeout_ms = _TOKEN_TIMEOUT_MS)
+    if err:
+        return None
+    err, output = catch(_read_token_reply, sock, types = [std.io.Error])
+    sock.close()
+    if err:
+        return None
+    output = output.strip()
     if not output:
         return None
 

@@ -19,12 +19,17 @@
 //! - `frame`: the frames of a `stacktrace`.
 //! - `raise`: `fail(e)` and the payload that carries a raised value.
 //! - `catch`: turning a failure back into a value, for `future.catch()`.
+//! - `native`: error types defined in Rust with `native_error!`, and the
+//!   `Attempt` pair a native `try_` method returns.
+//! - `io`: `std.io.Error`, what a failed I/O operation raises.
 
 use starlark::environment::GlobalsBuilder;
 
 mod catch;
 mod error_type;
 mod frame;
+mod io;
+mod native;
 mod raise;
 mod value;
 
@@ -37,6 +42,9 @@ pub(crate) use catch::{
     callback_error, caught_by, caught_ty, check_catch_types, err_pair, error_value_of, is_exit,
     ok_pair,
 };
+pub(crate) use error_type::{NativeErrorType, NativeField};
+pub(crate) use io::IoError;
+pub(crate) use native::{Attempt, NativeError, NativeFieldType, NativeRaised, native_error};
 pub use raise::RaisedError;
 
 /// Register `error` and the `fail` that raises error values. Call after the
