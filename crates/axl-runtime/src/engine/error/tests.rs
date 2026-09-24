@@ -429,3 +429,31 @@ def _caught() -> int:
         "catch().block() pairs the value type: {errors:?}"
     );
 }
+
+#[test]
+fn every_field_spec_typechecks_against_type_fields() {
+    let errors = type_errors(
+        r#"
+Custom = error.type(fields = {
+    "a": str,
+    "b": field(int, default = 1),
+    "c": list[str],
+    "d": str | None,
+})
+"#,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn std_io_error_is_an_error_type_with_a_kind() {
+    ok(r#"
+e = std.io.Error("refused", kind = "connection_refused")
+assert_eq(isinstance(e, std.io.Error), True)
+assert_eq(isinstance(e, error), True)
+assert_eq(e.kind, "connection_refused")
+assert_eq(repr(e), 'std.io.Error(message = "refused", kind = "connection_refused")')
+Mine = std.io.Error.type()
+assert_eq(isinstance(Mine("x", kind = "other"), std.io.Error), True)
+"#);
+}

@@ -4,15 +4,16 @@ use std::fmt::{self, Display, Write};
 
 use allocative::Allocative;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
-use starlark::eval::CallStack;
+use starlark::eval::{CallStack, Evaluator};
 use starlark::starlark_module;
-use starlark::values::list::AllocList;
+use starlark::typing::Ty;
+use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::{
-    Freeze, FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Value,
-    ValueLifetimeless, ValueLike, starlark_value,
+    AllocValue, Freeze, FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Trace,
+    Value, ValueLifetimeless, ValueLike, starlark_value,
 };
 
-use super::error_type::{ErrorTypeMeta, ErrorTypeRef, ROOT_META};
+use super::error_type::{ErrorTypeMeta, ErrorTypeRef, ROOT_META, error_instance_ty};
 use super::frame::ErrorFrame;
 
 pub(super) static ERROR_METHODS: MethodsStatic = MethodsStatic::new("error_methods", error_methods);
@@ -104,6 +105,23 @@ impl<'v> ErrorValueRef<'v> {
     }
 }
 
+/// An error value of type `typ`, built from Rust: `values` are its fields in
+/// declaration order, and the stacktrace is where `eval` is now.
+pub(super) fn error_value<'v>(
+    typ: Value<'v>,
+    message: String,
+    values: Vec<Value<'v>>,
+    eval: &Evaluator<'v, '_, '_>,
+) -> Value<'v> {
+    eval.heap().alloc_complex(ErrorValue {
+        typ,
+        message,
+        cause: Value::new_none(),
+        values: values.into_boxed_slice(),
+        stack: eval.call_stack(),
+    })
+}
+
 fn this_error<'v>(this: Value<'v>) -> ErrorValueRef<'v> {
     ErrorValueRef::of(this).expect("error attribute bound on a non-error value")
 }
@@ -158,6 +176,23 @@ where
     }
 }
 
+/// An error's `cause`: another error, or `None`.
+struct Cause<'v>(Value<'v>);
+
+impl StarlarkTypeRepr for Cause<'_> {
+    type Canonical = Self;
+
+    fn starlark_type_repr() -> Ty {
+        Ty::union2(error_instance_ty(), Ty::none())
+    }
+}
+
+impl<'v> AllocValue<'v> for Cause<'v> {
+    fn alloc_value(self, _heap: Heap<'v>) -> Value<'v> {
+        self.0
+    }
+}
+
 #[starlark_module]
 fn error_methods(builder: &mut MethodsBuilder) {
     /// What went wrong, as given to the constructor. `str(e)` returns it too.
@@ -168,15 +203,15 @@ fn error_methods(builder: &mut MethodsBuilder) {
 
     /// The error that led to this one, or `None`.
     #[starlark(attribute)]
-    fn cause<'v>(this: Value<'v>) -> starlark::Result<Value<'v>> {
-        Ok(this_error(this).cause())
+    fn cause<'v>(this: Value<'v>) -> starlark::Result<Cause<'v>> {
+        Ok(Cause(this_error(this).cause()))
     }
 
     /// Where the error was constructed, as a list of frames, outermost call
     /// first. For an error the runtime built from a failed operation, it is
     /// where that failure reached AXL, e.g. the `future.block()` call.
     #[starlark(attribute)]
-    fn stacktrace<'v>(this: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+    fn stacktrace<'v>(this: Value<'v>) -> starlark::Result<Vec<ErrorFrame>> {
         // A frame records where its function was *called*, so, like
         // Starlark's traceback, pair each location with the caller's name.
         // The innermost frame is the error's own constructor, and drops out.
@@ -186,6 +221,6 @@ fn error_methods(builder: &mut MethodsBuilder) {
             frames.push(ErrorFrame::new(caller, frame.location.as_ref()));
             caller = &frame.name;
         }
-        Ok(heap.alloc(AllocList(frames)))
+        Ok(frames)
     }
 }

@@ -55,6 +55,8 @@ rust_library(
         "@crates//:rand",
         "@crates//:reqwest",
         "@crates//:rmcp",
+        "@crates//:rustls",
+        "@crates//:rustls-native-certs",
         "@crates//:semver",
         "@crates//:serde",
         "@crates//:serde_json",
@@ -93,6 +95,7 @@ rust_test(
         "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
+        "@crates//:rcgen",
         "@crates//:tempfile",
     ],
 )

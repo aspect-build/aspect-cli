@@ -16,6 +16,8 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use crate::engine::error::{IoError, NativeError};
+
 mod env;
 mod fs;
 pub mod io;
@@ -101,7 +103,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     globals.namespace("process", register_process_types);
-    globals.namespace("io", register_io_types);
+    globals.namespace("net", net::register_net_types);
+    globals.namespace("io", |g| {
+        register_io_types(g);
+        g.set("Error", IoError::native_type().error_type());
+    });
     // `std.fs` is a module (the `fs.watch` event types live here); the
     // filesystem value type stays `std.FileSystem`.
     globals.namespace("fs", |g| g.namespace("watch", register_watch_types));
