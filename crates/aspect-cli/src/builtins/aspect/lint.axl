@@ -29,6 +29,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
@@ -851,6 +852,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_version = announce_version,
         announce_command = announce_command,
         flags = endpoint_auth_flags,
+        stdout = results_json.bazel_stdout(ctx),
         *ctx.args.targets
     )
 
@@ -1048,8 +1050,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
+            # `patch` narrates each file it touches on stdout, which under
+            # --output=json belongs to the result document.
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
-                .current_dir(ctx.std.env.current_dir()).spawn().wait()
+                .current_dir(ctx.std.env.current_dir()) \
+                .stdout(results_json.bazel_stdout(ctx)).spawn().wait()
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:
@@ -1175,6 +1180,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         progress = _progress(final_status, data),
     ))
     print_repro_and_fix(ctx.std, data, final_status)
+    results_json.emit(ctx, data, "lint", final_status, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -1230,7 +1236,7 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | bzl.flags.args("the lint build") | bzl.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the lint build") | bzl.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True) | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

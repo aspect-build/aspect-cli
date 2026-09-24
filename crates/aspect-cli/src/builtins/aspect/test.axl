@@ -8,6 +8,7 @@ load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/tips.axl", "tips")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
@@ -54,6 +55,10 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
     extra ceremony. A non-zero exit code from the tool is surfaced as a
     warning — it does not fail the test task, so uploaders (e.g. codecov)
     can still publish partial coverage when some tests failed.
+
+    Under `--output=json` the tool's stdout is redirected to stderr: stdout
+    carries the result document, and an uploader chattering into it would
+    leave the consumer with something that is no longer JSON.
     """
     bin, bin_matched = _substitute(bin, report_path)
     final_args = []
@@ -66,7 +71,10 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         final_args.append(report_path)
 
     print("Running coverage tool: " + bin + " " + " ".join(final_args))
-    status = ctx.std.process.command(bin).args(final_args).spawn().wait()
+    cmd = ctx.std.process.command(bin).args(final_args)
+    if results_json.wants_json(ctx.args):
+        cmd = cmd.stdout(ctx.std.io.stderr)
+    status = cmd.spawn().wait()
     if status.code != 0:
         ctx.std.io.stderr.write(
             "--coverage-tool: '" + bin + "' exited with code " + str(status.code) +
@@ -81,7 +89,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    bz = bzl.test(ctx)
+    bz = bzl.test(ctx, stdout = results_json.bazel_stdout(ctx))
     rs = results.test(ctx)
 
     rs.setup(bz.targets, bz.rc, bz.bazel_streams_bes, bz.results_url)
@@ -116,6 +124,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 # matter which one the tool reads.
                 _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
 
+    # Last, so the document is the final thing on stdout no matter what the
+    # coverage block did.
+    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     return conclusion
 
 test = task(
@@ -138,7 +149,7 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-    } | bzl.targets_arg("test") | bzl.core_args("the test invocation") | repro_flavor_args(),
+    } | bzl.targets_arg("test") | bzl.core_args("the test invocation") | repro_flavor_args() | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,
