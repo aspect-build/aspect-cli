@@ -567,7 +567,7 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
@@ -624,6 +624,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         cmd = cmd.stderr(ctx.std.fs.create(stderr_path))
     if capture and not stdout_path and not stderr_path:
         cmd = cmd.stdout("piped").stderr("piped")
+    if process_group:
+        cmd = cmd.process_group(0)
     return cmd.spawn()
 
 def runfiles_env(ep: struct) -> dict:
@@ -725,7 +727,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           the build's `--remote_download_outputs` setting; the caller is
           responsible for materializing what it intends to read.
 
-      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None) → Child
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -736,6 +738,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           Pass `stdout_path` / `stderr_path` to redirect the child's streams to
           files (so a non-blocking `try_wait()` reap can read them after exit
           without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
+          `process_group=True` starts the child in a separate process group so
+          the caller can terminate the child and its descendants together.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -768,5 +772,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group),
     )
