@@ -104,6 +104,21 @@ rust_test(
 )
 
 rust_test(
+    name = "auth_refresh_test",
+    srcs = ["tests/auth_refresh.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/auth_refresh.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:base64",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "auth_status_test",
     srcs = ["tests/auth_status.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/auth_status.rs",

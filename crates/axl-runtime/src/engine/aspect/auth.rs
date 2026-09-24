@@ -1485,16 +1485,13 @@ fn remove_deployment(name: &str) -> anyhow::Result<()> {
     write_user_config(existing)?;
     // Also clear its stored credential in every profile: the deployment is gone,
     // so no identity has anything left to say to it.
-    let mut all = load_all_credentials()?;
-    let mut changed = false;
-    for entries in all.values_mut() {
-        changed |= entries.remove(name).is_some();
-    }
-    if changed {
+    CredentialStore::resolve()?.update::<ProfileCredentials, _>(|all| {
+        for entries in all.values_mut() {
+            entries.remove(name);
+        }
         all.retain(|_, entries| !entries.is_empty());
-        save_all_credentials(&all)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1672,21 +1669,9 @@ fn load_all_credentials() -> anyhow::Result<AllCredentials> {
     CredentialStore::resolve()?.load_all()
 }
 
-fn save_all_credentials(map: &AllCredentials) -> anyhow::Result<()> {
-    CredentialStore::resolve()?.save_all(map)
-}
-
 /// The credentials filed under `profile`, empty when it holds none.
 fn load_profile_credentials(profile: &str) -> anyhow::Result<ProfileCredentials> {
     Ok(load_all_credentials()?.remove(profile).unwrap_or_default())
-}
-
-/// Read one deployment's credential from `profile`.
-fn load_credential(profile: &str, deployment: &str) -> anyhow::Result<Option<CredentialsEntry>> {
-    Ok(load_all_credentials()?
-        .get(profile)
-        .and_then(|p| p.get(deployment))
-        .cloned())
 }
 
 /// Put `entry` at `(profile, deployment)`, leaving every other profile and every
@@ -1726,19 +1711,15 @@ fn store_credential(
     deployment: &str,
     entry: CredentialsEntry,
 ) -> anyhow::Result<()> {
-    let mut all = load_all_credentials()?;
-    insert_credential(&mut all, profile, deployment, entry);
-    save_all_credentials(&all)
+    CredentialStore::resolve()?.update(|all| {
+        insert_credential(all, profile, deployment, entry);
+        Ok(())
+    })
 }
 
 /// Clear `profile`'s credential for `deployment`. Returns whether there was one.
 fn forget_credential(profile: &str, deployment: &str) -> anyhow::Result<bool> {
-    let mut all = load_all_credentials()?;
-    if !remove_credential(&mut all, profile, deployment) {
-        return Ok(false);
-    }
-    save_all_credentials(&all)?;
-    Ok(true)
+    CredentialStore::resolve()?.update(|all| Ok(remove_credential(all, profile, deployment)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2615,18 +2596,23 @@ fn build_login_session(
 }
 
 /// Why a refresh did not yield a usable credential.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum RefreshFailure {
     /// The issuer minted a token for a different tenant than the credential was
     /// issued for, because the user's default organization changed elsewhere (a
     /// web session's organization switcher, say), and the default could not be
     /// set back ([`restore_default_tenant`]). Refused rather than adopted, so a
     /// CLI session never silently crosses into another organization.
+    #[error("refresh changed organization from {was} to {now}")]
     TenantChanged { was: String, now: String },
-    /// The refresh itself failed: a revoked or expired refresh token, a network
-    /// error, a response with no usable bearer. The cause goes to the runtime
-    /// log (`ASPECT_DEBUG=1`) where it happened; the user is told to log in
-    /// again.
+    /// An expired bearer with no refresh credentials.
+    #[error("session expired")]
+    Expired,
+    /// The token endpoint refused the grant; do not expose its raw response.
+    #[error("refresh token rejected")]
+    Rejected,
+    /// Transport, timeout, or unusable response. Preserve the stored credential.
+    #[error("could not refresh credentials")]
     Failed,
 }
 
@@ -2638,7 +2624,14 @@ impl RefreshFailure {
             RefreshFailure::TenantChanged { was, now } => {
                 tenant_changed_message(deployment, was, now)
             }
-            RefreshFailure::Failed => session_expired_message(deployment),
+            RefreshFailure::Expired => session_expired_message(deployment),
+            RefreshFailure::Rejected => format!(
+                "the identity provider rejected the refresh token; run `{}` to re-authenticate",
+                login_hint(deployment)
+            ),
+            RefreshFailure::Failed => {
+                "could not refresh credentials; check the network and retry the command".to_string()
+            }
         }
     }
 }
@@ -2657,6 +2650,9 @@ async fn refresh_access_token(
     entry: &CredentialsEntry,
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
+        if let Some(RefreshFailure::Rejected) = cause.downcast_ref::<RefreshFailure>() {
+            return RefreshFailure::Rejected;
+        }
         crate::trace!("refreshing the stored credential failed: {cause:#}");
         RefreshFailure::Failed
     };
@@ -2742,16 +2738,22 @@ async fn refresh_with_grant(
     token_url: &str,
     client_id: &str,
 ) -> anyhow::Result<CredentialsEntry> {
-    let token_resp: TokenResponse = post_form(
-        token_url,
-        &[
+    let response = reqwest::Client::new()
+        .post(token_url)
+        .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", &entry.refresh_token),
             ("client_id", client_id),
-        ],
-        "token refresh",
-    )
-    .await?;
+        ])
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
+    if matches!(response.status().as_u16(), 400 | 401) {
+        return Err(RefreshFailure::Rejected.into());
+    }
+    // Preserve HTTP status without copying potentially sensitive response bodies
+    // into user-visible errors or logs.
+    let token_resp = response.error_for_status()?.json::<TokenResponse>().await?;
     entry.renewed(token_resp)
 }
 
@@ -2964,19 +2966,51 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
     if let Some(entry) = credentials_from_api_token_env(deployment)? {
         return Ok(Some(entry.access_token));
     }
-    let Some(entry) = load_credential(profile, deployment)? else {
+    resolve_stored_credential(&CredentialStore::resolve()?, profile, deployment)
+        .map(|entry| entry.map(|entry| entry.access_token))
+        .map_err(|error| credential_error(error, deployment))
+}
+
+fn credential_error(error: anyhow::Error, deployment: &str) -> anyhow::Error {
+    match error.downcast_ref::<RefreshFailure>() {
+        Some(failure) => anyhow::anyhow!(failure.message(deployment)),
+        None => error,
+    }
+}
+
+/// Shared by MCP/credential-helper and AXL. The initial read is the fast path;
+/// after acquiring the store lock we must read again, since another process may
+/// have refreshed, logged in, or logged out while we waited.
+fn resolve_stored_credential(
+    store: &CredentialStore,
+    profile: &str,
+    deployment: &str,
+) -> anyhow::Result<Option<CredentialsEntry>> {
+    let all: AllCredentials = store.load_all()?;
+    let Some(entry) = all.get(profile).and_then(|p| p.get(deployment)) else {
         return Ok(None);
     };
-    match classify_token(&entry) {
-        TokenAction::Use => Ok(Some(entry.access_token)),
-        TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
-        TokenAction::Refresh => {
-            let refreshed = block_on(refresh_access_token(&entry))
-                .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
-            store_credential(profile, deployment, refreshed.clone())?;
-            Ok(Some(refreshed.access_token))
-        }
+    if matches!(classify_token(entry), TokenAction::Use) {
+        return Ok(Some(entry.clone()));
     }
+    store.update(|all: &mut AllCredentials| {
+        let Some(entry) = all.get(profile).and_then(|p| p.get(deployment)) else {
+            return Ok(None);
+        };
+        match classify_token(entry) {
+            TokenAction::Use => Ok(Some(entry.clone())),
+            TokenAction::Expired => Err(RefreshFailure::Expired.into()),
+            TokenAction::Refresh => {
+                let refreshed = block_on(async {
+                    tokio::time::timeout(Duration::from_secs(30), refresh_access_token(entry))
+                        .await
+                        .unwrap_or(Err(RefreshFailure::Failed))
+                })?;
+                insert_credential(all, profile, deployment, refreshed.clone());
+                Ok(Some(refreshed))
+            }
+        }
+    })
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
@@ -4066,7 +4100,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         if all {
             // Empties the file / deletes the keyring entry outright.
-            save_all_credentials(&AllCredentials::new())?;
+            CredentialStore::resolve()?.update::<ProfileCredentials, _>(|all| {
+                all.clear();
+                Ok(())
+            })?;
             return Ok(heap.alloc(""));
         }
         let deployments = load_deployments()?;
@@ -4165,34 +4202,22 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         if let Some(entry) = credentials_from_api_token_env(&deployment)? {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
-        let Some(entry) = load_credential(&profile, &deployment)? else {
-            return Ok(values::Value::new_none());
-        };
-        // Never hand back a known-expired token (an endpoint would 401 on it).
-        // Mirror `resolve_access_token`: refresh when possible, else fail —
-        // `required = False` callers (best-effort endpoint auth) get `None` and
-        // proceed unauthenticated instead of a hard error. A refresh stuck in
-        // another organization is a refusal, not an inability, and ends the task
-        // for every caller: proceeding unauthenticated would only hide it behind
-        // later 401s.
-        let entry = match classify_token(&entry) {
-            TokenAction::Use => entry,
-            TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
-                Ok(refreshed) => {
-                    store_credential(&profile, &deployment, refreshed.clone())?;
-                    refreshed
+        let entry =
+            match resolve_stored_credential(&CredentialStore::resolve()?, &profile, &deployment) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return Ok(values::Value::new_none()),
+                Err(error) => {
+                    if let Some(failure) = error.downcast_ref::<RefreshFailure>() {
+                        if matches!(failure, RefreshFailure::TenantChanged { .. }) {
+                            return Err(TaskExit::error(failure.message(&deployment)).into());
+                        }
+                        if !required {
+                            return Ok(values::Value::new_none());
+                        }
+                    }
+                    return Err(credential_error(error, &deployment));
                 }
-                Err(failure @ RefreshFailure::TenantChanged { .. }) => {
-                    return Err(TaskExit::error(failure.message(&deployment)).into());
-                }
-                Err(_) if !required => return Ok(values::Value::new_none()),
-                Err(_) => return Err(anyhow::anyhow!(session_expired_message(&deployment))),
-            },
-            TokenAction::Expired if !required => return Ok(values::Value::new_none()),
-            TokenAction::Expired => {
-                return Err(anyhow::anyhow!(session_expired_message(&deployment)));
-            }
-        };
+            };
         Ok(heap.alloc(AuthCredentials::from_entry(&entry)))
     }
 
@@ -6925,10 +6950,20 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("set ASPECT_API_TOKEN_ACME."), "{msg}");
-        // Any other failure keeps the plain expiry message.
         assert_eq!(
-            RefreshFailure::Failed.message("acme"),
+            RefreshFailure::Expired.message("acme"),
             session_expired_message("acme")
+        );
+        assert!(
+            RefreshFailure::Rejected
+                .message("acme")
+                .contains("refresh token")
+        );
+        assert!(RefreshFailure::Failed.message("acme").contains("retry"));
+        assert!(
+            !RefreshFailure::Failed
+                .message("acme")
+                .contains("auth login")
         );
     }
 
@@ -7392,7 +7427,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_grant_is_reported_as_a_plain_failure() {
+    fn a_rejected_grant_is_distinct_from_a_transport_failure() {
         let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
             "/oauth/token" => (401, r#"{"errors":["invalid_grant"]}"#.into()),
             _ => respond_to_grant(request, "t1"),
@@ -7402,7 +7437,7 @@ mod tests {
         let failure = current_thread_runtime()
             .block_on(refresh_access_token(&entry))
             .unwrap_err();
-        assert_eq!(failure, RefreshFailure::Failed);
+        assert_eq!(failure, RefreshFailure::Rejected);
         issuer.finish();
     }
 

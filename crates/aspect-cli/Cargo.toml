@@ -55,4 +55,5 @@ libc = "0.2"
 backtrace = "0.3"
 
 [dev-dependencies]
+base64 = "0.22.1"
 tempfile = "3"
