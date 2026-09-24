@@ -1,0 +1,7 @@
+# Build the patched copies of the crates in patches/ that `cargo patch-crate`
+# prepares under target/patch/. A `paths` override, unlike `[patch]`, leaves
+# Cargo.lock naming the crates.io release, which Bazel relies on.
+#
+# "failed to update path override" means the copy is missing: install the tool
+# once with `cargo install patch-crate --locked`, then run `cargo patch-crate`.
+paths = ["target/patch/starlark-0.14.2"]

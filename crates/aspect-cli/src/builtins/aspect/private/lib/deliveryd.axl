@@ -127,9 +127,9 @@ def _send(conn: _Conn, method: str, path: str, payload) -> _Response:
     else:
         fut = conn.http.post(url = url, headers = _JSON_HEADERS, data = data, unix_socket = conn.socket)
 
-    res = fut.map_err(lambda e: str(e)).block()
-    if type(res) == "string":
-        return _Response(status = 0, body = res, headers = [])
+    err, res = fut.catch().block()
+    if err:
+        return _Response(status = 0, body = err.message, headers = [])
     return _Response(status = res.status, body = res.body, headers = res.headers)
 
 def _ok(res: _Response) -> bool:

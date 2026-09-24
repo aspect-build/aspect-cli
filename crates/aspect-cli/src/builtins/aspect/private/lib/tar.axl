@@ -120,14 +120,14 @@ def bsdtar(ctx):
     staging = ctx.std.fs.mkdtemp(prefix = "bsdtar-dl-", parent = cache)
     tmp_path = staging + "/tar"
 
-    download_result = ctx.http().download(
+    err, _ = ctx.http().download(
         url = url,
         output = tmp_path,
         mode = 0o755,
         sha256 = expected,
-    ).map_err(lambda e: str(e)).block()
-    if type(download_result) == "string":
-        _warn_skip(ctx, "download from %s failed (%s)" % (url, download_result))
+    ).catch().block()
+    if err:
+        _warn_skip(ctx, "download from %s failed (%s)" % (url, err.message))
         return None
 
     ctx.std.fs.rename(tmp_path, bin_path)

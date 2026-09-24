@@ -79,10 +79,10 @@ def _runner_api(ctx, token, runner_host, method, path, body = None, quiet = Fals
 
     # Transport errors → None so a flaky runner-API call surfaces as
     # a soft auth failure, not a task abort.
-    resp = fut.map_err(lambda e: str(e)).block()
-    if type(resp) == "string":
+    err, resp = fut.catch().block()
+    if err:
         if not quiet:
-            warn(ctx.std, "CircleCI runner API %s %s failed: transport error: %s" % (method, path, resp))
+            warn(ctx.std, "CircleCI runner API %s %s failed: transport error: %s" % (method, path, err.message))
         return None
     if resp.status < 200 or resp.status >= 300:
         if not quiet:

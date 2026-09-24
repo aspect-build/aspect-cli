@@ -36,10 +36,10 @@ def _res(status, body = "", headers = []):
     return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers)
 
 def _future(res):
-    return struct(map_err = lambda f: struct(block = lambda: res), block = lambda: res)
+    return struct(catch = lambda: struct(block = lambda: (None, res)), block = lambda: res)
 
 def _error_future(message):
-    return struct(map_err = lambda f: struct(block = lambda: f(message)), block = lambda: message)
+    return struct(catch = lambda: struct(block = lambda: (error(message), None)), block = lambda: fail(message))
 
 def _health_res(version = "2"):
     headers = [("deliveryd-version", version)] if version else []

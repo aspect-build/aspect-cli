@@ -1,0 +1,377 @@
+diff --git a/src/__derive_refs.rs b/src/__derive_refs.rs
+index 0a5c49b..d6a0b52 100644
+--- a/src/__derive_refs.rs
++++ b/src/__derive_refs.rs
+@@ -30,6 +30,7 @@ pub use anyhow;
+ pub use inventory;
+ // `pagable` re-exports so macros can reach them via `$crate::__derive_refs`,
+ // without consumer crates needing a direct `pagable` dependency.
++pub use pagable;
+ pub use pagable::StaticValue;
+ pub use pagable::static_str;
+ pub use pagable::static_value;
+diff --git a/src/stdlib/funcs/zip.rs b/src/stdlib/funcs/zip.rs
+index fbbce8f..e491e87 100644
+--- a/src/stdlib/funcs/zip.rs
++++ b/src/stdlib/funcs/zip.rs
+@@ -27,9 +27,7 @@ use crate::typing::Ty;
+ use crate::typing::TypingOracleCtx;
+ use crate::typing::call_args::TyCallArgs;
+ use crate::typing::callable::TyCallable;
+-use crate::typing::custom::TyCustomDyn;
+ use crate::typing::error::TypingOrInternalError;
+-use crate::typing::function::TyCustomFunction;
+ use crate::typing::function::TyCustomFunctionImpl;
+ use crate::values::FrozenValue;
+ use crate::values::Heap;
+@@ -43,7 +41,7 @@ use crate::values::typing::StarlarkIter;
+ )]
+ struct ZipType;
+ 
+-pagable::register_typetag!(TyCustomFunction<ZipType> as dyn TyCustomDyn);
++crate::register_ty_custom_function!(ZipType);
+ 
+ impl TyCustomFunctionImpl for ZipType {
+     fn as_callable(&self) -> TyCallable {
+diff --git a/src/typing.rs b/src/typing.rs
+index 1677d33..a1ed6f4 100644
+--- a/src/typing.rs
++++ b/src/typing.rs
+@@ -51,6 +51,14 @@ pub mod macro_support;
+ mod tests;
+ 
+ pub use basic::TyBasic;
++pub use call_args::TyCallArgs;
++pub use error::TypingError;
++pub use error::TypingOrInternalError;
++pub use function::TyCustomFunction;
++pub use function::TyCustomFunctionImpl;
++pub use function::TyCustomFunctionRegistered;
++#[doc(hidden)]
++pub use custom::TyCustomDyn;
+ pub use callable::TyCallable;
+ pub use callable_param::ParamIsRequired;
+ pub use callable_param::ParamSpec;
+diff --git a/src/typing/call_args.rs b/src/typing/call_args.rs
+index 6675a45..373a66b 100644
+--- a/src/typing/call_args.rs
++++ b/src/typing/call_args.rs
+@@ -19,7 +19,8 @@ use starlark_syntax::codemap::Spanned;
+ 
+ use crate::typing::Ty;
+ 
+-/// Function call arguments.
++/// Function call arguments, as the typechecker sees them: the type of each
++/// argument, with the span it came from.
+ pub struct TyCallArgs<'a> {
+     pub(crate) pos: Vec<Spanned<Ty>>,
+     pub(crate) named: Vec<Spanned<(&'a str, Ty)>>,
+@@ -27,3 +28,41 @@ pub struct TyCallArgs<'a> {
+     pub(crate) args: Option<Spanned<Ty>>,
+     pub(crate) kwargs: Option<Spanned<Ty>>,
+ }
++
++impl<'a> TyCallArgs<'a> {
++    /// Arguments from their parts, in call order: positional, named, then
++    /// `*args` and `**kwargs`.
++    pub fn new(
++        pos: Vec<Spanned<Ty>>,
++        named: Vec<Spanned<(&'a str, Ty)>>,
++        args: Option<Spanned<Ty>>,
++        kwargs: Option<Spanned<Ty>>,
++    ) -> Self {
++        TyCallArgs {
++            pos,
++            named,
++            args,
++            kwargs,
++        }
++    }
++
++    /// The positional arguments.
++    pub fn pos(&self) -> &[Spanned<Ty>] {
++        &self.pos
++    }
++
++    /// The named arguments.
++    pub fn named(&self) -> &[Spanned<(&'a str, Ty)>] {
++        &self.named
++    }
++
++    /// The `*args` argument, if any.
++    pub fn args(&self) -> Option<&Spanned<Ty>> {
++        self.args.as_ref()
++    }
++
++    /// The `**kwargs` argument, if any.
++    pub fn kwargs(&self) -> Option<&Spanned<Ty>> {
++        self.kwargs.as_ref()
++    }
++}
+diff --git a/src/typing/custom.rs b/src/typing/custom.rs
+index 6073895..ca2cc00 100644
+--- a/src/typing/custom.rs
++++ b/src/typing/custom.rs
+@@ -118,8 +118,12 @@ pub trait TyCustomImpl:
+     fn matcher<T: TypeMatcherAlloc>(&self, factory: T) -> T::Result;
+ }
+ 
++/// Object-safe form of [`TyCustomImpl`], public only so that crates outside
++/// starlark can register their [`TyCustomFunctionImpl`](crate::typing::TyCustomFunctionImpl)
++/// types with `pagable::register_typetag!`. Its methods are internal.
+ #[pagable_typetag]
+-pub(crate) trait TyCustomDyn:
++#[allow(missing_docs)]
++pub trait TyCustomDyn:
+     Debug + Display + Allocative + PagableTagged + Send + Sync + 'static
+ {
+     fn eq_token(&self) -> PartialEqAny<'_>;
+diff --git a/src/typing/function.rs b/src/typing/function.rs
+index ad2aa40..02135c4 100644
+--- a/src/typing/function.rs
++++ b/src/typing/function.rs
+@@ -82,6 +82,9 @@ pub trait TyCustomFunctionImpl:
+     self.0.as_callable().result(),
+ )]
+ #[pagable_tagged(TyCustomDyn)]
++/// A function whose calls the typechecker checks with a
++/// [`TyCustomFunctionImpl`], registered with
++/// [`register_ty_custom_function!`](crate::register_ty_custom_function).
+ pub struct TyCustomFunction<F: TyCustomFunctionImpl>(pub F);
+ 
+ impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F>
+@@ -175,7 +178,47 @@ impl TyFunction {
+     }
+ }
+ 
+-pagable::register_typetag!(TyCustomFunction<TyFunction> as dyn TyCustomDyn);
++/// A [`TyCustomFunctionImpl`] registered with
++/// [`register_ty_custom_function!`](crate::register_ty_custom_function), so that
++/// [`Ty::custom_function`](crate::typing::Ty::custom_function) accepts it.
++///
++/// Implemented by that macro only. It stands in for the pagable registration
++/// of `TyCustomFunction<F>`, which Rust's orphan rules let only starlark
++/// declare, so that crates outside starlark can register their own functions.
++pub trait TyCustomFunctionRegistered: TyCustomFunctionImpl {}
++
++impl<F: TyCustomFunctionRegistered> PagableRegisteredFor<dyn TyCustomDyn> for TyCustomFunction<F> {}
++
++/// Register a [`TyCustomFunctionImpl`] so a native function can name it in
++/// `#[starlark(ty_custom_function = F)]`.
++///
++/// ```ignore
++/// starlark::register_ty_custom_function!(MyFunctionType);
++/// ```
++#[macro_export]
++macro_rules! register_ty_custom_function {
++    ($f:ty) => {
++        impl $crate::typing::TyCustomFunctionRegistered for $f {}
++
++        $crate::__derive_refs::pagable::__internal::inventory::submit! {
++            <dyn $crate::typing::TyCustomDyn>::__pagable_wrap_registration(
++                $crate::__derive_refs::pagable::typetag::TypetagRegistration {
++                    tag: ::std::any::type_name::<$crate::typing::TyCustomFunction<$f>>,
++                    deserialize: |deserializer| {
++                        let value: $crate::typing::TyCustomFunction<$f> =
++                            $crate::__derive_refs::pagable::PagableDeserialize::pagable_deserialize(
++                                deserializer,
++                            )?;
++                        Ok(::std::boxed::Box::new(value)
++                            as ::std::boxed::Box<dyn $crate::typing::TyCustomDyn>)
++                    },
++                },
++            )
++        }
++    };
++}
++
++crate::register_ty_custom_function!(TyFunction);
+ 
+ impl TyCustomFunctionImpl for TyFunction {
+     fn is_type(&self) -> bool {
+diff --git a/src/typing/oracle/ctx.rs b/src/typing/oracle/ctx.rs
+index 404e261..f8aa6aa 100644
+--- a/src/typing/oracle/ctx.rs
++++ b/src/typing/oracle/ctx.rs
+@@ -99,7 +99,8 @@ impl<'a> TypingOracleCtx<'a> {
+         TypingOrInternalError::Typing(TypingError::new_anyhow(err.into(), span, self.codemap))
+     }
+ 
+-    pub(crate) fn msg_error(&self, span: Span, msg: impl Display) -> TypingOrInternalError {
++    /// A typing error at `span` with `msg`.
++    pub fn msg_error(&self, span: Span, msg: impl Display) -> TypingOrInternalError {
+         TypingOrInternalError::Typing(TypingError::msg(msg, span, self.codemap))
+     }
+ 
+@@ -289,8 +290,10 @@ impl<'a> TypingOracleCtx<'a> {
+         }
+     }
+ 
++    /// The result type of calling `fun` with `args`, or the typing error the
++    /// call is.
+     #[allow(clippy::collapsible_else_if)]
+-    pub(crate) fn validate_call(
++    pub fn validate_call(
+         &self,
+         span: Span,
+         fun: &Ty,
+diff --git a/src/typing/ty.rs b/src/typing/ty.rs
+index c6baedf..8bfad63 100644
+--- a/src/typing/ty.rs
++++ b/src/typing/ty.rs
+@@ -422,12 +422,6 @@ impl Ty {
+     }
+ 
+     /// Create a custom function type.
+-    #[expect(
+-        private_bounds,
+-        reason = "TyCustomDyn is intentionally pub(crate); it appears in the bound \
+-                  only to enforce typetag registration at compile time and is not \
+-                  part of the public API surface callers need to name."
+-    )]
+     pub fn custom_function<F>(f: F) -> Self
+     where
+         F: TyCustomFunctionImpl,
+diff --git a/src/typing/user.rs b/src/typing/user.rs
+index 65bec7f..94e7c84 100644
+--- a/src/typing/user.rs
++++ b/src/typing/user.rs
+@@ -218,18 +218,20 @@ impl TyCustomImpl for TyUser {
+     }
+ 
+     fn attribute(&self, attr: &str) -> Result<Ty, TypingNoContextError> {
++        // A known field is the more precise declaration, so it wins over a
++        // method of the base type with the same name.
++        if let Some(ty) = self.fields.known.get(attr) {
++            return Ok(ty.dupe());
++        }
+         match self.base.attr_from_methods(attr) {
+             Ok(ty) => Ok(ty),
+-            _ => match self.fields.known.get(attr) {
+-                Some(ty) => Ok(ty.dupe()),
+-                None => {
+-                    if self.fields.unknown {
+-                        Ok(Ty::any())
+-                    } else {
+-                        Err(TypingNoContextError)
+-                    }
++            _ => {
++                if self.fields.unknown {
++                    Ok(Ty::any())
++                } else {
++                    Err(TypingNoContextError)
+                 }
+-            },
++            }
+         }
+     }
+ 
+diff --git a/src/values/types/list/globals.rs b/src/values/types/list/globals.rs
+index 1401dad..4a0b480 100644
+--- a/src/values/types/list/globals.rs
++++ b/src/values/types/list/globals.rs
+@@ -31,9 +31,7 @@ use crate::typing::TyFunction;
+ use crate::typing::TypingOracleCtx;
+ use crate::typing::call_args::TyCallArgs;
+ use crate::typing::callable::TyCallable;
+-use crate::typing::custom::TyCustomDyn;
+ use crate::typing::error::TypingOrInternalError;
+-use crate::typing::function::TyCustomFunction;
+ use crate::typing::function::TyCustomFunctionImpl;
+ use crate::values::Heap;
+ use crate::values::Value;
+@@ -57,7 +55,7 @@ static LIST: Lazy<TyFunction> = Lazy::new(|| {
+     )
+ });
+ 
+-pagable::register_typetag!(TyCustomFunction<ListType> as dyn TyCustomDyn);
++crate::register_ty_custom_function!(ListType);
+ 
+ impl TyCustomFunctionImpl for ListType {
+     fn is_type(&self) -> bool {
+diff --git a/src/values/types/namespace/typing.rs b/src/values/types/namespace/typing.rs
+index 2cd2c18..cea6849 100644
+--- a/src/values/types/namespace/typing.rs
++++ b/src/values/types/namespace/typing.rs
+@@ -36,7 +36,6 @@ use crate::typing::custom::TyCustomDyn;
+ use crate::typing::custom::TyCustomImpl;
+ use crate::typing::error::TypingNoContextError;
+ use crate::typing::error::TypingOrInternalError;
+-use crate::typing::function::TyCustomFunction;
+ use crate::typing::function::TyCustomFunctionImpl;
+ use crate::typing::oracle::ctx::TypingOracleCtx;
+ use crate::util::arc_str::ArcStr;
+@@ -63,7 +62,7 @@ impl TypeMatcher for NamespaceMatcher {
+ )]
+ pub(super) struct TyNamespaceFunction;
+ 
+-pagable::register_typetag!(TyCustomFunction<TyNamespaceFunction> as dyn TyCustomDyn);
++crate::register_ty_custom_function!(TyNamespaceFunction);
+ 
+ impl TyCustomFunctionImpl for TyNamespaceFunction {
+     fn as_callable(&self) -> TyCallable {
+diff --git a/src/values/types/record.rs b/src/values/types/record.rs
+index d8df224..85d16f9 100644
+--- a/src/values/types/record.rs
++++ b/src/values/types/record.rs
+@@ -48,5 +48,8 @@ pub(crate) mod matcher;
+ pub(crate) mod record_type;
+ pub(crate) mod ty_record_type;
+ 
++pub use crate::values::record::field::Field;
++pub use crate::values::record::field::FieldGen;
++pub use crate::values::record::field::FrozenField;
+ pub use crate::values::record::instance::Record;
+ pub use crate::values::record::record_type::RecordType;
+diff --git a/src/values/types/record/field.rs b/src/values/types/record/field.rs
+index 8dc420e..d7d6565 100644
+--- a/src/values/types/record/field.rs
++++ b/src/values/types/record/field.rs
+@@ -73,12 +73,23 @@ unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless> Coerce<
+ {
+ }
+ 
+-starlark_complex_value!(pub(crate) Field);
++starlark_complex_value!(pub Field);
+ 
+ impl<V: ValueLifetimeless> FieldGen<V> {
+     pub(crate) fn new(typ: TypeCompiled<V>, default: Option<V>) -> Self {
+         Self { typ, default }
+     }
++
++    /// The type a value of this field must match.
++    pub fn typ(&self) -> &TypeCompiled<V> {
++        &self.typ
++    }
++
++    /// The value this field takes when it is omitted, or `None` if it is
++    /// required.
++    pub fn default(&self) -> Option<&V> {
++        self.default.as_ref()
++    }
+ }
+ 
+ impl<'v, V: ValueLike<'v>> FieldGen<V> {
+diff --git a/src/values/types/structs/structs.rs b/src/values/types/structs/structs.rs
+index 807de7d..cd8d2eb 100644
+--- a/src/values/types/structs/structs.rs
++++ b/src/values/types/structs/structs.rs
+@@ -31,9 +31,7 @@ use crate::typing::ParamSpec;
+ use crate::typing::Ty;
+ use crate::typing::call_args::TyCallArgs;
+ use crate::typing::callable::TyCallable;
+-use crate::typing::custom::TyCustomDyn;
+ use crate::typing::error::TypingOrInternalError;
+-use crate::typing::function::TyCustomFunction;
+ use crate::typing::function::TyCustomFunctionImpl;
+ use crate::typing::oracle::ctx::TypingOracleCtx;
+ use crate::typing::structs::TyStruct;
+@@ -47,7 +45,7 @@ use crate::values::structs::value::Struct;
+ )]
+ struct StructType;
+ 
+-pagable::register_typetag!(TyCustomFunction<StructType> as dyn TyCustomDyn);
++crate::register_ty_custom_function!(StructType);
+ 
+ impl TyCustomFunctionImpl for StructType {
+     fn as_callable(&self) -> TyCallable {

@@ -7,15 +7,21 @@ use starlark::StarlarkResultExt;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::typing::Ty;
-use starlark::values::tuple::AllocTuple;
+use starlark::typing::{ParamSpec, Ty, TyStarlarkValue, TyUser, TyUserFields, TyUserParams};
 use starlark::values::type_repr::StarlarkTypeRepr;
+use starlark::values::typing::TypeInstanceId;
 use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, ValueLike};
 use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::sync::{LazyLock, Mutex};
 
-use crate::engine::error::{ErrorValueRef, callback_error, error_type_id, error_value_of};
+use crate::engine::error::{
+    callback_error, caught_by, caught_ty, check_catch_types, err_pair, error_value_of, is_exit,
+    ok_pair,
+};
 use crate::engine::store::Env;
 
 pub trait FutureAlloc: Send {
@@ -108,6 +114,74 @@ impl<'v> StarlarkFuture<'v> {
             catch: RefCell::new(Some(types)),
         })
     }
+}
+
+/// A future that resolves to a `T`, typed as `Future[T]`: the typechecker
+/// knows what its `block()` returns and what `catch().block()` pairs. The
+/// value is an ordinary `Future`; only the type is more precise.
+pub struct FutureOf<'v, T>(StarlarkFuture<'v>, PhantomData<fn() -> T>);
+
+impl<'v, T: FutureAlloc + 'static> FutureOf<'v, T> {
+    pub fn from_future(
+        fut: impl Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+    ) -> Self {
+        Self(StarlarkFuture::from_future(fut), PhantomData)
+    }
+}
+
+impl<T: StarlarkTypeRepr> StarlarkTypeRepr for FutureOf<'_, T> {
+    type Canonical = Self;
+
+    fn starlark_type_repr() -> Ty {
+        future_ty(T::starlark_type_repr(), true)
+    }
+}
+
+impl<'v, T: StarlarkTypeRepr> AllocValue<'v> for FutureOf<'v, T> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
+        self.0.alloc_value(heap)
+    }
+}
+
+/// `Future[T]` for a `value` of type `T`: `block()` returns `T`, and, while
+/// `catchable`, `catch()` returns the `Future` whose `block()` gives the
+/// `(err, value)` pair. Other methods are typed as for any `Future`.
+fn future_ty(value: Ty, catchable: bool) -> Ty {
+    // One identity per spelling, so every `Future[HttpResponse]` is the same type.
+    static IDS: LazyLock<Mutex<HashMap<String, TypeInstanceId>>> = LazyLock::new(Default::default);
+
+    let name = format!("Future[{value}]");
+    let id = *IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(name.clone())
+        .or_insert_with(TypeInstanceId::r#gen);
+    let mut known = vec![(
+        "block".to_owned(),
+        Ty::callable(ParamSpec::empty(), value.clone()),
+    )];
+    if catchable {
+        let types = ParamSpec::new_parts([], [], Some(Ty::any()), [], None)
+            .expect("`*types` alone is a valid signature");
+        known.push((
+            "catch".to_owned(),
+            Ty::callable(types, future_ty(caught_ty(value), false)),
+        ));
+    }
+    TyUser::new(
+        name,
+        TyStarlarkValue::new::<StarlarkFuture>(),
+        id,
+        TyUserParams {
+            fields: TyUserFields {
+                known: known.into_iter().collect(),
+                unknown: true,
+            },
+            ..TyUserParams::default()
+        },
+    )
+    .map(Ty::custom)
+    .unwrap_or_else(|_| Ty::starlark_value::<StarlarkFuture>())
 }
 
 impl<'v> Future for StarlarkFuture<'v> {
@@ -239,20 +313,13 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         let Some(types) = catch else {
             return result;
         };
-        let none = values::Value::new_none();
         match result {
-            Ok(value) => Ok(eval.heap().alloc(AllocTuple([none, value]))),
+            Ok(value) => Ok(ok_pair(value, eval.heap())),
+            Err(err) if is_exit(&err) => Err(err),
             Err(err) => {
                 let error = error_value_of(&err, eval);
-                let caught = types.is_empty()
-                    || ErrorValueRef::of(error).is_some_and(|e| {
-                        types
-                            .iter()
-                            .filter_map(|t| error_type_id(*t))
-                            .any(|id| e.is_instance_of(id))
-                    });
-                if caught {
-                    Ok(eval.heap().alloc(AllocTuple([error, none])))
+                if caught_by(&types, error) {
+                    Ok(err_pair(error, eval.heap()))
                 } else {
                     Err(err)
                 }
@@ -265,7 +332,8 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
     /// `block()` on the returned future gives an `(err, value)` pair:
     /// `(None, value)` when it succeeds, `(err, None)` when it fails with an
     /// error of one of `types`. With no `types`, every failure is caught. A
-    /// failure of any other type still raises, unchanged.
+    /// failure of any other type still raises, unchanged, and so does a
+    /// `ctx.std.process.exit` in a `map_ok` callback.
     ///
     /// A failure raised by a runtime operation arrives as a plain `error`:
     /// its `message` is the failure, its `cause` chain holds the underlying
@@ -289,15 +357,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         let this_fut = this
             .downcast_ref_err::<StarlarkFuture>()
             .into_anyhow_result()?;
-        for t in &types.items {
-            if error_type_id(*t).is_none() {
-                anyhow::bail!(
-                    "catch() takes error types, got `{}` of type `{}`",
-                    t,
-                    t.get_type()
-                );
-            }
-        }
+        check_catch_types(&types.items)?;
         this_fut.with_catch(types.items)
     }
 

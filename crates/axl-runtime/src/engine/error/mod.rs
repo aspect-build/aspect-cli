@@ -33,16 +33,18 @@ mod test_future;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use catch::{callback_error, error_value_of};
-pub(crate) use error_type::error_type_id;
+pub(crate) use catch::{
+    callback_error, caught_by, caught_ty, check_catch_types, err_pair, error_value_of, is_exit,
+    ok_pair,
+};
 pub use raise::RaisedError;
-pub(crate) use value::ErrorValueRef;
 
 /// Register `error` and the `fail` that raises error values. Call after the
 /// Starlark standard library, so this `fail` replaces the builtin one.
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.set("error", error_type::root_error_type());
     raise::register_fail(globals);
+    catch::register_catch(globals);
     #[cfg(test)]
     test_future::register(globals);
 }
