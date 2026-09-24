@@ -161,8 +161,9 @@ from the crate root. Both build systems apply them, by different routes, so
   listed in `[workspace.metadata.patch]` into `target/patch/<crate>-<version>`,
   and the committed `.cargo/config.toml` points cargo there with a `paths`
   override. Run it once after cloning, and with `--force` whenever a patch
-  changes. CI jobs that run cargo on starlark's dependents run it first
-  (`axl-api-watch.yml`).
+  changes. The override applies to *every* cargo build in the workspace, not
+  only starlark's dependents, so every CI job that runs cargo uses the
+  `.github/actions/cargo-patch-crate` action first.
 
 Why `paths` and not the `[patch.crates-io]` entry patch-crate's docs suggest:
 rules_rs reads `[patch]` from `Cargo.toml` and would treat the crate as a local
