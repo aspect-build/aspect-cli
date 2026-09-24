@@ -28,6 +28,7 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkNever;
 
+use super::live;
 use super::stream;
 use crate::eval::TaskExit;
 
@@ -59,6 +60,7 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<Command> {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
+            own_group: std::cell::Cell::new(false),
         })
     }
 
@@ -132,6 +134,8 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
+    #[allocative(skip)]
+    own_group: std::cell::Cell<bool>,
 }
 
 impl Command {
@@ -145,14 +149,30 @@ impl Command {
         )
     }
 
-    fn try_spawn(&self) -> anyhow::Result<process::Child> {
-        let result = self.inner.borrow_mut().spawn();
-        result.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))
+    fn try_spawn(&self) -> anyhow::Result<(process::Child, live::LiveChildGuard)> {
+        let result = live::spawn_registered(&mut self.inner.borrow_mut(), self.own_group.get());
+        result.map_err(|e| self.spawn_error(e))
+    }
+
+    /// A spawn refused because shutdown began is an expected refusal, not a
+    /// bug: map it to a quiet `TaskExit` instead of a traceback while the
+    /// process winds down.
+    fn spawn_error(&self, e: std::io::Error) -> anyhow::Error {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            return TaskExit::error(format!(
+                "aspect-cli is shutting down; not spawning {}",
+                self.describe()
+            ))
+            .into();
+        }
+        anyhow!("failed to spawn command {}: {}", self.describe(), e)
     }
 
     fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
-        let result = self.inner.borrow_mut().status();
-        result.map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
+        let (mut child, _guard) = self.try_spawn()?;
+        child
+            .wait()
+            .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
     }
 }
 
@@ -293,14 +313,37 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Place the child in a new process group (Unix; no-op elsewhere).
+    /// `terminate()` and `kill()` then signal the whole group, catching
+    /// grandchildren a wrapper script leaves behind, and the OS shutdown
+    /// handler does the same. The child no longer receives terminal signals
+    /// (Ctrl-C) — the caller owns its lifecycle.
+    fn process_group<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        #[cfg(unix)]
+        {
+            std::os::unix::process::CommandExt::process_group(&mut *cmd.inner.borrow_mut(), 0);
+            cmd.own_group.set(true);
+        }
+        Ok(this)
+    }
+
     /// Executes the command as a child process, returning a handle to it.
     ///
     /// By default, stdin, stdout and stderr are inherited from the parent.
+    ///
+    /// On a cancelled run (Ctrl-C, or a CI job cancellation) spawned children
+    /// are SIGTERMed and, after a short grace, SIGKILLed. Launch bazel through
+    /// `ctx.bazel`, not here: the shutdown sequence never hard-kills the bazel
+    /// clients it knows about (protecting sandbox state), but a `bazel`
+    /// spawned as a plain command is killed like any other child.
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let child = cmd.try_spawn()?;
+        let (child, guard) = cmd.try_spawn()?;
         Ok(Child {
             inner: RefCell::new(Some(child)),
+            guard: RefCell::new(Some(guard)),
+            own_group: cmd.own_group.get(),
         })
     }
 
@@ -321,6 +364,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
+    #[allocative(skip)]
+    guard: RefCell<Option<live::LiveChildGuard>>,
+    own_group: bool,
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -410,12 +456,63 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// This is equivalent to sending a SIGKILL on Unix platforms.
     fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        child
-            .inner
-            .borrow_mut()
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
             .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .kill()?;
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        // A group is signaled before the leader is reaped: its members can
+        // outlive the leader, and `try_wait` frees the leader's pid for reuse
+        // as a pgid — so this must precede the exit check below. The group
+        // signal already reaches the leader, so no separate `inner.kill()`.
+        if child.own_group {
+            crate::engine::process::sigkill_group(inner.id());
+            return Ok(NoneType);
+        }
+        if inner.try_wait()?.is_some() {
+            let _ = child.guard.borrow_mut().take();
+            return Ok(NoneType);
+        }
+        inner.kill()?;
+        Ok(NoneType)
+    }
+
+    /// Asks the child process to exit gracefully. Sends SIGTERM on Unix and
+    /// falls back to a forced kill on other platforms.
+    ///
+    /// The child is not reaped by this call — follow up with `wait()` or
+    /// `try_wait()` to collect the exit status.
+    fn terminate<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        // Signal the group before the exit check: members can outlive the
+        // leader, and the `try_wait` below reaps the leader — freeing its pid
+        // for reuse as a pgid, which a later group signal must not hit.
+        #[cfg(unix)]
+        if child.own_group {
+            crate::engine::process::sigterm_group(inner.id());
+        }
+        // Avoid signalling a reused PID after the child exits.
+        if inner.try_wait()?.is_some() {
+            let _ = child.guard.borrow_mut().take();
+            return Ok(NoneType);
+        }
+        #[cfg(unix)]
+        if !child.own_group && !crate::engine::process::sigterm(inner.id()) {
+            // Treat exit between try_wait and signal as success.
+            if inner.try_wait()?.is_some() {
+                let _ = child.guard.borrow_mut().take();
+                return Ok(NoneType);
+            }
+            return Err(anyhow::anyhow!(
+                "failed to deliver SIGTERM to pid {}",
+                inner.id()
+            ));
+        }
+        #[cfg(not(unix))]
+        inner.kill()?;
         Ok(NoneType)
     }
 
@@ -435,6 +532,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .as_mut()
             .ok_or(anyhow::anyhow!("child is no longer active"))?
             .wait()?;
+        let _ = child.guard.borrow_mut().take();
         Ok(ExitStatus(status))
     }
 
@@ -455,7 +553,10 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .try_wait()?;
         Ok(match status {
             None => values::Value::new_none(),
-            Some(s) => heap.alloc(ExitStatus(s)),
+            Some(s) => {
+                let _ = child.guard.borrow_mut().take();
+                heap.alloc(ExitStatus(s))
+            }
         })
     }
 
@@ -477,12 +578,15 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// `stdout('piped')` or `stderr('piped')`, respectively.
     fn wait_with_output<'v>(this: values::Value<'v>) -> anyhow::Result<Output> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        let output = child
+        let result = child
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .wait_with_output()?;
-        Ok(Output(output))
+            .wait_with_output();
+        // The handle is consumed even on failure; drop the registration
+        // with it.
+        let _ = child.guard.borrow_mut().take();
+        Ok(Output(result?))
     }
 }
 
@@ -609,6 +713,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            own_group: std::cell::Cell::new(false),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_spawn().unwrap_err().to_string();
@@ -621,6 +726,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            own_group: std::cell::Cell::new(false),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_status().unwrap_err().to_string();
@@ -628,10 +734,148 @@ mod tests {
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn terminate_and_kill_are_noops_after_wait() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    c = ctx.std.process.command("sleep").arg("30").spawn()
+    c.terminate()
+    status = c.wait()
+    if status.success:
+        fail("SIGTERM'd child must not report success")
+    if status.signal != 15:
+        fail("expected SIGTERM (15), got %s" % status.signal)
+    c.terminate()
+    c.kill()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// A wrapper that backgrounds a worker into its own process group and
+    /// exits leaves the worker as an orphaned group member. `terminate()`
+    /// must still signal the group even though the leader already exited — the
+    /// P2 regression where the exit check short-circuited the group signal.
+    #[cfg(unix)]
+    #[test]
+    fn terminate_reaches_orphaned_group_member() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    d = ctx.std.fs.mkdtemp(prefix = "pg-orphan")
+    marker = d + "/worker.alive"
+    # Leader backgrounds a worker that traps SIGTERM to clear the marker,
+    # then exits immediately — so at terminate() time the leader is gone but
+    # the worker still holds the group.
+    script = "sh -c 'trap \"rm -f %s; exit 0\" TERM; touch %s; while true; do sleep 1; done' & exit 0" % (marker, marker)
+    c = ctx.std.process.command("sh").arg("-c").arg(script).process_group().spawn()
+
+    # Spin until the worker is up (it created the marker).
+    up = False
+    for _ in range(2000000):
+        if ctx.std.fs.exists(marker):
+            up = True
+            break
+    if not up:
+        fail("worker never started")
+
+    c.terminate()
+
+    # Spin until the worker handled SIGTERM (it removed the marker). If the
+    # group signal were skipped after the leader exited, this never clears.
+    for _ in range(2000000):
+        if not ctx.std.fs.exists(marker):
+            return 0
+    fail("orphaned group member survived terminate()")
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_write_survives_dead_child() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    c = ctx.std.process.command("cat").stdin("piped").stdout("null").spawn()
+    w = c.stdin()
+    if w.try_write("ping\n") != 5:
+        fail("write to a live child must succeed")
+    c.kill()
+    c.wait()
+    if w.try_write("ping\n") != 0:
+        fail("write to a dead child's pipe must report zero, not raise")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn try_write_accepts_file_and_stdout_streams() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    d = ctx.std.fs.mkdtemp(prefix = "trywrite")
+    f = ctx.std.fs.create(d + "/out.txt")
+    if f.try_write("data") != 4:
+        fail("file try_write must accept the buffer")
+    f.close()
+    if ctx.std.fs.read_to_string(d + "/out.txt") != "data":
+        fail("file try_write must land on disk")
+    ctx.std.io.stdout.try_write("")
+    ctx.std.io.stderr.try_write("")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn shutdown_spawn_refusal_is_a_quiet_task_exit() {
+        let cmd = Command {
+            inner: RefCell::new(process::Command::new("program")),
+            own_group: std::cell::Cell::new(false),
+        };
+        let refusal = cmd.spawn_error(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "process shutdown is already in progress",
+        ));
+        assert!(refusal.downcast_ref::<TaskExit>().is_some());
+
+        let failure = cmd.spawn_error(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        ));
+        assert!(failure.downcast_ref::<TaskExit>().is_none());
+        assert!(failure.to_string().contains("program"));
+    }
+
     #[test]
     fn describe_excludes_env_vars() {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
+            own_group: std::cell::Cell::new(false),
         };
         cmd.inner
             .borrow_mut()

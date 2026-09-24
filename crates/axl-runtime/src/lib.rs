@@ -27,6 +27,11 @@ pub mod bazel_live {
     pub use crate::engine::bazel::live::*;
 }
 
+/// Live tracking for child processes spawned through `std.process`.
+pub mod child_live {
+    pub use crate::engine::std::live::*;
+}
+
 #[cfg(test)]
 pub mod test;
 

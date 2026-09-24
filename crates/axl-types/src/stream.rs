@@ -306,6 +306,63 @@ fn ignore_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
+#[cfg(unix)]
+struct NonblockingFd {
+    fd: std::os::fd::RawFd,
+    flags: libc::c_int,
+    changed: bool,
+}
+
+#[cfg(unix)]
+impl NonblockingFd {
+    fn new(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let changed = flags & libc::O_NONBLOCK == 0;
+        if changed && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self { fd, flags, changed })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonblockingFd {
+    fn drop(&mut self) {
+        if self.changed {
+            unsafe {
+                libc::fcntl(self.fd, libc::F_SETFL, self.flags);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn nonblocking_write<W>(writer: &mut W, data: &[u8]) -> std::io::Result<usize>
+where
+    W: Write + std::os::fd::AsRawFd,
+{
+    let _guard = NonblockingFd::new(writer.as_raw_fd())?;
+    loop {
+        match writer.write(data) {
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn nonblocking_write<W: Write>(_writer: &mut W, _data: &[u8]) -> std::io::Result<usize> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "nonblocking pipe writes are unsupported on this platform",
+    ))
+}
+
 #[starlark_module]
 fn writable_methods(registry: &mut MethodsBuilder) {
     /// Returns true if the underlying stream is connected to a terminal/tty.
@@ -392,6 +449,63 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .map_err(|err| anyhow!(err))
             }
         }
+    }
+
+    /// Attempts one nonblocking write and returns the number of bytes
+    /// accepted. Returns 0 when the stream is closed, the pipe is full, or
+    /// the write fails. A short write may occur; retry only the unwritten
+    /// suffix. A regular file never blocks, so its write is the plain one.
+    ///
+    /// On non-Unix platforms nonblocking pipe writes are unsupported and
+    /// every call on a pipe-backed stream returns 0. That is deliberate:
+    /// callers treat 0 as "this stream cannot be reached this way" and fall
+    /// back to another path (e.g. the watch loop restarts the child instead
+    /// of notifying it over stdin).
+    fn try_write<'v>(
+        this: values::Value,
+        #[starlark(require = pos)] buf: values::Value,
+    ) -> anyhow::Result<u32> {
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
+        let data: &[u8] = if let Some(s) = buf.unpack_str() {
+            s.as_bytes()
+        } else if let Some(b) = buf.downcast_ref::<Bytes>() {
+            b.as_bytes()
+        } else {
+            return Err(anyhow!("try_write() expects a string or bytes"));
+        };
+        Ok(match &*io {
+            Writable::ChildStdin(stdin) => {
+                let guard = stdin.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed
+                    .as_mut()
+                    .and_then(|writer| nonblocking_write(writer, data).ok())
+                    .unwrap_or(0) as u32
+            }
+            Writable::Stdout(stdout) => {
+                let guard = stdout.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed
+                    .as_mut()
+                    .and_then(|inner| nonblocking_write(&mut inner.lock(), data).ok())
+                    .unwrap_or(0) as u32
+            }
+            Writable::Stderr(stderr) => {
+                let guard = stderr.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed
+                    .as_mut()
+                    .and_then(|inner| nonblocking_write(&mut inner.lock(), data).ok())
+                    .unwrap_or(0) as u32
+            }
+            Writable::File(file) => {
+                let mut guard = file.lock().unwrap();
+                guard
+                    .as_mut()
+                    .and_then(|inner| inner.write(data).ok())
+                    .unwrap_or(0) as u32
+            }
+        })
     }
 
     /// Flushes this output stream, ensuring that all intermediately buffered
@@ -496,5 +610,81 @@ mod broken_pipe_tests {
     #[test]
     fn success_passes_through() {
         assert!(ignore_broken_pipe(Ok(())).is_ok());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod nonblocking_write_tests {
+    use super::nonblocking_write;
+    use std::fs::File;
+    use std::io::{self, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+
+    fn pipe() -> (File, File) {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { (File::from_raw_fd(fds[1]), File::from_raw_fd(fds[0])) }
+    }
+
+    fn flags(fd: RawFd) -> libc::c_int {
+        let result = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(result >= 0);
+        result
+    }
+
+    #[test]
+    fn reports_partial_writes_and_restores_flags() {
+        struct PartialWriter {
+            fd: File,
+            limit: usize,
+        }
+
+        impl AsRawFd for PartialWriter {
+            fn as_raw_fd(&self) -> RawFd {
+                self.fd.as_raw_fd()
+            }
+        }
+
+        impl Write for PartialWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len().min(self.limit))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (fd, _reader) = pipe();
+        let mut writer = PartialWriter { fd, limit: 3 };
+        let original_flags = flags(writer.as_raw_fd());
+
+        assert_eq!(nonblocking_write(&mut writer, b"abcdef").unwrap(), 3);
+        assert_eq!(flags(writer.as_raw_fd()), original_flags);
+    }
+
+    #[test]
+    fn full_pipe_returns_would_block() {
+        let (mut writer, _reader) = pipe();
+        let chunk = [0_u8; 64 * 1024];
+
+        for _ in 0..4096 {
+            match nonblocking_write(&mut writer, &chunk) {
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
+                Err(err) => panic!("unexpected pipe write error: {err}"),
+            }
+        }
+
+        panic!("pipe did not fill after 256 MiB of writes");
+    }
+
+    #[test]
+    fn dead_pipe_returns_broken_pipe() {
+        let (mut writer, reader) = pipe();
+        drop(reader);
+
+        let err = nonblocking_write(&mut writer, b"notification").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }

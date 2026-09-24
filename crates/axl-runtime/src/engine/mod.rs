@@ -8,7 +8,8 @@ mod aspect;
 mod r#async;
 mod hash;
 mod http;
-mod std;
+pub(crate) mod process;
+pub(crate) mod std;
 mod template;
 mod wasm;
 

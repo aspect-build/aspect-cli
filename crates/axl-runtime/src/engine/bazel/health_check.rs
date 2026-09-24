@@ -115,7 +115,9 @@ impl Signal {
             Signal::Int => {
                 super::process::sigint(pid);
             }
-            Signal::Kill => super::process::sigkill(pid),
+            Signal::Kill => {
+                super::process::sigkill(pid);
+            }
         }
     }
 
