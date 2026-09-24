@@ -7,6 +7,9 @@ on:
     paths:
       - crates/aspect-launcher/**
       - crates/aspect-telemetry/**
+      - .cargo/**
+      - patches/**
+      - .github/actions/cargo-patch-crate/**
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -49,6 +52,7 @@ jobs:
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
           echo "CARGO_TARGET_ARGS=--target x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/cargo-patch-crate
       - name: Build launcher
         run: cargo build -p aspect-launcher $CARGO_TARGET_ARGS
       # ── Test 1: Unpinned first run ────────────────────────────────────────────
