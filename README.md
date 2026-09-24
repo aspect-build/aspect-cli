@@ -173,14 +173,12 @@ On GitHub Actions specifically, [`aspect-build/setup-aspect`](https://github.com
 
 ## See it in action
 
-The [`aspect-build/bazel-examples`](https://github.com/aspect-build/bazel-examples) repo runs `aspect <task>` pipelines on every commit across all four supported CI providers. Click through to inspect a current build:
+The [`aspect-build/bazel-examples`](https://github.com/aspect-build/bazel-examples) repo runs `aspect <task>` pipelines on every commit on GitHub Actions and Buildkite. Click through to inspect a current build:
 
 | CI provider | Live pipeline |
 |---|---|
 | GitHub Actions | [Actions tab](https://github.com/aspect-build/bazel-examples/actions?query=branch%3Amain) |
 | Buildkite | [Recent builds](https://buildkite.com/aspect-build/bazel-examples/builds?branch=main) |
-| GitLab CI/CD | [Pipelines](https://gitlab.com/aspect-build/bazel-examples/-/pipelines?scope=all&ref=main) |
-| CircleCI | [Pipeline runs](https://app.circleci.com/pipelines/github/aspect-build/bazel-examples?branch=main) |
 
 `aspect <task>` posts task results to three surfaces:
 
