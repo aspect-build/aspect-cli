@@ -1,0 +1,67 @@
+"""Unit tests for workspace watch batch dispatch."""
+
+load("./watch.axl", "watch")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _session(values):
+    queue = list(values)
+
+    def try_pop():
+        if not queue:
+            return None
+        return queue.pop(0)
+
+    return struct(try_pop = try_pop)
+
+def _test_no_batch_does_not_run(_ctx):
+    runs = []
+    _eq("no batch result", watch.run_pending(_session([None]), lambda: runs.append(True)), False)
+    _eq("no batch callback", runs, [])
+
+def _test_batch_runs_once(_ctx):
+    runs = []
+    _eq("batch result", watch.run_pending(_session([struct(), None]), lambda: runs.append(True)), True)
+    _eq("batch callback", runs, [True])
+
+def _test_queued_batches_are_coalesced(_ctx):
+    runs = []
+    ws = _session([struct(), struct(), struct(), None])
+    _eq("coalesced result", watch.run_pending(ws, lambda: runs.append(True)), True)
+    _eq("coalesced callback", runs, [True])
+    _eq("queue drained", watch.run_pending(ws, lambda: runs.append(True)), False)
+
+def _test_bazel_symlink_ignores_follow_resolved_prefix(_ctx):
+    ignores = watch.ignores("/repo/my-workspace", "links/%workspace%-")
+    _eq("custom bin symlink", "/repo/my-workspace/links/my-workspace-bin" in ignores, True)
+    _eq("custom workspace symlink", "/repo/my-workspace/links/my-workspace-my-workspace" in ignores, True)
+    _eq("default bin omitted", "/repo/my-workspace/bazel-bin" in ignores, False)
+
+def _test_disabled_or_absolute_symlink_prefix(_ctx):
+    base = ["/repo/ws/.git", "/repo/ws/.jj"]
+    _eq("disabled symlinks", watch.ignores("/repo/ws", "/"), base)
+    _eq("absolute bin symlink", "/repo/ws/links/bazel-bin" in watch.ignores("/repo/ws", "/repo/ws/links/bazel-"), True)
+
+_UNIT_TESTS = [
+    _test_no_batch_does_not_run,
+    _test_batch_runs_once,
+    _test_queued_batches_are_coalesced,
+    _test_bazel_symlink_ignores_follow_resolved_prefix,
+    _test_disabled_or_absolute_symlink_prefix,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("watch.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+watch_tests = task(
+    summary = "Run the workspace watch AXL unit tests.",
+    kind = "test-watch",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

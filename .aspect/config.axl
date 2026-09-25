@@ -49,6 +49,7 @@ load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
+load("@aspect//private/lib/watch_test.axl", "watch_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
@@ -358,6 +359,10 @@ def config(ctx: ConfigContext):
     # canonical_label normalization (local/external/bzlmod @@module+version → @module).
     # Run with: aspect dev test-runnable
     ctx.tasks.add(runnable_tests)
+
+    # Workspace-watch batch dispatch and queued-batch coalescing.
+    # Run with: aspect dev test-watch
+    ctx.tasks.add(watch_tests)
     ctx.tasks.add(cache_selection_tests)
 
     # The Bazel flags Aspect sets: the catalog's endpoint keying, the runner and

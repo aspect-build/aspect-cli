@@ -97,6 +97,7 @@ load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_co
 load("./private/lib/runnable.axl", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
+load("./private/lib/watch.axl", "watch")
 
 def _parse_diff_paths(diff_text):
     """Extract affected paths from a unified diff via `+++` lines
@@ -418,13 +419,39 @@ def _emit_final(ph, exit_code):
     )
 
 # buildifier: disable=function-docstring
-def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    bazel_trait = ctx.traits[BazelTrait]
-    ansi = color_enabled(ctx.std)
-
+def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Initialize data for status-check emission.
     data = gaz_init_data()
     ph = phases.new(ctx, data)
+
+    # Single pre-task setup phase (status surface, rc parse, health checks);
+    # returns resolved flags (a failed health check fails the task inside).
+    rc = ph.setup(ctx.args.gazelle_target, "gazelle_results")
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
+
+    if ctx.args.watch:
+        # Watch before the first run so edits made during it aren't missed.
+        ws = watch.new(ctx, rc = rc)
+
+        def rerun():
+            ph.reset(gaz_init_data())
+            _run_gazelle(ph, rc, endpoint_auth_flags, announce_version, announce_command)
+
+        _run_gazelle(ph, rc, endpoint_auth_flags, announce_version, announce_command)
+
+        # Never concludes: re-runs per change until Ctrl-C ends the process.
+        return watch.loop(ws, rerun)
+
+    return _emit_final(ph, _run_gazelle(ph, rc, endpoint_auth_flags, announce_version, announce_command))
+
+def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool, announce_command: bool) -> int:
+    """One gazelle pass: build the target, diff BUILD files, and (unless
+    --check-only) apply the patch. Returns the exit code without concluding."""
+    ctx = ph.ctx
+    data = ph.data
+    bazel_trait = ctx.traits[BazelTrait]
+
     data["start_time_ms"] = now_ms(ctx)
     data["gazelle"]["gazelle_target"] = ctx.args.gazelle_target
     data["gazelle"]["gazelle_command"] = ctx.args.gazelle_command or ""
@@ -436,12 +463,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["gazelle"]["severity_resolved"] = severity_resolved
     data["gazelle"]["check_only"] = check_only
 
-    # Single pre-task setup phase (status surface, rc parse, health checks);
-    # returns resolved flags (a failed health check fails the task inside).
-    rc = ph.setup(ctx.args.gazelle_target, "gazelle_results")
-    announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
-
     # Resolve dirs before the build: gazelle needs them when spawned, the no-op
     # short-circuit skips the build entirely, and the repro/fix builders read
     # data["gazelle"]["dirs"].
@@ -449,7 +470,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["gazelle"]["dirs"] = list(effective_dirs)
     if no_op:
         data["gazelle"]["no_changed_dirs"] = True
-        return _emit_final(ph, 0)
+        return 0
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the gazelle
     # target's executable (the sh_binary, not its `-runner.bash` helper), its
@@ -544,13 +565,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        _emit_final(ph, build_status.code or 1)
-        fail("Building the gazelle target has failed.")
+        error(ctx.std, "Building the gazelle target has failed.")
+        return build_status.code or 1
 
     ep = r.determine_entrypoint(ctx.args.gazelle_target)
     if not ep:
-        _emit_final(ph, 1)
-        fail("Failed to determine the gazelle target's entrypoint.")
+        error(ctx.std, "Failed to determine the gazelle target's entrypoint.")
+        return 1
 
     # Diff phase: -mode=diff yields the verdict + patch without touching the
     # tree. The wrapper hardcodes `-mode fix`; our appended `-mode=diff` wins
@@ -602,12 +623,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
         data["gazelle"]["gazelle_error"] = True
         data["gazelle"]["gazelle_error_code"] = diff_status.code
-        return _emit_final(ph, diff_status.code)
+        return diff_status.code
 
     if not diff_stdout.strip():
         # Clean, regardless of --severity / --check-only.
         print("✅ All BUILD files are up to date.")
-        return _emit_final(ph, 0)
+        return 0
 
     affected = _parse_diff_paths(diff_stdout)
 
@@ -641,7 +662,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data["gazelle"]["affected_files"] = affected
             data["gazelle"]["apply_error"] = True
             data["gazelle"]["apply_error_msg"] = apply_result.stderr.strip()
-            return _emit_final(ph, apply_result.status.code)
+            return apply_result.status.code
 
     verb = "would update" if check_only else "updated"
     if affected:
@@ -668,13 +689,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Verdict from --severity (resolved at entry).
     if severity_resolved == "fail":
         error(ctx.std, "BUILD files are out of date.")
-        return _emit_final(ph, 1)
+        return 1
     if severity_resolved == "warn":
         info(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
     elif not check_only:
         # Local apply: tree already updated, don't tell them to re-run.
         print("Gazelle updated %d file(s). Review and commit the changes." % len(affected))
-    return _emit_final(ph, 0)
+    return 0
 
 gazelle = task(
     summary = "Generate and update BUILD files with gazelle. Applies the patch locally; detect-only on CI (`--check-only`).",
@@ -732,10 +753,14 @@ gazelle = task(
             maximum = 4096,
             description = "Directories gazelle should update BUILD files in. When empty (default), gazelle considers every directory in the workspace. Combine with --scope=changed to take the intersection with directories that contain changed files. Useful for scoping to a sub-workspace within a monorepo. CAUTION: under --scope=changed, supplying narrow dirs intersection-filters the derived set. Changed dirs that fall outside the listed roots are dropped, so the BUILD updates those changes would have triggered are silently missed. NOTE: positional dirs only narrow the BUILD-regeneration step. Under gazelle's default `-index=all`, gazelle still traverses every workspace directory, parses every BUILD, and re-determines target exports (often re-parsing source) repo-wide. Pair with `--gazelle-flag=-index=lazy` (plus `# gazelle:go_search` / `# gazelle:proto_search` directives) to also narrow that traversal + parse + indexing work. Optionally also pass `--gazelle-flag=-r=false` to skip recursion on top of that, but some gazelle language extensions are incompatible with non-recursive mode — test against your plugin set first. See https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update.",
         ),
+        "watch": args.boolean(
+            default = False,
+            description = "Stay running after the first gazelle invocation, watching the workspace and re-running gazelle after each settled batch of changes. Stop with Ctrl-C.",
+        ),
     } | bzl.flags.args("the gazelle build") | bzl.announce.args("the gazelle build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,
     ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
-    implementation = _impl,
+    implementation = _gazelle_impl,
 )
