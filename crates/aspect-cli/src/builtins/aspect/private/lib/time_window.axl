@@ -1,0 +1,77 @@
+"""RFC 3339 timestamps, computed rather than shelled out for.
+
+The build-results API takes `start` and `end` as RFC 3339 UTC, and AXL's `time`
+builtin gives milliseconds since the epoch and nothing else. Shelling out to
+`date` would work on a developer's Mac and on a Linux runner, and would then
+differ on the one that has BusyBox, so the conversion is spelled out here.
+
+The civil-from-days algorithm is Howard Hinnant's, which is the one everybody
+uses: it treats March as the first month so the leap day lands at the end of the
+year and the month-length arithmetic becomes branchless.
+"""
+
+load("@std//time.axl", "time")
+
+Window = record(
+    start = field(str),
+    end = field(str),
+)
+
+def _civil_from_days(days: int) -> (int, int, int):
+    """(year, month, day) for a count of days since 1970-01-01."""
+    days = days + 719468
+    era = (days if days >= 0 else days - 146096) // 146097
+    day_of_era = days - era * 146097
+    year_of_era = (day_of_era - day_of_era // 1460 + day_of_era // 36524 - day_of_era // 146096) // 365
+    year = year_of_era + era * 400
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    mp = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * mp + 2) // 5 + 1
+    month = mp + 3 if mp < 10 else mp - 9
+    return (year + 1 if month <= 2 else year, month, day)
+
+def _pad(value: int, width: int) -> str:
+    out = str(value)
+    for _ in range(width - len(out)):
+        out = "0" + out
+    return out
+
+def _rfc3339(epoch_ms: int) -> str:
+    """`YYYY-MM-DDTHH:MM:SSZ` for a Unix timestamp in milliseconds.
+
+    Seconds resolution: the API filters on a window, and sub-second precision
+    in a 14-day lookback is noise.
+    """
+    seconds = epoch_ms // 1000
+    days = seconds // 86400
+    rest = seconds - days * 86400
+
+    year, month, day = _civil_from_days(days)
+    return "{}-{}-{}T{}:{}:{}Z".format(
+        _pad(year, 4),
+        _pad(month, 2),
+        _pad(day, 2),
+        _pad(rest // 3600, 2),
+        _pad((rest % 3600) // 60, 2),
+        _pad(rest % 60, 2),
+    )
+
+def _last_days(ctx, days: int) -> Window:
+    """The window ending now and reaching `days` back.
+
+    The API rejects a span over 31 days, so a caller asking for more gets 31
+    rather than a 400 in the middle of a notification rule.
+    """
+    capped = days if days <= 31 else 31
+    now = time.now_ms()
+    return Window(
+        start = _rfc3339(now - capped * 86400000),
+        end = _rfc3339(now),
+    )
+
+time_window = struct(
+    Window = Window,
+    last_days = _last_days,
+    rfc3339 = _rfc3339,
+    testonly_civil_from_days = _civil_from_days,
+)

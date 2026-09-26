@@ -1,0 +1,257 @@
+"""Read the deployment's build-results REST API from AXL.
+
+The same `/api/v1` surface the Build & Test UI and `aspect mcp` read, reachable
+from a task or a feature. It exists so an AXL extension can answer questions no
+single invocation can: is this test slower than it has been all week, is this
+target flaky, has this runner failed everything it touched.
+
+Authentication is the deployment credential the CLI already holds, so nothing
+new is provisioned: `ctx.aspect.auth.credentials()` for the bearer token and
+`deployment_endpoints().results_url` for the host.
+
+**Every call degrades rather than fails.** A repo with no deployment configured,
+a developer who has not logged in, a deployment too old to expose the API, a
+network that is down: each returns an empty `Response` carrying `unavailable`,
+and the caller reports or ignores it. A notification rule that cannot reach its
+history must not take the build down with it.
+
+The API is experimental and its response shapes move between Workflows
+releases. Everything here reads fields defensively with `.get(...)` and a
+default rather than indexing, so a renamed field degrades to a missing value
+instead of a traceback in the middle of somebody's build.
+"""
+
+_API_PATH = "/api/v1"
+
+Response = record(
+    ok = field(bool),
+    data = field(dict, default = {}),
+    unavailable = field(str | None, default = None),
+)
+
+def _origin(url: str) -> str:
+    """`scheme://host[:port]` of a URL, dropping any path.
+
+    `results_url` points at the invocation-browsing path rather than the API
+    root, so the path has to come off before `/api/v1` goes on.
+    """
+    if not url:
+        return ""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return ""
+    host, _, _ = rest.partition("/")
+    return scheme + "://" + host
+
+def _unavailable(reason: str) -> Response:
+    return Response(ok = False, unavailable = reason)
+
+def _endpoint(ctx, deployment: str | None) -> (str, str) | None:
+    """(origin, bearer token) for the deployment, or None with the reason logged."""
+    endpoints = ctx.aspect.auth.deployment_endpoints(deployment = deployment)
+    if endpoints == None:
+        return None
+
+    origin = _origin(endpoints.results_url)
+    if not origin:
+        return None
+
+    credentials = ctx.aspect.auth.credentials(deployment = deployment, required = False)
+    if credentials == None:
+        return None
+
+    return (origin, credentials.access_token)
+
+def _query(params: dict) -> str:
+    """Encode query parameters, skipping empty values.
+
+    Bazel labels carry `/` and `:` and go in the query string rather than a path
+    segment, which is why every label-taking route here takes `label=`.
+    """
+    parts = []
+    for name in sorted(params):
+        value = params[name]
+        if value == None or value == "":
+            continue
+        parts.append("{}={}".format(name, _encode(str(value))))
+    if not parts:
+        return ""
+    return "?" + "&".join(parts)
+
+_UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+_HEX_DIGITS = "0123456789ABCDEF"
+
+def _encode(value: str) -> str:
+    """Percent-encode for a query parameter, RFC 3986 unreserved set.
+
+    Labels are the reason this exists: `//path/to:target` has to survive as a
+    parameter value, and a half-encoded label silently selects the wrong target
+    rather than erroring.
+    """
+    out = []
+    for point in value.codepoints():
+        ch = chr(point)
+        if ch in _UNRESERVED:
+            out.append(ch)
+            continue
+        for byte in _utf8(point):
+            out.append("%" + _HEX_DIGITS[byte // 16] + _HEX_DIGITS[byte % 16])
+    return "".join(out)
+
+def _utf8(point: int) -> list:
+    """UTF-8 bytes of one codepoint.
+
+    AXL's `bytes()` yields single-byte `bytes` values rather than integers, and
+    percent-encoding needs the numbers, so the encoding is spelled out here.
+    """
+    if point < 0x80:
+        return [point]
+    if point < 0x800:
+        return [0xC0 | (point >> 6), 0x80 | (point & 0x3F)]
+    if point < 0x10000:
+        return [
+            0xE0 | (point >> 12),
+            0x80 | ((point >> 6) & 0x3F),
+            0x80 | (point & 0x3F),
+        ]
+    return [
+        0xF0 | (point >> 18),
+        0x80 | ((point >> 12) & 0x3F),
+        0x80 | ((point >> 6) & 0x3F),
+        0x80 | (point & 0x3F),
+    ]
+
+def _get(ctx, path: str, params: dict, deployment: str | None) -> Response:
+    resolved = _endpoint(ctx, deployment)
+    if resolved == None:
+        return _unavailable(
+            "no Aspect deployment is configured or logged in; run " +
+            "`aspect auth configure <host>` and `aspect auth login`",
+        )
+
+    origin, token = resolved
+    url = origin + _API_PATH + path + _query(params)
+
+    response = ctx.http().get(
+        url = url,
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+        },
+    ).block()
+
+    if response.status == 404:
+        return _unavailable(
+            "{} is not served by this deployment; it needs a newer Aspect Workflows".format(path),
+        )
+    if response.status == 401 or response.status == 403:
+        return _unavailable("not authorized for {} (HTTP {})".format(path, response.status))
+    if response.status < 200 or response.status >= 300:
+        return _unavailable("{} answered HTTP {}".format(path, response.status))
+
+    decoded = json.try_decode(response.body)
+    if decoded == None or type(decoded) != "dict":
+        return _unavailable("{} returned a body that is not a JSON object".format(path))
+
+    return Response(ok = True, data = decoded)
+
+def _invocations(ctx, limit: int = 20, repo: str = "", branch: str = "", status: str = "", deployment: str | None = None) -> Response:
+    """Recent builds, newest first."""
+    return _get(ctx, "/invocations", {
+        "limit": limit,
+        "repo": repo,
+        "branch": branch,
+        "status": status,
+    }, deployment)
+
+def _invocation_metrics(ctx, invocation_id: str, deployment: str | None = None) -> Response:
+    """One build's action counts, cache hit rates and critical path.
+
+    `invocation_id` is the API's own id, not the UUID Bazel printed. Resolve
+    that one through `invocations(invocation_id = ...)` first.
+    """
+    return _get(ctx, "/invocations/" + _encode(invocation_id) + "/metrics", {}, deployment)
+
+def _target_stats(ctx, label: str = "", repo: str = "", range: str = "d7", deployment: str | None = None) -> Response:
+    """Per-target statistics over a lookback window: build counts, failure and
+    flake rates, durations. With no `label`, every target in the organization.
+
+    `range` is one of `d1`, `d3`, `d7`, `m1`, `m3`, `y1`. The API rejects other
+    filters when a label is given, so this passes only what it accepts.
+    """
+    return _get(ctx, "/target-stats", {
+        "label": label,
+        "repo": repo,
+        "range": range,
+    }, deployment)
+
+def _target_invocations(ctx, label: str, range: str = "d7", deployment: str | None = None) -> Response:
+    """The builds that built one target over the window: "when did this start failing"."""
+    return _get(ctx, "/target-invocations", {"label": label, "range": range}, deployment)
+
+def _action_history(ctx, label: str, start: str, end: str, repo: str = "", branch: str = "", cache: str = "", daily: bool = False, limit: int = 20, deployment: str | None = None) -> Response:
+    """Execution-log records for one action-owner label between two RFC 3339 times.
+
+    This is the endpoint with percentiles on it, so it is the one a "slower than
+    usual" rule reads. `cache = "miss"` is almost always what you want: a window
+    that includes cache hits reports the time it took to download an output, not
+    the time it took to produce one.
+
+    The window may span at most 31 days. Not every deployment serves this route;
+    an older one comes back `unavailable` rather than empty.
+    """
+    return _get(ctx, "/action-history", {
+        "label": label,
+        "start": start,
+        "end": end,
+        "repo": repo,
+        "branch": branch,
+        "cache": cache,
+        "daily": "true" if daily else "",
+        "limit": limit,
+    }, deployment)
+
+def _percentile(response: Response, name: str) -> int | None:
+    """Pull one percentile out of an action-history `summary`.
+
+    Returns None when the window held no records, which is the common case for a
+    new target and must read as "no opinion" rather than as zero.
+    """
+    if not response.ok:
+        return None
+    summary = response.data.get("summary")
+    if type(summary) != "dict":
+        return None
+    value = summary.get(name)
+    if value == None:
+        return None
+    return int(value)
+
+def _slower_than(observed_ms: int, baseline_ms: int | None, threshold_pct: int) -> int | None:
+    """How much slower `observed_ms` is than `baseline_ms`, as a percentage, or
+    None when there is no baseline or the increase is under `threshold_pct`.
+
+    Separated from the API calls so the arithmetic that decides whether to wake
+    somebody up is testable without a deployment.
+    """
+    if baseline_ms == None or baseline_ms <= 0:
+        return None
+    increase = ((observed_ms - baseline_ms) * 100) // baseline_ms
+    if increase < threshold_pct:
+        return None
+    return increase
+
+build_results = struct(
+    Response = Response,
+    invocations = _invocations,
+    invocation_metrics = _invocation_metrics,
+    target_stats = _target_stats,
+    target_invocations = _target_invocations,
+    action_history = _action_history,
+    percentile = _percentile,
+    slower_than = _slower_than,
+    testonly_origin = _origin,
+    testonly_query = _query,
+    testonly_encode = _encode,
+    testonly_utf8 = _utf8,
+)

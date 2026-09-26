@@ -1,0 +1,20 @@
+"""Public re-export of the `Notify` owner feature.
+
+The owner feature lives co-located with its trait and rules in
+`private/lib/notify.axl`, so a user `config.axl` reaches it here with a load
+path symmetric to the other features:
+
+    load("@aspect//feature/notify.axl", "Notify")
+
+    def config(ctx: ConfigContext):
+        ctx.features[Notify].args.webhook_env = "ASPECT_SLACK_WEBHOOK"
+        ctx.features[Notify].args.on = ["build-failure", "flaky-test"]
+        ctx.features[Notify].args.branches = ["main", "release/*"]
+
+The authoring API for a rule of your own (`notify.send`) is on
+`@aspect//notify.axl`.
+"""
+
+load("../private/lib/notify.axl", _Notify = "Notify")
+
+Notify = _Notify

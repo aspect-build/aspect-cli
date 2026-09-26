@@ -1,0 +1,496 @@
+"""Slack notifications driven by what a task actually did.
+
+The shape of the problem: a build produces far more signal than anyone wants in
+a channel. Notifying on every failure trains people to mute it; notifying on
+nothing wastes the data. What earns an interruption is narrow, and it is not the
+same list in two organizations.
+
+So this ships the four rules almost everyone writes, each off unless configured,
+and exposes the same primitive they are built on so the fifth rule (yours) is a
+function in `config.axl` rather than a feature request:
+
+    load("@aspect//notify.axl", "notify")
+
+    def _my_rule(ctx: TaskContext, update: TaskUpdate) -> None:
+        if not update.final:
+            return
+        if update.data["bazel"]["actions_cached"] == 0 and update.data["bazel"]["actions_total"] > 100:
+            notify.send(ctx, headline = "Cold cache on " + ctx.task.kind)
+
+    def config(ctx: ConfigContext):
+        ctx.traits[Phases].task_update.append(_my_rule)
+
+Built-in rules, all opt-in through `ctx.features[Notify].args`:
+
+| id                 | fires when                                                          |
+|--------------------|---------------------------------------------------------------------|
+| `build-failure`    | a task fails on a branch matching `branches`                        |
+| `flaky-test`       | Bazel reported a test as flaky (passed on retry)                    |
+| `slow-test`        | a test took longer than `test_budget_ms`, or regressed vs. history  |
+| `slow-build`       | the task took longer than `build_budget_ms`, or regressed           |
+
+The two "or regressed" rules read the deployment's build-results API for a
+baseline. That needs a configured, logged-in deployment; without one the rule
+falls back to its fixed budget and says so once, rather than failing.
+
+## Why this is a feature and not a task
+
+It has no command of its own. It subscribes to `Phases.task_update`, which every
+task already emits, so one line in `config.axl` covers `build`, `test`, `lint`
+and anything you wrote yourself, with no per-task wiring.
+
+## Delivery never fails a build
+
+Every path here is best-effort: no webhook, a Slack outage, a deployment that
+cannot be reached. Each is reported once on stderr and the task's own verdict is
+untouched. A notification system that can redden a green build gets turned off.
+"""
+
+load("@aspect//bazel/build_metadata.axl", "get_build_metadata")
+load("./build_results.axl", "build_results")
+load("./ci.axl", "detect_build_url")
+load("./lifecycle.axl", "Phases")
+load("./slack.axl", "slack")
+load("./time_window.axl", "time_window")
+
+_RULE_BUILD_FAILURE = "build-failure"
+_RULE_FLAKY_TEST = "flaky-test"
+_RULE_SLOW_TEST = "slow-test"
+_RULE_SLOW_BUILD = "slow-build"
+
+RULES = [_RULE_BUILD_FAILURE, _RULE_FLAKY_TEST, _RULE_SLOW_TEST, _RULE_SLOW_BUILD]
+
+Config = record(
+    webhook = field(str),
+    rules = field(list),
+    branches = field(list),
+    test_budget_ms = field(int),
+    build_budget_ms = field(int),
+    regression_pct = field(int),
+    baseline = field(str),
+    mention = field(str),
+    dry_run = field(bool),
+    max_items = field(int),
+)
+
+Note = record(
+    rule = field(str),
+    headline = field(str),
+    body = field(str, default = ""),
+    fields = field(list, default = []),
+)
+
+def _branch(ctx, meta: dict) -> str:
+    """The branch this build is for.
+
+    `get_build_metadata` fills `BRANCH_NAME` from the CI host's own variables,
+    which is the right source on CI and is absent everywhere else. Falling back
+    to git means a rule can be developed and demonstrated on a laptop instead of
+    only ever being exercised for the first time in production.
+    """
+    branch = meta.get("BRANCH_NAME", "")
+    if branch:
+        return branch
+
+    result = (ctx.std.process.command("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .stdout("piped")
+        .stderr("null")
+        .spawn()
+        .wait_with_output())
+    if result.status.code != 0:
+        return ""
+    branch = result.stdout.strip()
+
+    # A detached HEAD reports "HEAD", which is not a branch and must not be
+    # matched against a protected-branch pattern.
+    return "" if branch == "HEAD" else branch
+
+def _matches_branch(branch: str, patterns: list) -> bool:
+    """Branch matching with a trailing `*` only.
+
+    Full globs invite `release/**/hotfix` and the questions that follow. A
+    prefix covers `release/*` and `hotfix/*`, which is every real use of this.
+    """
+    if not branch:
+        return False
+    for pattern in patterns:
+        if pattern.endswith("*"):
+            if branch.startswith(pattern[:-1]):
+                return True
+        elif branch == pattern:
+            return True
+    return False
+
+def _ms(value: int) -> str:
+    if value < 1000:
+        return "{}ms".format(value)
+    if value < 60000:
+        return "{}.{}s".format(value // 1000, (value % 1000) // 100)
+    return "{}m {}s".format(value // 60000, (value % 60000) // 1000)
+
+def _build_failure(ctx, cfg: Config, update, meta: dict) -> Note | None:
+    if _RULE_BUILD_FAILURE not in cfg.rules:
+        return None
+    if update.status != "failed" and update.status != "aborted":
+        return None
+
+    branch = _branch(ctx, meta)
+    if not _matches_branch(branch, cfg.branches):
+        return None
+
+    bazel = update.data["bazel"]
+    failed_targets = bazel["failed_targets"]
+    failed_tests = [t["label"] for t in bazel["failed_tests"]]
+
+    body = ""
+    if failed_tests:
+        body = "*Failing tests*\n" + _bullets(failed_tests, cfg.max_items)
+    elif failed_targets:
+        body = "*Failing targets*\n" + _bullets(failed_targets, cfg.max_items)
+
+    return Note(
+        rule = _RULE_BUILD_FAILURE,
+        headline = "{}{} failed on `{}`".format(
+            cfg.mention + " " if cfg.mention else "",
+            ctx.task.friendly_kind,
+            slack.escape(branch),
+        ),
+        body = body,
+        fields = _common_fields(ctx, meta, update),
+    )
+
+def _flaky_test(ctx, cfg: Config, update, meta: dict) -> Note | None:
+    if _RULE_FLAKY_TEST not in cfg.rules:
+        return None
+
+    flaky = update.data["bazel"]["flaky_tests"]
+    if not flaky:
+        return None
+
+    labels = ["{} ({})".format(t["label"], _ms(t["duration_ms"])) for t in flaky]
+    return Note(
+        rule = _RULE_FLAKY_TEST,
+        headline = "{} flaky test{} on `{}`".format(
+            len(flaky),
+            "" if len(flaky) == 1 else "s",
+            slack.escape(_branch(ctx, meta) or "unknown branch"),
+        ),
+        body = "*Passed only on retry*\n" + _bullets(labels, cfg.max_items),
+        fields = _common_fields(ctx, meta, update),
+    )
+
+def _slow_test(ctx, cfg: Config, update, meta: dict) -> Note | None:
+    if _RULE_SLOW_TEST not in cfg.rules:
+        return None
+    if cfg.test_budget_ms <= 0 and cfg.regression_pct <= 0:
+        return None
+
+    bazel = update.data["bazel"]
+    offenders = []
+    for test in bazel["passed_tests"] + bazel["flaky_tests"]:
+        if test["cached"]:
+            # A cached result reports the time it took to fetch an output, not
+            # to produce one. Budgeting on it would fire on a slow network.
+            continue
+        duration = test["duration_ms"]
+        if cfg.test_budget_ms > 0 and duration > cfg.test_budget_ms:
+            offenders.append("{} took {} (budget {})".format(
+                test["label"],
+                _ms(duration),
+                _ms(cfg.test_budget_ms),
+            ))
+            continue
+        if cfg.regression_pct > 0:
+            regression = _regression(ctx, cfg, test["label"], duration, meta)
+            if regression != None:
+                offenders.append(regression)
+
+    if not offenders:
+        return None
+
+    return Note(
+        rule = _RULE_SLOW_TEST,
+        headline = "{} slow test{} on `{}`".format(
+            len(offenders),
+            "" if len(offenders) == 1 else "s",
+            slack.escape(_branch(ctx, meta) or "unknown branch"),
+        ),
+        body = _bullets(offenders, cfg.max_items),
+        fields = _common_fields(ctx, meta, update),
+    )
+
+def _slow_build(ctx, cfg: Config, update, meta: dict) -> Note | None:
+    if _RULE_SLOW_BUILD not in cfg.rules:
+        return None
+    if cfg.build_budget_ms <= 0:
+        return None
+
+    elapsed = ctx.task.elapsed_ms
+    if elapsed <= cfg.build_budget_ms:
+        return None
+
+    bazel = update.data["bazel"]
+    executed = bazel["actions_executed"]
+    cached = bazel["actions_cached"]
+    total = executed + cached
+    hit_rate = (cached * 100) // total if total > 0 else 0
+
+    return Note(
+        rule = _RULE_SLOW_BUILD,
+        headline = "{} took {} on `{}`, over its {} budget".format(
+            ctx.task.friendly_kind,
+            _ms(elapsed),
+            slack.escape(_branch(ctx, meta) or "unknown branch"),
+            _ms(cfg.build_budget_ms),
+        ),
+        # Cache hit rate first, because it explains most slow builds and is the
+        # one number that tells you whether to look at the build or the cache.
+        body = "Action cache hit rate *{}%* ({} executed, {} cached).".format(hit_rate, executed, cached),
+        fields = _common_fields(ctx, meta, update),
+    )
+
+def _regression(ctx, cfg: Config, label: str, observed_ms: int, meta: dict) -> str | None:
+    """Compare one target against its own recent history.
+
+    Reads the deployment's action history for the same label over the last
+    fortnight, on the same branch, excluding cache hits. Returns a sentence when
+    the observed run is `regression_pct` slower than the baseline percentile,
+    otherwise None — including when there is no history, which is the common
+    case for a target nobody has built before.
+    """
+    window = time_window.last_days(ctx, 14)
+    history = build_results.action_history(
+        ctx,
+        label = label,
+        start = window.start,
+        end = window.end,
+        branch = meta.get("BRANCH_NAME", ""),
+        cache = "miss",
+    )
+    if not history.ok:
+        return None
+
+    baseline = build_results.percentile(history, "exec_wall_ms_" + cfg.baseline)
+    increase = build_results.slower_than(observed_ms, baseline, cfg.regression_pct)
+    if increase == None:
+        return None
+
+    return "{} took {}, {}% over its 14-day {} of {}".format(
+        label,
+        _ms(observed_ms),
+        increase,
+        cfg.baseline,
+        _ms(baseline),
+    )
+
+def _bullets(items: list, limit: int) -> str:
+    shown = items[:limit]
+    lines = ["• " + slack.escape(str(item)) for item in shown]
+    hidden = len(items) - len(shown)
+    if hidden > 0:
+        lines.append("• …and {} more".format(hidden))
+    return "\n".join(lines)
+
+def _common_fields(ctx, meta: dict, update) -> list:
+    fields = [
+        slack.Field(label = "Task", value = ctx.task.friendly_name),
+        slack.Field(label = "Elapsed", value = _ms(ctx.task.elapsed_ms)),
+    ]
+    commit = meta.get("COMMIT_SHA", "")
+    if commit:
+        fields.append(slack.Field(label = "Commit", value = "`{}`".format(commit[:12])))
+    repo = meta.get("REPO_URL", "")
+    if repo:
+        fields.append(slack.Field(label = "Repository", value = slack.escape(repo)))
+    return fields
+
+def _actions(ctx, update) -> list:
+    """The links worth putting under a notification: the CI job, and the build."""
+    links = []
+    build_url = detect_build_url(ctx.std.env)
+    if build_url:
+        links.append(slack.link(build_url, "CI job"))
+    results = update.data.get("aspect_results_url", "")
+    if results:
+        links.append(slack.link(results, "Build results"))
+    return links
+
+def _config_from_args(ctx) -> Config:
+    # `args.custom` defaults and `env.var` both come back None rather than ""
+    # when unset, and the rest of this module treats the webhook as a string.
+    webhook = ctx.args.webhook or ""
+    if not webhook and ctx.args.webhook_env:
+        webhook = ctx.std.env.var(ctx.args.webhook_env) or ""
+    return Config(
+        webhook = webhook,
+        rules = list(ctx.args.on),
+        branches = list(ctx.args.branches),
+        test_budget_ms = ctx.args.test_budget_ms,
+        build_budget_ms = ctx.args.build_budget_ms,
+        regression_pct = ctx.args.regression_pct,
+        baseline = ctx.args.baseline,
+        mention = ctx.args.mention,
+        dry_run = ctx.args.dry_run,
+        max_items = ctx.args.max_items,
+    )
+
+def _evaluate(ctx, cfg: Config, update, meta: dict) -> list:
+    notes = []
+    for rule in [_build_failure, _flaky_test, _slow_test, _slow_build]:
+        note = rule(ctx, cfg, update, meta)
+        if note != None:
+            notes.append(note)
+    return notes
+
+def _deliver(ctx, cfg: Config, note: Note, actions: list) -> None:
+    message = slack.message(
+        headline = note.headline,
+        body = note.body,
+        fields = note.fields,
+        actions = actions,
+    )
+
+    if cfg.dry_run:
+        print("notify [{}] would post to {}:\n{}".format(
+            note.rule,
+            slack.redact(cfg.webhook),
+            json.encode(message),
+        ))
+        return
+
+    delivery = slack.post(ctx, cfg.webhook, message)
+    if not delivery.ok:
+        print("WARNING: notify could not deliver the '{}' notification: {}".format(
+            note.rule,
+            delivery.detail,
+        ))
+
+_WEBHOOK_ENV = "ASPECT_SLACK_WEBHOOK"
+
+def _send(ctx, headline: str, body: str = "", fields: list = [], rule: str = "custom", webhook: str = "", dry_run: bool = False) -> None:
+    """Post one message. The escape hatch for a rule this module does not ship.
+
+    Resolves the webhook from the `webhook` argument, else from
+    `ASPECT_SLACK_WEBHOOK`. With neither it is a silent no-op, so a rule in a
+    `config.axl` that is shared across repos needs no guard of its own.
+
+    It reads the environment rather than the `Notify` feature's own `webhook`
+    arg because a feature's args are not reachable from a `config.axl` hook, and
+    the alternative — a trait every task has to declare — would leave a custom
+    rule failing on the tasks you wrote yourself. Configure the env var and both
+    paths agree.
+    """
+    url = webhook or ctx.std.env.var(_WEBHOOK_ENV) or ""
+    if not url:
+        return
+
+    message = slack.message(headline = headline, body = body, fields = fields)
+    if dry_run:
+        print("notify [{}] would post to {}:\n{}".format(rule, slack.redact(url), json.encode(message)))
+        return
+
+    delivery = slack.post(ctx, url, message)
+    if not delivery.ok:
+        print("WARNING: notify could not deliver the '{}' notification: {}".format(rule, delivery.detail))
+
+def _impl(ctx: FeatureContext):
+    cfg = _config_from_args(ctx)
+
+    if not cfg.webhook:
+        # Configured with rules but no webhook is a mistake worth naming once:
+        # the rules silently never fire otherwise.
+        if cfg.rules:
+            print("WARNING: notify has rules enabled but no webhook; set " +
+                  "ctx.features[Notify].args.webhook or the {} environment variable".format(
+                      ctx.args.webhook_env,
+                  ))
+        if not cfg.dry_run:
+            return
+
+    meta = get_build_metadata(ctx.std)
+
+    def _on_update(tctx: TaskContext, update) -> None:
+        if not update.final:
+            return
+        notes = _evaluate(tctx, cfg, update, meta)
+        if not notes:
+            return
+        actions = _actions(tctx, update)
+        for note in notes:
+            _deliver(tctx, cfg, note, actions)
+
+    ctx.traits[Phases].task_update.append(_on_update)
+
+Notify = feature(
+    display_name = "Slack notifications",
+    summary = "Post build failures, flaky tests and slow tests to a Slack webhook.",
+    implementation = _impl,
+    args = {
+        "webhook": args.custom(
+            str,
+            default = "",
+            description = "Slack incoming webhook URL. A secret, so prefer `webhook_env` " +
+                          "and keep it out of the repository. config.axl only.",
+        ),
+        "webhook_env": args.string(
+            default = _WEBHOOK_ENV,
+            description = "Environment variable to read the webhook URL from when `webhook` is unset.",
+        ),
+        "on": args.string_list(
+            default = [],
+            long = "notify:on",
+            description = "Rule to enable: build-failure, flaky-test, slow-test, slow-build. " +
+                          "Repeat for several. Empty (the default) sends nothing.",
+        ),
+        "branches": args.string_list(
+            default = ["main", "master", "release/*"],
+            long = "notify:branch",
+            description = "Branches the build-failure rule fires on. A trailing * matches a prefix.",
+        ),
+        "test_budget_ms": args.int(
+            default = 0,
+            description = "Report an uncached test that took longer than this. 0 disables the budget.",
+        ),
+        "build_budget_ms": args.int(
+            default = 0,
+            description = "Report a task whose wall time exceeded this. 0 disables the budget.",
+        ),
+        "regression_pct": args.int(
+            default = 0,
+            description = "Report a test this much slower than its own recent history, as a " +
+                          "percentage. Needs a deployment with the build-results API. 0 disables it.",
+        ),
+        "baseline": args.string(
+            default = "p50",
+            values = ["p50", "p90", "p99"],
+            description = "Which percentile of the last 14 days a regression is measured against.",
+        ),
+        "mention": args.string(
+            default = "",
+            description = "Text to prefix a build-failure headline with, e.g. <!here> or " +
+                          "<!subteam^ID>. Left empty, nothing is pinged.",
+        ),
+        "max_items": args.int(
+            default = 10,
+            description = "Longest list of targets or tests to put in one message.",
+        ),
+        "dry_run": args.boolean(
+            default = False,
+            description = "Render each message to stderr instead of posting it. " +
+                          "The way to develop a rule without a webhook.",
+        ),
+    },
+)
+
+notify = struct(
+    send = _send,
+    RULES = RULES,
+    WEBHOOK_ENV = _WEBHOOK_ENV,
+    testonly_matches_branch = _matches_branch,
+    testonly_ms = _ms,
+    testonly_bullets = _bullets,
+    testonly_evaluate = _evaluate,
+    testonly_Config = Config,
+    testonly_Note = Note,
+)
