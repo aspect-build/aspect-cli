@@ -1,0 +1,416 @@
+"""Read compact execution logs and explain why an action would not be a cache hit.
+
+A compact execution log is a stream of entries that reference each other by id:
+a `spawn` names an `input_set`, which names `file` ids and nested set ids, and a
+file carries the digest that actually feeds Bazel's action key. Nothing in the
+log states "this action changed"; you get there by rebuilding each spawn's
+identity from those references and comparing it across two logs.
+
+The shape of the work is set by how big these get. A 20 MB compact log expands
+to gigabytes once every input set is flattened, and a diff needs two of them, so
+nothing here holds a flattened input list for a whole log. Instead:
+
+  Pass 1 (`index`)  Per log, walk once and keep three small maps keyed by entry
+                    id, plus one `Fingerprint` per spawn. A fingerprint is five
+                    hashes and a label, so its size tracks the number of actions
+                    rather than the number of files.
+  Pass 2 (`detail`) Walk the same logs again, resolving full input lists only for
+                    the spawns whose fingerprints differ. On a healthy build that
+                    is a handful of actions out of tens of thousands.
+
+Two passes over a compressed file are far cheaper than holding one flattened
+log in memory, and the second pass is skipped entirely when nothing differs.
+
+Ported from the Go `execlog-diff` tool. That one streams and diffs concurrently;
+this is the same analysis with a bounded working set instead of a pipeline.
+"""
+
+load("@std//hash.axl", "sha256")
+
+_INVOCATION = "invocation"
+_FILE = "file"
+_DIRECTORY = "directory"
+_UNRESOLVED_SYMLINK = "unresolved_symlink"
+_INPUT_SET = "input_set"
+_RUNFILES_TREE = "runfiles_tree"
+_SPAWN = "spawn"
+_SYMLINK_ACTION = "symlink_action"
+
+Fingerprint = record(
+    key = field(str),
+    label = field(str),
+    mnemonic = field(str),
+    runner = field(str),
+    cache_hit = field(bool),
+    args_hash = field(str),
+    env_hash = field(str),
+    inputs_hash = field(str),
+    tools_hash = field(str),
+    platform_hash = field(str),
+    overall = field(str),
+)
+
+Detail = record(
+    args = field(list),
+    env = field(dict),
+    inputs = field(dict),
+    tools = field(dict),
+)
+
+Index = record(
+    spawns = field(dict),
+    entries = field(int),
+    truncated = field(str | None, default = None),
+)
+
+def _hash(parts: list) -> str:
+    h = sha256()
+    for part in parts:
+        h.update(str(part))
+
+        # Length-prefixing would be tidier, but a NUL cannot appear in an
+        # argv entry or an env name, so it is already unambiguous here.
+        h.update("\x00")
+    return h.hexdigest()
+
+def _digest_of(entry) -> str:
+    d = getattr(entry, "digest", None)
+    return d.hash if d != None else ""
+
+def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) -> list:
+    """Resolve an input set id to a sorted list of `path@digest` strings.
+
+    Iterative rather than recursive: input sets nest arbitrarily deep in a large
+    repo, and a blown evaluation stack part-way through a log is a worse failure
+    than a slow one. `budget` bounds the walk at the number of entries in the
+    log, which is more ids than any one set can reach.
+    """
+    if root_id == 0:
+        return []
+
+    seen = {}
+    stack = [root_id]
+    out = []
+
+    for _ in range(budget):
+        if not stack:
+            break
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen[current] = True
+
+        if current in sets:
+            direct, transitive = sets[current]
+            for child in direct:
+                stack.append(child)
+            for child in transitive:
+                stack.append(child)
+            continue
+
+        path = paths.get(current)
+        if path != None:
+            out.append(path + "@" + digests.get(current, ""))
+
+    return sorted(out)
+
+def _index(ctx: TaskContext, log_path: str) -> Index:
+    """Walk a log once and fingerprint every spawn in it."""
+    paths = {}
+    digests = {}
+    sets = {}
+    spawns = {}
+    count = 0
+
+    entries = bazel.execution_log.read(path = log_path)
+    for entry in entries:
+        count += 1
+        payload = entry.type
+        kind = type(payload)
+
+        if kind == _FILE:
+            paths[entry.id] = payload.path
+            digests[entry.id] = _digest_of(payload)
+        elif kind == _DIRECTORY or kind == _UNRESOLVED_SYMLINK:
+            paths[entry.id] = payload.path
+        elif kind == _INPUT_SET:
+            sets[entry.id] = (payload.input_ids, payload.transitive_set_ids)
+        elif kind == _RUNFILES_TREE:
+            # A spawn names the tree, not the set inside it, so the tree has to
+            # resolve as if it were a set or every runfile drops out of the key.
+            paths[entry.id] = payload.path
+            sets[entry.id] = ([], [payload.input_set_id])
+        elif kind == _SPAWN:
+            fp = _fingerprint(payload, sets, paths, digests, count)
+
+            # Two spawns can share a key when an action is retried. The last one
+            # is the one whose outputs the build kept.
+            spawns[fp.key] = fp
+
+    return Index(
+        spawns = spawns,
+        entries = count,
+        truncated = entries.error(),
+    )
+
+def _spawn_key(spawn, paths: dict) -> str:
+    """The identity of an action across two builds.
+
+    Bazel gives no stable action id, so the primary output path stands in: it is
+    unique within a build and identical between two builds of the same target,
+    which is exactly the property a diff key needs. Outputs are ids into the
+    entry table, except when Bazel could not resolve one and recorded the raw
+    path instead.
+    """
+    for output in spawn.outputs:
+        value = output.type
+        if type(value) == "string":
+            return value
+        resolved = paths.get(value)
+        if resolved != None:
+            return resolved
+
+    # A spawn with no usable output is rare (a failed action that produced
+    # nothing). Falling back to the label keeps it in the diff instead of
+    # silently dropping it, at the cost of colliding with its siblings.
+    return spawn.target_label + "!" + spawn.mnemonic
+
+def _fingerprint(spawn, sets: dict, paths: dict, digests: dict, budget: int) -> Fingerprint:
+    args_hash = _hash(spawn.args)
+    env_hash = _hash(sorted([v.name + "=" + v.value for v in spawn.env_vars]))
+    inputs_hash = _hash(_flatten(sets, paths, digests, spawn.input_set_id, budget))
+    tools_hash = _hash(_flatten(sets, paths, digests, spawn.tool_set_id, budget))
+    platform_hash = _hash(_platform_properties(spawn))
+
+    return Fingerprint(
+        key = _spawn_key(spawn, paths),
+        label = spawn.target_label,
+        mnemonic = spawn.mnemonic,
+        runner = spawn.runner,
+        cache_hit = spawn.cache_hit,
+        args_hash = args_hash,
+        env_hash = env_hash,
+        inputs_hash = inputs_hash,
+        tools_hash = tools_hash,
+        platform_hash = platform_hash,
+        overall = _hash([args_hash, env_hash, inputs_hash, tools_hash, platform_hash]),
+    )
+
+def _platform_properties(spawn) -> list:
+    platform = spawn.platform
+    if platform == None:
+        return []
+    return sorted([p.name + "=" + p.value for p in platform.properties])
+
+def _detail(ctx: TaskContext, log_path: str, wanted: dict) -> dict:
+    """Second pass: resolve full inputs for the spawns named in `wanted`."""
+    paths = {}
+    digests = {}
+    sets = {}
+    found = {}
+    count = 0
+
+    entries = bazel.execution_log.read(path = log_path)
+    for entry in entries:
+        count += 1
+        payload = entry.type
+        kind = type(payload)
+
+        if kind == _FILE:
+            paths[entry.id] = payload.path
+            digests[entry.id] = _digest_of(payload)
+        elif kind == _DIRECTORY or kind == _UNRESOLVED_SYMLINK:
+            paths[entry.id] = payload.path
+        elif kind == _INPUT_SET:
+            sets[entry.id] = (payload.input_ids, payload.transitive_set_ids)
+        elif kind == _RUNFILES_TREE:
+            paths[entry.id] = payload.path
+            sets[entry.id] = ([], [payload.input_set_id])
+        elif kind == _SPAWN:
+            key = _spawn_key(payload, paths)
+            if key not in wanted:
+                continue
+            found[key] = Detail(
+                args = list(payload.args),
+                env = {v.name: v.value for v in payload.env_vars},
+                inputs = _as_map(_flatten(sets, paths, digests, payload.input_set_id, count)),
+                tools = _as_map(_flatten(sets, paths, digests, payload.tool_set_id, count)),
+            )
+
+    return found
+
+def _as_map(flattened: list) -> dict:
+    out = {}
+    for item in flattened:
+        path, _, digest = item.rpartition("@")
+        out[path] = digest
+    return out
+
+Change = record(
+    key = field(str),
+    label = field(str),
+    mnemonic = field(str),
+    reasons = field(list),
+)
+
+Reason = record(
+    kind = field(str),
+    summary = field(str),
+    items = field(list, default = []),
+)
+
+def _compare(before: Fingerprint, after: Fingerprint) -> list:
+    """Name every dimension of the action key that moved.
+
+    All of them, not the first: an action whose inputs *and* environment changed
+    has two problems, and reporting only the first sends the reader round the
+    loop twice.
+    """
+    reasons = []
+    if before.args_hash != after.args_hash:
+        reasons.append("args")
+    if before.env_hash != after.env_hash:
+        reasons.append("env")
+    if before.inputs_hash != after.inputs_hash:
+        reasons.append("inputs")
+    if before.tools_hash != after.tools_hash:
+        reasons.append("tools")
+    if before.platform_hash != after.platform_hash:
+        reasons.append("platform")
+    return reasons
+
+def _diff_lists(before: list, after: list) -> Reason:
+    items = []
+    limit = max(len(before), len(after))
+    for i in range(limit):
+        b = before[i] if i < len(before) else "<missing>"
+        a = after[i] if i < len(after) else "<missing>"
+        if b != a:
+            items.append("[{}] {} -> {}".format(i, b, a))
+    return Reason(
+        kind = "args",
+        summary = "{} argument(s) differ".format(len(items)),
+        items = items,
+    )
+
+def _diff_maps(kind: str, before: dict, after: dict) -> Reason:
+    changed = []
+    added = []
+    removed = []
+
+    for key in sorted(after):
+        if key not in before:
+            added.append(key)
+        elif before[key] != after[key]:
+            changed.append(key)
+    for key in sorted(before):
+        if key not in after:
+            removed.append(key)
+
+    items = []
+    for key in changed:
+        items.append("changed  " + key)
+    for key in added:
+        items.append("added    " + key)
+    for key in removed:
+        items.append("removed  " + key)
+
+    return Reason(
+        kind = kind,
+        summary = "{} changed, {} added, {} removed".format(len(changed), len(added), len(removed)),
+        items = items,
+    )
+
+def _explain(before: Detail, after: Detail, reasons: list) -> list:
+    out = []
+    for reason in reasons:
+        if reason == "args":
+            out.append(_diff_lists(before.args, after.args))
+        elif reason == "env":
+            out.append(_diff_maps("env", before.env, after.env))
+        elif reason == "inputs":
+            out.append(_diff_maps("inputs", before.inputs, after.inputs))
+        elif reason == "tools":
+            out.append(_diff_maps("tools", before.tools, after.tools))
+        else:
+            out.append(Reason(kind = reason, summary = "differs"))
+    return out
+
+DiffResult = record(
+    changed = field(list),
+    only_before = field(list),
+    only_after = field(list),
+    matched = field(int),
+    before_entries = field(int),
+    after_entries = field(int),
+    before_spawns = field(int),
+    after_spawns = field(int),
+    truncated = field(list, default = []),
+)
+
+def _diff(ctx: TaskContext, before_path: str, after_path: str, explain: bool) -> DiffResult:
+    before = _index(ctx, before_path)
+    after = _index(ctx, after_path)
+
+    truncated = []
+    if before.truncated != None:
+        truncated.append(before_path + ": " + before.truncated)
+    if after.truncated != None:
+        truncated.append(after_path + ": " + after.truncated)
+
+    differing = {}
+    matched = 0
+    for key in before.spawns:
+        if key not in after.spawns:
+            continue
+        matched += 1
+        reasons = _compare(before.spawns[key], after.spawns[key])
+        if reasons:
+            differing[key] = reasons
+
+    before_detail = {}
+    after_detail = {}
+    if explain and differing:
+        before_detail = _detail(ctx, before_path, differing)
+        after_detail = _detail(ctx, after_path, differing)
+
+    changed = []
+    for key in sorted(differing):
+        fp = after.spawns[key]
+        reasons = differing[key]
+        explained = []
+        if key in before_detail and key in after_detail:
+            explained = _explain(before_detail[key], after_detail[key], reasons)
+        else:
+            explained = [Reason(kind = r, summary = "differs") for r in reasons]
+        changed.append(Change(
+            key = key,
+            label = fp.label,
+            mnemonic = fp.mnemonic,
+            reasons = explained,
+        ))
+
+    return DiffResult(
+        changed = changed,
+        only_before = sorted([k for k in before.spawns if k not in after.spawns]),
+        only_after = sorted([k for k in after.spawns if k not in before.spawns]),
+        matched = matched,
+        before_entries = before.entries,
+        after_entries = after.entries,
+        before_spawns = len(before.spawns),
+        after_spawns = len(after.spawns),
+        truncated = truncated,
+    )
+
+execlog = struct(
+    index = _index,
+    diff = _diff,
+    Change = Change,
+    DiffResult = DiffResult,
+    Fingerprint = Fingerprint,
+    Reason = Reason,
+    testonly_flatten = _flatten,
+    testonly_diff_maps = _diff_maps,
+    testonly_diff_lists = _diff_lists,
+    testonly_hash = _hash,
+)
