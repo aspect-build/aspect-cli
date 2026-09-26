@@ -5,7 +5,7 @@ deployment section chains, and `environment.env_names_deployment`.
 Run with: aspect dev test-rc-groups
 """
 
-load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "exec_log_flags", "independent_flags")
+load("./aspect_flags.axl", "diagnostics_upload_flags", "endpoint_flags", "exec_log_flags", "independent_flags", "workspace_data_flags")
 load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "env_names_deployment")
 load(
     "./rc_groups.axl",
@@ -55,7 +55,7 @@ def _test_bare_host(_ctx):
     _eq("common", by[GROUP_COMMON].flags, independent_flags())
     _eq("cache is tuning alone", by[GROUP_CACHE].flags, endpoint_flags(cache = True, bes = False))
     _eq("bes sections chain bes alone", bes_chains(groups), [GROUP_BES])
-    _eq("bes is tuning + upload switch", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags())
+    _eq("bes is tuning + upload switch + workspace status", by[GROUP_BES].flags, endpoint_flags(cache = False, bes = True) + diagnostics_upload_flags() + workspace_data_flags())
 
     # With a log path the execution log is its own group, chained beside bes.
     (groups, enabled) = rc_groups(WorkflowsEnvironment(), on_runner = False, misdetects_color = False, exec_log_path = "%workspace%/.aspect/generated/exec.log.zstd", machine_rc = False)
