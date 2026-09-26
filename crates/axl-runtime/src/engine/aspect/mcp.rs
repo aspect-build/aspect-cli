@@ -24,9 +24,9 @@ use derive_more::Display;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData as McpError,
-    Implementation, InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ErrorData as McpError, Implementation, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -709,6 +709,33 @@ impl BuildResultsServer {
     }
 }
 
+/// The `tools/list` response for a client that negotiated `version`.
+///
+/// Protocol 2026-07-28 requires `ttlMs` and `cacheScope` on list results, and
+/// a client on that version rejects a list without them, leaving the server
+/// with no tools. Older versions do not define the fields, so they are sent
+/// only when negotiated, as rmcp's own `#[tool_handler]` does. The list is the
+/// same for every caller and never changes within a session: `Public`, fresh
+/// for 0ms to match rmcp's generated handler.
+fn list_tools_result(version: Option<&ProtocolVersion>) -> ListToolsResult {
+    let tools = tool_defs()
+        .iter()
+        .map(|def| {
+            let schema = match (def.schema)() {
+                serde_json::Value::Object(map) => map,
+                _ => unreachable!("tool schemas are objects by construction"),
+            };
+            Tool::new(def.name, def.description, Arc::new(schema))
+        })
+        .collect();
+    let result = ListToolsResult::with_all_items(tools);
+    if version.is_some_and(|v| *v >= ProtocolVersion::V_2026_07_28) {
+        result.with_ttl_ms(0).with_cache_scope(CacheScope::Public)
+    } else {
+        result
+    }
+}
+
 impl ServerHandler for BuildResultsServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
@@ -729,22 +756,9 @@ impl ServerHandler for BuildResultsServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = tool_defs()
-            .iter()
-            .map(|def| {
-                let schema = match (def.schema)() {
-                    serde_json::Value::Object(map) => map,
-                    _ => unreachable!("tool schemas are objects by construction"),
-                };
-                Tool::new(def.name, def.description, Arc::new(schema))
-            })
-            .collect();
-        Ok(ListToolsResult {
-            tools,
-            ..Default::default()
-        })
+        Ok(list_tools_result(context.protocol_version().as_ref()))
     }
 
     async fn call_tool(
@@ -909,6 +923,24 @@ mod tests {
             .expect("tool exists");
         let map = arguments.as_object().cloned();
         (def.route)(&Args(map.as_ref()))
+    }
+
+    #[test]
+    fn tools_list_carries_cache_hints_from_2026_07_28() {
+        let current =
+            serde_json::to_value(list_tools_result(Some(&ProtocolVersion::V_2026_07_28))).unwrap();
+        assert_eq!(current["ttlMs"], 0);
+        assert_eq!(current["cacheScope"], "public");
+        assert_eq!(
+            current["tools"].as_array().unwrap().len(),
+            tool_defs().len()
+        );
+
+        for older in [Some(ProtocolVersion::V_2025_06_18), None] {
+            let json = serde_json::to_value(list_tools_result(older.as_ref())).unwrap();
+            assert!(json.get("ttlMs").is_none(), "{older:?}: {json}");
+            assert!(json.get("cacheScope").is_none(), "{older:?}: {json}");
+        }
     }
 
     #[test]
