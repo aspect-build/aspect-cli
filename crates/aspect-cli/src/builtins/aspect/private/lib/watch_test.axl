@@ -44,12 +44,121 @@ def _test_disabled_or_absolute_symlink_prefix(_ctx):
     _eq("disabled symlinks", watch.ignores("/repo/ws", "/"), base)
     _eq("absolute bin symlink", "/repo/ws/links/bazel-bin" in watch.ignores("/repo/ws", "/repo/ws/links/bazel-"), True)
 
+def _test_missing_execution_log_is_safe(ctx):
+    directory = ctx.std.fs.mkdtemp(prefix = "aspect-watch-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory) if ctx.std.fs.exists(directory) else None)
+    path = directory + "/missing.binpb"
+    _eq("failed build without log", watch.take_execution_outputs(ctx, path, False), [])
+    _eq("successful build without log", watch.take_execution_outputs(ctx, path, True), None)
+
+def _entrypoint(args = [], environment = {}, inherited_environment = []):
+    return struct(
+        path = "/out/bin/app",
+        args = args,
+        environment = environment,
+        inherited_environment = inherited_environment,
+        runfiles_dir = "/out/bin/app.runfiles",
+        runfiles_workspace_dir = "/out/bin/app.runfiles/_main",
+    )
+
+def _manifest(entries):
+    return struct(entries = entries, origins = {origin: logical for logical, origin in entries.items() if origin})
+
+def _test_manifest_parses_source_and_generated_origins(_ctx):
+    manifest = watch.parse_manifest(
+        "_main/src/app.py /repo/src/app.py\n" +
+        "_main/bin/app /tmp/output/execroot/_main/bazel-out/k8-fastbuild/bin/app\n" +
+        "_main/link ../../somewhere\n",
+        "/repo",
+    )
+    _eq("source origin absolute", manifest.origins["/repo/src/app.py"], "_main/src/app.py")
+    _eq("source origin watcher-relative", manifest.origins["src/app.py"], "_main/src/app.py")
+    _eq("generated origin execroot-relative", manifest.origins["bazel-out/k8-fastbuild/bin/app"], "_main/bin/app")
+    _eq("relative symlink origin ignored", "../../somewhere" in manifest.origins, False)
+
+def _test_manifest_decodes_escaped_fields(_ctx):
+    manifest = watch.parse_manifest(" _main/path\\swith\\sspace /repo/path\\swith\\sspace\n", "/repo")
+    _eq("escaped logical path", manifest.entries["_main/path with space"], "/repo/path with space")
+    _eq("escaped source origin", manifest.origins["path with space"], "_main/path with space")
+
+def _test_source_runfile_change_is_reported(_ctx):
+    state = _manifest({"_main/app.py": "app.py"})
+    _eq("source runfile changed", watch.changed_runfiles(state, state, ["app.py"], []), ["_main/app.py"])
+    _eq("unrelated source ignored", watch.changed_runfiles(state, state, ["README.md"], []), [])
+
+def _test_source_directory_runfile_change_is_reported(_ctx):
+    state = _manifest({"_main/assets": "assets"})
+    _eq("source directory child changed", watch.changed_runfiles(state, state, ["assets/config.json"], []), ["_main/assets/config.json"])
+    _eq("source directory sibling ignored", watch.changed_runfiles(state, state, ["assets-old/config.json"], []), [])
+
+def _test_generated_runfile_change_is_reported(_ctx):
+    state = _manifest({"_main/app": "bazel-out/k8/bin/app"})
+    _eq("generated runfile changed", watch.changed_runfiles(state, state, [], ["bazel-out/k8/bin/app"]), ["_main/app"])
+    _eq("unrelated action ignored", watch.changed_runfiles(state, state, [], ["bazel-out/k8/bin/status.txt"]), [])
+
+def _test_default_output_change_restarts_without_manifest_entry(_ctx):
+    state = _manifest({"_main/config": "/repo/config"})
+    outputs = ["bazel-out/k8/bin/custom-launcher"]
+    defaults = ["/tmp/output/execroot/_main/bazel-out/k8/bin/custom-launcher"]
+    _eq("not present in manifest", watch.changed_runfiles(state, state, [], outputs), [])
+    _eq("default output changed", watch.outputs_changed(outputs, defaults, "/repo"), True)
+    _eq("unrelated default output", watch.outputs_changed(["bazel-out/k8/bin/other"], defaults, "/repo"), False)
+
+def _test_manifest_changes_are_reported(_ctx):
+    before = _manifest({"_main/app": "bazel-out/k8/bin/app", "_main/old": "/repo/old"})
+    after = _manifest({"_main/app": "bazel-out/k8/bin/new-app", "_main/new": "/repo/new"})
+    _eq(
+        "added, removed, and remapped runfiles",
+        watch.changed_runfiles(before, after, [], []),
+        ["_main/app", "_main/new", "_main/old"],
+    )
+
+def _test_manifest_fallbacks_are_conservative(_ctx):
+    state = _manifest({"_main/app": "/repo/app"})
+    _eq("missing manifest", watch.changed_runfiles(state, None, [], []), None)
+    _eq("watcher rescan", watch.changed_runfiles(state, state, [], [], rescan = True), None)
+    _eq("missing execution log", watch.changed_runfiles(state, state, [], None), None)
+
+def _test_manifest_output_path(_ctx):
+    _eq(
+        "select native manifest",
+        watch.manifest_path(["/out/metadata.json", "/out/app.runfiles_manifest"]),
+        "/out/app.runfiles_manifest",
+    )
+    _eq(
+        "select runfiles-tree manifest",
+        watch.manifest_path(["/out/app.runfiles/MANIFEST"]),
+        "/out/app.runfiles/MANIFEST",
+    )
+
+def _test_unchanged_entrypoint_state_is_equal(_ctx):
+    before = watch.entrypoint_state(_entrypoint(args = ["serve"]))
+    after = watch.entrypoint_state(_entrypoint(args = ["serve"]))
+    _eq("unchanged state", before == after, True)
+
+def _test_runinfo_changes_entrypoint_state(_ctx):
+    before = watch.entrypoint_state(_entrypoint(args = ["serve"], environment = {"PORT": "3000"}))
+    after = watch.entrypoint_state(_entrypoint(args = ["serve", "--debug"], environment = {"PORT": "3001"}))
+    _eq("runinfo changed", before != after, True)
+
 _UNIT_TESTS = [
     _test_no_batch_does_not_run,
     _test_batch_runs_once,
     _test_queued_batches_are_coalesced,
     _test_bazel_symlink_ignores_follow_resolved_prefix,
     _test_disabled_or_absolute_symlink_prefix,
+    _test_missing_execution_log_is_safe,
+    _test_manifest_parses_source_and_generated_origins,
+    _test_manifest_decodes_escaped_fields,
+    _test_source_runfile_change_is_reported,
+    _test_source_directory_runfile_change_is_reported,
+    _test_generated_runfile_change_is_reported,
+    _test_default_output_change_restarts_without_manifest_entry,
+    _test_manifest_changes_are_reported,
+    _test_manifest_fallbacks_are_conservative,
+    _test_manifest_output_path,
+    _test_unchanged_entrypoint_state_is_equal,
+    _test_runinfo_changes_entrypoint_state,
 ]
 
 def _test_impl(ctx):

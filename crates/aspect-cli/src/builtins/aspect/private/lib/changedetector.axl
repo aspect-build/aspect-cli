@@ -1,0 +1,63 @@
+"""Runfiles-aware restart decisions for `run --watch`."""
+
+load("./watch.axl", "watch")
+
+def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
+    execution_log_dir = ctx.std.fs.mkdtemp(prefix = "aspect-run-watch-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(execution_log_dir) if ctx.std.fs.exists(execution_log_dir) else None)
+
+    state = {
+        "before": None,
+        "manifest": None,
+        "restart_pending": False,
+    }
+
+    def current_manifest():
+        paths = r.get_output_group_outputs(target, watch.manifest_output_group)
+        return watch.read_manifest(ctx, watch.manifest_path(paths), root)
+
+    def prepare_build():
+        state["before"] = watch.entrypoint_state(r.determine_entrypoint(target))
+        r.clear_default_outputs(target)
+        r.clear_output_group_outputs(target, watch.manifest_output_group)
+
+    def initial_build_succeeded():
+        state["manifest"] = current_manifest()
+        state["restart_pending"] = False
+
+    def build_failed():
+        state["restart_pending"] = True
+
+    def changed_runfiles(batch, execution_outputs: list[str] | None) -> list[str] | None:
+        """Return precise changed logical runfiles, or None when the caller
+        must conservatively restart because the change cannot be represented."""
+        after = watch.entrypoint_state(r.determine_entrypoint(target))
+        next_manifest = current_manifest()
+        source_paths = [event.path for event in batch.events]
+        changed = watch.changed_runfiles(
+            state["manifest"],
+            next_manifest,
+            source_paths,
+            execution_outputs,
+            rescan = batch.rescan,
+        )
+        default_outputs_changed = watch.outputs_changed(
+            execution_outputs,
+            r.get_default_outputs(target),
+            root,
+        )
+        state["manifest"] = next_manifest
+        precise = not state["restart_pending"] and changed != None and not default_outputs_changed and state["before"] == after
+        state["restart_pending"] = False
+        return changed if precise else None
+
+    return struct(
+        aspects = [watch.aspect(ctx)],
+        execution_log_path = execution_log_dir + "/execution.binpb",
+        prepare_build = prepare_build,
+        initial_build_succeeded = initial_build_succeeded,
+        build_failed = build_failed,
+        changed_runfiles = changed_runfiles,
+    )
+
+changedetector = namespace(new = _new)
