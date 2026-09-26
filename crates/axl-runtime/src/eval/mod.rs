@@ -12,6 +12,7 @@ pub use api::get_globals;
 pub use error::EvalError;
 pub use exit::TaskExit;
 pub use load::AxlLoader as Loader;
+pub use load_path::LoadPath;
 pub(crate) use load_path::join_confined;
 pub(crate) use load_path::validate_module_name;
 pub use multi_phase::{FinishedEval, ModuleEnv, MultiPhaseEval, TimingMode};
