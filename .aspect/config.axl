@@ -154,6 +154,14 @@ def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
         body = "\n".join(lines),
     )
 
+def _stamp_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
+    """Write the epoch second of each task update to
+    `$ASPECT_TEST_TASK_UPDATE_STAMP`, so //examples/deliverable:slow_deliverable
+    can check updates keep flowing while it runs. No-op when unset."""
+    path = ctx.std.env.var("ASPECT_TEST_TASK_UPDATE_STAMP")
+    if path:
+        ctx.std.fs.write(path, str(time.now_ms() // 1000))
+
 def _runfiles_path(entry, suffix):
     """Resolve `<runfiles_workspace_dir>/<package>/<target_name><suffix>` for a
     local-label delivery target (where `data = [...]` files live). None when no
@@ -268,6 +276,7 @@ def config(ctx: ConfigContext):
 
     # Offer the click-through-links tip on whatever task runs.
     lifecycle.task_update.append(_links_task_update)
+    lifecycle.task_update.append(_stamp_task_update)
 
     # Announce the resolved Bazel version on every supporting task.
     ctx.tasks["build"].args.announce_bazel_version = "true"

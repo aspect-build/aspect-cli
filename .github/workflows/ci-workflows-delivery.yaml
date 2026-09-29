@@ -251,3 +251,28 @@ jobs:
           if echo "$out" | grep -q "Skipping the delivery build"; then
             echo "::error::--dry-run=build reported skipping the delivery build"; exit 1
           fi
+  # Regression guard for the reap loop that blocked on a running deliverable:
+  # the task sent no updates until it exited, so the check-run heartbeat those
+  # updates carry stopped and the orphan sweep closed the check as DISCONNECTED
+  # while the target still ran. slow_deliverable runs for 15s and fails unless
+  # a task update (stamped by //.aspect/config.axl) lands meanwhile.
+  delivery-heartbeat-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+      - name: Delivery keeps sending task updates while a target runs
+        env:
+          ASPECT_TEST_TASK_UPDATE_STAMP: ${{ runner.temp }}/delivery-task-update-stamp
+        run: aspect delivery --task:name delivery-heartbeat --track-state=false --mode=always --github-status-checks:enabled=false --query=//examples/deliverable:slow_deliverable
