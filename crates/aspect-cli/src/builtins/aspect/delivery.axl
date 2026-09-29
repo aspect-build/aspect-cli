@@ -1602,8 +1602,10 @@ def _delivery_impl(ctx):
         # submission order so a slow head can't idle the slots queued behind it.
         # Captured children write stdout/stderr to per-target temp files (not a
         # pipe), so `try_wait()` alone drives reaping — a slow deliverable never
-        # blocks draining the others. When every slot is full and none has
-        # finished we block on the head to make room.
+        # blocks draining the others. Nothing here blocks on a running child:
+        # the tick must keep reaching `ph.update`, whose updates carry the
+        # status-check heartbeat, or the orphan sweep closes the check as
+        # disconnected while the deliverable still runs.
         dispatched = {}
         ready = []
         running = []
@@ -1699,9 +1701,7 @@ def _delivery_impl(ctx):
             # via try_wait() and reap it, refilling as slots free. Captured
             # output lands in per-target temp files, so reaping reads a finished
             # file rather than draining a live pipe — no delivery can deadlock
-            # the pipeline. Only when every slot is full and none has finished
-            # (or we're finalizing) do we block on the head. The bound drains
-            # every in-flight + queued delivery in one finalizing tick.
+            # the pipeline. When none has exited, leave the rest to a later tick.
             for _ in range(len(running) + len(ready) + 1):
                 if not running:
                     break
@@ -1711,9 +1711,7 @@ def _delivery_impl(ctx):
                         reap_idx = i
                         break
                 if reap_idx == None:
-                    if not (len(running) >= max_par or (build_done and not ready)):
-                        break
-                    reap_idx = 0
+                    break
                 label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
                 if capture:
                     # Output was redirected to files, so wait() has no pipe to
