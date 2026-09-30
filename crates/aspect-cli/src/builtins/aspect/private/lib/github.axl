@@ -15,6 +15,7 @@ load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./environment.axl", "color_enabled", "info", "warn")
+load("./git_diff.axl", "git_diff_args")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
     "./rate_limit.axl",
@@ -1294,7 +1295,7 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
     head_args = [] if head == "HEAD" else [head]
 
     if line_level:
-        result = process.command("git").args(["diff", base_sha] + head_args + ["--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        result = process.command("git").args(git_diff_args(base_sha, *head_args) + ["--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not result.status.success:
             return None
         parsed = _parse_local_diff_output(result.stdout)
@@ -1302,11 +1303,17 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
             entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
         return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
-    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha] + head_args).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    out = process.command("git").args(git_diff_args("--diff-filter=d", "--name-only", base_sha, *head_args)).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
         return None
     names = [f for f in out.stdout.strip().split("\n") if f]
     return {"files": names, "skipped": [], "source": source, "unscoped": False}
+
+def local_git_diff_for_test(ctx, line_level, base_sha, cwd):
+    """Test seam for `_try_local_git_diff_from_base_sha` (working-tree HEAD)
+    against a scratch repo at `cwd`. Production goes through
+    `detect_changed_files`."""
+    return _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, cwd = cwd)
 
 def _diff_synthesized_merge(ctx, line_level, merge_sha, cwd = None):
     """Change set from the synthesized PR merge commit `merge_sha`, or `None`.

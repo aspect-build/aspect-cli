@@ -12,6 +12,9 @@ Covers:
     whether HEAD's first parent is a safe diff base, including the
     PR-head-checkout, base-advance-race, `pull_request_target`-base-merge,
     and batched-merge_group cases.
+  - Local `git diff` parsing under git config that rewrites porcelain
+    output (`diff.external`, `color.diff`, `diff.noprefix`, textconv,
+    `diff.relative`).
   - `list_pull_request_files` auth fallback + rate-limit bucketing.
 
 Most cases are env- and event-file-driven, so they stub `std` with a
@@ -37,6 +40,7 @@ load(
     "detect_synthesized_merge_sha",
     "github",
     "head_is_synthesized_merge",
+    "local_git_diff_for_test",
     "read_github_event",
     "refresh_remote_ref_for_test",
     "resolve_merge_base_for_test",
@@ -1236,6 +1240,50 @@ def _test_resolve_merge_base_integration(ctx):
     _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
     diff_base, _source = resolve_merge_base_for_test(ctx, "main", repo)
     _eq("bare-local-ref — diff base is the fork point", diff_base, b0)
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (8) Output-rewriting git config. `diff.external` replaces the patch,
+    # `color.diff=always` adds ANSI, `diff.noprefix` drops `b/`,
+    # `diff.<driver>.textconv` rewrites content, and `diff.relative` (from a
+    # subdir) narrows and rebases the paths. Unguarded, each leaves the
+    # line-level parse with no files, so lint drops every finding and
+    # passes. The diff runs from `sub/` against the working tree, with one
+    # committed and one uncommitted change, and must see both at
+    # git-root-relative paths with the real added lines.
+    repo, _ = _init_repo(ctx)
+    _commit_file(ctx, repo, "top.txt", "x\n", "top")
+    ctx.std.fs.create_dir_all(repo + "/sub")
+    base = _commit_file(ctx, repo, "sub/f.txt", "a\n", "sub")
+    _commit_file(ctx, repo, "sub/f.txt", "a\nb\n", "sub change")
+    ctx.std.fs.write(repo + "/top.txt", "x\ny\nz\n")
+    for key, value in [
+        ("diff.external", "true"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.relative", "true"),
+        ("diff.upper.textconv", "true"),
+    ]:
+        _git_ok(ctx, repo, ["config", key, value])
+    ctx.std.fs.write(repo + "/.git/info/attributes", "*.txt diff=upper\n")
+
+    line_result = local_git_diff_for_test(ctx, True, base, repo + "/sub")
+    if line_result == None:
+        fail("hostile-config (line-level) — local diff returned None")
+    _eq(
+        "hostile-config (line-level) — changed files and added lines",
+        sorted([(e["file"], e["lines"]) for e in line_result["files"]]),
+        [("sub/f.txt", [1]), ("top.txt", [1, 2])],
+    )
+    name_result = local_git_diff_for_test(ctx, False, base, repo + "/sub")
+    if name_result == None:
+        fail("hostile-config (filename) — local diff returned None")
+    _eq(
+        "hostile-config (filename) — git-root-relative, not narrowed to sub/",
+        sorted(name_result["files"]),
+        ["sub/f.txt", "top.txt"],
+    )
     ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(

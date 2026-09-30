@@ -1,0 +1,30 @@
+"""`git diff` argv that ignores the user's git config.
+
+Porcelain `git diff` honors config that rewrites its output: `diff.external`
+replaces the patch with the tool's output, `color.diff=always` adds ANSI
+escapes, `diff.noprefix` / `diff.mnemonicPrefix` change the `a/` / `b/`
+header prefixes, `diff.<driver>.textconv` rewrites file content, and
+`diff.relative` makes paths (and the set of files) relative to the cwd.
+Any of these breaks callers that parse the output or treat its paths as
+git-root-relative, so every machine-read `git diff` goes through
+`git_diff_args`.
+
+`diff.relative` is overridden with `-c` instead of `--no-relative` because
+the flag needs git 2.28; the other flags are available in every git we
+support.
+"""
+
+_CONFIG_OVERRIDES = ["-c", "diff.relative=false"]
+
+_DIFF_FLAGS = [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+]
+
+def git_diff_args(*args):
+    """argv (without the leading `git`) for `git diff <args>` with the
+    config-independent flags applied."""
+    return _CONFIG_OVERRIDES + ["diff"] + _DIFF_FLAGS + list(args)
