@@ -1,9 +1,11 @@
-"""Cross-CI URL helpers.
+"""Cross-CI host, run-identity, and URL helpers.
 
-`detect_build_url` and `detect_artifacts_browse_url` centralize the
-URL shapes status surfaces, build metadata, and the runner job history
-all need. Each CI host yields a job-scoped URL when one is available
-so links land on the specific execution, not the build root.
+`detect_ci_host` names the running host and `ci_identity` resolves its
+per-run identity (run id, workflow, job, attempt) for the status surfaces
+that key state by run. `detect_build_url` and `detect_artifacts_browse_url`
+centralize the URL shapes status surfaces, build metadata, and the runner
+job history all need. Each CI host yields a job-scoped URL when one is
+available so links land on the specific execution, not the build root.
 
 Shapes by host:
 
@@ -54,6 +56,55 @@ def detect_ci_host(env: std.Env) -> dict | None:
         if env.var(host["marker"]):
             return host
     return None
+
+# Per-host run identity. `run_id` is the broadest scope sibling jobs in one
+# logical run share (GHA run, BK build, CCI workflow): the status-comment
+# coordination key, and the run a status-check registration belongs to.
+# `workflow_name` keys the status-comment per-workflow re-trigger eviction. The
+# resolved `workflow_name` is prefixed with the host marker (see `ci_identity`)
+# so two CI hosts that share a raw pipeline/repo name (e.g. CircleCI's
+# `CIRCLE_PROJECT_REPONAME` and Buildkite's `BUILDKITE_PIPELINE_SLUG` both
+# "myrepo") aren't mistaken for re-triggers of each other and evicted.
+_CI_IDENTITY = {
+    "GITHUB_ACTIONS": {
+        "run_id": "GITHUB_RUN_ID",
+        "workflow_name": "GITHUB_WORKFLOW",
+        "job_name": "GITHUB_JOB",
+        "run_attempt": "GITHUB_RUN_ATTEMPT",
+    },
+    "BUILDKITE": {
+        "run_id": "BUILDKITE_BUILD_ID",
+        "workflow_name": "BUILDKITE_PIPELINE_SLUG",
+        "job_name": "BUILDKITE_STEP_KEY",
+        "run_attempt": "BUILDKITE_RETRY_COUNT",
+    },
+    "CIRCLECI": {
+        "run_id": "CIRCLE_WORKFLOW_ID",
+        "workflow_name": "CIRCLE_PROJECT_REPONAME",
+        "job_name": "CIRCLE_JOB",
+        "run_attempt": "",
+    },
+}
+
+def ci_identity(env: std.Env, marker: str) -> dict | None:
+    """Resolve `{run_id, workflow_name, job_name, run_attempt}` for the host
+    identified by `marker` (a `detect_ci_host` marker), or `None` for an
+    unsupported host (GitLab has its own identity in `GitlabStatusComments`).
+
+    `run_id` is `""` when the host's env var is unset; `run_attempt` defaults
+    to "1". `workflow_name` is prefixed with `marker` so the re-trigger eviction
+    key is unique per CI host — two hosts sharing a raw pipeline/repo name don't
+    collapse each other's slots (see `_CI_IDENTITY`)."""
+    spec = _CI_IDENTITY.get(marker)
+    if spec == None:
+        return None
+    raw_workflow_name = env.var(spec["workflow_name"]) or ""
+    return {
+        "run_id": env.var(spec["run_id"]) or "",
+        "workflow_name": "%s:%s" % (marker, raw_workflow_name),
+        "job_name": env.var(spec["job_name"]) or "unknown-job",
+        "run_attempt": (env.var(spec["run_attempt"]) if spec["run_attempt"] else "") or "1",
+    }
 
 def detect_buildkite_build_url(env):
     """Buildkite job-anchored build URL.

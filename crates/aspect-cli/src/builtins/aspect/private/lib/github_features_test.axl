@@ -6,16 +6,47 @@ API, or the render pipeline.
 
   * `conclusion_for(status, final)` — Aspect task status → GitHub check-run
     conclusion, or "" when the update lands none.
+  * `registration_request(...)` — the orphan-cleanup register body, keyed by
+    the CI host's run identity; `None` when a required field is missing.
 
 Run with:
   aspect dev test-github-features
 """
 
-load("@aspect//feature/github_status_checks.axl", "conclusion_for")
+load("@aspect//feature/github_status_checks.axl", "conclusion_for", "registration_request")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _request(run_identity, installation_id = "inst-1", installation_proof = "proof", check_run_id = 42, final = False):
+    return registration_request(
+        run_identity,
+        installation_id,
+        installation_proof,
+        "o",
+        "r",
+        "sha1",
+        check_run_id,
+        "aspect / test",
+        final,
+    )
+
+def _test_registration_request():
+    circleci = {"run_id": "wf-abc", "run_attempt": "1"}
+    req = _request(circleci)
+    _eq("register — run id from the CI host", req["run_id"], "wf-abc")
+    _eq("register — run attempt from the CI host", req["run_attempt"], "1")
+    _eq("register — check run id", req["check_run_id"], 42)
+    _eq("register — heartbeat is not final", req["final"], False)
+    _eq("register — deregister is final", _request(circleci, final = True)["final"], True)
+
+    # The backend 400s an empty run id, so no request is built at all.
+    _eq("register — unsupported host", _request(None), None)
+    _eq("register — empty run id", _request({"run_id": "", "run_attempt": "1"}), None)
+    _eq("register — no installation id", _request(circleci, installation_id = ""), None)
+    _eq("register — no installation proof", _request(circleci, installation_proof = None), None)
+    _eq("register — no check run", _request(circleci, check_run_id = None), None)
 
 def _test_impl(ctx):
     # Early-fail concludes `failure` before the terminal update, so a broken
@@ -42,6 +73,8 @@ def _test_impl(ctx):
 
     # Unknown statuses degrade to "no conclusion" instead of concluding wrongly.
     _eq("unknown status", conclusion_for("bogus", True), "")
+
+    _test_registration_request()
 
     print("github features test: OK")
     return 0

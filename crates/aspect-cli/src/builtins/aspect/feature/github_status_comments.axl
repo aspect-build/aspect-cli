@@ -84,7 +84,7 @@ load(
 )
 load("../private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "snippet_budget_for")
 load("../private/lib/checkrun.axl", "checkrun")
-load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
+load("../private/lib/ci.axl", "ci_identity", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lifecycle.axl", "Phases")
@@ -681,52 +681,6 @@ def _ci_run_url(env):
     if not repository or not run_id:
         return ""
     return server + "/" + repository + "/actions/runs/" + run_id
-
-# Per-host CI identity for the status-comment coordination key. `run_id` is the
-# broadest scope sibling jobs in one logical run share (GHA run, BK build, CCI
-# workflow); `workflow_name` keys the per-workflow re-trigger eviction. The
-# resolved `workflow_name` is prefixed with the host marker (see `_ci_identity`)
-# so two CI hosts that share a raw pipeline/repo name (e.g. CircleCI's
-# `CIRCLE_PROJECT_REPONAME` and Buildkite's `BUILDKITE_PIPELINE_SLUG` both
-# "myrepo") aren't mistaken for re-triggers of each other and evicted.
-_CI_IDENTITY = {
-    "GITHUB_ACTIONS": {
-        "run_id": "GITHUB_RUN_ID",
-        "workflow_name": "GITHUB_WORKFLOW",
-        "job_name": "GITHUB_JOB",
-        "run_attempt": "GITHUB_RUN_ATTEMPT",
-    },
-    "BUILDKITE": {
-        "run_id": "BUILDKITE_BUILD_ID",
-        "workflow_name": "BUILDKITE_PIPELINE_SLUG",
-        "job_name": "BUILDKITE_STEP_KEY",
-        "run_attempt": "BUILDKITE_RETRY_COUNT",
-    },
-    "CIRCLECI": {
-        "run_id": "CIRCLE_WORKFLOW_ID",
-        "workflow_name": "CIRCLE_PROJECT_REPONAME",
-        "job_name": "CIRCLE_JOB",
-        "run_attempt": "",
-    },
-}
-
-def _ci_identity(env, marker):
-    """Resolve `(run_id, workflow_name, job_name, run_attempt)` for the host
-    identified by `marker`, or `None` for an unsupported host.
-
-    `workflow_name` is prefixed with `marker` so the re-trigger eviction key is
-    unique per CI host — two hosts sharing a raw pipeline/repo name don't
-    collapse each other's slots (see `_CI_IDENTITY`)."""
-    spec = _CI_IDENTITY.get(marker)
-    if spec == None:
-        return None
-    raw_workflow_name = env.var(spec["workflow_name"]) or ""
-    return {
-        "run_id": env.var(spec["run_id"]) or "",
-        "workflow_name": "%s:%s" % (marker, raw_workflow_name),
-        "job_name": env.var(spec["job_name"]) or "unknown-job",
-        "run_attempt": (env.var(spec["run_attempt"]) if spec["run_attempt"] else "") or "1",
-    }
 
 def _progress_dict(progress_styles):
     """Serialize a ProgressStyles record to a dict surviving the contribution
@@ -1440,7 +1394,7 @@ def _github_status_comments(ctx: FeatureContext):
     host = detect_ci_host(ctx.std.env)
     if host == None:
         return
-    identity = _ci_identity(ctx.std.env, host["marker"])
+    identity = ci_identity(ctx.std.env, host["marker"])
     if identity == None:
         return
 
