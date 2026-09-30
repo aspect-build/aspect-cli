@@ -10,7 +10,7 @@ load(
     "version_tuple",
 )
 load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warning", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset")
+load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
@@ -3895,32 +3895,37 @@ def test_template_presets(tc: int) -> int:
 
     return tc
 
-def test_denied_terminal_post_warning(tc: int) -> int:
-    """A terminal publish the server declines to post leaves the task's entry
-    frozen mid-run, which is otherwise invisible. The warning names the grant
-    holder when the server reports one, and stays sensible when it does not."""
-    with_holder = denied_terminal_post_warning("lint-gha", "123456")
-    tc = test_case(tc, "lint-gha" in with_holder, "the warning names the task")
-    tc = test_case(tc, "post grant held by run 123456" in with_holder, "the warning names the grant holder")
+def test_terminal_post_withheld_error(tc: int) -> int:
+    """A terminal publish the server keeps withholding past the retry deadline
+    leaves the task's entry frozen mid-run, which is otherwise invisible. The
+    error names the grant holder when the server reports one, and stays
+    sensible when it does not."""
+    with_holder = terminal_post_withheld_error("lint-gha", "123456", 90)
+    tc = test_case(tc, "lint-gha" in with_holder, "the error names the task")
+    tc = test_case(tc, "post grant held by run 123456" in with_holder, "the error names the grant holder")
+    tc = test_case(tc, "90s" in with_holder, "the error says how long it retried")
 
-    # The formatter is only useful if the field survives the response wrapper,
+    # The formatter is only useful if the fields survive the response wrapper,
     # which rebuilds the body rather than passing it through.
     piped = github.contribute_result({
         "state": {"entries": []},
         "should_post": False,
         "comment_id": "c1",
         "post_grant_run": "987654",
+        "next_eligible_epoch_s": 1700000035,
     })
     tc = test_case(tc, piped.get("post_grant_run") == "987654", "the contribute wrapper preserves post_grant_run")
+    tc = test_case(tc, piped.get("next_eligible_epoch_s") == 1700000035, "the contribute wrapper preserves next_eligible_epoch_s")
     tc = test_case(
         tc,
-        "post grant held by run 987654" in denied_terminal_post_warning("t", piped.get("post_grant_run", "")),
-        "a server-reported holder reaches the warning end to end",
+        "post grant held by run 987654" in terminal_post_withheld_error("t", piped.get("post_grant_run", ""), 90),
+        "a server-reported holder reaches the error end to end",
     )
 
-    # Older servers omit the field entirely.
+    # Older servers omit both fields.
     older = github.contribute_result({"state": {}, "should_post": False, "comment_id": ""})
     tc = test_case(tc, older.get("post_grant_run") == "", "an omitted post_grant_run reads as empty, not missing")
+    tc = test_case(tc, older.get("next_eligible_epoch_s") == 0, "an omitted next_eligible_epoch_s reads as 0")
 
     # The other silent path: a terminal contribution that never reached the API.
     dropped = dropped_terminal_contribute_warning("build-gha", "503 upstream")
@@ -3932,10 +3937,10 @@ def test_denied_terminal_post_warning(tc: int) -> int:
         "an empty error still reads sensibly",
     )
 
-    without = denied_terminal_post_warning("lint-gha", "")
-    tc = test_case(tc, "lint-gha" in without, "the warning names the task with no holder reported")
+    without = terminal_post_withheld_error("lint-gha", "", 90)
+    tc = test_case(tc, "lint-gha" in without, "the error names the task with no holder reported")
     tc = test_case(tc, "post grant held by" not in without, "no dangling holder clause when the server reports none")
-    tc = test_case(tc, without.endswith("posts later"), "the message ends cleanly with no holder")
+    tc = test_case(tc, "for 90s;" in without, "the message reads cleanly with no holder")
     return tc
 
 def test_terminal_progress(tc: int) -> int:
@@ -4138,7 +4143,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_terminal_progress(tc)
     tc = test_result_cell_text(tc)
     tc = test_results_subset_carries_progress(tc)
-    tc = test_denied_terminal_post_warning(tc)
+    tc = test_terminal_post_withheld_error(tc)
 
     print(tc, "tests passed")
     return 0

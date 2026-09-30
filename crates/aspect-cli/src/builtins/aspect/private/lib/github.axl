@@ -486,6 +486,9 @@ def contribute_result(parsed):
     Every field a caller needs must be listed here — the response is rebuilt,
     not passed through, so anything omitted silently reads as absent no matter
     what the server sent. `post_grant_run` is optional: older servers omit it.
+    `next_eligible_epoch_s` is when a denied caller may next be granted: the
+    holder's lease expiry while another run holds the grant, else the end of
+    the post interval. 0 when absent.
     """
     return {
         "success": True,
@@ -493,6 +496,7 @@ def contribute_result(parsed):
         "should_post": bool(parsed.get("should_post", False)),
         "comment_id": parsed.get("comment_id", "") or "",
         "post_grant_run": parsed.get("post_grant_run", "") or "",
+        "next_eligible_epoch_s": int(parsed.get("next_eligible_epoch_s", 0) or 0),
     }
 
 def _status_comment_contribute(ctx, request, profile = None):
@@ -506,11 +510,12 @@ def _status_comment_contribute(ctx, request, profile = None):
 
     `request` is the JSON-encodable body — `{scm, owner, repo, pr_number,
     head_sha, run_id, workflow_name, entries, shown_snippets, shown_repros,
-    shown_fixes, final, posted?}` (see the server's ContributeRequestSchema).
+    shown_fixes, final, posted?, comment_id?}` (see the server's
+    ContributeRequestSchema).
 
     Returns a result dict:
       `{"success": True, "state": {...}, "should_post": bool,
-        "comment_id": str}`
+        "comment_id": str, "post_grant_run": str, "next_eligible_epoch_s": int}`
     on a 2xx, else `{"success": False, "error": str, "status": int}`. Never
     raises — transport errors and non-2xx responses come back as
     `success=False` so the caller can fall back to local coordination.

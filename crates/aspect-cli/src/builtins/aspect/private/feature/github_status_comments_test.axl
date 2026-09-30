@@ -28,6 +28,9 @@ load(
     "DEFAULT_STATUS_BADGES",
     "GITHUB_STATUS_COMMENT_ROLES",
     "MARKER_FMT",
+    "TERMINAL_DENIED",
+    "TERMINAL_DONE",
+    "TERMINAL_POSTED",
     "bucket_entries",
     "by_task_overflow",
     "collect_repro_fix_rows",
@@ -42,12 +45,15 @@ load(
     "parse_state",
     "prepare_for_render",
     "render_body",
+    "resettle_after_terminal_post",
     "results_subset",
+    "retry_terminal_post",
     "select_snippets",
     "select_sticky",
     "serialize_state",
     "should_create_fallback",
     "snippet_key",
+    "terminal_post_deadline_s",
 )
 load(
     "./test_fixtures.axl",
@@ -622,6 +628,114 @@ def _check_lease_held():
     # Floor at 0 → diff < window → lease held (safer than under).
     if not lease_held(now_epoch = 100, last_upsert_epoch = 150, lease_window_s = 10):
         fail("lease_held under clock skew (sibling ahead) should be True")
+
+def _fake_clock():
+    """A clock whose `sleep_ms` advances it, for the terminal-post loops."""
+    clock = {"t": 0.0, "sleeps": []}
+
+    def _sleep_ms(ms):
+        clock["sleeps"].append(ms)
+        clock["t"] += ms / 1000.0
+
+    return struct(
+        state = clock,
+        monotonic_s = lambda: clock["t"],
+        epoch_s = lambda: 1000 + int(clock["t"]),
+        sleep_ms = _sleep_ms,
+    )
+
+def _scripted_attempts(outcomes):
+    """An `attempt()` returning each `(outcome, next_eligible)` in turn."""
+    calls = {"n": 0}
+
+    def _attempt():
+        i = calls["n"]
+        calls["n"] += 1
+        return outcomes[min(i, len(outcomes) - 1)]
+
+    return struct(attempt = _attempt, calls = calls)
+
+def _check_retry_terminal_post():
+    # Granted first try: no wait.
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_POSTED, 0)])
+    _eq("posted first try", retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 90), TERMINAL_POSTED)
+    _eq("posted first try: attempts", a.calls["n"], 1)
+    _eq("posted first try: sleeps", c.state["sleeps"], [])
+
+    # Withheld twice, then granted: each wait runs to the server's
+    # next-eligible time (the holder's lease expiry).
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_DENIED, 1004), (TERMINAL_DENIED, 1007), (TERMINAL_POSTED, 0)])
+    _eq("denied then posted", retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 90), TERMINAL_POSTED)
+    _eq("denied then posted: waits", c.state["sleeps"], [4000, 3000])
+
+    # A next-eligible time already past still waits 1s; a far one is capped.
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_DENIED, 0), (TERMINAL_DENIED, 999999), (TERMINAL_POSTED, 0)])
+    retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 90, max_wait_s = 10)
+    _eq("wait clamp", c.state["sleeps"], [1000, 10000])
+
+    # Withheld until the deadline: gives up, reporting TERMINAL_DENIED, and
+    # never sleeps past the deadline.
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_DENIED, 999999)])
+    _eq("gives up", retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 25, max_wait_s = 10), TERMINAL_DENIED)
+    _eq("gives up: waits", c.state["sleeps"], [10000, 10000, 5000])
+    _eq("gives up: attempts", a.calls["n"], 4)
+
+    # The last wait is cut to the time left, even under 1s.
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_DENIED, 999999)])
+    retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 10.5, max_wait_s = 10)
+    _eq("short last wait", c.state["sleeps"], [10000, 500])
+
+    # The fallback path (TERMINAL_DONE) is not retried.
+    c = _fake_clock()
+    a = _scripted_attempts([(TERMINAL_DONE, 0)])
+    _eq("done", retry_terminal_post(a.attempt, c.monotonic_s, c.epoch_s, c.sleep_ms, 90), TERMINAL_DONE)
+    _eq("done: attempts", a.calls["n"], 1)
+
+def _check_terminal_post_deadline_s():
+    # Two grant leases of `interval + 15s`, bounded to 60s..300s.
+    _eq("deadline at the default interval", terminal_post_deadline_s(20), 70)
+    _eq("deadline floor", terminal_post_deadline_s(1), 60)
+    _eq("deadline for a slow cadence", terminal_post_deadline_s(90), 210)
+    _eq("deadline cap", terminal_post_deadline_s(600), 300)
+
+def _check_resettle_after_terminal_post():
+    def _run(release_results, repost_ok = True, rounds = 2):
+        log = []
+        seq = {"i": 0}
+
+        def _release():
+            i = seq["i"]
+            seq["i"] += 1
+            log.append("release")
+            return release_results[min(i, len(release_results) - 1)]
+
+        def _repost(bodies):
+            log.append("repost:" + bodies[0])
+            return repost_ok
+
+        resettle_after_terminal_post(_release, _repost, rounds = rounds)
+        return log
+
+    # The merged state matches our post: one confirming release.
+    _eq("resettle unchanged", _run([None]), ["release"])
+
+    # A sibling's result arrived after we rendered: re-post, then confirm it.
+    _eq("resettle one repost", _run([("with-sibling", "b"), None]), ["release", "repost:with-sibling", "release"])
+
+    # Bounded: after `rounds` re-posts the last release only confirms.
+    _eq(
+        "resettle bounded",
+        _run([("r1", "b"), ("r2", "b"), ("r3", "b")]),
+        ["release", "repost:r1", "release", "repost:r2", "release"],
+    )
+
+    # A failed re-post stops; there is nothing new to confirm.
+    _eq("resettle repost fails", _run([("r1", "b")], repost_ok = False), ["release", "repost:r1"])
 
 def _check_dedup_survivor():
     """dedup_survivor: deterministic lowest-id survivor over marker-bearing
@@ -1685,6 +1799,9 @@ def _test_impl(ctx):
     _check_repro_dedup_consecutive_headings(ctx)
     _check_format_http_failure_detail()
     _check_lease_held()
+    _check_retry_terminal_post()
+    _check_terminal_post_deadline_s()
+    _check_resettle_after_terminal_post()
     _check_dedup_survivor()
     _check_markers_stable()
     _check_should_create_fallback()
