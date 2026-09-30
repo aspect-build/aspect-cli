@@ -1,17 +1,17 @@
-"""`git diff` argv that ignores the user's git config.
+"""`git diff` whose output doesn't depend on the user's git config.
 
-Porcelain `git diff` honors config that rewrites its output: `diff.external`
-replaces the patch with the tool's output, `color.diff=always` adds ANSI
-escapes, `diff.noprefix` / `diff.mnemonicPrefix` change the `a/` / `b/`
-header prefixes, `diff.<driver>.textconv` rewrites file content, and
-`diff.relative` makes paths (and the set of files) relative to the cwd.
-Any of these breaks callers that parse the output or treat its paths as
-git-root-relative, so every machine-read `git diff` goes through
-`git_diff_args`.
+Porcelain `git diff` honors config that rewrites its output:
 
-`diff.relative` is overridden with `-c` instead of `--no-relative` because
-the flag needs git 2.28; the other flags are available in every git we
-support.
+  - `diff.external` replaces the patch with an external tool's output.
+  - `color.diff` / `color.ui` = `always` add ANSI escapes.
+  - `diff.noprefix` / `diff.mnemonicPrefix` change the `a/` / `b/` prefixes.
+  - `diff.<driver>.textconv` rewrites file content before diffing.
+  - `diff.relative` limits the diff to the cwd and makes paths relative to it.
+
+Any of these breaks a caller that parses the output or treats its paths as
+git-root-relative, so every `git diff` whose output is read goes through
+here. `diff.relative` is overridden with `-c` because `--no-relative` needs
+git 2.28; the other flags are much older.
 """
 
 _CONFIG_OVERRIDES = ["-c", "diff.relative=false"]
@@ -25,6 +25,12 @@ _DIFF_FLAGS = [
 ]
 
 def git_diff_args(*args):
-    """argv (without the leading `git`) for `git diff <args>` with the
-    config-independent flags applied."""
+    """argv, without the leading `git`, for `git diff <args>`."""
     return _CONFIG_OVERRIDES + ["diff"] + _DIFF_FLAGS + list(args)
+
+def run_git_diff(ctx, cwd, *args):
+    """Run `git diff <args>` in `cwd` → the process output (`.status`,
+    `.stdout`, `.stderr`)."""
+    return ctx.std.process.command("git").args(git_diff_args(*args)) \
+        .current_dir(cwd) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()

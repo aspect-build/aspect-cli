@@ -15,7 +15,7 @@ load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./environment.axl", "color_enabled", "info", "warn")
-load("./git_diff.axl", "git_diff_args")
+load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
     "./rate_limit.axl",
@@ -1279,7 +1279,6 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
     append context. Used by every local-diff path in `detect_changed_files`.
     """
 
-    process = ctx.std.process
     cwd = _git_cwd(ctx, cwd)
 
     # Shallow checkout may lack the SHA(s); depth-1 fetch on-demand.
@@ -1295,7 +1294,7 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
     head_args = [] if head == "HEAD" else [head]
 
     if line_level:
-        result = process.command("git").args(git_diff_args(base_sha, *head_args) + ["--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        result = run_git_diff(ctx, cwd, "--unified=0", base_sha, *head_args)
         if not result.status.success:
             return None
         parsed = _parse_local_diff_output(result.stdout)
@@ -1303,7 +1302,7 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
             entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
         return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
-    out = process.command("git").args(git_diff_args("--diff-filter=d", "--name-only", base_sha, *head_args)).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    out = run_git_diff(ctx, cwd, "--diff-filter=d", "--name-only", base_sha, *head_args)
     if not out.status.success:
         return None
     names = [f for f in out.stdout.strip().split("\n") if f]
@@ -1345,20 +1344,23 @@ def _parse_local_diff_output(output):
     From `@@ -old_start,old_count +new_start,new_count @@` headers. With
     `--unified=0`, old/new_count == the `-`/`+` line counts, matching the
     PR Files API's `additions`/`deletions`.
+
+    `---`/`+++` are headers only between a `diff --git` line and the file's
+    first hunk; inside a hunk they are removed/added content. Deleted files
+    (`+++ /dev/null`) are omitted.
     """
     files = []
     current_file = None
+    in_header = False
     for line in output.split("\n"):
-        if line.startswith("+++ b/"):
-            path = line.removeprefix("+++ b/")
-            current_file = {"file": path, "lines": [], "additions": 0, "deletions": 0}
-            files.append(current_file)
-        elif line.startswith("--- /dev/null"):
-            pass
-        elif line.startswith("+++ /dev/null"):
-            if current_file:
-                files.pop()
-                current_file = None
+        if line.startswith("diff --git "):
+            current_file = None
+            in_header = True
+        elif in_header and line.startswith("+++ "):
+            in_header = False
+            if line.startswith("+++ b/"):
+                current_file = {"file": line.removeprefix("+++ b/"), "lines": [], "additions": 0, "deletions": 0}
+                files.append(current_file)
         elif line.startswith("@@ ") and current_file != None:
             # Parse positionally — the trailing section heading is free-form
             # and may contain `+`/`-` tokens (`@@ -10,3 +10,3 @@ + heading`).

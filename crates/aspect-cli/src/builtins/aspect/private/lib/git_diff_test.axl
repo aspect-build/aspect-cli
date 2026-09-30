@@ -1,64 +1,41 @@
 """Tests for `lib/git_diff.axl`.
 
-Builds a scratch repo whose local config rewrites porcelain `git diff`
-output (`diff.external`, `color.diff`, `diff.noprefix`,
-`diff.mnemonicPrefix`, textconv, `diff.relative`) and checks that
-`git_diff_args` still yields a plain unified patch and git-root-relative
-`--name-only` paths from a subdirectory — the shapes the format task
-string-compares, archives, and rebases.
+Each case runs against a scratch repo whose local config rewrites porcelain
+`git diff` output (`OUTPUT_REWRITING_DIFF_CONFIG`), from a subdirectory, and
+checks the output shapes callers rely on: a plain unified patch with `a/` /
+`b/` headers and no ANSI, and git-root-relative `--name-only` paths.
 
 Run with:
   aspect dev test-git-diff
 """
 
-load("./git_diff.axl", "git_diff_args")
+load("./git_diff.axl", "run_git_diff")
+load("./git_scratch.axl", "git_run", "write_output_rewriting_diff_config")
 
-_GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Test",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_COMMITTER_NAME": "Test",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_SYSTEM": "/dev/null",
-}
-
-def _git(ctx, cwd, args):
-    cmd = ctx.std.process.command("git").args(args).current_dir(cwd)
-    for k, v in _GIT_ENV.items():
-        cmd = cmd.env(k, v)
-    out = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
-    if not out.status.success:
-        fail("git %s failed in %s: %s" % (" ".join(args), cwd, out.stderr.strip()))
-    return out.stdout
-
-def _hostile_repo(ctx):
-    """Repo with one committed file per directory, both modified in the
-    working tree, and config that rewrites every aspect of `git diff`."""
+def _scratch_repo(ctx):
+    """Repo with `top.txt` and `sub/f.txt` committed, both modified in the
+    working tree, and output-rewriting diff config. Returns the repo root."""
     repo = ctx.std.fs.mkdtemp(prefix = "axl-git-diff-test-")
-    _git(ctx, repo, ["init", "-q", "--initial-branch=main"])
+    git_run(ctx, repo, ["init", "-q", "--initial-branch=main"])
     ctx.std.fs.create_dir_all(repo + "/sub")
     ctx.std.fs.write(repo + "/top.txt", "x\n")
     ctx.std.fs.write(repo + "/sub/f.txt", "a\n")
-    _git(ctx, repo, ["add", "."])
-    _git(ctx, repo, ["commit", "-q", "-m", "init"])
+    git_run(ctx, repo, ["add", "."])
+    git_run(ctx, repo, ["commit", "-q", "-m", "init"])
     ctx.std.fs.write(repo + "/top.txt", "x\ny\n")
     ctx.std.fs.write(repo + "/sub/f.txt", "a\nb\n")
-    for key, value in [
-        ("diff.external", "true"),
-        ("color.diff", "always"),
-        ("color.ui", "always"),
-        ("diff.noprefix", "true"),
-        ("diff.mnemonicPrefix", "true"),
-        ("diff.relative", "true"),
-        ("diff.upper.textconv", "true"),
-    ]:
-        _git(ctx, repo, ["config", key, value])
-    ctx.std.fs.write(repo + "/.git/info/attributes", "*.txt diff=upper\n")
+    write_output_rewriting_diff_config(ctx, repo)
     return repo
 
+def _diff_ok(ctx, cwd, *args):
+    out = run_git_diff(ctx, cwd, *args)
+    if not out.status.success:
+        fail("git diff %s failed in %s: %s" % (" ".join(args), cwd, out.stderr.strip()))
+    return out.stdout
+
 def _test_patch(ctx):
-    repo = _hostile_repo(ctx)
-    out = _git(ctx, repo + "/sub", git_diff_args("HEAD"))
+    repo = _scratch_repo(ctx)
+    out = _diff_ok(ctx, repo + "/sub", "HEAD")
     for want in ["--- a/sub/f.txt\n", "+++ b/sub/f.txt\n", "\n+b\n", "--- a/top.txt\n", "+++ b/top.txt\n", "\n+y\n"]:
         if want not in out:
             fail("patch — missing %r in:\n%s" % (want, out))
@@ -67,16 +44,23 @@ def _test_patch(ctx):
     ctx.std.fs.remove_dir_all(repo)
 
 def _test_name_only(ctx):
-    repo = _hostile_repo(ctx)
-    out = _git(ctx, repo + "/sub", git_diff_args("--name-only", "HEAD"))
+    repo = _scratch_repo(ctx)
+    out = _diff_ok(ctx, repo + "/sub", "--name-only", "HEAD")
     got = sorted([f for f in out.strip().split("\n") if f])
     if got != ["sub/f.txt", "top.txt"]:
         fail("name-only — got %r, want git-root-relative [sub/f.txt, top.txt]" % got)
     ctx.std.fs.remove_dir_all(repo)
 
+def _test_failure_is_reported(ctx):
+    repo = _scratch_repo(ctx)
+    if run_git_diff(ctx, repo, "not-a-revision").status.success:
+        fail("failure — `git diff not-a-revision` should exit non-zero")
+    ctx.std.fs.remove_dir_all(repo)
+
 _TESTS = [
     _test_patch,
     _test_name_only,
+    _test_failure_is_reported,
 ]
 
 def _test_impl(ctx):

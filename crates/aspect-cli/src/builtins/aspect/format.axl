@@ -42,6 +42,10 @@ def _git_capture(ctx, *args):
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
 
+def _git_diff_capture(ctx, *args):
+    """`_git_capture` for `git diff <args>`, independent of user git config."""
+    return _git_capture(ctx, *git_diff_args(*args))
+
 def _snapshot_tracked_state(ctx):
     """Snapshot tracked-tree state via `git stash create`. Returns:
         - commit SHA (str) on success — pass to `_diff_against`.
@@ -78,10 +82,9 @@ def _snapshot_tracked_state(ctx):
 
 def _diff_against(ctx, base):
     """Diff `base` (commit SHA) against the working tree; base="" → HEAD.
-    Config-independent (`git_diff_args`) — output is string-compared and
-    archived as a patch."""
+    Output is string-compared and archived as a patch."""
     target = base if base else "HEAD"
-    out, code, err = _git_capture(ctx, *git_diff_args(target))
+    out, code, err = _git_diff_capture(ctx, target)
     if code != 0:
         msg = "`git diff %s` failed (exit %d).\nstderr: %s" % (target, code, err.strip())
         fail(msg)
@@ -563,7 +566,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Pattern filters hide files from the affected list + failure decision; they
     # don't undo changes (still in the tree), just stop unexpected files failing.
-    name_out, _, _ = _git_capture(ctx, *git_diff_args("--name-only", pre_snap if pre_snap else "HEAD"))
+    name_out, _, _ = _git_diff_capture(ctx, "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
     affected = affected_raw
     if include_patterns and not explicit_files:
@@ -602,9 +605,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # filtered files too, which shouldn't appear in the uploaded patch.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
-            upload_diff, _, _ = _git_capture(
+            upload_diff, _, _ = _git_diff_capture(
                 ctx,
-                *git_diff_args(pre_snap if pre_snap else "HEAD", "--", *affected)
+                pre_snap if pre_snap else "HEAD",
+                "--",
+                *affected
             )
         else:
             upload_diff = formatter_diff
