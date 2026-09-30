@@ -24,6 +24,7 @@ load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
+load("./private/lib/git_diff.axl", "git_diff_args")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
@@ -40,6 +41,10 @@ def _git_capture(ctx, *args):
         .current_dir(ctx.std.env.current_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
+
+def _git_diff_capture(ctx, *args):
+    """`_git_capture` for `git diff <args>`, independent of user git config."""
+    return _git_capture(ctx, *git_diff_args(*args))
 
 def _snapshot_tracked_state(ctx):
     """Snapshot tracked-tree state via `git stash create`. Returns:
@@ -77,9 +82,9 @@ def _snapshot_tracked_state(ctx):
 
 def _diff_against(ctx, base):
     """Diff `base` (commit SHA) against the working tree; base="" → HEAD.
-    No --color — output is string-compared and archived as a patch."""
+    Output is string-compared and archived as a patch."""
     target = base if base else "HEAD"
-    out, code, err = _git_capture(ctx, "diff", target)
+    out, code, err = _git_diff_capture(ctx, target)
     if code != 0:
         msg = "`git diff %s` failed (exit %d).\nstderr: %s" % (target, code, err.strip())
         fail(msg)
@@ -561,7 +566,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Pattern filters hide files from the affected list + failure decision; they
     # don't undo changes (still in the tree), just stop unexpected files failing.
-    name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
+    name_out, _, _ = _git_diff_capture(ctx, "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
     affected = affected_raw
     if include_patterns and not explicit_files:
@@ -600,9 +605,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # filtered files too, which shouldn't appear in the uploaded patch.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
-            upload_diff, _, _ = _git_capture(
+            upload_diff, _, _ = _git_diff_capture(
                 ctx,
-                "diff",
                 pre_snap if pre_snap else "HEAD",
                 "--",
                 *affected

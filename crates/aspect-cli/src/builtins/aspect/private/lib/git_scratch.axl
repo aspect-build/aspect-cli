@@ -1,0 +1,50 @@
+"""Test helpers for scratch git repos built with real `git` subprocesses.
+
+`GIT_TEST_ENV` pins identity and dates so commit SHAs are independent of the
+wall clock, and points global/system config at `/dev/null` so the host's
+`~/.gitconfig` can't leak into fixture setup. Code under test runs with the
+inherited environment; a test that needs specific config writes it to the
+scratch repo's local config (see `write_output_rewriting_diff_config`).
+"""
+
+GIT_TEST_ENV = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+# Local config that rewrites porcelain `git diff` output; `lib/git_diff.axl`
+# documents what each key does. `true` as the external tool / textconv
+# command emits nothing, so an unguarded diff comes back empty.
+OUTPUT_REWRITING_DIFF_CONFIG = [
+    ("diff.external", "true"),
+    ("color.diff", "always"),
+    ("color.ui", "always"),
+    ("diff.noprefix", "true"),
+    ("diff.mnemonicPrefix", "true"),
+    ("diff.relative", "true"),
+    ("diff.scratch.textconv", "true"),
+]
+
+def git_run(ctx, cwd, args):
+    """Run `git <args>` in `cwd` under `GIT_TEST_ENV` → untrimmed stdout.
+    Fails the test on a non-zero exit."""
+    cmd = ctx.std.process.command("git").args(args).current_dir(cwd)
+    for k, v in GIT_TEST_ENV.items():
+        cmd = cmd.env(k, v)
+    out = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        fail("git %s failed in %s: %s" % (" ".join(args), cwd, out.stderr.strip()))
+    return out.stdout
+
+def write_output_rewriting_diff_config(ctx, repo):
+    """Apply `OUTPUT_REWRITING_DIFF_CONFIG` to `repo`'s local config and bind
+    every file to its textconv driver."""
+    for key, value in OUTPUT_REWRITING_DIFF_CONFIG:
+        git_run(ctx, repo, ["config", key, value])
+    ctx.std.fs.write(repo + "/.git/info/attributes", "* diff=scratch\n")

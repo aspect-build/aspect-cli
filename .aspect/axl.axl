@@ -1736,7 +1736,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, len(files3) == 0, "parse_local_diff: deleted file dropped")
 
     # Multiple files in one diff.
-    diff4 = "--- a/one.txt\n+++ b/one.txt\n@@ -0,0 +1,1 @@\n+a\n--- a/two.txt\n+++ b/two.txt\n@@ -0,0 +1,2 @@\n+b\n+c"
+    diff4 = "diff --git a/one.txt b/one.txt\n--- a/one.txt\n+++ b/one.txt\n@@ -0,0 +1,1 @@\n+a\ndiff --git a/two.txt b/two.txt\n--- a/two.txt\n+++ b/two.txt\n@@ -0,0 +1,2 @@\n+b\n+c"
     files4 = github.parse_local_diff(diff4)
     tc = test_case(tc, len(files4) == 2, "parse_local_diff: 2 files")
     tc = test_case(tc, files4[0]["file"] == "one.txt" and files4[1]["file"] == "two.txt", "parse_local_diff: file names")
@@ -1773,7 +1773,7 @@ rename to new.txt
     # Hunk header with a section heading containing a bare `+` (e.g. when the
     # function-context line found by git starts with `+`). Earlier versions
     # scanned every space-split token and hit `int("")` on the bare `+`.
-    diff_sh = "--- a/h.md\n+++ b/h.md\n@@ -1,1 +1,1 @@ + heading\n-old\n+new"
+    diff_sh = "diff --git a/h.md b/h.md\n--- a/h.md\n+++ b/h.md\n@@ -1,1 +1,1 @@ + heading\n-old\n+new"
     files_sh = github.parse_local_diff(diff_sh)
     tc = test_case(tc, len(files_sh) == 1 and files_sh[0]["file"] == "h.md", "parse_local_diff: section heading parsed")
     tc = test_case(tc, files_sh[0]["lines"] == [0] and files_sh[0]["additions"] == 1, "parse_local_diff: section heading doesn't break range parse")
