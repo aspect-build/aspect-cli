@@ -19,6 +19,14 @@ through the comment's own embedded state block (read → merge own entry →
 render → post under a local time lease), so a single job still renders a
 correct comment.
 
+A task's terminal update is its last contribution, so it has no later tick to
+land on. When the server withholds that post because another job holds the post
+grant, the task retries until it is granted or `_TERMINAL_POST_DEADLINE_S`
+passes, carrying the comment id so the server can grant it over the holder.
+After a terminal post it sends one non-final contribution to confirm it, which
+releases the grant before the job exits, and posts again if the merged state
+gained a sibling's result it had not rendered.
+
 Requires the Aspect GitHub App with `prs.write` (issue-comment
 POST/PATCH/DELETE/GET) and Aspect credentials (ASPECT_API_TOKEN) for the
 contribute call. On GitHub Actions it additionally requests `actions.read`
@@ -342,19 +350,88 @@ def dropped_terminal_contribute_warning(task_name, error):
     return ("Terminal status for %s could not be contributed to the status-comment API (%s); " +
             "falling back to coordinating through the comment itself") % (task_name, error or "unknown")
 
-def denied_terminal_post_warning(task_name, post_grant_run):
-    """Warn that a task's terminal status was contributed but not posted.
+def terminal_post_withheld_error(task_name, post_grant_run, waited_s):
+    """Report that a task's terminal status never reached the PR comment.
 
-    A terminal publish is the job's last word — there is no later emit from
-    this task. If the server withholds the post and no other job posts
-    afterwards, the entry stays frozen at whatever the previous post captured,
-    reporting a finished task as still running for as long as the comment
-    lives. That failure is otherwise invisible, so it gets a log line naming
-    the grant holder when the server reports one (older servers do not).
+    The server withholds a post while another job holds the post grant, and a
+    terminal publish retries until `_TERMINAL_POST_DEADLINE_S` (see
+    `retry_terminal_post`). Giving up means the task's entry keeps whatever the
+    last post captured, reporting a finished task as still running for as long
+    as the comment lives, so it is an error rather than a warning. Names the
+    grant holder when the server reports one (older servers do not).
     """
     held = " (post grant held by run %s)" % post_grant_run if post_grant_run else ""
-    return ("Terminal status for %s was contributed but the server withheld the comment post; " +
-            "it will only appear if another job posts later%s") % (task_name, held)
+    return ("Terminal status for %s never reached the PR comment: the server withheld the post for %ds%s; " +
+            "the comment may still show this task's last posted state") % (task_name, waited_s, held)
+
+# A terminal publish the server withholds, because another job holds the post
+# grant, is retried for up to this long. The server's grant lease is the post
+# interval plus 15s (35s at the default 20s interval), so this covers two leases
+# with margin. Paid only when a terminal post is withheld.
+_TERMINAL_POST_DEADLINE_S = 90
+
+# Longest single wait between terminal-post retries. The wait normally runs to
+# the server's `next_eligible_epoch_s`; the cap keeps a skewed or far-off value
+# from spending the whole deadline in one sleep.
+_TERMINAL_POST_MAX_WAIT_S = 10
+
+# After a terminal post, the most times a job re-posts because the merged state
+# gained a sibling's result it had not rendered. Bounds the exchange when
+# several jobs finish together.
+_TERMINAL_RESETTLE_ROUNDS = 2
+
+# `retry_terminal_post` attempt outcomes.
+TERMINAL_POSTED = "posted"  # this job PATCHed; confirm it with a release
+TERMINAL_DENIED = "denied"  # the server withheld the post; retry
+TERMINAL_DONE = "done"  # nothing to confirm or retry
+
+def retry_terminal_post(attempt, monotonic_s, epoch_s, sleep_ms, deadline_s = _TERMINAL_POST_DEADLINE_S, max_wait_s = _TERMINAL_POST_MAX_WAIT_S):
+    """Run a terminal publish until the server stops withholding it or
+    `deadline_s` passes.
+
+    A terminal publish is a task's last emit, so a post the server withholds
+    for another job's grant has no later tick to land on. `attempt()` returns
+    `(outcome, next_eligible_epoch_s)`, and only `TERMINAL_DENIED` retries.
+    Each wait runs to `next_eligible_epoch_s`, when the holder's lease lapses
+    and a terminal contribution is granted, clamped to 1s..`max_wait_s` and to
+    the time left. The deadline runs on `monotonic_s()`; the wait is computed
+    against `epoch_s()` because the server's value is wall-clock.
+
+    Returns the last outcome, so `TERMINAL_DENIED` means it gave up.
+    """
+    start = monotonic_s()
+    outcome = TERMINAL_DENIED
+
+    # Every wait is at least 1s, so the deadline bounds the attempts.
+    for _ in range(int(deadline_s) + 1):
+        outcome, next_eligible = attempt()
+        if outcome != TERMINAL_DENIED:
+            return outcome
+        remaining = deadline_s - (monotonic_s() - start)
+        if remaining <= 0:
+            return outcome
+        wait = min(max(next_eligible - epoch_s(), 1), max_wait_s, remaining)
+        sleep_ms(int(wait * 1000))
+    return outcome
+
+def resettle_after_terminal_post(release, repost, rounds = _TERMINAL_RESETTLE_ROUNDS):
+    """Confirm a terminal post, re-posting if the merged state moved on.
+
+    `release()` sends the pending confirmation, which clears this job's grant
+    server-side before it exits, and returns the `(stable_body, final_body)`
+    render of the merged state it gets back when that differs from what this
+    job last posted, else None. A difference means a sibling's result arrived
+    after this job rendered, and this job may be the last to post, so it posts
+    again with `repost(bodies)`, which returns True on success. The next
+    `release()` confirms that post. At most `rounds` re-posts.
+    """
+    for _ in range(rounds):
+        bodies = release()
+        if bodies == None:
+            return
+        if not repost(bodies):
+            return
+    release()
 
 def _with_failed_phase(entry, text):
     """Prefix `failed in <phase>` when the phase adds something.
@@ -1634,17 +1711,52 @@ def _github_status_comments(ctx: FeatureContext):
         return (_body(True), _body(False))
 
     def _publish(ctx, final = False):
+        """Contribute this task's entry and post the comment if granted.
+
+        Mid-run this is one attempt; a withheld post waits for the next tick.
+        A terminal publish has no next tick, so it retries a withheld post
+        (`retry_terminal_post`), then sends one more contribution to confirm the
+        post it made, which releases the grant before the job exits and
+        re-posts if a sibling's result arrived meanwhile
+        (`resettle_after_terminal_post`).
+        """
         token = _state.get("_github_token")
         if not token:
             return
 
         own_entry = _own_payload(ctx)
-        now_epoch = epoch_now_s(ctx.std)
+        if not final:
+            _publish_once(ctx, token, own_entry, False)
+            return
 
-        # Contribute our entry to the Aspect API, which merges it with every
-        # sibling job's contribution and tells us whether to post this cycle.
-        # `posted` confirms a prior grant so the server records the comment id
-        # + posted hash and measures the next interval from the real post.
+        outcome = retry_terminal_post(
+            lambda: _publish_once(ctx, token, own_entry, True),
+            monotonic,
+            lambda: epoch_now_s(ctx.std),
+            sleep,
+        )
+        if outcome == TERMINAL_POSTED:
+            resettle_after_terminal_post(
+                lambda: _release_terminal_post(ctx, own_entry),
+                lambda bodies: _repost_terminal(ctx, token, bodies),
+            )
+        elif outcome == TERMINAL_DENIED:
+            _LOG.error(ctx.std, terminal_post_withheld_error(
+                ctx.task.name,
+                _state.get("_post_grant_run", ""),
+                _TERMINAL_POST_DEADLINE_S,
+            ))
+
+    def _contribute(ctx, own_entry, final):
+        """Send one contribution and apply the merged state it returns.
+
+        Returns `(result, sel)`, with `sel` None when the call failed.
+        """
+
+        # The Aspect API merges our entry with every sibling job's contribution
+        # and tells us whether to post this cycle. `posted` confirms a prior
+        # grant so the server records the comment id + posted hash and measures
+        # the next interval from the real post.
         request = {
             "scm": "github",
             "installation_id": _state.get("_installation_id", ""),
@@ -1669,8 +1781,45 @@ def _github_status_comments(ctx: FeatureContext):
         if pending:
             request["posted"] = pending
 
+        # A known comment makes a terminal post an edit rather than a racing
+        # create, which lets the server grant it over another run's live grant.
+        if final and _state.get("_comment_id"):
+            request["comment_id"] = str(_state["_comment_id"])
+
         result = github.status_comment_contribute(ctx, request)
         if not result.get("success"):
+            return (result, None)
+
+        # Contribute succeeded — the confirmation (if any) was delivered.
+        # Record that server coordination works so the comment-state fallback
+        # only ever PATCHes (never creates out-of-band), letting the server's
+        # single-poster election own comment creation.
+        _state.pop("_pending_post", None)
+        _state["_api_ok"] = True
+
+        # Entries arrive as decoded JSON, so rehydrate the repro/fix command
+        # lists back to records (the render path accesses `c.command`/`c.target`).
+        _rehydrate_entries(result["state"].get("entries", []) or [])
+        sel = _select_for_render(result["state"])
+
+        # Carry our chosen sticky keys into the next contribution so the server
+        # accretes them (append-only) across the swarm.
+        _state["_shown_snippets"] = sel["shown_snippets"]
+        _state["_shown_repros"] = sel["shown_repros"]
+        _state["_shown_fixes"] = sel["shown_fixes"]
+        return (result, sel)
+
+    def _publish_once(ctx, token, own_entry, final):
+        """One contribute-then-post cycle.
+
+        Returns `(outcome, next_eligible_epoch_s)` for `retry_terminal_post`:
+        `TERMINAL_POSTED` when this job PATCHed the comment (the confirmation is
+        pending), `TERMINAL_DENIED` when the server withheld the post, and
+        `TERMINAL_DONE` otherwise. Mid-run callers ignore it.
+        """
+        now_epoch = epoch_now_s(ctx.std)
+        result, sel = _contribute(ctx, own_entry, final)
+        if sel == None:
             # API unreachable / errored — fall back to coordinating through the
             # comment's own state block (read → merge our entry → render →
             # post), so a single job still renders a correct comment.
@@ -1686,36 +1835,16 @@ def _github_status_comments(ctx: FeatureContext):
             else:
                 _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
-            return
-
-        # Contribute succeeded — the confirmation (if any) was delivered.
-        # Record that server coordination works so the comment-state fallback
-        # only ever PATCHes (never creates out-of-band), letting the server's
-        # single-poster election own comment creation.
-        _state.pop("_pending_post", None)
-        _state["_api_ok"] = True
-
-        # Render the server's merged state, then post only if granted. Entries
-        # arrive as decoded JSON, so rehydrate the repro/fix command lists back
-        # to records (the render path accesses `c.command`/`c.target`).
-        state = result["state"]
-        _rehydrate_entries(state.get("entries", []) or [])
-        sel = _select_for_render(state)
-
-        # Carry our chosen sticky keys into the next contribution so the server
-        # accretes them (append-only) across the swarm.
-        _state["_shown_snippets"] = sel["shown_snippets"]
-        _state["_shown_repros"] = sel["shown_repros"]
-        _state["_shown_fixes"] = sel["shown_fixes"]
+            return (TERMINAL_DONE, 0)
 
         if not result.get("should_post"):
-            # Mid-run denials are routine throttling; a terminal one is not.
-            if final:
-                _LOG.warn(ctx.std, denied_terminal_post_warning(
-                    ctx.task.name,
-                    result.get("post_grant_run", ""),
-                ))
-            return
+            # Mid-run denials are routine throttling. A terminal one is retried
+            # by the caller; find the comment first so the retry can carry its
+            # id and be granted over the holder's grant.
+            _state["_post_grant_run"] = result.get("post_grant_run", "")
+            if final and "_comment_id" not in _state:
+                _fetch_existing_comment_body(ctx, token)
+            return (TERMINAL_DENIED, result.get("next_eligible_epoch_s", 0))
 
         # Resolve the comment id before posting so we PATCH the existing comment
         # rather than create a duplicate: prefer the server's hint, else
@@ -1728,19 +1857,56 @@ def _github_status_comments(ctx: FeatureContext):
             _fetch_existing_comment_body(ctx, token)
 
         # We hold the post grant. Skip the PATCH when our render is unchanged
-        # (the client owns the content-changed decision); the grant lapses on
-        # its own lease. Otherwise upsert and confirm on the next contribution
-        # so the server clears the grant and advances its post interval.
-        stable_body, final_body = _render_comment(ctx, state, sel, now_epoch)
+        # (the client owns the content-changed decision). Otherwise upsert and
+        # confirm on the next contribution so the server clears the grant and
+        # advances its post interval; a terminal post has no next contribution,
+        # so `_publish` sends one to confirm it.
+        stable_body, final_body = _render_comment(ctx, result["state"], sel, now_epoch)
         if _state.get("_last_stable_body") == stable_body:
-            return
+            # A terminal grant we don't use would stay held until its lease
+            # lapses; confirming the comment that is already there releases it.
+            if final and _state.get("_comment_id"):
+                _state["_pending_post"] = {"comment_id": str(_state["_comment_id"])}
+                return (TERMINAL_POSTED, 0)
+            return (TERMINAL_DONE, 0)
 
         # Mid-run PATCHes are skippable under budget pressure; the terminal
         # verdict (final) always lands.
         if not _upsert_comment(ctx, token, final_body, skippable = not final):
-            return
+            return (TERMINAL_DONE, 0)
         _state["_last_stable_body"] = stable_body
         _state["_pending_post"] = {"comment_id": str(_state.get("_comment_id", ""))}
+        return (TERMINAL_POSTED, 0)
+
+    def _release_terminal_post(ctx, own_entry):
+        """Confirm a terminal post with a non-final contribution.
+
+        Non-final so no server version grants it again: the confirmation resets
+        the post interval, and a non-final contribution inside the interval is
+        never granted. Returns the merged render when it differs from what this
+        job last posted, else None (see `resettle_after_terminal_post`).
+        """
+        now_epoch = epoch_now_s(ctx.std)
+        result, sel = _contribute(ctx, own_entry, False)
+        if sel == None:
+            _LOG.trace("status-comment release failed (%s); the grant lapses on its lease" % result.get("error", ""))
+            return None
+        bodies = _render_comment(ctx, result["state"], sel, now_epoch)
+        if bodies[0] == _state.get("_last_stable_body"):
+            return None
+        return bodies
+
+    def _repost_terminal(ctx, token, bodies):
+        """Post a render that gained a sibling's result after our terminal post.
+
+        An edit of the comment we just posted, so it needs no grant.
+        """
+        stable_body, final_body = bodies
+        if not _upsert_comment(ctx, token, final_body, skippable = False):
+            return False
+        _state["_last_stable_body"] = stable_body
+        _state["_pending_post"] = {"comment_id": str(_state.get("_comment_id", ""))}
+        return True
 
     def _publish_via_comment_state(ctx, token, own_entry, now_epoch, final):
         """Fallback coordination when the Aspect API is unreachable: the
