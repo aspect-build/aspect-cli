@@ -421,7 +421,8 @@ def _github_status_checks(ctx: FeatureContext):
         keeps advancing while the task runs. Driven off `_task_update` rather
         than a timer — updates fire regularly, and a wall-clock gate keeps the
         rate bounded even when they don't. Stops once deregistered so a late
-        update can't resurrect a concluded check."""
+        update can't resurrect a concluded check; `_register_check` also stops
+        after a rejected registration."""
         if not _state.get("_check_run_id") or _state.get("_deregistered"):
             return
         last = _state.get("_last_register_ms", 0)
