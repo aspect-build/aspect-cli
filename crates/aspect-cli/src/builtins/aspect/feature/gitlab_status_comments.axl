@@ -160,7 +160,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
     # Host-prefixed so the re-trigger eviction key can't collide with another CI
     # host that shares a raw pipeline/project name (matches the GitHub feature's
-    # `_ci_identity`).
+    # `ci_identity`).
     workflow_name = "GITLAB_CI:%s" % (env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or "")
     if not run_id:
         # Fall back to the MR IID so single-pipeline coordination still

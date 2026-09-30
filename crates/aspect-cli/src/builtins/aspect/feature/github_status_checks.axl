@@ -70,7 +70,7 @@ load(
     "snippet_budget_for",
 )
 load("../private/lib/checkrun.axl", "checkrun")
-load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
+load("../private/lib/ci.axl", "ci_identity", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load(
@@ -152,9 +152,45 @@ def _conclusion_for(status, final):
         return "success"
     return ""
 
-def _collect_ci_links(ctx, results_base_url):
-    """CI job URL + label, plus empty slots for sibling-feature URLs."""
-    host = detect_ci_host(ctx.std.env)
+def _registration_request(
+        run_identity,
+        installation_id,
+        installation_proof,
+        owner,
+        repo,
+        sha,
+        check_run_id,
+        name,
+        final):
+    """Build the `/status-checks/register` body for one check run, or `None`
+    when a field the backend requires is missing: the installation id + proof
+    (absent on an env-token path that didn't mint an App token), the check run
+    id, or a CI run id (`ci_identity` — `None` on an unsupported host).
+
+    `run_id` / `run_attempt` come from the CI host, not `GITHUB_RUN_*`, so
+    checks created from CircleCI or Buildkite register too. On GitHub Actions
+    they match the `workflow_run` webhook's run, which arms an early sweep.
+    """
+    if not check_run_id or not installation_id or not installation_proof:
+        return None
+    if not run_identity or not run_identity["run_id"]:
+        return None
+    return {
+        "scm": "github",
+        "installation_id": installation_id,
+        "installation_proof": installation_proof,
+        "owner": owner,
+        "repo": repo,
+        "run_id": run_identity["run_id"],
+        "run_attempt": run_identity["run_attempt"],
+        "head_sha": sha,
+        "check_run_id": check_run_id,
+        "name": name,
+        "final": final,
+    }
+
+def _collect_ci_links(ctx, host, results_base_url):
+    """CI job URL + `host` label, plus empty slots for sibling-feature URLs."""
     return {
         "ci_label": host["label"] if host else "",
         "ci_url": resolve_build_url(ctx),
@@ -193,7 +229,9 @@ def _github_status_checks(ctx: FeatureContext):
     if not sha or not owner or not repo:
         return
 
-    _ci_links_base = _collect_ci_links(ctx, workflows_results_url(ctx.std))
+    ci_host = detect_ci_host(ctx.std.env)
+    _ci_links_base = _collect_ci_links(ctx, ci_host, workflows_results_url(ctx.std))
+    run_identity = ci_identity(ctx.std.env, ci_host["marker"]) if ci_host else None
 
     # Clamp to 1s floor; branch (non-PR) builds get ≥60s since nobody's
     # watching a push-to-main run.
@@ -339,30 +377,35 @@ def _github_status_checks(ctx: FeatureContext):
         task's check run with the Aspect API for orphan cleanup. Best-effort and
         non-blocking; a miss just leaves the backend to finalize on staleness.
 
-        Needs the installation id + proof from the token mint; skips silently if
-        they're absent (e.g. an env-token path that didn't mint an App token).
+        Skips silently when `_registration_request` can't build a request. A
+        4xx is a deterministic reject every later call would repeat, so it warns
+        once and disables registration for the rest of the task.
         """
-        check_run_id = _state.get("_check_run_id")
-        installation_id = _state.get("_installation_id")
-        installation_proof = _state.get("_installation_proof")
-        if not check_run_id or not installation_id or not installation_proof:
+        if _state.get("_register_rejected"):
+            return
+        request = _registration_request(
+            run_identity,
+            _state.get("_installation_id"),
+            _state.get("_installation_proof"),
+            owner,
+            repo,
+            sha,
+            _state.get("_check_run_id"),
+            _state.get("_check_name", ""),
+            final,
+        )
+        if request == None:
             return
 
-        result = github.status_check_register(ctx, {
-            "scm": "github",
-            "installation_id": installation_id,
-            "installation_proof": installation_proof,
-            "owner": owner,
-            "repo": repo,
-            "run_id": ctx.std.env.var("GITHUB_RUN_ID") or "",
-            "run_attempt": ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1",
-            "head_sha": sha,
-            "check_run_id": check_run_id,
-            "name": _state.get("_check_name", ""),
-            "final": final,
-        })
-        if result["success"] and not final:
+        # Paced by attempt, not success, so a failing endpoint isn't hit on
+        # every task update.
+        if not final:
             _state["_last_register_ms"] = now_ms(ctx)
+        result = github.status_check_register(ctx, request)
+        status = result["status"]
+        if status >= 400 and status < 500:
+            _state["_register_rejected"] = True
+            _LOG.warn(ctx.std, "Orphan-cleanup registration rejected (HTTP %d); if this task is canceled, its check may stay in progress." % status)
 
     def _deregister_check(ctx):
         """Deregister once, after the task lands its own terminal conclusion, so
@@ -626,6 +669,10 @@ def _github_status_checks(ctx: FeatureContext):
 def conclusion_for(status, final):
     """Public test hook; see `_conclusion_for`."""
     return _conclusion_for(status, final)
+
+def registration_request(*args, **kwargs):
+    """Public test hook; see `_registration_request`."""
+    return _registration_request(*args, **kwargs)
 
 GithubStatusChecks = feature(
     summary = "Report live task status as GitHub check runs.",

@@ -1442,7 +1442,7 @@ def _check_merge_state_evicts_superseded_workflow_run():
 def _check_merge_state_distinct_hosts_same_raw_name_coexist():
     """Two CI hosts on one PR can share a raw pipeline/repo name (e.g.
     CircleCI's `CIRCLE_PROJECT_REPONAME` and Buildkite's
-    `BUILDKITE_PIPELINE_SLUG` both "myrepo"). `_ci_identity` host-prefixes
+    `BUILDKITE_PIPELINE_SLUG` both "myrepo"). `ci_identity` host-prefixes
     `workflow_name`, so the slots stay distinct and neither host's run evicts
     the other's — the cause of a CI host's tasks vanishing from the comment."""
     existing = {

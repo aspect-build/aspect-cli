@@ -5,6 +5,9 @@ variables alone, without an authenticated API call:
 
   - `detect_ci_host` — per-host detection + precedence order, and the
                        `None` result off a recognized host.
+  - `ci_identity` — per-host run id / attempt resolution (the CircleCI
+                       workflow id, not `GITHUB_RUN_ID`), host-prefixed
+                       workflow name, and `None` for an unsupported host.
   - `detect_buildkite_build_url` — job-anchored URL, bare-build-URL
                        fallback, and the empty case.
   - `github_actions_run_url` — run-level URL shape, custom server,
@@ -25,7 +28,7 @@ Run with:
   aspect dev test-ci
 """
 
-load("./ci.axl", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
+load("./ci.axl", "ci_identity", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
 
 # Every CI-host marker + the per-job cache, snapshotted/restored around
 # each subtest so the harness's own CI environment can't leak in.
@@ -35,6 +38,16 @@ _ENV_KEYS = [
     "GITHUB_SERVER_URL",
     "GITHUB_REPOSITORY",
     "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_WORKFLOW",
+    "GITHUB_JOB",
+    "BUILDKITE_BUILD_ID",
+    "BUILDKITE_PIPELINE_SLUG",
+    "BUILDKITE_STEP_KEY",
+    "BUILDKITE_RETRY_COUNT",
+    "CIRCLE_WORKFLOW_ID",
+    "CIRCLE_PROJECT_REPONAME",
+    "CIRCLE_JOB",
     "BUILDKITE",
     "BUILDKITE_BUILD_URL",
     "BUILDKITE_JOB_ID",
@@ -85,6 +98,40 @@ def _test_detect_ci_host(ctx):
     ctx.std.env.set_var("GITHUB_ACTIONS", "true")
     ctx.std.env.set_var("BUILDKITE", "true")
     _eq("ci_host — precedence is GitHub Actions first", detect_ci_host(ctx.std.env)["marker"], "GITHUB_ACTIONS")
+
+    _restore_env(ctx, snapshot)
+
+def _test_ci_identity(ctx):
+    snapshot = _snapshot_env(ctx)
+    _clear_env(ctx)
+
+    _eq("identity — unsupported host", ci_identity(ctx.std.env, "GITLAB_CI"), None)
+
+    ctx.std.env.set_var("GITHUB_RUN_ID", "111")
+    ctx.std.env.set_var("GITHUB_RUN_ATTEMPT", "2")
+    ctx.std.env.set_var("GITHUB_WORKFLOW", "ci")
+    gha = ci_identity(ctx.std.env, "GITHUB_ACTIONS")
+    _eq("identity — gha run id", gha["run_id"], "111")
+    _eq("identity — gha run attempt", gha["run_attempt"], "2")
+    _eq("identity — gha workflow host-prefixed", gha["workflow_name"], "GITHUB_ACTIONS:ci")
+
+    # CircleCI never sets GITHUB_RUN_ID; the run id is the workflow id.
+    _clear_env(ctx)
+    ctx.std.env.set_var("CIRCLE_WORKFLOW_ID", "wf-abc")
+    ctx.std.env.set_var("CIRCLE_JOB", "test")
+    cci = ci_identity(ctx.std.env, "CIRCLECI")
+    _eq("identity — cci run id is the workflow id", cci["run_id"], "wf-abc")
+    _eq("identity — cci attempt defaults to 1", cci["run_attempt"], "1")
+    _eq("identity — cci job name", cci["job_name"], "test")
+
+    _clear_env(ctx)
+    ctx.std.env.set_var("BUILDKITE_BUILD_ID", "bk-1")
+    bk = ci_identity(ctx.std.env, "BUILDKITE")
+    _eq("identity — bk run id", bk["run_id"], "bk-1")
+    _eq("identity — bk job name defaults", bk["job_name"], "unknown-job")
+
+    _clear_env(ctx)
+    _eq("identity — unset run id is empty", ci_identity(ctx.std.env, "CIRCLECI")["run_id"], "")
 
     _restore_env(ctx, snapshot)
 
@@ -206,12 +253,13 @@ def _test_resolve_build_url_off_gha(ctx):
 
 def _test_impl(ctx):
     _test_detect_ci_host(ctx)
+    _test_ci_identity(ctx)
     _test_detect_buildkite_build_url(ctx)
     _test_github_actions_run_url(ctx)
     _test_detect_build_url_per_host(ctx)
     _test_detect_build_url_cache_first(ctx)
     _test_resolve_build_url_off_gha(ctx)
-    print("ci.axl: OK (6 sections)")
+    print("ci.axl: OK (7 sections)")
     return 0
 
 ci_tests = task(
