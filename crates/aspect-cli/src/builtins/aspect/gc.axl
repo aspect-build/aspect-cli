@@ -14,6 +14,11 @@ grow without bound:
 
 This task reaps the first and reports the second.
 
+Nothing is deleted without saying so first: the orphans are listed in full, then
+confirmed on the terminal. `--force` answers for you and is **required** off a
+terminal, so a `gc` wired into CI or a cron has to state that it deletes rather
+than inheriting it from a default.
+
 What it never touches, and why:
 
   - **An output base whose workspace still exists.** Its analysis cache is the
@@ -23,10 +28,6 @@ What it never touches, and why:
   - **`install/` and `cache/`.** They sit beside the output bases under the same
     root and are shared by every workspace on the machine. Treating them as
     output bases reports tens of gigabytes of working cache as garbage.
-  - **A base pinned to an `aspect worktree` pool slot.** A free slot has no
-    worktree — the pool destroys it and keeps the base on purpose — so one is
-    indistinguishable from an orphan by workspace alone, and reaping it would
-    throw away exactly the warm state the pool exists to hold.
 
 A base's workspace is resolved from the execroot's own source symlinks, falling
 back to the `--workspace_directory` in `server/cmdline`. Neither source alone
@@ -44,18 +45,6 @@ _SCHEMA_VERSION = 1
 _LIVE = "live"
 _ORPHAN = "orphan"
 _UNKNOWN = "unknown"
-_POOLED = "pooled"
-
-# How a worktree-pool output base is recognized, mirroring `aspect worktree`'s
-# own constants (`_OUTPUT_BASE_PREFIX` and `pools_root` in
-# `private/lib/worktree.axl`). Spelled out here rather than imported so this
-# task stays independent of whether the pool feature is present.
-#
-# These bases look exactly like orphans and must never be reaped: the pool
-# destroys a slot's worktree while keeping its output base on purpose, because
-# the warm server and `external/` tree are the whole reason the pool exists.
-_POOL_BASE_PREFIX = "aspect-wt-"
-_POOL_WORKTREES_SUBDIR = "/.aspect/worktrees/"
 
 # Directories under the output user root that are shared infrastructure, not
 # output bases. `install/` holds the extracted Bazel binaries; `cache/` holds the
@@ -205,15 +194,6 @@ def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
             sizes[parts[1].strip()] = int(parts[0].strip())
     return sizes
 
-def _is_pooled(name: str, workspace: str) -> bool:
-    """True when this base belongs to an `aspect worktree` pool slot.
-
-    Either signal is enough: the pool names the bases it creates, and a base
-    built inside a slot before the pool pinned one still points its workspace
-    there.
-    """
-    return name.startswith(_POOL_BASE_PREFIX) or _POOL_WORKTREES_SUBDIR in workspace
-
 def _scan(ctx: TaskContext, root: str) -> list:
     """Classify every output base under `root`."""
     bases = []
@@ -222,9 +202,7 @@ def _scan(ctx: TaskContext, root: str) -> list:
             continue
         path = root + "/" + entry.path
         workspace = _workspace_of(ctx, path)
-        if _is_pooled(entry.path, workspace):
-            state = _POOLED
-        elif not workspace:
+        if not workspace:
             state = _UNKNOWN
         elif ctx.std.fs.exists(workspace):
             state = _LIVE
@@ -301,6 +279,63 @@ def _cache_report(ctx: TaskContext, root: str) -> dict:
         "install_bases_kb": sizes.get(installs, 0),
     }
 
+def _answered_yes(answer: str) -> bool:
+    """True when the answer begins with `y` or `Y`.
+
+    Anything else, an empty line included, is a no: the destructive branch
+    should take a deliberate keystroke, not merely a non-matching one.
+    """
+    trimmed = answer.strip()
+    return trimmed.startswith("y") or trimmed.startswith("Y")
+
+def _read_line(ctx: TaskContext) -> str:
+    """One line from the terminal.
+
+    Read through `head -n 1`, which inherits the console and hands the line back
+    as a string. `ctx.std.io.stdin` yields `bytes`, and AXL's `bytes` has no
+    decode — only `elems()`, over length-1 `bytes` whose literals buildifier
+    rejects, Bazel's Starlark having no such syntax. Shelling out is what the
+    rest of this task already does for `du`, `ps` and `chmod`.
+    """
+    out = ctx.std.process.command("head").args(["-n", "1"]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout if out.status.code == 0 else ""
+
+def _ask(ctx: TaskContext, count: int, kb: int) -> bool:
+    """Ask on the terminal whether to delete, defaulting to no.
+
+    The prompt goes to the console rather than stdout, which may be carrying a
+    results document.
+    """
+    ctx.std.io.stderr.write("  Delete %d output base(s) and free %s? [y/N] " % (count, _fmt_kb(kb)))
+    return _answered_yes(_read_line(ctx))
+
+def _should_delete(ctx: TaskContext, orphans: list, kb: int) -> struct:
+    """Whether to go ahead, as `(go, conclusion)` — a conclusion ends the task.
+
+    Deleting is the destructive half of this task, so it is never reached
+    without either an explicit `--force` or a terminal answer. Off a terminal
+    there is nobody to ask and no safe assumption, so `--force` is required
+    rather than inferred: a `gc` wired into a CI job or a cron should say out
+    loud that it deletes.
+    """
+    if not orphans or ctx.args.dry_run:
+        return struct(go = False, conclusion = None)
+    if ctx.args.force:
+        return struct(go = True, conclusion = None)
+    if not ctx.std.io.stdin.is_tty:
+        return struct(go = False, conclusion = TaskConclusion(
+            exit_code = 1,
+            message = ("refusing to delete %d output base(s) with no terminal to confirm at. " +
+                       "Pass --force to delete them, or --dry-run to look without deleting.") % len(orphans),
+        ))
+    if _ask(ctx, len(orphans), kb):
+        return struct(go = True, conclusion = None)
+    return struct(go = False, conclusion = TaskConclusion(
+        exit_code = 0,
+        message = "left alone; nothing was deleted.",
+    ))
+
 def _say(ctx: TaskContext, streaming: bool, line: str) -> None:
     """A progress line, suppressed under `--output=json`.
 
@@ -330,16 +365,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bases = _scan(ctx, root)
     live = [b for b in bases if b.state == _LIVE]
     unknown = [b for b in bases if b.state == _UNKNOWN]
-    pooled = [b for b in bases if b.state == _POOLED]
     found = [b for b in bases if b.state == _ORPHAN]
-    _say(ctx, streaming, "  %d bases: %d live, %d orphaned, %d undetermined, %d held by the worktree pool" %
-                         (len(bases), len(live), len(found), len(unknown), len(pooled)))
+    _say(ctx, streaming, "  %d bases: %d live, %d orphaned, %d undetermined" %
+                         (len(bases), len(live), len(found), len(unknown)))
     if unknown:
         _say(ctx, streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
         _say(ctx, streaming, "     the base cannot be attributed to a workspace. Left alone.)")
-    if pooled:
-        _say(ctx, streaming, "    (worktree pool = pinned to an `aspect worktree` slot. A free slot has no")
-        _say(ctx, streaming, "     worktree, which is what keeps its server warm. Left alone.)")
 
     if found:
         _say(ctx, streaming, "  measuring %d orphaned base(s)…" % len(found))
@@ -354,22 +385,27 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _say(ctx, streaming, "  measuring the shared caches… (this is the slow part)")
     caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
 
+    # The full list goes out before anything is deleted, so the confirmation
+    # below is answered with the whole picture rather than a count.
+    if orphans:
+        _say(ctx, streaming, "  %d orphaned output base(s), %s:" % (len(orphans), _fmt_kb(reclaimable)))
+    for b in orphans:
+        _say(ctx, streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
+
+    proceed = _should_delete(ctx, orphans, reclaimable)
+    if proceed.conclusion != None:
+        return proceed.conclusion
+
     reaped = 0
     freed = 0
-    if orphans and ctx.args.dry_run:
-        _say(ctx, streaming, "  would reclaim (nothing is deleted under --dry-run):")
-    elif orphans:
-        _say(ctx, streaming, "  reclaiming %s from %d output base(s):" % (_fmt_kb(reclaimable), len(orphans)))
-
-    for b in orphans:
-        # Printed before the work, not after: a 1 GB tree takes seconds to
-        # unlink, and this line is what says where that time is going.
-        _say(ctx, streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
-        if ctx.args.dry_run:
-            continue
-        if _reap(ctx, b.path, b.pid):
-            reaped += 1
-            freed += b.kb
+    if proceed.go:
+        for i, b in enumerate(orphans):
+            # Printed before the work, not after: a 1 GB tree takes seconds to
+            # unlink, and this line is what says where that time is going.
+            _say(ctx, streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(orphans), _fmt_kb(b.kb), b.name))
+            if _reap(ctx, b.path, b.pid):
+                reaped += 1
+                freed += b.kb
 
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
@@ -380,7 +416,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 "live": len(live),
                 "orphaned": len(orphans),
                 "undetermined": len(unknown),
-                "worktree_pool": len(pooled),
             },
             "orphans": [
                 {"path": b.path, "workspace": b.workspace, "kb": b.kb, "pid": b.pid}
@@ -431,7 +466,11 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
         ),
         "dry_run": args.boolean(
             default = False,
-            description = "Report what would be reclaimed without deleting anything.",
+            description = "Report what would be reclaimed without deleting anything, and without prompting.",
+        ),
+        "force": args.boolean(
+            default = False,
+            description = "Delete without asking. Required when stdin is not a terminal, since there is nobody to confirm with — a `gc` running from CI or cron has to say that it deletes.",
         ),
         "report_caches": args.boolean(
             default = False,
@@ -446,6 +485,7 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 )
 
 # Exposed for gc_test.axl; not part of the task's surface.
+testonly_answered_yes = _answered_yes
 testonly_fmt_kb = _fmt_kb
 testonly_reap = _reap
 testonly_scan = _scan

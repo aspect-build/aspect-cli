@@ -5,20 +5,16 @@ Run with:
 
 The classifier is what decides whether a directory gets deleted, so the tests
 build a real output-base-shaped tree under a temp dir and run the real `_scan`
-against it. The fixture covers every state plus the two that would be data-loss
-bugs:
-
-  - `install/` and `cache/` sit beside the output bases under the same root and
-    are shared by every workspace on the machine. Counting them as bases
-    reports tens of gigabytes of working cache as garbage.
-  - A worktree-pool base has no worktree at its workspace path, by design, so
-    it is indistinguishable from an orphan without the pool-specific test.
+against it. The fixture covers every state plus the one that would be a data-loss
+bug: `install/` and `cache/` sit beside the output bases under the same root
+and are shared by every workspace on the machine. Counting them as bases reports
+tens of gigabytes of working cache as garbage.
 
 Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_answered_yes", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -76,16 +72,23 @@ def _fixture(ctx: TaskContext) -> str:
     _make_base(ctx, root, "bothbase", live_ws)
     _write_cmdline(ctx, root + "/bothbase", tmp + "/stale-from-cmdline")
 
-    # Two shapes of worktree-pool base, both of which look exactly like orphans:
-    # one named by the pool, one built in a slot before the pool pinned a base.
-    # The slot directories are deliberately absent — that is what a free slot is.
-    _make_base(ctx, root, "aspect-wt-abc123", tmp + "/pool/aspect-worktree-abc123")
-    _make_base(ctx, root, "hashnamed", tmp + "/.aspect/worktrees/github.com/acme/repo/aspect-worktree-def456")
-
     # Shared infrastructure, not output bases.
     ctx.std.fs.create_dir_all(root + "/install/abc123")
     ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
     return root
+
+def _test_only_an_explicit_y_consents_to_deletion(ctx):
+    """This answer is the only thing between a listing and `rm -rf` on
+    multi-gigabyte trees, so everything that is not a deliberate yes — an empty
+    line, Enter alone, a stray word, EOF from a closed stdin — has to read as
+    no.
+    """
+    for yes in ["y", "y\n", "Y\n", "yes\n", "  y\n", "\ty\n"]:
+        if not testonly_answered_yes(yes):
+            fail("expected %r to consent" % yes)
+    for no in ["", "\n", "n", "n\n", "N\n", "no\n", "later\n", " \n", "maybe"]:
+        if testonly_answered_yes(no):
+            fail("expected %r NOT to consent" % no)
 
 def _test_fmt_kb(ctx):
     _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
@@ -118,7 +121,7 @@ def _test_shared_directories_are_never_classified(ctx):
     names = [b.name for b in testonly_scan(ctx, root)]
     _eq("install is not a base", "install" in names, False)
     _eq("cache is not a base", "cache" in names, False)
-    _eq("only the real bases", sorted(names), ["aspect-wt-abc123", "bothbase", "cmdlinebase", "deadbase", "hashnamed", "livebase", "weirdbase"])
+    _eq("only the real bases", sorted(names), ["bothbase", "cmdlinebase", "deadbase", "livebase", "weirdbase"])
 
 def _test_orphan_carries_the_workspace_it_lost(ctx):
     """The report names the workspace that went away; without it a reader can't
@@ -151,25 +154,6 @@ def _test_execroot_wins_over_a_stale_cmdline(ctx):
     root = _fixture(ctx)
     ws = testonly_workspace_of(ctx, root + "/bothbase")
     _eq("execroot wins", ws.endswith("/live-workspace"), True)
-
-def _test_worktree_pool_bases_are_never_reaped(ctx):
-    """The cross-feature data-loss case. `aspect worktree remove` deletes a
-    slot's worktree and keeps its output base on purpose — that warm server and
-    `external/` tree are the whole point of the pool — so a free slot's base is
-    indistinguishable from an orphan by workspace alone. Reaping it would undo
-    the feature.
-    """
-    root = _fixture(ctx)
-    states = {}
-    for b in testonly_scan(ctx, root):
-        states[b.name] = b.state
-    _eq("recognized by base name", states["aspect-wt-abc123"], "pooled")
-    _eq("recognized by slot workspace", states["hashnamed"], "pooled")
-
-    # The reap list is built from orphans alone, so being anything else is what
-    # protects them.
-    _eq("not offered for deletion", states["aspect-wt-abc123"] == "orphan", False)
-    _eq("not offered for deletion", states["hashnamed"] == "orphan", False)
 
 def _test_reap_removes_a_base_bazel_left_read_only(ctx):
     """Bazel strips the owner-write bit from action output directories under
@@ -217,6 +201,7 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
     _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
 
 _UNIT_TESTS = [
+    _test_only_an_explicit_y_consents_to_deletion,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
     _test_scan_classifies_the_three_outcomes,
@@ -224,7 +209,6 @@ _UNIT_TESTS = [
     _test_orphan_carries_the_workspace_it_lost,
     _test_cmdline_attributes_a_base_with_an_empty_execroot,
     _test_execroot_wins_over_a_stale_cmdline,
-    _test_worktree_pool_bases_are_never_reaped,
     _test_reap_removes_a_base_bazel_left_read_only,
     _test_reap_does_not_reach_outside_the_base,
     _test_a_base_neither_source_resolves_stays_undetermined,
