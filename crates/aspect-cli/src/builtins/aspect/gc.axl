@@ -254,22 +254,40 @@ def _with_sizes(ctx: TaskContext, bases: list) -> list:
         for b in bases
     ]
 
-def _reap(ctx: TaskContext, base: _Base) -> bool:
+def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
     """Stop the base's server if it is really its server, then delete the base.
 
     The server is signalled rather than asked to shut down over its RPC port:
     `bazel shutdown` against a dead workspace would start a server to shut it
     down, and everything the running one holds lives in the directory about to
     be removed.
+
+    The tree is made writable first. Bazel strips the owner-write bit from the
+    action output directories under `bazel-out/`, and unlinking a child needs
+    write on its parent, so a base that completed a build cannot be removed as
+    it stands — which is every base large enough to be worth reclaiming. This is
+    the same `chmod` `bazel clean` does for the same reason.
     """
-    if _is_this_bases_server(ctx, base.pid, base.path):
-        ctx.std.process.command("kill").args([str(base.pid)]) \
+    if _is_this_bases_server(ctx, pid, path):
+        ctx.std.process.command("kill").args([str(pid)]) \
             .stdout("null").stderr("null").spawn().wait()
-    err, _ = catch(ctx.std.fs.remove_dir_all, base.path)
+    _make_writable(ctx, path)
+    err, _ = catch(ctx.std.fs.remove_dir_all, path)
     if err != None:
-        warn(ctx.std, "could not remove " + base.path + ": " + str(err))
+        warn(ctx.std, "could not remove " + path + ": " + str(err))
         return False
     return True
+
+def _make_writable(ctx: TaskContext, path: str) -> None:
+    """Restore the owner-write bit across `path`, so the tree can be unlinked.
+
+    One `chmod -R` rather than an AXL walk: a single output base holds hundreds
+    of read-only directories and tens of thousands of files, and spawning once
+    beats a per-entry round trip. Failure is not reported here — the removal
+    that follows reports it, with the error the caller actually cares about.
+    """
+    ctx.std.process.command("chmod").args(["-R", "u+w", path]) \
+        .stdout("null").stderr("null").spawn().wait()
 
 def _cache_report(ctx: TaskContext, root: str) -> dict:
     """Sizes of the caches this task reports but does not touch."""
@@ -283,6 +301,15 @@ def _cache_report(ctx: TaskContext, root: str) -> dict:
         "install_bases_kb": sizes.get(installs, 0),
     }
 
+def _say(ctx: TaskContext, streaming: bool, line: str) -> None:
+    """A progress line, suppressed under `--output=json`.
+
+    The JSON document reports the finished state, so narrating to a script that
+    is waiting to parse one is noise.
+    """
+    if streaming:
+        print(line)
+
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     root = ctx.args.output_user_root or _default_output_user_root(ctx)
     if not ctx.std.fs.exists(root):
@@ -292,26 +319,57 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                       " — pass --output-user-root to point at one",
         )
 
+    # Everything below narrates as it goes rather than reporting at the end:
+    # classifying walks every base, sizing shells out to `du`, and deleting a
+    # multi-gigabyte tree takes seconds apiece. A reader needs to see which of
+    # those it is waiting on.
+    streaming = ctx.args.output != "json"
+    info(ctx.std, "output user root: " + root)
+
+    _say(ctx, streaming, "  scanning output bases…")
     bases = _scan(ctx, root)
-    orphans = _with_sizes(ctx, [b for b in bases if b.state == _ORPHAN])
     live = [b for b in bases if b.state == _LIVE]
     unknown = [b for b in bases if b.state == _UNKNOWN]
     pooled = [b for b in bases if b.state == _POOLED]
+    found = [b for b in bases if b.state == _ORPHAN]
+    _say(ctx, streaming, "  %d bases: %d live, %d orphaned, %d undetermined, %d held by the worktree pool" %
+                         (len(bases), len(live), len(found), len(unknown), len(pooled)))
+    if unknown:
+        _say(ctx, streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
+        _say(ctx, streaming, "     the base cannot be attributed to a workspace. Left alone.)")
+    if pooled:
+        _say(ctx, streaming, "    (worktree pool = pinned to an `aspect worktree` slot. A free slot has no")
+        _say(ctx, streaming, "     worktree, which is what keeps its server warm. Left alone.)")
+
+    if found:
+        _say(ctx, streaming, "  measuring %d orphaned base(s)…" % len(found))
+    orphans = _with_sizes(ctx, found)
     reclaimable = 0
     for b in orphans:
         reclaimable += b.kb
 
     # Sizing the shared caches walks tens of gigabytes and costs more than the
     # rest of the task put together, so it is asked for rather than assumed.
+    if ctx.args.report_caches:
+        _say(ctx, streaming, "  measuring the shared caches… (this is the slow part)")
     caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
 
     reaped = 0
     freed = 0
-    if not ctx.args.dry_run:
-        for b in orphans:
-            if _reap(ctx, b):
-                reaped += 1
-                freed += b.kb
+    if orphans and ctx.args.dry_run:
+        _say(ctx, streaming, "  would reclaim (nothing is deleted under --dry-run):")
+    elif orphans:
+        _say(ctx, streaming, "  reclaiming %s from %d output base(s):" % (_fmt_kb(reclaimable), len(orphans)))
+
+    for b in orphans:
+        # Printed before the work, not after: a 1 GB tree takes seconds to
+        # unlink, and this line is what says where that time is going.
+        _say(ctx, streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
+        if ctx.args.dry_run:
+            continue
+        if _reap(ctx, b.path, b.pid):
+            reaped += 1
+            freed += b.kb
 
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
@@ -335,24 +393,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         }, indent = 2) + "\n")
         return 0
 
-    info(ctx.std, "output user root: " + root)
-    print("  %d live, %d orphaned, %d undetermined, %d held by the worktree pool" %
-          (len(live), len(orphans), len(unknown), len(pooled)))
-    if unknown:
-        print("    (undetermined = no execroot symlinks and no recorded server command line, so")
-        print("     the base cannot be attributed to a workspace. Left alone.)")
-    if pooled:
-        print("    (worktree pool = pinned to an `aspect worktree` slot. A free slot has no")
-        print("     worktree, which is what keeps its server warm. Left alone.)")
-    for b in orphans:
-        print("    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
-
     if not orphans:
         print("  nothing to reclaim")
     elif ctx.args.dry_run:
         print("  would reclaim " + _fmt_kb(reclaimable) + " from " + str(len(orphans)) + " output base(s)")
-    else:
+    elif reaped == len(orphans):
         print("  reclaimed " + _fmt_kb(freed) + " from " + str(reaped) + " output base(s)")
+    else:
+        # The per-base warnings above say which ones and why; this is the total,
+        # so a reader does not have to count the warnings to know what is left.
+        print("  reclaimed %s from %d of %d output base(s); %s could not be removed" %
+              (_fmt_kb(freed), reaped, len(orphans), _fmt_kb(reclaimable - freed)))
 
     # Reported, never touched: the download cache has no collector in any Bazel
     # release, so its size is the number a reader most needs to see.
@@ -396,5 +447,6 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 
 # Exposed for gc_test.axl; not part of the task's surface.
 testonly_fmt_kb = _fmt_kb
+testonly_reap = _reap
 testonly_scan = _scan
 testonly_workspace_of = _workspace_of

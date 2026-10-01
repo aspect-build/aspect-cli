@@ -18,7 +18,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_fmt_kb", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -171,6 +171,23 @@ def _test_worktree_pool_bases_are_never_reaped(ctx):
     _eq("not offered for deletion", states["aspect-wt-abc123"] == "orphan", False)
     _eq("not offered for deletion", states["hashnamed"] == "orphan", False)
 
+def _test_reap_removes_a_base_bazel_left_read_only(ctx):
+    """Bazel strips the owner-write bit from action output directories under
+    `bazel-out/`, and unlinking a child needs write on its parent. Without the
+    `chmod` this fails with EACCES on every base that completed a build — which
+    is every base large enough to be worth reclaiming.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-perm")
+    base = tmp + "/base"
+    locked = base + "/execroot/_main/bazel-out/k8-fastbuild/bin/pkg/build_script.out_dir"
+    ctx.std.fs.create_dir_all(locked)
+    ctx.std.fs.write(locked + "/out.txt", "an action output\n")
+    ctx.std.fs.set_permissions(locked, 0o555)
+
+    reaped = testonly_reap(ctx, base, 0)
+    _eq("reported as reaped", reaped, True)
+    _eq("actually gone", ctx.std.fs.exists(base), False)
+
 def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
     """The conservative end of the fallback: no symlinks and no cmdline means
     no deletion."""
@@ -186,6 +203,7 @@ _UNIT_TESTS = [
     _test_cmdline_attributes_a_base_with_an_empty_execroot,
     _test_execroot_wins_over_a_stale_cmdline,
     _test_worktree_pool_bases_are_never_reaped,
+    _test_reap_removes_a_base_bazel_left_read_only,
     _test_a_base_neither_source_resolves_stays_undetermined,
 ]
 
