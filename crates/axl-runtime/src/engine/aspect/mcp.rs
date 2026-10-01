@@ -26,7 +26,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     ErrorData as McpError, Implementation, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -222,7 +222,8 @@ fn label_prop() -> serde_json::Value {
 }
 
 /// The published tool surface. Read-only build data only: the API's
-/// org/profile/session management routes are deliberately not exposed.
+/// org/profile/session management routes are deliberately not exposed, and
+/// `list_tools_result` annotates every tool `readOnlyHint` on that basis.
 fn tool_defs() -> &'static [ToolDef] {
     &[
         ToolDef {
@@ -726,6 +727,7 @@ fn list_tools_result(version: Option<&ProtocolVersion>) -> ListToolsResult {
                 _ => unreachable!("tool schemas are objects by construction"),
             };
             Tool::new(def.name, def.description, Arc::new(schema))
+                .annotate(ToolAnnotations::new().read_only(true))
         })
         .collect();
     let result = ListToolsResult::with_all_items(tools);
@@ -940,6 +942,18 @@ mod tests {
             let json = serde_json::to_value(list_tools_result(older.as_ref())).unwrap();
             assert!(json.get("ttlMs").is_none(), "{older:?}: {json}");
             assert!(json.get("cacheScope").is_none(), "{older:?}: {json}");
+        }
+    }
+
+    #[test]
+    fn every_tool_is_annotated_read_only() {
+        let json = serde_json::to_value(list_tools_result(None)).unwrap();
+        for tool in json["tools"].as_array().unwrap() {
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"], true,
+                "{}",
+                tool["name"]
+            );
         }
     }
 
