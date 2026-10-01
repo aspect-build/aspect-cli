@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_answered_yes", "testonly_delete_decision", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_answered_yes", "testonly_delete_decision", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -85,6 +85,50 @@ def _fixture(ctx: TaskContext) -> str:
     ctx.std.fs.create_dir_all(root + "/install/abc123")
     ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
     return root
+
+def _doc(ctx, root, verbose):
+    """The document for `root`'s real classification, at a given verbosity."""
+    bases = testonly_scan(ctx, root)
+    return testonly_document(
+        root = root,
+        dry_run = True,
+        verbose = verbose,
+        live = [b for b in bases if b.state == "live"],
+        unknown = [b for b in bases if b.state == "unknown"],
+        orphans = [b for b in bases if b.state == "orphan"],
+        reclaimable = 0,
+        reaped = 0,
+        freed = 0,
+        caches = {},
+    )
+
+def _test_verbose_lists_what_was_left_alone(ctx):
+    """`--verbose` exists so a classification can be checked rather than taken
+    on trust, so the kept bases have to carry the workspace each was attributed
+    to — that is the part a reader is auditing."""
+    root = _fixture(ctx)
+    doc = _doc(ctx, root, True)
+
+    _eq("every live base listed", len(doc["live_bases"]), 2)
+    _eq("every undetermined base listed", len(doc["undetermined_bases"]), 1)
+    _eq("live entries name their workspace", all([e["workspace"] for e in doc["live_bases"]]), True)
+    _eq("an undetermined base has none to name", doc["undetermined_bases"][0]["workspace"], "")
+
+    # Nothing sizes the kept bases: a `du` over every live base on the machine
+    # would cost more than the run, to report what will not be reclaimed.
+    _eq("no sizes claimed", all(["kb" not in e for e in doc["live_bases"]]), True)
+
+def _test_verbose_is_additive_only(ctx):
+    """A consumer that never passes `--verbose` must see the same document, so
+    the flag may only add keys."""
+    root = _fixture(ctx)
+    plain = _doc(ctx, root, False)
+    verbose = _doc(ctx, root, True)
+
+    _eq("no kept bases by default", "live_bases" in plain, False)
+    _eq("none by default either", "undetermined_bases" in plain, False)
+    for key in plain:
+        _eq("key %s unchanged" % key, verbose[key], plain[key])
 
 def _test_deletion_never_happens_unasked(ctx):
     """The whole policy as a table. Every row that deletes has either --force or
@@ -238,6 +282,8 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
     _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
 
 _UNIT_TESTS = [
+    _test_verbose_lists_what_was_left_alone,
+    _test_verbose_is_additive_only,
     _test_deletion_never_happens_unasked,
     _test_only_an_explicit_y_consents_to_deletion,
     _test_fmt_kb,

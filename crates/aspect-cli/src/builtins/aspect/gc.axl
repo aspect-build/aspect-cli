@@ -354,9 +354,14 @@ def _needs_force_message(count: int) -> str:
     return ("refusing to delete %d output base(s) with no terminal to confirm at. " +
             "Pass --force to delete them, or --dry-run to look without deleting.") % count
 
+def _kept_entries(bases: list) -> list:
+    """Bases a run leaves alone, for the document. No `kb`: nothing sizes them."""
+    return [{"path": b.path, "workspace": b.workspace, "pid": b.pid} for b in bases]
+
 def _document(
         root: str,
         dry_run: bool,
+        verbose: bool,
         live: list,
         unknown: list,
         orphans: list,
@@ -368,9 +373,10 @@ def _document(
 
     `reclaimable_kb` is what the orphans hold and `freed_kb` what was actually
     removed; under `--dry-run`, or when a removal failed, they differ. The key
-    names are a contract, so `_SCHEMA_VERSION` moves when they do.
+    names are a contract, so `_SCHEMA_VERSION` moves when they do — `--verbose`
+    only adds keys, which consumers already have to tolerate.
     """
-    return {
+    doc = {
         "schema_version": _SCHEMA_VERSION,
         "output_user_root": root,
         "dry_run": dry_run,
@@ -388,6 +394,24 @@ def _document(
         "freed_kb": freed,
         "caches": caches,
     }
+    if verbose:
+        doc["live_bases"] = _kept_entries(live)
+        doc["undetermined_bases"] = _kept_entries(unknown)
+    return doc
+
+def _list_kept(streaming: bool, heading: str, bases: list) -> None:
+    """List bases this run will not touch, under `--verbose`.
+
+    Sizes are deliberately absent: measuring them means a `du` over every live
+    base on the machine, tens of gigabytes, to report something nothing is going
+    to reclaim. The path and the workspace are what make a classification
+    checkable, which is what this flag is for.
+    """
+    if not bases:
+        return
+    _say(streaming, "  %s (%d):" % (heading, len(bases)))
+    for b in bases:
+        _say(streaming, "    " + b.name + ("  " + b.workspace if b.workspace else ""))
 
 def _say(streaming: bool, line: str) -> None:
     """A progress line, suppressed under `--output=json`.
@@ -424,6 +448,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if unknown:
         _say(streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
         _say(streaming, "     the base cannot be attributed to a workspace. Left alone.)")
+
+    if ctx.args.verbose:
+        _say(streaming, "")
+        _list_kept(streaming, "live — workspace still exists", live)
+        _list_kept(streaming, "undetermined — cannot be attributed", unknown)
+        _say(streaming, "")
 
     if orphaned:
         _say(streaming, "  measuring %d orphaned base(s)…" % len(orphaned))
@@ -471,6 +501,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ctx.std.io.stdout.write(json.encode(_document(
             root = root,
             dry_run = ctx.args.dry_run,
+            verbose = ctx.args.verbose,
             live = live,
             unknown = unknown,
             orphans = orphans,
@@ -527,6 +558,10 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
             default = False,
             description = "Delete without asking. Required when stdin is not a terminal, since there is nobody to confirm with — a `gc` running from CI or cron has to say that it deletes.",
         ),
+        "verbose": args.boolean(
+            default = False,
+            description = "Also list the bases that are left alone — the live ones with the workspace each still belongs to, and the undetermined ones — so a classification can be checked rather than taken on trust. Sizes are not reported for them: measuring would mean walking every live base on the machine to size something nothing will reclaim. Adds `live_bases` and `undetermined_bases` to `--output=json`.",
+        ),
         "report_caches": args.boolean(
             default = False,
             description = "Also report the sizes of the caches shared between output bases (download cache, repo contents cache, install bases). Off by default because measuring them walks tens of gigabytes and takes longer than everything else this task does.",
@@ -542,6 +577,7 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 # Exposed for gc_test.axl; not part of the task's surface.
 testonly_answered_yes = _answered_yes
 testonly_delete_decision = _delete_decision
+testonly_document = _document
 testonly_fmt_kb = _fmt_kb
 testonly_reap = _reap
 testonly_scan = _scan
