@@ -1493,10 +1493,8 @@ fn describe_index(
     let mut commands: Vec<serde_json::Value> = tasks
         .iter()
         .map(|task| {
-            let mut path = task.group().clone();
-            path.push(task.kind());
             json!({
-                "command": format!("aspect {}", path.join(" ")),
+                "command": format!("aspect {}", command_path(*task)),
                 "summary": task.summary(),
             })
         })
@@ -1523,13 +1521,7 @@ fn describe_index(
 /// it stays true for a reader who has their own reasons to call the underlying
 /// tool, and so the CLI is not asserting a preference on a repo's behalf.
 fn agent_guidance(tasks: &[&dyn TaskLike<'_>]) -> Vec<String> {
-    let has = |path: &str| {
-        tasks.iter().any(|t| {
-            let mut p = t.group().clone();
-            p.push(t.kind());
-            p.join(" ") == path
-        })
-    };
+    let has = |path: &str| tasks.iter().any(|t| command_path(*t) == path);
 
     let mut lines = vec![
         "This repository's task surface is defined by its own `.aspect/*.axl` files, so it \
@@ -1538,13 +1530,23 @@ fn agent_guidance(tasks: &[&dyn TaskLike<'_>]) -> Vec<String> {
             .to_string(),
     ];
 
-    if has("build") || has("test") {
-        lines.push(
-            "`aspect build` / `aspect test` wrap the corresponding Bazel commands with this \
-             repo's resolved flags, remote cache and BES wiring, retries, and CI reporting. \
-             Calling `bazel` directly still works and skips all of that."
-                .to_string(),
-        );
+    let bazel_wrappers: Vec<&str> = ["build", "test"].into_iter().filter(|p| has(p)).collect();
+    if !bazel_wrappers.is_empty() {
+        let named = bazel_wrappers
+            .iter()
+            .map(|p| format!("`aspect {p}`"))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        let (verb, object) = if bazel_wrappers.len() == 1 {
+            ("wraps", "the corresponding Bazel command")
+        } else {
+            ("wrap", "their corresponding Bazel commands")
+        };
+        lines.push(format!(
+            "{named} {verb} {object} with this repo's resolved flags, remote cache and BES \
+             wiring, retries, and CI reporting. Calling `bazel` directly still works and skips \
+             all of that."
+        ));
     }
     if has("setup tools-bazel-wrapper") {
         lines.push(
@@ -1563,12 +1565,26 @@ fn agent_guidance(tasks: &[&dyn TaskLike<'_>]) -> Vec<String> {
                 .to_string(),
         );
     }
-    lines.push(
-        "Tasks accept `--output=json` where they produce a result worth parsing; \
-         `aspect describe '<task>'` lists every flag with its type and default."
-            .to_string(),
-    );
+    if tasks.iter().any(|t| t.args().contains_key("output")) {
+        lines.push(
+            "Tasks that produce a result worth parsing accept `--output=json`; \
+             `aspect describe '<task>'` lists every flag with its type and default."
+                .to_string(),
+        );
+    }
     lines
+}
+
+/// A task's command path split into words — its group, then its own name.
+fn command_path_parts(task: &dyn TaskLike<'_>) -> Vec<String> {
+    let mut parts = task.group().clone();
+    parts.push(task.kind());
+    parts
+}
+
+/// A task's full command path as a user types it, without the leading `aspect `.
+fn command_path(task: &dyn TaskLike<'_>) -> String {
+    command_path_parts(task).join(" ")
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
@@ -1599,8 +1615,7 @@ fn describe_json(
         .iter()
         .map(|task| {
             let kind = task.kind();
-            let mut path = task.group().clone();
-            path.push(kind.clone());
+            let path = command_path_parts(*task);
             let overrides = stringify_overrides(task.overrides());
             let args: Vec<serde_json::Value> = task
                 .cli_args()
@@ -2564,6 +2579,41 @@ mod tests {
         assert!(
             !text.contains("tools-bazel-wrapper"),
             "must not advertise a task this repo has not defined"
+        );
+    }
+
+    #[test]
+    fn guidance_names_only_the_bazel_wrappers_that_exist() {
+        // One sentence covers both `build` and `test`, so a repo that defines
+        // only one of them must not have the other named in it.
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let test = stub_task("test", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&test];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("`aspect test` wraps"), "got: {text}");
+        assert!(!text.contains("aspect build"), "got: {text}");
+    }
+
+    #[test]
+    fn guidance_mentions_json_output_only_where_a_task_offers_it() {
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let plain = stub_task("build", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&plain];
+        assert!(
+            !describe_index("1.2.3", &tasks, &[])["guidance"]
+                .to_string()
+                .contains("--output=json")
+        );
+
+        let mut with_output: SmallMap<String, Arg> = SmallMap::new();
+        with_output.insert("output".into(), arg_string("text"));
+        let json_task = stub_task("build", &[], with_output);
+        let tasks: Vec<&dyn TaskLike> = vec![&json_task];
+        assert!(
+            describe_index("1.2.3", &tasks, &[])["guidance"]
+                .to_string()
+                .contains("--output=json")
         );
     }
 

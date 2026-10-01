@@ -595,9 +595,15 @@ fn tool_defs() -> &'static [ToolDef] {
     ]
 }
 
-/// The MCP server: one configured deployment's API origin plus the credential
-/// profile that authenticates against it.
-struct BuildResultsServer {
+/// The MCP server. Usage guidance always; build-results tools only when a
+/// deployment is configured, which is what `build_results` being `None` means.
+struct AspectServer {
+    build_results: Option<BuildResults>,
+}
+
+/// One configured deployment's API origin plus the credential profile that
+/// authenticates against it — everything the build-results tools need.
+struct BuildResults {
     /// Deployment name — also the credential-store profile.
     deployment: String,
     /// Scheme + host of the web/API edge (no path), from the deployment's
@@ -618,7 +624,7 @@ struct BuildResultsServer {
     http: reqwest::Client,
 }
 
-impl BuildResultsServer {
+impl BuildResults {
     /// Resolve the bearer for the deployment, fresh per call so the stored
     /// credential's refresh flow keeps a long-lived MCP session alive.
     ///
@@ -729,13 +735,10 @@ impl BuildResultsServer {
 /// only when negotiated, as rmcp's own `#[tool_handler]` does. The list is the
 /// same for every caller and never changes within a session: `Public`, fresh
 /// for 0ms to match rmcp's generated handler.
-/// `build_results` is false when no deployment is configured, in which case the
-/// list is empty: a tool that would answer every call with "configure a
-/// deployment" is worse than one that was never advertised.
-///
-/// Every tool here is a read-only query, declared as such so a host can apply a
+/// Every tool is a read-only query, declared as such so a host can apply a
 /// policy like "auto-approve reads, prompt on the rest" — which it can only do
-/// for properties the server states.
+/// for properties the server states. With `build_results` false the list is
+/// empty; see the module docs for why.
 fn list_tools_result(version: Option<&ProtocolVersion>, build_results: bool) -> ListToolsResult {
     let tools = if build_results {
         tool_defs()
@@ -764,35 +767,15 @@ fn list_tools_result(version: Option<&ProtocolVersion>, build_results: bool) -> 
     }
 }
 
-impl ServerHandler for BuildResultsServer {
+impl ServerHandler for AspectServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info =
             Implementation::new("aspect-cli", env!("CARGO_PKG_VERSION")).with_title("Aspect CLI");
 
-        // The CLI's own surface is per-repo and cannot be described from here,
-        // so this points at the command that can rather than trying to
-        // summarize it. Keeping that pointer short is the whole design: it is
-        // loaded into every session, while `aspect describe` is paid for only
-        // when something needs it.
-        let mut instructions = String::from(
-            "The Aspect CLI is available in this environment. Its task surface is defined \
-             per-repository by that repo's own `.aspect/*.axl` files, so it is not in any \
-             training data and differs between repositories.\n\n\
-             Run `aspect describe` in the repository to get the authoritative list of tasks, \
-             each with a one-line summary, plus guidance on working in that repo. Run \
-             `aspect describe '<task>'` for one task's full flag surface with types and \
-             defaults. Both emit JSON.",
-        );
-        if !self.deployment.is_empty() {
-            instructions.push_str(&format!(
-                "\n\nThis server also exposes read-only build and test results from the Aspect \
-                 Workflows deployment '{}'. Builds are addressed by their `id` from \
-                 list_invocations — when you only have the invocation UUID Bazel printed, \
-                 resolve it first with list_invocations(invocation_id=...). Responses carry \
-                 `links` objects; follow them rather than constructing URLs.",
-                self.deployment
-            ));
+        let mut instructions = String::from(GUIDANCE_INSTRUCTIONS);
+        if let Some(br) = &self.build_results {
+            instructions.push_str(&build_results_instructions(&br.deployment));
         }
         info.instructions = Some(instructions);
         info
@@ -805,7 +788,7 @@ impl ServerHandler for BuildResultsServer {
     ) -> Result<ListToolsResult, McpError> {
         Ok(list_tools_result(
             context.protocol_version().as_ref(),
-            !self.deployment.is_empty(),
+            self.build_results.is_some(),
         ))
     }
 
@@ -820,8 +803,14 @@ impl ServerHandler for BuildResultsServer {
                 None,
             ));
         };
+        // Unreachable through a conforming client, which has an empty tool list
+        // to call from — but a name is cheap to send and the answer has to be
+        // the actionable one rather than a panic.
+        let Some(br) = &self.build_results else {
+            return Err(McpError::invalid_params(NO_DEPLOYMENT_MESSAGE, None));
+        };
         let args = Args(request.arguments.as_ref());
-        Ok(match self.call(def, &args).await {
+        Ok(match br.call(def, &args).await {
             Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
             Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         }
@@ -829,27 +818,50 @@ impl ServerHandler for BuildResultsServer {
     }
 }
 
-/// What a deployment contributes to the server, when one is configured.
+/// The half of `instructions` every session gets, deployment or not.
 ///
-/// `None` is an ordinary state, not an error: a developer who has installed the
-/// CLI and never configured a Workflows deployment still gets a server, because
-/// the instructions it carries are useful on their own. Refusing to start would
-/// make `claude mcp add aspect -- aspect mcp` fail for most first-time users.
-struct BuildResultsGroup {
-    deployment: String,
-    origin: String,
-    confirmed: bool,
+/// A pointer, not a summary: the CLI's task surface is per-repository and
+/// cannot be enumerated from here. Keeping it short is the whole design — this
+/// is loaded into every session, while `aspect describe` is paid for only when
+/// something needs it.
+const GUIDANCE_INSTRUCTIONS: &str = "The Aspect CLI is available in this environment. Its task \
+     surface is defined per-repository by that repo's own `.aspect/*.axl` files, so it is not in \
+     any training data and differs between repositories.\n\n\
+     Run `aspect describe` in the repository to get the authoritative list of tasks, each with a \
+     one-line summary, plus guidance on working in that repo. Run `aspect describe '<task>'` for \
+     one task's full flag surface with types and defaults. Both emit JSON.";
+
+/// What a client is told when it names a tool on a server that advertises none.
+const NO_DEPLOYMENT_MESSAGE: &str = "this server advertises no build-results tools because no \
+     Aspect Workflows deployment is configured; run `aspect auth configure <remote-host>` and \
+     restart the server";
+
+/// The half of `instructions` added when a deployment is configured. Carries
+/// the two things an agent gets wrong unprompted: which identifier addresses a
+/// build, and that response URLs are given rather than constructed.
+fn build_results_instructions(deployment: &str) -> String {
+    format!(
+        "\n\nThis server also exposes read-only build and test results from the Aspect Workflows \
+         deployment '{deployment}'. Builds are addressed by their `id` from list_invocations — \
+         when you only have the invocation UUID Bazel printed, resolve it first with \
+         list_invocations(invocation_id=...). Responses carry `links` objects; follow them rather \
+         than constructing URLs."
+    )
 }
 
 /// Resolve the deployment if there is one, probing its API.
 ///
-/// Every failure here is reported and swallowed. The deployment is one group of
-/// an otherwise useful server, so a missing, misconfigured or unreachable one
-/// costs its tools and nothing else.
+/// `None` is an ordinary state, not an error, and every failure below is
+/// reported and swallowed to reach it: a developer who has installed the CLI
+/// and never configured a Workflows deployment still gets a server, because the
+/// guidance it carries is useful on its own. Refusing to start would make
+/// `claude mcp add aspect -- aspect mcp` fail for most first-time users, so a
+/// missing, misconfigured or unreachable deployment costs its tools and nothing
+/// else.
 fn resolve_build_results(
     deployment_name: Option<&str>,
-    http: &reqwest::Client,
-) -> Option<BuildResultsGroup> {
+    http: reqwest::Client,
+) -> Option<BuildResults> {
     let deployments = match auth::load_deployments() {
         Ok(d) => d,
         Err(e) => {
@@ -907,10 +919,12 @@ fn resolve_build_results(
             }
         }
     });
-    Some(BuildResultsGroup {
+    Some(BuildResults {
         deployment: deployment.name.clone(),
-        origin,
-        confirmed,
+        api_origin: origin,
+        api_confirmed: std::sync::atomic::AtomicBool::new(confirmed),
+        token_cache: std::sync::Mutex::new(None),
+        http,
     })
 }
 
@@ -928,12 +942,13 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
-    let group = resolve_build_results(deployment_name, &http);
-    match &group {
-        Some(g) => errln!(
-            "aspect mcp: serving usage guidance and build results for deployment '{}' ({}) over stdio",
-            g.deployment,
-            g.origin
+    let build_results = resolve_build_results(deployment_name, http);
+    match &build_results {
+        Some(br) => errln!(
+            "aspect mcp: serving usage guidance and build results for deployment '{}' ({}) over \
+             stdio",
+            br.deployment,
+            br.api_origin
         ),
         None => errln!(
             "aspect mcp: serving usage guidance over stdio; no Workflows deployment is \
@@ -941,21 +956,10 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         ),
     }
 
-    let server = BuildResultsServer {
-        deployment: group
-            .as_ref()
-            .map(|g| g.deployment.clone())
-            .unwrap_or_default(),
-        api_origin: group.as_ref().map(|g| g.origin.clone()).unwrap_or_default(),
-        api_confirmed: std::sync::atomic::AtomicBool::new(
-            group.as_ref().is_some_and(|g| g.confirmed),
-        ),
-        token_cache: std::sync::Mutex::new(None),
-        http,
-    };
-
     auth::block_on(async {
-        let service = server.serve(rmcp::transport::stdio()).await?;
+        let service = AspectServer { build_results }
+            .serve(rmcp::transport::stdio())
+            .await?;
         service.waiting().await?;
         Ok::<_, anyhow::Error>(())
     })?;
@@ -1031,6 +1035,33 @@ mod tests {
         // learns nothing it could not have been told once in `instructions`.
         let result = list_tools_result(Some(&ProtocolVersion::V_2026_07_28), false);
         assert!(result.tools.is_empty());
+    }
+
+    #[test]
+    fn instructions_point_at_describe_with_or_without_a_deployment() {
+        // The guidance half is what makes the server worth registering before
+        // anyone has logged in, so it must not be conditional on the half that
+        // is.
+        let bare = AspectServer {
+            build_results: None,
+        };
+        let text = bare.get_info().instructions.unwrap();
+        assert!(text.contains("aspect describe"), "{text}");
+        assert!(!text.contains("list_invocations"), "{text}");
+
+        let configured = AspectServer {
+            build_results: Some(BuildResults {
+                deployment: "acme".into(),
+                api_origin: "https://acme.example".into(),
+                api_confirmed: std::sync::atomic::AtomicBool::new(true),
+                token_cache: std::sync::Mutex::new(None),
+                http: reqwest::Client::new(),
+            }),
+        };
+        let text = configured.get_info().instructions.unwrap();
+        assert!(text.contains("aspect describe"), "{text}");
+        assert!(text.contains("list_invocations"), "{text}");
+        assert!(text.contains("acme"), "{text}");
     }
 
     #[test]
