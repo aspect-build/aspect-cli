@@ -235,6 +235,10 @@ fn label_prop() -> serde_json::Value {
 
 /// The published tool surface. Read-only build data only: the API's
 /// org/profile/session management routes are deliberately not exposed.
+///
+/// A mutating tool must not be added here. Every entry is published
+/// `readOnlyHint` / `destructiveHint: false` / `idempotentHint`, which a host
+/// may act on by calling it without asking the user first.
 fn tool_defs() -> &'static [ToolDef] {
     &[
         ToolDef {
@@ -1070,7 +1074,11 @@ mod tests {
         // the rest" to properties the server states. Every tool here is a
         // query, and saying so is what makes that policy expressible.
         let result = list_tools_result(Some(&ProtocolVersion::V_2026_07_28), true);
-        assert!(!result.tools.is_empty());
+        assert_eq!(
+            result.tools.len(),
+            tool_defs().len(),
+            "every defined tool must reach the list"
+        );
         for tool in &result.tools {
             let annotations = tool
                 .annotations
