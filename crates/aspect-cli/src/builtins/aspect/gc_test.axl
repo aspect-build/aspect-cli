@@ -1,0 +1,128 @@
+"""Unit tests for gc.axl — the output-base classifier.
+
+Run with:
+  aspect dev test-gc
+
+The classifier is what decides whether a directory gets deleted, so the tests
+build a real output-base-shaped tree under a temp dir and run the real `_scan`
+against it. The fixture covers the three outcomes plus the one that would be a
+data-loss bug: `install/` and `cache/` sit beside the output bases under the
+same root and are shared by every workspace on the machine. Counting them as
+bases reports tens of gigabytes of working cache as garbage, which is exactly
+the mistake a first pass makes.
+
+Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
+symlink creation.
+"""
+
+load("./gc.axl", "testonly_fmt_kb", "testonly_scan", "testonly_workspace_of")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _symlink(ctx: TaskContext, target: str, link: str) -> None:
+    ctx.std.process.command("ln").args(["-s", target, link]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _make_base(ctx: TaskContext, root: str, name: str, workspace: str) -> None:
+    """An output base shaped like Bazel's: an execroot holding an absolute
+    source symlink back into `workspace`."""
+    execroot = root + "/" + name + "/execroot/_main"
+    ctx.std.fs.create_dir_all(execroot)
+    _symlink(ctx, workspace + "/MODULE.bazel", execroot + "/MODULE.bazel")
+
+def _fixture(ctx: TaskContext) -> str:
+    """A root holding one live base, one orphan, one unattributable base, and
+    the two shared directories that must never be classified."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-test")
+    root = tmp + "/root"
+    live_ws = tmp + "/live-workspace"
+    ctx.std.fs.create_dir_all(root)
+    ctx.std.fs.create_dir_all(live_ws)
+    ctx.std.fs.write(live_ws + "/MODULE.bazel", "module(name = \"live\")\n")
+
+    _make_base(ctx, root, "livebase", live_ws)
+    _make_base(ctx, root, "deadbase", tmp + "/workspace-that-was-deleted")
+
+    # A base whose execroot never got a symlink forest: an invocation that
+    # failed before analysis. Real, and must not be guessed at.
+    ctx.std.fs.create_dir_all(root + "/weirdbase/execroot")
+    ctx.std.fs.write(root + "/weirdbase/execroot/DO_NOT_BUILD_HERE", "")
+
+    # Shared infrastructure, not output bases.
+    ctx.std.fs.create_dir_all(root + "/install/abc123")
+    ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
+    return root
+
+def _test_fmt_kb(ctx):
+    _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
+    _eq("exact MB", testonly_fmt_kb(1024), "1 MB")
+    _eq("MB rounds to nearest", testonly_fmt_kb(2047), "2 MB")
+    _eq("GB keeps one decimal", testonly_fmt_kb(1048576), "1.0 GB")
+    _eq("7.6 GB", testonly_fmt_kb(7969177), "7.6 GB")
+    _eq("zero", testonly_fmt_kb(0), "0 KB")
+
+def _test_workspace_resolves_from_the_execroot_symlink(ctx):
+    root = _fixture(ctx)
+    live = testonly_workspace_of(ctx, root + "/livebase")
+    _eq("resolved workspace ends with live-workspace", live.endswith("/live-workspace"), True)
+
+def _test_unattributable_base_resolves_to_empty(ctx):
+    """No symlink in the execroot means no workspace can be named. Returning ""
+    is what keeps the base out of the delete list."""
+    root = _fixture(ctx)
+    _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
+
+def _test_scan_classifies_the_three_outcomes(ctx):
+    root = _fixture(ctx)
+    bases = testonly_scan(ctx, root)
+    states = {}
+    for b in bases:
+        states[b.name] = b.state
+    _eq("live workspace still exists", states["livebase"], "live")
+    _eq("deleted workspace", states["deadbase"], "orphan")
+    _eq("no symlink to resolve", states["weirdbase"], "unknown")
+
+def _test_shared_directories_are_never_classified(ctx):
+    """The data-loss case: `install/` and `cache/` are shared by every workspace
+    and sit beside the output bases. Classifying them would offer tens of
+    gigabytes of live cache for deletion."""
+    root = _fixture(ctx)
+    names = [b.name for b in testonly_scan(ctx, root)]
+    _eq("install is not a base", "install" in names, False)
+    _eq("cache is not a base", "cache" in names, False)
+    _eq("only the three real bases", len(names), 3)
+
+def _test_orphan_carries_the_workspace_it_lost(ctx):
+    """The report names the workspace that went away; without it a reader can't
+    tell whether the deletion is safe."""
+    root = _fixture(ctx)
+    for b in testonly_scan(ctx, root):
+        if b.name == "deadbase":
+            _eq("names the vanished workspace", b.workspace.endswith("/workspace-that-was-deleted"), True)
+            return
+    fail("deadbase was not scanned")
+
+_UNIT_TESTS = [
+    _test_fmt_kb,
+    _test_workspace_resolves_from_the_execroot_symlink,
+    _test_unattributable_base_resolves_to_empty,
+    _test_scan_classifies_the_three_outcomes,
+    _test_shared_directories_are_never_classified,
+    _test_orphan_carries_the_workspace_it_lost,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("gc.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+gc_tests = task(
+    summary = "Run the gc output-base classifier unit tests.",
+    kind = "test-gc",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
