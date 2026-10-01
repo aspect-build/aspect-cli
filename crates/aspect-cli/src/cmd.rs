@@ -1493,10 +1493,8 @@ fn describe_index(
     let mut commands: Vec<serde_json::Value> = tasks
         .iter()
         .map(|task| {
-            let mut path = task.group().clone();
-            path.push(task.kind());
             json!({
-                "command": format!("aspect {}", path.join(" ")),
+                "command": format!("aspect {}", command_path(*task)),
                 "summary": task.summary(),
             })
         })
@@ -1511,7 +1509,82 @@ fn describe_index(
             "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
             "feature_flags": "aspect feature <name>",
         },
+        "guidance": agent_guidance(tasks),
     })
+}
+
+/// How to work in this repository, for a reader that has just discovered it.
+///
+/// Every line is derived from what this repo actually has, so nothing here can
+/// claim a task that does not exist or outlive one that is removed. Phrased as
+/// capability rather than instruction — "X wraps Y" rather than "prefer X" — so
+/// it stays true for a reader who has their own reasons to call the underlying
+/// tool, and so the CLI is not asserting a preference on a repo's behalf.
+fn agent_guidance(tasks: &[&dyn TaskLike<'_>]) -> Vec<String> {
+    let has = |path: &str| tasks.iter().any(|t| command_path(*t) == path);
+
+    let mut lines = vec![
+        "This repository's task surface is defined by its own `.aspect/*.axl` files, so it \
+         differs from every other repo and is not in any training data. Treat this listing as \
+         the authority."
+            .to_string(),
+    ];
+
+    let bazel_wrappers: Vec<&str> = ["build", "test"].into_iter().filter(|p| has(p)).collect();
+    if !bazel_wrappers.is_empty() {
+        let named = bazel_wrappers
+            .iter()
+            .map(|p| format!("`aspect {p}`"))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        let (verb, object) = if bazel_wrappers.len() == 1 {
+            ("wraps", "the corresponding Bazel command")
+        } else {
+            ("wrap", "their corresponding Bazel commands")
+        };
+        lines.push(format!(
+            "{named} {verb} {object} with this repo's resolved flags, remote cache and BES \
+             wiring, retries, and CI reporting. Calling `bazel` directly still works and skips \
+             all of that."
+        ));
+    }
+    if has("setup tools-bazel-wrapper") {
+        lines.push(
+            "`aspect setup tools-bazel-wrapper` installs a `tools/bazel` shim that routes plain \
+             `bazel` invocations through the CLI, if you would rather not change which command \
+             you type."
+                .to_string(),
+        );
+    }
+    if has("worktree add") {
+        lines.push(
+            "`aspect worktree add <branch>` creates a git worktree backed by a pooled, already \
+             warm Bazel output base. `git worktree add` gives Bazel a workspace path it has \
+             never seen, which costs a full server start and a cold analysis cache on the first \
+             build — the one case where the plain git command is materially worse."
+                .to_string(),
+        );
+    }
+    if tasks.iter().any(|t| t.args().contains_key("output")) {
+        lines.push(
+            "Tasks that produce a result worth parsing accept `--output=json`; \
+             `aspect describe '<task>'` lists every flag with its type and default."
+                .to_string(),
+        );
+    }
+    lines
+}
+
+/// A task's command path split into words — its group, then its own name.
+fn command_path_parts(task: &dyn TaskLike<'_>) -> Vec<String> {
+    let mut parts = task.group().clone();
+    parts.push(task.kind());
+    parts
+}
+
+/// A task's full command path as a user types it, without the leading `aspect `.
+fn command_path(task: &dyn TaskLike<'_>) -> String {
+    command_path_parts(task).join(" ")
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
@@ -1542,8 +1615,7 @@ fn describe_json(
         .iter()
         .map(|task| {
             let kind = task.kind();
-            let mut path = task.group().clone();
-            path.push(kind.clone());
+            let path = command_path_parts(*task);
             let overrides = stringify_overrides(task.overrides());
             let args: Vec<serde_json::Value> = task
                 .cli_args()
@@ -2488,6 +2560,84 @@ mod tests {
         assert!(au_at < tips_at, "rows should be alphabetical by slug");
         assert!(out.contains("Upload artifacts."), "summary missing");
         assert!(out.contains("aspect feature <NAME>"), "footer missing");
+    }
+
+    #[test]
+    fn guidance_is_derived_from_the_tasks_that_exist() {
+        // Every guidance line names a command, so a line for a task this repo
+        // does not define would point an agent at something that is not there.
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let build = stub_task("build", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&build];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("aspect build"), "names the task that exists");
+        assert!(
+            !text.contains("worktree"),
+            "must not advertise a task this repo has not defined"
+        );
+        assert!(
+            !text.contains("tools-bazel-wrapper"),
+            "must not advertise a task this repo has not defined"
+        );
+    }
+
+    #[test]
+    fn guidance_names_only_the_bazel_wrappers_that_exist() {
+        // One sentence covers both `build` and `test`, so a repo that defines
+        // only one of them must not have the other named in it.
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let test = stub_task("test", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&test];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("`aspect test` wraps"), "got: {text}");
+        assert!(!text.contains("aspect build"), "got: {text}");
+    }
+
+    #[test]
+    fn guidance_mentions_json_output_only_where_a_task_offers_it() {
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let plain = stub_task("build", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&plain];
+        assert!(
+            !describe_index("1.2.3", &tasks, &[])["guidance"]
+                .to_string()
+                .contains("--output=json")
+        );
+
+        let mut with_output: SmallMap<String, Arg> = SmallMap::new();
+        with_output.insert("output".into(), arg_string("text"));
+        let json_task = stub_task("build", &[], with_output);
+        let tasks: Vec<&dyn TaskLike> = vec![&json_task];
+        assert!(
+            describe_index("1.2.3", &tasks, &[])["guidance"]
+                .to_string()
+                .contains("--output=json")
+        );
+    }
+
+    #[test]
+    fn guidance_mentions_worktrees_only_when_the_task_is_present() {
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let add = stub_task("add", &["worktree"], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&add];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("aspect worktree add"));
+        // The reason travels with the advice: without it an agent has no basis
+        // to prefer this over the git command it already knows.
+        assert!(text.contains("never seen"));
+    }
+
+    #[test]
+    fn guidance_always_states_that_the_surface_is_per_repo() {
+        // True of every repository, and the reason the rest of the document is
+        // worth reading at all.
+        let tasks: Vec<&dyn TaskLike> = vec![];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+        assert!(text.contains(".aspect/"));
+        assert!(text.contains("training data"));
     }
 
     #[test]
