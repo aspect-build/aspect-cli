@@ -18,7 +18,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("./gc.axl", "testonly_fmt_kb", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_fmt_kb", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:

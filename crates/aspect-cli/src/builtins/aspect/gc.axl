@@ -35,7 +35,7 @@ until a build gets past loading, and `server/cmdline` is absent once `server/`
 is cleaned. A base that neither resolves is reported and left alone.
 """
 
-load("@aspect//private/lib/environment.axl", "info", "warn")
+load("./private/lib/environment.axl", "info", "warn")
 
 # Bumped whenever a key in the `--output=json` document is renamed, removed, or
 # changes meaning. Additive keys do not bump it.
@@ -300,6 +300,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     reclaimable = 0
     for b in orphans:
         reclaimable += b.kb
+
     # Sizing the shared caches walks tens of gigabytes and costs more than the
     # rest of the task put together, so it is asked for rather than assumed.
     caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
