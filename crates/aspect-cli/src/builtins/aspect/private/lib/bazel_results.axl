@@ -298,7 +298,7 @@ def _repro_with_prefix(prefix, labels, max_chars):
 # when `build_started` resets the accumulator for a new (or retried) stream.
 # All three feed the Aspect Web UI link — two identify the invocation, one is its
 # base URL off a runner; see `resolve_aspect_url`.
-_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url"]
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url", "target_pattern"]
 
 def init_data():
     """Create a fresh data accumulator.
@@ -2422,6 +2422,24 @@ def _assemble_explicit_command(build_command, target_pattern, explicit_cmd_line,
 
     long_form = _format_shell_command(head, flags, target_tokens)
     return {"short": short, "long": long_form}
+
+def redacted_explicit_command(data: dict) -> dict:
+    """The user-typed bazel command as `{"short", "long"}`, credential-redacted
+    and shell-quoted — the same pair the rendered surfaces show, resolved from
+    `data` alone.
+
+    For consumers outside the renderers (`lib/results_json.axl`). The resolved
+    post-bazelrc flag lists stay private on purpose: they are large, and reaching
+    them without `_redact_args` is how a `--remote_header` escapes.
+    """
+    bz = data.get("bazel", {}) or {}
+    opts = bz.get("options_parsed", {}) or {}
+    return _assemble_explicit_command(
+        bz.get("build_command", ""),
+        data.get("target_pattern", ""),
+        opts.get("explicit_cmd_line", []),
+        _allow_env_patterns(bz.get("metadata", {})),
+    )
 
 def _sorted_dedup(args, allow_env):
     """Redact + sort + dedup + shell-quote, for browseable option lists. Sort is
@@ -4796,6 +4814,10 @@ def _results_new(ctx, command):
         "label": "",
         "bazel_streams_bes": False,
         "results_url": "",
+        # Set by conclude(); read back through the handle by tasks that emit a
+        # `--output=json` document, which needs the terminal status the
+        # TaskConclusion does not carry.
+        "final_status": "",
     }
 
     def _emit(status, priority):
@@ -4820,6 +4842,11 @@ def _results_new(ctx, command):
         m["results_url"] = results_url
         data["bes_streamed_by_bazel"] = bazel_streams_bes
         data["aspect_results_url"] = results_url
+
+        # The surfaces read the pattern off their own `subject`; `data` carries
+        # it for everything else (the redacted explicit command, the
+        # `--output=json` document), which is what init_data() already promises.
+        data["target_pattern"] = " ".join(targets)
         ph.setup_surface(" ".join(targets), "bazel_results")
 
     def attempt(index, prior = None):
@@ -4891,6 +4918,7 @@ def _results_new(ctx, command):
             archive_bazel_attempt(data, m["attempts"], code)
 
         final_status = _pick_status(command, data, had_failure = not w.success, terminal = True)
+        m["final_status"] = final_status
 
         # Per-subcommand + per-failure repro commands, flavor-gated. Keyed by the
         # subcommand that REPRODUCES each failure (a test that failed to build
@@ -4953,6 +4981,8 @@ def _results_new(ctx, command):
         invocation = invocation,
         process = process,
         conclude = conclude,
+        # Terminal lifecycle status, "" until conclude() has run.
+        final_status = lambda: m["final_status"],
     )
 
 results = namespace(

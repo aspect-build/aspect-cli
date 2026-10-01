@@ -94,6 +94,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/runnable.axl", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -411,6 +412,7 @@ def _emit_final(ph, exit_code):
         progress = _progress(status, data),
     ))
     print_repro_and_fix(ctx.std, data, status)
+    results_json.emit(ctx, data, "gazelle", status, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -420,6 +422,15 @@ def _emit_final(ph, exit_code):
 
 # buildifier: disable=function-docstring
 def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
+    # The document describes a finished task, and `watch.loop` never concludes —
+    # `_emit_final` is on the other branch. Refuse the pair rather than run the
+    # watch loop and leave stdout empty forever.
+    if ctx.args.watch and results_json.wants_json(ctx.args):
+        return TaskConclusion(
+            exit_code = 1,
+            message = "--output=json and --watch cannot be combined: the JSON document reports a task's final result, and --watch never finishes. Drop one of the two.",
+        )
+
     # Initialize data for status-check emission.
     data = gaz_init_data()
     ph = phases.new(ctx, data)
@@ -511,6 +522,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         directory = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
+        stdout = results_json.child_stdout(ctx.std.io, ctx.args),
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns. Populate
@@ -757,7 +769,7 @@ gazelle = task(
             default = False,
             description = "Stay running after the first gazelle invocation, watching the workspace and re-running gazelle after each settled batch of changes. Stop with Ctrl-C.",
         ),
-    } | bzl.flags.args("the gazelle build") | bzl.announce.args("the gazelle build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the gazelle build") | bzl.announce.args("the gazelle build") | bes_args() | repro_flavor_args(include_fix = True) | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,
