@@ -176,8 +176,8 @@ impl<'v> StarlarkValue<'v> for Arguments<'v> {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(arguments_methods)
+        static RES: MethodsStatic = MethodsStatic::new("arguments_methods", arguments_methods);
+        Some(RES.methods())
     }
 }
 
@@ -239,8 +239,8 @@ impl<'v> StarlarkValue<'v> for FrozenArguments {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(arguments_methods)
+        static RES: MethodsStatic = MethodsStatic::new("arguments_methods", arguments_methods);
+        Some(RES.methods())
     }
 }
 

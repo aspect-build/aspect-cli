@@ -64,9 +64,9 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task
         # --force-target re-delivers every run so the manifest always
         # carries at least one `ok` outcome to exercise the per-target
@@ -93,9 +93,9 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
         # --warn-unresolved-digest for the same reason as delivery-gha: the
         # deliverable set includes the stamped, uncacheable py_deliverable.
@@ -122,9 +122,9 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Delivery unresolvable-digest must hard-fail
         run: |
           set -uo pipefail
@@ -171,9 +171,9 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: no-remote-exec deliverable must resolve a digest on every run
         run: |
           set -uo pipefail
@@ -196,3 +196,83 @@ jobs:
             echo "$out" | grep -q "Resolved digests for all" \
               || { echo "::error::run $run resolved no digest for no_remote_exec_deliverable (local action cache likely served the DeliveryHash probe)"; exit 1; }
           done
+  # Regression guard for the dry-run that performed the full stamped release
+  # build of every pending target and then dispatched nothing. --dry-run must
+  # skip phase 3; --dry-run=build must bring it back. --force-target guarantees
+  # a pending target on a steady-state run, so "no phase-3 build" can't pass
+  # trivially by there being nothing left to deliver. Both runs suppress their
+  # check runs — the job's own status is the signal.
+  delivery-dry-run-build-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+      - name: --dry-run skips the delivery build, --dry-run=build restores it
+        run: |
+          set -uo pipefail
+          # --warn-not-runnable / --warn-unresolved-digest for the same reasons
+          # as delivery-gha: this deliverable set intentionally contains a
+          # non-runnable target and the stamped, uncacheable py_deliverable.
+          common="--warn-not-runnable --warn-unresolved-digest --github-status-checks:enabled=false --force-target=//examples/deliverable:deliverable_with_digest"
+          preview_common="--dry-run $common"
+          build_common="--dry-run=build $common"
+
+          echo "== --dry-run: expect NO phase-3 build =="
+          out="$(aspect delivery --task:name delivery-dry-run $preview_common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::dry-run delivery failed (exit $code)"; exit 1
+          fi
+          echo "$out" | grep -q "Skipping the delivery build" \
+            || { echo "::error::dry-run did not report skipping the delivery build"; exit 1; }
+          if echo "$out" | grep -q "Delivery build took"; then
+            echo "::error::dry-run ran the phase-3 delivery build; it must be skipped unless --dry-run=build"; exit 1
+          fi
+
+          echo "== --dry-run=build: expect the phase-3 build =="
+          out="$(aspect delivery --task:name delivery-dry-run-build $build_common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::--dry-run=build delivery failed (exit $code)"; exit 1
+          fi
+          echo "$out" | grep -q "Delivery build took" \
+            || { echo "::error::--dry-run=build did not run the phase-3 delivery build"; exit 1; }
+          if echo "$out" | grep -q "Skipping the delivery build"; then
+            echo "::error::--dry-run=build reported skipping the delivery build"; exit 1
+          fi
+  # Regression guard for the reap loop that blocked on a running deliverable:
+  # the task sent no updates until it exited, so the check-run heartbeat those
+  # updates carry stopped and the orphan sweep closed the check as DISCONNECTED
+  # while the target still ran. slow_deliverable runs for 15s and fails unless
+  # a task update (stamped by //.aspect/config.axl) lands meanwhile.
+  delivery-heartbeat-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+      - name: Delivery keeps sending task updates while a target runs
+        env:
+          ASPECT_TEST_TASK_UPDATE_STAMP: ${{ runner.temp }}/delivery-task-update-stamp
+        run: aspect delivery --task:name delivery-heartbeat --track-state=false --mode=always --github-status-checks:enabled=false --query=//examples/deliverable:slow_deliverable

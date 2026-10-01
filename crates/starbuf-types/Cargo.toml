@@ -15,5 +15,5 @@ anyhow = "1"
 derive_more = { version = "2.0.1", features = ["display"] }
 prost = "0.14.1"
 prost-types = "0.14.1"
-starlark = "0.13.0"
+starlark = "0.14.2"
 axl-types = { path = "../axl-types" }

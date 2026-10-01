@@ -1,12 +1,20 @@
-load("@aspect//bazel/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
+load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load(
-    "../private/lib/environment.axl",
+    "../private/lib/aspect_flags.axl",
     "apply_output_base_suffix",
-    "color_enabled",
-    "get_bazelrc_flags",
-    "get_build_diagnostics_flags",
+    "color_flags",
+    "env_task_flags",
+    "runner_diagnostics_flags",
+    "runner_executor_flags",
+    "runner_flags",
+    "temp_diagnostics_upload_flags",
+)
+load(
+    "../private/lib/environment.axl",
+    "bazel_misdetects_color",
     "get_workflows_environment",
+    "info",
     "print_environment_info",
     "sanitize_filename",
 )
@@ -19,28 +27,14 @@ def _workflows_impl(ctx: FeatureContext):
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
 
-    # Register task-identity --build_metadata as a task_flags hook. Runs
-    # with TaskContext at invocation time, so it has access to ctx.task.*
-    # (name, key, id) which FeatureContext doesn't expose. Every task that
-    # uses BazelTrait (build, test, lint, delivery) picks this up by
-    # calling `bazel_trait.task_flags` hooks from its impl — one place to
-    # register, zero per-task wiring.
-    bazel_trait.task_flags.append(get_task_metadata_flags)
+    bazel_trait.extra_flags.extend(color_flags(bazel_misdetects_color(ctx.std.env)))
 
-    # `--color=yes` is wanted in every environment where aspect-cli will
-    # render ANSI elsewhere — not just on Workflows runners. Bazel's
-    # default `--color=auto` keys off stderr's isatty (since `ctx.bazel.
-    # build` inherits stderr by default that's normally a TTY locally),
-    # but several conditions still trip it to "no color" — `TERM=dumb`,
-    # being launched from a parent that's not on a tty (e.g. `cargo run
-    # -- format` from certain shells / editors), or CI log viewers that
-    # capture stderr to a pipe even though they render ANSI fine. Force
-    # it whenever `color_enabled` agrees output should be colored. On a
-    # plain TTY this matches what `auto` would have done. Deliberately
-    # not forcing `--curses=yes`: line-oriented log viewers garble
-    # cursor-control sequences.
-    if color_enabled(ctx.std):
-        bazel_trait.extra_flags.append("--color=yes")
+    if ctx.args.remote_exec:
+        executor_flags = runner_executor_flags(environment)
+        if executor_flags:
+            bazel_trait.extra_flags.extend(executor_flags)
+        else:
+            info(ctx.std, "Remote execution was requested (--workflows:remote-exec) but ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset, so none is wired.")
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the
@@ -63,11 +57,7 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.build_retry = recovery.build_retry
         bazel_trait.build_end.append(recovery.build_end)
 
-        # Flags to optimize build & test
-        (startup_flags, build_flags) = get_bazelrc_flags(
-            environment = environment,
-            aspect_root_dir = ctx.std.env.aspect_root_dir(),
-        )
+        (startup_flags, build_flags) = runner_flags(environment, ctx.std.env.aspect_root_dir())
 
         # Optionally move this task to its own Bazel server by suffixing the
         # runner-derived output base, so a job that flips Bazel options (e.g.
@@ -79,12 +69,7 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.extra_startup_flags.extend(startup_flags)
         bazel_trait.extra_flags.extend(build_flags)
 
-        # BES-backend upload of the JSON profile + compact exec log. Driven by
-        # the deployment (ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS) or a
-        # workspace-level override arg. get_build_diagnostics_flags re-checks
-        # build_events/remote_cache and returns [] if either is missing.
-        diagnostics_on = ctx.args.upload_build_diagnostics or environment.runner.upload_build_diagnostics
-        bazel_trait.extra_flags.extend(get_build_diagnostics_flags(environment, diagnostics_on))
+        bazel_trait.extra_flags.extend(runner_diagnostics_flags(environment))
 
         # On older runners, `bazel` on the PATH is the legacy CLI, which we
         # disable the plugin feature on. `ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI`
@@ -103,14 +88,15 @@ def _workflows_impl(ctx: FeatureContext):
         if is_legacy_cli:
             bazel_trait.extra_startup_flags.extend(["--aspect:disable_plugins", "--aspect:lock_version"])
 
-    if environment.build_events != None:
-        metadata_flags = get_build_metadata_flags(ctx.std)
+    if environment.runner == None:
+        # A hand-set ASPECT_WORKFLOWS_* endpoint names the deployment the way a
+        # runner's does; only the runner's mounts are missing.
+        bazel_trait.extra_flags.extend(env_task_flags(environment))
+        if environment.build_events != None:
+            bazel_trait.task_flags.append(temp_diagnostics_upload_flags)
 
-        # The runtime owns the BES connection, so send `x-identity` as sink
-        # metadata (the remote cache/RE path gets it via `--remote_header`).
-        bes_metadata = {}
-        if environment.runner and environment.runner.identity:
-            bes_metadata["x-identity"] = environment.runner.identity
+    if environment.build_events != None:
+        register_bes_metadata(ctx, bazel_trait)
 
         bessie_sinks = []
         if environment.build_events and environment.build_events.backend:
@@ -120,14 +106,12 @@ def _workflows_impl(ctx: FeatureContext):
             buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = environment.build_events.backend,
-                metadata = bes_metadata,
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
                 retry_max_buffer_bytes = buffer_bytes if buffer_bytes > 0 else None,
                 timeout = ctx.args.bes_timeout,
             ))
 
-        bazel_trait.extra_flags.extend(metadata_flags)
         bazel_trait.build_event_sinks.extend(bessie_sinks)
 
     if environment.ci and environment.ci.host == "github":
@@ -171,6 +155,16 @@ Workflows = feature(
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
         ),
+        "remote_exec": args.boolean(
+            default = False,
+            description = "Run actions on the remote executor the runner environment names " +
+                          "(ASPECT_WORKFLOWS_REMOTE_EXECUTOR), by setting --remote_executor on this " +
+                          "task's Bazel call. Off by default because remote execution relocates " +
+                          "every action; the runner's cache and BES are wired regardless. Set it " +
+                          "once per repo in config.axl via ctx.features[Workflows].args.remote_exec, " +
+                          "or per task with --workflows:remote-exec. Vanilla `bazel` on the runner " +
+                          "opts in with --config=aspect-exec from the rc `aspect setup bazelrc` writes.",
+        ),
         "runner_output_base_suffix": args.string(
             default = "",
             description = "Suffix appended to the runner-derived Bazel " +
@@ -184,15 +178,6 @@ Workflows = feature(
                           "runners; a no-op elsewhere. Set per repo in config.axl via " +
                           "ctx.features[Workflows].args.runner_output_base_suffix, or " +
                           "per task with --workflows:runner-output-base-suffix.",
-        ),
-        "upload_build_diagnostics": args.boolean(
-            default = False,
-            description = "Upload Bazel's JSON trace profile and compact " +
-                          "execution log to the remote cache via BES for " +
-                          "backend analysis. Normally driven by the deployment " +
-                          "(ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS); " +
-                          "this arg is a workspace-level override. No effect " +
-                          "unless a BES backend and remote cache are configured.",
         ),
     },
 )

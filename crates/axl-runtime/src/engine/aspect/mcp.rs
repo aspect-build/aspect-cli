@@ -9,7 +9,7 @@
 //!
 //! The API host comes from the deployment's advertised build-results viewer URL
 //! (`aspect_bes_results_url`, recorded by `aspect auth configure`). The REST
-//! API ships in Aspect Workflows 6.1 and is opt-in (`webapp.web.api_enabled`),
+//! API ships in Aspect Workflows 6.0.30 and is opt-in (`webapp.web.api_enabled`),
 //! and the CLI reaches customers before their deployments upgrade — so when the
 //! one startup probe (the RFC 9728 discovery document, the only unauthenticated
 //! path) finds no API, the server still starts and every tool returns the
@@ -24,9 +24,9 @@ use derive_more::Display;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData as McpError,
-    Implementation, InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ErrorData as McpError, Implementation, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -58,7 +58,7 @@ const MAX_LIMIT: u64 = 100;
 fn api_unavailable_message(deployment: &str, api_origin: &str) -> String {
     format!(
         "The deployment '{deployment}' ({api_origin}) does not expose the REST API the MCP server \
-         needs. It requires Aspect Workflows 6.1 or later with `webapp.web.api_enabled = true` — \
+         needs. It requires Aspect Workflows 6.0.30 or later with `webapp.web.api_enabled = true` — \
          see {DOCS_URL}. Ask your Workflows operator to enable it."
     )
 }
@@ -70,6 +70,20 @@ fn not_logged_in_message(deployment: &str) -> String {
          then retry.",
         auth::login_hint(deployment)
     )
+}
+
+fn not_found_hint(tool: &str, deployment: &str) -> String {
+    if tool == "get_action_history" {
+        // An empty history is a 200. A 404 here means the deployment lacks the route,
+        // not that the label is unknown. CLI and Workflows releases ship independently.
+        format!(
+            " — deployment '{deployment}' does not expose /api/v1/action-history. \
+             Ask your Workflows operator to upgrade to a release that includes action-history \
+             support, then retry. See {DOCS_URL}#action-performance-history"
+        )
+    } else {
+        format!(" — no such resource on deployment '{deployment}'; ids come from list_invocations")
+    }
 }
 
 /// One tool the server publishes: the curated MCP-facing contract plus how it
@@ -485,11 +499,56 @@ fn tool_defs() -> &'static [ToolDef] {
             },
         },
         ToolDef {
+            name: "get_action_history",
+            description: "Execution-log history for one action-owner label, including private or \
+                          transitive labels without target completion records. Requires a deployment \
+                          exposing GET /api/v1/action-history; older deployments return 404. \
+                          Entries are per-invocation label aggregates, not individual spawns. \
+                          Summary counts, total execution-wall time and p50/p90/p99 cover the whole \
+                          filtered window; percentiles measure per-invocation label totals, including \
+                          cached records unless cache=miss. Optional daily buckets use UTC and omit \
+                          empty days. Empty results can reflect retention or pending ingestion. \
+                          Results may be cached for 30 seconds. If HTTP 503 reports action history \
+                          is busy, wait at least one second before retrying. Queries may wait up to five \
+                          seconds for capacity before returning 503.",
+            schema: || {
+                obj(
+                    serde_json::json!({
+                        "label": label_prop(),
+                        "start": prop("Inclusive invocation-received timestamp in RFC 3339 (e.g. 2026-09-01T00:00:00Z).", "string"),
+                        "end": prop("Exclusive invocation-received timestamp in RFC 3339; must be after start and at most 31 days later.", "string"),
+                        "repo": prop("Exact repository name. Omit for all repositories in your organization.", "string"),
+                        "branch": prop("Exact branch name. Omit for all branches.", "string"),
+                        "cache": prop("Record-level cache filter: hit (all spawns cached or locally cached), miss (any noncached spawn, including mixed records). Omit for both.", "string"),
+                        "daily": {"type": "boolean", "description": "Include daily aggregates over the full filtered window (default false)."},
+                        "limit": limit_prop(20),
+                        "offset": offset_prop(),
+                    }),
+                    &["label", "start", "end"],
+                )
+            },
+            route: |args| {
+                let mut q = String::new();
+                for key in ["label", "start", "end"] {
+                    push_param(&mut q, key, args.required_str(key)?);
+                }
+                push_common(
+                    args,
+                    &mut q,
+                    &["repo", "branch", "cache", "limit", "offset"],
+                );
+                if let Some(daily) = args.bool("daily") {
+                    push_param(&mut q, "daily", if daily { "true" } else { "false" });
+                }
+                Ok(format!("/action-history{q}"))
+            },
+        },
+        ToolDef {
             name: "get_target_stats",
             description: "Cross-invocation statistics for the organization's targets over a \
                           lookback window: build counts, failure and flake rates, durations. With \
-                          `label`, the same shape narrowed to one target — in that form no other \
-                          filter or paging parameter is accepted, and the collection-wide \
+                          `label`, the same shape narrowed to one target and repository — only \
+                          `repo` may accompany the label, and the collection-wide \
                           `profiled_invocations_daily` series is empty. A label with no builds in \
                           the window is an empty page, not an error.",
             schema: || {
@@ -497,7 +556,7 @@ fn tool_defs() -> &'static [ToolDef] {
                     serde_json::json!({
                         "range": range_prop(),
                         "label": label_prop(),
-                        "repo": prop("Filter to one repository.", "string"),
+                        "repo": prop("Filter to one repository. With label, selects that repository's row; omitting repo selects builds with no recorded repository, not all repositories.", "string"),
                         "is_test": {"type": "boolean", "description": "Only test targets (true) or only non-test targets (false)."},
                         "limit": limit_prop(20),
                     }),
@@ -508,11 +567,16 @@ fn tool_defs() -> &'static [ToolDef] {
                 let mut q = String::new();
                 push_param(&mut q, "range", args.required_str("range")?);
                 if let Some(label) = args.str("label").filter(|l| !l.is_empty()) {
-                    // The API rejects other params alongside `label`; send it alone.
+                    // An exact row is keyed by both label and repository.
                     push_param(&mut q, "label", label);
+                    push_common(args, &mut q, &["repo"]);
                     return Ok(format!("/target-stats{q}"));
                 }
-                push_common(args, &mut q, &["repo", "is_test", "limit"]);
+                // The collection uses `repos`; `repo` is only valid with a label.
+                if let Some(repo) = args.str("repo").filter(|r| !r.is_empty()) {
+                    push_param(&mut q, "repos", repo);
+                }
+                push_common(args, &mut q, &["is_test", "limit"]);
                 Ok(format!("/target-stats{q}"))
             },
         },
@@ -560,9 +624,11 @@ impl BuildResultsServer {
             return Ok(cached.clone());
         }
         let deployment = self.deployment.clone();
-        let resolved = tokio::task::spawn_blocking(move || auth::resolve_access_token(&deployment))
-            .await
-            .map_err(|e| format!("token resolution failed: {e}"))?;
+        let profile = auth::resolve_profile(None);
+        let resolved =
+            tokio::task::spawn_blocking(move || auth::resolve_access_token(&profile, &deployment))
+                .await
+                .map_err(|e| format!("token resolution failed: {e}"))?;
         match resolved {
             Ok(Some(token)) => {
                 *self.token_cache.lock().expect("token cache lock") = Some(token.clone());
@@ -636,13 +702,37 @@ impl BuildResultsServer {
                     auth::login_hint(&self.deployment)
                 )
             }
-            404 => format!(
-                " — no such resource on deployment '{}'; ids come from list_invocations",
-                self.deployment
-            ),
+            404 => not_found_hint(def.name, &self.deployment),
             _ => String::new(),
         };
         Err(format!("HTTP {status} from {path}{hint}: {detail}"))
+    }
+}
+
+/// The `tools/list` response for a client that negotiated `version`.
+///
+/// Protocol 2026-07-28 requires `ttlMs` and `cacheScope` on list results, and
+/// a client on that version rejects a list without them, leaving the server
+/// with no tools. Older versions do not define the fields, so they are sent
+/// only when negotiated, as rmcp's own `#[tool_handler]` does. The list is the
+/// same for every caller and never changes within a session: `Public`, fresh
+/// for 0ms to match rmcp's generated handler.
+fn list_tools_result(version: Option<&ProtocolVersion>) -> ListToolsResult {
+    let tools = tool_defs()
+        .iter()
+        .map(|def| {
+            let schema = match (def.schema)() {
+                serde_json::Value::Object(map) => map,
+                _ => unreachable!("tool schemas are objects by construction"),
+            };
+            Tool::new(def.name, def.description, Arc::new(schema))
+        })
+        .collect();
+    let result = ListToolsResult::with_all_items(tools);
+    if version.is_some_and(|v| *v >= ProtocolVersion::V_2026_07_28) {
+        result.with_ttl_ms(0).with_cache_scope(CacheScope::Public)
+    } else {
+        result
     }
 }
 
@@ -666,22 +756,9 @@ impl ServerHandler for BuildResultsServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = tool_defs()
-            .iter()
-            .map(|def| {
-                let schema = match (def.schema)() {
-                    serde_json::Value::Object(map) => map,
-                    _ => unreachable!("tool schemas are objects by construction"),
-                };
-                Tool::new(def.name, def.description, Arc::new(schema))
-            })
-            .collect();
-        Ok(ListToolsResult {
-            tools,
-            ..Default::default()
-        })
+        Ok(list_tools_result(context.protocol_version().as_ref()))
     }
 
     async fn call_tool(
@@ -798,8 +875,8 @@ starlark_simple_value!(Mcp);
 #[starlark_value(type = "aspect.Mcp")]
 impl<'v> values::StarlarkValue<'v> for Mcp {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(mcp_methods)
+        static RES: MethodsStatic = MethodsStatic::new("mcp_methods", mcp_methods);
+        Some(RES.methods())
     }
 }
 
@@ -846,6 +923,24 @@ mod tests {
             .expect("tool exists");
         let map = arguments.as_object().cloned();
         (def.route)(&Args(map.as_ref()))
+    }
+
+    #[test]
+    fn tools_list_carries_cache_hints_from_2026_07_28() {
+        let current =
+            serde_json::to_value(list_tools_result(Some(&ProtocolVersion::V_2026_07_28))).unwrap();
+        assert_eq!(current["ttlMs"], 0);
+        assert_eq!(current["cacheScope"], "public");
+        assert_eq!(
+            current["tools"].as_array().unwrap().len(),
+            tool_defs().len()
+        );
+
+        for older in [Some(ProtocolVersion::V_2025_06_18), None] {
+            let json = serde_json::to_value(list_tools_result(older.as_ref())).unwrap();
+            assert!(json.get("ttlMs").is_none(), "{older:?}: {json}");
+            assert!(json.get("cacheScope").is_none(), "{older:?}: {json}");
+        }
     }
 
     #[test]
@@ -905,15 +1000,106 @@ mod tests {
     }
 
     #[test]
-    fn target_stats_with_label_sends_no_other_filters() {
+    fn target_stats_with_label_preserves_repo_and_omits_collection_filters() {
         let path = route(
             "get_target_stats",
             args(
-                serde_json::json!({"range": "d7", "label": "//a:b", "repo": "ignored", "limit": 5}),
+                serde_json::json!({"range": "d7", "label": "//a:b", "repo": "org/repo & tools", "limit": 5, "is_test": true}),
             ),
         )
         .unwrap();
+        assert_eq!(
+            path,
+            "/target-stats?range=d7&label=%2F%2Fa%3Ab&repo=org%2Frepo+%26+tools"
+        );
+    }
+
+    #[test]
+    fn target_stats_with_label_without_repo_selects_unattributed_builds() {
+        let path = route(
+            "get_target_stats",
+            args(serde_json::json!({"range": "d7", "label": "//a:b"})),
+        )
+        .unwrap();
         assert_eq!(path, "/target-stats?range=d7&label=%2F%2Fa%3Ab");
+    }
+
+    #[test]
+    fn target_stats_collection_maps_repo_to_repos() {
+        let path = route(
+            "get_target_stats",
+            args(serde_json::json!({"range": "d7", "repo": "org/repo & tools", "is_test": false, "limit": 5})),
+        ).unwrap();
+        assert_eq!(
+            path,
+            "/target-stats?range=d7&repos=org%2Frepo+%26+tools&is_test=false&limit=5"
+        );
+    }
+
+    #[test]
+    fn action_history_preserves_filters_and_encodes_timestamps() {
+        let path = route(
+            "get_action_history",
+            serde_json::json!({
+                "label": "//private:action", "start": "2026-09-01T00:00:00+02:00",
+                "end": "2026-09-15T00:00:00Z", "repo": "org/repo", "branch": "fix/a&b",
+                "cache": "miss", "daily": true, "limit": 1000, "offset": 20,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/action-history?label=%2F%2Fprivate%3Aaction&start=2026-09-01T00%3A00%3A00%2B02%3A00&end=2026-09-15T00%3A00%3A00Z&repo=org%2Frepo&branch=fix%2Fa%26b&cache=miss&limit=100&offset=20&daily=true"
+        );
+    }
+
+    #[test]
+    fn action_history_requires_label_and_both_time_bounds() {
+        for missing in ["label", "start", "end"] {
+            let mut args = serde_json::json!({"label": "//a:b", "start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z"});
+            args.as_object_mut().unwrap().remove(missing);
+            assert!(
+                route("get_action_history", args)
+                    .unwrap_err()
+                    .contains(missing)
+            );
+        }
+        let path = route("get_action_history", serde_json::json!({
+            "label": "//a:b", "start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z", "daily": false
+        })).unwrap();
+        assert_eq!(
+            path,
+            "/action-history?label=%2F%2Fa%3Ab&start=2026-09-01T00%3A00%3A00Z&end=2026-09-02T00%3A00%3A00Z&daily=false"
+        );
+    }
+
+    #[test]
+    fn missing_action_history_endpoint_explains_the_deployment_upgrade() {
+        let hint = not_found_hint("get_action_history", "example-deployment");
+        for expected in [
+            "example-deployment",
+            "/api/v1/action-history",
+            "Workflows operator",
+            "upgrade",
+            "then retry",
+            "#action-performance-history",
+        ] {
+            assert!(hint.contains(expected), "missing {expected}: {hint}");
+        }
+        assert!(!hint.contains("list_invocations"));
+    }
+
+    #[test]
+    fn other_tools_keep_the_resource_not_found_hint() {
+        for def in tool_defs()
+            .iter()
+            .filter(|d| d.name != "get_action_history")
+        {
+            assert_eq!(
+                not_found_hint(def.name, "example-deployment"),
+                " — no such resource on deployment 'example-deployment'; ids come from list_invocations"
+            );
+        }
     }
 
     #[test]
@@ -938,7 +1124,7 @@ mod tests {
     #[test]
     fn gating_message_names_version_flag_and_docs() {
         let msg = api_unavailable_message("acme", "https://app.acme.example.com");
-        for needle in ["6.1", "webapp.web.api_enabled", DOCS_URL, "acme"] {
+        for needle in ["6.0.30", "webapp.web.api_enabled", DOCS_URL, "acme"] {
             assert!(msg.contains(needle), "missing {needle}: {msg}");
         }
     }

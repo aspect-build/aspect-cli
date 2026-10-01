@@ -94,8 +94,8 @@ starlark_simple_value!(TaskPhase);
 #[starlark_value(type = "TaskPhase")]
 impl<'v> StarlarkValue<'v> for TaskPhase {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_phase_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_phase_methods", task_phase_methods);
+        Some(RES.methods())
     }
 }
 
@@ -286,8 +286,8 @@ impl<'v> AllocValue<'v> for TaskInfo {
 #[starlark_value(type = "TaskInfo")]
 impl<'v> StarlarkValue<'v> for TaskInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_info_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_info_methods", task_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -502,6 +502,12 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
 /// - `flagged`    — when `True` and `exit_code == 0`, the bookend
 ///                  reads `⚠️ Flagged` instead of `✅ Passed`. Ignored
 ///                  on non-zero exit (failure dominates).
+/// - `message`    — why the task ended, printed on its own line before
+///                  the bookend: `ERROR:` on a non-zero exit, `WARNING:`
+///                  when flagged, `INFO:` otherwise. The same rendering
+///                  `ctx.std.process.exit(code, message)` gets, so a
+///                  refusal reads the same whether `_impl` returns it or
+///                  a nested helper raises it.
 ///
 /// Tasks may instead return a bare `int` (treated as `TaskConclusion(
 /// exit_code=int)`) when they have nothing more to say than the
@@ -509,15 +515,17 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
 /// return types.
 #[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
 #[display(
-    "<TaskConclusion exit_code={} text={:?} flagged={}>",
+    "<TaskConclusion exit_code={} text={:?} flagged={} message={:?}>",
     exit_code,
     text,
-    flagged
+    flagged,
+    message
 )]
 pub struct TaskConclusion {
     pub exit_code: i32,
     pub text: String,
     pub flagged: bool,
+    pub message: Option<String>,
 }
 
 starlark_simple_value!(TaskConclusion);
@@ -525,8 +533,9 @@ starlark_simple_value!(TaskConclusion);
 #[starlark_value(type = "TaskConclusion")]
 impl<'v> StarlarkValue<'v> for TaskConclusion {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_conclusion_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("task_conclusion_methods", task_conclusion_methods);
+        Some(RES.methods())
     }
 }
 
@@ -551,14 +560,30 @@ fn task_conclusion_methods(registry: &mut MethodsBuilder) {
     fn flagged<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         Ok(this.downcast_ref::<TaskConclusion>().unwrap().flagged)
     }
+
+    /// Why the task ended, or `None`. Printed on its own line before the
+    /// bookend with a severity matching the exit code.
+    #[starlark(attribute)]
+    fn message<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<String>> {
+        Ok(NoneOr::from_option(
+            this.downcast_ref::<TaskConclusion>()
+                .unwrap()
+                .message
+                .clone(),
+        ))
+    }
 }
 
 #[starlark_module]
 pub fn register_globals(globals: &mut starlark::environment::GlobalsBuilder) {
     /// Construct a `TaskConclusion` to return from `_impl`. Carries the
     /// task's terminal state to the runtime: exit code, optional
-    /// conclusion text (rendered as `· <text>` on the bookend), and
-    /// optional `flagged` flag (passing-with-warning).
+    /// conclusion text (rendered as `· <text>` on the bookend), optional
+    /// `flagged` flag (passing-with-warning), and an optional `message`
+    /// saying why the task ended, printed before the bookend as an
+    /// `ERROR:` line on a non-zero exit (`WARNING:` when flagged, `INFO:`
+    /// otherwise). `return TaskConclusion(exit_code = 1, message = ...)`
+    /// renders exactly like `ctx.std.process.exit(1, ...)`.
     ///
     /// `_impl` may return either a bare `int` (treated as
     /// `TaskConclusion(exit_code=int)`) or a `TaskConclusion`.
@@ -567,11 +592,13 @@ pub fn register_globals(globals: &mut starlark::environment::GlobalsBuilder) {
         #[starlark(require = named)] exit_code: i32,
         #[starlark(require = named, default = String::new())] text: String,
         #[starlark(require = named, default = false)] flagged: bool,
+        #[starlark(require = named, default = NoneOr::None)] message: NoneOr<String>,
     ) -> anyhow::Result<TaskConclusion> {
         Ok(TaskConclusion {
             exit_code,
             text,
             flagged,
+            message: message.into_option(),
         })
     }
 }
@@ -625,6 +652,26 @@ Test = task(implementation = _impl)
         .run_task(0)
         .expect("run_task");
         assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn return_task_conclusion_with_message() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    conclusion = TaskConclusion(exit_code = 1, message = "Provide a target.")
+    if conclusion.message != "Provide a target.":
+        fail("message attribute did not round-trip")
+    if TaskConclusion(exit_code = 0).message != None:
+        fail("message should default to None")
+    return conclusion
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(1));
     }
 
     #[test]

@@ -7,7 +7,7 @@ The `.aspect/version.axl` file pins the Aspect CLI version and configures how th
 Pin a specific version:
 
 ```python
-version("2025.46.20")
+version("2026.38.30")
 ```
 
 The launcher downloads this version from the default sources: the GitHub
@@ -26,7 +26,7 @@ reproducing a crash for a bug report.
 
 ```python
 version(
-    "2025.46.20",
+    "2026.38.30",
     debug = True,
 )
 ```
@@ -45,7 +45,7 @@ Override where the launcher looks for the CLI binary by providing a `sources` li
 
 ```python
 version(
-    "2025.46.20",
+    "2026.38.30",
     sources = [
         local("target/debug/aspect-cli"),
         local("bazel-bin/crates/aspect-cli/aspect-cli"),
@@ -79,7 +79,7 @@ github(
 ```
 
 When `tag` and `artifact` are omitted, the launcher derives defaults:
-- `tag` defaults to `v{version}` (e.g. `v2025.46.20`)
+- `tag` defaults to `v{version}` (e.g. `v2026.38.30`)
 - `artifact` defaults to `{repo}-{target}` (e.g. `aspect-cli-aarch64-apple-darwin`)
 
 You can override either with explicit values:
@@ -120,7 +120,7 @@ String values in `tag`, `artifact`, and `url` support `{variable}` placeholders 
 
 | Variable | Example Value | Description |
 |---|---|---|
-| `{version}` | `2025.46.20` | The version from the `version()` call |
+| `{version}` | `2026.38.30` | The version from the `version()` call |
 | `{os}` | `darwin`, `linux` | Operating system kernel name |
 | `{arch}` | `x86_64`, `aarch64` | CPU instruction set architecture |
 | `{target}` | `aarch64-apple-darwin` | Full platform target triple |

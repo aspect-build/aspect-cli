@@ -16,12 +16,15 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use crate::engine::error::{IoError, NativeError};
+
 mod env;
 mod fs;
 pub mod io;
 mod net;
 mod process;
 pub mod stream;
+pub(crate) mod watch;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]
@@ -32,8 +35,8 @@ starlark_simple_value!(Std);
 #[starlark_value(type = "std.Std")]
 impl<'v> values::StarlarkValue<'v> for Std {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(std_methods)
+        static RES: MethodsStatic = MethodsStatic::new("std_methods", std_methods);
+        Some(RES.methods())
     }
 }
 
@@ -89,9 +92,23 @@ fn register_io_types(globals: &mut GlobalsBuilder) {
     const Writable: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
 }
 
+#[starlark_module]
+fn register_watch_types(globals: &mut GlobalsBuilder) {
+    const CreatedEvent: StarlarkValueAsType<watch::WatchCreated> = StarlarkValueAsType::new();
+    const ModifiedEvent: StarlarkValueAsType<watch::WatchModified> = StarlarkValueAsType::new();
+    const RemovedEvent: StarlarkValueAsType<watch::WatchRemoved> = StarlarkValueAsType::new();
+}
+
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     globals.namespace("process", register_process_types);
-    globals.namespace("io", register_io_types);
+    globals.namespace("net", net::register_net_types);
+    globals.namespace("io", |g| {
+        register_io_types(g);
+        g.set("Error", IoError::native_type().error_type());
+    });
+    // `std.fs` is a module (the `fs.watch` event types live here); the
+    // filesystem value type stays `std.FileSystem`.
+    globals.namespace("fs", |g| g.namespace("watch", register_watch_types));
 }

@@ -48,8 +48,8 @@ impl Stdio {
 #[starlark_value(type = "std.io.Stdio")]
 impl<'v> values::StarlarkValue<'v> for Stdio {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(stdio_methods)
+        static RES: MethodsStatic = MethodsStatic::new("stdio_methods", stdio_methods);
+        Some(RES.methods())
     }
 }
 

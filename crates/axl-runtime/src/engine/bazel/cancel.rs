@@ -43,8 +43,9 @@ impl<'v> AllocValue<'v> for Cancellation {
 #[starlark_value(type = "bazel.build.Cancellation")]
 impl<'v> values::StarlarkValue<'v> for Cancellation {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(cancellation_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("cancellation_methods", cancellation_methods);
+        Some(RES.methods())
     }
 }
 

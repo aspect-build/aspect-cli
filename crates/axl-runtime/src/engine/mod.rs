@@ -15,8 +15,11 @@ mod wasm;
 /// Re-exported for the credential helper: resolve the effective credentials
 /// profile, and resolve the current Aspect access token (JWT) for a profile,
 /// auto-refreshing if needed.
-pub use aspect::auth::{UriProfile, profile_for_uri, resolve_access_token, resolve_profile};
+pub use aspect::auth::{
+    UriProfile, login_hint, profile_for_uri, resolve_access_token, resolve_profile,
+};
 
+pub mod error;
 pub mod feature;
 pub mod grpc;
 pub mod names;
@@ -33,6 +36,7 @@ pub mod feature_map;
 pub mod store;
 pub mod task;
 pub mod task_context;
+pub mod task_hooks;
 pub mod task_info;
 pub mod task_map;
 pub mod telemetry;
@@ -51,6 +55,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Arg: StarlarkValueAsType<arg::Arg> = StarlarkValueAsType::new();
     const Arguments: StarlarkValueAsType<arguments::Arguments> = StarlarkValueAsType::new();
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
+    const TaskHooks: StarlarkValueAsType<task_hooks::TaskHooks> = StarlarkValueAsType::new();
     const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
     const Telemetry: StarlarkValueAsType<telemetry::Telemetry> = StarlarkValueAsType::new();
@@ -62,6 +67,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     r#async::register_globals(globals);
+    // After the Starlark stdlib, so its `fail` replaces the builtin.
+    error::register_globals(globals);
     r#trait::register_globals(globals);
     task::register_globals(globals);
     task_info::register_globals(globals);

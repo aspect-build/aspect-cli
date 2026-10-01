@@ -1,4 +1,4 @@
-"""Pure helpers for the `aspect wrapper` tasks, unit-tested in
+"""Pure helpers for the `aspect setup tools-bazel-wrapper` task, unit-tested in
 lib/wrapper_test.axl. `find_workspace_root` is the one exception: it takes
 `std` to walk the filesystem.
 """

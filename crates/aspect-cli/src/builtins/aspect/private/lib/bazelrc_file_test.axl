@@ -1,0 +1,240 @@
+"""Unit tests for `bazelrc_file.axl`: `rc_paths` (where each file goes),
+`command_sections`, `render_bazelrc`, `prune_configs`, `startup_flags_for_rc`,
+`import_line` and `ensure_import` (the one-time `try-import` block).
+Run with: aspect dev test-bazelrc-file
+"""
+
+load(
+    "./bazelrc_file.axl",
+    "GENERATED_HEADER",
+    "IMPORT_COMMENT",
+    "ImportAction",
+    "RcConfig",
+    "command_sections",
+    "defined_configs",
+    "ensure_import",
+    "import_line",
+    "prune_configs",
+    "rc_paths",
+    "render_bazelrc",
+    "startup_flags_for_rc",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_SECTION = RcConfig(name = "aspect-x", source = "x", comment = "x: remote cache.", flags = ["--remote_cache=grpcs://x", ("--credential_helper=x=h", ">=6.4.0")])
+_CHAIN = RcConfig(name = "aspect-x-exec", source = "x exec", flags = ["--config=aspect-x", "--remote_executor=grpcs://x"])
+
+def _test_rc_paths_in_a_checkout(_ctx):
+    # The default: everything under the workspace root, and the committed lines
+    # address the checkout through `%workspace%` so they hold in every clone.
+    got = rc_paths("/w")
+    _eq("output", got.output, "/w/.aspect/bazelrc")
+    _eq("imported by the workspace rc", got.importer, "/w/.bazelrc")
+    _eq("through %workspace%", got.imported, "%workspace%/.aspect/bazelrc")
+    _eq("log through %workspace% too", got.exec_log, "%workspace%/.aspect/generated/exec.log.zstd")
+    _eq("the log's parent is ours to create", got.generated_dir, "/w/.aspect/generated")
+
+def _test_rc_paths_in_home_mode(_ctx):
+    # The same shape rooted at the home directory. Nothing outside a checkout
+    # can be addressed through `%workspace%`, so the paths are absolute.
+    got = rc_paths("/h", home_mode = True)
+    _eq("output", got.output, "/h/.aspect/bazelrc")
+    _eq("imported by the home rc", got.importer, "/h/.bazelrc")
+    _eq("by the path written", got.imported, "/h/.aspect/bazelrc")
+    _eq("log under the home base", got.exec_log, "/h/.aspect/generated/exec.log.zstd")
+    _eq("its parent is ours to create", got.generated_dir, "/h/.aspect/generated")
+
+    # A runner overrides the log with its job tmpdir, which it already owns, so
+    # there is no generated directory to create under the base.
+    got = rc_paths("/h", home_mode = True, exec_log = "/wf/exec.log.zstd")
+    _eq("the override wins", got.exec_log, "/wf/exec.log.zstd")
+    _eq("nothing of ours to create", got.generated_dir, "")
+    _eq("the rc is still the home one", got.output, "/h/.aspect/bazelrc")
+
+def _test_rc_paths_overrides(_ctx):
+    # `--output` may point anywhere, so its log sits beside it rather than under
+    # a base, the import names it as written, and no directory is ours to create.
+    got = rc_paths("/w", output = "/elsewhere/my.bazelrc")
+    _eq("output", got.output, "/elsewhere/my.bazelrc")
+    _eq("still imported by the base's rc", got.importer, "/w/.bazelrc")
+    _eq("imported as written", got.imported, "/elsewhere/my.bazelrc")
+    _eq("log beside it", got.exec_log, "/elsewhere/exec.log.zstd")
+    _eq("nothing of ours to create", got.generated_dir, "")
+
+    # Both overrides name every derived path, so no base is needed.
+    got = rc_paths("", output = "/o/rc", import_into = "/i/rc")
+    _eq("output", got.output, "/o/rc")
+    _eq("importer", got.importer, "/i/rc")
+
+    # Importing a file into itself is nothing to do, not a self-import.
+    _eq("no import needed", rc_paths("", output = "/o/rc", import_into = "/o/rc").importer, "")
+
+def _test_startup_flags_for_rc(_ctx):
+    # The `--no*_rc` suppression flags must all be dropped: Bazel fatals on any of
+    # them inside a bazelrc. Output paths stay.
+    got = startup_flags_for_rc(["--nohome_rc", "--nosystem_rc", "--output_user_root=/b/x", "--output_base=/o/x"])
+    _eq("suppression dropped, paths kept", got, ["--output_user_root=/b/x", "--output_base=/o/x"])
+
+def _test_command_sections(_ctx):
+    # >= 6.3.0 and the unknown-version (assume latest) case use `common`.
+    for v in [None, "6.3.0", "7.4.1", "8.0.0"]:
+        _eq("%s -> common" % v, command_sections(v), ["common"])
+
+    # < 6.3.0 has no `common`; spell out build (inherited) + query (not inherited).
+    for v in ["6.2.1", "6.0.0", "5.4.0"]:
+        _eq("%s -> build/query" % v, command_sections(v), ["build", "query"])
+
+_COMMON = RcConfig(name = "aspect-common", source = "common", comment = "Common tuning.", flags = ["--heap_dump_on_oom"])
+
+def _test_render_common_section(_ctx):
+    out = render_bazelrc(["--output_base=/mnt/output"], [("aspect-common", ["common"])], ["common"], [_COMMON])
+    lines = out.split("\n")
+    _eq("header first", lines[0], GENERATED_HEADER)
+    _eq("startup line", "startup --output_base=/mnt/output" in lines, True)
+    _eq("enable line", "common --config=aspect-common" in lines, True)
+    _eq("group flag", "common:aspect-common --heap_dump_on_oom" in lines, True)
+    _eq("enable before definition", lines.index("common --config=aspect-common") < lines.index("common:aspect-common --heap_dump_on_oom"), True)
+    _eq("no unscoped flag", "common --heap_dump_on_oom" in lines, False)
+    _eq("no common startup_flag", "common --output_base=/mnt/output" in lines, False)
+    _eq("trailing newline", out.endswith("\n"), True)
+
+def _test_render_pre_common_sections(_ctx):
+    # < 6.3.0: each enable and group line is emitted once per section (build +
+    # query); startup flags are emitted once regardless of the command sections.
+    lines = render_bazelrc(["--output_base=/o"], [("aspect-common", ["build", "query"])], ["build", "query"], [_COMMON]).split("\n")
+    _eq("build enable", "build --config=aspect-common" in lines, True)
+    _eq("query enable", "query --config=aspect-common" in lines, True)
+    _eq("build group", "build:aspect-common --heap_dump_on_oom" in lines, True)
+    _eq("query group", "query:aspect-common --heap_dump_on_oom" in lines, True)
+    _eq("no common", any([ln.startswith("common") for ln in lines]), False)
+    _eq("startup once", len([ln for ln in lines if ln == "startup --output_base=/o"]), 1)
+
+def _test_render_enable_sections(_ctx):
+    """An enable line goes under the sections it was paired with, so a group that
+    carries an endpoint can be turned on for build-like commands while the
+    tuning beside it stays on for every command. The definitions are unaffected:
+    a `--config` naming one by hand works whatever the command."""
+    lines = render_bazelrc(
+        [],
+        [("aspect-common", ["common"]), ("aspect-x", ["build"])],
+        ["common"],
+        [_COMMON, _SECTION],
+    ).split("\n")
+    _eq("tuning enabled everywhere", "common --config=aspect-common" in lines, True)
+    _eq("endpoints enabled for build", "build --config=aspect-x" in lines, True)
+    _eq("and not for every command", "common --config=aspect-x" in lines, False)
+    _eq("definition stays common", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
+
+def _test_render_configs(_ctx):
+    # Config flags go under `<section>:<name>`, tuples unwrapped, chain lines
+    # verbatim, each group behind its comment; an unenabled group is defined only.
+    lines = render_bazelrc([], [], ["common"], [_SECTION, _CHAIN]).split("\n")
+    _eq("section flag", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
+    _eq("tuple unwrapped", "common:aspect-x --credential_helper=x=h" in lines, True)
+    _eq("chain verbatim", "common:aspect-x-exec --config=aspect-x" in lines, True)
+    _eq("comment", "# x: remote cache." in lines, True)
+    _eq("nothing enabled", any([ln.startswith("common --config=") for ln in lines]), False)
+    _eq("no condition leaked", any([">=" in ln for ln in lines]), False)
+
+def _test_prune_configs(_ctx):
+    cache = RcConfig(name = "aspect-cache", source = "g", flags = [])
+    exec = RcConfig(name = "aspect-exec", source = "e", flags = ["--config=aspect-cache", "--remote_executor=grpcs://e"])
+    alias = RcConfig(name = "aspect", source = "a", flags = ["--config=aspect-cache"])
+    (configs, enabled) = prune_configs([_COMMON, cache, exec, alias], ["aspect-common", "aspect-cache"])
+
+    # The emptied group goes, with its enable line and every chain to it; a
+    # section that only chained to it empties in turn and goes too.
+    _eq("survivors", [c.name for c in configs], ["aspect-common", "aspect-exec"])
+    _eq("chain dropped", configs[1].flags, ["--remote_executor=grpcs://e"])
+    _eq("enable dropped", enabled, ["aspect-common"])
+    _eq("nothing to prune", prune_configs([_COMMON], ["aspect-common"]), ([_COMMON], ["aspect-common"]))
+
+_LINE = import_line("%workspace%/.aspect/bazelrc")
+_BLOCK = IMPORT_COMMENT + "\n" + _LINE + "\n"
+
+def _ensure(existing):
+    return ensure_import(existing, _LINE)
+
+def _test_import_line(_ctx):
+    # `try-import`, so a generated file that later disappears is not fatal.
+    _eq("try-import", _LINE, "try-import %workspace%/.aspect/bazelrc")
+    _eq("explicit path as given", import_line("/srv/ci/aspect.bazelrc"), "try-import /srv/ci/aspect.bazelrc")
+
+def _test_ensure_import_new_file(_ctx):
+    got = _ensure(None)
+    _eq("created content", got.content, _BLOCK)
+    _eq("created", got.action, ImportAction("created"))
+    _eq("empty is new", _ensure("").action, ImportAction("created"))
+
+def _test_ensure_import_appends_once(_ctx):
+    # A user's rc keeps every line; ours is added after them, and a second run
+    # finds it and changes nothing — so re-running never accumulates lines.
+    first = _ensure("build --disk_cache=/tmp/dc\n")
+
+    # At the top, so the file's own lines come after and override the import.
+    _eq("prepended a blank line apart, under the comment", first.content, _BLOCK + "\nbuild --disk_cache=/tmp/dc\n")
+    _eq("prepended", first.action, ImportAction("prepended"))
+    _eq("no trailing newline", _ensure("build --x").content, _BLOCK + "\nbuild --x")
+    _eq("leading blank lines folded", _ensure("\n\nbuild --x\n").content, _BLOCK + "\nbuild --x\n")
+
+    second = _ensure(first.content)
+    _eq("unchanged content", second.content, first.content)
+    _eq("unchanged", second.action, ImportAction("unchanged"))
+    _eq("mid-file", _ensure(_LINE + "\nbuild --later\n").action, ImportAction("unchanged"))
+
+def _test_defined_configs(_ctx):
+    # Read off the `<command>:<name>` heads, in order, once each.
+    rc = "\n".join([
+        "# a comment",
+        "startup --output_base=/o",
+        "common --config=aspect-cloud",
+        "common:aspect-common --heap_dump_on_oom",
+        "common:aspect-cloud --remote_cache=grpcs://c",
+        "common:aspect-cloud --bes_backend=grpcs://b",
+        "build:aspect-cloud-exec --remote_executor=grpcs://e",
+        "try-import %workspace%/.aspect/bazelrc",
+        "build --flag_alias=x=//y:z",
+    ])
+    _eq("names", defined_configs(rc), ["aspect-common", "aspect-cloud", "aspect-cloud-exec"])
+
+    # An enable line names a config but does not define one, and neither does a
+    # flag whose *value* holds a colon.
+    _eq("no enable line", "aspect-cloud" in defined_configs("common --config=aspect-cloud"), False)
+    _eq("no value colon", defined_configs("build --flag_alias=x=//y:z"), [])
+    _eq("commented out", defined_configs("# common:aspect-cloud --remote_cache=grpcs://c"), [])
+    _eq("empty", defined_configs(""), [])
+    _eq("missing", defined_configs(None), [])
+
+_UNIT_TESTS = [
+    _test_rc_paths_in_a_checkout,
+    _test_rc_paths_in_home_mode,
+    _test_rc_paths_overrides,
+    _test_startup_flags_for_rc,
+    _test_command_sections,
+    _test_render_common_section,
+    _test_render_pre_common_sections,
+    _test_render_enable_sections,
+    _test_render_configs,
+    _test_prune_configs,
+    _test_import_line,
+    _test_ensure_import_new_file,
+    _test_ensure_import_appends_once,
+    _test_defined_configs,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bazelrc_file.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+bazelrc_file_tests = task(
+    summary = "Run the bazelrc_file AXL unit tests.",
+    kind = "test-bazelrc-file",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

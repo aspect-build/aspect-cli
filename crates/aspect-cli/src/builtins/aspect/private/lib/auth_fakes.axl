@@ -1,0 +1,37 @@
+"""A stand-in for `ctx.aspect.auth` in tests that must not reach a credential
+store.
+
+`ctx.aspect.auth` is a Rust Starlark value: its attributes and its methods'
+parameters are declared in `auth.rs`, and nothing type-checks an AXL caller
+against them. A test that builds its own `struct(...)` fake therefore duplicates
+that surface by hand, and the duplicate is invisible to everything until the suite
+is run — a parameter added in Rust fails as `Found <x> extra named parameter(s)`,
+in whichever test files happen to have their own copy.
+
+So there is one copy, here. Widening the real surface means widening `fake_auth`,
+and every test that uses it keeps working.
+
+Only what tests actually need is modelled. Add to it when a test needs more,
+matching the real signature rather than just the call being made — the point is
+that the fake does not have to be revisited the next time a caller changes.
+"""
+
+# Aspect Cloud's own name, as `auth.rs` defines it. A literal rather than a read
+# of the real value: a test fake that asked the engine would not be a fake.
+FAKE_ASPECT_CLOUD_DEPLOYMENT = "aspect-cloud"
+FAKE_ASPECT_CLOUD_API_URL = "https://api.aspect.build"
+
+def fake_auth(credentials = None, owned_hosts = None):
+    """`ctx.aspect.auth` returning `credentials` from every lookup.
+
+    `owned_hosts` maps a host to the deployment that owns it, for the endpoint
+    auth path; an unlisted host resolves to `None`, the "no configured deployment
+    claims it" answer."""
+    owned = owned_hosts or {}
+    return struct(
+        aspect_cloud_deployment = FAKE_ASPECT_CLOUD_DEPLOYMENT,
+        aspect_cloud_api_url = FAKE_ASPECT_CLOUD_API_URL,
+        deployment_for_host = lambda host: owned.get(host),
+        credentials = lambda deployment = None, profile = None, required = True: credentials,
+        login_profile = lambda deployment = None: deployment or FAKE_ASPECT_CLOUD_DEPLOYMENT,
+    )

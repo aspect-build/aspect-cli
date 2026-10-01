@@ -21,6 +21,18 @@ bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.2")
 
 register_toolchains("@toolchains_llvm_bootstrapped//toolchain:all")
 
+# Any osx.framework tag replaces the extension's default framework list, so the
+# defaults are repeated here. CoreServices is required by fsevent-sys (notify).
+osx = use_extension("@toolchains_llvm_bootstrapped//extensions:osx.bzl", "osx")
+osx.framework(name = "CFNetwork")  # re-exported by the CoreServices umbrella
+osx.framework(name = "CoreFoundation")
+osx.framework(name = "CoreServices")
+osx.framework(name = "Foundation")
+osx.framework(name = "Kernel")
+osx.framework(name = "OSLog")
+osx.framework(name = "Security")
+osx.framework(name = "SystemConfiguration")
+
 bazel_dep(name = "rules_rs", version = "0.0.27")
 
 # Special toolchains branch
@@ -72,59 +84,12 @@ crate.annotation(
 
 inject_repo(crate, "zstd")
 
-# starlark-rust git fork: crates live in subdirectories, so rules_rs needs
-# explicit strip_prefix hints for each one.
-crate.annotation(
-    crate = "allocative",
-    strip_prefix = "allocative/allocative",
-)
-crate.annotation(
-    crate = "allocative_derive",
-    strip_prefix = "allocative/allocative_derive",
-)
-crate.annotation(
-    crate = "cmp_any",
-    strip_prefix = "gazebo/cmp_any",
-)
-crate.annotation(
-    crate = "display_container",
-    strip_prefix = "gazebo/display_container",
-)
-crate.annotation(
-    crate = "dupe",
-    strip_prefix = "gazebo/dupe",
-)
-crate.annotation(
-    crate = "dupe_derive",
-    strip_prefix = "gazebo/dupe_derive",
-)
+# Patches to crates.io releases, one patches/<crate>+<version>.patch per crate.
+# Cargo builds get the same patches from `cargo patch-crate`.
 crate.annotation(
     crate = "starlark",
-    strip_prefix = "starlark",
-)
-crate.annotation(
-    crate = "starlark_derive",
-    strip_prefix = "starlark_derive",
-)
-crate.annotation(
-    crate = "starlark_lsp",
-    strip_prefix = "starlark_lsp",
-)
-crate.annotation(
-    crate = "starlark_map",
-    strip_prefix = "starlark_map",
-)
-crate.annotation(
-    crate = "starlark_syntax",
-    strip_prefix = "starlark_syntax",
-)
-crate.annotation(
-    crate = "strong_hash",
-    strip_prefix = "gazebo/strong_hash",
-)
-crate.annotation(
-    crate = "strong_hash_derive",
-    strip_prefix = "gazebo/strong_hash_derive",
+    patch_args = ["-p1"],
+    patches = ["//patches:starlark+0.14.2.patch"],
 )
 use_repo(crate, "crates")
 

@@ -19,7 +19,10 @@ permissions:
 jobs:
   build:
     name: Build MacOS and Linux release artifacts
-    runs-on: ubuntu-22.04-32core
+    # Only reachable via workflow_dispatch and the release workflows, never from
+    # a fork PR, so no GitHub-hosted fallback is needed.
+    runs-on: [self-hosted, aspect-workflows, aspect-large]
+    timeout-minutes: 120
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     env:
@@ -35,9 +38,9 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
           disk-cache: ${{ github.workflow }}
           repository-cache: ${{ github.workflow }}
       - name: Build release artifacts
@@ -57,23 +60,27 @@ jobs:
         # remote-only and the cp fails with "cannot stat". Same reasoning for
         # aspect-cli's `:debug_bins`, which `:release` copies but which is not
         # reachable from `:bins`.
+        #
+        # Assets go under $RUNNER_TEMP, not the checkout: untracked files
+        # would flip the stamp's LOCAL_CHANGES key to dirty and force every
+        # stamped crate to recompile on the next `bazel run`.
         run: |
-          mkdir -p upload_root/assets
+          mkdir -p "${RUNNER_TEMP}/upload_root/assets"
           bazel build --config=release --config=ci --remote_download_outputs=toplevel \
             //crates/aspect-launcher:bins \
             //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
             //crates/aspect-cli:debug_bins \
             //crates/axl-docgen:bins
-          bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
-          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
-          bazel run --config=release --config=ci //crates/axl-docgen:release -- "${PWD}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${RUNNER_TEMP}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${RUNNER_TEMP}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/axl-docgen:release -- "${RUNNER_TEMP}/upload_root/assets"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-path: "upload_root/assets/*"
+          subject-path: "${{ runner.temp }}/upload_root/assets/*"
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
-          path: upload_root/
+          path: ${{ runner.temp }}/upload_root/
           retention-days: 1

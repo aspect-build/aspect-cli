@@ -1,0 +1,35 @@
+name: Patch crates for cargo
+description: |
+  Applies patches/ to the crates listed in [workspace.metadata.patch], so any
+  cargo build in the workspace works. The committed .cargo/config.toml points
+  cargo at target/patch/ for every build here, including crates that do not
+  depend on a patched crate, so every job that runs cargo needs this first.
+  Bazel applies the same patches itself and needs nothing. See "Patched crates"
+  in CLAUDE.md.
+
+  patch-crate publishes no binaries and builds the whole cargo library from
+  source, so the built binary is cached by version.
+inputs:
+  version:
+    description: patch-crate version to install
+    default: "0.1.13"
+runs:
+  using: composite
+  steps:
+    - name: Restore patch-crate
+      id: cache
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/bin/cargo-patch-crate
+        key: ${{ runner.os }}-${{ runner.arch }}-patch-crate-${{ inputs.version }}
+    # Outside the checkout, so the repository's .cargo/config.toml, whose
+    # override names the copy this action is about to create, is not loaded.
+    - name: Install patch-crate
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      run: cargo install patch-crate --locked --version "${{ inputs.version }}"
+    # --force: a restored target/ may hold a copy made from an older patch.
+    - name: Apply patches
+      shell: bash
+      run: cargo patch-crate --force

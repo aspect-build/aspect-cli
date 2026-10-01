@@ -127,8 +127,8 @@ starlark_simple_value!(GrpcRpcContext);
 #[starlark_value(type = "grpc.rpc")]
 impl<'v> StarlarkValue<'v> for GrpcRpcContext {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(grpc_rpc_methods)
+        static RES: MethodsStatic = MethodsStatic::new("grpc_rpc_methods", grpc_rpc_methods);
+        Some(RES.methods())
     }
 }
 

@@ -80,8 +80,9 @@ impl<'v> values::StarlarkValue<'v> for WorkspaceEventIterator {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(workspace_event_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("workspace_event_methods", workspace_event_methods);
+        Some(RES.methods())
     }
 
     unsafe fn iterate(

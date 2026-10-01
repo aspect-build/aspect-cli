@@ -14,7 +14,10 @@ pub mod engine;
 pub mod eval;
 pub mod module;
 pub mod out;
+pub mod project_root;
 pub mod trace;
+
+pub use eval::TaskExit;
 
 /// Bazel subprocess live-tracking. Re-exported so `aspect-cli`'s
 /// signal handler can forward SIGINT / SIGTERM to in-flight bazel

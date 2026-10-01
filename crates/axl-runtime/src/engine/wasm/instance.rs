@@ -85,8 +85,8 @@ impl Debug for Instance {
 #[starlark_value(type = "Instance")]
 impl<'v> values::StarlarkValue<'v> for Instance {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(instance_methods)
+        static RES: MethodsStatic = MethodsStatic::new("instance_methods", instance_methods);
+        Some(RES.methods())
     }
 }
 

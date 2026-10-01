@@ -91,8 +91,9 @@ starlark_simple_value!(BuiltinsHash);
 #[starlark_value(type = "BuiltinsHash")]
 impl<'v> StarlarkValue<'v> for BuiltinsHash {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(builtins_hash_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("builtins_hash_methods", builtins_hash_methods);
+        Some(RES.methods())
     }
 }
 
@@ -264,8 +265,9 @@ starlark_simple_value!(BuiltinsBase64);
 #[starlark_value(type = "BuiltinsBase64")]
 impl<'v> StarlarkValue<'v> for BuiltinsBase64 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(builtins_base64_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("builtins_base64_methods", builtins_base64_methods);
+        Some(RES.methods())
     }
 }
 
@@ -377,8 +379,8 @@ starlark_simple_value!(Builtins);
 #[starlark_value(type = "__builtins__")]
 impl<'v> StarlarkValue<'v> for Builtins {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(builtins_methods)
+        static RES: MethodsStatic = MethodsStatic::new("builtins_methods", builtins_methods);
+        Some(RES.methods())
     }
 }
 
@@ -397,8 +399,9 @@ starlark_simple_value!(BuiltinsTime);
 #[starlark_value(type = "BuiltinsTime")]
 impl<'v> StarlarkValue<'v> for BuiltinsTime {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(builtins_time_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("builtins_time_methods", builtins_time_methods);
+        Some(RES.methods())
     }
 }
 

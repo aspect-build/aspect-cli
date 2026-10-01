@@ -13,7 +13,9 @@ HTTP failure contract (every helper below):
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./environment.axl", "color_enabled", "info", "warn")
+load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
     "./rate_limit.axl",
@@ -124,9 +126,9 @@ def _do_request_once(ctx, method, url, token, payload = None, token_class = BUCK
     else:
         return (False, 0, "unsupported method: " + method)
 
-    response = fut.map_err(lambda e: str(e)).block()
-    if type(response) == "string":
-        return (False, 0, "transport error: " + response)
+    err, response = fut.catch().block()
+    if err:
+        return (False, 0, "transport error: " + err.message)
 
     # Record rate-limit headers before branching on status — 4xx carry
     # them too. No-op when absent (non-github.com endpoints).
@@ -248,6 +250,13 @@ _AUTH_KIND_EXPIRED = "credentials-expired"
 _AUTH_KIND_DENIED = "access-denied"
 _AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
 _AUTH_KIND_API_ERROR = "aspect-api-error"
+
+# Fallback for a 404 whose body carried no message. "Not linked" rather than
+# "not installed": the app can be installed on the org and the request still
+# fail because the *Aspect account* the CLI authenticated as has no
+# installation linked to it, which is the likelier of the two and the one a
+# reader cannot diagnose from "not installed".
+_APP_NOT_LINKED = "GitHub App not linked to your Aspect account (see https://aspect.build/docs/cli/authentication)"
 
 def _set_auth_reason(_reason, kind, msg):
     """Populate `_reason` with both the structured `kind` and the
@@ -386,7 +395,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         _set_auth_reason(_reason, _AUTH_KIND_NO_OWNER_REPO, "owner/repo not provided")
         return None
 
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         kind, msg = _classify_missing_credentials(ctx)
         _set_auth_reason(_reason, kind, msg)
@@ -400,25 +409,25 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
                 fail(msg)
 
-    url = ctx.aspect.auth.api_url + "/github/token"
+    url = aspect_cloud_url(ctx, "/github/token")
     if roles:
         url = url + "?roles=" + ",".join(roles)
 
-    # Convert transport errors to a string so they don't fail the parent task.
-    resp = ctx.http().post(
+    # Catch transport errors so they don't fail the parent task.
+    err, resp = ctx.http().post(
         url = url,
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
         },
         data = json.encode({"owner": owner, "repo": repo}),
-    ).map_err(lambda e: str(e)).block()
+    ).catch().block()
 
-    if type(resp) == "string":
+    if err:
         _set_auth_reason(
             _reason,
             _AUTH_KIND_TRANSPORT_ERROR,
-            "Aspect API request failed (transport error): %s" % resp,
+            "Aspect API request failed (transport error): %s" % err.message,
         )
         return None
 
@@ -459,12 +468,12 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     if resp.status == 401:
         _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
     elif resp.status == 403:
-        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % resp.body)
+        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % (aspect_cloud_error(resp) or resp.body))
     elif resp.status == 404:
         _set_auth_reason(
             _reason,
             _AUTH_KIND_APP_NOT_INSTALLED,
-            "GitHub App not installed (see https://aspect.build/docs/cli/authentication)",
+            aspect_cloud_error(resp) or _APP_NOT_LINKED,
         )
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))
@@ -478,6 +487,9 @@ def contribute_result(parsed):
     Every field a caller needs must be listed here — the response is rebuilt,
     not passed through, so anything omitted silently reads as absent no matter
     what the server sent. `post_grant_run` is optional: older servers omit it.
+    `next_eligible_epoch_s` is when a denied caller may next be granted: the
+    holder's lease expiry while another run holds the grant, else the end of
+    the post interval. 0 when absent.
     """
     return {
         "success": True,
@@ -485,6 +497,7 @@ def contribute_result(parsed):
         "should_post": bool(parsed.get("should_post", False)),
         "comment_id": parsed.get("comment_id", "") or "",
         "post_grant_run": parsed.get("post_grant_run", "") or "",
+        "next_eligible_epoch_s": int(parsed.get("next_eligible_epoch_s", 0) or 0),
     }
 
 def _status_comment_contribute(ctx, request, profile = None):
@@ -498,31 +511,32 @@ def _status_comment_contribute(ctx, request, profile = None):
 
     `request` is the JSON-encodable body — `{scm, owner, repo, pr_number,
     head_sha, run_id, workflow_name, entries, shown_snippets, shown_repros,
-    shown_fixes, final, posted?}` (see the server's ContributeRequestSchema).
+    shown_fixes, final, posted?, comment_id?}` (see the server's
+    ContributeRequestSchema).
 
     Returns a result dict:
       `{"success": True, "state": {...}, "should_post": bool,
-        "comment_id": str}`
+        "comment_id": str, "post_grant_run": str, "next_eligible_epoch_s": int}`
     on a 2xx, else `{"success": False, "error": str, "status": int}`. Never
     raises — transport errors and non-2xx responses come back as
     `success=False` so the caller can fall back to local coordination.
     """
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         _, msg = _classify_missing_credentials(ctx)
         return {"success": False, "error": msg, "status": 0}
 
-    resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/status-comments/contribute",
+    err, resp = ctx.http().post(
+        url = aspect_cloud_url(ctx, "/status-comments/contribute"),
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
         },
         data = json.encode(request),
-    ).map_err(lambda e: str(e)).block()
+    ).catch().block()
 
-    if type(resp) == "string":
-        return {"success": False, "error": "transport error: %s" % resp, "status": 0}
+    if err:
+        return {"success": False, "error": "transport error: %s" % err.message, "status": 0}
 
     if resp.status >= 200 and resp.status < 300:
         parsed = json.try_decode(resp.body, None)
@@ -558,11 +572,11 @@ def _status_check_register(ctx, request, profile = None):
     `{"success": bool, "status": int}`. A miss just widens the sweep's job; the
     caller never blocks on it.
     """
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         return {"success": False, "status": 0}
 
-    url = ctx.aspect.auth.api_url + "/status-checks/register"
+    url = aspect_cloud_url(ctx, "/status-checks/register")
     headers = {
         "Authorization": "Bearer " + creds.access_token,
         "Content-Type": "application/json",
@@ -573,8 +587,8 @@ def _status_check_register(ctx, request, profile = None):
     for attempt in range(_REGISTER_ATTEMPTS):
         if attempt > 0:
             time.sleep(_REGISTER_RETRY_MS)
-        resp = ctx.http().post(url = url, headers = headers, data = body).map_err(lambda e: str(e)).block()
-        if type(resp) == "string":
+        err, resp = ctx.http().post(url = url, headers = headers, data = body).catch().block()
+        if err:
             continue  # transport error — retry
         status = resp.status
         if status >= 200 and status < 300:
@@ -647,20 +661,20 @@ def _post_budget(ctx, request):
     installation_proof, remaining, reset}` + optional `limit` (the proof comes
     from the token mint; see the server's RequestSchema). Never raises — a
     failure just leaves the prior budget/cadence in place."""
-    creds = ctx.aspect.auth.credentials()
+    creds = aspect_cloud_credentials(ctx)
     if not creds:
         return
 
-    resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/github/budget",
+    err, resp = ctx.http().post(
+        url = aspect_cloud_url(ctx, "/github/budget"),
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
         },
         data = json.encode(request),
-    ).map_err(lambda e: str(e)).block()
+    ).catch().block()
 
-    if type(resp) == "string" or resp.status < 200 or resp.status >= 300:
+    if err or resp.status < 200 or resp.status >= 300:
         return
     parsed = json.try_decode(resp.body, None)
     if type(parsed) != "dict":
@@ -1265,7 +1279,6 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
     append context. Used by every local-diff path in `detect_changed_files`.
     """
 
-    process = ctx.std.process
     cwd = _git_cwd(ctx, cwd)
 
     # Shallow checkout may lack the SHA(s); depth-1 fetch on-demand.
@@ -1281,7 +1294,7 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
     head_args = [] if head == "HEAD" else [head]
 
     if line_level:
-        result = process.command("git").args(["diff", base_sha] + head_args + ["--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        result = run_git_diff(ctx, cwd, "--unified=0", base_sha, *head_args)
         if not result.status.success:
             return None
         parsed = _parse_local_diff_output(result.stdout)
@@ -1289,11 +1302,17 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", 
             entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
         return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
-    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha] + head_args).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    out = run_git_diff(ctx, cwd, "--diff-filter=d", "--name-only", base_sha, *head_args)
     if not out.status.success:
         return None
     names = [f for f in out.stdout.strip().split("\n") if f]
     return {"files": names, "skipped": [], "source": source, "unscoped": False}
+
+def local_git_diff_for_test(ctx, line_level, base_sha, cwd):
+    """Test seam for `_try_local_git_diff_from_base_sha` (working-tree HEAD)
+    against a scratch repo at `cwd`. Production goes through
+    `detect_changed_files`."""
+    return _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, cwd = cwd)
 
 def _diff_synthesized_merge(ctx, line_level, merge_sha, cwd = None):
     """Change set from the synthesized PR merge commit `merge_sha`, or `None`.
@@ -1325,20 +1344,23 @@ def _parse_local_diff_output(output):
     From `@@ -old_start,old_count +new_start,new_count @@` headers. With
     `--unified=0`, old/new_count == the `-`/`+` line counts, matching the
     PR Files API's `additions`/`deletions`.
+
+    `---`/`+++` are headers only between a `diff --git` line and the file's
+    first hunk; inside a hunk they are removed/added content. Deleted files
+    (`+++ /dev/null`) are omitted.
     """
     files = []
     current_file = None
+    in_header = False
     for line in output.split("\n"):
-        if line.startswith("+++ b/"):
-            path = line.removeprefix("+++ b/")
-            current_file = {"file": path, "lines": [], "additions": 0, "deletions": 0}
-            files.append(current_file)
-        elif line.startswith("--- /dev/null"):
-            pass
-        elif line.startswith("+++ /dev/null"):
-            if current_file:
-                files.pop()
-                current_file = None
+        if line.startswith("diff --git "):
+            current_file = None
+            in_header = True
+        elif in_header and line.startswith("+++ "):
+            in_header = False
+            if line.startswith("+++ b/"):
+                current_file = {"file": line.removeprefix("+++ b/"), "lines": [], "additions": 0, "deletions": 0}
+                files.append(current_file)
         elif line.startswith("@@ ") and current_file != None:
             # Parse positionally — the trailing section heading is free-form
             # and may contain `+`/`-` tokens (`@@ -10,3 +10,3 @@ + heading`).
@@ -1932,9 +1954,9 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    res = ctx.http().download(url = url, output = output_path, mode = 0o644, headers = headers).map_err(lambda e: str(e)).block()
-    if type(res) == "string":
-        return {"success": False, "error": "transport error: " + res}
+    err, _ = ctx.http().download(url = url, output = output_path, mode = 0o644, headers = headers).catch().block()
+    if err:
+        return {"success": False, "error": "transport error: " + err.message}
     return {"success": True}
 
 # Struct-based API
@@ -1992,13 +2014,13 @@ _MISSING_TOKEN_MSG = "missing ACTIONS_RUNTIME_TOKEN (see the `add-id-token-permi
 def _github_twirp_once(ctx, url, headers, payload):
     """Single Twirp attempt → `(success, status, body_or_None)`, matching
     `_do_request_once` so `_is_retryable_http` applies."""
-    response = ctx.http().post(
+    err, response = ctx.http().post(
         url = url,
         headers = headers,
         data = json.encode(payload),
-    ).map_err(lambda e: str(e)).block()
-    if type(response) == "string":
-        return (False, 0, "transport error: " + response)
+    ).catch().block()
+    if err:
+        return (False, 0, "transport error: " + err.message)
     success = response.status >= 200 and response.status < 300
     body = None
     if response.body:
@@ -2112,7 +2134,7 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
 
     # No retry: body is a non-replayable `fs.open()` stream. Transport
     # errors still convert to `success=False` (soft failure).
-    upload_resp = ctx.http().put(
+    upload_err, upload_resp = ctx.http().put(
         url = signed_url,
         headers = {
             "x-ms-blob-type": "BlockBlob",
@@ -2120,15 +2142,15 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
             "Content-Length": str(zip_size),
         },
         data = ctx.std.fs.open(zip_path),
-    ).map_err(lambda e: str(e)).block()
+    ).catch().block()
 
     # Only remove the zip if we owned it; a caller-passed zip is theirs.
     if owns_zip and ctx.std.fs.exists(zip_path):
         ctx.std.fs.remove_file(zip_path)
 
-    if type(upload_resp) == "string":
-        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, 0, upload_resp)
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload transport error: " + upload_resp]}
+    if upload_err:
+        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, 0, upload_err.message)
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload transport error: " + upload_err.message]}
     if upload_resp.status < 200 or upload_resp.status >= 300:
         _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, upload_resp.status, upload_resp.body)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}

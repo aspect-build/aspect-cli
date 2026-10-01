@@ -131,8 +131,8 @@ impl<'v> StarlarkValue<'v> for TaskMap<'v> {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_map_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_map_methods", task_map_methods);
+        Some(RES.methods())
     }
 }
 

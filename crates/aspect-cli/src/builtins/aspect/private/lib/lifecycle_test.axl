@@ -1,8 +1,8 @@
-"""Tests for `lib/lifecycle.axl`'s Buildkite phase-section expansion.
+"""Tests for `lib/lifecycle.axl`.
 
-Covers `bk_phase_section_marker` + `publish_expanded_phases` — the logic
-deciding whether a phase's BK section header is emitted expanded (`+++`) or
-collapsed (`---`):
+Buildkite phase-section expansion — `bk_phase_section_marker` +
+`publish_expanded_phases`, the logic deciding whether a phase's BK section
+header is emitted expanded (`+++`) or collapsed (`---`):
 
   - `Phase.expanded = True` → `+++`.
   - A `--buildkite-annotations:expand-phase` entry (published via
@@ -14,11 +14,16 @@ collapsed (`---`):
 These exercise real `ctx.std.env` (no env-mocking layer in AXL), so the
 subtest snapshots and restores the channel env var it touches.
 
+Surface auto-close — the post-task hook `phases.new` registers, run against a
+fake `ctx` whose `Phases` handler records every update and whose `hooks`
+capture the registration, so the real status surfaces never see these
+updates.
+
 Run with:
   aspect dev test-lifecycle
 """
 
-load("./lifecycle.axl", "Phase", "phases")
+load("./lifecycle.axl", "Phase", "Phases", "phases")
 
 _ENV_KEY = "ASPECT_BK_EXPANDED_PHASES"
 
@@ -60,9 +65,67 @@ def _test_marker(ctx):
     else:
         ctx.std.env.set_var(_ENV_KEY, prior)
 
+def _fake_task_ctx():
+    """A `ctx` with only what `phases.new` and an update without a phase or
+    stream touch: a `Phases` handler list that records updates, and `hooks`
+    that capture the post-task registration. Returns `(ctx, updates, hooks)`."""
+    updates = []
+    hooks = []
+    ctx = struct(
+        traits = {Phases: struct(task_update = [lambda _c, u: updates.append(u)], repro_fix_suggestion = [])},
+        hooks = struct(post_task = lambda fn: hooks.append(fn)),
+    )
+    return ctx, updates, hooks
+
+def _close_after(open_kind, conclusion_before_close, outcome):
+    """Drive one handle: open the surface under `open_kind` (unless None),
+    send `conclusion_before_close` as the task's own final update (unless
+    None), then run the post-task hook with `outcome`. Returns the updates the
+    handler saw."""
+    ctx, updates, hooks = _fake_task_ctx()
+    ph = phases.new(ctx, {"k": "v"})
+    _eq("phases.new registers one post-task hook", len(hooks), 1)
+    if open_kind != None:
+        ph.update("running", phases.ProgressStyles(body = "working"), kind = open_kind)
+    if conclusion_before_close != None:
+        ph.update("passed", phases.ProgressStyles(body = "done"), final = True, conclusion = conclusion_before_close)
+    hooks[0](ctx, outcome)
+    return updates
+
+def _test_close_surface(_ctx):
+    # Never opened: nothing to close, so the hook must not create a surface
+    # just to conclude it.
+    _eq("unopened surface stays untouched", len(_close_after(None, None, TaskConclusion(exit_code = 1, message = "x"))), 0)
+
+    # The task sent its own final update: the hook stands down.
+    updates = _close_after("lint_results", "3 findings", TaskConclusion(exit_code = 1))
+    _eq("own final update: no second final", [u.final for u in updates], [False, True])
+    _eq("own final update: conclusion kept", updates[-1].conclusion, "3 findings")
+
+    # Ended early with a message: failed, first line of the message, same kind.
+    updates = _close_after("lint_results", None, TaskConclusion(exit_code = 1, message = "unknown deployment\n\nConfigure it."))
+    _eq("early failure: one final update added", [u.final for u in updates], [False, True])
+    _eq("early failure: status", updates[-1].status, "failed")
+    _eq("early failure: kind carried over", updates[-1].kind, "lint_results")
+    _eq("early failure: first line of message", updates[-1].conclusion, "unknown deployment")
+    _eq("early failure: body is the message", updates[-1].progress.body, "unknown deployment")
+    _eq("early failure: data is the handle's", updates[-1].data, {"k": "v"})
+
+    # A flagged pass closes as a warning, matching the bookend's verdict.
+    updates = _close_after("format_results", None, TaskConclusion(exit_code = 0, flagged = True, text = "reformatted 2 files"))
+    _eq("flagged pass: status", updates[-1].status, "warning")
+    _eq("flagged pass: text used when there is no message", updates[-1].conclusion, "reformatted 2 files")
+
+    # A bare `return 0` with nothing to say still closes the surface.
+    updates = _close_after("format_results", None, TaskConclusion(exit_code = 0))
+    _eq("silent pass: status", updates[-1].status, "passed")
+    _eq("silent pass: fallback body", updates[-1].progress.body, "Passed")
+    _eq("silent pass: empty conclusion", updates[-1].conclusion, "")
+
 def _test_impl(ctx):
     _test_marker(ctx)
-    print("lifecycle.axl: OK (1 section)")
+    _test_close_surface(ctx)
+    print("lifecycle.axl: OK (2 sections)")
     return 0
 
 lifecycle_tests = task(

@@ -1,5 +1,4 @@
 name: Publish Release
-
 on:
   workflow_call:
     inputs:
@@ -10,12 +9,10 @@ on:
   push:
     tags:
       - 'v202[0-9].[0-9]+.[0-9]+'
-
 permissions:
   id-token: write
   attestations: write
   contents: write
-
 jobs:
   build_release_artifacts:
     uses: ./.github/workflows/build_release_artifacts.yaml
@@ -29,20 +26,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-
       - name: Display structure of downloaded files
         run: ls -R
-
       - name: Calculate shasum
         run: shasum -a 256 assets/* > sha256
-
       - name: Prepare workspace snippet
         env:
           TAG: ${{ inputs.tag_name || github.ref_name }}
         run: .github/workflows/install_snippet.sh > release_notes.txt
-
       - name: Create GitHub draft release and upload artifacts
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ inputs.tag_name || github.ref_name }}
           # Use GH feature to populate the changelog automatically

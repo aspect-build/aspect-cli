@@ -6,6 +6,7 @@ use axl_proto::{
         BuildEvent, OrderedBuildEvent, PublishBuildToolEventStreamRequest, build_event::Event,
     },
 };
+use prost::{Message, Name, bytes::Bytes};
 use prost_types::{Any, Timestamp};
 
 use super::stream_id::stream_id;
@@ -38,13 +39,35 @@ pub fn bazel_event(
     seq: i64,
     event: &BazelBuildEvent,
 ) -> PublishBuildToolEventStreamRequest {
-    let packed = Any::from_msg(event).expect("failed to encode bazel event");
+    bazel_event_encoded(
+        build_id,
+        invocation_id,
+        seq,
+        Bytes::from(event.encode_to_vec()),
+        Timestamp::from(SystemTime::now()),
+    )
+}
+
+/// [`bazel_event`] for an event already on the wire: `encoded` is the
+/// serialized `BuildEvent` message exactly as bazel wrote it, so a caller
+/// holding those bytes skips a decode/re-encode round trip.
+pub fn bazel_event_encoded(
+    build_id: String,
+    invocation_id: String,
+    seq: i64,
+    encoded: Bytes,
+    event_time: Timestamp,
+) -> PublishBuildToolEventStreamRequest {
+    let packed = Any {
+        type_url: BazelBuildEvent::type_url(),
+        value: encoded.into(),
+    };
     stream_request(
         build_id,
         invocation_id,
         seq,
         BuildEvent {
-            event_time: Some(Timestamp::from(SystemTime::now())),
+            event_time: Some(event_time),
             event: Some(Event::BazelEvent(packed)),
         },
     )

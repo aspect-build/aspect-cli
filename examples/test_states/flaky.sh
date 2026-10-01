@@ -10,10 +10,10 @@ COUNTER_FILE="/tmp/flaky_counter_${LABEL_SAFE}"
 
 # Initialize or increment counter
 if [ ! -f "$COUNTER_FILE" ]; then
-    echo 1 > "$COUNTER_FILE"
+    echo 1 >"$COUNTER_FILE"
 else
     COUNT=$(cat "$COUNTER_FILE")
-    echo $((COUNT + 1)) > "$COUNTER_FILE"
+    echo $((COUNT + 1)) >"$COUNTER_FILE"
 fi
 
 COUNT=$(cat "$COUNTER_FILE")

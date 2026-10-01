@@ -20,6 +20,7 @@ use crate::engine::feature_map::FeatureMap;
 use crate::engine::passthrough;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
+use crate::engine::task_hooks::{self, TaskHooks};
 use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
@@ -27,7 +28,9 @@ use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
 use crate::engine::r#trait::extract_trait_type_id;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
+use crate::eval::exit::TaskExit;
 use crate::eval::load::AxlLoader;
+use crate::eval::outcome::{Ending, Outcome};
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
@@ -154,19 +157,22 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
     /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
     telemetry_value: Value<'v>,
+    /// The run's `TaskHooks`, shared by ConfigContext, FeatureContext, and
+    /// TaskContext as `ctx.hooks`; phase 4 runs what was registered into it.
+    hooks_value: Value<'v>,
 }
 
 impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn new(env: &'l ModuleEnv<'v>, loader: &'l AxlLoader<'l>) -> Self {
         let heap = env.heap();
-        let telemetry_value = Telemetry::alloc(heap);
         MultiPhaseEval {
             env,
             loader,
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
             trait_map_value: None,
-            telemetry_value,
+            telemetry_value: Telemetry::alloc(heap),
+            hooks_value: TaskHooks::alloc(heap),
         }
     }
 
@@ -372,6 +378,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.trait_map_value.unwrap(),
             self.features,
             self.telemetry_value,
+            self.hooks_value,
         ));
 
         for (config_path, scope) in configs {
@@ -435,10 +442,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Phase 3: run enabled feature implementations.
     ///
-    /// Must be called after `eval_config` so that config files have had the opportunity
-    /// to enable or disable features. `args_builder` builds the fully-merged `Arguments`
-    /// for each feature (callers handle CLI/override/default precedence). Features whose
-    /// resolved `enabled` is `False` are skipped.
+    /// Must be called after [`Self::execute_configs`] so that config files have had
+    /// the opportunity to enable or disable features. `args_builder` builds the
+    /// fully-merged `Arguments` for each feature (callers handle CLI/override/default
+    /// precedence). Features whose resolved `enabled` is `False` are skipped.
+    ///
+    /// A failing feature impl propagates as its own `starlark::Error` under a
+    /// `Feature implementation failed` context, so a [`TaskExit`] raised inside it
+    /// is still found by [`TaskExit::from_anyhow`].
     #[tracing::instrument(name = "execute.features", skip_all)]
     pub fn execute_features_with_args(
         &mut self,
@@ -448,7 +459,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let trait_map_value = self.trait_map_value.ok_or_else(|| {
             EvalError::UnknownError(anyhow!(
-                "eval_config() must be called before execute_features_with_args()"
+                "execute_configs() must be called before execute_features_with_args()"
             ))
         })?;
 
@@ -468,6 +479,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 attrs_value,
                 trait_map_value,
                 self.telemetry_value,
+                self.hooks_value,
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
@@ -475,7 +487,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             eval.extra = Some(&self.loader.env);
             eval.eval_function(feature.implementation(), &[fctx], &[])
                 .map_err(|e| {
-                    EvalError::UnknownError(anyhow!("Feature implementation failed: {:?}", e))
+                    EvalError::UnknownError(
+                        anyhow::Error::from(EvalError::StarlarkError(e))
+                            .context("Feature implementation failed"),
+                    )
                 })?;
         }
 
@@ -487,6 +502,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// The index refers to the position in `self.tasks()` (same Vec returned to
     /// the CLI when building the command tree). `args_builder` returns the
     /// fully-merged `Arguments` (callers handle CLI/override/default precedence).
+    ///
+    /// Runs, in order: the pre-task hooks, `_impl`, the post-task hooks with
+    /// the resolved conclusion, the `ctx.defer` callbacks, and the closing
+    /// bookend (see [`TaskHooks`]). Returns the task's exit code: what `_impl`
+    /// returned, or the code of a [`TaskExit`] it or a pre-task hook raised,
+    /// which is reported without a traceback. Any other error propagates once
+    /// the hooks and defers have run, with no bookend.
     #[tracing::instrument(
         name = "execute.task",
         skip_all,
@@ -593,6 +615,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_trait_map,
             task_info_val,
             bazel,
+            self.hooks_value,
         ));
 
         let mut eval = Evaluator::new(&self.env.0);
@@ -600,36 +623,38 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
 
-        let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
-        run_deferred(context, &mut eval);
-        let ret = impl_result?;
-        let (exit_code, flagged, conclusion) = unpack_task_return(ret);
-
-        // The task has had its chance to act on the flags the CLI could not
-        // attribute to a declared arg.
-        let unclaimed = passthrough::unclaimed(&passthrough::bucket_names(task), task_args_val);
-        let exit_code = if unclaimed.is_empty() {
-            exit_code
-        } else {
-            // A task that concluded with its own non-zero code has the more
-            // informative story, so it keeps it; only an otherwise-successful
-            // run fails over dropped flags. A hard error never reaches here at
-            // all (`impl_result?` above), so a real failure is never masked.
-            let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
-            for (bucket, flags) in &unclaimed {
-                let message = passthrough::message(&task_kind, "return", bucket, flags);
-                if failed_on_its_own {
-                    diag::warn(&message);
-                } else {
-                    diag::error(&message);
-                }
-            }
-            if failed_on_its_own {
-                exit_code
-            } else {
-                Some(passthrough::EXIT_UNCLAIMED)
-            }
+        let hooks = self
+            .hooks_value
+            .downcast_ref::<TaskHooks>()
+            .expect("hooks_value is a TaskHooks");
+        hooks.start();
+        let body_result = match hooks.run_pre(context, &mut eval) {
+            Ok(()) => eval.eval_function(task.implementation(), &[context], &[]),
+            Err(e) => Err(e),
         };
+        let (mut outcome, ending) = Outcome::resolve(body_result);
+        // A hard error prints itself, traceback and all, once it propagates
+        // below; an exit or return is reported here like a conclusion.
+        if !matches!(ending, Ending::Failed(_)) {
+            outcome.report_message();
+            if let Ending::Exited(e) = &ending {
+                TaskExit::debug_traceback(e);
+            }
+            outcome.exit_code =
+                apply_unclaimed_flags(task, &task_kind, task_args_val, outcome.exit_code);
+        }
+        let conclusion = heap.alloc(outcome.to_conclusion());
+        hooks.run_post(context, conclusion, &mut eval);
+        run_deferred(context, &mut eval);
+        if let Ending::Failed(e) = ending {
+            return Err(e.into());
+        }
+        let Outcome {
+            exit_code,
+            flagged,
+            text: conclusion,
+            ..
+        } = outcome;
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
         // any phase still active when `_impl` returned so the breakdown
@@ -727,6 +752,37 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     }
 }
 
+/// The exit code once the passthrough-flag check has had its say. A task that
+/// declared a bucket promised to act on what the CLI routed into it, so
+/// unclaimed flags fail an otherwise-successful run; a task that failed on its
+/// own has the more informative story and keeps its code, with the flags only
+/// warned about. An early exit is treated like the return it stands in for.
+fn apply_unclaimed_flags<'v>(
+    task: &dyn TaskLike<'v>,
+    task_kind: &str,
+    task_args_val: Value<'v>,
+    exit_code: Option<u8>,
+) -> Option<u8> {
+    let unclaimed = passthrough::unclaimed(&passthrough::bucket_names(task), task_args_val);
+    if unclaimed.is_empty() {
+        return exit_code;
+    }
+    let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
+    for (bucket, flags) in &unclaimed {
+        let message = passthrough::message(task_kind, "return", bucket, flags);
+        if failed_on_its_own {
+            diag::warn(&message);
+        } else {
+            diag::error(&message);
+        }
+    }
+    if failed_on_its_own {
+        exit_code
+    } else {
+        Some(passthrough::EXIT_UNCLAIMED)
+    }
+}
+
 fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
     let Some(ctx) = context.downcast_ref::<TaskContext>() else {
         return;
@@ -734,7 +790,7 @@ fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
     let defers = ctx.drain_defers();
     for defer in defers {
         if let Err(e) = eval.eval_function(defer.callable, &defer.args, &defer.kwargs) {
-            tracing::error!(error = %e, "ctx.defer callable failed");
+            task_hooks::report_callback_failure("ctx.defer callback", &e);
         }
     }
 }
@@ -796,22 +852,6 @@ impl<'a> Verdict<'a> {
                 color: bold_red,
             },
         }
-    }
-}
-
-/// Unpack the return value of `_impl` into `(exit_code, flagged, conclusion)`.
-///
-/// Tasks may return either a bare `int` (treated as `TaskConclusion(
-/// exit_code=int)`) or a `TaskConclusion` record carrying the full
-/// terminal state. Anything else yields `(None, false, "")` — the
-/// runtime renders that as `✅ Passed` with no conclusion suffix.
-fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> (Option<u8>, bool, String) {
-    if let Some(tc) = ret.downcast_ref::<crate::engine::task_info::TaskConclusion>() {
-        (Some(tc.exit_code as u8), tc.flagged, tc.text.clone())
-    } else if let Some(code) = ret.unpack_i32() {
-        (Some(code as u8), false, String::new())
-    } else {
-        (None, false, String::new())
     }
 }
 

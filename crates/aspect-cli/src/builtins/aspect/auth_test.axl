@@ -1,16 +1,17 @@
-"""Unit tests for the pure string builders in `auth.axl` (the `status`/`configure`
-detail rendering): `identity`, `login_command`, `capabilities`, `status_line`,
-`shadowed_warning`.
+"""Unit tests for the pure string builders in `auth.axl` — every line
+`auth status` and `auth configure` render, built where it can be asserted on
+rather than printed.
 
 A struct-based fake summary substitutes for a real `DeploymentSummary` (only the
 fields these helpers read are set). The `print`-driven `_print_deployment` /
-usage-hint functions and the fail() paths are exercised end-to-end, not here.
+usage-hint functions and the fail() paths are exercised end-to-end, not here:
+`crates/aspect-cli/tests/auth_status.rs` runs the real command.
 
 Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "identity", "login_command", "shadowed_warning", "status_line")
+load("@aspect//auth.axl", "aspect_cloud_heading", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "organization_label", "shadowed_warning", "status_line", "use_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -27,7 +28,8 @@ def _summary(
         cache = "",
         bes = "",
         exec = "",
-        results_url = ""):
+        results_url = "",
+        api_token_env = "ASPECT_API_TOKEN_GCP"):
     return struct(
         name = name,
         builtin = builtin,
@@ -39,6 +41,7 @@ def _summary(
         cache = cache,
         bes = bes,
         results_url = results_url,
+        api_token_env = api_token_env,
         exec = exec,
     )
 
@@ -52,12 +55,28 @@ def _test_login_command(_):
     _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
     _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
 
-def _test_status_line(_):
+def _test_login_target_label(_):
+    _eq("bare login → Aspect Cloud", login_target_label("", False), "Aspect Cloud")
+
+    # `--deployment aspect` names the built-in entry, which is still Aspect Cloud.
+    _eq("named account → Aspect Cloud", login_target_label("aspect", True), "Aspect Cloud")
     _eq(
-        "logged out → login hint",
-        status_line(_summary(name = "gcp")),
-        "logged out (run `aspect auth login --deployment gcp`)",
+        "deployment → quoted, after the noun",
+        login_target_label("acme", False),
+        "Aspect Workflows deployment 'acme'",
     )
+
+    # A dotted name is exactly why the name trails the noun rather than leading it.
+    _eq(
+        "dotted name stays readable",
+        login_target_label("gcp.awd-gha-test-staging", False),
+        "Aspect Workflows deployment 'gcp.awd-gha-test-staging'",
+    )
+
+def _test_status_line(_):
+    # Bare: what to do about it is the `Log in` row's job, which has room for all
+    # three ways rather than one of them in a parenthetical.
+    _eq("logged out → bare", status_line(_summary(name = "gcp")), "logged out")
     _eq(
         "logged in with identity + expiry",
         status_line(_summary(logged_in = True, display_name = "Greg", email = "g@x.io", status = "expires in 2h")),
@@ -68,6 +87,91 @@ def _test_status_line(_):
         status_line(_summary(logged_in = True)),
         "logged in",
     )
+
+def _test_login_options(_):
+    # All three ways, so a reader on CI is not left thinking the browser flow is
+    # the only one. The env var is named in full because its name is derived from
+    # the deployment's — the one thing here a reader cannot work out.
+    _eq(
+        "deployment → command, stdin flag, its own variable",
+        login_options(_summary(name = "gcp.acme", api_token_env = "ASPECT_API_TOKEN_GCP_ACME")),
+        [
+            "run `aspect auth login --deployment gcp.acme`,",
+            "or add --with-api-token to read an API token from stdin,",
+            "or set $ASPECT_API_TOKEN_GCP_ACME",
+        ],
+    )
+
+    # Aspect Cloud gets the same treatment: a bare login, and the unsuffixed
+    # variable every installation needs anyway.
+    _eq(
+        "Aspect Cloud → bare login and the unsuffixed variable",
+        login_options(_summary(builtin = True, name = "aspect-cloud", api_token_env = "ASPECT_API_TOKEN")),
+        [
+            "run `aspect auth login`,",
+            "or add --with-api-token to read an API token from stdin,",
+            "or set $ASPECT_API_TOKEN",
+        ],
+    )
+
+    # The `$` is load-bearing: without it the name reads as the token itself,
+    # which is what sent this row back for a rewrite.
+    for option in login_options(_summary()):
+        if "ASPECT_API_TOKEN" in option and "$ASPECT_API_TOKEN" not in option:
+            fail("the variable must be marked with $: %s" % option)
+
+def _test_default_marker_line(_):
+    # The shape every entry shares, Aspect Cloud included: glyph first, so the
+    # column reads straight down a mixed list.
+    _eq("default", default_marker_line("acme", True), "● acme (default)")
+    _eq("not default", default_marker_line("acme", False), "○ acme")
+
+    # The glyph is unconditional; only the wording waits for something to contrast
+    # with. A lone entry is the default trivially, and saying so sends the reader
+    # looking for the alternative it implies.
+    _eq(
+        "default, unnoted",
+        default_marker_line("acme", True, note_default = False),
+        "● acme",
+    )
+    _eq(
+        "not default, unnoted",
+        default_marker_line("acme", False, note_default = False),
+        "○ acme",
+    )
+
+def _test_aspect_cloud_heading(_):
+    cloud = _summary(builtin = True, name = "aspect-cloud")
+    default_cloud = _summary(builtin = True, name = "aspect-cloud", default = True)
+
+    # `_print_deployment` draws no header for Aspect Cloud — its name is this
+    # heading — so without this nothing on screen carries the marker the legend
+    # names, in the common case where Aspect Cloud is the default.
+    _eq("default", aspect_cloud_heading(default_cloud, True), "● Aspect Cloud (default)")
+    _eq("not default", aspect_cloud_heading(cloud, True), "○ Aspect Cloud")
+
+    # The only deployment there is: still glyphed, since that column is what a
+    # reader scans, but not called the default — there is nothing it could be the
+    # default over.
+    _eq("alone", aspect_cloud_heading(default_cloud, False), "● Aspect Cloud")
+
+    # The heading is the product name, not the deployment name that `auth use`
+    # takes — which is why the `Default` row spells the command out.
+    _eq(
+        "named for the product, whatever the entry is called",
+        aspect_cloud_heading(_summary(builtin = True, name = "aspect", default = True), True),
+        "● Aspect Cloud (default)",
+    )
+
+def _test_use_command(_):
+    # The name `auth use` takes, which for Aspect Cloud appears nowhere else on
+    # screen — its heading is the product name.
+    _eq(
+        "Aspect Cloud",
+        use_command(_summary(builtin = True, name = "aspect-cloud")),
+        "aspect auth use aspect-cloud",
+    )
+    _eq("deployment", use_command(_summary(name = "gcp.acme")), "aspect auth use gcp.acme")
 
 def _shadowed(name = "aspect", path = "/home/u/.aspect/config.json", user_config = True):
     return struct(name = name, path = path, user_config = user_config)
@@ -90,11 +194,27 @@ def _test_shadowed_warning(_):
     if "Rename or delete" not in repo:
         fail("repo warning should say to edit the file: %s" % repo)
 
+def _org(id = "0b1c-2d3e", name = "Acme"):
+    return struct(id = id, name = name)
+
+def _test_organization_label(_):
+    _eq("named → name (id)", organization_label(_org()), "Acme (0b1c-2d3e)")
+
+    # No name came back for the organization, so the id stands in for it and is
+    # not repeated in parentheses.
+    _eq("id only → id once", organization_label(_org(name = "0b1c-2d3e")), "0b1c-2d3e")
+
 _UNIT_TESTS = [
+    _test_aspect_cloud_heading,
+    _test_default_marker_line,
     _test_identity,
     _test_login_command,
+    _test_login_options,
+    _test_login_target_label,
+    _test_organization_label,
     _test_shadowed_warning,
     _test_status_line,
+    _test_use_command,
 ]
 
 def _test_impl(ctx):

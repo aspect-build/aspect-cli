@@ -368,6 +368,7 @@ def _process_bes(state: struct, event):
             # build was interrupted before the target finished), which has no
             # `output_group`. Read defensively so an aborted target no-ops.
             for og in (bes_get(event.payload, "output_group", None) or []):
+                state.output_group_filesets[(label_key, og.name)] = og.file_sets
                 if og.name == "default":
                     state.target_fileset[label_key] = og.file_sets
                 elif og.name == _RUNINFO_OUTPUT_GROUP:
@@ -422,6 +423,22 @@ def _get_default_outputs(state: struct, target: str) -> list[str]:
     if target not in state.target_fileset:
         return []
     return _collect_fileset_paths(state, state.target_fileset[target])
+
+def _clear_default_outputs(state: struct, target: str) -> None:
+    """Forget a prior build's default output group before the next build."""
+    target = apparent_label(target, state.current_package)
+    state.target_fileset.pop(target, None)
+
+def _get_output_group_outputs(state: struct, target: str, group: str) -> list[str]:
+    """Return local paths reported for one named target output group."""
+    target = apparent_label(target, state.current_package)
+    refs = state.output_group_filesets.get((target, group))
+    return _collect_fileset_paths(state, refs) if refs != None else []
+
+def _clear_output_group_outputs(state: struct, target: str, group: str) -> None:
+    """Forget a prior build's named output group before starting the next one."""
+    target = apparent_label(target, state.current_package)
+    state.output_group_filesets.pop((target, group), None)
 
 def _read_runinfo(state: struct, target_key: str) -> struct | None:
     """Parse the `aspect_runinfo` JSON the injected aspect wrote for `target_key`.
@@ -567,7 +584,7 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
@@ -624,6 +641,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         cmd = cmd.stderr(ctx.std.fs.create(stderr_path))
     if capture and not stdout_path and not stderr_path:
         cmd = cmd.stdout("piped").stderr("piped")
+    if process_group:
+        cmd = cmd.process_group(0)
     return cmd.spawn()
 
 def runfiles_env(ep: struct) -> dict:
@@ -725,7 +744,11 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           the build's `--remote_download_outputs` setting; the caller is
           responsible for materializing what it intends to read.
 
-      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None) → Child
+      clear_default_outputs(target)
+          Forget the prior build's default output group before starting the
+          next build, preventing an incomplete build from leaving stale paths.
+
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -736,6 +759,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           Pass `stdout_path` / `stderr_path` to redirect the child's streams to
           files (so a non-blocking `try_wait()` reap can read them after exit
           without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
+          `process_group=True` starts the child in a separate process group so
+          the caller can terminate the child and its descendants together.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -745,6 +770,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         filesets = {},
         target_fileset = {},
         runinfo_fileset = {},
+        output_group_filesets = {},
         # Whether the runinfo aspect was injected (`rc` given). When true a
         # runnable target's `aspect_runinfo` arrives in a separate
         # `target_completed` (same label, set `id.aspect`), so `entrypoint_ready`
@@ -768,5 +794,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path),
+        clear_default_outputs = lambda target: _clear_default_outputs(state, target),
+        get_output_group_outputs = lambda target, group: _get_output_group_outputs(state, target, group),
+        clear_output_group_outputs = lambda target, group: _clear_output_group_outputs(state, target, group),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group),
     )

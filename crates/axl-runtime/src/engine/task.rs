@@ -289,8 +289,8 @@ impl<'v> StarlarkValue<'v> for Task<'v> {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_methods", task_methods);
+        Some(RES.methods())
     }
 }
 
@@ -346,8 +346,8 @@ impl<'v> StarlarkValue<'v> for FrozenTask {
     type Canonical = Task<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_methods)
+        static RES: MethodsStatic = MethodsStatic::new("task_methods", task_methods);
+        Some(RES.methods())
     }
 }
 

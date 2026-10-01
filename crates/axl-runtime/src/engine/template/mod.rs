@@ -157,8 +157,8 @@ starlark_simple_value!(Template);
 #[starlark_value(type = "Template")]
 impl<'v> StarlarkValue<'v> for Template {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(template_methods)
+        static RES: MethodsStatic = MethodsStatic::new("template_methods", template_methods);
+        Some(RES.methods())
     }
 }
 

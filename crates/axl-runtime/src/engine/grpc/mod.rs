@@ -53,8 +53,9 @@ starlark_simple_value!(BuiltinsGrpc);
 #[starlark_value(type = "BuiltinsGrpc")]
 impl<'v> StarlarkValue<'v> for BuiltinsGrpc {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(builtins_grpc_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("builtins_grpc_methods", builtins_grpc_methods);
+        Some(RES.methods())
     }
 }
 

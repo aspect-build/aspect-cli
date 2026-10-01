@@ -1,0 +1,74 @@
+"""Workspace file-watch session for `--watch` tasks."""
+
+load("@std//time.axl", "sleep_iter")
+
+# Workspace entries never worth a rebuild: VCS internals and bazel's
+# convenience symlinks (bazel-bin, bazel-out,
+# bazel-<workspace>, ...) — outputs live in the output base outside the
+# workspace, but the symlinks themselves flicker during builds.
+_IGNORE_NAMES = [".git", ".jj"]
+
+def _absolute(ctx: TaskContext, path: str) -> str:
+    if path.startswith("/") or path.startswith("\\\\") or (len(path) >= 3 and path[1] == ":" and path[2] in ["/", "\\"]):
+        return path
+    return ctx.std.env.current_dir() + "/" + path
+
+def _ignores(root: str, symlink_prefix: str | None = None) -> list[str]:
+    # `fs.watch` ignore prefixes must be absolute. Bazel's default convenience
+    # symlink prefix is `bazel-`; `/` disables convenience symlinks entirely.
+    prefix = "bazel-" if symlink_prefix == None else symlink_prefix
+    paths = [root + "/" + name for name in _IGNORE_NAMES]
+    if prefix != "/":
+        workspace = root.rstrip("/").rsplit("/", 1)[-1]
+        prefix = prefix.replace("%workspace%", workspace)
+        prefix = prefix if prefix.startswith("/") else root + "/" + prefix
+        paths.extend([prefix + suffix for suffix in ["bin", "out", "testlogs", workspace]])
+    return paths
+
+def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
+    """Start watching the bazel workspace. Returns a session:
+
+      try_pop() → None | fs.WatchBatch — non-blocking; a settled batch of
+          workspace changes.
+      root — the watched workspace root.
+
+    Additional ignore paths may be absolute or relative to the invocation
+    directory.
+    """
+    root = ctx.std.env.bazel_root_dir()
+    extra_ignores = [_absolute(ctx, path) for path in ignore]
+    symlink_prefix = rc.flag_value("--symlink_prefix", command = "build") if rc != None else None
+    w = ctx.std.fs.watch(root, ignore = _ignores(root, symlink_prefix) + extra_ignores)
+    return struct(
+        try_pop = w.try_pop,
+        root = root,
+    )
+
+_TICK_MS = 100
+
+def _run_pending(ws: struct, run_cycle) -> bool:
+    """Run one cycle when a settled batch is ready, coalescing batches that
+    were already queued before the cycle starts. Returns whether it ran."""
+    if ws.try_pop() == None:
+        return False
+    for _ in range(1000):
+        if ws.try_pop() == None:
+            break
+    run_cycle()
+    return True
+
+def _loop(ws: struct, run_cycle) -> None:
+    """Re-run `run_cycle` on each settled batch of workspace changes — the
+    simple watch shape for tasks whose cycle is just re-running a bazel
+    command. Batches already queued when a cycle starts are coalesced into
+    it; a failed cycle waits for the next change like any other. Runs until
+    Ctrl-C."""
+    for _tick in sleep_iter(_TICK_MS):
+        _run_pending(ws, run_cycle)
+
+watch = namespace(
+    ignores = _ignores,
+    new = _new,
+    loop = _loop,
+    run_pending = _run_pending,
+)

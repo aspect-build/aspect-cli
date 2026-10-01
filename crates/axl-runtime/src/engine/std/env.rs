@@ -24,8 +24,8 @@ impl Env {
 #[starlark_value(type = "std.Env")]
 impl<'v> StarlarkValue<'v> for Env {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(env_methods)
+        static RES: MethodsStatic = MethodsStatic::new("env_methods", env_methods);
+        Some(RES.methods())
     }
 }
 

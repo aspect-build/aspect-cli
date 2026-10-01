@@ -1,0 +1,67 @@
+"""Tests for `lib/aspect_cloud_api.axl`'s `aspect_cloud_error`.
+
+The helper decides whether the CLI renders Aspect Cloud's own failure message
+or falls back to a client-side string. Getting it wrong is how a precise
+server message ("No GitHub App installations linked to this account") gets
+replaced by a guess ("GitHub App not installed"), so the cases where it must
+return `""` matter as much as the case where it must not.
+
+Run with:
+  aspect dev test-aspect-cloud-api
+"""
+
+load("./aspect_cloud_api.axl", "aspect_cloud_error")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _resp(body):
+    """The one field the helper reads off an `ctx.http` response."""
+    return struct(body = body)
+
+def _test_server_message(_ctx):
+    _eq(
+        "error field is returned verbatim",
+        aspect_cloud_error(_resp('{"error": "No GitHub App installations linked to this account."}')),
+        "No GitHub App installations linked to this account.",
+    )
+    _eq(
+        "surrounding whitespace trimmed",
+        aspect_cloud_error(_resp('{"error": "  linked to nothing  "}')),
+        "linked to nothing",
+    )
+    _eq(
+        "other fields ignored",
+        aspect_cloud_error(_resp('{"error": "denied", "token": "t"}')),
+        "denied",
+    )
+
+def _test_falls_back_to_empty(_ctx):
+    # Each of these must yield "" so the caller renders its own fallback
+    # rather than an empty or nonsense message.
+    for label, body in [
+        ("empty body", ""),
+        ("invalid JSON", "<html>502</html>"),
+        ("JSON but not an object", '["error"]'),
+        ("object without an error key", '{"token": "t"}'),
+        ("error is not a string", '{"error": {"code": 404}}'),
+        ("error is null", '{"error": null}'),
+        ("error is empty", '{"error": ""}'),
+        ("error is whitespace", '{"error": "   "}'),
+    ]:
+        _eq(label, aspect_cloud_error(_resp(body)), "")
+
+def _test_impl(ctx):
+    _test_server_message(ctx)
+    _test_falls_back_to_empty(ctx)
+    print("aspect_cloud_api.axl: OK (2 sections)")
+    return 0
+
+aspect_cloud_api_tests = task(
+    summary = "Run the Aspect Cloud API helper unit tests.",
+    kind = "test-aspect-cloud-api",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

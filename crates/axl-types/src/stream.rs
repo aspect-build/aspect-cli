@@ -178,8 +178,8 @@ impl Readable {
 #[starlark_value(type = "std.io.Readable")]
 impl<'v> values::StarlarkValue<'v> for Readable {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(readable_methods)
+        static RES: MethodsStatic = MethodsStatic::new("readable_methods", readable_methods);
+        Some(RES.methods())
     }
 
     unsafe fn iterate(
@@ -282,8 +282,8 @@ fn readable_methods(registry: &mut MethodsBuilder) {
 #[starlark_value(type = "std.io.Writable")]
 impl<'v> values::StarlarkValue<'v> for Writable {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(writable_methods)
+        static RES: MethodsStatic = MethodsStatic::new("writable_methods", writable_methods);
+        Some(RES.methods())
     }
 }
 

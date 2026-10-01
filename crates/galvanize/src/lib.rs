@@ -238,24 +238,40 @@ impl Read for Pipe {
     }
 }
 
-/// A regular file that streams its contents as the writer (identified by `pid`) appends to it.
+/// A regular file that streams its contents as the writer appends to it.
 ///
 /// Busy-polls for file existence at open time, then reads with the same retry logic as
 /// [`Pipe`] with [`RetryPolicy::IfOpenForPid`]: on EOF, checks whether the writer process
 /// still has the file open. Returns `BrokenPipe` when the writer closes the file.
+///
+/// Two pids, because the process holding the file open is not always the process
+/// whose death settles whether more bytes are coming. For bazel, `holder_pid` is
+/// the daemon that writes the file and `invocation_pid` is the client that ran the
+/// command; the daemon outlives the invocation by design, so only the client can
+/// answer "is this over?".
 pub struct StreamingFile {
     path: PathBuf,
     inner: File,
-    pid: u32,
+    holder_pid: u32,
 }
 
 impl StreamingFile {
     /// Polls until `path` exists (10 ms sleep between checks), then opens it.
-    /// Returns `BrokenPipe` immediately if `pid` exits before the file appears.
+    /// Returns `BrokenPipe` if either pid dies before the file appears.
     /// Path is canonicalized after open for accurate fd matching.
-    pub fn open(path: PathBuf, pid: u32) -> io::Result<Self> {
-        while !path.exists() {
-            if !is_pid_alive(pid) {
+    pub fn open(path: PathBuf, holder_pid: u32, invocation_pid: u32) -> io::Result<Self> {
+        loop {
+            if path.exists() {
+                break;
+            }
+            // Sample liveness *before* the last existence check: a writer that
+            // finished the file and exited in between must not be read as a
+            // writer that never wrote one.
+            let over = !is_pid_alive(invocation_pid) || !is_pid_alive(holder_pid);
+            if path.exists() {
+                break;
+            }
+            if over {
                 return Err(io::Error::new(
                     ErrorKind::BrokenPipe,
                     "process exited before the file was created",
@@ -265,7 +281,11 @@ impl StreamingFile {
         }
         let inner = File::open(&path)?;
         let path = path.canonicalize()?;
-        Ok(Self { path, inner, pid })
+        Ok(Self {
+            path,
+            inner,
+            holder_pid,
+        })
     }
 }
 
@@ -278,7 +298,7 @@ impl Read for StreamingFile {
             // Callers that cannot tolerate Ok(0) (e.g. a zstd Decoder) should wrap
             // this in a blocking retry adapter.
             Ok(0) => {
-                if is_path_open_for_pid(&self.path, self.pid)? {
+                if is_path_open_for_pid(&self.path, self.holder_pid)? {
                     Ok(0)
                 } else {
                     Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream"))
@@ -404,6 +424,56 @@ mod tests {
             b"beforeafter".to_vec(),
             "a poke beside a live writer must not truncate the stream"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A path no writer will ever create, plus a holder that outlives the
+    /// invocation. `holder_pid` alone can never end this wait — bazel's daemon
+    /// is configured to idle for minutes after the client it served has gone.
+    #[test]
+    fn a_dead_invocation_ends_the_wait_while_the_holder_lives_on() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-test-{}-never-written",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut invocation = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn the invocation stand-in");
+        let invocation_pid = invocation.id();
+        invocation.wait().expect("reap the invocation stand-in");
+
+        match StreamingFile::open(path, std::process::id(), invocation_pid) {
+            Ok(_) => panic!("nothing was ever written; the open must not succeed"),
+            Err(err) => assert_eq!(err.kind(), ErrorKind::BrokenPipe),
+        }
+    }
+
+    /// The other side of that check: the writer got the file written and then
+    /// exited, so by the time we look the invocation is already dead. The bytes
+    /// are still there and must still be read.
+    #[test]
+    fn a_file_written_before_the_invocation_exited_is_still_opened() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-test-{}-written-then-exited",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"payload").expect("write the file");
+
+        let mut invocation = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn the invocation stand-in");
+        let invocation_pid = invocation.id();
+        invocation.wait().expect("reap the invocation stand-in");
+
+        let mut f = StreamingFile::open(path.clone(), std::process::id(), invocation_pid)
+            .expect("the file exists; a dead invocation must not hide it");
+        let mut buf = [0u8; 7];
+        f.read_exact(&mut buf).expect("read the payload");
+        assert_eq!(&buf, b"payload");
         let _ = std::fs::remove_file(&path);
     }
 }

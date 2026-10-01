@@ -7,14 +7,14 @@ use starlark::syntax::DialectTypes;
 use starlark_lsp::error::eval_message_to_lsp_diagnostic;
 use starlark_lsp::server::LspContext;
 use starlark_lsp::server::LspEvalResult;
-use starlark_lsp::server::LspUrl;
+use starlark_lsp::server::LspUri;
 use starlark_lsp::server::StringLiteralResult;
 pub struct AxlContext {}
 
 impl LspContext for AxlContext {
     fn parse_file_with_contents(
         &self,
-        uri: &LspUrl,
+        uri: &LspUri,
         content: String,
     ) -> starlark_lsp::server::LspEvalResult {
         eprintln!("parse_file_with_contents {uri} {content}");
@@ -31,7 +31,7 @@ impl LspContext for AxlContext {
             ..Default::default()
         };
         match uri {
-            LspUrl::File(path) => {
+            LspUri::File(path) => {
                 match AstModule::parse(&path.to_string_lossy(), content, &dialect) {
                     Ok(ast) => LspEvalResult {
                         ast: Some(ast),
@@ -54,17 +54,17 @@ impl LspContext for AxlContext {
     fn resolve_load(
         &self,
         path: &str,
-        current_file: &LspUrl,
+        current_file: &LspUri,
         workspace_root: Option<&std::path::Path>,
-    ) -> Result<LspUrl, String> {
+    ) -> Result<LspUri, String> {
         eprintln!("resolve_load {path} {current_file} {workspace_root:?}");
         Err("not implemented yet: resolve_load".to_owned())
     }
 
     fn render_as_load(
         &self,
-        target: &LspUrl,
-        current_file: &LspUrl,
+        target: &LspUri,
+        current_file: &LspUri,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<String, String> {
         eprintln!("render_as_load {target} {current_file} {workspace_root:?}");
@@ -74,29 +74,29 @@ impl LspContext for AxlContext {
     fn resolve_string_literal(
         &self,
         literal: &str,
-        current_file: &LspUrl,
+        current_file: &LspUri,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Option<StringLiteralResult>, String> {
         eprintln!("resolve_string_literal {literal} {current_file} {workspace_root:?}");
         Ok(None)
     }
 
-    fn get_load_contents(&self, uri: &LspUrl) -> Result<Option<String>, String> {
+    fn get_load_contents(&self, uri: &LspUri) -> Result<Option<String>, String> {
         eprintln!("get_load_contents {uri}");
         Ok(None)
     }
 
-    fn get_environment(&self, uri: &LspUrl) -> DocModule {
+    fn get_environment(&self, uri: &LspUri) -> DocModule {
         eprintln!("get_environment {uri}");
         eval::get_globals().build().documentation()
     }
 
-    fn get_url_for_global_symbol(
+    fn get_uri_for_global_symbol(
         &self,
-        current_file: &LspUrl,
+        current_file: &LspUri,
         symbol: &str,
-    ) -> Result<Option<LspUrl>, String> {
-        eprintln!("get_url_for_global_symbol {current_file} {symbol}");
+    ) -> Result<Option<LspUri>, String> {
+        eprintln!("get_uri_for_global_symbol {current_file} {symbol}");
         Ok(None)
     }
 }

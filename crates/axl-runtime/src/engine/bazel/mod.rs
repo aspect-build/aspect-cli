@@ -276,8 +276,8 @@ impl<'v> values::Freeze for Bazel<'v> {
 #[starlark_value(type = "bazel.Bazel")]
 impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(bazel_methods)
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        Some(RES.methods())
     }
 }
 
@@ -294,8 +294,8 @@ starlark_simple_value!(FrozenBazel);
 impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     type Canonical = Bazel<'v>;
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(bazel_methods)
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        Some(RES.methods())
     }
 }
 
@@ -929,27 +929,60 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
     /// Probe the Bazel server to determine whether it is responsive.
     ///
-    /// Runs `bazel --noblock_for_lock info server_pid`. If the server is
-    /// unresponsive, attempts recovery by killing the server process and
-    /// re-checking.
+    /// Runs `bazel --noblock_for_lock info server_pid`. When another bazel
+    /// client holds the output base lock, waits for it to finish, then
+    /// SIGINTs and finally SIGKILLs it. When the server itself is wedged,
+    /// kills the server and re-checks.
     ///
-    /// Returns a `HealthCheckResult` with `.success`, `.healthy`, `.message`,
-    /// and `.exit_code` attributes.
+    /// Each recovery step is reported as one line of text. Pass `log`, a
+    /// callable taking that line, to render it yourself, for example
+    /// indented under a heading; without it the line prints to stderr as is.
+    /// An error raised by `log` fails the call once the check completes.
+    ///
+    /// Returns a `HealthCheckResult` with `.outcome` (`"healthy"`,
+    /// `"unhealthy"`, or `"inconclusive"`), `.message`, and `.exit_code`
+    /// attributes.
     ///
     /// **Examples**
     ///
     /// ```python
+    /// def _indented(line):
+    ///     print("\t" + line)
+    ///
     /// def _health_probe_impl(ctx):
-    ///     result = ctx.bazel.health_check()
-    ///     if not result.healthy:
-    ///         fail("Bazel server is unhealthy")
+    ///     result = ctx.bazel.health_check(log = _indented)
+    ///     if result.outcome == "unhealthy":
+    ///         ctx.std.process.exit(1, "Bazel server is unhealthy: " + result.message)
     /// ```
+    ///
+    /// An unhealthy server is an expected refusal, so the example ends the
+    /// task with the message and no traceback; `fail()` is for bugs.
     fn health_check<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] log: NoneOr<values::Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
-        Ok(health_check::run(&startup_flags))
+        let Some(log) = log.into_option() else {
+            return Ok(health_check::run(&startup_flags, &mut |line| {
+                crate::errln!("{line}")
+            }));
+        };
+        let mut log_error = None;
+        let result = health_check::run(&startup_flags, &mut |line| {
+            if log_error.is_some() {
+                return;
+            }
+            let line = eval.heap().alloc(line);
+            if let Err(e) = eval.eval_function(log, &[line], &[]) {
+                log_error = Some(e);
+            }
+        });
+        match log_error {
+            Some(e) => Err(e.into_anyhow()),
+            None => Ok(result),
+        }
     }
 
     /// Detect and best-effort repair runner-poisoning sandbox state
@@ -1022,8 +1055,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   root here in a sub-workspace layout would read the outer
     ///   `.bazelrc` and leak the parent project's flags.
     /// * `startup_flags` - Startup flags (e.g. `["--bazelrc=/path/to/extra.bazelrc"]`).
-    /// * `flags` - Command flags to inject as synthetic `always` options; each
-    ///   element is a `str` or a `(flag, version_constraint)` tuple.
+    /// * `flags` - Command flags to inject as synthetic rc entries: a `str`, a
+    ///   `(flag, version_condition)` tuple, or `(flag, version_condition, command)`
+    ///   naming the section (`"build"` for an option only build-like commands
+    ///   accept; default `always`, which every command reads).
     /// * `skip_config_if_missing` - `--config` names to drop if undefined.
     /// * `version` - Bazel version for evaluating version-gated options. When
     ///   unset, the running Bazel is probed (only if a gated option exists).
@@ -1067,7 +1102,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// # Arguments
     /// * `startup_flags` - Startup flags carried by the run command.
-    /// * `flags` - Command flags, same `str | (str, str)` shape as `parse_rc`.
+    /// * `flags` - Command flags, same `str | (str, str) | (str, str, str)` shape as `parse_rc`.
     /// * `version` - Bazel version for evaluating version-gated options.
     fn new_rc<'v>(
         #[allow(unused)] this: values::Value<'v>,

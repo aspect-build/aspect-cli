@@ -80,8 +80,8 @@ starlark_simple_value!(GrpcStream);
 #[starlark_value(type = "grpc.stream")]
 impl<'v> StarlarkValue<'v> for GrpcStream {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(grpc_stream_methods)
+        static RES: MethodsStatic = MethodsStatic::new("grpc_stream_methods", grpc_stream_methods);
+        Some(RES.methods())
     }
 }
 

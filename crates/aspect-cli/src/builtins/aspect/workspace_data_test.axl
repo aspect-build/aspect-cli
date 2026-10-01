@@ -1,0 +1,65 @@
+"""Unit tests for the `KEY value` workspace status `aspect setup workspace-data`
+prints — the rendering, not the metadata collection behind it.
+Run with: aspect dev test-workspace-data
+"""
+
+load("@aspect//bazel/build_metadata.axl", "workspace_status_lines")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_key_value_lines(_ctx):
+    # Bazel takes the rest of the line as the value, so a value with spaces
+    # needs no quoting — unlike the same data as a --build_metadata flag.
+    _eq(
+        "lines",
+        workspace_status_lines({"COMMIT_SHA": "9f2c1ae", "COMMIT_MESSAGE": "fix: a thing with spaces"}),
+        ["COMMIT_SHA 9f2c1ae", "COMMIT_MESSAGE fix: a thing with spaces"],
+    )
+
+def _test_keys_verbatim(_ctx):
+    # Keys are written as given, which is what keeps them out of
+    # stable-status.txt: a STABLE_ key invalidates every stamped action on each
+    # new commit. Pins the rendering rather than asserting the absence of a
+    # prefix nothing adds.
+    _eq(
+        "verbatim",
+        workspace_status_lines({"COMMIT_SHA": "abc1234", "REPO_URL": "https://example.test/o/r"}),
+        ["COMMIT_SHA abc1234", "REPO_URL https://example.test/o/r"],
+    )
+
+def _test_empty_dropped(_ctx):
+    _eq("empty value", workspace_status_lines({"COMMIT_SHA": "", "BRANCH_NAME": "main"}), ["BRANCH_NAME main"])
+    _eq("empty key", workspace_status_lines({"": "orphan"}), [])
+    _eq("nothing", workspace_status_lines({}), [])
+
+def _test_newlines_collapsed(_ctx):
+    # A newline inside a value would start a bogus key on the next line.
+    _eq(
+        "newline",
+        workspace_status_lines({"COMMIT_MESSAGE": "subject\n\nbody"}),
+        ["COMMIT_MESSAGE subject  body"],
+    )
+    _eq("carriage return", workspace_status_lines({"COMMIT_MESSAGE": "a\r\nb"}), ["COMMIT_MESSAGE a  b"])
+
+_UNIT_TESTS = [
+    _test_key_value_lines,
+    _test_keys_verbatim,
+    _test_empty_dropped,
+    _test_newlines_collapsed,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("workspace_data.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+workspace_data_tests = task(
+    summary = "Run the workspace-data AXL unit tests.",
+    kind = "test-workspace-data",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

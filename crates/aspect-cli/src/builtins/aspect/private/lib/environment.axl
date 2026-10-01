@@ -2,7 +2,8 @@
 Workflows Environment Library
 
 Reads runner environment from environment variables and exposes it as typed
-records. Also provides bazelrc flag generation and host/CI detection.
+records, plus host/CI detection and the shared console-output helpers. The
+Bazel flags derived from this environment live in `aspect_flags.axl`.
 """
 
 load("./ansi.axl", "ansi")
@@ -16,6 +17,11 @@ RemoteCache = record(
     endpoint = field(str, default = ""),
     # → Bazel `--remote_bytestream_uri_prefix`; cross-cache de-dup. "" when runner didn't surface one.
     bytestream_uri_prefix = field(str, default = ""),
+    # Whether the cache accepts compressed blobs (ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION
+    # set). False forces `--noremote_cache_compression`, since Bazel errors when a
+    # repository asks a cache that lacks it for compression; true leaves the
+    # choice to the repository. Goes away once no deployment lacks compression.
+    supports_compression = field(bool, default = False),
 )
 
 BuildEvents = record(
@@ -23,11 +29,13 @@ BuildEvents = record(
     results_url = field(str, default = ""),
 )
 
+# → Bazel `--remote_executor=<endpoint>`, only where a build opts in.
+RemoteExecutor = record(
+    endpoint = field(str, default = ""),
+)
+
 Runner = record(
     storage_path = field(str, default = DEFAULT_STORAGE_PATH),
-    # Opaque value sent verbatim as the `x-identity` header on the build's
-    # remote connections. "" when unset (no header sent).
-    identity = field(str, default = ""),
     product_version = field(str, default = ""),
     instance_id = field(str, default = ""),
     instance_name = field(str, default = ""),
@@ -40,8 +48,6 @@ Runner = record(
     az = field(str, default = ""),
     preemptible = field(bool, default = False),
     warming_enabled = field(bool, default = False),
-    # → enables BES-backend upload of the JSON profile + compact exec log.
-    upload_build_diagnostics = field(bool, default = False),
     cloud_provider = field(str, default = ""),
     data_dir = field(str, default = ""),
     bin_dir = field(str, default = DEFAULT_BIN_DIR),
@@ -70,6 +76,7 @@ WorkflowsEnvironment = record(
     # Each field is independently None when its `_read_*` found no signals;
     # callers gate per field (e.g. plain GHA: runner == None but ci != None).
     remote_cache = field(RemoteCache | None, default = None),
+    remote_executor = field(RemoteExecutor | None, default = None),
     build_events = field(BuildEvents | None, default = None),
     runner = field(Runner | None, default = None),
     ci = field(CI | None, default = None),
@@ -77,24 +84,29 @@ WorkflowsEnvironment = record(
 
 # Terminal / ANSI detection
 
-def color_enabled(std):
-    """Should ANSI color be emitted to stdout? The "emit color?" predicate.
-
-    True on a real TTY, or on a recognized CI host (GHA, Buildkite, CircleCI,
-    GitLab) — those render ANSI in log viewers despite a non-TTY pipe.
-
-    Broader than `CI.supports_curses`: curses cursor control breaks
-    line-oriented log viewers, but plain ANSI color renders fine.
-    """
-    if std.io.stdout.is_tty:
-        return True
-    env = std.env
+def ci_renders_ansi(env) -> bool:
+    """Whether this is a CI host whose log viewer renders ANSI color despite a
+    non-TTY pipe: GitHub Actions, Buildkite, CircleCI, GitLab. Broader than
+    `CI.supports_curses`: curses cursor control breaks line-oriented log viewers,
+    but plain ANSI color renders fine."""
     return bool(
         env.var("GITHUB_ACTIONS") or
         env.var("BUILDKITE") or
         env.var("CIRCLECI") or
         env.var("GITLAB_CI"),
     )
+
+def color_enabled(std):
+    """Should ANSI color be emitted to stdout? True on a real TTY, or on a CI
+    host that renders ANSI (`ci_renders_ansi`)."""
+    return std.io.stdout.is_tty or ci_renders_ansi(std.env)
+
+def bazel_misdetects_color(env) -> bool:
+    """Whether Bazel's `--color=auto` would wrongly decide against color here: a
+    CI host whose log viewer renders ANSI but which runs the job with no TTY for
+    Bazel to see — GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
+    but gives the job a PTY, so Bazel gets it right unaided and is left out."""
+    return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
 
 # Severity-prefixed output. Channels (increasing alarm):
 #   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
@@ -215,7 +227,18 @@ def _read_remote_cache(std) -> RemoteCache | None:
     return RemoteCache(
         endpoint = endpoint,
         bytestream_uri_prefix = std.env.var("ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX") or "",
+        supports_compression = bool(std.env.var("ASPECT_WORKFLOWS_REMOTE_CACHE_COMPRESSION")),
     )
+
+def _read_remote_executor(std) -> RemoteExecutor | None:
+    """Read the remote-execution endpoint; None when
+    ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset. Never wired on its own: remote
+    execution relocates every action, so a build names it (`--workflows:remote-exec`
+    on a task, `--config=aspect-exec` for vanilla `bazel`)."""
+    endpoint = std.env.var("ASPECT_WORKFLOWS_REMOTE_EXECUTOR") or ""
+    if not endpoint:
+        return None
+    return RemoteExecutor(endpoint = endpoint)
 
 def get_workflows_environment(std) -> WorkflowsEnvironment:
     """Read all Aspect-Workflows-managed environment state in one call.
@@ -225,6 +248,7 @@ def get_workflows_environment(std) -> WorkflowsEnvironment:
     """
     return WorkflowsEnvironment(
         remote_cache = _read_remote_cache(std),
+        remote_executor = _read_remote_executor(std),
         build_events = _read_build_events(std),
         runner = _read_runner(std),
         ci = _read_ci(std),
@@ -264,7 +288,6 @@ def _read_runner(std) -> Runner | None:
     return Runner(
         account = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT") or "",
         aspect_launcher_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION") or "",
-        identity = std.env.var("ASPECT_WORKFLOWS_RUNNER_IDENTITY") or "",
         az = std.env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or "",
         bazel_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR") or (storage_path + "/bazel"),
         bin_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BIN_DIR") or DEFAULT_BIN_DIR,
@@ -288,7 +311,6 @@ def _read_runner(std) -> Runner | None:
         warming_complete = warming_complete,
         warming_current_cache = warming_current_cache,
         warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
-        upload_build_diagnostics = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS")),
         runner_group_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME") or "",
         runner_group_queue = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE") or "",
         runner_resource_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE") or "",
@@ -331,164 +353,6 @@ def sanitize_filename(name: str) -> str:
             result += "_"
     return result
 
-def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
-    """Build flags that are safe on ANY CI, not just an Aspect Workflows runner.
-
-    These tune Bazel's remote/cache/profiling behavior in ways that don't depend
-    on the runner's mounts, identity, or the Workflows cache implementation, so
-    they can be written into a CI bazelrc even off a Workflows runner. Includes
-    the remote-cache endpoint flags when the `ASPECT_WORKFLOWS_REMOTE_CACHE` /
-    `ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX` env vars are set (they can be
-    set off a runner too), surfaced via `environment.remote_cache`.
-
-    Excludes runner-specific flags — the per-runner mount paths
-    (`--repository_cache`, output base/root), the runner identity header, the
-    `--nosystem_rc` startup flag, and the cache-compression gates (Aspect
-    Workflows' own remote cache does not support compression, so those only
-    apply when talking to it on a runner). `get_bazelrc_flags` adds those.
-
-    Returns a flat list of build flags (no version-gated tuples — none of the
-    generic flags are version-conditional).
-    """
-    build_flags = [
-        "--remote_upload_local_results",
-        "--heap_dump_on_oom",
-        "--generate_json_trace_profile",
-        "--experimental_repository_cache_hardlinks",
-        "--remote_accept_cached",
-        "--disk_cache=",
-        "--remote_timeout=3600",
-        "--remote_retries=360",
-        "--grpc_keepalive_timeout=30s",
-    ]
-
-    remote_cache = environment.remote_cache
-    if remote_cache:
-        if remote_cache.endpoint:
-            build_flags.append("--remote_cache=" + remote_cache.endpoint)
-        if remote_cache.bytestream_uri_prefix:
-            build_flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
-
-    return build_flags
-
-def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
-    """Generate the full bazelrc flag set for an Aspect Workflows runner.
-
-    The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
-    ones: the cache-compression gates (the Workflows remote cache doesn't support
-    compression), the runner identity header, the per-runner repository cache and
-    output paths, and `--nohome_rc`/`--nosystem_rc`.
-
-    The `--output_base` startup flag in the result is what `apply_output_base_suffix`
-    rewrites to move a task to its own Bazel server (`--output_user_root` stays
-    shared so the install base and external-repo cache are not duplicated).
-
-    Args:
-        environment: WorkflowsEnvironment. Caller must have verified
-                     `runner != None` (output_base/output_user_root come from it).
-        aspect_root_dir: absolute path to the Aspect project root.
-
-    Returns:
-        (startup_flags, build_flags): two lists; build_flags may contain
-        version-gated `(flag, constraint)` tuples.
-    """
-    runner = environment.runner
-    if runner == None:
-        fail("get_bazelrc_flags called without a Workflows runner — gate on environment.runner != None")
-
-    repo_name = environment.ci.scm_repo_name if environment.ci else ""
-    subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
-
-    build_flags = get_generic_bazelrc_flags(environment)
-
-    # Aspect Workflows' remote cache does not support compression, so disable it
-    # (the flag name changed in Bazel 8). The disk-results gate is a <7 quirk.
-    build_flags.append(("--noexperimental_remote_cache_compression", "<8.0.0"))
-    build_flags.append(("--noremote_cache_compression", ">=8.0.0"))
-    build_flags.append(("--incompatible_remote_results_ignore_disk", "<7.0.0"))
-
-    # `--remote_header` is the shared header Bazel applies to both the remote
-    # cache and the executor channel, so gate on the identity alone: this also
-    # covers executor-only setups, and Bazel ignores the flag with no backend.
-    if runner.identity:
-        build_flags.append("--remote_header=x-identity=" + runner.identity)
-
-    build_flags.append("--repository_cache=" + runner.repository_cache_dir)
-
-    # In the runner, home/system rc files are redundant — workspace .bazelrc
-    # plus these synthesized flags cover everything.
-    startup_flags = ["--nohome_rc", "--nosystem_rc"]
-
-    bazel_root = runner.bazel_root_dir
-    output_root = runner.output_root_dir
-    if repo_name:
-        sanitized = sanitize_filename(repo_name)
-        startup_flags.append("--output_user_root=" + bazel_root + "/" + sanitized + "/" + subdir)
-        startup_flags.append("--output_base=" + output_root + "/" + sanitized + "/" + subdir)
-    else:
-        startup_flags.append("--output_user_root=" + bazel_root + "/" + subdir)
-        startup_flags.append("--output_base=" + output_root + "/" + subdir)
-
-    return (startup_flags, build_flags)
-
-_OUTPUT_BASE_FLAG_PREFIX = "--output_base="
-
-def _is_output_base_flag(flag: str) -> bool:
-    """True for the `--output_base=` startup flag that names this invocation's
-    Bazel server (and its analysis cache).
-
-    Deliberately NOT `--output_user_root`: that root holds state we want shared
-    across servers — the install base, the extracted external-repo trees, and
-    the action cache — so only `--output_base` is unique per isolated server."""
-    return flag.startswith(_OUTPUT_BASE_FLAG_PREFIX)
-
-def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
-    """Return a copy of `startup_flags` with `suffix` appended to the path value
-    of the `--output_base=` entry; every other flag passes through unchanged.
-
-    `--output_base` names the Bazel server (and its analysis cache), so suffixing
-    it moves the invocation to a sibling server (e.g. `.../myrepo/aspect-cli` →
-    `.../myrepo/aspect-cli-delivery`) — isolating a task whose build flips Bazel
-    options (`--stamp`) from the shared warm analysis cache. `--output_user_root`
-    is left untouched so the install base and external-repo cache stay shared.
-
-    A no-op returning an unchanged copy when `suffix` is empty or no
-    `--output_base` is present. `suffix` becomes part of an on-disk path segment,
-    so the caller must sanitize it (e.g. via `sanitize_filename`).
-    """
-    if not suffix:
-        return list(startup_flags)
-    return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
-
-def get_build_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool) -> list:
-    """BES-backend upload flags for the JSON profile + compact exec log.
-
-    `enabled` is the opt-in decision the caller owns — the deployment env var
-    (runner.upload_build_diagnostics) OR the workspace-level override arg — so
-    both paths reach the flags. Even when enabled, returns empty unless both a
-    BES backend and a remote cache are wired up: the files ride the BES stream
-    to the remote cache as bytestream:// refs, so both are required for the
-    upload to land. `--generate_json_trace_profile` is already set
-    unconditionally in get_bazelrc_flags; this only enriches/uploads it.
-    """
-    runner = environment.runner
-    if not enabled or runner == None:
-        return []
-    if environment.build_events == None or environment.remote_cache == None:
-        return []
-
-    tmpdir = runner.job_tmpdir
-    return [
-        "--experimental_profile_include_target_label",
-        "--profile=" + tmpdir + "/command.profile.gz",
-        # Version-gated tuple like the cache-compression flags above;
-        # --execution_log_compact_file needs Bazel >= 7.1.
-        ("--execution_log_compact_file=" + tmpdir + "/exec.log.zstd", ">=7.1.0"),
-        # Upload ALL BEP-referenced local outputs (default is `minimal`) so
-        # the profile + exec log actually reach the cache for ivy-bep-etl.
-        "--remote_build_event_upload=all",
-    ]
-
 # Display helpers
 
 def _url_encode(s: str) -> str:
@@ -523,6 +387,19 @@ def display_cloud_provider(raw):
 def is_aspect_workflows_runner(env):
     """True when the current process is running on an Aspect Workflows runner."""
     return bool(env.var("ASPECT_WORKFLOWS_RUNNER"))
+
+# The variables by which the environment names this machine's deployment.
+_DEPLOYMENT_VARS = ["ASPECT_WORKFLOWS_RUNNER", "ASPECT_WORKFLOWS_REMOTE_CACHE", "ASPECT_WORKFLOWS_BES_BACKEND", "ASPECT_WORKFLOWS_REMOTE_EXECUTOR"]
+
+def env_names_deployment(env) -> bool:
+    """Whether the environment says which deployment this machine is on: the
+    runner marker, or any `ASPECT_WORKFLOWS_*` endpoint. Then that is the
+    deployment for every Bazel call here — `aspect setup bazelrc` takes its
+    endpoints from the env and writes no `--config=aspect-*` sections, and a
+    task refuses `--remote`, which would point at a configured deployment
+    instead. The two are answers to the same question; a build routed off the
+    runner's own services by a second answer is never what anyone meant."""
+    return any([bool(env.var(name)) for name in _DEPLOYMENT_VARS])
 
 def detect_ci(env):
     """Detect the CI platform from env vars (env = ctx.std.env). Returns:

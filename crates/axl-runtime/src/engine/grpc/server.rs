@@ -61,8 +61,8 @@ starlark_simple_value!(GrpcServer);
 #[starlark_value(type = "grpc.Server")]
 impl<'v> StarlarkValue<'v> for GrpcServer {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(grpc_server_methods)
+        static RES: MethodsStatic = MethodsStatic::new("grpc_server_methods", grpc_server_methods);
+        Some(RES.methods())
     }
 }
 
@@ -200,8 +200,9 @@ starlark_simple_value!(GrpcServerHandle);
 #[starlark_value(type = "grpc.ServerHandle")]
 impl<'v> StarlarkValue<'v> for GrpcServerHandle {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(grpc_server_handle_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("grpc_server_handle_methods", grpc_server_handle_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attr: &str, heap: Heap<'v>) -> Option<Value<'v>> {

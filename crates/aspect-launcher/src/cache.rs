@@ -94,7 +94,7 @@ mod tests {
         let cache = AspectCache::from(PathBuf::from("/tmp/cache"));
         let path = cache.tool_path(
             &"aspect-cli".to_string(),
-            &"https://github.com/aspect-build/aspect-cli/releases/download/v2026.15.2/aspect-cli-aarch64-apple-darwin".to_string(),
+            &"https://github.com/aspect-build/aspect-cli/releases/download/v2026.38.30/aspect-cli-aarch64-apple-darwin".to_string(),
         );
         // Path should be: /tmp/cache/bin/{tool_name}/{hash}/{tool_name}
         let components: Vec<_> = path.components().collect();
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn test_tool_path_separates_debug_variant() {
         let cache = AspectCache::from(PathBuf::from("/tmp/cache"));
-        let base = "https://github.com/aspect-build/aspect-cli/releases/download/v2026.31.10";
+        let base = "https://github.com/aspect-build/aspect-cli/releases/download/v2026.38.30";
         let primary = cache.tool_path(
             &"aspect-cli".to_string(),
             &format!("{base}/aspect-cli-x86_64-unknown-linux-musl"),
@@ -210,7 +210,7 @@ mod tests {
         let cache = AspectCache::from(tmp.clone());
         let hint = cache.latest_tag_path("aspect-cli", "aspect-build", "aspect-cli", "artifact");
         fs::create_dir_all(hint.parent().unwrap()).unwrap();
-        fs::write(&hint, "v2026.15.2").unwrap();
+        fs::write(&hint, "v2026.38.30").unwrap();
 
         assert!(cache.latest_tag_is_fresh(&hint, Duration::from_secs(3600)));
         fs::remove_dir_all(&tmp).unwrap();
@@ -222,7 +222,7 @@ mod tests {
         let cache = AspectCache::from(tmp.clone());
         let hint = cache.latest_tag_path("aspect-cli", "aspect-build", "aspect-cli", "artifact");
         fs::create_dir_all(hint.parent().unwrap()).unwrap();
-        fs::write(&hint, "v2026.15.2").unwrap();
+        fs::write(&hint, "v2026.38.30").unwrap();
 
         // Zero max-age means any file is immediately stale.
         assert!(!cache.latest_tag_is_fresh(&hint, Duration::ZERO));
@@ -245,12 +245,12 @@ mod tests {
         let cache = AspectCache::from(tmp.clone());
         let hint = cache.latest_tag_path("aspect-cli", "aspect-build", "aspect-cli", "artifact");
         fs::create_dir_all(hint.parent().unwrap()).unwrap();
-        fs::write(&hint, "v2026.15.2").unwrap();
+        fs::write(&hint, "v2026.38.30").unwrap();
 
         // After touching, the file should still be fresh and contents unchanged.
         cache.touch_latest_tag(&hint);
         assert!(cache.latest_tag_is_fresh(&hint, Duration::from_secs(3600)));
-        assert_eq!(fs::read_to_string(&hint).unwrap(), "v2026.15.2");
+        assert_eq!(fs::read_to_string(&hint).unwrap(), "v2026.38.30");
         fs::remove_dir_all(&tmp).unwrap();
     }
 }

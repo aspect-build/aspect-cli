@@ -18,8 +18,8 @@ prost-types = "0.14.1"
 starbuf-derive = { path = "../starbuf-derive" }
 starbuf-types = { path = "../starbuf-types" }
 axl-types = { path = "../axl-types" }
-starlark = "0.13.0"
-starlark_derive = "0.13.0"
+starlark = "0.14.2"
+starlark_derive = "0.14.2"
 tonic = { version = "0.14.2", features = ["transport", "tls-native-roots"] }
 tonic-prost = "0.14.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

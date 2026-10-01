@@ -25,7 +25,7 @@ use crate::ci::on_recognized_ci;
 
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Severity {
+pub(crate) enum Severity {
     /// Cyan `INFO:` — a notable but expected runtime branch fired.
     Info,
     /// Yellow `WARNING:` — a subsystem problem; the task continues.
@@ -80,7 +80,9 @@ fn colorize() -> bool {
 }
 
 /// Print one severity-prefixed line to stderr, colorized per [`colorize`].
-fn emit(sev: Severity, msg: &str) {
+/// The named helpers below cover the fixed severities; call this when the
+/// severity is computed.
+pub(crate) fn emit(sev: Severity, msg: &str) {
     errln!("{}", format_line(sev, colorize(), msg));
 }
 

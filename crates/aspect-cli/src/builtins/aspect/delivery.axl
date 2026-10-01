@@ -17,7 +17,8 @@ Up to three Bazel build phases plus a dispatch loop:
   3. deliveryd record/query — record (label, digest) pairs, query per-prefix
      state. A v2 daemon needs no record step; `lib/deliveryd.axl` negotiates.
   4. Phase 3 — download runfiles for targets that survived change detection,
-     streaming BES into a run tracker to discover entrypoints.
+     streaming BES into a run tracker to discover entrypoints. Skipped under
+     `--dry-run` unless `--dry-run=build` asks for it.
   5. Dispatch — `bazel run` each pending target, then `dd.deliver()`
      (or `dd.delete()` on failure).
 
@@ -37,6 +38,23 @@ target as a candidate (legacy `only_on_change: false`; `--force-target`
 redundant here). `--track-state=true` records this run's digests/deliveries
 and queries prior ones; since change detection builds on it,
 `--mode=selective --track-state=false` is rejected at startup.
+
+`--dry-run` is tri-state rather than boolean, because the delivery build is
+the one thing a preview might still want:
+
+  --dry-run=false                  the default — deliver
+  --dry-run=true                   bare `--dry-run`; preview, no delivery build
+  --dry-run=build                  preview, but run the delivery build anyway
+
+Phase 3 exists to put each pending deliverable's runfiles on disk so the
+dispatch can spawn it, and a dry-run spawns nothing — so a preview skips it,
+and with it the stamped release build of every pending target. Two things ride
+that build, and `build` is how a preview keeps them: the on-disk paths the
+manifest carries per target (`entrypoint_path`, `runfiles_dir`,
+`runfiles_workspace_dir`, `default_outputs`, all None/empty under `true`), and
+the per-target `never built` / `not runnable` checks the dispatch loop
+performs. Neither is worth a full release build to a run that only wants the
+pending list.
 
 State backend is `deliveryd` today (Unix-socket HTTP server that Aspect
 Workflows runners start and expose via
@@ -79,14 +97,17 @@ Each cell says whether each pipeline stage runs:
 
   Combination                                       phase 1/2  phase 3  record  detect  run  deliver
   --mode=selective (default)                            ✓         ✓       ✓       ✓     ✓     ✓
-  --mode=selective --dry-run                            ✓         ✓       ✓       ✓     —     —
+  --mode=selective --dry-run                            ✓         —¹      ✓       ✓     —     —
   --mode=selective --track-state=false                  rejected at startup
   --mode=always                                      ✓         ✓       ✓        —     ✓     ✓
-  --mode=always --dry-run                            ✓         ✓       ✓        —     —     —
+  --mode=always --dry-run                            ✓         —¹      ✓        —     —     —
   --mode=always --track-state=false                  —         ✓       —        —     ✓     —
-  --mode=always --dry-run --track-state=false      optional¹   —       —        —     —     —
+  --mode=always --dry-run --track-state=false      optional²   —¹      —        —     —     —
 
-¹ Best-effort preview — this is the only combination tolerant of a missing
+¹ `--dry-run=build` runs phase 3 anyway; see the flags section for what that
+  buys back. It is the only thing that puts phase 3 in a dry-run.
+
+² Best-effort preview — this is the only combination tolerant of a missing
   remote cache. If a remote cache is configured, action digests are computed
   and shown in the dry-run output. If not, a `NOTE:` is printed and the
   preview falls back to listing candidates without digests; everything else
@@ -150,17 +171,18 @@ See https://aspect.build/docs/cli/guides/delivery-manifest.
 User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
-load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
+load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
+load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/deliveryd.axl", "deliveryd")
-load("./private/lib/environment.axl", "apply_output_base_suffix", "color_enabled", "error", "info", "sanitize_filename", "warn")
+load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -169,6 +191,13 @@ load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_an
 load("./private/lib/runnable.axl", "apparent_label", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
+
+# `--dry-run`'s three states. `false` delivers; `true` (what a bare --dry-run
+# means) previews without building; `build` previews and runs the delivery
+# build anyway. The boolean spellings are the historical ones and keep working.
+DRY_RUN_OFF = "false"
+DRY_RUN_ON = "true"
+DRY_RUN_BUILD = "build"
 
 DeliveryTrait = trait(
     delivery_start = attr(
@@ -1102,10 +1131,17 @@ def _delivery_impl(ctx):
     data["delivery"]["build_url"] = ctx.args.build_url
     data["delivery"]["ci_host"] = ctx.args.ci_host
 
+    # `--dry-run` is a tri-state string, so compare it — every value including
+    # "false" is a non-empty (truthy) string, and `bool(...)` would read them
+    # all as a dry-run.
+    dry_run = ctx.args.dry_run != DRY_RUN_OFF
+    dry_run_build = ctx.args.dry_run == DRY_RUN_BUILD
+
     # Surface the run-shape so the summary shows `Mode: …` above the data
     # table — analogous to lint's `Strategy:` line.
     data["delivery"]["mode"] = ctx.args.mode
-    data["delivery"]["dry_run"] = bool(ctx.args.dry_run)
+    data["delivery"]["dry_run"] = dry_run
+    data["delivery"]["dry_run_build"] = dry_run_build
     data["delivery"]["track_state"] = bool(ctx.args.track_state)
 
     color = color_enabled(ctx.std)
@@ -1130,9 +1166,9 @@ def _delivery_impl(ctx):
     delivery_trait.delivery_start()
 
     # Three orthogonal flags shape this invocation. See the module docstring
-    # for the full reference + combination matrix.
+    # for the full reference + combination matrix. `dry_run`/`dry_run_build`
+    # were resolved off the tri-state `--dry-run` above.
     mode = ctx.args.mode
-    dry_run = ctx.args.dry_run
     track_state = ctx.args.track_state
 
     if mode == "selective" and not track_state:
@@ -1143,8 +1179,11 @@ def _delivery_impl(ctx):
     # phase 1/2 runs whenever digests are needed (recorded or previewed).
     phase_1_2_runs = track_state or dry_run
 
-    # dry-run + --track-state=false: phase 3 has nothing to do.
-    preview_only = dry_run and not track_state
+    # A dry-run dispatches nothing, so phase 3 — whose whole job is to put each
+    # pending deliverable's runfiles on disk for the dispatch — is pure cost.
+    # `--dry-run=build` opts it back in for previews that want the on-disk paths
+    # in their manifest or the dispatch loop's runnability checks.
+    skip_delivery_build = dry_run and not dry_run_build
 
     # deliveryd state backend; Workflows runners expose its Unix socket here.
     endpoint = ctx.std.env.var(deliveryd.ENDPOINT_ENV)
@@ -1205,7 +1244,7 @@ def _delivery_impl(ctx):
     # first phase header below rather than here, so the lines land inside a
     # phase instead of ahead of the task's first one.
     build_events = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    data.update(bes_link_data(bazel_trait, rc, build_events))
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -1426,6 +1465,12 @@ def _delivery_impl(ctx):
         phase = phases.Phase(name = "deliver", description = "Deliver targets", emoji = "🚚"),
     )
 
+    if delivery_targets and skip_delivery_build:
+        info(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
+                      " Pass --dry-run=build to build the pending targets anyway — it fills each manifest entry's" +
+                      " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
+                      " full release build.")
+
     rows = []
     skipped_count = 0
     pending_count = 0
@@ -1483,8 +1528,10 @@ def _delivery_impl(ctx):
                 is_forced = is_forced,
             )
             _fire_target_hook(data, delivery_trait, run_tracker, label)
-        elif preview_only:
-            # dry-run + --track-state=false: no build runs, so preview directly.
+        elif skip_delivery_build:
+            # Phase 3 was skipped, so there is no build event to spawn off:
+            # preview directly. `run_tracker` saw no events, so the hook's
+            # on-disk path fields come back None/empty.
             pending_count += 1
             forced_marker = " (FORCED)" if is_forced else ""
             rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha or "-", "-"))
@@ -1502,7 +1549,7 @@ def _delivery_impl(ctx):
             spawn_order.append(label)
 
     build_exit_code = 0
-    if delivery_targets and not preview_only:
+    if delivery_targets and not skip_delivery_build:
         # Expand any `--config=NAME` in release_bazel_flags against the rc — the
         # release build reaches Bazel under --ignore_all_rc_files, so an
         # unexpanded `--config=release` would fail with "Config value not
@@ -1555,8 +1602,10 @@ def _delivery_impl(ctx):
         # submission order so a slow head can't idle the slots queued behind it.
         # Captured children write stdout/stderr to per-target temp files (not a
         # pipe), so `try_wait()` alone drives reaping — a slow deliverable never
-        # blocks draining the others. When every slot is full and none has
-        # finished we block on the head to make room.
+        # blocks draining the others. Nothing here blocks on a running child:
+        # the tick must keep reaching `ph.update`, whose updates carry the
+        # status-check heartbeat, or the orphan sweep closes the check as
+        # disconnected while the deliverable still runs.
         dispatched = {}
         ready = []
         running = []
@@ -1652,9 +1701,7 @@ def _delivery_impl(ctx):
             # via try_wait() and reap it, refilling as slots free. Captured
             # output lands in per-target temp files, so reaping reads a finished
             # file rather than draining a live pipe — no delivery can deadlock
-            # the pipeline. Only when every slot is full and none has finished
-            # (or we're finalizing) do we block on the head. The bound drains
-            # every in-flight + queued delivery in one finalizing tick.
+            # the pipeline. When none has exited, leave the rest to a later tick.
             for _ in range(len(running) + len(ready) + 1):
                 if not running:
                     break
@@ -1664,9 +1711,7 @@ def _delivery_impl(ctx):
                         reap_idx = i
                         break
                 if reap_idx == None:
-                    if not (len(running) >= max_par or (build_done and not ready)):
-                        break
-                    reap_idx = 0
+                    break
                 label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
                 if capture:
                     # Output was redirected to files, so wait() has no pipe to
@@ -1830,7 +1875,7 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
         "release_bazel_flags": args.string_list(
             long = "release-bazel-flag",
             default = ["--stamp"],
-            description = "Bazel flags applied ONLY to the final delivery build, not to the change-detection phases. Use this for flags that add non-determinism to release artifacts and would otherwise spuriously shift the change-detection digest — e.g. --stamp, --workspace_status_command=<path>. Defaults to [\"--stamp\"] so delivered binaries embed workspace status; pass --release-bazel-flag=--nostamp to opt out.",
+            description = "Bazel flags applied ONLY to the final delivery build, not to the change-detection phases. Use this for flags that add non-determinism to release artifacts and would otherwise spuriously shift the change-detection digest — e.g. --stamp, --workspace_status_command=<path>. Defaults to [\"--stamp\"] so delivered binaries embed workspace status; pass --release-bazel-flag=--nostamp to opt out. Unused under --dry-run, which skips that build unless --dry-run=build asks for it.",
         ),
         "bazel_startup_flags": args.string_list(
             long = "bazel-startup-flag",
@@ -1860,9 +1905,11 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
             values = ["selective", "always"],
             description = "Delivery model. 'selective' (default): only run candidates that haven't already been delivered for this --task:name[:--salt] prefix (uses change detection). 'always': skip change detection entirely and run every resolved target — closest analogue to legacy always-deliver behavior. Combine with --dry-run for a preview and/or --track-state=false for environments without a state backend.",
         ),
-        "dry_run": args.boolean(
-            default = False,
-            description = "Resolve delivery state and print what would be delivered without running any targets. Combines with both modes: --mode=selective --dry-run previews change-detection data; --mode=always --dry-run lists every resolved target as a delivery candidate.",
+        "dry_run": args.string(
+            default = DRY_RUN_OFF,
+            values = [DRY_RUN_OFF, DRY_RUN_ON, DRY_RUN_BUILD],
+            bare = DRY_RUN_ON,
+            description = "Resolve delivery state and print what would be delivered without running any targets. `false` (the default) delivers. `true` — which bare --dry-run means — previews: it combines with both modes (--mode=selective --dry-run previews change-detection data; --mode=always --dry-run lists every resolved target as a delivery candidate) and skips the final delivery build (phase 3) along with the dispatch, since that build exists only to put the pending targets' runfiles on disk for a dispatch that never happens — so a preview neither stamps nor materializes release artifacts. `build` previews and runs that build anyway, for the preview that needs what only it produces: the per-target on-disk paths in the manifest (entrypoint_path, runfiles_dir, runfiles_workspace_dir, default_outputs — all empty under `true`) and the 'never built' / 'not runnable' checks that run as each target completes.",
         ),
         "track_state": args.boolean(
             default = True,
@@ -1874,7 +1921,7 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
         ),
         "warn_not_runnable": args.boolean(
             default = False,
-            description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
+            description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable. The check needs the delivery build's outputs on disk, so it does not run under --dry-run unless --dry-run=build asks for that build.",
         ),
         "warn_unresolved_digest": args.boolean(
             default = False,

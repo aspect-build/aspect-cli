@@ -168,10 +168,13 @@ aspect delivery //pkg/foo:release //pkg/bar:release
 aspect delivery --mode=selective                # default: change-detect via state
 aspect delivery --mode=always                   # always deliver (skip change detection)
 aspect delivery --dry-run                       # preview without delivering
+aspect delivery --dry-run=build                 # preview, but build the pending targets too
 aspect delivery --force-target=//pkg/foo:release  # force one target through
 ```
 
-Phase 1 builds the user's targets with the `hashsum_aspect` to compute action digests. Phase 2 queries the remote cache for those digests via `--experimental_remote_require_cached`. Phase 3 invokes per-target delivery entrypoints. Outcome buckets: `ok` / `skip` (already delivered) / `warn` / `fail` / `pending`.
+Phase 1 builds the user's targets with the `hashsum_aspect` to compute action digests. Phase 2 queries the remote cache for those digests via `--experimental_remote_require_cached`. Phase 3 builds the pending targets and invokes their delivery entrypoints. Outcome buckets: `ok` / `skip` (already delivered) / `warn` / `fail` / `pending`.
+
+`--dry-run` is tri-state (`false` / `true` / `build`). A preview skips phase 3: it exists to put the pending targets' runfiles on disk for a dispatch that a dry-run never performs, so a preview neither stamps nor materializes release artifacts. `--dry-run=build` opts that build back in for previews that need the manifest's per-target on-disk paths or the `not runnable` check.
 
 Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tables (label / hash / context), failed deliveries open by default, plus the shared bazel detail body from phase 1.
 

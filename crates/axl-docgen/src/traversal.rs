@@ -5,6 +5,10 @@ use std::collections::HashMap;
 /// Represents a documentation page with all its items.
 #[derive(Debug, Clone)]
 pub struct DocPage {
+    /// Human-readable page title, emitted as frontmatter. A type page is
+    /// titled by its type name (`AuthSession`), a module page by its dotted
+    /// qualified name (`aspect.auth`), the two roots `Types` and `Builtins`.
+    pub title: String,
     pub items: Vec<DocPageItem>,
 }
 
@@ -65,7 +69,7 @@ pub fn traverse_all(
     let mut pages: HashMap<String, DocPage> = HashMap::new();
     register_builtin_types(&mut registry);
 
-    traverse_module(globals, TYPES_ROOT, &mut pages, &mut registry);
+    traverse_module(globals, TYPES_ROOT, "", &mut pages, &mut registry);
 
     for (module, name, dm) in builtins {
         let page_path = normalize_path(&format!("{BUILTINS_ROOT}/{name}"));
@@ -75,6 +79,7 @@ pub fn traverse_all(
         add_page(
             &mut pages,
             BUILTINS_ROOT.to_string(),
+            "Builtins",
             vec![DocPageItem::Module {
                 name: name.clone(),
                 docs: dm.docs.clone(),
@@ -94,12 +99,13 @@ pub fn traverse_all(
         add_page(
             &mut pages,
             page_path.clone(),
+            name,
             vec![DocPageItem::LoadStatement {
                 module: format!("@{module}//{name}.axl"),
                 symbols,
             }],
         );
-        traverse_module(dm, &page_path, &mut pages, &mut registry);
+        traverse_module(dm, &page_path, name, &mut pages, &mut registry);
     }
 
     TraversalResult { pages, registry }
@@ -123,9 +129,12 @@ fn register_builtin_types(registry: &mut TypeRegistry) {
     registry.register("NoneType", "types/none");
 }
 
+/// `qualified` is the dotted AXL name of `module` (`aspect.auth`), empty for
+/// the root of the types tree; it titles the module's page.
 fn traverse_module(
     module: &DocModule,
     path: &str,
+    qualified: &str,
     pages: &mut HashMap<String, DocPage>,
     registry: &mut TypeRegistry,
 ) {
@@ -153,7 +162,12 @@ fn traverse_module(
                 });
 
                 // Recurse into submodule
-                traverse_module(submodule, &submodule_path, pages, registry);
+                let sub_qualified = if qualified.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{qualified}.{name}")
+                };
+                traverse_module(submodule, &submodule_path, &sub_qualified, pages, registry);
             }
             DocItem::Type(doc_type) => {
                 // Calculate the type path and normalize it
@@ -192,7 +206,7 @@ fn traverse_module(
                 }
 
                 // Create a page for this type (even if empty - the type itself is documentation)
-                add_page(pages, type_path, type_items);
+                add_page(pages, type_path, name, type_items);
             }
             DocItem::Member(DocMember::Function(func)) => {
                 // Add function to current module's page
@@ -222,17 +236,34 @@ fn traverse_module(
     // Create the module's page with all its direct members
     // Always create a page for modules, even if empty (serves as index)
     let normalized_path = normalize_path(path);
-    add_page(pages, normalized_path, module_items);
+    let title = if qualified.is_empty() {
+        "Types"
+    } else {
+        qualified
+    };
+    add_page(pages, normalized_path, title, module_items);
 }
 
 /// Add items to a page, creating it if it doesn't exist or merging if it does.
-fn add_page(pages: &mut HashMap<String, DocPage>, path: String, items: Vec<DocPageItem>) {
+/// The title is taken from whichever call creates the page.
+fn add_page(
+    pages: &mut HashMap<String, DocPage>,
+    path: String,
+    title: &str,
+    items: Vec<DocPageItem>,
+) {
     if let Some(existing) = pages.get_mut(&path) {
         // Merge items into existing page
         existing.items.extend(items);
     } else {
         // Create new page
-        pages.insert(path, DocPage { items });
+        pages.insert(
+            path,
+            DocPage {
+                title: title.to_string(),
+                items,
+            },
+        );
     }
 }
 

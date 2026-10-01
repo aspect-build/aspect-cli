@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 
 use super::credential_store::CredentialStore;
+use crate::eval::TaskExit;
 
 /// A deployment the CLI can authenticate against: the built-in Aspect
 /// deployment or a configured self-hosted one. `configure` discovers these from a
@@ -35,9 +36,9 @@ pub(crate) struct Deployment {
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "is_false")]
     default: bool,
-    /// Whether this is the built-in Aspect account rather than a configured
-    /// Workflows deployment. Set only by [`default_deployment`]; `#[serde(skip)]`
-    /// keeps a hand-edited `config.json` from claiming account status and keeps the
+    /// Whether this is the built-in Aspect Cloud entry rather than a configured
+    /// Aspect Workflows deployment. Set only by [`aspect_cloud_deployment`]; `#[serde(skip)]`
+    /// keeps a hand-edited `config.json` from claiming Aspect Cloud status and keeps the
     /// flag out of the written file.
     ///
     /// Account identity is this flag, never the name, so a deployment that happens
@@ -48,9 +49,9 @@ pub(crate) struct Deployment {
     issuer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
-    /// Aspect-cloud API base (`ctx.aspect.auth.api_url`), used by Aspect-cloud
+    /// Aspect Cloud API base (`ctx.aspect.auth.api_url`), used by Aspect Cloud
     /// features (GitHub/GitLab token exchange, status comments, budget). Present
-    /// only for the built-in Aspect account; self-hosted deployments don't run
+    /// only for the built-in Aspect Cloud entry; self-hosted deployments don't run
     /// these endpoints, so it is absent for configured deployments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_url: Option<String>,
@@ -77,10 +78,17 @@ pub(crate) struct Deployment {
     /// `aspect_endpoints` map, so a discovered deployment always has this.
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
     pub(crate) endpoints: Endpoints,
+    /// The `redirect_uri` this deployment's login sends the IdP to, exactly as it
+    /// advertised it. Absent for a deployment whose document predates the field —
+    /// see [`login_redirect_uri`], which derives one in that case. The built-in
+    /// Aspect Cloud seed states [`DEFAULT_LOGIN_REDIRECT_URI`] rather than leaving
+    /// this empty, so a first login has somewhere to relay through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_redirect_uri: Option<String>,
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
-/// and the set [`default_deployment`] states for the built-in Aspect account.
+/// and the set [`aspect_cloud_deployment`] states for the built-in Aspect Cloud entry.
 /// A deployment that advertises its own set is authoritative and this does not
 /// apply to it. `offline_access` requests a refresh token so the credential renews
 /// without re-login; a provider that gates one differently (Google) advertises the
@@ -108,6 +116,11 @@ pub(crate) struct Endpoints {
     bes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     exec: String,
+    /// The deployment's own API host. Only Aspect Cloud advertises one today; a
+    /// self-hosted deployment that grows API routes advertises its own here and
+    /// [`resolve_deployment_api_url`] picks it up with no CLI change.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    api: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) results_url: String,
 }
@@ -117,7 +130,20 @@ impl Endpoints {
         self.cache.is_empty()
             && self.bes.is_empty()
             && self.exec.is_empty()
+            && self.api.is_empty()
             && self.results_url.is_empty()
+    }
+
+    /// Whether this advertises somewhere Bazel can actually talk to, which is
+    /// what makes a resource a *deployment* rather than merely an Aspect service.
+    ///
+    /// Deliberately narrower than [`Self::is_empty`], which counts `results_url`
+    /// and `api` as well. Both are served alongside no cache or BES at all
+    /// (`app.aspect.build` serves exactly that), and treating such a resource as a
+    /// deployment would record an entry that cannot serve a build — and, under
+    /// Aspect Cloud's own name, would replace the endpoints that can.
+    fn serves_build_endpoints(&self) -> bool {
+        !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
     }
 }
 
@@ -140,29 +166,160 @@ struct AuthEnv {
     authorize_params: BTreeMap<String, String>,
 }
 
-/// The built-in Aspect production deployment, seeded so a fresh install can
-/// `aspect auth login` with no `configure` step. It backs Aspect Cloud services
-/// (not a Bazel remote cache/BES/exec), so it owns no endpoint hosts and `hosts`
-/// is left empty. `config.json` entries add to this seed but cannot replace it:
-/// the seed is identified by its `builtin` flag, and [`RESERVED_NAMES`] keeps a
-/// configured deployment from taking its name.
-const DEFAULT_DEPLOYMENT_NAME: &str = "aspect";
+/// Aspect Cloud, seeded so a fresh install can `aspect auth login` with no
+/// `configure` step. The seed states the identity — issuer, PKCE client, API —
+/// and discovery fills in the endpoints it cannot know; a `config.json` entry
+/// under this name is folded in rather than replacing it, so Aspect Cloud can be
+/// extended but never redirected. See [`overlay_config_sources`].
+/// What Aspect Cloud calls itself — the name `auth status` shows, `--deployment`
+/// takes, and every Aspect Cloud edge advertises as RFC 9728 `resource_name`.
+///
+/// Deliberately not "default" anything: [`DEFAULT_PROFILE`] is the credential slot,
+/// and `Deployment::default` is which deployment `--remote` targets, which
+/// `auth use` can point at a configured one instead. Aspect Cloud is neither by
+/// definition.
+///
+/// The entry is still identified by its `builtin` flag rather than by this string
+/// (see [`Deployment::builtin`]); the name is what the user types.
+const ASPECT_CLOUD_DEPLOYMENT_NAME: &str = "aspect-cloud";
+
+/// A second name that addresses Aspect Cloud. Accepted wherever a deployment is
+/// named — `--deployment`, `--name` — and a `config.json` entry under it folds into
+/// the seed exactly as one under [`ASPECT_CLOUD_DEPLOYMENT_NAME`] does. Never written:
+/// anything the CLI records uses the canonical name, so a config carrying this one
+/// heals on the next discovery write.
+///
+/// The obvious short thing to type, and a name a hand-written or older
+/// `config.json` may carry. Reserved, so no configured deployment can claim it.
+const ASPECT_CLOUD_DEPLOYMENT_ALIAS: &str = "aspect";
 const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
-const DEFAULT_CLIENT_ID: &str = "771ff228-18a1-43f0-bc83-62c9df0d72ca";
+/// The account's PKCE client — the "Aspect Build" application client.
+///
+/// The fallback rather than the source of truth: once discovery has run, the
+/// client advertised by [`DEFAULT_DISCOVERY_HOST`] is adopted instead (see
+/// [`overlay_config_sources`]), so the deployed value can rotate without a CLI
+/// release. This stands in until then — a first login on a fresh machine, or an
+/// endpoint that could not be reached — which is why a login never depends on the
+/// discovery fetch having succeeded. It still reaches the issuer, as every OAuth
+/// login must.
+const DEFAULT_CLIENT_ID: &str = "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
-/// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
+/// Where Aspect Cloud relays a CLI login back to the loopback listener.
+///
+/// The same role [`DEFAULT_CLIENT_ID`] plays: discovery supplies the current value
+/// and overrides this, but the seed states one so a login never depends on having
+/// discovered anything. Without it a first login on a fresh install would have
+/// nowhere to relay through and fail outright.
+const DEFAULT_LOGIN_REDIRECT_URI: &str = "https://app.aspect.build/auth/cli/callback";
+
+/// Aspect Cloud's Bazel-facing endpoints, as the seed states them.
+///
+/// The same role [`DEFAULT_LOGIN_REDIRECT_URI`] plays: discovery records what the
+/// deployment actually advertises and [`merge_into_seed`] takes that over these,
+/// so an edge can be renamed without a CLI release. Stating them is what makes
+/// Aspect Cloud a usable deployment before anything has been discovered, so
+/// `aspect setup bazelrc` has somewhere to point on a machine that has never
+/// logged in and the rc it writes works as soon as there is a credential.
+///
+/// No `exec`: Aspect Cloud serves no remote executor today, and a seeded one
+/// would put an `--config=aspect-cloud-exec` in every rc pointing nowhere. The
+/// day it ships, discovery advertises it before this constant would.
+const DEFAULT_CACHE_HOST: &str = "cache.aspect.build";
+const DEFAULT_BES_HOST: &str = "bes.aspect.build";
+const DEFAULT_RESULTS_URL: &str = "https://app.aspect.build/i/";
+
+/// The host a bare `aspect auth login` probes to discover the Aspect Cloud
+/// endpoints, so a fresh install has a working `--remote` without anyone running
+/// `aspect auth configure` by hand — see [`configure_default`].
+///
+/// The API rather than a cache/BES edge: every Aspect Cloud resource advertises
+/// the same capability map, so any would serve, but this one is Aspect Cloud's own
+/// ([`DEFAULT_API_URL`]) and so is the least likely to be renamed out from under
+/// the CLI — which the edges have been.
+///
+/// What it finds is recorded under Aspect Cloud's own name, not a second one, so
+/// `auth status` shows a single entry and `--remote` needs no `--deployment`.
+const DEFAULT_DISCOVERY_HOST: &str = "api.aspect.build";
+
+/// The hosts Aspect Cloud serves itself. `configure` records their endpoints on
+/// the built-in Aspect Cloud entry rather than deriving a deployment name from the host, so
+/// `aspect auth configure cache.aspect.build` lands in the same place as a bare
+/// login instead of creating a `cache` deployment beside Aspect Cloud.
+///
+/// An allowlist rather than "anything on [`DEFAULT_ISSUER`]": the issuer is the
+/// right *safety* check (see [`configure_deployment`]) but too broad an identity
+/// one — a future Aspect Cloud deployment sharing that issuer would silently
+/// absorb into Aspect Cloud. An explicit `--name` still wins, so a second entry
+/// for these hosts stays possible when someone wants one.
+///
+/// `exec` and `remote` are listed ahead of resolving anywhere: `exec` arrives with
+/// remote execution, and `remote` may return as a single multiplexed endpoint.
+/// Naming them costs nothing — configuring a host that does not resolve fails as
+/// unreachable either way — while a host *missing* from this list becomes a stray
+/// deployment beside Aspect Cloud the day it ships. Do not prune them for looking
+/// dead.
+const ASPECT_CLOUD_HOSTS: &[&str] = &[
+    "api.aspect.build",
+    "app.aspect.build",
+    "bes.aspect.build",
+    "cache.aspect.build",
+    "exec.aspect.build",
+    "remote.aspect.build",
+];
+
+/// The regional aliases of those same endpoints — `bes.us.aspect.build`,
+/// `api.eu.aspect.build`, and so on. They answer with the global names in their
+/// discovery document, but a user may well configure the host they were handed,
+/// so every service under a region resolves to Aspect Cloud.
+///
+/// Matched as a suffix so this covers each service in a region without naming the
+/// cross product, but the regions themselves are enumerated: an unknown
+/// `<service>.<anything>.aspect.build` is far more likely to be another
+/// Aspect Cloud deployment than a new region, and absorbing one of those into
+/// Aspect Cloud is the failure this allowlist exists to prevent. A genuinely new
+/// region is a one-line change here.
+const ASPECT_CLOUD_HOST_SUFFIXES: &[&str] = &[".us.aspect.build", ".eu.aspect.build"];
+
+/// Whether `host` is served by Aspect Cloud itself — see [`ASPECT_CLOUD_HOSTS`].
+/// `host` is already normalized by [`endpoint_host_str`]; the trailing dot of an
+/// absolute FQDN is stripped so `app.aspect.build.` still matches.
+fn is_aspect_cloud_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ASPECT_CLOUD_HOSTS.contains(&host.as_str())
+        || ASPECT_CLOUD_HOST_SUFFIXES.iter().any(|s| host.ends_with(s))
+}
+
+/// The dot-anchored suffix for Aspect's own domain, which Aspect Cloud endpoints
 /// sit under (`remote.<deployment>.aspect.build`).
-/// [`deployment_name_from_host`] strips it so an Aspect-hosted endpoint yields a
+/// [`deployment_name_from_host`] strips it so an Aspect Cloud endpoint yields a
 /// bare deployment name, while a self-hosted one keeps its full domain.
 const ASPECT_DOMAIN_SUFFIX: &str = ".aspect.build";
 
-/// Names a configured deployment may not take, because each would shadow the
-/// built-in Aspect account: [`DEFAULT_DEPLOYMENT_NAME`] is the account's own
-/// name, and [`DEFAULT_PROFILE`] is the credential profile the account files
-/// under (a deployment's credential is stored under its name, so a deployment
-/// named `default` would share the account's slot).
-const RESERVED_NAMES: &[&str] = &[DEFAULT_DEPLOYMENT_NAME, DEFAULT_PROFILE];
+/// Names a configured deployment may not take. The first two are Aspect Cloud's
+/// own ([`ASPECT_CLOUD_DEPLOYMENT_NAME`] and [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`]), so
+/// an entry under either would shadow it. [`DEFAULT_PROFILE`] is the profile a
+/// login lands in when none is named, and the word `auth use` uses for the default
+/// deployment, so a deployment called `default` would read ambiguously against
+/// both.
+const RESERVED_NAMES: &[&str] = &[
+    ASPECT_CLOUD_DEPLOYMENT_NAME,
+    ASPECT_CLOUD_DEPLOYMENT_ALIAS,
+    DEFAULT_PROFILE,
+];
+
+/// Whether `name` addresses the built-in Aspect Cloud entry — its own name, or its
+/// [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`].
+fn names_aspect_cloud(name: &str) -> bool {
+    name == ASPECT_CLOUD_DEPLOYMENT_NAME || name == ASPECT_CLOUD_DEPLOYMENT_ALIAS
+}
+
+/// Whether `name`, as a user typed it, addresses `deployment`. Its own name, plus
+/// the alias for Aspect Cloud — which no configured deployment can take, so this
+/// cannot resolve two.
+fn names_deployment(deployment: &Deployment, name: &str) -> bool {
+    deployment.name == name || (deployment.builtin && names_aspect_cloud(name))
+}
 
 fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
@@ -170,24 +327,47 @@ fn is_reserved_name(name: &str) -> bool {
 
 /// The error for a configured deployment claiming a [`RESERVED_NAMES`] entry,
 /// whether the name came from an explicit `--deployment` or was derived from an
-/// Aspect-hosted endpoint (see [`deployment_name_from_host`]). Either way the
+/// Aspect Cloud endpoint (see [`deployment_name_from_host`]). Either way the
 /// remedy is an explicit name, so the message asks for one.
 fn reserved_name_error(name: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "deployment name {name:?} is reserved for the built-in Aspect account\n\n\
+        "deployment name {name:?} is reserved for the built-in Aspect Cloud entry\n\n\
          Pass --deployment <name> to `aspect auth configure` with a different name."
     )
 }
 
-fn default_deployment() -> Deployment {
+/// The built-in Aspect Cloud entry, re-created on every config load and enriched
+/// from `config.json` by [`merge_into_seed`]. Never read from disk: `builtin` is
+/// `#[serde(skip)]`, so this is the only thing that can produce one.
+///
+/// Complete enough to use as it stands — it states Aspect Cloud's login client,
+/// its API, and its Bazel-facing endpoints — so everything that reads a
+/// deployment works before a first `aspect auth login`. Only the credential is
+/// genuinely missing then, and that is the error the user gets.
+///
+/// Its `hosts` come from the endpoints it states ([`endpoint_hosts`]), as they
+/// do for a discovered deployment, so [`deployment_for_host`] recognizes Aspect
+/// Cloud's own cache and BES as Aspect Cloud's. Everything that attaches a
+/// credential gates on that ownership — the `aspect get` credential helper, the
+/// endpoint auth in `lib/aspect_endpoint_auth.axl` — and a host owned by nobody
+/// is talked to unauthenticated.
+fn aspect_cloud_deployment() -> Deployment {
+    let endpoints = Endpoints {
+        cache: DEFAULT_CACHE_HOST.to_string(),
+        bes: DEFAULT_BES_HOST.to_string(),
+        api: DEFAULT_DISCOVERY_HOST.to_string(),
+        results_url: DEFAULT_RESULTS_URL.to_string(),
+        ..Endpoints::default()
+    };
     Deployment {
-        name: DEFAULT_DEPLOYMENT_NAME.to_string(),
+        name: ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(),
         default: true,
         builtin: true,
         issuer: Some(DEFAULT_ISSUER.to_string()),
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
-        hosts: Vec::new(),
+        hosts: endpoint_hosts(&endpoints),
+        login_redirect_uri: Some(DEFAULT_LOGIN_REDIRECT_URI.to_string()),
         // The same set a deployment gets when it advertises nothing: this seed is
         // not discovered from anywhere, so it states what that fallback would give
         // it rather than keeping a second list to drift from. `offline_access`
@@ -197,7 +377,31 @@ fn default_deployment() -> Deployment {
         // asking for the token.
         scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
-        endpoints: Endpoints::default(),
+        endpoints,
+    }
+}
+
+/// The bare hosts of the Bazel-facing endpoints a deployment serves — cache,
+/// BES, executor — deduped and in a stable order: what `hosts` must carry for
+/// [`deployment_for_host`] to recognize them as that deployment's.
+///
+/// Those three and no more, because ownership decides which endpoints receive
+/// the login. `api` is the CLI's own, reached with the credential directly
+/// rather than through Bazel, and `results_url` is a viewer URL passed to
+/// `--bes_results_url` and never dialed.
+fn endpoint_hosts(endpoints: &Endpoints) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for value in [&endpoints.cache, &endpoints.bes, &endpoints.exec] {
+        push_host(&mut hosts, value);
+    }
+    hosts
+}
+
+/// Append `value`'s bare host to `hosts`, unless it is empty or already there.
+fn push_host(hosts: &mut Vec<String>, value: &str) {
+    let host = endpoint_host_str(value);
+    if !host.is_empty() && !hosts.contains(&host) {
+        hosts.push(host);
     }
 }
 
@@ -235,7 +439,7 @@ struct ConfigSource {
 }
 
 /// The config files overlaying the built-in seed, read in precedence order: the
-/// repo's `.aspect/config.json` (when `$ASPECT_WORKSPACE` names one), then the
+/// repo's `.aspect/config.json` (when the working directory is in a project), then the
 /// user's `~/.aspect/config.json`. A missing file reads as no entries.
 fn config_sources() -> anyhow::Result<Vec<ConfigSource>> {
     let mut sources = Vec::new();
@@ -263,8 +467,8 @@ fn config_sources() -> anyhow::Result<Vec<ConfigSource>> {
 /// Overlay is by `name` (a later entry replaces an earlier one), so a user can
 /// override a repo-declared deployment. The seed is the exception — an entry
 /// claiming a [`RESERVED_NAMES`] name is skipped rather than allowed to replace
-/// it, since shadowing the account is silent and confusing (`auth status` would
-/// render the impostor in the account's section).
+/// it, since shadowing Aspect Cloud is silent and confusing (`auth status` would
+/// render the impostor in Aspect Cloud's section).
 ///
 /// Skipping rather than erroring keeps a config that already holds such an entry
 /// usable: erroring would fail *every* auth command, including the `auth remove`
@@ -290,14 +494,20 @@ fn shadowed_deployments() -> anyhow::Result<Vec<ShadowedDeployment>> {
 fn overlay_config_sources(
     sources: Vec<ConfigSource>,
 ) -> (Vec<Deployment>, Vec<ShadowedDeployment>) {
-    let mut merged: Vec<Deployment> = vec![default_deployment()];
+    let mut merged: Vec<Deployment> = vec![aspect_cloud_deployment()];
     let mut shadowed: Vec<ShadowedDeployment> = Vec::new();
     for source in sources {
         for entry in source.entries {
+            if names_aspect_cloud(&entry.name) {
+                if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
+                    merge_into_seed(seed, entry);
+                }
+                continue;
+            }
             if is_reserved_name(&entry.name) {
                 tracing::warn!(
                     "ignoring deployment {:?} from {}: the name is reserved for the \
-                     built-in Aspect account",
+                     built-in Aspect Cloud entry",
                     entry.name,
                     source.path.display()
                 );
@@ -323,6 +533,57 @@ fn overlay_config_sources(
     (merged, shadowed)
 }
 
+/// Fold a `config.json` entry under Aspect Cloud's own name into the seed.
+///
+/// An enrichment, not a shadow: Aspect Cloud's endpoints are discovered rather
+/// than compiled in, so `configure_default` records them under that name and this
+/// puts them back on the entry they belong to.
+///
+/// The endpoints are taken wholesale whenever the entry advertises any, so a
+/// discovery record replaces the seeded set rather than merging into it: an edge
+/// the deployment has dropped has to be able to disappear. An entry advertising
+/// none leaves the seed's standing, so a hand-written `aspect-cloud` entry that
+/// only pins, say, a client cannot blank out Aspect Cloud's hosts.
+///
+/// The PKCE client and login redirect are
+/// taken only from an entry naming Aspect Cloud's own issuer, which is the whole
+/// safety argument: each is only ever exercised against the issuer it was
+/// discovered from, so one taken from a document on [`DEFAULT_ISSUER`] cannot send
+/// a login anywhere new. What that buys is rotation without a CLI release.
+///
+/// The issuer and `api_url` are never taken, so a hand-edited config can extend
+/// Aspect Cloud but cannot redirect its login. Neither are scopes or
+/// `authorize_params`: the seed states its own, and widening the adopted set is a
+/// separate decision from rotating the client.
+fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
+    if entry
+        .issuer
+        .as_deref()
+        .is_some_and(|issuer| issuers_match(issuer, DEFAULT_ISSUER))
+    {
+        if let Some(client_id) = non_empty(entry.client_id) {
+            seed.client_id = Some(client_id);
+        }
+        if let Some(uri) = non_empty(entry.login_redirect_uri) {
+            seed.login_redirect_uri = Some(uri);
+        }
+    }
+    // Only what the entry states replaces what the seed states. An entry with no
+    // hosts (or no endpoints) is saying nothing about them, and taking that as
+    // "Aspect Cloud owns no hosts" would un-own its own cache and BES.
+    if !entry.hosts.is_empty() {
+        seed.hosts = entry.hosts;
+    }
+    if !entry.endpoints.is_empty() {
+        seed.endpoints = entry.endpoints;
+    }
+}
+
+/// `value` unless it is empty, so an advertised-but-blank field reads as absent.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
+}
+
 /// The seed is re-created `default = true` on every load, but a configured
 /// deployment marked default must win. So clear the seed's default whenever any
 /// configured deployment claims it — leaving the seed as default only when
@@ -337,20 +598,35 @@ fn reconcile_seed_default(deployments: &mut [Deployment]) {
 }
 
 /// The repo-level `.aspect/config.json`, checked in so a team shares a
-/// deployment. Located via `$ASPECT_WORKSPACE` (the CLI's workspace root); absent
-/// when the CLI runs outside a workspace.
+/// deployment. It sits under the Aspect project root — the one the process
+/// already resolved for axl and config loading — and is absent when the caller
+/// is outside a project.
+///
+/// The `aspect get` credential helper is the one caller with no resolved root to
+/// reuse: Bazel spawns it as a bare subprocess and it skips workspace discovery
+/// to stay fast. It walks for one itself, which is the same few `stat`s startup
+/// would have done.
 fn repo_config_path() -> Option<PathBuf> {
-    let root = std::env::var_os("ASPECT_WORKSPACE")?;
-    Some(PathBuf::from(root).join(".aspect").join("config.json"))
+    let root = match crate::engine::store::resolved_aspect_root() {
+        Some(root) => root.to_path_buf(),
+        None => crate::project_root::aspect_root_from_cwd()?,
+    };
+    Some(
+        root.join(crate::project_root::DOT_ASPECT_FOLDER)
+            .join("config.json"),
+    )
 }
 
-/// Select a deployment by name, or the default when `name` is `None`. An
-/// explicit name must match a configured deployment. With no name, the entry
-/// marked `default` wins (the first configured deployment claims `default` when
-/// written, so a single configured deployment is the default), falling back to
-/// the built-in seed. The default flag is the single source of truth —
-/// configuring a deployment does not implicitly hijack selection away from an
-/// explicit default.
+/// Select a deployment by name, or the default when `name` is `None`.
+///
+/// An explicit name must name a deployment: its own, or — for Aspect Cloud —
+/// [`ASPECT_CLOUD_DEPLOYMENT_ALIAS`]. Every path that takes a `--deployment` comes
+/// through here, so the alias works for `--remote` and `deployment_endpoints` as
+/// well as the `auth` commands.
+///
+/// With no name, the entry marked `default` wins, falling back to Aspect Cloud —
+/// which is therefore the default until `aspect auth use` or `configure --default`
+/// moves it. Configuring a deployment never does.
 pub(crate) fn select_deployment(
     deployments: &[Deployment],
     name: Option<&str>,
@@ -358,13 +634,14 @@ pub(crate) fn select_deployment(
     if let Some(name) = name.filter(|n| !n.is_empty()) {
         return deployments
             .iter()
-            .find(|d| d.name == name)
+            .find(|d| names_deployment(d, name))
             .cloned()
             .ok_or_else(|| {
-                anyhow::anyhow!(
+                TaskExit::error(format!(
                     "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
                     name
-                )
+                ))
+                .into()
             });
     }
     deployments
@@ -378,10 +655,10 @@ pub(crate) fn select_deployment(
 /// Selection for the `auth login`/`logout` commands, which target the Aspect
 /// *account* by default rather than the default *deployment*: an explicit
 /// `name` picks that deployment (erroring if unknown); an empty `name` resolves
-/// the built-in Aspect account (the seed). The default-deployment concept (set by
-/// `auth use`) governs builds (`--remote`), not the account login — so a
-/// bare `auth login` always means the account, never a configured default.
-fn select_account_or_deployment(
+/// the built-in Aspect Cloud entry (the seed). The default-deployment concept (set by
+/// `auth use`) governs builds (`--remote`), not the Aspect Cloud login — so a
+/// bare `auth login` always means Aspect Cloud, never a configured default.
+fn select_aspect_cloud_or_deployment(
     deployments: &[Deployment],
     name: Option<&str>,
 ) -> anyhow::Result<Deployment> {
@@ -396,28 +673,29 @@ fn select_account_or_deployment(
     }
 }
 
-/// The name of the configured deployment that owns `host` — an exact or
-/// dot-anchored suffix match against any deployment's `hosts`. Returns `None`
-/// when no configured deployment claims the host. Used so endpoint auth attaches
-/// the token of the deployment serving a given cache/BES endpoint, whichever
-/// profile it was logged in under.
-fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<String> {
+/// The configured deployment that owns `host` — an exact or dot-anchored suffix
+/// match against any deployment's `hosts`. `None` when no configured deployment
+/// claims it. Endpoint auth uses this to attach the token of the deployment
+/// serving a given cache/BES endpoint.
+fn deployment_for_host<'a>(deployments: &'a [Deployment], host: &str) -> Option<&'a Deployment> {
     // Normalize a trailing dot so an absolute FQDN (`host.example.com.`) still
     // matches its configured host.
     let host = host.trim_end_matches('.').to_lowercase();
-    deployments
-        .iter()
-        .find(|d| {
-            d.hosts.iter().any(|h| {
-                let h = h
-                    .trim()
-                    .trim_start_matches('.')
-                    .trim_end_matches('.')
-                    .to_lowercase();
-                !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
-            })
+    deployments.iter().find(|d| {
+        d.hosts.iter().any(|h| {
+            let h = h
+                .trim()
+                .trim_start_matches('.')
+                .trim_end_matches('.')
+                .to_lowercase();
+            !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
         })
-        .map(|d| d.name.clone())
+    })
+}
+
+/// The name of the deployment owning `host` — see [`deployment_for_host`].
+fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<String> {
+    deployment_for_host(deployments, host).map(|d| d.name.clone())
 }
 
 /// Resolve the issuer + client_id for a login / api-token / refresh flow against
@@ -429,16 +707,50 @@ fn resolve_auth_env(name: Option<&str>) -> anyhow::Result<AuthEnv> {
     auth_env_from(&deployment)
 }
 
-/// The Aspect-cloud API base for `ctx.aspect.auth.api_url`, used by Aspect-cloud
-/// features (GitHub/GitLab token exchange, status comments, budget). Independent
-/// of which deployment serves the cache/BES endpoints: the first deployment that
-/// carries an `api_url` (the built-in Aspect seed, unless overridden), then the
-/// compile-time default.
-fn resolve_api_url() -> anyhow::Result<String> {
+/// Aspect Cloud's API base, whatever deployment is selected or default.
+///
+/// The GitHub and GitLab App routes (`/github/token`, `/gitlab/token`,
+/// `/status-comments/contribute`, `/status-checks/register`, `/github/budget`) are
+/// served only here, so every caller of those must resolve this and pair it with
+/// Aspect Cloud's own credential — see [`Auth::aspect_cloud_deployment`].
+///
+/// Its advertised `api` endpoint when discovery has recorded one, then its
+/// `api_url`, then the compiled-in default, so the host can move without a CLI
+/// release.
+fn resolve_aspect_cloud_api_url() -> anyhow::Result<String> {
     Ok(load_deployments()?
-        .into_iter()
-        .find_map(|d| d.api_url)
+        .iter()
+        .find(|d| d.builtin)
+        .and_then(deployment_api_base)
         .unwrap_or_else(|| DEFAULT_API_URL.to_string()))
+}
+
+/// The API base of the deployment named `name` — its own advertised `api`.
+///
+/// For a route a deployment serves itself. Errors when it advertises none, which
+/// is every deployment but Aspect Cloud today: a caller that reaches here for a
+/// deployment without an API is asking for something that does not exist, and
+/// silently falling back to Aspect Cloud's would send a deployment-scoped request
+/// to the wrong place.
+fn resolve_deployment_api_url(name: Option<&str>) -> anyhow::Result<String> {
+    let deployments = load_deployments()?;
+    let selected = select_deployment(&deployments, name)?;
+    deployment_api_base(&selected)
+        .ok_or_else(|| anyhow::anyhow!("deployment {:?} advertises no API endpoint", selected.name))
+}
+
+/// A deployment's own API base: the `api` endpoint it advertises, else the
+/// `api_url` recorded for it. `None` when it has neither, which is every
+/// deployment but Aspect Cloud today.
+///
+/// The two callers differ only in what they do with that `None` — Aspect Cloud
+/// falls back to the compiled-in default, a named deployment errors — which is the
+/// whole distinction between them.
+fn deployment_api_base(deployment: &Deployment) -> Option<String> {
+    if !deployment.endpoints.api.is_empty() {
+        return Some(format!("https://{}", deployment.endpoints.api));
+    }
+    deployment.api_url.clone()
 }
 
 fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
@@ -473,8 +785,21 @@ fn login_scopes(advertised: &[String]) -> Vec<String> {
     }
 }
 
-fn resolve_aspect_env() -> anyhow::Result<AuthEnv> {
-    resolve_auth_env(None)
+/// How long a discovery fetch may take before the CLI gives up and uses what it
+/// already has. Both fetches sit in front of an interactive login, and both have a
+/// working fallback, so a slow answer is worth less than a prompt one: without a
+/// bound, a black-holed host does not fail fast — it stalls on the OS connect
+/// timeout, which is minutes on macOS.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A client for the discovery fetches, bounded by [`DISCOVERY_TIMEOUT`]. Falls
+/// back to an unbounded client if one cannot be built, which cannot happen for a
+/// timeout-only config.
+fn discovery_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .unwrap_or_default()
 }
 
 /// Path of the discovery document a deployment serves (RFC 9728, OAuth 2.0
@@ -562,6 +887,20 @@ struct ProtectedResource {
     /// a bare host; omitted by a deployment with no web UI.
     #[serde(default)]
     aspect_bes_results_url: String,
+    /// The `redirect_uri` this deployment's CLI login must send the IdP to — the
+    /// page that relays the authorization code back to the CLI's loopback
+    /// listener. A full URI rather than a host: which path serves the relay is the
+    /// deployment's business, not something the CLI should be encoding.
+    ///
+    /// Empty from a document written before the field existed, which
+    /// [`login_redirect_uri`] derives a URI for instead.
+    #[serde(default)]
+    aspect_login_redirect_uri: String,
+    /// What this deployment calls itself (RFC 9728). Used as its name in
+    /// `config.json`, `auth status` and `--deployment`, in preference to one
+    /// derived from the host — see [`configure_deployment`].
+    #[serde(default)]
+    resource_name: String,
 }
 
 impl ProtectedResource {
@@ -586,6 +925,13 @@ impl ProtectedResource {
             .collect();
         if !nested.is_empty() {
             return nested;
+        }
+        // Both halves are required for PKCE, so the flat shape is filtered on the
+        // client too — a document that lists an issuer but no `client_id` (the
+        // build-result viewer's) would otherwise yield a server whose empty client
+        // reads as "can log in" right up until the authorize call.
+        if self.client_id.is_empty() {
+            return Vec::new();
         }
         self.authorization_servers
             .iter()
@@ -673,7 +1019,7 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         host.trim_end_matches('/'),
         PROTECTED_RESOURCE_PATH
     );
-    let resp = match reqwest::Client::new().get(&url).send().await {
+    let resp = match discovery_client().get(&url).send().await {
         Ok(resp) => resp,
         // A transport-level failure (DNS, connect, TLS, timeout): can't tell
         // whether it's a deployment, so report unreachable with a terse reason.
@@ -683,7 +1029,9 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         return Discovery::NotADeployment;
     }
     match resp.json::<ProtectedResource>().await {
-        Ok(info) if !info.aspect_endpoints.is_empty() => Discovery::Reachable(Box::new(info)),
+        Ok(info) if info.aspect_endpoints.serves_build_endpoints() => {
+            Discovery::Reachable(Box::new(info))
+        }
         _ => Discovery::NotADeployment,
     }
 }
@@ -712,9 +1060,9 @@ fn transport_error_reason(e: &reqwest::Error) -> String {
 /// Only Aspect's own domain is stripped, because only there does the remainder
 /// name the deployment; a self-hosted host keeps its full domain, which reads
 /// unambiguously and can never collide with [`RESERVED_NAMES`]
-/// (`remote.aspect.foo.com` → `aspect.foo.com`, not the account's `aspect`).
+/// (`remote.aspect.foo.com` → `aspect.foo.com`, not Aspect Cloud's `aspect`).
 ///
-/// An Aspect-hosted host still can collide — `remote.aspect.aspect.build` →
+/// An Aspect Cloud host still can collide — `remote.aspect.aspect.build` →
 /// `aspect` — so this does not itself guarantee a usable name;
 /// [`upsert_deployment`] rejects a reserved one.
 ///
@@ -738,6 +1086,76 @@ fn deployment_name_from_host(host: &str) -> String {
     name.trim_matches('.').to_string()
 }
 
+/// The name to record a discovered deployment under, and whether that name claims
+/// Aspect Cloud.
+///
+/// In precedence: the name the user typed, then Aspect Cloud when the host is one
+/// Aspect Cloud serves, then the name the deployment advertises
+/// ([`advertised_name`]), then one derived from the host.
+///
+/// Aspect Cloud is claimed only by naming it or by configuring one of its hosts. A
+/// name that merely *derives* to it (`remote.aspect-cloud.aspect.build` →
+/// `aspect-cloud`) is refused by [`upsert_deployment`], so nobody extends Aspect
+/// Cloud by accident.
+fn resolve_deployment_name(
+    explicit: Option<String>,
+    host: &str,
+    info: &ProtectedResource,
+) -> (String, bool) {
+    let explicit = explicit.filter(|name| !name.is_empty());
+    let account = match explicit.as_deref() {
+        Some(name) => names_aspect_cloud(name),
+        None => is_aspect_cloud_host(host),
+    };
+    let name = explicit
+        .filter(|name| !names_aspect_cloud(name))
+        .or_else(|| account.then(|| ASPECT_CLOUD_DEPLOYMENT_NAME.to_string()))
+        .or_else(|| advertised_name(info))
+        .unwrap_or_else(|| deployment_name_from_host(host));
+    (name, account)
+}
+
+/// The name a deployment gives itself, when it gives one the CLI can use.
+///
+/// A deployment naming itself beats a name derived from DNS, which is why
+/// `resource_name` is read at all: `app.aws.awd-cci-test-dev.aspect.build` derives
+/// the unlovely `aws.awd-cci-test-dev`, and only the deployment knows better.
+///
+/// Refused when it is not `^[a-z][a-z0-9-]*$`, or would take a [`RESERVED_NAMES`]
+/// name. The charset is what a deployment is allowed to advertise — RFC 9728 calls
+/// this a display name, but it is used here as an identifier, so it has to survive
+/// being retyped after `--deployment`. The reserved names are the CLI's own: the
+/// account, and the credential slot every deployment files under.
+///
+/// Either way the derived name is used rather than failing the command, since the
+/// user did not ask for this name and cannot correct it. `--name` is the override.
+fn advertised_name(info: &ProtectedResource) -> Option<String> {
+    let name = info.resource_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let refusal = if !is_advertisable_name(name) {
+        "not lowercase letters, digits and hyphens starting with a letter"
+    } else if is_reserved_name(name) {
+        "reserved by the CLI"
+    } else {
+        return Some(name.to_string());
+    };
+    tracing::warn!("ignoring the name this deployment advertises, {name:?}: {refusal}");
+    None
+}
+
+/// Whether `name` is one a deployment may advertise: `^[a-z][a-z0-9-]*$`.
+///
+/// Narrow on purpose, and matched by the charts and Terraform modules that set it,
+/// so a bad name fails at render rather than at login. A name derived from a host
+/// is not held to this — it is dotted by construction, and nobody chose it.
+fn is_advertisable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Build a [`Deployment`] record from a discovered [`ProtectedResource`] and the
 /// `selected` authorization server the deployment logs in against (chosen by the
 /// caller from [`ProtectedResource::auth_servers`]; `None` when the endpoint
@@ -756,28 +1174,21 @@ fn deployment_from_discovery(
     selected: Option<&AuthServer>,
 ) -> Deployment {
     let mut hosts: Vec<String> = Vec::new();
-    let mut push = |h: &str| {
-        let h = endpoint_host_str(h);
-        if !h.is_empty() && !hosts.contains(&h) {
-            hosts.push(h);
-        }
-    };
-    push(configured_host);
-    push(&info.resource);
-    // The endpoint hosts share the same credential, so they extend the auth gate
-    // too (normalized to bare hosts, matching `hosts`).
+    push_host(&mut hosts, configured_host);
+    push_host(&mut hosts, &info.resource);
     let endpoints = Endpoints {
         cache: endpoint_host_str(&info.aspect_endpoints.cache),
         bes: endpoint_host_str(&info.aspect_endpoints.bes),
         exec: endpoint_host_str(&info.aspect_endpoints.exec),
+        api: endpoint_host_str(&info.aspect_endpoints.api),
         // A viewer URL, kept verbatim: it is passed to --bes_results_url, not
-        // dialed as a gRPC endpoint, so it is neither host-normalized nor pushed
-        // onto the auth gate below.
+        // dialed as a gRPC endpoint, so it is neither host-normalized nor
+        // part of the auth gate.
         results_url: info.aspect_bes_results_url.clone(),
     };
-    push(&endpoints.cache);
-    push(&endpoints.bes);
-    push(&endpoints.exec);
+    for host in endpoint_hosts(&endpoints) {
+        push_host(&mut hosts, &host);
+    }
     Deployment {
         name,
         default: false,
@@ -786,6 +1197,7 @@ fn deployment_from_discovery(
         client_id: selected.map(|s| s.client_id.clone()),
         api_url: None,
         hosts,
+        login_redirect_uri: non_empty(Some(info.aspect_login_redirect_uri.clone())),
         scopes: selected.map(|s| s.scopes.clone()).unwrap_or_default(),
         authorize_params: selected
             .map(|s| s.authorize_params.clone())
@@ -794,12 +1206,24 @@ fn deployment_from_discovery(
     }
 }
 
-/// Insert or replace `deployment` in `existing` (by name), keeping exactly one
-/// entry marked `default`. A deployment becomes the default when it explicitly
-/// claims it, when it is the first configured entry, or when it replaces the
-/// entry that was already the default (so re-running `configure` on the current
-/// default does not silently clear it). Returns whether the written record is
-/// the effective default.
+/// Insert or replace `deployment` in `existing` (by name), keeping at most one
+/// entry marked `default`. Returns whether the written record is the effective
+/// default.
+///
+/// Configuring a deployment never moves the default. Aspect Cloud serves a cache
+/// and a BES of its own, so it is a working default from the first login, and a
+/// newly configured deployment silently taking over would change what every
+/// `--remote` build talks to. `--default` here and `aspect auth use` are the ways
+/// to move it, and both are the user saying so.
+///
+/// The one exception is re-configuring the deployment that already holds it, which
+/// keeps it rather than demoting it as a side effect of a refresh.
+///
+/// An entry naming Aspect Cloud neither holds the default nor withholds it: it is
+/// folded into the built-in seed on load, so its `default` flag is never read, and
+/// Aspect Cloud is what `--remote` targets whenever no configured deployment
+/// claims it. `--default` on such an entry therefore takes the default by clearing
+/// whichever deployment holds it, rather than by setting a flag.
 ///
 /// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
 /// here — derived names and an explicit `--deployment` alike — so this is the one
@@ -807,15 +1231,44 @@ fn deployment_from_discovery(
 fn upsert_deployment(
     existing: &mut Vec<Deployment>,
     mut deployment: Deployment,
+    explicit_aspect_cloud: bool,
 ) -> anyhow::Result<bool> {
-    if is_reserved_name(&deployment.name) {
+    // `default` is a credential-store key, never a deployment name: an entry under
+    // it would share Aspect Cloud's credential slot, so it is refused outright.
+    //
+    // The account's own name is writable, but only when the caller asked for it by
+    // name: such an entry enriches the seed (see `overlay_config_sources`), which
+    // is what `configure --name aspect-cloud` is for. A name that merely *derives*
+    // to it — `remote.aspect-cloud.aspect.build` — is an accident, and is still
+    // refused so the user picks a real one rather than silently extending their
+    // account.
+    let permitted = explicit_aspect_cloud && deployment.name == ASPECT_CLOUD_DEPLOYMENT_NAME;
+    if !permitted && is_reserved_name(&deployment.name) {
         return Err(reserved_name_error(&deployment.name));
     }
-    let replacing_default = existing
+    // Such an entry folds into the seed on load under either of its names, so keep
+    // one. Aspect Cloud takes the default by *nothing else* holding it, so
+    // `--default` here means clearing whoever does — its own flag is never read.
+    if names_aspect_cloud(&deployment.name) {
+        let take_default = deployment.default;
+        existing.retain(|d| !names_aspect_cloud(&d.name));
+        if take_default {
+            for d in existing.iter_mut() {
+                d.default = false;
+            }
+        }
+        deployment.default = false;
+        let claimed = existing.iter().any(|d| d.default);
+        existing.push(deployment);
+        return Ok(!claimed);
+    }
+
+    // Re-configuring the current default keeps it: losing it to a refresh would be
+    // a side effect nobody asked for.
+    if existing
         .iter()
-        .any(|d| d.name == deployment.name && d.default);
-    let none_default = !existing.iter().any(|d| d.default);
-    if none_default || replacing_default {
+        .any(|d| d.name == deployment.name && d.default)
+    {
         deployment.default = true;
     }
     if deployment.default {
@@ -851,31 +1304,128 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
 /// via [`upsert_deployment`]. Returns whether the written record is the default.
-fn save_user_deployment(deployment: Deployment) -> anyhow::Result<bool> {
+fn save_user_deployment(
+    deployment: Deployment,
+    explicit_aspect_cloud: bool,
+) -> anyhow::Result<bool> {
     let mut existing = load_config_file(&config_path()?)?;
-    let is_default = upsert_deployment(&mut existing, deployment)?;
+    let is_default = upsert_deployment(&mut existing, deployment, explicit_aspect_cloud)?;
     write_user_config(existing)?;
     Ok(is_default)
+}
+
+/// Discover `host`'s deployment and record it in the user's `config.json`,
+/// returning the [`DeploymentInfo`] the `configure` task renders. Shared by
+/// [`Auth::configure`] (a host the user typed) and [`Auth::configure_default`]
+/// (the compiled-in Aspect Cloud endpoint).
+///
+/// The returned `status` distinguishes every outcome the caller reports:
+/// `"unreachable"` (transport failure, `reason` carries a terse cause),
+/// `"not_a_deployment"` (reached, but serves no `aspect_endpoints`),
+/// `"needs_issuer"` / `"issuer_not_advertised"` (the advertised servers come back
+/// in `auth_servers` so the caller can prompt from — or list — them), or `"ok"`.
+/// Only `"ok"` writes anything.
+///
+/// `name` overrides the host-derived deployment name, `issuer` selects among
+/// advertised authorization servers, and `make_default` forces the default crown;
+/// see [`Auth::configure`] for what each means to a user.
+fn configure_deployment(
+    host: &str,
+    name: Option<String>,
+    make_default: bool,
+    issuer: Option<String>,
+) -> anyhow::Result<DeploymentInfo> {
+    let host = endpoint_host_str(host);
+    // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
+    // Aspect Workflows deployment) so the task prints the right guidance rather than a
+    // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
+    // a deployment — probe_protected_resource requires it.
+    let mk = |status: &str, reason: String| DeploymentInfo {
+        status: status.to_string(),
+        reason,
+        name: String::new(),
+        can_login: false,
+        is_default: false,
+        hosts: Vec::new(),
+        auth_servers: Vec::new(),
+    };
+    let info = match block_on(probe_protected_resource(&host)) {
+        Discovery::Reachable(info) => info,
+        Discovery::Unreachable(reason) => return Ok(mk("unreachable", reason)),
+        Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
+    };
+    let (name, explicit_aspect_cloud) = resolve_deployment_name(name, &host, &info);
+    // Endpoints recorded under Aspect Cloud's own name are folded into the seed and
+    // reached with Aspect Cloud's own credential, so only a deployment on the
+    // account's issuer may claim them: `hosts` is the auth gate, and a host on some
+    // other issuer would be handed Aspect Cloud's bearer. Pinning here — rather than
+    // refusing the name outright — is what lets `configure --name aspect` do
+    // exactly what a bare login's discovery does. A host that does not advertise
+    // this issuer comes back `issuer_not_advertised` and records nothing.
+    let requested = if explicit_aspect_cloud {
+        Some(DEFAULT_ISSUER.to_string())
+    } else {
+        issuer.filter(|s| !s.is_empty())
+    };
+    let candidates = info.auth_servers();
+    // Hand the advertised choices back so the task can prompt from them or list
+    // the valid values when `--issuer` names one that isn't advertised.
+    // `reason` carries the issuer actually looked for, which is not always the one
+    // the user typed: Aspect Cloud's is pinned (above), so an empty `--issuer` would
+    // otherwise be reported back as `''`.
+    let with_candidates = |status: &str| DeploymentInfo {
+        status: status.to_string(),
+        reason: requested.clone().unwrap_or_default(),
+        name: name.clone(),
+        can_login: false,
+        is_default: false,
+        hosts: Vec::new(),
+        auth_servers: candidates.iter().cloned().map(auth_server_info).collect(),
+    };
+    let selected = match resolve_auth_server(&candidates, requested.as_deref()) {
+        AuthServerChoice::Ambiguous => return Ok(with_candidates("needs_issuer")),
+        AuthServerChoice::NotAdvertised => return Ok(with_candidates("issuer_not_advertised")),
+        AuthServerChoice::Selected(s) => Some(s),
+        AuthServerChoice::None => None,
+    };
+    let mut deployment = deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
+    // `--default` forces this deployment to take the default crown (upsert
+    // then clears it on every other entry); without it, upsert only sets the
+    // default when none exists yet, so a second configure doesn't hijack it.
+    deployment.default = make_default;
+    let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
+    let hosts = deployment.hosts.clone();
+    let is_default = save_user_deployment(deployment, explicit_aspect_cloud)?;
+    Ok(DeploymentInfo {
+        status: "ok".to_string(),
+        reason: String::new(),
+        name,
+        can_login,
+        is_default,
+        hosts,
+        auth_servers: Vec::new(),
+    })
 }
 
 /// Drop the entry named `name` from a configured-deployment list (the file's
 /// contents, which never include the seed).
 ///
-/// A [`RESERVED_NAMES`] name means the built-in account — and is refused — *unless*
+/// A [`RESERVED_NAMES`] name means the built-in Aspect Cloud entry — and is refused — *unless*
 /// the file really holds an entry under it, which is how a shadowed `config.json`
 /// is cleaned up.
 fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result<()> {
     if is_reserved_name(name) && !deployments.iter().any(|d| d.name == name) {
-        return Err(anyhow::anyhow!(
-            "the built-in {name:?} account cannot be removed"
-        ));
+        return Err(
+            TaskExit::error(format!("the built-in {name:?} account cannot be removed")).into(),
+        );
     }
     let before = deployments.len();
     deployments.retain(|d| d.name != name);
     if deployments.len() == before {
-        return Err(anyhow::anyhow!(
+        return Err(TaskExit::error(format!(
             "unknown deployment: {name:?}\n\nRun `aspect auth status` to see configured deployments."
-        ));
+        ))
+        .into());
     }
     Ok(())
 }
@@ -893,27 +1443,28 @@ fn set_default_deployment(name: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Mutate a configured-deployment list (the file's contents, excluding the seed)
-/// so `name` is the sole default, or — for `None` or [`DEFAULT_DEPLOYMENT_NAME`] —
+/// so `name` is the sole default, or — for `None` or [`ASPECT_CLOUD_DEPLOYMENT_NAME`] —
 /// so no configured deployment is default. Errors if `name` is any other name
 /// absent from the list. See [`set_default_deployment`].
 ///
 /// This operates on the file, which never contains the seed, so it matches by name
-/// rather than the `builtin` flag: [`DEFAULT_DEPLOYMENT_NAME`] here means "the
+/// rather than the `builtin` flag: [`ASPECT_CLOUD_DEPLOYMENT_NAME`] here means "the
 /// account", expressed as the absence of a configured default.
 ///
 /// That one name is the sentinel, *not* all of [`RESERVED_NAMES`]. `default` is
-/// reserved from being configured but is not the account, so `auth use default`
+/// reserved from being configured but is not Aspect Cloud, so `auth use default`
 /// must fail the unknown-deployment check rather than clear every default and
-/// quietly send `--remote` back to the account.
+/// quietly send `--remote` back to Aspect Cloud.
 fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyhow::Result<()> {
-    // Selecting the built-in account (or None) means "no configured default".
-    let target = name.filter(|n| *n != DEFAULT_DEPLOYMENT_NAME);
+    // Selecting the built-in Aspect Cloud entry (or None) means "no configured default".
+    let target = name.filter(|n| !names_aspect_cloud(n));
     if let Some(target) = target {
         if !deployments.iter().any(|d| d.name == target) {
-            return Err(anyhow::anyhow!(
+            return Err(TaskExit::error(format!(
                 "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
                 target
-            ));
+            ))
+            .into());
         }
     }
     for d in deployments.iter_mut() {
@@ -923,19 +1474,25 @@ fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyh
 }
 
 /// Forget a configured deployment: drop its `~/.aspect/config.json` entry and its
-/// stored credential. Errors on an unknown name. The built-in account isn't in the
+/// stored credential. Errors on an unknown name. The built-in Aspect Cloud entry isn't in the
 /// file, so it can't be removed — but a *file entry* under a reserved name can be,
 /// which is the only way to clear one (the loader skips such entries). When the
 /// removed deployment was the default, the file simply has no default afterward
-/// (selection falls back to the account).
+/// (selection falls back to Aspect Cloud).
 fn remove_deployment(name: &str) -> anyhow::Result<()> {
     let mut existing = load_config_file(&config_path()?)?;
     apply_remove(&mut existing, name)?;
     write_user_config(existing)?;
-    // Also clear its stored credential (the profile is the deployment name).
-    let mut creds = load_all_credentials()?;
-    if creds.remove(name).is_some() {
-        save_all_credentials(&creds)?;
+    // Also clear its stored credential in every profile: the deployment is gone,
+    // so no identity has anything left to say to it.
+    let mut all = load_all_credentials()?;
+    let mut changed = false;
+    for entries in all.values_mut() {
+        changed |= entries.remove(name).is_some();
+    }
+    if changed {
+        all.retain(|_, entries| !entries.is_empty());
+        save_all_credentials(&all)?;
     }
     Ok(())
 }
@@ -954,11 +1511,80 @@ struct CredentialsEntry {
     auth_client_id: Option<String>,
     // True when this session's bearer is the OIDC id_token (the self-hosted
     // endpoint flow), so a subsequent refresh keeps minting an id_token rather
-    // than downgrading to the access_token. Absent/false for the Aspect-cloud
+    // than downgrading to the access_token. Absent/false for the Aspect Cloud
     // flow (access_token bearer). Defaulted so entries written before this field
     // existed load as cloud sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     prefer_id_token: bool,
+    /// What kind of issuer minted this credential, read off the discovery
+    /// response at login and again on every refresh ([`IssuerKind::or`] keeps a
+    /// detection once made). An issuer with the tenant API can list the user's
+    /// organizations and switch between them at login. Defaulted so entries
+    /// written before this field existed load as plain OIDC sessions.
+    #[serde(default, skip_serializing_if = "IssuerKind::is_oidc")]
+    issuer_kind: IssuerKind,
+}
+
+/// What an issuer offers beyond OAuth, as far as the CLI can tell.
+///
+/// Aspect Cloud's identity provider mints tenant-bound user tokens (the
+/// `tenantId` claim), and a user who belongs to several tenants has one *default*
+/// tenant kept server-side: the one a login or a refresh grant mints for, on
+/// whichever client mints next, and one any client can change. Sessions already
+/// holding a token keep it until they refresh. The provider also serves a tenant
+/// API under the issuer: the user's tenants, and a way to set that default. The
+/// login task uses both to offer and apply an organization choice.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Allocative)]
+pub(crate) enum IssuerKind {
+    #[default]
+    #[serde(rename = "oidc")]
+    Oidc,
+    #[serde(rename = "tenant-api")]
+    TenantApi,
+}
+
+impl IssuerKind {
+    fn is_oidc(&self) -> bool {
+        *self == IssuerKind::Oidc
+    }
+
+    /// The kind after another look at the issuer: the tenant API once seen is
+    /// kept. Detection rides on a discovery request that can time out or be
+    /// refused for a moment, and a miss must not demote a credential to plain
+    /// OIDC, which would drop its organization list.
+    fn or(self, other: IssuerKind) -> IssuerKind {
+        if self == IssuerKind::TenantApi || other == IssuerKind::TenantApi {
+            IssuerKind::TenantApi
+        } else {
+            IssuerKind::Oidc
+        }
+    }
+
+    /// The provider stamps every response, the discovery document included, with
+    /// its trace header. That is true of custom domains too (Aspect Cloud's
+    /// issuer is one), so the header is what identifies the tenant API rather
+    /// than any URL shape.
+    fn from_response_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        if headers.contains_key(TENANT_API_TRACE_HEADER) {
+            IssuerKind::TenantApi
+        } else {
+            IssuerKind::Oidc
+        }
+    }
+}
+
+/// The header the tenant API's provider stamps on every response; see
+/// [`IssuerKind::from_response_headers`].
+const TENANT_API_TRACE_HEADER: &str = "frontegg-trace-id";
+
+/// The tenant API paths the CLI calls, all served under the issuer.
+const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v1/api-token";
+const TENANT_API_SWITCH_PATH: &str = "/identity/resources/users/v1/tenant";
+const TENANT_API_TENANTS_PATH: &str = "/identity/resources/users/v3/me/tenants";
+
+/// `path` on the tenant API behind `auth_domain`.
+fn tenant_api_url(auth_domain: &str, path: &str) -> String {
+    format!("{}{path}", auth_domain.trim_end_matches('/'))
 }
 
 impl CredentialsEntry {
@@ -967,13 +1593,15 @@ impl CredentialsEntry {
     /// so the credential can be refreshed. `refresh_token` may be empty (api-token
     /// and raw-token logins are not refreshable). `prefer_id_token` records that the
     /// bearer is an id_token (the self-hosted endpoint flow) so refresh preserves
-    /// that kind.
+    /// that kind. `issuer_kind` records what the issuer offers beyond OAuth
+    /// ([`IssuerKind`]).
     fn from_bearer(
         bearer: String,
         refresh_token: String,
         auth_domain: Option<String>,
         auth_client_id: Option<String>,
         prefer_id_token: bool,
+        issuer_kind: IssuerKind,
     ) -> anyhow::Result<Self> {
         let claims = decode_jwt_claims(&bearer)?;
         Ok(CredentialsEntry {
@@ -985,16 +1613,132 @@ impl CredentialsEntry {
             auth_domain,
             auth_client_id,
             prefer_id_token,
+            issuer_kind,
         })
+    }
+
+    /// This credential re-minted from `token_resp`: the same issuer, client,
+    /// bearer kind and provider, with the rotated refresh token when one came
+    /// back ([`merged_refresh_token`]).
+    fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
+        let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(self.prefer_id_token)?,
+            refresh_token,
+            self.auth_domain.clone(),
+            self.auth_client_id.clone(),
+            self.prefer_id_token,
+            self.issuer_kind,
+        )
+    }
+
+    /// Every tenant the bearer says its user belongs to (the `tenantIds` claim),
+    /// empty when the issuer mints no such claim.
+    fn tenant_ids(&self) -> Vec<String> {
+        decode_jwt_claims(&self.access_token)
+            .map(|c| c.tenant_ids)
+            .unwrap_or_default()
+    }
+
+    /// The issuer and OAuth client this credential re-mints against, which only
+    /// a browser login records (see [`can_refresh`]).
+    fn refresh_target(&self) -> anyhow::Result<(&str, &str)> {
+        let auth_domain = self
+            .auth_domain
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("no auth_domain stored — cannot refresh"))?;
+        let client_id = self
+            .auth_client_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
+        Ok((auth_domain, client_id))
     }
 }
 
-fn load_all_credentials() -> anyhow::Result<HashMap<String, CredentialsEntry>> {
+/// One profile's credentials, keyed by deployment name.
+type ProfileCredentials = HashMap<String, CredentialsEntry>;
+
+/// Every profile's credentials: `{ profile: { deployment: entry } }`.
+///
+/// The two keys answer different questions. The profile is *who you are* — a
+/// person, a CI role, a second account on the same deployment — selected by
+/// `--profile` or [`PROFILE_ENV`]. The deployment is *what you are talking to*.
+/// One profile therefore holds a credential per deployment at once, so
+/// `--profile bob` covers Aspect Cloud and every self-hosted deployment bob uses,
+/// and switching to `--profile susan` switches all of them together.
+type AllCredentials = HashMap<String, ProfileCredentials>;
+
+fn load_all_credentials() -> anyhow::Result<AllCredentials> {
     CredentialStore::resolve()?.load_all()
 }
 
-fn save_all_credentials(map: &HashMap<String, CredentialsEntry>) -> anyhow::Result<()> {
+fn save_all_credentials(map: &AllCredentials) -> anyhow::Result<()> {
     CredentialStore::resolve()?.save_all(map)
+}
+
+/// The credentials filed under `profile`, empty when it holds none.
+fn load_profile_credentials(profile: &str) -> anyhow::Result<ProfileCredentials> {
+    Ok(load_all_credentials()?.remove(profile).unwrap_or_default())
+}
+
+/// Read one deployment's credential from `profile`.
+fn load_credential(profile: &str, deployment: &str) -> anyhow::Result<Option<CredentialsEntry>> {
+    Ok(load_all_credentials()?
+        .get(profile)
+        .and_then(|p| p.get(deployment))
+        .cloned())
+}
+
+/// Put `entry` at `(profile, deployment)`, leaving every other profile and every
+/// other deployment in this one untouched. Split from [`store_credential`] so the
+/// nesting is testable without a credential store behind it.
+fn insert_credential(
+    all: &mut AllCredentials,
+    profile: &str,
+    deployment: &str,
+    entry: CredentialsEntry,
+) {
+    all.entry(profile.to_string())
+        .or_default()
+        .insert(deployment.to_string(), entry);
+}
+
+/// Drop `(profile, deployment)`, and the profile itself once it holds nothing — an
+/// empty profile is indistinguishable from an absent one, and leaving the husk
+/// would have a profile with no logins show up wherever profiles are listed.
+/// Returns whether anything was removed.
+fn remove_credential(all: &mut AllCredentials, profile: &str, deployment: &str) -> bool {
+    let Some(entries) = all.get_mut(profile) else {
+        return false;
+    };
+    if entries.remove(deployment).is_none() {
+        return false;
+    }
+    if entries.is_empty() {
+        all.remove(profile);
+    }
+    true
+}
+
+/// File `entry` for `deployment` under `profile`.
+fn store_credential(
+    profile: &str,
+    deployment: &str,
+    entry: CredentialsEntry,
+) -> anyhow::Result<()> {
+    let mut all = load_all_credentials()?;
+    insert_credential(&mut all, profile, deployment, entry);
+    save_all_credentials(&all)
+}
+
+/// Clear `profile`'s credential for `deployment`. Returns whether there was one.
+fn forget_credential(profile: &str, deployment: &str) -> anyhow::Result<bool> {
+    let mut all = load_all_credentials()?;
+    if !remove_credential(&mut all, profile, deployment) {
+        return Ok(false);
+    }
+    save_all_credentials(&all)?;
+    Ok(true)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1005,6 +1749,9 @@ struct JwtClaims {
     // it as optional (display-only) rather than failing to decode.
     #[serde(rename = "tenantId", default)]
     tenant_id: String,
+    // Every tenant the user belongs to, minted alongside `tenantId`.
+    #[serde(rename = "tenantIds", default)]
+    tenant_ids: Vec<String>,
     exp: Option<u64>,
 }
 
@@ -1147,6 +1894,20 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
     None
 }
 
+fn parse_callback_response(path: &str) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(error) = extract_query_param(path, "error") {
+        let description = extract_query_param(path, "error_description").unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "authentication failed: {} {}",
+            error,
+            description
+        ));
+    }
+    let code = extract_query_param(path, "code")
+        .ok_or_else(|| anyhow::anyhow!("OAuth callback has no `code` parameter"))?;
+    Ok((code, extract_query_param(path, "state")))
+}
+
 pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     Handle::current().block_on(fut)
 }
@@ -1177,28 +1938,85 @@ fn api_token_cache() -> &'static Mutex<Option<ApiTokenCacheEntry>> {
     API_TOKEN_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-/// Exchange an ASPECT_API_TOKEN from an explicit source — the env var or the
-/// Buildkite secret store — for a fresh credentials entry. Returns Ok(None)
-/// only when no such source is present; a malformed token or a failed
-/// exchange is surfaced as an error so CI misconfigurations fail loudly
-/// instead of falling through to whatever happens to be cached on disk
+/// The API-token variable for `deployment`: `ASPECT_API_TOKEN` for Aspect Cloud,
+/// `ASPECT_API_TOKEN_<NAME>` for anything else, with the name uppercased and every
+/// character outside `[A-Z0-9]` replaced by `_`.
+///
+/// Aspect Cloud takes the unsuffixed name because a token for it is the one every
+/// installation needs — the GitHub and GitLab App features are served only there,
+/// so a self-hosted customer sets this one *and* the suffixed one for their own
+/// deployment. It is pinned to Aspect Cloud rather than tracking the default
+/// deployment so that `aspect auth use` cannot silently change which issuer a CI
+/// credential is minted by.
+///
+/// The same name is used for the Buildkite secret store, so one scheme documents
+/// both.
+///
+/// Two deployment names can normalize to one variable (`gcp.acme` and `gcp-acme`);
+/// [`api_token_env_collisions`] reports that rather than letting one silently
+/// answer for the other.
+pub(crate) fn api_token_env_var(deployment: &str) -> String {
+    if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
+        return API_TOKEN_ENV.to_string();
+    }
+    let suffix: String = deployment
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{API_TOKEN_ENV}_{suffix}")
+}
+
+const API_TOKEN_ENV: &str = "ASPECT_API_TOKEN";
+
+/// Configured deployments whose [`api_token_env_var`] collide, as
+/// `(variable, names)`. Empty in every ordinary configuration.
+fn api_token_env_collisions(deployments: &[Deployment]) -> Vec<(String, Vec<String>)> {
+    let mut by_var: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for d in deployments {
+        by_var
+            .entry(api_token_env_var(&d.name))
+            .or_default()
+            .push(d.name.clone());
+    }
+    by_var
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .collect()
+}
+
+/// Exchange `deployment`'s API token from an explicit source — its env var (see
+/// [`api_token_env_var`]) or the Buildkite secret store — for a fresh credentials
+/// entry. Returns Ok(None) only when no such source is present; a malformed token
+/// or a failed exchange is surfaced as an error so CI misconfigurations fail
+/// loudly instead of falling through to whatever happens to be cached on disk
 /// (e.g. from a previous job on a persistent runner).
 ///
-/// Subsequent calls within the same process reuse the cached exchange
-/// result until the JWT approaches expiry.
-fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> {
-    let token = std::env::var("ASPECT_API_TOKEN")
+/// Exchanged against `deployment`'s own issuer, because that is who issued it. A
+/// token is minted by one IdP for one deployment, so one exchanged against
+/// another's issuer would be rejected by the endpoints it was meant for.
+///
+/// Subsequent calls within the same process reuse the cached exchange result until
+/// the JWT approaches expiry.
+fn credentials_from_api_token_env(deployment: &str) -> anyhow::Result<Option<CredentialsEntry>> {
+    let var = api_token_env_var(deployment);
+    let token = std::env::var(&var)
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(buildkite_aspect_api_token);
+        .or_else(|| buildkite_aspect_api_token(&var));
     let Some(token) = token else {
         return Ok(None);
     };
 
-    // Resolve the default deployment's issuer each call so a config change
-    // within a single process (test harnesses, multi-step tooling) re-exchanges
-    // against the new issuer instead of returning a stale token.
-    let env = resolve_aspect_env()?;
+    // Resolved each call so a config change within a single process (test
+    // harnesses, multi-step tooling) re-exchanges against the new issuer instead
+    // of returning a stale token.
+    let env = resolve_auth_env(Some(deployment))?;
 
     // Fast path: a cached exchange for the same source token AND issuer whose
     // JWT hasn't entered the 60-second pre-expiry buffer.
@@ -1215,7 +2033,7 @@ fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> 
 
     let (client_id, secret) = token
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("ASPECT_API_TOKEN must be in 'client_id:secret' format"))?;
+        .ok_or_else(|| anyhow::anyhow!("{var} must be in 'client_id:secret' format"))?;
     let entry = block_on(exchange_api_token(client_id, secret, &env))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
@@ -1230,18 +2048,18 @@ fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> 
     Ok(Some(entry))
 }
 
-/// Read ASPECT_API_TOKEN from Buildkite's secret store when running on a
+/// Read the API token named `var` from Buildkite's secret store when running on a
 /// Buildkite agent. Returns None if not on a Buildkite agent, the CLI is
 /// missing, or the secret is not defined — callers should fall through to
 /// the "not authenticated" path rather than surface the error.
-fn buildkite_aspect_api_token() -> Option<String> {
+fn buildkite_aspect_api_token(var: &str) -> Option<String> {
     // BUILDKITE_AGENT_ACCESS_TOKEN is injected into every job on a Buildkite
     // agent; checking it avoids shelling out when we're not on Buildkite.
     if std::env::var_os("BUILDKITE_AGENT_ACCESS_TOKEN").is_none() {
         return None;
     }
     let output = std::process::Command::new("buildkite-agent")
-        .args(["secret", "get", "ASPECT_API_TOKEN"])
+        .args(["secret", "get", var])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1261,33 +2079,24 @@ async fn exchange_api_token(
         #[serde(rename = "accessToken", alias = "access_token")]
         access_token: String,
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!(
-            "{}/identity/resources/auth/v1/api-token",
-            env.domain
-        ))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "clientId": client_id, "secret": secret }))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("API token exchange failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "API token exchange failed (HTTP {}): {}",
-            status,
-            body
-        ));
-    }
-    let data: ApiTokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse API token response: {}", e))?;
+    let data: ApiTokenResponse = send_json(
+        reqwest::Client::new()
+            .post(tenant_api_url(&env.domain, TENANT_API_TOKEN_EXCHANGE_PATH))
+            .json(&serde_json::json!({ "clientId": client_id, "secret": secret })),
+        "API token exchange",
+    )
+    .await?;
     // Not refreshable (the api-token is re-exchanged each run), so no
-    // auth_domain/client_id are stored. Access-token bearer (Aspect cloud).
-    CredentialsEntry::from_bearer(data.access_token, String::new(), None, None, false)
+    // auth_domain/client_id are stored and the issuer kind is moot. Access-token
+    // bearer (Aspect cloud).
+    CredentialsEntry::from_bearer(
+        data.access_token,
+        String::new(),
+        None,
+        None,
+        false,
+        IssuerKind::Oidc,
+    )
 }
 
 /// Accept one OAuth callback request on `listener` and return its `code` and
@@ -1312,12 +2121,7 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         .split_whitespace()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("malformed HTTP request line"))?;
-    let code = extract_query_param(path, "code").ok_or_else(|| {
-        let error = extract_query_param(path, "error").unwrap_or_else(|| "unknown".to_string());
-        let desc = extract_query_param(path, "error_description").unwrap_or_default();
-        anyhow::anyhow!("authentication failed: {} {}", error, desc)
-    })?;
-    let state = extract_query_param(path, "state");
+    let callback = parse_callback_response(path)?;
     let html = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1379,12 +2183,12 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         .write_all(response.as_bytes())
         .await
         .map_err(|e| anyhow::anyhow!("failed to write OAuth response: {}", e))?;
-    Ok((code, state))
+    Ok(callback)
 }
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
 /// `id_token` when present (self-hosted edges validate the OIDC id_token), else
-/// the `access_token` (the Aspect-cloud flow).
+/// the `access_token` (the Aspect Cloud flow).
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(default)]
@@ -1401,7 +2205,7 @@ impl TokenResponse {
     /// id_token and error if the grant omitted it, rather than silently returning
     /// the access_token: a refresh grant that drops the id_token (permitted by RFC
     /// 6749 §5.1) would otherwise downgrade a working session to a bearer the edge
-    /// rejects with 401. When not preferring the id_token (the Aspect-cloud flow,
+    /// rejects with 401. When not preferring the id_token (the Aspect Cloud flow,
     /// which validates the access_token), return the access_token, falling back to
     /// the id_token only if the access_token is absent.
     fn bearer(self, prefer_id_token: bool) -> anyhow::Result<String> {
@@ -1428,15 +2232,36 @@ impl TokenResponse {
 }
 
 /// POST an `application/x-www-form-urlencoded` body to a token/exchange endpoint
-/// and deserialize the JSON response, surfacing a non-2xx status with its body.
+/// and deserialize the JSON response ([`send_json`]).
 async fn post_form<T: serde::de::DeserializeOwned>(
     url: &str,
     form: &[(&str, &str)],
     what: &str,
 ) -> anyhow::Result<T> {
-    let resp = reqwest::Client::new()
-        .post(url)
-        .form(form)
+    send_json(reqwest::Client::new().post(url).form(form), what).await
+}
+
+/// Send `request` and deserialize its JSON body. Every failure names `what`: a
+/// transport error, a non-2xx status (with the body the server sent, which is
+/// where an IdP explains a refusal), or an unparseable body.
+async fn send_json<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<T> {
+    send_ok(request, what)
+        .await?
+        .json::<T>()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse {what} response: {e}"))
+}
+
+/// Send `request`, requiring a 2xx answer; the error names `what` and carries
+/// the status and body of a refusal.
+async fn send_ok(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let resp = request
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("{what} request failed: {e}"))?;
@@ -1445,9 +2270,7 @@ async fn post_form<T: serde::de::DeserializeOwned>(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!("{what} failed (HTTP {status}): {body}"));
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse {what} response: {e}"))
+    Ok(resp)
 }
 
 /// Exchange an authorization `code` for tokens at `token_url` (PKCE — sends
@@ -1474,16 +2297,21 @@ async fn exchange_code(
     .await
 }
 
-/// The authorize + token endpoints for an issuer.
+/// The authorize + token endpoints for an issuer, and what kind of provider
+/// answered for it.
 struct OidcEndpoints {
     authorize: String,
     token: String,
+    issuer_kind: IssuerKind,
 }
 
 /// Resolve an issuer's authorize + token endpoints, preferring OIDC discovery
 /// (`{issuer}/.well-known/openid-configuration`) so a self-hosted provider works
 /// without assuming a URL layout, falling back to the conventional
-/// `{issuer}/oauth/{authorize,token}` when no discovery document is served.
+/// `{issuer}/oauth/{authorize,token}` when no discovery document is served. The
+/// discovery response's headers also identify the provider
+/// ([`IssuerKind::from_response_headers`]) whatever its status or body says; a
+/// request that gets no response at all leaves it [`IssuerKind::Oidc`].
 async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
     let issuer = issuer.trim_end_matches('/');
     #[derive(Deserialize)]
@@ -1491,13 +2319,15 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
         authorization_endpoint: String,
         token_endpoint: String,
     }
-    let discovered = reqwest::Client::new()
+    let Ok(resp) = discovery_client()
         .get(format!("{issuer}/.well-known/openid-configuration"))
         .send()
         .await
-        .ok()
-        .filter(|r| r.status().is_success());
-    if let Some(resp) = discovered {
+    else {
+        return oidc_endpoints_fallback(issuer);
+    };
+    let issuer_kind = IssuerKind::from_response_headers(resp.headers());
+    if resp.status().is_success() {
         if let Ok(d) = resp.json::<Discovery>().await {
             // The discovery doc is server-controlled and drives where the
             // authorization code + PKCE verifier are sent, so require https on
@@ -1508,11 +2338,15 @@ async fn resolve_oidc_endpoints(issuer: &str) -> OidcEndpoints {
                 return OidcEndpoints {
                     authorize: d.authorization_endpoint,
                     token: d.token_endpoint,
+                    issuer_kind,
                 };
             }
         }
     }
-    oidc_endpoints_fallback(issuer)
+    OidcEndpoints {
+        issuer_kind,
+        ..oidc_endpoints_fallback(issuer)
+    }
 }
 
 /// Whether `url` is an absolute `https://` URL (case-insensitive scheme).
@@ -1528,22 +2362,23 @@ fn oidc_endpoints_fallback(issuer: &str) -> OidcEndpoints {
     OidcEndpoints {
         authorize: format!("{issuer}/oauth/authorize"),
         token: format!("{issuer}/oauth/token"),
+        issuer_kind: IssuerKind::Oidc,
     }
 }
 
-/// The OAuth `state` for a self-hosted login: `"<nonce>.<port>"`. The nonce is
-/// the CSRF guard (validated verbatim on callback); the port suffix tells the
-/// endpoint's callback page which loopback port to forward to. The nonce is
-/// base64url so it never contains the dot separator.
+/// The OAuth `state` for a login: `"<nonce>.<port>"`. The nonce is the CSRF guard
+/// (validated verbatim on callback); the port suffix tells the deployment's relay
+/// page which loopback port to forward to. The nonce is base64url so it never
+/// contains the dot separator.
 fn login_state(nonce: &str, port: u16) -> String {
     format!("{nonce}.{port}")
 }
 
 /// Build an OAuth Authorization-Code + PKCE authorize URL. Every value is
-/// url-encoded; `scope` is space-joined; `state` is appended when present (the
-/// self-hosted flow uses it, the cloud flow does not). `authorize_endpoint` may
-/// already carry a query (OIDC discovery can return one), so the parameter
-/// separator is chosen accordingly.
+/// url-encoded; `scope` is space-joined; `state` is appended when present — every
+/// login flow supplies one; it stays optional so the encoding can be tested
+/// without it. `authorize_endpoint` may already carry a query (OIDC discovery can
+/// return one), so the parameter separator is chosen accordingly.
 ///
 /// `authorize_params` carries the deployment-advertised parameters that have no scope
 /// equivalent (see [`Deployment::authorize_params`]), appended before `state` so
@@ -1580,46 +2415,171 @@ fn build_authorize_url(
     url
 }
 
-fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
-    let port: u16 = 19556;
-    let listener = block_on(TcpListener::bind(format!("127.0.0.1:{}", port))).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to bind localhost:{} — is another login in progress? ({})",
-            port,
-            e
-        )
-    })?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
-    let code_verifier = generate_code_verifier();
-    let code_challenge = generate_code_challenge(&code_verifier);
-    let authorize_url = build_authorize_url(
-        &format!("{}/oauth/authorize", env.domain),
-        &env.client_id,
-        &redirect_uri,
-        &env.scopes,
-        &code_challenge,
-        None,
-        &env.authorize_params,
-    );
-    Ok(AuthSession {
-        url: authorize_url,
-        inner: Mutex::new(Some(AuthSessionInner {
-            listener: Some(listener),
-            code_verifier,
-            redirect_uri,
-            env,
-            kind: SessionKind::Cloud,
-        })),
-    })
+fn is_remote_session(get: impl Fn(&str) -> Option<String>) -> bool {
+    let set = |key: &str| get(key).is_some_and(|value| !value.is_empty());
+    if !(set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY")) {
+        return false;
+    }
+    let forwarded_display = get("DISPLAY").is_some_and(|display| {
+        let Some((host, display)) = display.rsplit_once(':') else {
+            return false;
+        };
+        let Some(number) = display
+            .split('.')
+            .next()
+            .and_then(|number| number.parse::<u16>().ok())
+        else {
+            return false;
+        };
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]") && number >= 10
+    });
+    !forwarded_display
 }
 
-/// Build a configured (self-hosted) deployment's browser session. The redirect is
-/// the endpoint's own `https://<host>/oauth2/callback`, which forwards the browser
-/// to this CLI's loopback listener; an OS-assigned port is bound up front and
-/// carried to the endpoint in `state = "<nonce>.<port>"` so the callback page can
-/// forward to it. The authorize endpoint is resolved via OIDC discovery, and the
-/// bearer is the OIDC `id_token`.
-fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSession> {
+fn browser_launchers() -> &'static [&'static [&'static str]] {
+    if cfg!(target_os = "macos") {
+        &[&["open"]]
+    } else if cfg!(target_os = "windows") {
+        // Avoid `cmd /c start`; it reparses `&` in OAuth URLs.
+        &[&["rundll32.exe", "url.dll,FileProtocolHandler"]]
+    } else {
+        &[
+            // WSL may provide `xdg-open` without a visible desktop.
+            &["wslview"],
+            &["xdg-open"],
+            &["gio", "open"],
+            &["gnome-open"],
+            &["kde-open"],
+            &["x-www-browser"],
+            // Debian may install `open` as an `xdg-open` alias.
+            &["open"],
+        ]
+    }
+}
+
+const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn launcher_started(mut child: std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = std::thread::Builder::new()
+                    .name("browser-launcher-reaper".to_string())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+                return true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn spawn_launcher(argv: &[&str], url: &str) -> bool {
+    let Some((program, rest)) = argv.split_first() else {
+        return false;
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(rest)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    launcher_started(child, LAUNCHER_PROBE_TIMEOUT)
+}
+
+fn launch_first(candidates: &[&[&str]], url: &str) -> bool {
+    candidates.iter().any(|argv| spawn_launcher(argv, url))
+}
+
+fn open_url_in_browser(url: &str) -> bool {
+    if is_remote_session(|key| std::env::var(key).ok()) {
+        return false;
+    }
+    launch_first(browser_launchers(), url)
+}
+
+/// The host whose `/oauth2/callback` relays a deployment's login back to this
+/// CLI's loopback listener — see [`build_login_session`].
+///
+/// Only the machine edges serve that relay page: it ships with the jwt-validator
+/// that fronts the remote cache and the BES. On a deployment's web UI host the
+/// same path is oauth2-proxy's own redemption endpoint, and on its API host there
+/// is nothing there at all — so a deployment configured from one of those has to
+/// bounce through an edge that does have it. Prefer the advertised cache, then the
+/// BES.
+///
+/// Falls back to the host the user configured for a deployment that advertised no
+/// endpoints map: an older discovery document, or a hand-written `config.json`
+/// entry. Those predate the relay's move and are the case this preserves.
+///
+/// Deliberately separate from `hosts`, which answers a different question — which
+/// endpoints the login JWT is attached to — and stays as discovered.
+/// The `redirect_uri` a configured deployment's login sends the IdP to.
+///
+/// The deployment's own advertised value when it has one: which host and path
+/// serve the relay is its business, and encoding a guess here is what forces a CLI
+/// release every time a deployment moves the page.
+///
+/// Derived from a machine edge otherwise, for a document written before the field
+/// existed — see [`callback_host`]. That fallback is the only reason the cache/BES
+/// preference still exists, and it is why the path below is the old one.
+///
+/// An advertised URI must be `https`. It is where the authorization code is
+/// delivered, and the document is server-controlled, so a plaintext one is refused
+/// and the derived URI used instead — the same rule [`resolve_oidc_endpoints`]
+/// applies to a discovered token endpoint, and for the same reason.
+fn login_redirect_uri(selected: &Deployment) -> Option<String> {
+    if let Some(uri) = non_empty(selected.login_redirect_uri.clone()) {
+        if is_https(&uri) {
+            return Some(uri);
+        }
+        tracing::warn!(
+            "ignoring the login redirect advertised by deployment {:?}: {:?} is not https",
+            selected.name,
+            uri
+        );
+    }
+    // `/oauth2/callback`, not the current `/auth/cli/callback`: this branch is only
+    // reached for a deployment running a version of Aspect Workflows that advertises
+    // no redirect URI, and those serve the relay at the old path. A version that
+    // advertises one has already been taken above, at whatever path it names.
+    callback_host(selected).map(|host| format!("https://{host}/oauth2/callback"))
+}
+
+fn callback_host(selected: &Deployment) -> Option<String> {
+    [&selected.endpoints.cache, &selected.endpoints.bes]
+        .into_iter()
+        .chain(selected.hosts.first())
+        .map(|host| endpoint_host_str(host))
+        .find(|host| !host.is_empty())
+}
+
+/// Build a deployment's browser login session — Aspect Cloud and a self-hosted
+/// deployment alike. The browser is sent to `redirect_uri`, a relay page that
+/// forwards it on to this CLI's loopback listener; an OS-assigned port is bound up
+/// front and carried to the relay in `state = "<nonce>.<port>"` so it knows where
+/// to forward. The authorize endpoint is resolved via OIDC discovery.
+///
+/// `redirect_uri` comes from [`login_redirect_uri`] — the deployment's own
+/// advertised value, or one derived from a machine edge. It must be registered as
+/// an allowed redirect with the deployment's IdP.
+///
+/// `prefer_id_token` selects which of the grant's tokens becomes the bearer, which
+/// is a property of what the credential is sent to rather than of this flow — see
+/// [`AuthSessionInner::prefer_id_token`].
+fn build_login_session(
+    env: AuthEnv,
+    redirect_uri: String,
+    prefer_id_token: bool,
+) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
     let port = listener
@@ -1627,7 +2587,6 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
         .map_err(|e| anyhow::anyhow!("failed to read the login callback port: {}", e))?
         .port();
 
-    let redirect_uri = format!("https://{}/oauth2/callback", host);
     let code_verifier = generate_code_verifier();
     let code_challenge = generate_code_challenge(&code_verifier);
     let state = login_state(&generate_code_verifier(), port);
@@ -1648,28 +2607,143 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
             code_verifier,
             redirect_uri,
             env,
-            kind: SessionKind::Endpoint {
-                expected_state: state,
-            },
+            expected_state: state,
+            prefer_id_token,
+            issuer_kind: endpoints.issuer_kind,
         })),
     })
 }
 
-async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<CredentialsEntry> {
-    let auth_domain = entry
-        .auth_domain
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("no auth_domain stored — cannot refresh"))?;
-    let client_id = entry
-        .auth_client_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
-    // Resolve the token endpoint via OIDC discovery (the conventional
-    // /oauth/token is the fallback), so a self-hosted issuer whose token endpoint
-    // is elsewhere still refreshes.
+/// Why a refresh did not yield a usable credential.
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshFailure {
+    /// The issuer minted a token for a different tenant than the credential was
+    /// issued for, because the user's default organization changed elsewhere (a
+    /// web session's organization switcher, say), and the default could not be
+    /// set back ([`restore_default_tenant`]). Refused rather than adopted, so a
+    /// CLI session never silently crosses into another organization.
+    TenantChanged { was: String, now: String },
+    /// The refresh itself failed: a revoked or expired refresh token, a network
+    /// error, a response with no usable bearer. The cause goes to the runtime
+    /// log (`ASPECT_DEBUG=1`) where it happened; the user is told to log in
+    /// again.
+    Failed,
+}
+
+impl RefreshFailure {
+    /// The message for a failed refresh of `deployment`'s credential: what
+    /// happened, and the login that fixes it.
+    fn message(&self, deployment: &str) -> String {
+        match self {
+            RefreshFailure::TenantChanged { was, now } => {
+                tenant_changed_message(deployment, was, now)
+            }
+            RefreshFailure::Failed => session_expired_message(deployment),
+        }
+    }
+}
+
+/// Mint a fresh credential for `entry` with the standard refresh grant, keeping
+/// it in the tenant `entry` was issued for.
+///
+/// The grant mints for the account's default tenant, which another client may
+/// have moved since login. When the result is for another tenant and the issuer
+/// has the tenant API, the default is set back and the grant re-run
+/// ([`restore_default_tenant`]); otherwise, or when that fails, the credential is
+/// refused ([`RefreshFailure::TenantChanged`]). The issuer is looked at again on
+/// the way ([`resolve_oidc_endpoints`]), so a credential whose login missed the
+/// tenant API is upgraded to it here and persisted that way by the caller.
+async fn refresh_access_token(
+    entry: &CredentialsEntry,
+) -> Result<CredentialsEntry, RefreshFailure> {
+    let failed = |cause: anyhow::Error| {
+        crate::trace!("refreshing the stored credential failed: {cause:#}");
+        RefreshFailure::Failed
+    };
+    let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
+    let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
+    let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
+        .await
+        .map_err(failed)?;
+    if let Some(now) = tenant_moved(entry, &refreshed) {
+        if issuer_kind != IssuerKind::TenantApi {
+            return Err(RefreshFailure::TenantChanged {
+                was: entry.tenant_id.clone(),
+                now,
+            });
+        }
+        refreshed =
+            restore_default_tenant(entry, refreshed, auth_domain, &endpoints.token, client_id)
+                .await?;
+    }
+    refreshed.issuer_kind = issuer_kind;
+    Ok(refreshed)
+}
+
+/// How many times a refresh that landed in another tenant sets the default back
+/// and tries again before giving up. The default can move again under us (a
+/// browser switching organizations at the same moment), so one try is not
+/// conclusive; a few are.
+const RESTORE_DEFAULT_ATTEMPTS: usize = 3;
+
+/// Bring a refresh that landed in another tenant back to `wanted`'s: the token
+/// just minted is valid, if for the wrong tenant, so it can set the account's
+/// default back ([`switch_and_refresh`]), after which the grant mints for
+/// `wanted`'s tenant again. `current` is the credential the grant minted; each
+/// attempt continues from the latest one, since the grant rotates the refresh
+/// token. Gives up after [`RESTORE_DEFAULT_ATTEMPTS`] so the caller asks for a
+/// re-login rather than run against another organization.
+async fn restore_default_tenant(
+    wanted: &CredentialsEntry,
+    mut current: CredentialsEntry,
+    auth_domain: &str,
+    token_url: &str,
+    client_id: &str,
+) -> Result<CredentialsEntry, RefreshFailure> {
+    let was = wanted.tenant_id.as_str();
+    for attempt in 1..=RESTORE_DEFAULT_ATTEMPTS {
+        match switch_and_refresh(&current, was, auth_domain, token_url, client_id).await {
+            Ok(restored) if restored.tenant_id == was => return Ok(restored),
+            Ok(minted) => {
+                crate::trace!(
+                    "attempt {attempt}: set the default organization back to {was} but the grant minted for {}",
+                    minted.tenant_id
+                );
+                current = minted;
+            }
+            Err(e) => {
+                crate::trace!(
+                    "attempt {attempt}: could not set the default organization back: {e:#}"
+                )
+            }
+        }
+    }
+    Err(RefreshFailure::TenantChanged {
+        was: was.to_string(),
+        now: current.tenant_id,
+    })
+}
+
+/// The tenant `fresh` was minted for when it differs from `prior`'s. `None` when
+/// they agree, or when either side has no tenant: an issuer that mints no
+/// `tenantId` has nothing to compare.
+fn tenant_moved(prior: &CredentialsEntry, fresh: &CredentialsEntry) -> Option<String> {
+    let moved = !prior.tenant_id.is_empty()
+        && !fresh.tenant_id.is_empty()
+        && prior.tenant_id != fresh.tenant_id;
+    moved.then(|| fresh.tenant_id.clone())
+}
+
+/// The standard OAuth refresh grant against `token_url`, the issuer's token
+/// endpoint as [`resolve_oidc_endpoints`] found it.
+async fn refresh_with_grant(
+    entry: &CredentialsEntry,
+    token_url: &str,
+    client_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
     let token_resp: TokenResponse = post_form(
-        &endpoints.token,
+        token_url,
         &[
             ("grant_type", "refresh_token"),
             ("refresh_token", &entry.refresh_token),
@@ -1678,14 +2752,64 @@ async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<Creden
         "token refresh",
     )
     .await?;
-    let refresh_token = merged_refresh_token(&entry.refresh_token, &token_resp.refresh_token);
-    CredentialsEntry::from_bearer(
-        token_resp.bearer(entry.prefer_id_token)?,
-        refresh_token,
-        entry.auth_domain.clone(),
-        entry.auth_client_id.clone(),
-        entry.prefer_id_token,
+    entry.renewed(token_resp)
+}
+
+/// Set the user's default tenant at the issuer, the one its login and refresh
+/// grants mint for from now on. What the provider's tenant-switch SDK call does,
+/// and what a web session's organization switcher does; every client of this
+/// user picks it up on its next login or refresh.
+async fn set_default_tenant(
+    auth_domain: &str,
+    bearer: &str,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    send_ok(
+        reqwest::Client::new()
+            .put(tenant_api_url(auth_domain, TENANT_API_SWITCH_PATH))
+            .bearer_auth(bearer)
+            .json(&serde_json::json!({ "tenantId": tenant_id })),
+        "setting the default organization",
     )
+    .await?;
+    Ok(())
+}
+
+/// Set `tenant_id` as the account's default with `current`'s bearer, then run the
+/// refresh grant, which now mints for it. The caller checks the result's tenant:
+/// the default can move again between the two calls.
+async fn switch_and_refresh(
+    current: &CredentialsEntry,
+    tenant_id: &str,
+    auth_domain: &str,
+    token_url: &str,
+    client_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
+    set_default_tenant(auth_domain, &current.access_token, tenant_id).await?;
+    refresh_with_grant(current, token_url, client_id).await
+}
+
+/// Re-mint `entry` for `tenant_id`, one of its user's organizations, by making
+/// it the user's default tenant at the issuer and re-running the refresh grant
+/// ([`switch_and_refresh`]). Errors unless the result is for `tenant_id`.
+async fn select_tenant(
+    entry: &CredentialsEntry,
+    tenant_id: &str,
+) -> anyhow::Result<CredentialsEntry> {
+    let (auth_domain, client_id) = entry.refresh_target()?;
+    if entry.refresh_token.is_empty() {
+        return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
+    }
+    let endpoints = resolve_oidc_endpoints(auth_domain).await;
+    let refreshed =
+        switch_and_refresh(entry, tenant_id, auth_domain, &endpoints.token, client_id).await?;
+    if refreshed.tenant_id != tenant_id {
+        return Err(anyhow::anyhow!(
+            "the issuer minted a token for organization {} instead",
+            refreshed.tenant_id
+        ));
+    }
+    Ok(refreshed)
 }
 
 /// The refresh token to persist after a refresh: the newly-issued `fresh` one, or
@@ -1701,16 +2825,13 @@ fn merged_refresh_token(prior: &str, fresh: &str) -> String {
     }
 }
 
-/// The `aspect auth login` invocation that re-authenticates `profile`, naming
-/// the deployment so the hint doesn't assume the default. A self-hosted
-/// deployment stores under its name, so the profile is the deployment name and
-/// gets an explicit `--deployment`; the default profile (the built-in Aspect
-/// deployment, or a `$ASPECT_AUTH_PROFILE`) gets a bare `login`.
-pub(crate) fn login_hint(profile: &str) -> String {
-    if profile == DEFAULT_PROFILE {
+/// The `aspect auth login` invocation that re-authenticates `deployment`. Aspect
+/// Cloud is what a bare `login` targets; anything else needs naming.
+pub fn login_hint(deployment: &str) -> String {
+    if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
         "aspect auth login".to_string()
     } else {
-        format!("aspect auth login --deployment {profile}")
+        format!("aspect auth login --deployment {deployment}")
     }
 }
 
@@ -1719,6 +2840,22 @@ fn session_expired_message(profile: &str) -> String {
     format!(
         "session expired\n\nRun `{}` to re-authenticate.",
         login_hint(profile)
+    )
+}
+
+/// Shown when a refresh came back for a different organization than the one the
+/// stored session was logged in to and the default could not be set back
+/// ([`RefreshFailure::TenantChanged`]). Points at the re-login, and at API tokens
+/// as the login that cannot drift: one is bound to its organization when it is
+/// created.
+fn tenant_changed_message(deployment: &str, was: &str, now: &str) -> String {
+    let login = login_hint(deployment);
+    format!(
+        "could not refresh the login for organization {was}: your account's default \
+         organization is now {now}, and setting it back to {was} failed.\n\nRun `{login}` \
+         to log in again. An API token is bound to one organization and never needs \
+         this: `{login} --with-api-token`, or set {}.",
+        api_token_env_var(deployment)
     )
 }
 
@@ -1743,19 +2880,27 @@ fn classify_token(entry: &CredentialsEntry) -> TokenAction {
     }
 }
 
-/// Environment variable naming the credentials profile to use when no explicit
-/// profile is given. The single selector shared by the `auth` tasks and the
-/// Bazel credential helper (which has no way to pass a flag), so one
-/// `export ASPECT_AUTH_PROFILE=...` drives both.
+/// Environment variable naming the profile to use when `--profile` is not given.
+/// The single selector shared by the `auth` tasks and the Bazel credential helper
+/// (which has no way to pass a flag), so one `export ASPECT_AUTH_PROFILE=...`
+/// drives both.
 pub const PROFILE_ENV: &str = "ASPECT_AUTH_PROFILE";
 
-/// The credentials profile when none is configured.
+/// The profile holding a login when none is named.
+///
+/// Also reserved as a deployment name: it is the word `auth use` and `auth status`
+/// use for *which* deployment `--remote` targets, so a deployment actually called
+/// `default` would be ambiguous against both this and `aspect auth use default`.
 const DEFAULT_PROFILE: &str = "default";
 
-/// Resolve the effective profile name: an explicit (non-empty) value wins, then
-/// [`PROFILE_ENV`] (non-empty), then [`DEFAULT_PROFILE`]. An empty `explicit` is
-/// treated as absent (the `auth` tasks pass `""` when `--profile` is omitted),
-/// so it still falls through to the env var.
+/// Resolve the profile — the identity a credential is filed under. An explicit
+/// (non-empty) value wins, then [`PROFILE_ENV`], then [`DEFAULT_PROFILE`]. An empty
+/// `explicit` is treated as absent (the `auth` tasks pass `""` when `--profile` is
+/// omitted), so it still falls through to the env var.
+///
+/// This is one of the credential store's two axes and answers *who*; the other is
+/// the deployment, which answers *what you are talking to* — see
+/// [`login_profile_for`] and [`AllCredentials`].
 pub fn resolve_profile(explicit: Option<&str>) -> String {
     let non_empty = |s: String| (!s.is_empty()).then_some(s);
     explicit
@@ -1765,60 +2910,70 @@ pub fn resolve_profile(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
 }
 
-/// Which configured deployment owns the endpoint `uri`, for the credential helper:
-/// the `host` parsed from the URI and the `deployment` (name = credential profile)
-/// that claims it, or `None` when no configured deployment does. The helper emits
-/// a credential only when a deployment owns the host, so it self-scopes by the URI
-/// Bazel passes — a global `--credential_helper=aspect` never sends a token to an
-/// unclaimed (e.g. third-party) host.
+/// Which configured deployment owns the endpoint `uri`, for the credential helper.
+/// `deployment` is `None` when no configured deployment claims the host: the helper
+/// emits a credential only when one does, so it self-scopes by the URI Bazel passes
+/// — a global `--credential_helper=aspect` never sends a token to an unclaimed
+/// (e.g. third-party) host.
 pub struct UriProfile {
     pub host: String,
+    /// The owning deployment's name, which is also the credential-store key its
+    /// login is filed under — see [`login_profile_for`].
     pub deployment: Option<String>,
+    /// Whether the owner is the built-in Aspect Cloud entry, so a caller can name
+    /// it the way the user knows it rather than by its config name.
+    pub builtin: bool,
 }
 
 /// Resolve the [`UriProfile`] for a credential-helper request, so a Bazel request
 /// for a configured deployment's cache/BES gets *that* deployment's token.
 pub fn profile_for_uri(uri: &str) -> anyhow::Result<UriProfile> {
     let host = endpoint_host_str(uri);
-    let deployment = if host.is_empty() {
-        None
-    } else {
-        deployment_name_for_host(&load_deployments()?, &host)
-    };
-    Ok(UriProfile { host, deployment })
+    if host.is_empty() {
+        return Ok(UriProfile {
+            host,
+            deployment: None,
+            builtin: false,
+        });
+    }
+    let deployments = load_deployments()?;
+    let owner = deployment_for_host(&deployments, &host);
+    Ok(UriProfile {
+        host,
+        deployment: owner.map(login_profile_for),
+        builtin: owner.is_some_and(|d| d.builtin),
+    })
 }
 
-/// Resolve the current access token (JWT) for `profile` (already resolved, e.g.
-/// via [`resolve_profile`]). For the default profile an explicit
-/// `ASPECT_API_TOKEN` (exchanged against the Aspect account issuer) takes
-/// precedence over stored credentials; other profiles always use their stored
-/// credential. Auto-refreshes an expired-but-refreshable token (persisting the
-/// refresh). Returns `None` when no credential exists for the profile, and errors
-/// when the stored token is expired and cannot be refreshed: it never returns a
-/// known-expired token, so a consumer (e.g. the credential helper) does not emit
-/// one a server will 401. Requires a Tokio runtime (the refresh path blocks on
-/// async HTTP).
-pub fn resolve_access_token(profile: &str) -> anyhow::Result<Option<String>> {
-    // ASPECT_API_TOKEN is exchanged against the default (Aspect account) issuer,
-    // so it only stands in for the default profile — a self-hosted deployment's
-    // profile must use its own stored credential, not the account token.
-    if profile == DEFAULT_PROFILE {
-        if let Some(entry) = credentials_from_api_token_env()? {
-            return Ok(Some(entry.access_token));
-        }
+/// Resolve the current access token (JWT) for `deployment` as `profile` — the
+/// identity, already resolved via [`resolve_profile`].
+///
+/// `deployment`'s API token (see [`api_token_env_var`]) takes precedence over a
+/// stored credential, and is exchanged against that deployment's own issuer. It is
+/// an identity in its own right, so it applies whichever profile is selected.
+///
+/// Auto-refreshes an expired-but-refreshable token, persisting the refresh against
+/// this profile's entry for this deployment alone. Returns `None` when the profile
+/// holds no credential for the deployment, and errors when the stored token is
+/// expired and cannot be refreshed, or when the refresh came back for a different
+/// organization ([`RefreshFailure`]): it never returns a known-expired token, so a
+/// consumer (e.g. the credential helper) does not emit one a server will 401, and
+/// never one minted for an organization the user did not log in to.
+/// Requires a Tokio runtime (the refresh path blocks on async HTTP).
+pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<Option<String>> {
+    if let Some(entry) = credentials_from_api_token_env(deployment)? {
+        return Ok(Some(entry.access_token));
     }
-    let mut map = load_all_credentials()?;
-    let Some(entry) = map.get(profile).cloned() else {
+    let Some(entry) = load_credential(profile, deployment)? else {
         return Ok(None);
     };
     match classify_token(&entry) {
         TokenAction::Use => Ok(Some(entry.access_token)),
-        TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(profile))),
+        TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
         TokenAction::Refresh => {
             let refreshed = block_on(refresh_access_token(&entry))
-                .map_err(|_| anyhow::anyhow!(session_expired_message(profile)))?;
-            map.insert(profile.to_string(), refreshed.clone());
-            save_all_credentials(&map)?;
+                .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
+            store_credential(profile, deployment, refreshed.clone())?;
             Ok(Some(refreshed.access_token))
         }
     }
@@ -1837,6 +2992,7 @@ pub struct AuthCredentials {
     pub(crate) auth_domain: Option<String>,
     pub(crate) auth_client_id: Option<String>,
     pub(crate) prefer_id_token: bool,
+    pub(crate) issuer_kind: IssuerKind,
 }
 
 starlark_simple_value!(AuthCredentials);
@@ -1844,8 +3000,9 @@ starlark_simple_value!(AuthCredentials);
 #[starlark_value(type = "aspect.AuthCredentials")]
 impl<'v> values::StarlarkValue<'v> for AuthCredentials {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_credentials_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_credentials_methods", auth_credentials_methods);
+        Some(RES.methods())
     }
 }
 
@@ -1891,6 +3048,51 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthCredentials, access_token)
     }
 
+    /// The organizations this login's user belongs to ([`list_organizations`]),
+    /// for the login task to offer a choice when there is more than one. Empty
+    /// for an issuer without the tenant API.
+    fn organizations<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
+        let orgs = block_on(list_organizations(&creds.to_entry()));
+        Ok(heap.alloc(orgs))
+    }
+
+    /// This login re-minted for organization `org`, named by display name
+    /// (case-insensitive) or tenant id ([`find_organization`]). Returns the same
+    /// credential when `org` is already the one it is minted for; otherwise `org`
+    /// becomes the user's default organization at the issuer to get it
+    /// ([`select_tenant`]), which the caller can tell from the changed
+    /// `tenant_id`. Ends the task with a message when `org` names none of the
+    /// user's organizations or the issuer will not mint for it.
+    fn with_organization<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] org: &str,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
+        let entry = creds.to_entry();
+        let orgs = block_on(list_organizations(&entry));
+        let chosen = find_organization(&orgs, org)
+            .ok_or_else(|| TaskExit::error(unknown_organization_message(org, &orgs)))?;
+        if chosen.id == entry.tenant_id {
+            return Ok(heap.alloc(creds.clone()));
+        }
+        let selected = block_on(select_tenant(&entry, &chosen.id)).map_err(|e| {
+            TaskExit::error(format!(
+                "could not log in to organization {} ({}): {e}",
+                chosen.name, chosen.id
+            ))
+        })?;
+        Ok(heap.alloc(AuthCredentials::from_entry(&selected)))
+    }
+
     #[starlark(attribute)]
     fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, AuthCredentials, token_status)
@@ -1911,6 +3113,7 @@ impl AuthCredentials {
             auth_domain: entry.auth_domain.clone(),
             auth_client_id: entry.auth_client_id.clone(),
             prefer_id_token: entry.prefer_id_token,
+            issuer_kind: entry.issuer_kind,
         }
     }
 
@@ -1924,28 +3127,251 @@ impl AuthCredentials {
             auth_domain: self.auth_domain.clone(),
             auth_client_id: self.auth_client_id.clone(),
             prefer_id_token: self.prefer_id_token,
+            issuer_kind: self.issuer_kind,
         }
     }
 }
 
-/// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
-enum SessionKind {
-    /// Aspect-cloud: loopback redirect registered directly with the IdP; the
-    /// bearer is the OAuth `access_token`.
-    Cloud,
-    /// A configured (self-hosted) deployment: the redirect is the endpoint's own
-    /// `/oauth2/callback` (which forwards the browser to this loopback), the
-    /// authorization/token endpoints come from OIDC discovery, and the bearer is
-    /// the OIDC `id_token`. `state` is validated against the value we generated.
-    Endpoint { expected_state: String },
+/// One organization (a tenant at the issuer) the logged-in user belongs to, as
+/// `AuthCredentials.organizations()` lists them for the login task's choice.
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
+#[display("<aspect.Organization>")]
+pub struct Organization {
+    pub id: String,
+    pub name: String,
 }
 
+impl Organization {
+    /// `id` stands in for an empty `name`, so every organization has something
+    /// to show.
+    fn named(id: String, name: String) -> Self {
+        let name = if name.is_empty() { id.clone() } else { name };
+        Organization { id, name }
+    }
+}
+
+starlark_simple_value!(Organization);
+
+#[starlark_value(type = "aspect.Organization")]
+impl<'v> values::StarlarkValue<'v> for Organization {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic =
+            MethodsStatic::new("organization_methods", organization_methods);
+        Some(RES.methods())
+    }
+}
+
+#[starlark_module]
+fn organization_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn id<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, Organization, id)
+    }
+
+    #[starlark(attribute)]
+    fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, Organization, name)
+    }
+}
+
+/// The organizations `entry`'s user belongs to, for a credential from an issuer
+/// with the tenant API; empty for any other issuer, whose tokens carry no
+/// organization membership the CLI understands.
+///
+/// Names come from the tenant API's tenants endpoint. When that call fails or answers
+/// with nothing, the list falls back to the bearer's `tenantIds` claim with each
+/// id standing in for its name, so the choice stays possible.
+async fn list_organizations(entry: &CredentialsEntry) -> Vec<Organization> {
+    if entry.issuer_kind != IssuerKind::TenantApi {
+        return Vec::new();
+    }
+    let orgs = match entry.auth_domain.as_deref() {
+        Some(domain) => fetch_tenants(domain, &entry.access_token)
+            .await
+            .unwrap_or_else(|e| {
+                crate::trace!("falling back to the token's tenantIds claim: {e:#}");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
+    if orgs.is_empty() {
+        return entry
+            .tenant_ids()
+            .into_iter()
+            .map(|id| Organization::named(id.clone(), id))
+            .collect();
+    }
+    orgs
+}
+
+/// Every tenant the bearer's user belongs to, from the tenant API's tenants
+/// endpoint.
+async fn fetch_tenants(auth_domain: &str, bearer: &str) -> anyhow::Result<Vec<Organization>> {
+    #[derive(Deserialize)]
+    struct Tenant {
+        #[serde(rename = "tenantId")]
+        tenant_id: String,
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Tenants {
+        #[serde(default)]
+        tenants: Vec<Tenant>,
+    }
+    let tenants: Tenants = send_json(
+        discovery_client()
+            .get(tenant_api_url(auth_domain, TENANT_API_TENANTS_PATH))
+            .bearer_auth(bearer),
+        "listing organizations",
+    )
+    .await?;
+    Ok(tenants
+        .tenants
+        .into_iter()
+        .map(|t| Organization::named(t.tenant_id, t.name))
+        .collect())
+}
+
+/// The organization `wanted` names: by id exactly, else by display name ignoring
+/// case. `None` when nothing matches, or when two organizations share the name.
+fn find_organization<'a>(orgs: &'a [Organization], wanted: &str) -> Option<&'a Organization> {
+    let wanted = wanted.trim();
+    if let Some(by_id) = orgs.iter().find(|o| o.id == wanted) {
+        return Some(by_id);
+    }
+    let mut by_name = orgs.iter().filter(|o| o.name.eq_ignore_ascii_case(wanted));
+    let first = by_name.next();
+    if by_name.next().is_some() {
+        return None;
+    }
+    first
+}
+
+/// The refusal for an `--org` that names none, or more than one, of `orgs`.
+fn unknown_organization_message(wanted: &str, orgs: &[Organization]) -> String {
+    if orgs.is_empty() {
+        return format!(
+            "'{wanted}' cannot be selected: this login's issuer reports no organizations to choose from."
+        );
+    }
+    let choices = orgs
+        .iter()
+        .map(|o| format!("{} ({})", o.name, o.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("'{wanted}' does not name exactly one of your organizations. Choose one of: {choices}")
+}
+
+/// Which browser login a pending [`AuthSession`] runs when `wait()`ed.
 struct AuthSessionInner {
     listener: Option<TcpListener>,
     code_verifier: String,
     redirect_uri: String,
     env: AuthEnv,
-    kind: SessionKind,
+    /// The `state` nonce this login generated, echoed back by the relay page and
+    /// validated verbatim on the callback — the CSRF guard. Every login relays, so
+    /// there is always one; see [`login_state`] for the port suffix the relay
+    /// reads.
+    expected_state: String,
+    /// Whether this login's bearer is the OIDC `id_token` rather than the
+    /// `access_token`. A property of what the credential will be *sent to*, not of
+    /// how the browser came back: a deployment's cache/BES edges validate the
+    /// id_token, while Aspect Cloud addresses an API that validates the
+    /// access_token — and both may reach the IdP through the same relay.
+    prefer_id_token: bool,
+    /// What the issuer offers beyond OAuth, as the discovery response identified
+    /// it when the authorize URL was built; recorded on the credential.
+    issuer_kind: IssuerKind,
+}
+
+impl AuthSessionInner {
+    /// With `require_state = false`, an omitted state is allowed but a supplied one
+    /// is still validated.
+    ///
+    /// Returns the credential for this session's bearer — the `id_token` for a
+    /// self-hosted deployment, the `access_token` for Aspect Cloud, per
+    /// `prefer_id_token`. One grant, one credential.
+    async fn complete(
+        self,
+        code: String,
+        state: Option<String>,
+        require_state: bool,
+    ) -> anyhow::Result<CredentialsEntry> {
+        if !callback_state_matches(&self.expected_state, state.as_deref(), require_state) {
+            return Err(anyhow::anyhow!(
+                "authentication failed: callback state did not match"
+            ));
+        }
+        let endpoints = resolve_oidc_endpoints(&self.env.domain).await;
+        let token_resp = exchange_code(
+            &endpoints.token,
+            &self.env.client_id,
+            &self.redirect_uri,
+            &code,
+            &self.code_verifier,
+        )
+        .await?;
+        let refresh_token = token_resp.refresh_token.clone();
+        // Recorded so refresh keeps minting the same kind rather than downgrading
+        // to whatever the grant happens to return.
+        let prefer_id_token = self.prefer_id_token;
+        CredentialsEntry::from_bearer(
+            token_resp.bearer(prefer_id_token)?,
+            refresh_token,
+            Some(self.env.domain.clone()),
+            Some(self.env.client_id.clone()),
+            prefer_id_token,
+            // Two looks at the issuer, when the authorize URL was built and now,
+            // so one discovery request failing does not record a plain OIDC
+            // credential for an issuer with the tenant API.
+            self.issuer_kind.or(endpoints.issuer_kind),
+        )
+    }
+}
+
+fn callback_state_matches(expected: &str, actual: Option<&str>, require_state: bool) -> bool {
+    actual.map_or(!require_state, |actual| actual == expected)
+}
+
+fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>)> {
+    let pasted = pasted.trim();
+    if pasted.is_empty() {
+        return Err(anyhow::anyhow!("no authorization code entered"));
+    }
+    if pasted.starts_with("http://") || pasted.starts_with("https://") {
+        parse_callback_response(pasted)
+    } else {
+        Ok((pasted.to_string(), None))
+    }
+}
+
+fn finish_auth_session(
+    session: &AuthSession,
+    pasted: Option<&str>,
+) -> anyhow::Result<AuthCredentials> {
+    let mut guard = session
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
+    let mut inner = guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
+    drop(guard);
+    let entry = if let Some(pasted) = pasted {
+        let (code, state) = parse_pasted_callback(pasted)?;
+        block_on(inner.complete(code, state, false))?
+    } else {
+        let listener = inner
+            .listener
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
+        block_on(async move {
+            let (code, state) = accept_callback(listener).await?;
+            inner.complete(code, state, true).await
+        })?
+    };
+    Ok(AuthCredentials::from_entry(&entry))
 }
 
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -1969,8 +3395,9 @@ starlark_simple_value!(AuthSession);
 #[starlark_value(type = "aspect.AuthSession")]
 impl<'v> values::StarlarkValue<'v> for AuthSession {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_session_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_session_methods", auth_session_methods);
+        Some(RES.methods())
     }
 }
 
@@ -1981,57 +3408,22 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
         attr_str!(this, AuthSession, url)
     }
 
-    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<AuthCredentials> {
+    fn open_browser<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let session = this
             .downcast_ref_err::<AuthSession>()
             .into_anyhow_result()?;
-        let mut guard = session
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
-        let inner = guard.take().ok_or_else(|| {
-            anyhow::anyhow!("auth session already consumed (wait() called twice)")
-        })?;
-        let entry = block_on(async move {
-            let listener = inner
-                .listener
-                .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
-            let (code, state) = accept_callback(listener).await?;
-            // The Aspect-cloud flow posts to the conventional token endpoint; the
-            // self-hosted flow resolves it via OIDC discovery and first validates
-            // the callback `state` (CSRF guard).
-            let token_url = match &inner.kind {
-                SessionKind::Cloud => format!("{}/oauth/token", inner.env.domain),
-                SessionKind::Endpoint { expected_state } => {
-                    if state.as_deref() != Some(expected_state.as_str()) {
-                        return Err(anyhow::anyhow!(
-                            "authentication failed: callback state did not match"
-                        ));
-                    }
-                    resolve_oidc_endpoints(&inner.env.domain).await.token
-                }
-            };
-            let token_resp = exchange_code(
-                &token_url,
-                &inner.env.client_id,
-                &inner.redirect_uri,
-                &code,
-                &inner.code_verifier,
-            )
-            .await?;
-            let refresh_token = token_resp.refresh_token.clone();
-            // Self-hosted edges validate the id_token; the cloud flow the
-            // access_token. Record which so refresh keeps minting the same kind.
-            let prefer_id_token = matches!(inner.kind, SessionKind::Endpoint { .. });
-            CredentialsEntry::from_bearer(
-                token_resp.bearer(prefer_id_token)?,
-                refresh_token,
-                Some(inner.env.domain.clone()),
-                Some(inner.env.client_id.clone()),
-                prefer_id_token,
-            )
-        })?;
-        Ok(AuthCredentials::from_entry(&entry))
+        Ok(open_url_in_browser(&session.url))
+    }
+
+    /// Complete from pasted input when supplied; otherwise wait on the listener.
+    fn finish<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] pasted: Option<&str>,
+    ) -> anyhow::Result<AuthCredentials> {
+        let session = this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?;
+        finish_auth_session(session, pasted)
     }
 }
 
@@ -2052,8 +3444,9 @@ starlark_simple_value!(AuthServerInfo);
 #[starlark_value(type = "aspect.AuthServerInfo")]
 impl<'v> values::StarlarkValue<'v> for AuthServerInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_server_info_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("auth_server_info_methods", auth_server_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -2120,8 +3513,9 @@ starlark_simple_value!(DeploymentInfo);
 #[starlark_value(type = "aspect.DeploymentInfo")]
 impl<'v> values::StarlarkValue<'v> for DeploymentInfo {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_info_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_info_methods", deployment_info_methods);
+        Some(RES.methods())
     }
 }
 
@@ -2205,6 +3599,10 @@ pub struct DeploymentSummary {
     /// Advertised build-result viewer (a full URL, not a host), empty when the
     /// deployment serves no web UI.
     pub results_url: String,
+    /// The environment variable holding this deployment's API token — reported so
+    /// nobody has to work out the name from the deployment's own (see
+    /// [`api_token_env_var`]).
+    pub api_token_env: String,
 }
 
 starlark_simple_value!(DeploymentSummary);
@@ -2212,8 +3610,9 @@ starlark_simple_value!(DeploymentSummary);
 #[starlark_value(type = "aspect.DeploymentSummary")]
 impl<'v> values::StarlarkValue<'v> for DeploymentSummary {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_summary_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_summary_methods", deployment_summary_methods);
+        Some(RES.methods())
     }
 }
 
@@ -2260,6 +3659,11 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
+    fn api_token_env<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, DeploymentSummary, api_token_env)
+    }
+
+    #[starlark(attribute)]
     fn cache<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentSummary, cache)
     }
@@ -2280,19 +3684,41 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect account
+/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect Cloud entry
 /// (`builtin`) plus every configured deployment, each tagged with whether it is
 /// the default and whether a credential is stored under its profile. The account
 /// is always included (the `auth status` task renders it in its own section, logged
-/// in or not); when no configured deployment is the default, the account is the
+/// in or not); when no configured deployment is the default, Aspect Cloud is the
 /// effective default (matching [`select_deployment`]).
-fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
+/// Everything [`summarize_deployment`] needs, read once: the configured
+/// deployments, the selected profile's credentials, and whether any configured
+/// deployment claims the default (which decides whether Aspect Cloud shows as it).
+///
+/// The credentials are the selected profile's alone — a login held by another
+/// identity is not one this shell can use, so reporting it as logged in would be a
+/// lie.
+fn summary_inputs() -> anyhow::Result<(Vec<Deployment>, ProfileCredentials, bool)> {
     let deployments = load_deployments()?;
-    let creds = load_all_credentials()?;
-    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
+    let creds = load_profile_credentials(&resolve_profile(None))?;
+    let any_default = any_configured_default(&deployments);
+    Ok((deployments, creds, any_default))
+}
+
+fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
+    let (deployments, creds, any_default) = summary_inputs()?;
+    // Reported here rather than at load: `auth status` is where a user is looking
+    // at their deployments, so it is where a clash between two of them is
+    // actionable.
+    for (var, names) in api_token_env_collisions(&deployments) {
+        tracing::warn!(
+            "deployments {} share the API-token variable {var}; rename one so each \
+             has its own",
+            names.join(", ")
+        );
+    }
     Ok(deployments
         .iter()
-        .map(|d| summarize_deployment(d, &creds, any_configured_default))
+        .map(|d| summarize_deployment(d, &creds, any_default))
         .collect())
 }
 
@@ -2306,11 +3732,7 @@ fn summarize_deployment(
 ) -> DeploymentSummary {
     let builtin = d.builtin;
     let entry = creds.get(&login_profile_for(d));
-    let default = if builtin {
-        !any_configured_default
-    } else {
-        d.default
-    };
+    let default = effective_default(d, any_configured_default);
     // Identity + expiry come from the stored credential (when present).
     let (email, display_name, status) = match entry {
         Some(e) => {
@@ -2327,6 +3749,7 @@ fn summarize_deployment(
         email,
         display_name,
         status,
+        api_token_env: api_token_env_var(&d.name),
         issuer: d
             .issuer
             .as_deref()
@@ -2343,31 +3766,71 @@ fn summarize_deployment(
 /// such deployment is configured. Used by `configure` to render the recorded
 /// deployment with the same detail as `list`.
 fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary>> {
-    let deployments = load_deployments()?;
-    let creds = load_all_credentials()?;
-    let any_configured_default = deployments.iter().any(|d| d.default && !d.builtin);
+    let (deployments, creds, any_default) = summary_inputs()?;
     Ok(deployments
         .iter()
         .find(|d| d.name == name)
-        .map(|d| summarize_deployment(d, &creds, any_configured_default)))
+        .map(|d| summarize_deployment(d, &creds, any_default)))
 }
 
-/// The resolved Bazel-facing endpoints for `ctx.aspect.auth.deployment_endpoints(name)`:
-/// `cache` (→ --remote_cache), `bes` (→ the CLI BES sink / --bes_backend), and
-/// `exec` (→ --remote_executor). Each is a bare host, or "" when the deployment
-/// doesn't advertise/serve that capability. `name` is the resolved deployment
-/// name. Consumed by bazel-spawning tasks' `--remote` to auto-wire the flags.
+/// A deployment as Bazel sees it, for `ctx.aspect.auth.deployment_endpoints(name)`
+/// and `ctx.aspect.auth.deployments()`: `cache` (→ --remote_cache), `bes` (→ the
+/// CLI BES sink / --bes_backend), and `exec` (→ --remote_executor). Each is a bare
+/// host, or "" when the deployment doesn't advertise/serve that capability.
+/// `name` is the resolved deployment name. Consumed by bazel-spawning tasks'
+/// `--remote` to auto-wire the flags, and by `aspect ci bazelrc` to write them.
 ///
 /// `results_url` is a full URL rather than a host — the build-result viewer
 /// (→ --bes_results_url), "" when the deployment advertises no web UI.
+///
+/// Built from the deployment config alone, never from the credential store, so
+/// it is available where no keyring or login exists (a CI runner writing an rc).
+/// `default` follows [`DeploymentSummary`]: the built-in entry is default only
+/// when no configured deployment claims it. `api_token_env` names the variable
+/// whose token authenticates the deployment unattended.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.DeploymentEndpoints>")]
 pub struct DeploymentEndpoints {
     pub name: String,
+    pub builtin: bool,
+    pub default: bool,
     pub cache: String,
     pub bes: String,
     pub exec: String,
     pub results_url: String,
+    pub api_token_env: String,
+}
+
+impl DeploymentEndpoints {
+    fn of(d: &Deployment, any_configured_default: bool) -> Self {
+        Self {
+            name: d.name.clone(),
+            builtin: d.builtin,
+            default: effective_default(d, any_configured_default),
+            cache: d.endpoints.cache.clone(),
+            bes: d.endpoints.bes.clone(),
+            exec: d.endpoints.exec.clone(),
+            results_url: d.endpoints.results_url.clone(),
+            api_token_env: api_token_env_var(&d.name),
+        }
+    }
+}
+
+/// Whether any configured (non-built-in) deployment is marked default, which
+/// demotes the built-in Aspect Cloud entry from default.
+fn any_configured_default(deployments: &[Deployment]) -> bool {
+    deployments.iter().any(|d| d.default && !d.builtin)
+}
+
+/// Whether `d` is the deployment `--remote` targets by default: a configured
+/// deployment by its own flag, the built-in entry only when no configured one
+/// claims it.
+fn effective_default(d: &Deployment, any_configured_default: bool) -> bool {
+    if d.builtin {
+        !any_configured_default
+    } else {
+        d.default
+    }
 }
 
 starlark_simple_value!(DeploymentEndpoints);
@@ -2375,8 +3838,9 @@ starlark_simple_value!(DeploymentEndpoints);
 #[starlark_value(type = "aspect.DeploymentEndpoints")]
 impl<'v> values::StarlarkValue<'v> for DeploymentEndpoints {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(deployment_endpoints_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("deployment_endpoints_methods", deployment_endpoints_methods);
+        Some(RES.methods())
     }
 }
 
@@ -2385,6 +3849,21 @@ fn deployment_endpoints_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentEndpoints, name)
+    }
+
+    #[starlark(attribute)]
+    fn builtin<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, DeploymentEndpoints, builtin)
+    }
+
+    #[starlark(attribute)]
+    fn default<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, DeploymentEndpoints, default)
+    }
+
+    #[starlark(attribute)]
+    fn api_token_env<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, DeploymentEndpoints, api_token_env)
     }
 
     #[starlark(attribute)]
@@ -2424,8 +3903,9 @@ starlark_simple_value!(ShadowedDeployment);
 #[starlark_value(type = "aspect.ShadowedDeployment")]
 impl<'v> values::StarlarkValue<'v> for ShadowedDeployment {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(shadowed_deployment_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("shadowed_deployment_methods", shadowed_deployment_methods);
+        Some(RES.methods())
     }
 }
 
@@ -2456,16 +3936,39 @@ starlark_simple_value!(Auth);
 #[starlark_value(type = "aspect.Auth")]
 impl<'v> values::StarlarkValue<'v> for Auth {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(auth_methods)
+        static RES: MethodsStatic = MethodsStatic::new("auth_methods", auth_methods);
+        Some(RES.methods())
     }
 }
 
 #[starlark_module]
 fn auth_methods(registry: &mut MethodsBuilder) {
+    /// Aspect Cloud's API base. Pair it with a credential for
+    /// [`Self::aspect_cloud_deployment`]: the routes served here accept only
+    /// Aspect Cloud's own tokens.
     #[starlark(attribute)]
-    fn api_url<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<String> {
-        Ok(resolve_api_url()?)
+    fn aspect_cloud_api_url<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> anyhow::Result<String> {
+        resolve_aspect_cloud_api_url()
+    }
+
+    /// Aspect Cloud's deployment name, for addressing its credential explicitly
+    /// rather than taking whichever deployment happens to be default.
+    #[starlark(attribute)]
+    fn aspect_cloud_deployment<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> anyhow::Result<String> {
+        Ok(ASPECT_CLOUD_DEPLOYMENT_NAME.to_string())
+    }
+
+    /// The API base of `deployment` (or the default one), for a route a deployment
+    /// serves itself. Errors when it advertises no API.
+    fn deployment_api_url<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
+    ) -> anyhow::Result<String> {
+        resolve_deployment_api_url(deployment.into_option().as_deref())
     }
 
     fn login<'v>(
@@ -2476,7 +3979,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
-        let selected = select_account_or_deployment(&deployments, deployment)?;
+        let selected = select_aspect_cloud_or_deployment(&deployments, deployment)?;
         let env = auth_env_from(&selected)?;
 
         if let Some(token) = token {
@@ -2490,6 +3993,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 auth_domain: None,
                 auth_client_id: None,
                 prefer_id_token: false,
+                issuer_kind: IssuerKind::Oidc,
             };
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
@@ -2502,46 +4006,57 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
-        // Browser-based OAuth flow. A self-hosted deployment (one that advertises
-        // endpoint hosts) uses the endpoint-callback flow: the endpoint forwards
-        // the browser to this loopback, so its redirect is the endpoint's own
-        // /oauth2/callback and the callback port travels in the OAuth `state`. The
-        // built-in Aspect account carries no hosts and registers a
-        // loopback redirect directly with the IdP. Keying on `hosts` rather than
-        // the name keeps the seed on the cloud flow even if a `config.json` entry
-        // overrides it by name.
-        let session = match selected.hosts.first() {
-            Some(host) => build_endpoint_session(env, host)?,
-            None => build_cloud_session(env)?,
-        };
+        // The bearer is a separate question from the flow: a deployment's cache/BES
+        // edges validate the id_token, while Aspect Cloud addresses an API that
+        // validates the access_token and has the id_token filed alongside it.
+        let redirect_uri = login_redirect_uri(&selected).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deployment {:?} advertises no login redirect URI and serves no endpoint to \
+                 derive one from — re-run `aspect auth configure <host>` to refresh it",
+                selected.name
+            )
+        })?;
+        let session = build_login_session(env, redirect_uri, !selected.builtin)?;
         Ok(heap.alloc(session))
     }
 
+    /// File `creds` for `deployment` under `profile`.
+    ///
+    /// `deployment` names what the credential talks to — omitted means the
+    /// effective default deployment — and is normalized, so the Aspect Cloud alias
+    /// files where Aspect Cloud's canonical name does. `profile` names who holds
+    /// it, defaulting to [`resolve_profile`]; every other deployment in that
+    /// profile, and every other profile, is left alone.
     fn persist<'v>(
         #[allow(unused)] this: values::Value<'v>,
         creds: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
     ) -> anyhow::Result<values::Value<'v>> {
         let creds = creds
             .downcast_ref_err::<AuthCredentials>()
             .into_anyhow_result()?;
         let profile = resolve_profile(profile.into_option().as_deref());
-        let mut map = load_all_credentials()?;
-        map.insert(profile, creds.to_entry());
-        save_all_credentials(&map)?;
+        let deployments = load_deployments()?;
+        let selected =
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
+        store_credential(&profile, &selected.name, creds.to_entry())?;
         Ok(values::Value::new_none())
     }
 
-    /// Log out. `all` clears every stored credential. Otherwise the target is the
-    /// deployment named `deployment`, or — when none is given — the effective
-    /// default deployment (a configured default, else the built-in Aspect seed).
-    /// An explicit `profile` overrides the resolved profile for advanced use.
+    /// Log out. `all` clears every credential of every profile. Otherwise it clears
+    /// one deployment's credential in one profile: the deployment named
+    /// `deployment` — or, when none is given, the effective default deployment —
+    /// as `profile`, defaulting to [`resolve_profile`].
+    ///
+    /// Only that one credential: logging out of one deployment leaves the same
+    /// profile's other logins alone, and logging out as one profile never touches
+    /// another identity's.
     ///
     /// Logging out of the current default configured deployment also clears the
     /// default (there is no fall-through to another configured deployment): a
-    /// later command with no `--deployment` then resolves the built-in Aspect
-    /// seed, or errors if it needs a login. Returns the name that was logged out
-    /// (empty for `all`).
+    /// later command with no `--deployment` then resolves Aspect Cloud, or errors
+    /// if it needs a login. Returns the name that was logged out (empty for `all`).
     fn logout<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -2550,20 +4065,15 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         if all {
-            // Clear every stored profile (empties the file / deletes the keyring entry).
-            save_all_credentials(&HashMap::new())?;
+            // Empties the file / deletes the keyring entry outright.
+            save_all_credentials(&AllCredentials::new())?;
             return Ok(heap.alloc(""));
         }
         let deployments = load_deployments()?;
         let selected =
-            select_account_or_deployment(&deployments, deployment.into_option().as_deref())?;
-        let profile = match profile.into_option() {
-            Some(p) if !p.is_empty() => p,
-            _ => login_profile_for(&selected),
-        };
-        let mut map = load_all_credentials()?;
-        map.remove(&profile);
-        save_all_credentials(&map)?;
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
+        let profile = resolve_profile(profile.into_option().as_deref());
+        forget_credential(&profile, &selected.name)?;
         // If the logged-out deployment was the current default, clear the default
         // rather than letting selection fall through to another deployment.
         if selected.default && !selected.builtin {
@@ -2583,7 +4093,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The `config.json` deployments ignored for claiming a name reserved by the
-    /// built-in Aspect account, as [`ShadowedDeployment`] rows, so `auth status`
+    /// built-in Aspect Cloud entry, as [`ShadowedDeployment`] rows, so `auth status`
     /// can name them (and the file to fix) rather than let them vanish silently.
     fn shadowed<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -2607,7 +4117,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Make `deployment` the default (used when a command runs with no explicit
-    /// `--deployment`). Selecting the built-in Aspect account is expressed as
+    /// `--deployment`). Selecting the built-in Aspect Cloud entry is expressed as
     /// clearing every configured default. Errors if `deployment` names no
     /// configured deployment.
     fn set_default<'v>(
@@ -2620,7 +4130,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Forget a configured deployment: drop its `~/.aspect/config.json` entry and
-    /// its stored credential. Errors on the built-in Aspect account or an
+    /// its stored credential. Errors on the built-in Aspect Cloud entry or an
     /// unknown name.
     fn remove<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -2631,42 +4141,57 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         Ok(values::Value::new_none())
     }
 
+    /// `profile`'s credential for `deployment`, or `None` when it holds none.
+    ///
+    /// `deployment` is taken as given rather than normalized: callers pass a name
+    /// `deployment_for_host` resolved, which is already canonical. An expired
+    /// credential is refreshed first; one whose refresh came back for another
+    /// organization ends the task ([`RefreshFailure::TenantChanged`]), whatever
+    /// `required` says.
     fn credentials<'v>(
         #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
         #[starlark(require = named, default = true)] required: bool,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let profile = resolve_profile(profile.into_option().as_deref());
-        // Prefer an explicit ASPECT_API_TOKEN over stored credentials, but only for
-        // the default profile: the token is exchanged against the Aspect account
-        // issuer, so it can't stand in for a self-hosted deployment's profile.
-        if profile == DEFAULT_PROFILE {
-            if let Some(entry) = credentials_from_api_token_env()? {
-                return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
-            }
+        let deployment = match deployment.into_option() {
+            Some(name) if !name.is_empty() => name,
+            _ => select_deployment(&load_deployments()?, None)?.name,
+        };
+        // An API token is an identity in its own right, so it takes precedence
+        // over anything stored and applies whichever profile is selected.
+        if let Some(entry) = credentials_from_api_token_env(&deployment)? {
+            return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
-        let mut map = load_all_credentials()?;
-        let Some(entry) = map.get(&profile).cloned() else {
+        let Some(entry) = load_credential(&profile, &deployment)? else {
             return Ok(values::Value::new_none());
         };
         // Never hand back a known-expired token (an endpoint would 401 on it).
         // Mirror `resolve_access_token`: refresh when possible, else fail —
         // `required = False` callers (best-effort endpoint auth) get `None` and
-        // proceed unauthenticated instead of a hard error.
+        // proceed unauthenticated instead of a hard error. A refresh stuck in
+        // another organization is a refusal, not an inability, and ends the task
+        // for every caller: proceeding unauthenticated would only hide it behind
+        // later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
             TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
                 Ok(refreshed) => {
-                    map.insert(profile.clone(), refreshed.clone());
-                    save_all_credentials(&map)?;
+                    store_credential(&profile, &deployment, refreshed.clone())?;
                     refreshed
                 }
+                Err(failure @ RefreshFailure::TenantChanged { .. }) => {
+                    return Err(TaskExit::error(failure.message(&deployment)).into());
+                }
                 Err(_) if !required => return Ok(values::Value::new_none()),
-                Err(_) => return Err(anyhow::anyhow!(session_expired_message(&profile))),
+                Err(_) => return Err(anyhow::anyhow!(session_expired_message(&deployment))),
             },
             TokenAction::Expired if !required => return Ok(values::Value::new_none()),
-            TokenAction::Expired => return Err(anyhow::anyhow!(session_expired_message(&profile))),
+            TokenAction::Expired => {
+                return Err(anyhow::anyhow!(session_expired_message(&deployment)));
+            }
         };
         Ok(heap.alloc(AuthCredentials::from_entry(&entry)))
     }
@@ -2693,70 +4218,53 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] issuer: NoneOr<String>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let host = endpoint_host_str(host);
-        // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
-        // Workflows deployment) so the task prints the right guidance rather than a
-        // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
-        // a deployment — probe_protected_resource requires it.
-        let mk = |status: &str, reason: String| DeploymentInfo {
-            status: status.to_string(),
-            reason,
-            name: String::new(),
+        Ok(heap.alloc(configure_deployment(
+            host,
+            name.into_option(),
+            make_default,
+            issuer.into_option(),
+        )?))
+    }
+
+    /// Discover and record the Aspect Cloud endpoints the built-in entry fronts
+    /// ([`DEFAULT_DISCOVERY_HOST`] under [`ASPECT_CLOUD_DEPLOYMENT_NAME`]), so a bare
+    /// `aspect auth login` leaves `--remote` working without a separate
+    /// `auth configure`. Returns the same [`DeploymentInfo`] shape as
+    /// [`Self::configure`]; the caller treats any non-`"ok"` status as "skip and
+    /// carry on", never as a login failure.
+    ///
+    /// Never fails, unlike [`Self::configure`]. This step is not what the user
+    /// asked for — they asked to log in — so an unwritable `config.json` must cost
+    /// them the endpoints, not the login. A failure comes back as
+    /// `"not_recorded"` carrying the reason, which the caller reports below the
+    /// login summary.
+    ///
+    /// The issuer is pinned to [`DEFAULT_ISSUER`] rather than taken from the
+    /// document: discovery here is not user-initiated (the host is compiled in,
+    /// not typed), so the endpoint may name the PKCE client to use but may not
+    /// redirect Aspect Cloud's login to a different authorization server. A
+    /// document advertising only some other issuer resolves to
+    /// `"issuer_not_advertised"` and records nothing.
+    fn configure_default<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let info = configure_deployment(
+            DEFAULT_DISCOVERY_HOST,
+            Some(ASPECT_CLOUD_DEPLOYMENT_NAME.to_string()),
+            false,
+            Some(DEFAULT_ISSUER.to_string()),
+        )
+        .unwrap_or_else(|e| DeploymentInfo {
+            status: "not_recorded".to_string(),
+            reason: e.to_string(),
+            name: ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(),
             can_login: false,
             is_default: false,
             hosts: Vec::new(),
             auth_servers: Vec::new(),
-        };
-        let info = match block_on(probe_protected_resource(&host)) {
-            Discovery::Reachable(info) => info,
-            Discovery::Unreachable(reason) => return Ok(heap.alloc(mk("unreachable", reason))),
-            Discovery::NotADeployment => {
-                return Ok(heap.alloc(mk("not_a_deployment", String::new())));
-            }
-        };
-        let name = name
-            .into_option()
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| deployment_name_from_host(&host));
-        let requested = issuer.into_option().filter(|s| !s.is_empty());
-        let candidates = info.auth_servers();
-        // Hand the advertised choices back so the task can prompt from them or list
-        // the valid values when `--issuer` names one that isn't advertised.
-        let with_candidates = |status: &str| DeploymentInfo {
-            status: status.to_string(),
-            reason: String::new(),
-            name: name.clone(),
-            can_login: false,
-            is_default: false,
-            hosts: Vec::new(),
-            auth_servers: candidates.iter().cloned().map(auth_server_info).collect(),
-        };
-        let selected = match resolve_auth_server(&candidates, requested.as_deref()) {
-            AuthServerChoice::Ambiguous => return Ok(heap.alloc(with_candidates("needs_issuer"))),
-            AuthServerChoice::NotAdvertised => {
-                return Ok(heap.alloc(with_candidates("issuer_not_advertised")));
-            }
-            AuthServerChoice::Selected(s) => Some(s),
-            AuthServerChoice::None => None,
-        };
-        let mut deployment =
-            deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
-        // `--default` forces this deployment to take the default crown (upsert
-        // then clears it on every other entry); without it, upsert only sets the
-        // default when none exists yet, so a second configure doesn't hijack it.
-        deployment.default = make_default;
-        let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
-        let hosts = deployment.hosts.clone();
-        let is_default = save_user_deployment(deployment)?;
-        Ok(heap.alloc(DeploymentInfo {
-            status: "ok".to_string(),
-            reason: String::new(),
-            name,
-            can_login,
-            is_default,
-            hosts,
-            auth_servers: Vec::new(),
-        }))
+        });
+        Ok(heap.alloc(info))
     }
 
     /// The Bazel-facing endpoints (`cache`/`bes`/`exec` hosts) advertised by the
@@ -2773,14 +4281,26 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
+        let any_default = any_configured_default(&deployments);
         let selected = select_deployment(&deployments, deployment.into_option().as_deref())?;
-        Ok(heap.alloc(DeploymentEndpoints {
-            name: selected.name,
-            cache: selected.endpoints.cache,
-            bes: selected.endpoints.bes,
-            exec: selected.endpoints.exec,
-            results_url: selected.endpoints.results_url,
-        }))
+        Ok(heap.alloc(DeploymentEndpoints::of(&selected, any_default)))
+    }
+
+    /// Every effective deployment (built-in seed + configured) as
+    /// [`DeploymentEndpoints`] rows, in config order. Reads only the deployment
+    /// config — never the credential store — so it works where `list` cannot
+    /// (no keyring, no login); use `list` when login status matters.
+    fn deployments<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let deployments = load_deployments()?;
+        let any_default = any_configured_default(&deployments);
+        let rows: Vec<DeploymentEndpoints> = deployments
+            .iter()
+            .map(|d| DeploymentEndpoints::of(d, any_default))
+            .collect();
+        Ok(heap.alloc(rows))
     }
 
     /// The name of the configured deployment that owns `host` (its advertised
@@ -2799,11 +4319,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// The credentials profile a login against `deployment` should persist under,
-    /// so it matches what [`Self::deployment_for_host`] later resolves for that
-    /// deployment's endpoints. A configured deployment (one with its own hosts)
-    /// stores under its name; the built-in Aspect account — whose endpoints go
-    /// through the default profile — stores under the resolved default profile.
+    /// The key a login against `deployment` is filed under within a profile: its
+    /// canonical name, so an alias resolves to the name
+    /// [`Self::deployment_for_host`] later hands back for its endpoints.
     fn login_profile<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -2811,28 +4329,20 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
         let selected =
-            select_account_or_deployment(&deployments, deployment.into_option().as_deref())?;
+            select_aspect_cloud_or_deployment(&deployments, deployment.into_option().as_deref())?;
         Ok(heap.alloc(login_profile_for(&selected)))
     }
 }
 
-/// The credentials profile a login against `selected` persists under: a
-/// self-hosted deployment (one with its own endpoint hosts) stores under its
-/// name so [`Auth::deployment_for_host`] later resolves the same profile for its
-/// endpoints; the built-in Aspect account (no hosts) stores under the
-/// resolved default profile.
+/// The key a login against `selected` is filed under *within* a profile, and the
+/// one its endpoints are read back from: the deployment's own name, Aspect Cloud
+/// included. So `deployment_for_host` hands back a key that needs no translation.
 ///
-/// Keyed on `hosts` rather than the `builtin` flag, to stay in lockstep with the
-/// cloud/endpoint flow split in [`Auth::login`] — which needs a host to build the
-/// endpoint callback, so it is a capability question, not an identity one. A
-/// hand-written deployment with no endpoints therefore files under the default
-/// profile, matching the cloud flow it logs in through.
+/// Which profile holds it is the other axis, chosen by `--profile` or
+/// [`PROFILE_ENV`] — see [`resolve_profile`]. Keeping them separate is what lets
+/// one profile hold a credential for every deployment at once.
 fn login_profile_for(selected: &Deployment) -> String {
-    if selected.hosts.is_empty() {
-        resolve_profile(None)
-    } else {
-        selected.name.clone()
-    }
+    selected.name.clone()
 }
 
 /// Extract a bare host from a possibly-URL argument (`https://h/p` → `h`), so
@@ -2898,6 +4408,7 @@ mod tests {
             auth_domain: None,
             auth_client_id: None,
             prefer_id_token: false,
+            issuer_kind: IssuerKind::Oidc,
         }
     }
 
@@ -2938,13 +4449,23 @@ mod tests {
         assert!(can_refresh(&e));
     }
 
+    /// Serializes every test that reads or writes `$ASPECT_AUTH_PROFILE`. The
+    /// process env is global and cargo runs tests on parallel threads, so without
+    /// this a reader intermittently observes the writer's value mid-flight — two
+    /// calls inside one assertion can even straddle the change. Poison is ignored:
+    /// one failing test should not cascade into the others.
+    static PROFILE_ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    fn profile_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        PROFILE_ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn resolve_profile_prefers_explicit_then_env_then_default() {
         // An explicit, non-empty profile always wins, regardless of the env.
         assert_eq!(resolve_profile(Some("ci")), "ci");
 
-        // This test mutates the process env, so it must run serially with any
-        // other PROFILE_ENV reader; it is currently the only one.
+        let _guard = profile_env_guard();
         let saved = std::env::var(PROFILE_ENV).ok();
 
         // SAFETY: single-threaded test body; restored before returning.
@@ -2955,7 +4476,7 @@ mod tests {
         // An explicit profile still overrides the env.
         assert_eq!(resolve_profile(Some("explicit")), "explicit");
 
-        // With the env unset, everything falls through to the default.
+        // With the env unset, everything falls through to the default profile.
         unsafe { std::env::remove_var(PROFILE_ENV) };
         assert_eq!(resolve_profile(None), DEFAULT_PROFILE);
         assert_eq!(resolve_profile(Some("")), DEFAULT_PROFILE);
@@ -2998,6 +4519,7 @@ mod tests {
             scopes: Vec::new(),
             authorize_params: BTreeMap::new(),
             endpoints: Endpoints::default(),
+            login_redirect_uri: None,
         }
     }
 
@@ -3011,7 +4533,7 @@ mod tests {
 
     #[test]
     fn select_deployment_by_explicit_name() {
-        let deployments = vec![default_deployment(), dep("acme", false)];
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
         assert_eq!(
             select_deployment(&deployments, Some("acme")).unwrap().name,
             "acme"
@@ -3019,63 +4541,254 @@ mod tests {
         assert!(select_deployment(&deployments, Some("nope")).is_err());
     }
 
+    /// The alias reaches Aspect Cloud everywhere a deployment is named, not just in
+    /// the `auth` commands: `select_deployment` is the one gate `--remote`,
+    /// `deployment_endpoints` and `credentials` all come through, so an alias that
+    /// worked only in `auth use` would fail a build with "unknown deployment".
+    #[test]
+    fn select_deployment_accepts_the_aspect_cloud_alias() {
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
+        for name in [ASPECT_CLOUD_DEPLOYMENT_NAME, ASPECT_CLOUD_DEPLOYMENT_ALIAS] {
+            let selected = select_deployment(&deployments, Some(name)).unwrap();
+            assert!(selected.builtin, "{name} should select Aspect Cloud");
+            // Resolved to the canonical entry, so a caller never sees the alias as
+            // a credential key or in output.
+            assert_eq!(selected.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        }
+
+        // The alias is Aspect Cloud's alone: it does not make some other
+        // deployment reachable under two names.
+        assert_eq!(
+            select_deployment(&deployments, Some("acme")).unwrap().name,
+            "acme"
+        );
+        assert!(select_deployment(&deployments, Some("nope")).is_err());
+
+        // And the `auth` commands' selection funnels through the same gate.
+        let via_auth =
+            select_aspect_cloud_or_deployment(&deployments, Some(ASPECT_CLOUD_DEPLOYMENT_ALIAS))
+                .unwrap();
+        assert_eq!(via_auth.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+    }
+
     #[test]
     fn select_deployment_with_no_name_uses_the_default_flag() {
         // Only the seed → the seed.
-        let seed_only = vec![default_deployment()];
+        let seed_only = vec![aspect_cloud_deployment()];
         assert_eq!(
             select_deployment(&seed_only, None).unwrap().name,
-            DEFAULT_DEPLOYMENT_NAME
+            ASPECT_CLOUD_DEPLOYMENT_NAME
         );
 
-        // The entry marked default wins (upsert makes the first configured entry
-        // default, so a single configured deployment is selected here).
-        let mut one = vec![default_deployment(), dep("acme", true)];
+        // The entry marked default wins.
+        let mut one = vec![aspect_cloud_deployment(), dep("acme", true)];
         one[0].default = false;
         assert_eq!(select_deployment(&one, None).unwrap().name, "acme");
 
         // An explicit default on the seed is respected even with a configured
         // deployment present — configuring does not implicitly hijack selection.
-        let explicit_seed = vec![default_deployment(), dep("acme", false)];
+        let explicit_seed = vec![aspect_cloud_deployment(), dep("acme", false)];
         assert_eq!(
             select_deployment(&explicit_seed, None).unwrap().name,
-            DEFAULT_DEPLOYMENT_NAME
+            ASPECT_CLOUD_DEPLOYMENT_NAME
         );
     }
 
     #[test]
-    fn select_account_or_deployment_defaults_to_the_account_not_the_default_deployment() {
+    fn select_aspect_cloud_or_deployment_defaults_to_the_account_not_the_default_deployment() {
         // Even with a configured deployment marked default (the build default),
-        // a bare auth login/logout targets the Aspect account (the seed) — the
-        // default-deployment concept governs builds, not the account.
-        let mut ds = vec![default_deployment(), dep("acme", true)];
+        // a bare auth login/logout targets Aspect Cloud (the seed) — the
+        // default-deployment concept governs builds, not Aspect Cloud.
+        let mut ds = vec![aspect_cloud_deployment(), dep("acme", true)];
         ds[0].default = false;
         assert_eq!(
-            select_account_or_deployment(&ds, None).unwrap().name,
-            DEFAULT_DEPLOYMENT_NAME
+            select_aspect_cloud_or_deployment(&ds, None).unwrap().name,
+            ASPECT_CLOUD_DEPLOYMENT_NAME
         );
         // An explicit name still picks that deployment.
         assert_eq!(
-            select_account_or_deployment(&ds, Some("acme"))
+            select_aspect_cloud_or_deployment(&ds, Some("acme"))
                 .unwrap()
                 .name,
             "acme"
         );
         // Unknown name errors.
-        assert!(select_account_or_deployment(&ds, Some("nope")).is_err());
+        assert!(select_aspect_cloud_or_deployment(&ds, Some("nope")).is_err());
     }
 
     #[test]
-    fn login_hint_names_the_deployment_except_for_the_default() {
-        // The default profile → bare login (no deployment assumed).
-        assert_eq!(login_hint(DEFAULT_PROFILE), "aspect auth login");
+    fn login_hint_names_the_deployment_except_for_aspect_cloud() {
+        // Aspect Cloud → bare login, which is what targets it.
+        assert_eq!(
+            login_hint(ASPECT_CLOUD_DEPLOYMENT_NAME),
+            "aspect auth login"
+        );
         // A configured deployment's profile is its name → explicit --deployment.
         assert_eq!(
             login_hint("gcp.acme"),
             "aspect auth login --deployment gcp.acme"
         );
         assert!(session_expired_message("gcp.acme").contains("--deployment gcp.acme"));
-        assert!(!session_expired_message(DEFAULT_PROFILE).contains("--deployment"));
+        assert!(!session_expired_message(ASPECT_CLOUD_DEPLOYMENT_NAME).contains("--deployment"));
+    }
+
+    /// The variable scheme customers are documented against: the unsuffixed name
+    /// is Aspect Cloud's, everything else is suffixed with its own name. Aspect
+    /// Cloud takes the unsuffixed one because every installation needs a token for
+    /// it — the GitHub and GitLab App routes are served only there — so a
+    /// self-hosted customer sets this one *and* the suffixed one for their own
+    /// deployment.
+    #[test]
+    fn api_token_env_var_names_aspect_cloud_unsuffixed() {
+        assert_eq!(
+            api_token_env_var(ASPECT_CLOUD_DEPLOYMENT_NAME),
+            "ASPECT_API_TOKEN"
+        );
+        assert_eq!(api_token_env_var("acme"), "ASPECT_API_TOKEN_ACME");
+        // Every character a deployment name may hold that an env var may not.
+        assert_eq!(
+            api_token_env_var("aws-cci-test-dev"),
+            "ASPECT_API_TOKEN_AWS_CCI_TEST_DEV"
+        );
+        assert_eq!(api_token_env_var("gcp.acme"), "ASPECT_API_TOKEN_GCP_ACME");
+        // The alias is a name in its own right here: it is not Aspect Cloud's
+        // canonical name, so it gets suffixed like anything else. Nothing records
+        // the alias, so no deployment is ever looked up under it.
+        assert_eq!(
+            api_token_env_var(ASPECT_CLOUD_DEPLOYMENT_ALIAS),
+            "ASPECT_API_TOKEN_ASPECT"
+        );
+    }
+
+    /// Two names can normalize to one variable, in which case one token would
+    /// silently answer for both deployments. Reported rather than resolved: only
+    /// the user can say which deployment should be renamed.
+    #[test]
+    fn colliding_api_token_env_vars_are_reported() {
+        let deployments = vec![
+            aspect_cloud_deployment(),
+            dep("gcp.acme", false),
+            dep("gcp-acme", false),
+            dep("other", false),
+        ];
+        let collisions = api_token_env_collisions(&deployments);
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
+        assert_eq!(collisions[0].0, "ASPECT_API_TOKEN_GCP_ACME");
+        assert_eq!(collisions[0].1, vec!["gcp.acme", "gcp-acme"]);
+
+        // The ordinary configuration reports nothing.
+        assert!(
+            api_token_env_collisions(&[aspect_cloud_deployment(), dep("acme", false)]).is_empty()
+        );
+    }
+
+    fn cred(email: &str) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"email":"{email}","name":"U"}}"#)),
+            "refresh".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            false,
+            IssuerKind::Oidc,
+        )
+        .unwrap()
+    }
+
+    /// A profile holds one credential per deployment, and profiles do not see each
+    /// other. This is the whole point of the two axes: `--profile bob` covers every
+    /// deployment bob uses, and switching to susan switches all of them at once.
+    #[test]
+    fn a_profile_holds_one_credential_per_deployment() {
+        let mut all = AllCredentials::new();
+        insert_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("bob@x.io"),
+        );
+        insert_credential(&mut all, "bob", "acme", cred("bob@acme.io"));
+        insert_credential(
+            &mut all,
+            "susan",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("susan@x.io"),
+        );
+
+        assert_eq!(all["bob"].len(), 2);
+        assert_eq!(all["bob"][ASPECT_CLOUD_DEPLOYMENT_NAME].email, "bob@x.io");
+        assert_eq!(all["bob"]["acme"].email, "bob@acme.io");
+        // Same deployment, different identity: separate credentials.
+        assert_eq!(
+            all["susan"][ASPECT_CLOUD_DEPLOYMENT_NAME].email,
+            "susan@x.io"
+        );
+        assert!(!all["susan"].contains_key("acme"));
+
+        // Re-filing one deployment leaves its siblings alone.
+        insert_credential(&mut all, "bob", "acme", cred("bob2@acme.io"));
+        assert_eq!(all["bob"]["acme"].email, "bob2@acme.io");
+        assert_eq!(all["bob"][ASPECT_CLOUD_DEPLOYMENT_NAME].email, "bob@x.io");
+    }
+
+    /// Logging out is one deployment in one profile. The profile goes only once it
+    /// is empty, since a profile holding nothing is not a profile.
+    #[test]
+    fn removing_a_credential_leaves_siblings_and_prunes_an_empty_profile() {
+        let mut all = AllCredentials::new();
+        insert_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("bob@x.io"),
+        );
+        insert_credential(&mut all, "bob", "acme", cred("bob@acme.io"));
+        insert_credential(
+            &mut all,
+            "susan",
+            ASPECT_CLOUD_DEPLOYMENT_NAME,
+            cred("susan@x.io"),
+        );
+
+        assert!(remove_credential(&mut all, "bob", "acme"));
+        assert_eq!(all["bob"].len(), 1, "the sibling survives");
+        assert!(all.contains_key("susan"), "another identity is untouched");
+
+        assert!(remove_credential(
+            &mut all,
+            "bob",
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        ));
+        assert!(!all.contains_key("bob"), "the emptied profile is pruned");
+
+        // Removing what is not there reports so rather than writing.
+        assert!(!remove_credential(&mut all, "bob", "acme"));
+        assert!(!remove_credential(&mut all, "susan", "acme"));
+        assert!(all.contains_key("susan"));
+    }
+
+    /// A deployment's API comes from what it advertises, so the host can move
+    /// without a CLI release. The recorded `api_url` stands in for a document that
+    /// predates the `api` endpoint.
+    #[test]
+    fn a_deployments_api_base_prefers_what_it_advertises() {
+        let mut cloud = aspect_cloud_deployment();
+        // The seed carries `api_url`; with nothing advertised that is what is used.
+        assert_eq!(
+            deployment_api_base(&cloud).as_deref(),
+            Some(DEFAULT_API_URL)
+        );
+
+        // An advertised endpoint wins, and is given a scheme — `aspect_endpoints`
+        // carries bare hosts.
+        cloud.endpoints.api = "api.eu.aspect.build".to_string();
+        assert_eq!(
+            deployment_api_base(&cloud).as_deref(),
+            Some("https://api.eu.aspect.build")
+        );
+
+        // A deployment advertising neither has no API, which the named lookup
+        // reports rather than silently addressing Aspect Cloud's.
+        assert_eq!(deployment_api_base(&dep("acme", false)), None);
     }
 
     #[test]
@@ -3088,31 +4801,35 @@ mod tests {
         assert_eq!(e.token, "https://acme.auth.aspect.build/oauth/token");
     }
 
+    /// Every deployment files under its own name, Aspect Cloud included and with or
+    /// without hosts. Nothing keys on `builtin`, so no deployment can end up
+    /// sharing another's credential.
     #[test]
-    fn login_profile_keys_on_hosts_not_name() {
-        // The built-in account (no hosts) → the default profile.
-        assert_eq!(login_profile_for(&default_deployment()), DEFAULT_PROFILE);
-        // A hostless configured entry logs in through the same cloud flow, so it
-        // files under the same profile.
+    fn every_deployment_files_under_its_own_name() {
+        let _guard = profile_env_guard();
+        assert_eq!(
+            login_profile_for(&aspect_cloud_deployment()),
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        );
+        let mut with_hosts = aspect_cloud_deployment();
+        with_hosts.hosts = vec!["remote.app.aspect.build".to_string()];
+        assert_eq!(login_profile_for(&with_hosts), ASPECT_CLOUD_DEPLOYMENT_NAME);
+
         let mut hostless = dep("acme", false);
         hostless.hosts = Vec::new();
-        assert_eq!(login_profile_for(&hostless), DEFAULT_PROFILE);
-        // A self-hosted deployment (has hosts) → its own name.
+        assert_eq!(login_profile_for(&hostless), "acme");
         assert_eq!(login_profile_for(&dep("acme", true)), "acme");
 
-        // Why `default` is reserved: a deployment files under its own name, so one
-        // named `default` would share the account's credential slot.
-        assert_eq!(
-            login_profile_for(&dep(DEFAULT_PROFILE, true)),
-            DEFAULT_PROFILE
-        );
+        // Why `default` is reserved as a deployment name: it names the profile a
+        // login lands in when none is given, so a deployment called `default` would
+        // read ambiguously wherever either appears.
         assert!(is_reserved_name(DEFAULT_PROFILE));
     }
 
     #[test]
     fn deployment_name_from_host_strips_service_label_and_aspect_domain() {
         for (host, want) in [
-            // Aspect-hosted: the service label and `.aspect.build` both go, so
+            // Aspect Cloud: the service label and `.aspect.build` both go, so
             // the deployment segment is left bare.
             ("remote.acme.aspect.build", "acme"),
             ("bes.acme.aspect.build", "acme"),
@@ -3124,7 +4841,7 @@ mod tests {
             // domain itself names it.
             ("remote.aspect.build", "aspect.build"),
             // Self-hosted: only the service label goes; the domain is kept, which
-            // is what keeps these names distinct from the built-in account.
+            // is what keeps these names distinct from the built-in Aspect Cloud entry.
             ("remote.foo.bar.com", "foo.bar.com"),
             ("cache.app.corp.io", "app.corp.io"),
             ("cache.team.acme.co.uk", "team.acme.co.uk"),
@@ -3165,29 +4882,116 @@ mod tests {
         // Under Aspect's own domain the stripped remainder still can be reserved,
         // so derivation alone is not a guarantee — `upsert_deployment` rejects it.
         for (host, want) in [
-            ("remote.aspect.aspect.build", DEFAULT_DEPLOYMENT_NAME),
+            (
+                "remote.aspect-cloud.aspect.build",
+                ASPECT_CLOUD_DEPLOYMENT_NAME,
+            ),
+            // The alias is reserved too, so a host cannot derive its way onto it.
+            ("remote.aspect.aspect.build", ASPECT_CLOUD_DEPLOYMENT_ALIAS),
             ("remote.default.aspect.build", DEFAULT_PROFILE),
         ] {
             let name = deployment_name_from_host(host);
             assert_eq!(name, want);
             assert!(is_reserved_name(&name));
-            assert!(upsert_deployment(&mut vec![], dep(&name, false)).is_err());
+            assert!(upsert_deployment(&mut vec![], dep(&name, false), false).is_err());
         }
+    }
+
+    /// An Aspect Cloud entry is folded into the seed on load, under either of its
+    /// names, so `upsert` must answer the default question the way the loader will
+    /// — otherwise a bare login reports Aspect Cloud as not-the-default and tells
+    /// the user to `auth use` something that already is.
+    #[test]
+    fn an_aspect_cloud_entry_does_not_hold_or_withhold_the_default() {
+        let cloud = || dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+
+        // Nothing configured claims the default, so Aspect Cloud is what
+        // `--remote` targets, whatever flag a previous entry left behind.
+        let mut stale = vec![dep(ASPECT_CLOUD_DEPLOYMENT_ALIAS, true)];
+        assert!(
+            upsert_deployment(&mut stale, cloud(), true).unwrap(),
+            "a stale Aspect Cloud entry must not withhold the default"
+        );
+
+        // And it collapses: one entry for Aspect Cloud, under its own name.
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+
+        // A configured deployment does hold it, and Aspect Cloud does not take it.
+        let mut claimed = vec![dep("acme", true)];
+        assert!(
+            !upsert_deployment(&mut claimed, cloud(), true).unwrap(),
+            "a configured default outranks Aspect Cloud"
+        );
+        assert!(
+            claimed.iter().find(|d| d.name == "acme").unwrap().default,
+            "and keeps it"
+        );
+        assert!(
+            !claimed
+                .iter()
+                .find(|d| d.name == ASPECT_CLOUD_DEPLOYMENT_NAME)
+                .unwrap()
+                .default,
+            "Aspect Cloud's entry never carries the flag — the loader ignores it"
+        );
+    }
+
+    /// `aspect auth configure <Aspect Cloud host> --default` has to work, and the
+    /// only way Aspect Cloud can hold the default is for nothing else to. Setting
+    /// a flag on its entry would do nothing — the loader never reads it — so the
+    /// request has to clear whichever deployment holds it instead.
+    #[test]
+    fn an_explicit_default_on_aspect_cloud_clears_the_holder() {
+        let mut existing = vec![dep("acme", true), dep("emca", false)];
+        let mut cloud = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        cloud.default = true; // `--default`
+
+        assert!(
+            upsert_deployment(&mut existing, cloud, true).unwrap(),
+            "Aspect Cloud takes the default"
+        );
+        assert!(
+            existing.iter().all(|d| !d.default),
+            "nothing configured holds it, which is what makes Aspect Cloud the default"
+        );
+
+        // Without `--default` the holder keeps it, so a plain re-configure of an
+        // Aspect Cloud host cannot quietly take the default away from a deployment.
+        let mut held = vec![dep("acme", true)];
+        assert!(
+            !upsert_deployment(&mut held, dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false), true).unwrap()
+        );
+        assert!(held.iter().find(|d| d.name == "acme").unwrap().default);
+    }
+
+    /// `--default` reaches past Aspect Cloud's entry. That entry never holds the
+    /// flag, so it must not look like a holder either — otherwise the deployment
+    /// asking for the default would be refused it.
+    #[test]
+    fn an_explicit_default_reaches_past_aspect_clouds_entry() {
+        let mut existing = vec![dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false)];
+        assert!(upsert_deployment(&mut existing, dep("acme", true), false).unwrap());
+        assert!(existing.iter().find(|d| d.name == "acme").unwrap().default);
     }
 
     #[test]
     fn upsert_deployment_rejects_reserved_names() {
         // The write choke point refuses a reserved name whatever its origin: an
-        // explicit `--deployment=aspect`, or a name derived from an
-        // `aspect.aspect.build`-style host.
+        // explicit `--deployment=aspect-cloud`, or a name derived from an
+        // `aspect-cloud.aspect.build`-style host.
         // Pin the membership as well as the behavior: iterating the constant keeps
         // this in sync as names are added, but would pass vacuously if it emptied.
-        assert!(RESERVED_NAMES.contains(&DEFAULT_DEPLOYMENT_NAME));
+        // Both of Aspect Cloud's names are its own — a configured deployment may
+        // take neither — as is the credential slot every deployment files under.
+        assert!(RESERVED_NAMES.contains(&ASPECT_CLOUD_DEPLOYMENT_NAME));
+        assert!(RESERVED_NAMES.contains(&ASPECT_CLOUD_DEPLOYMENT_ALIAS));
         assert!(RESERVED_NAMES.contains(&DEFAULT_PROFILE));
+        assert_eq!(RESERVED_NAMES, ["aspect-cloud", "aspect", "default"]);
 
         for name in RESERVED_NAMES {
             let mut existing = vec![dep("acme", true)];
-            let err = upsert_deployment(&mut existing, dep(name, false)).unwrap_err();
+            let err = upsert_deployment(&mut existing, dep(name, false), false).unwrap_err();
             assert!(
                 err.to_string().contains("reserved"),
                 "unexpected error for {name:?}: {err}"
@@ -3202,20 +5006,22 @@ mod tests {
     fn seed_identity_is_the_builtin_flag_not_the_name() {
         // A deployment merely *named* `aspect` is an ordinary deployment: only
         // the seed carries `builtin`.
-        assert!(default_deployment().builtin);
+        assert!(aspect_cloud_deployment().builtin);
         assert!(!dep("aspect", false).builtin);
 
-        // ...so it is never mistaken for the account in a summary.
+        // ...so it is never mistaken for Aspect Cloud in a summary.
         let creds = HashMap::new();
         let impostor = summarize_deployment(&dep("aspect", false), &creds, false);
         assert!(!impostor.builtin);
-        let seed = summarize_deployment(&default_deployment(), &creds, false);
+        let seed = summarize_deployment(&aspect_cloud_deployment(), &creds, false);
         assert!(seed.builtin);
     }
 
-    /// A `config.json` entry that took the account's name must not replace the
-    /// built-in account on load — that is what made the account vanish from
-    /// `auth status` with the deployment rendered in its place.
+    /// A `config.json` entry under a reserved name must not replace the built-in
+    /// account on load — that is what made Aspect Cloud vanish from `auth status`
+    /// with the deployment rendered in its place. `default` is the remaining such
+    /// name; an entry under Aspect Cloud's own name merges instead, covered by
+    /// `an_account_named_entry_merges_into_the_seed`.
     #[test]
     fn config_json_entry_cannot_shadow_the_account() {
         let dir = tempfile::tempdir().unwrap();
@@ -3225,7 +5031,7 @@ mod tests {
             r#"{"deployments":[
                 {"name":"silo-gcp","issuer":"https://silo-gcp.auth.aspect.build",
                  "client_id":"test-client","hosts":["remote.silo-gcp.aspect.build"]},
-                {"name":"aspect","issuer":"https://silo-gcp.auth.aspect.build",
+                {"name":"default","issuer":"https://silo-gcp.auth.aspect.build",
                  "client_id":"test-client","hosts":["remote.aspect.foo.com"],
                  "endpoints":{"cache":"remote.aspect.foo.com"}}
             ]}"#,
@@ -3238,15 +5044,16 @@ mod tests {
 
         // The ignored entry is reported so `auth status` can explain the absence.
         assert_eq!(shadowed.len(), 1);
-        assert_eq!(shadowed[0].name, "aspect");
+        assert_eq!(shadowed[0].name, "default");
 
-        // Exactly one account, carrying the seed's own issuer and no hosts.
+        // Exactly one account, carrying the seed's own issuer and its own hosts —
+        // the impostor's `remote.aspect.foo.com` reaches neither.
         let accounts: Vec<_> = merged.iter().filter(|d| d.builtin).collect();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].issuer.as_deref(), Some(DEFAULT_ISSUER));
-        assert!(accounts[0].hosts.is_empty());
-        // The impostor is dropped rather than silently taking the account's place.
-        assert!(!merged.iter().any(|d| !d.builtin && d.name == "aspect"));
+        assert_eq!(accounts[0].hosts, aspect_cloud_deployment().hosts);
+        // The impostor is dropped rather than silently taking Aspect Cloud's slot.
+        assert!(!merged.iter().any(|d| d.name == "default"));
         // A legitimate deployment sharing that issuer is unaffected.
         assert!(merged.iter().any(|d| d.name == "silo-gcp"));
     }
@@ -3259,34 +5066,35 @@ mod tests {
         // A repo-config entry is checked in: `auth remove` only edits the user
         // file, so the advice must point at the repo path instead.
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
             src(USER, vec![dep("acme", false)], true),
         ]);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "aspect");
+        assert_eq!(found[0].name, DEFAULT_PROFILE);
         assert!(!found[0].user_config);
         assert_eq!(found[0].path, REPO);
 
         // A user-config entry is removable.
-        let (_, found) = overlay_config_sources(vec![src(USER, vec![dep("aspect", false)], true)]);
+        let (_, found) =
+            overlay_config_sources(vec![src(USER, vec![dep(DEFAULT_PROFILE, false)], true)]);
         assert_eq!(found.len(), 1);
         assert!(found[0].user_config);
 
         // Declared in both files → reported once, against the first (repo).
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
-            src(USER, vec![dep("aspect", false)], true),
+            src(REPO, vec![dep(DEFAULT_PROFILE, false)], false),
+            src(USER, vec![dep(DEFAULT_PROFILE, false)], true),
         ]);
         assert_eq!(found.len(), 1);
         assert!(!found[0].user_config);
 
-        // Both reserved names, from different files, are each reported.
+        // The account's own name is never reported from either file: it merges
+        // into the seed rather than shadowing it.
         let (_, found) = overlay_config_sources(vec![
-            src(REPO, vec![dep("aspect", false)], false),
-            src(USER, vec![dep("default", false)], true),
+            src(REPO, vec![dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false)], false),
+            src(USER, vec![dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false)], true),
         ]);
-        assert_eq!(found.len(), 2);
-        assert!(!found[0].user_config && found[1].user_config);
+        assert!(found.is_empty());
     }
 
     #[test]
@@ -3303,7 +5111,7 @@ mod tests {
         ]);
         assert!(shadowed.is_empty());
         let names: Vec<_> = merged.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, [DEFAULT_DEPLOYMENT_NAME, "acme", "shared"]);
+        assert_eq!(names, [ASPECT_CLOUD_DEPLOYMENT_NAME, "acme", "shared"]);
         // The user entry won, so its `default` claim is the one that took effect.
         let shared = merged.iter().find(|d| d.name == "shared").unwrap();
         assert!(shared.default);
@@ -3320,7 +5128,7 @@ mod tests {
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].name, "acme");
 
-        // The same name with no file entry means the built-in account — refused.
+        // The same name with no file entry means the built-in Aspect Cloud entry — refused.
         let mut ds = vec![dep("acme", true)];
         let err = apply_remove(&mut ds, "aspect").unwrap_err();
         assert!(err.to_string().contains("cannot be removed"), "{err}");
@@ -3333,7 +5141,7 @@ mod tests {
         // status, and keeps the flag out of the written file.
         let parsed: Deployment = serde_json::from_str(r#"{"name":"acme","builtin":true}"#).unwrap();
         assert!(!parsed.builtin);
-        let json = serde_json::to_string(&default_deployment()).unwrap();
+        let json = serde_json::to_string(&aspect_cloud_deployment()).unwrap();
         assert!(
             !json.contains("builtin"),
             "flag leaked into config.json: {json}"
@@ -3401,6 +5209,8 @@ mod tests {
                 ..Default::default()
             },
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         }
     }
 
@@ -3474,9 +5284,12 @@ mod tests {
                 cache: "https://remote.acme.aspect.build".to_string(),
                 bes: "bes.acme.aspect.build".to_string(),
                 exec: "https://remote.acme.aspect.build".to_string(),
+                api: String::new(),
                 results_url: String::new(),
             },
             aspect_bes_results_url: "https://app.acme.aspect.build/i/".to_string(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
         let d = configure_from(&advertised, None);
         assert_eq!(d.issuer.as_deref(), Some("https://acme.auth.aspect.build"));
@@ -3525,10 +5338,13 @@ mod tests {
                 cache: "remote.acme.aspect.build".to_string(),
                 bes: "bes.acme.aspect.build".to_string(),
                 exec: String::new(),
+                api: String::new(),
                 results_url: String::new(),
             },
             // A deployment with no web UI omits it entirely.
             aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
         };
         let d = configure_from(&bare, None);
         assert!(d.issuer.is_none() && d.client_id.is_none());
@@ -3678,6 +5494,7 @@ mod tests {
             issuer: Some("https://acme.auth.aspect.build/".to_string()),
             client_id: Some("abc".to_string()),
             api_url: None,
+            login_redirect_uri: None,
             hosts: vec![],
             scopes: vec![],
             endpoints: Endpoints::default(),
@@ -3705,9 +5522,845 @@ mod tests {
         }
     }
 
+    /// Aspect Cloud's own hosts resolve to Aspect Cloud; everything else derives a
+    /// deployment name from the host as before. An explicit `--name` still wins,
+    /// so a separate entry for these hosts stays possible.
+    #[test]
+    fn aspect_cloud_hosts_resolve_to_the_account() {
+        for host in [
+            "api.aspect.build",
+            "app.aspect.build",
+            "bes.aspect.build",
+            "cache.aspect.build",
+            // Not resolving yet: `exec` ships with remote execution, `remote` may
+            // return as a multiplexed endpoint. Listed so neither becomes a stray
+            // deployment on the day it does.
+            "exec.aspect.build",
+            "remote.aspect.build",
+            // Every service under every region, including ones not yet serving.
+            "api.us.aspect.build",
+            "app.us.aspect.build",
+            "bes.us.aspect.build",
+            "cache.us.aspect.build",
+            "exec.us.aspect.build",
+            "remote.us.aspect.build",
+            "api.eu.aspect.build",
+            "app.eu.aspect.build",
+            "bes.eu.aspect.build",
+            "cache.eu.aspect.build",
+            "exec.eu.aspect.build",
+            "remote.eu.aspect.build",
+            // Case and an absolute FQDN's trailing dot are tolerated.
+            "Cache.EU.Aspect.Build.",
+        ] {
+            assert!(
+                is_aspect_cloud_host(host),
+                "{host} should belong to Aspect Cloud"
+            );
+        }
+
+        for host in [
+            // Another Aspect Cloud deployment is its own thing.
+            "remote.silo-aws.aspect.build",
+            "bes.gcp.awd-gha-test-dev.aspect.build",
+            // Self-hosted, and lookalikes that must not match a suffix.
+            "remote.acme.example.com",
+            "cache.us.aspect.build.evil.com",
+            "notcache.aspect.build",
+            // An unenumerated region is not assumed to be one: far likelier to be
+            // another Aspect Cloud deployment than a new Aspect Cloud region.
+            "cache.ap.aspect.build",
+        ] {
+            assert!(
+                !is_aspect_cloud_host(host),
+                "{host} should be its own deployment"
+            );
+        }
+    }
+
+    /// The account relays like any deployment once it knows where to, but keeps
+    /// the access_token as its bearer — it addresses an API that validates that
+    /// one, while a deployment's cache/BES edges validate the id_token. Which
+    /// token is kept is independent of how the browser came back.
+    #[test]
+    fn the_account_relays_but_keeps_the_access_token() {
+        let mut seed = aspect_cloud_deployment();
+        // Seeded, so even a first login relays — no probe, nothing discovered.
+        assert_eq!(
+            login_redirect_uri(&seed).as_deref(),
+            Some(DEFAULT_LOGIN_REDIRECT_URI)
+        );
+        // Discovery overrides it, exactly as it overrides the seeded client.
+        seed.login_redirect_uri = Some("https://app.aspect.build/moved".to_string());
+        assert_eq!(
+            login_redirect_uri(&seed).as_deref(),
+            Some("https://app.aspect.build/moved")
+        );
+        // `builtin` alone decides the bearer, independently of the relay.
+        assert!(seed.builtin);
+    }
+
+    /// The relay page is named by the deployment, so Aspect Cloud takes it from a
+    /// document on its own issuer and refuses one from anywhere else — the gate
+    /// that already guards the adopted client.
+    #[test]
+    fn the_account_adopts_a_relay_only_from_its_own_issuer() {
+        let seed_redirect = |issuer: &str| {
+            let mut e = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+            e.issuer = Some(issuer.to_string());
+            e.login_redirect_uri = Some("https://app.aspect.build/auth/cli/callback".to_string());
+            let (merged, _) = overlay_config_sources(vec![ConfigSource {
+                path: PathBuf::from("/tmp/config.json"),
+                entries: vec![e],
+                user: true,
+            }]);
+            merged
+                .into_iter()
+                .find(|d| d.builtin)
+                .and_then(|d| d.login_redirect_uri)
+        };
+        assert_eq!(
+            seed_redirect(DEFAULT_ISSUER).as_deref(),
+            Some("https://app.aspect.build/auth/cli/callback")
+        );
+        // A foreign issuer may not name the relay: the seeded one stands.
+        assert_eq!(
+            seed_redirect("https://auth.evil.example.com").as_deref(),
+            Some(DEFAULT_LOGIN_REDIRECT_URI)
+        );
+    }
+
+    /// A deployment naming itself beats a name derived from DNS, but never beats a
+    /// name the user typed, never claims Aspect Cloud, and never takes a name the
+    /// CLI reserves for itself.
+    #[test]
+    fn a_deployment_may_name_itself() {
+        let doc = |resource_name: &str| ProtectedResource {
+            resource: "https://remote.aws.awd-cci-test-dev.aspect.build".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: "remote.aws.awd-cci-test-dev.aspect.build".to_string(),
+                bes: String::new(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: resource_name.to_string(),
+        };
+
+        assert_eq!(
+            advertised_name(&doc("cci-test")).as_deref(),
+            Some("cci-test")
+        );
+        // Surrounding whitespace is not a name.
+        assert_eq!(
+            advertised_name(&doc("  cci-test  ")).as_deref(),
+            Some("cci-test")
+        );
+        assert_eq!(advertised_name(&doc("   ")), None);
+        assert_eq!(advertised_name(&doc("")), None);
+        // The CLI's own names are not a deployment's to take: `aspect-cloud` is
+        // Aspect Cloud and `aspect` its alias, `default` the credential slot every
+        // deployment files under. Aspect Cloud
+        // advertises its own name, but its hosts never reach here — they resolve to
+        // Aspect Cloud first; see `parses_the_aspect_cloud_document_as_served`.
+        assert_eq!(advertised_name(&doc(ASPECT_CLOUD_DEPLOYMENT_NAME)), None);
+        assert_eq!(advertised_name(&doc(ASPECT_CLOUD_DEPLOYMENT_ALIAS)), None);
+        assert_eq!(advertised_name(&doc(DEFAULT_PROFILE)), None);
+
+        // `^[a-z][a-z0-9-]*$` — what the charts and Terraform modules enforce, so a
+        // name reaching the CLI outside it means something upstream went wrong.
+        for ok in ["acme2", "a", "cci-test", "acme-cloud"] {
+            assert_eq!(advertised_name(&doc(ok)).as_deref(), Some(ok), "{ok}");
+        }
+        for bad in [
+            "Acme",      // uppercase
+            "2acme",     // leading digit
+            "-acme",     // leading hyphen
+            "acme.dev",  // dotted, as a derived name would be
+            "acme prod", // a display name, not an identifier
+            "acme_prod",
+            "acmé",
+            "--deployment",
+        ] {
+            assert_eq!(advertised_name(&doc(bad)), None, "{bad}");
+        }
+    }
+
+    /// The whole precedence, in order.
+    #[test]
+    fn a_typed_name_beats_an_advertised_one_beats_the_host() {
+        let named = |resource_name: &str| ProtectedResource {
+            resource: String::new(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints::default(),
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: resource_name.to_string(),
+        };
+        let host = "remote.aws.awd-cci-test-dev.aspect.build";
+
+        // Typed wins over everything.
+        assert_eq!(
+            resolve_deployment_name(Some("mine".to_string()), host, &named("theirs")),
+            ("mine".to_string(), false)
+        );
+        // Advertised beats the host.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named("cci-test")),
+            ("cci-test".to_string(), false)
+        );
+        // Nothing advertised → derived from the host, as before.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named("")),
+            ("aws.awd-cci-test-dev".to_string(), false)
+        );
+        // An Aspect Cloud host is Aspect Cloud, whatever it calls itself.
+        assert_eq!(
+            resolve_deployment_name(None, "cache.aspect.build", &named("Aspect Cloud")),
+            (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
+        );
+        // Typing Aspect Cloud's name claims it.
+        assert_eq!(
+            resolve_deployment_name(
+                Some(ASPECT_CLOUD_DEPLOYMENT_NAME.to_string()),
+                host,
+                &named("x")
+            ),
+            (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
+        );
+        // A document may not claim Aspect Cloud by naming it.
+        assert_eq!(
+            resolve_deployment_name(None, host, &named(ASPECT_CLOUD_DEPLOYMENT_NAME)),
+            ("aws.awd-cci-test-dev".to_string(), false)
+        );
+    }
+
+    /// The Aspect Cloud document as served, verbatim. Pins the CLI against the
+    /// shape silo publishes: no flat `client_id` or `scopes_supported`, a `resource`
+    /// matching the origin, and every field the CLI depends on behind `aspect_`.
+    #[test]
+    fn parses_the_aspect_cloud_document_as_served() {
+        let doc = r#"{
+            "aspect_authorization_servers": [
+                {
+                    "client_id": "efcf21f7-ebdc-4ffa-9f93-12129dbfdc44",
+                    "issuer": "https://auth.aspect.build",
+                    "scopes": ["openid", "profile", "email", "offline_access"]
+                }
+            ],
+            "aspect_bes_results_url": "https://app.aspect.build/i/",
+            "aspect_endpoints": {
+                "api": "api.aspect.build",
+                "bes": "bes.aspect.build",
+                "cache": "cache.aspect.build"
+            },
+            "aspect_login_redirect_uri": "https://app.aspect.build/auth/cli/callback",
+            "authorization_servers": ["https://auth.aspect.build"],
+            "bearer_methods_supported": ["header"],
+            "resource": "https://bes.aspect.build",
+            "resource_name": "aspect-cloud"
+        }"#;
+        let parsed: ProtectedResource = serde_json::from_str(doc).unwrap();
+
+        // The nested form carries the login config; the flat fields are gone, and
+        // the fallback that reads them is never reached while it is present.
+        assert_eq!(parsed.client_id, "");
+        assert!(parsed.scopes_supported.is_empty());
+        let servers = parsed.auth_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].client_id, DEFAULT_CLIENT_ID);
+        assert_eq!(servers[0].issuer, DEFAULT_ISSUER);
+
+        assert_eq!(
+            parsed.aspect_login_redirect_uri,
+            "https://app.aspect.build/auth/cli/callback"
+        );
+        assert!(parsed.aspect_endpoints.serves_build_endpoints());
+
+        // Aspect Cloud calls itself what the CLI now calls it, so the served
+        // document and `ASPECT_CLOUD_DEPLOYMENT_NAME` agree.
+        assert_eq!(parsed.resource_name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        // Its hosts resolve to Aspect Cloud without consulting the advertised name —
+        // identity is the `builtin` flag, not the string — and the name is reserved,
+        // so a host that is *not* Aspect Cloud's cannot claim it either.
+        assert_eq!(advertised_name(&parsed), None);
+        assert_eq!(
+            resolve_deployment_name(None, "bes.aspect.build", &parsed),
+            (ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), true)
+        );
+    }
+
+    /// Aspect Cloud is usable before a first login: the seed alone advertises the
+    /// endpoints Bazel needs, so `aspect setup bazelrc` on a fresh machine has a
+    /// deployment to point at and `--remote` has somewhere to go. Only the
+    /// credential is missing until someone logs in.
+    #[test]
+    fn the_seed_advertises_aspect_clouds_endpoints_with_nothing_configured() {
+        let (merged, shadowed) = overlay_config_sources(vec![]);
+
+        assert_eq!(merged.len(), 1);
+        let seed = &merged[0];
+        assert!(seed.builtin && seed.default);
+        assert_eq!(seed.endpoints.cache, DEFAULT_CACHE_HOST);
+        assert_eq!(seed.endpoints.bes, DEFAULT_BES_HOST);
+        assert_eq!(seed.endpoints.results_url, DEFAULT_RESULTS_URL);
+        // No remote executor to point an `-exec` config at, and the API host it
+        // advertises is the one the compiled-in default already names.
+        assert!(seed.endpoints.exec.is_empty());
+        assert_eq!(
+            deployment_api_base(seed).as_deref(),
+            Some(DEFAULT_API_URL),
+            "the advertised API host and the compiled-in API url must agree"
+        );
+        assert!(shadowed.is_empty());
+    }
+
+    /// Discovery replaces the seeded endpoints wholesale, so an edge Aspect Cloud
+    /// has dropped disappears — but an entry that advertises none is not a
+    /// discovery record, and must not blank out hosts the CLI knows.
+    #[test]
+    fn an_endpointless_entry_leaves_the_seeded_endpoints_alone() {
+        let mut discovered = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        discovered.endpoints.cache = "cache.eu.aspect.build".to_string();
+        let (merged, _) = overlay_config_sources(vec![src("/config.json", vec![discovered], true)]);
+        assert_eq!(merged[0].endpoints.cache, "cache.eu.aspect.build");
+        assert!(
+            merged[0].endpoints.bes.is_empty(),
+            "a discovery record replaces the set rather than merging into it"
+        );
+
+        let mut endpointless = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        endpointless.endpoints = Endpoints::default();
+        let (merged, _) =
+            overlay_config_sources(vec![src("/config.json", vec![endpointless], true)]);
+        assert_eq!(merged[0].endpoints.cache, DEFAULT_CACHE_HOST);
+        assert_eq!(merged[0].endpoints.bes, DEFAULT_BES_HOST);
+    }
+
+    /// A `config.json` entry under the alias must fold into the seed rather than
+    /// appear beside it as a second deployment claiming Aspect Cloud's hosts.
+    #[test]
+    fn a_config_entry_under_the_alias_folds_into_the_seed() {
+        let mut aliased = dep(ASPECT_CLOUD_DEPLOYMENT_ALIAS, false);
+        aliased.hosts = vec!["cache.aspect.build".to_string()];
+        aliased.endpoints.cache = "cache.aspect.build".to_string();
+
+        let (merged, shadowed) = overlay_config_sources(vec![src(
+            "/home/u/.aspect/config.json",
+            vec![aliased],
+            true,
+        )]);
+
+        // Absorbed, not listed: one entry, and it is the seed under its own name.
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].builtin);
+        assert_eq!(merged[0].name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        assert_eq!(merged[0].endpoints.cache, "cache.aspect.build");
+        // Absorbing is not shadowing, so nothing is reported against the file.
+        assert!(shadowed.is_empty());
+
+        // The alias addresses Aspect Cloud too, so an explicit one resolves to the
+        // canonical entry rather than recording a stray deployment.
+        assert!(names_aspect_cloud(ASPECT_CLOUD_DEPLOYMENT_ALIAS));
+    }
+
+    /// A deployment's own advertised redirect wins over anything the CLI would
+    /// derive: which host and path serve the relay is the deployment's business,
+    /// and guessing is what forces a release every time one moves.
+    #[test]
+    fn an_advertised_login_redirect_is_used_verbatim() {
+        let mut d = dep("acme", false);
+        d.hosts = vec!["app.example".to_string()];
+        d.endpoints = Endpoints {
+            cache: "cache.example".to_string(),
+            bes: "bes.example".to_string(),
+            exec: String::new(),
+            api: String::new(),
+            results_url: String::new(),
+        };
+
+        // Advertised: used as given, path and all, in preference to the edge the
+        // fallback would have picked.
+        d.login_redirect_uri = Some("https://app.example/cli/callback".to_string());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://app.example/cli/callback")
+        );
+
+        // Absent: derived exactly as before the field existed.
+        d.login_redirect_uri = None;
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+        // An empty string is an absent field, not an override.
+        d.login_redirect_uri = Some(String::new());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+
+        // The authorization code lands at this URI and the document is
+        // server-controlled, so a plaintext one is refused and the derived URI
+        // stands — the rule `resolve_oidc_endpoints` applies to a token endpoint.
+        d.login_redirect_uri = Some("http://app.example/cli/callback".to_string());
+        assert_eq!(
+            login_redirect_uri(&d).as_deref(),
+            Some("https://cache.example/oauth2/callback")
+        );
+    }
+
+    /// The advertised URI survives the round trip through `config.json`, so a
+    /// login long after `configure` still bounces where the deployment asked.
+    #[test]
+    fn an_advertised_login_redirect_round_trips_through_the_config_file() {
+        let doc = ProtectedResource {
+            resource: "https://cache.acme.example".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: vec!["https://acme.auth.example".to_string()],
+            client_id: "abc".to_string(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: "cache.acme.example".to_string(),
+                bes: "bes.acme.example".to_string(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: "https://app.acme.example/cli/callback".to_string(),
+            resource_name: String::new(),
+        };
+        let server = doc.auth_servers().into_iter().next();
+        let recorded = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example",
+            &doc,
+            server.as_ref(),
+        );
+        assert_eq!(
+            recorded.login_redirect_uri.as_deref(),
+            Some("https://app.acme.example/cli/callback")
+        );
+
+        let json = serde_json::to_string(&recorded).unwrap();
+        let reloaded: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            login_redirect_uri(&reloaded).as_deref(),
+            Some("https://app.acme.example/cli/callback")
+        );
+
+        // A document without the field writes no key at all, and still derives.
+        let older = ProtectedResource {
+            aspect_login_redirect_uri: String::new(),
+            ..doc
+        };
+        let recorded = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example",
+            &older,
+            server.as_ref(),
+        );
+        assert!(recorded.login_redirect_uri.is_none());
+        let json = serde_json::to_string(&recorded).unwrap();
+        assert!(!json.contains("login_redirect_uri"));
+        let reloaded: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            login_redirect_uri(&reloaded).as_deref(),
+            Some("https://cache.acme.example/oauth2/callback")
+        );
+    }
+
+    /// A login bounces through the deployment's machine edge, not necessarily the
+    /// host it was configured from: only the cache/BES edges serve the
+    /// `/oauth2/callback` relay page. Prefer the cache, then the BES.
+    #[test]
+    fn the_login_callback_goes_to_a_machine_edge() {
+        let with_endpoints = |cache: &str, bes: &str, configured: &str| {
+            let mut d = dep("acme", false);
+            d.hosts = vec![configured.to_string()];
+            d.endpoints = Endpoints {
+                cache: cache.to_string(),
+                bes: bes.to_string(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: String::new(),
+            };
+            d
+        };
+
+        // Configured from the web UI host → the callback still goes to the cache.
+        assert_eq!(
+            callback_host(&with_endpoints(
+                "cache.example",
+                "bes.example",
+                "app.example"
+            ))
+            .as_deref(),
+            Some("cache.example")
+        );
+        // No cache advertised → the BES serves the relay too.
+        assert_eq!(
+            callback_host(&with_endpoints("", "bes.example", "app.example")).as_deref(),
+            Some("bes.example")
+        );
+        // No endpoints map at all — an older discovery document or a hand-written
+        // entry — keeps the previous behaviour of using the configured host.
+        let mut bare = dep("acme", false);
+        bare.hosts = vec!["remote.example".to_string()];
+        bare.endpoints = Endpoints::default();
+        assert_eq!(callback_host(&bare).as_deref(), Some("remote.example"));
+
+        // Nothing to bounce through at all: the caller falls back to the cloud flow.
+        let mut empty = dep("acme", false);
+        empty.hosts = Vec::new();
+        empty.endpoints = Endpoints::default();
+        assert_eq!(callback_host(&empty), None);
+
+        // A hand-written entry may carry a URL rather than a bare host.
+        let urlish = with_endpoints("https://cache.example/path", "", "app.example");
+        assert_eq!(callback_host(&urlish).as_deref(), Some("cache.example"));
+    }
+
+    /// A resource advertising only a build-result viewer is not a deployment.
+    /// `app.aspect.build` serves that shape — a `results_url` and an issuer, with
+    /// no cache, no BES and no `client_id`. Recording it under Aspect Cloud's name
+    /// would replace the endpoints that do serve builds with ones that cannot,
+    /// behind a client that can never complete a login.
+    ///
+    /// Defence in depth: the document is silo's to get right, and these two guards
+    /// mean a malformed one is refused rather than half-adopted.
+    #[test]
+    fn a_results_viewer_is_not_a_deployment() {
+        let viewer = ProtectedResource {
+            resource: "https://app.aspect.build/api/v1".to_string(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: vec![DEFAULT_ISSUER.to_string()],
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: String::new(),
+                bes: String::new(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: "https://app.aspect.build".to_string(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
+        };
+        assert!(!viewer.aspect_endpoints.serves_build_endpoints());
+        // An issuer with no client is no login target.
+        assert!(viewer.auth_servers().is_empty());
+
+        // A real edge advertises somewhere Bazel can talk to, and a client.
+        let edge = ProtectedResource {
+            aspect_endpoints: Endpoints {
+                cache: "cache.aspect.build".to_string(),
+                bes: "bes.aspect.build".to_string(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: String::new(),
+            },
+            client_id: "client".to_string(),
+            ..viewer
+        };
+        assert!(edge.aspect_endpoints.serves_build_endpoints());
+        assert_eq!(edge.auth_servers().len(), 1);
+    }
+
+    /// The account's own name is writable when the caller asks for it by name —
+    /// that entry enriches the seed rather than shadowing it, which is what
+    /// `configure --name aspect` is for. A name that merely derives to it is still
+    /// refused, and `default` is refused either way: it is a credential-store key,
+    /// so an entry under it would share Aspect Cloud's slot.
+    ///
+    /// What keeps Aspect Cloud safe is not this check but the issuer pin in
+    /// `configure_deployment` — see
+    /// `the_account_only_absorbs_endpoints_on_its_own_issuer`.
+    #[test]
+    fn the_account_name_is_writable_only_when_asked_for_by_name() {
+        let account = || dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        assert!(upsert_deployment(&mut Vec::new(), account(), true).is_ok());
+        assert!(upsert_deployment(&mut Vec::new(), account(), false).is_err());
+        // The credential slot is refused however it is asked for.
+        assert!(upsert_deployment(&mut Vec::new(), dep(DEFAULT_PROFILE, false), true).is_err());
+    }
+
+    /// The entry `configure_default` writes enriches the seed rather than
+    /// shadowing it: Aspect Cloud keeps its identity and gains the endpoints, so
+    /// `auth status` shows one Aspect entry and `--remote` resolves it.
+    #[test]
+    fn an_account_named_entry_merges_into_the_seed() {
+        let mut entry = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        entry.hosts = vec!["remote.app.aspect.build".to_string()];
+        entry.endpoints = Endpoints {
+            cache: "remote.app.aspect.build".to_string(),
+            bes: "bes.app.aspect.build".to_string(),
+            exec: String::new(),
+            api: String::new(),
+            results_url: String::new(),
+        };
+        // A hand-edited file could also carry identity fields; they must not win.
+        entry.issuer = Some("https://auth.evil.example.com".to_string());
+        entry.client_id = Some("hijacked".to_string());
+
+        let (merged, shadowed) = overlay_config_sources(vec![ConfigSource {
+            path: PathBuf::from("/tmp/config.json"),
+            entries: vec![entry],
+            user: true,
+        }]);
+
+        // One Aspect entry, not two, and it is still the seed.
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|d| d.name == ASPECT_CLOUD_DEPLOYMENT_NAME)
+                .count(),
+            1
+        );
+        assert!(shadowed.is_empty());
+        let seed = merged.iter().find(|d| d.builtin).unwrap();
+        assert_eq!(seed.endpoints.cache, "remote.app.aspect.build");
+        assert_eq!(seed.endpoints.bes, "bes.app.aspect.build");
+        // The issuer stays the seed's — the file may extend Aspect Cloud, never
+        // redirect its login — and a client offered alongside a foreign issuer is
+        // refused with it.
+        assert_eq!(seed.issuer.as_deref(), Some(DEFAULT_ISSUER));
+        assert_eq!(seed.client_id.as_deref(), Some(DEFAULT_CLIENT_ID));
+        assert_eq!(seed.api_url.as_deref(), Some(DEFAULT_API_URL));
+    }
+
+    /// A client discovered from Aspect Cloud's own issuer *is* adopted, which is
+    /// what lets the deployed client rotate without a CLI release. The compiled-in
+    /// one is the fallback for before discovery has run.
+    #[test]
+    fn the_account_adopts_a_client_discovered_on_its_own_issuer() {
+        let entry_with = |issuer: &str, client_id: &str| {
+            let mut e = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+            e.issuer = Some(issuer.to_string());
+            e.client_id = Some(client_id.to_string());
+            e
+        };
+        let seed_client = |entry: Deployment| {
+            let (merged, _) = overlay_config_sources(vec![ConfigSource {
+                path: PathBuf::from("/tmp/config.json"),
+                entries: vec![entry],
+                user: true,
+            }]);
+            merged
+                .into_iter()
+                .find(|d| d.builtin)
+                .and_then(|d| d.client_id)
+                .unwrap()
+        };
+
+        // Same issuer → the advertised client wins.
+        assert_eq!(
+            seed_client(entry_with(DEFAULT_ISSUER, "rotated-client")),
+            "rotated-client"
+        );
+        // Trailing slash and case still name the same issuer.
+        assert_eq!(
+            seed_client(entry_with("HTTPS://Auth.Aspect.Build/", "rotated-client")),
+            "rotated-client"
+        );
+        // Another issuer → refused; the compiled-in client stands.
+        assert_eq!(
+            seed_client(entry_with(
+                "https://auth.evil.example.com",
+                "rotated-client"
+            )),
+            DEFAULT_CLIENT_ID
+        );
+        // An empty client is not an override.
+        assert_eq!(
+            seed_client(entry_with(DEFAULT_ISSUER, "")),
+            DEFAULT_CLIENT_ID
+        );
+    }
+
+    /// Anything recorded under Aspect Cloud's name — a bare login's discovery or
+    /// an explicit `configure --name aspect` — takes the endpoint's PKCE client
+    /// but not its issuer. `hosts` is the auth gate, so a host on a different
+    /// issuer would be handed Aspect Cloud's own bearer; pinning keeps Aspect Cloud
+    /// absorbing endpoints only from deployments that share its issuer.
+    #[test]
+    fn the_account_only_absorbs_endpoints_on_its_own_issuer() {
+        let doc = |issuer: &str, client_id: &str| ProtectedResource {
+            resource: format!("https://{DEFAULT_DISCOVERY_HOST}"),
+            aspect_authorization_servers: vec![AspectAuthServer {
+                issuer: issuer.to_string(),
+                client_id: client_id.to_string(),
+                scopes: vec!["openid".to_string()],
+                authorize_params: BTreeMap::new(),
+            }],
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                cache: DEFAULT_DISCOVERY_HOST.to_string(),
+                bes: "bes.app.aspect.build".to_string(),
+                exec: String::new(),
+                api: String::new(),
+                results_url: String::new(),
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
+        };
+
+        // The advertised client_id is adopted, which is what lets the client ID be
+        // rotated server-side without a CLI release.
+        let advertised = doc(DEFAULT_ISSUER, "new-client-id");
+        match resolve_auth_server(&advertised.auth_servers(), Some(DEFAULT_ISSUER)) {
+            AuthServerChoice::Selected(s) => assert_eq!(s.client_id, "new-client-id"),
+            _ => panic!("Aspect Cloud's own issuer should resolve"),
+        }
+
+        // A host on some other issuer records nothing, so it can never be handed
+        // Aspect Cloud's credential.
+        let hijacked = doc("https://auth.evil.example.com", "new-client-id");
+        assert!(matches!(
+            resolve_auth_server(&hijacked.auth_servers(), Some(DEFAULT_ISSUER)),
+            AuthServerChoice::NotAdvertised
+        ));
+    }
+
+    /// The invariant every endpoint-credential lookup rests on: a host resolves to
+    /// its deployment's name, and that name is the credential-store key. Getting it
+    /// wrong sends a build to an endpoint with no credential at all.
+    #[test]
+    fn an_endpoint_resolves_to_the_key_its_deployment_filed_under() {
+        let _guard = profile_env_guard();
+        // The seed as it comes, with no config file behind it: it states its own
+        // cache, so it owns it.
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
+
+        let cloud = deployment_for_host(&deployments, "cache.aspect.build").expect("owned");
+        assert_eq!(cloud.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        // With no $ASPECT_AUTH_PROFILE override in play (see the guard above).
+        assert_eq!(login_profile_for(cloud), cloud.name);
+
+        let acme = deployment_for_host(&deployments, "remote.acme.aspect.build").expect("owned");
+        assert_eq!(login_profile_for(acme), acme.name);
+
+        assert!(deployment_for_host(&deployments, "cache.example.com").is_none());
+    }
+
+    /// Aspect Cloud owns the endpoints it states, with nothing configured — the
+    /// whole of what a CI runner has after an `--with-api-token` login. Unowned,
+    /// they are a third party's: the credential helper hands them nothing and the
+    /// build talks to them with no Authorization header.
+    #[test]
+    fn aspect_cloud_owns_the_endpoints_it_states() {
+        let seed = [aspect_cloud_deployment()];
+        for host in [DEFAULT_CACHE_HOST, DEFAULT_BES_HOST] {
+            let owner = deployment_for_host(&seed, host)
+                .unwrap_or_else(|| panic!("{host} is Aspect Cloud's own endpoint"));
+            assert_eq!(owner.name, ASPECT_CLOUD_DEPLOYMENT_NAME);
+        }
+        // Exactly those hosts. A single-tenant deployment sits on the same domain,
+        // and a suffix match would hand Aspect Cloud's credential to its cache.
+        assert!(deployment_for_host(&seed, "remote.acme.aspect.build").is_none());
+    }
+
+    /// Ownership covers what Bazel dials and nothing else: the API host is
+    /// reached with the credential directly, and the viewer URL is not dialed at
+    /// all, so neither belongs to the gate that decides what receives a token.
+    #[test]
+    fn endpoint_hosts_are_the_bazel_facing_ones() {
+        let hosts = endpoint_hosts(&Endpoints {
+            cache: "shared.example".to_string(),
+            bes: "shared.example".to_string(),
+            exec: "exec.example".to_string(),
+            api: "api.example".to_string(),
+            results_url: "https://app.example/i/".to_string(),
+        });
+
+        // Deduped, in the order stated.
+        assert_eq!(hosts, vec!["shared.example", "exec.example"]);
+        assert!(endpoint_hosts(&Endpoints::default()).is_empty());
+    }
+
+    /// A config entry that says nothing about hosts leaves the seed's own in
+    /// place, so an entry naming Aspect Cloud to set one field — a rotated
+    /// `client_id`, say — cannot un-own its cache and BES as a side effect.
+    #[test]
+    fn a_config_entry_that_names_no_hosts_keeps_the_seeds_own() {
+        let mut entry = dep(ASPECT_CLOUD_DEPLOYMENT_NAME, false);
+        entry.issuer = Some(DEFAULT_ISSUER.to_string());
+        entry.client_id = Some("rotated-client-id".to_string());
+        entry.hosts = Vec::new();
+
+        let mut seed = aspect_cloud_deployment();
+        merge_into_seed(&mut seed, entry);
+
+        assert_eq!(seed.client_id.as_deref(), Some("rotated-client-id"));
+        assert_eq!(seed.hosts, aspect_cloud_deployment().hosts);
+    }
+
+    /// `$ASPECT_API_TOKEN` is exchanged against Aspect Cloud's issuer, so it stands
+    /// in for Aspect Cloud's credential and no other. Getting this wrong breaks CI
+    /// logins silently, since CI sets the env var and never notices a credential
+    /// was not used.
+    #[test]
+    fn the_api_token_env_stands_in_for_aspect_cloud_only() {
+        let _guard = profile_env_guard();
+        // The key a bare login files under is the key the env token stands in for.
+        assert_eq!(
+            login_profile_for(&aspect_cloud_deployment()),
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        );
+        // And a self-hosted deployment's key is not it, so Aspect Cloud token can
+        // never be handed to a deployment on another issuer.
+        assert_ne!(
+            login_profile_for(&dep("acme", false)),
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        );
+    }
+
+    /// The store's two axes stay independent: `$ASPECT_AUTH_PROFILE` chooses the
+    /// profile and never the key within it. Crossing them would have one identity's
+    /// credential answer for another deployment.
+    ///
+    /// An env var rather than a flag because the Bazel credential helper takes no
+    /// flags, so it is the only thing that can steer the CLI and the helper alike.
+    #[test]
+    fn the_profile_env_chooses_the_profile_not_the_deployment_key() {
+        let _guard = profile_env_guard();
+        let saved = std::env::var(PROFILE_ENV).ok();
+
+        // SAFETY: single-threaded test body, guarded above, restored before return.
+        unsafe { std::env::set_var(PROFILE_ENV, "bob") };
+        assert_eq!(resolve_profile(None), "bob");
+        // The key a deployment files under is unmoved by it.
+        assert_eq!(
+            login_profile_for(&aspect_cloud_deployment()),
+            ASPECT_CLOUD_DEPLOYMENT_NAME
+        );
+        assert_eq!(login_profile_for(&dep("acme", false)), "acme");
+        // An explicit `--profile` still wins over the env.
+        assert_eq!(resolve_profile(Some("susan")), "susan");
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var(PROFILE_ENV, v) },
+            None => unsafe { std::env::remove_var(PROFILE_ENV) },
+        }
+    }
+
     #[test]
     fn cloud_bearer_prefers_access_token_then_id_token() {
-        // The Aspect-cloud flow (prefer_id_token = false) validates the
+        // The Aspect Cloud flow (prefer_id_token = false) validates the
         // access_token, falling back to the id_token only if absent.
         assert_eq!(token_response("acc", "idt").bearer(false).unwrap(), "acc");
         assert_eq!(token_response("", "idt").bearer(false).unwrap(), "idt");
@@ -3734,11 +6387,13 @@ mod tests {
             Some("https://acme.auth.aspect.build".into()),
             Some("abc".into()),
             true,
+            IssuerKind::TenantApi,
         )
         .unwrap();
         assert_eq!(e.access_token, jwt);
         assert_eq!(e.email, "u@x.io");
         assert_eq!(e.tenant_id, "t1");
+        assert_eq!(e.issuer_kind, IssuerKind::TenantApi);
         assert!(e.prefer_id_token);
         assert_eq!(
             e.auth_domain.as_deref(),
@@ -3748,7 +6403,9 @@ mod tests {
         // A self-hosted id_token without email/tenantId decodes with empty
         // defaults (display-only) rather than failing.
         let bare = jwt_with_payload(r#"{"sub":"user-1"}"#);
-        let e = CredentialsEntry::from_bearer(bare, String::new(), None, None, false).unwrap();
+        let e =
+            CredentialsEntry::from_bearer(bare, String::new(), None, None, false, IssuerKind::Oidc)
+                .unwrap();
         assert_eq!(e.email, "");
         assert_eq!(e.tenant_id, "");
         assert_eq!(e.name, "Unknown");
@@ -3770,20 +6427,22 @@ mod tests {
     fn build_authorize_url_encodes_params_and_handles_query_and_state() {
         let scopes = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // No prior query → `?` separator; no state; scopes space-joined+encoded.
-        let cloud = build_authorize_url(
+        let plain = build_authorize_url(
             "https://auth.aspect.build/oauth/authorize",
             "client-1",
-            "http://localhost:19556/callback",
+            "https://app.aspect.build/auth/cli/callback",
             &scopes(&["openid", "profile", "email"]),
             "chal",
             None,
             &BTreeMap::new(),
         );
-        assert!(cloud.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
-        assert!(cloud.contains("redirect_uri=http%3A%2F%2Flocalhost%3A19556%2Fcallback"));
-        assert!(cloud.contains("scope=openid%20profile%20email"));
-        assert!(cloud.contains("code_challenge_method=S256"));
-        assert!(!cloud.contains("state="));
+        assert!(plain.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
+        assert!(
+            plain.contains("redirect_uri=https%3A%2F%2Fapp.aspect.build%2Fauth%2Fcli%2Fcallback")
+        );
+        assert!(plain.contains("scope=openid%20profile%20email"));
+        assert!(plain.contains("code_challenge_method=S256"));
+        assert!(!plain.contains("state="));
 
         // Discovery endpoint that already has a query → `&` separator; state appended.
         let with_state = build_authorize_url(
@@ -3825,7 +6484,7 @@ mod tests {
 
     #[test]
     fn deployment_name_for_host_matches_owning_deployment() {
-        let deployments = vec![default_deployment(), dep("acme", false)];
+        let deployments = vec![aspect_cloud_deployment(), dep("acme", false)];
         // dep("acme") owns remote.acme.aspect.build.
         assert_eq!(
             deployment_name_for_host(&deployments, "remote.acme.aspect.build").as_deref(),
@@ -3846,9 +6505,15 @@ mod tests {
             deployment_name_for_host(&deployments, "remote.acme.aspect.build.").as_deref(),
             Some("acme")
         );
-        // A host no configured deployment claims → None (no token attached).
+        // Aspect Cloud's own BES is Aspect Cloud's, stated by the seed rather than
+        // configured anywhere.
         assert_eq!(
-            deployment_name_for_host(&deployments, "bes.aspect.build"),
+            deployment_name_for_host(&deployments, "bes.aspect.build").as_deref(),
+            Some(ASPECT_CLOUD_DEPLOYMENT_NAME)
+        );
+        // A host nothing claims → None (no token attached).
+        assert_eq!(
+            deployment_name_for_host(&deployments, "bes.example.com"),
             None
         );
     }
@@ -3860,39 +6525,50 @@ mod tests {
         let mut existing = vec![dep("acme", true), dep("emca", false)];
         let mut incoming = dep("acme", false);
         incoming.issuer = Some("https://acme.auth.aspect.build/v2".to_string());
-        assert!(upsert_deployment(&mut existing, incoming).unwrap());
+        assert!(upsert_deployment(&mut existing, incoming, false).unwrap());
         let acme = existing.iter().find(|d| d.name == "acme").unwrap();
         assert!(acme.default, "re-configured current default stays default");
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
     }
 
+    /// Configuring never moves the default; only `--default` does. Aspect Cloud is
+    /// a working default from the first login, so a deployment taking over on
+    /// `configure` would change what every `--remote` build talks to without the
+    /// user asking.
     #[test]
-    fn upsert_first_entry_and_explicit_default() {
-        // First configured entry becomes default even without claiming it.
+    fn configuring_a_deployment_does_not_take_the_default() {
         let mut existing: Vec<Deployment> = vec![];
-        assert!(upsert_deployment(&mut existing, dep("acme", false)).unwrap());
+        assert!(
+            !upsert_deployment(&mut existing, dep("acme", false), false).unwrap(),
+            "the first configured deployment leaves the default with Aspect Cloud"
+        );
+        assert!(existing.iter().all(|d| !d.default));
 
-        // A later entry claiming default steals it from the previous one.
-        assert!(upsert_deployment(&mut existing, dep("emca", true)).unwrap());
+        // The second behaves exactly as the first: nothing about the default
+        // depends on the order deployments were configured in.
+        assert!(!upsert_deployment(&mut existing, dep("emca", false), false).unwrap());
+        assert!(existing.iter().all(|d| !d.default));
+
+        // `--default` is the user saying so, and takes it from whoever holds it.
+        assert!(upsert_deployment(&mut existing, dep("emca", true), false).unwrap());
         assert_eq!(existing.iter().filter(|d| d.default).count(), 1);
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
-        assert!(!existing.iter().find(|d| d.name == "acme").unwrap().default);
 
-        // A later non-default entry does not disturb the existing default.
-        assert!(!upsert_deployment(&mut existing, dep("third", false)).unwrap());
+        // A later plain configure leaves that alone.
+        assert!(!upsert_deployment(&mut existing, dep("third", false), false).unwrap());
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
     }
 
     #[test]
     fn reconcile_seed_default_yields_to_configured_default() {
         // Seed loads default=true; a configured default clears it.
-        let mut merged = vec![default_deployment(), dep("acme", true)];
+        let mut merged = vec![aspect_cloud_deployment(), dep("acme", true)];
         reconcile_seed_default(&mut merged);
         assert!(!merged[0].default, "seed yields to configured default");
         assert!(merged[1].default);
 
         // No configured default → the seed stays default (the fallback state).
-        let mut none_configured = vec![default_deployment(), dep("acme", false)];
+        let mut none_configured = vec![aspect_cloud_deployment(), dep("acme", false)];
         reconcile_seed_default(&mut none_configured);
         assert!(none_configured[0].default, "seed is the default fallback");
     }
@@ -3907,7 +6583,7 @@ mod tests {
 
         // Selecting the built-in seed clears every configured default (no
         // configured deployment is default → seed is the fallback).
-        apply_set_default(&mut ds, Some(DEFAULT_DEPLOYMENT_NAME)).unwrap();
+        apply_set_default(&mut ds, Some(ASPECT_CLOUD_DEPLOYMENT_NAME)).unwrap();
         assert!(ds.iter().all(|d| !d.default));
 
         // None also clears (the logged-out-of-default state).
@@ -3923,7 +6599,7 @@ mod tests {
         // `default` is reserved from being *configured*, but it is not the
         // account — so `auth use default` must error like any unknown name
         // rather than silently clear every default (which would send `--remote`
-        // back to the account while reporting success).
+        // back to Aspect Cloud while reporting success).
         ds[0].default = true;
         let err = apply_set_default(&mut ds, Some(DEFAULT_PROFILE)).unwrap_err();
         assert!(err.to_string().contains("unknown deployment"), "{err}");
@@ -3932,11 +6608,14 @@ mod tests {
 
     #[test]
     fn summarize_deployment_reflects_credential_and_default() {
+        // Reads $ASPECT_AUTH_PROFILE through `login_profile_for`.
+        let _guard = profile_env_guard();
         let jwt = jwt_with_payload(r#"{"email":"u@x.io","name":"U"}"#);
         let mut creds = HashMap::new();
         creds.insert(
             "acme".to_string(),
-            CredentialsEntry::from_bearer(jwt, String::new(), None, None, false).unwrap(),
+            CredentialsEntry::from_bearer(jwt, String::new(), None, None, false, IssuerKind::Oidc)
+                .unwrap(),
         );
 
         // A logged-in configured deployment: identity from the credential,
@@ -3946,6 +6625,7 @@ mod tests {
             cache: "remote.acme".to_string(),
             bes: "bes.acme".to_string(),
             exec: String::new(),
+            api: String::new(),
             results_url: "https://app.acme/i/".to_string(),
         };
         let s = summarize_deployment(&acme, &creds, true);
@@ -3962,8 +6642,45 @@ mod tests {
         assert!(!s.logged_in && s.email.is_empty() && s.status.is_empty());
 
         // The built-in seed is default only when nothing configured claims it.
-        assert!(summarize_deployment(&default_deployment(), &creds, false).default);
-        assert!(!summarize_deployment(&default_deployment(), &creds, true).default);
+        assert!(summarize_deployment(&aspect_cloud_deployment(), &creds, false).default);
+        assert!(!summarize_deployment(&aspect_cloud_deployment(), &creds, true).default);
+    }
+
+    #[test]
+    fn deployment_endpoints_come_from_config_alone() {
+        // No credential store is consulted: the row carries the endpoints, the
+        // default marking, and the API-token variable, nothing login-derived.
+        let mut acme = dep("acme", true);
+        acme.endpoints = Endpoints {
+            cache: "remote.acme".to_string(),
+            bes: "bes.acme".to_string(),
+            exec: "exec.acme".to_string(),
+            api: String::new(),
+            results_url: "https://app.acme/i/".to_string(),
+        };
+        let e = DeploymentEndpoints::of(&acme, true);
+        assert!(e.default && !e.builtin);
+        assert_eq!(
+            (e.cache.as_str(), e.bes.as_str(), e.exec.as_str()),
+            ("remote.acme", "bes.acme", "exec.acme")
+        );
+        assert_eq!(e.results_url, "https://app.acme/i/");
+        assert_eq!(e.api_token_env, api_token_env_var("acme"));
+
+        // The built-in seed is default only when nothing configured claims it,
+        // the same rule `summarize_deployment` applies.
+        let seed = DeploymentEndpoints::of(&aspect_cloud_deployment(), false);
+        assert!(seed.builtin && seed.default);
+        assert_eq!(seed.api_token_env, API_TOKEN_ENV);
+        assert!(!DeploymentEndpoints::of(&aspect_cloud_deployment(), true).default);
+
+        let deployments = vec![
+            aspect_cloud_deployment(),
+            dep("acme", true),
+            dep("other", false),
+        ];
+        assert!(any_configured_default(&deployments));
+        assert!(!any_configured_default(&deployments[..1]));
     }
 
     #[test]
@@ -4072,12 +6789,12 @@ mod tests {
         // expires like any other, so it asks for offline_access; without the scope an
         // expired cloud credential forces an interactive re-login, since the
         // issuer-agnostic refresh path has nothing to refresh from.
-        let scopes = auth_env_from(&default_deployment()).unwrap().scopes;
+        let scopes = auth_env_from(&aspect_cloud_deployment()).unwrap().scopes;
         assert!(scopes.iter().any(|s| s == "offline_access"));
         // One list, shared with the no-advertisement fallback.
         assert_eq!(scopes, DEFAULT_LOGIN_SCOPES);
         // And nothing extra on the wire: the cloud IdP gates refresh on the scope.
-        assert!(default_deployment().authorize_params.is_empty());
+        assert!(aspect_cloud_deployment().authorize_params.is_empty());
     }
 
     #[test]
@@ -4094,6 +6811,7 @@ mod tests {
             Some(DEFAULT_CLIENT_ID.to_string()),
             // Cloud sends the access_token, not the id_token.
             false,
+            IssuerKind::TenantApi,
         )
         .unwrap();
         assert!(can_refresh(&cloud));
@@ -4109,6 +6827,673 @@ mod tests {
         assert_eq!(merged_refresh_token("old", ""), "old");
         // No prior and none returned → empty (nothing to refresh with).
         assert_eq!(merged_refresh_token("", ""), "");
+    }
+
+    fn entry_with_tenant(tenant: &str, kind: IssuerKind) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}"}}"#)),
+            "refresh".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            false,
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn issuer_kind_defaults_to_oidc_and_is_omitted_when_so() {
+        // Entries written before the field existed load as plain OIDC sessions,
+        // and a plain OIDC session writes no field (no churn in the store).
+        let json = r#"{"access_token":"a","email":"u@x.io","name":"U","tenant_id":"t"}"#;
+        let e: CredentialsEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.issuer_kind, IssuerKind::Oidc);
+        assert!(!serde_json::to_string(&e).unwrap().contains("issuer_kind"));
+
+        let mut tenant_api = e.clone();
+        tenant_api.issuer_kind = IssuerKind::TenantApi;
+        let out = serde_json::to_string(&tenant_api).unwrap();
+        assert!(out.contains(r#""issuer_kind":"tenant-api""#), "{out}");
+        let back: CredentialsEntry = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.issuer_kind, IssuerKind::TenantApi);
+    }
+
+    #[test]
+    fn the_trace_header_identifies_the_tenant_api() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(
+            IssuerKind::from_response_headers(&headers),
+            IssuerKind::Oidc
+        );
+        headers.insert(TENANT_API_TRACE_HEADER, "513960cf".parse().unwrap());
+        assert_eq!(
+            IssuerKind::from_response_headers(&headers),
+            IssuerKind::TenantApi
+        );
+    }
+
+    #[test]
+    fn a_tenant_move_is_detected_only_when_both_sides_name_one() {
+        let prior = entry_with_tenant("t1", IssuerKind::TenantApi);
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("t2", IssuerKind::TenantApi)),
+            Some("t2".to_string())
+        );
+        // The same tenant is no move, and neither is a credential with no tenant
+        // on either side: an issuer that mints no tenantId has nothing to compare.
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("t1", IssuerKind::TenantApi)),
+            None
+        );
+        assert_eq!(
+            tenant_moved(
+                &entry_with_tenant("", IssuerKind::Oidc),
+                &entry_with_tenant("t2", IssuerKind::Oidc)
+            ),
+            None
+        );
+        assert_eq!(
+            tenant_moved(&prior, &entry_with_tenant("", IssuerKind::TenantApi)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tenant_change_names_both_tenants_and_the_login() {
+        let changed = RefreshFailure::TenantChanged {
+            was: "t1".into(),
+            now: "t2".into(),
+        };
+        let msg = changed.message(ASPECT_CLOUD_DEPLOYMENT_NAME);
+        assert!(
+            msg.contains("refresh the login for organization t1"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("is now t2, and setting it back to t1 failed"),
+            "{msg}"
+        );
+        assert!(msg.contains("`aspect auth login`"), "{msg}");
+        assert!(
+            msg.contains("`aspect auth login --with-api-token`"),
+            "{msg}"
+        );
+        assert!(msg.contains("set ASPECT_API_TOKEN."), "{msg}");
+        let msg = changed.message("acme");
+        assert!(
+            msg.contains("`aspect auth login --deployment acme --with-api-token`"),
+            "{msg}"
+        );
+        assert!(msg.contains("set ASPECT_API_TOKEN_ACME."), "{msg}");
+        // Any other failure keeps the plain expiry message.
+        assert_eq!(
+            RefreshFailure::Failed.message("acme"),
+            session_expired_message("acme")
+        );
+    }
+
+    #[test]
+    fn tenant_api_urls_join_the_issuer_and_path_once() {
+        assert_eq!(
+            tenant_api_url("https://auth.example.com/", TENANT_API_TENANTS_PATH),
+            "https://auth.example.com/identity/resources/users/v3/me/tenants"
+        );
+        assert_eq!(
+            tenant_api_url("https://auth.example.com", TENANT_API_SWITCH_PATH),
+            "https://auth.example.com/identity/resources/users/v1/tenant"
+        );
+    }
+
+    #[test]
+    fn an_organization_without_a_name_shows_its_id() {
+        assert_eq!(
+            Organization::named("id-1".into(), "Acme".into()).name,
+            "Acme"
+        );
+        assert_eq!(
+            Organization::named("id-1".into(), String::new()).name,
+            "id-1"
+        );
+    }
+
+    #[test]
+    fn an_org_request_with_nothing_to_choose_from_says_so() {
+        let msg = unknown_organization_message("acme", &[]);
+        assert!(msg.contains("reports no organizations"), "{msg}");
+        assert!(!msg.contains("Choose one of"), "{msg}");
+    }
+
+    #[test]
+    fn tenant_ids_come_from_the_claim() {
+        let e = CredentialsEntry::from_bearer(
+            jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#),
+            String::new(),
+            None,
+            None,
+            false,
+            IssuerKind::TenantApi,
+        )
+        .unwrap();
+        assert_eq!(e.tenant_ids(), vec!["t1".to_string(), "t2".to_string()]);
+        assert!(
+            entry_with_tenant("t1", IssuerKind::Oidc)
+                .tenant_ids()
+                .is_empty()
+        );
+    }
+
+    fn org(id: &str, name: &str) -> Organization {
+        Organization {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn find_organization_matches_id_then_name_ignoring_case() {
+        let orgs = vec![
+            org("id-1", "Acme"),
+            org("id-2", "Beta"),
+            org("id-3", "beta"),
+        ];
+        assert_eq!(find_organization(&orgs, "id-2").unwrap().name, "Beta");
+        assert_eq!(find_organization(&orgs, " acme ").unwrap().id, "id-1");
+        // Two organizations share a name: ambiguous, so nothing matches.
+        assert!(find_organization(&orgs, "BETA").is_none());
+        assert!(find_organization(&orgs, "nope").is_none());
+
+        let msg = unknown_organization_message("nope", &orgs);
+        assert!(msg.contains("'nope'"), "{msg}");
+        assert!(msg.contains("Acme (id-1)"), "{msg}");
+    }
+
+    #[test]
+    fn organizations_are_listed_for_tenant_api_credentials_only() {
+        let runtime = current_thread_runtime();
+        let jwt = jwt_with_payload(r#"{"tenantId":"t1","tenantIds":["t1","t2"]}"#);
+        // With no issuer recorded there is nowhere to fetch names from, so the
+        // claim's ids stand in for them.
+        let tenant_api = CredentialsEntry::from_bearer(
+            jwt.clone(),
+            "r".into(),
+            None,
+            None,
+            false,
+            IssuerKind::TenantApi,
+        )
+        .unwrap();
+        let orgs = runtime.block_on(list_organizations(&tenant_api));
+        let listed: Vec<_> = orgs
+            .iter()
+            .map(|o| (o.id.as_str(), o.name.as_str()))
+            .collect();
+        assert_eq!(listed, vec![("t1", "t1"), ("t2", "t2")]);
+
+        let oidc =
+            CredentialsEntry::from_bearer(jwt, "r".into(), None, None, false, IssuerKind::Oidc)
+                .unwrap();
+        assert!(runtime.block_on(list_organizations(&oidc)).is_empty());
+    }
+
+    /// One request a [`MockIssuer`] answered: its request line parts, the raw
+    /// header block lower-cased (hyper writes header names that way), and body.
+    struct Received {
+        method: String,
+        path: String,
+        headers: String,
+        body: String,
+    }
+
+    /// A loopback HTTP/1.1 issuer for the refresh paths: answers exactly
+    /// `connections` requests, one per connection (every response closes it, so
+    /// reqwest reconnects for the next), from `respond`, which maps a request to
+    /// a `(status, JSON body)`. `finish()` joins the server and hands back what it
+    /// received, in order, so a test can assert on the route each step took.
+    /// `start_tenant_api` stamps every response with the tenant API's trace
+    /// header, the way that provider's edge does.
+    struct MockIssuer {
+        address: std::net::SocketAddr,
+        received: std::sync::Arc<Mutex<Vec<Received>>>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockIssuer {
+        fn start(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+        ) -> Self {
+            Self::start_with(connections, respond, false)
+        }
+
+        fn start_tenant_api(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+        ) -> Self {
+            Self::start_with(connections, respond, true)
+        }
+
+        fn start_with(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
+            trace_header: bool,
+        ) -> Self {
+            use std::io::Write;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let received = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let log = received.clone();
+            let server = std::thread::spawn(move || {
+                for _ in 0..connections {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = Self::read_request(&mut stream);
+                    let (status, body) = respond(&request);
+                    log.lock().unwrap().push(request);
+                    let reason = match status {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        404 => "Not Found",
+                        _ => "Other",
+                    };
+                    let trace = if trace_header {
+                        format!("{TENANT_API_TRACE_HEADER}: mock\r\n")
+                    } else {
+                        String::new()
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\n{trace}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            MockIssuer {
+                address,
+                received,
+                server: Some(server),
+            }
+        }
+
+        fn read_request(stream: &mut std::net::TcpStream) -> Received {
+            use std::io::Read;
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "connection closed before the headers ended");
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "connection closed before the body ended");
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let body =
+                String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string();
+            let mut request_line = headers
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace();
+            Received {
+                method: request_line.next().unwrap_or_default().to_uppercase(),
+                path: request_line.next().unwrap_or_default().to_string(),
+                headers,
+                body,
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        fn finish(mut self) -> Vec<Received> {
+            self.server.take().unwrap().join().unwrap();
+            std::mem::take(&mut *self.received.lock().unwrap())
+        }
+    }
+
+    /// A token response minting for `tenant`, rotating the refresh token.
+    fn token_body_for(tenant: &str) -> String {
+        format!(
+            r#"{{"access_token":"{}","refresh_token":"rotated"}}"#,
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}"}}"#))
+        )
+    }
+
+    /// An expired credential from `issuer` pinned to `tenant`.
+    fn stored_entry(issuer: &str, tenant: &str, kind: IssuerKind) -> CredentialsEntry {
+        CredentialsEntry::from_bearer(
+            jwt_with_payload(&format!(r#"{{"tenantId":"{tenant}","exp":1}}"#)),
+            "refresh-token".into(),
+            Some(issuer.into()),
+            Some("client-id-1".into()),
+            false,
+            kind,
+        )
+        .unwrap()
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The routes the refresh grant takes against an issuer serving no discovery
+    /// document: the conventional token endpoint after a 404'd discovery probe.
+    fn respond_to_grant(request: &Received, tenant: &str) -> (u16, String) {
+        match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            "/oauth/token" => (200, token_body_for(tenant)),
+            other => panic!("unexpected request to {other}"),
+        }
+    }
+
+    #[test]
+    fn a_refresh_for_the_same_tenant_rotates_the_credential() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.refresh_token, "rotated");
+        assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", "/oauth/token"]
+        );
+    }
+
+    #[test]
+    fn a_login_that_missed_the_tenant_api_is_upgraded_on_refresh() {
+        // Stored as plain OIDC (the discovery request failed at login), but the
+        // issuer answers with its trace header now, even on a 404: the returned
+        // credential records the tenant API, so the caller persists the upgrade.
+        let issuer = MockIssuer::start_tenant_api(2, |request| respond_to_grant(request, "t1"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(issuer.finish().len(), 2);
+    }
+
+    #[test]
+    fn issuer_kind_detection_only_ever_upgrades() {
+        use IssuerKind::{Oidc, TenantApi};
+        assert_eq!(Oidc.or(Oidc), Oidc);
+        assert_eq!(Oidc.or(TenantApi), TenantApi);
+        assert_eq!(TenantApi.or(Oidc), TenantApi);
+        assert_eq!(TenantApi.or(TenantApi), TenantApi);
+    }
+
+    #[test]
+    fn a_refresh_that_landed_in_another_tenant_sets_the_default_back() {
+        // The grant mints for t2 until the default is set back to t1; the switch
+        // is made with the t2 token just minted, and the second grant lands home.
+        let switched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let issuer = MockIssuer::start(4, {
+            let switched = switched.clone();
+            move |request| match request.path.as_str() {
+                "/.well-known/openid-configuration" => (404, String::new()),
+                TENANT_API_SWITCH_PATH => {
+                    assert!(
+                        request.body.contains(r#""tenantId":"t1""#),
+                        "{}",
+                        request.body
+                    );
+                    switched.store(true, std::sync::atomic::Ordering::SeqCst);
+                    (200, "{}".into())
+                }
+                "/oauth/token" => {
+                    let tenant = if switched.load(std::sync::atomic::Ordering::SeqCst) {
+                        "t1"
+                    } else {
+                        "t2"
+                    };
+                    (200, token_body_for(tenant))
+                }
+                other => panic!("unexpected request to {other}"),
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.refresh_token, "rotated");
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/.well-known/openid-configuration",
+                "/oauth/token",
+                TENANT_API_SWITCH_PATH,
+                "/oauth/token"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_that_cannot_be_set_back_is_refused_after_a_few_tries() {
+        let issuer = MockIssuer::start(2 + RESTORE_DEFAULT_ATTEMPTS, |request| {
+            match request.path.as_str() {
+                TENANT_API_SWITCH_PATH => (500, r#"{"errors":["nope"]}"#.into()),
+                _ => respond_to_grant(request, "t2"),
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        let switches = issuer
+            .finish()
+            .iter()
+            .filter(|r| r.path == TENANT_API_SWITCH_PATH)
+            .count();
+        assert_eq!(switches, RESTORE_DEFAULT_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_default_another_client_keeps_moving_is_never_adopted() {
+        // Two CLI sessions in different organizations refreshing at once: our
+        // switch succeeds every time, but the grant keeps minting for the other
+        // session's tenant because it moved the default back in between. Nothing
+        // but a token for our own tenant is ever accepted.
+        let issuer = MockIssuer::start(2 + 2 * RESTORE_DEFAULT_ATTEMPTS, |request| {
+            match request.path.as_str() {
+                TENANT_API_SWITCH_PATH => (200, "{}".into()),
+                _ => respond_to_grant(request, "t2"),
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        let grants = issuer
+            .finish()
+            .iter()
+            .filter(|r| r.path == "/oauth/token")
+            .count();
+        assert_eq!(grants, 1 + RESTORE_DEFAULT_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_grant_for_another_tenant_is_refused_without_the_tenant_api() {
+        // Nothing to set back with, so the mismatch is refused outright.
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t2"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            RefreshFailure::TenantChanged {
+                was: "t1".into(),
+                now: "t2".into()
+            }
+        );
+        issuer.finish();
+    }
+
+    #[test]
+    fn a_plain_oidc_credential_never_touches_the_tenant_api() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.issuer_kind, IssuerKind::Oidc);
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", "/oauth/token"]
+        );
+    }
+
+    #[test]
+    fn a_failed_grant_is_reported_as_a_plain_failure() {
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/oauth/token" => (401, r#"{"errors":["invalid_grant"]}"#.into()),
+            _ => respond_to_grant(request, "t1"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(failure, RefreshFailure::Failed);
+        issuer.finish();
+    }
+
+    #[test]
+    fn a_refusal_names_the_call_with_its_status_and_body() {
+        let issuer = MockIssuer::start(1, |_| (401, r#"{"errors":["invalid_grant"]}"#.into()));
+        let error = current_thread_runtime()
+            .block_on(post_form::<serde_json::Value>(
+                &format!("{}/oauth/token", issuer.url()),
+                &[("grant_type", "refresh_token")],
+                "token refresh",
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("token refresh failed (HTTP 401 Unauthorized): "),
+            "{error}"
+        );
+        assert!(
+            error.ends_with(r#"{"errors":["invalid_grant"]}"#),
+            "{error}"
+        );
+        issuer.finish();
+    }
+
+    #[test]
+    fn selecting_an_organization_needs_a_refresh_token() {
+        let mut entry = stored_entry("http://127.0.0.1:1", "t1", IssuerKind::TenantApi);
+        entry.refresh_token.clear();
+        let error = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no refresh token stored"), "{error}");
+    }
+
+    #[test]
+    fn selecting_an_organization_sets_the_default_tenant_then_refreshes() {
+        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
+            TENANT_API_SWITCH_PATH => {
+                assert_eq!(request.method, "PUT");
+                assert!(
+                    request.body.contains(r#""tenantId":"t2""#),
+                    "{}",
+                    request.body
+                );
+                (200, "{}".into())
+            }
+            _ => respond_to_grant(request, "t2"),
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let selected = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap();
+        assert_eq!(selected.tenant_id, "t2");
+
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/.well-known/openid-configuration",
+                TENANT_API_SWITCH_PATH,
+                "/oauth/token"
+            ]
+        );
+    }
+
+    #[test]
+    fn organizations_are_named_from_the_tenants_endpoint() {
+        let issuer = MockIssuer::start(1, |request| {
+            assert_eq!(request.path, TENANT_API_TENANTS_PATH);
+            assert!(
+                request.headers.contains("authorization: bearer "),
+                "{}",
+                request.headers
+            );
+            (
+                200,
+                r#"{"tenants":[{"tenantId":"t1","name":"Acme"},{"tenantId":"t2","name":""}],"activeTenant":{"tenantId":"t1"}}"#.into(),
+            )
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+
+        let orgs = current_thread_runtime().block_on(list_organizations(&entry));
+        let listed: Vec<_> = orgs
+            .iter()
+            .map(|o| (o.id.as_str(), o.name.as_str()))
+            .collect();
+        assert_eq!(listed, vec![("t1", "Acme"), ("t2", "t2")]);
+        issuer.finish();
     }
 
     #[test]
@@ -4147,5 +7532,247 @@ mod tests {
             extract_query_param("/cb?code=first&code=second", "code"),
             Some("first".to_string())
         );
+    }
+
+    #[test]
+    fn parse_pasted_callback_reads_a_url_or_an_opaque_code() {
+        for (input, code, state) in [
+            (
+                "  http://localhost:54321/callback?code=abc123&state=nonce.54321  ",
+                "abc123",
+                Some("nonce.54321"),
+            ),
+            ("abc123", "abc123", None),
+            ("YWJjMTIz==", "YWJjMTIz==", None),
+            ("opaque-code=value", "opaque-code=value", None),
+            ("error=opaque", "error=opaque", None),
+        ] {
+            assert_eq!(
+                parse_pasted_callback(input).unwrap(),
+                (code.to_string(), state.map(str::to_string))
+            );
+        }
+        assert_eq!(
+            parse_pasted_callback("https://x/cb?code=a%2Fb").unwrap().0,
+            "a/b"
+        );
+
+        // An authorize error the browser was redirected with is reported as one,
+        // rather than as a missing `code`.
+        let err = parse_pasted_callback(
+            "http://localhost:54321/callback?error=access_denied&error_description=nope",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("access_denied") && err.contains("nope"),
+            "{err}"
+        );
+
+        assert!(
+            parse_pasted_callback("http://localhost:54321/callback")
+                .unwrap_err()
+                .to_string()
+                .contains("no `code` parameter")
+        );
+        assert!(
+            parse_pasted_callback("   ")
+                .unwrap_err()
+                .to_string()
+                .contains("no authorization code")
+        );
+    }
+
+    #[test]
+    fn callback_state_policy_requires_listener_state_and_checks_pasted_state() {
+        assert!(callback_state_matches("expected", Some("expected"), true));
+        assert!(!callback_state_matches("expected", Some("wrong"), true));
+        assert!(!callback_state_matches("expected", None, true));
+        assert!(callback_state_matches("expected", None, false));
+        assert!(!callback_state_matches("expected", Some("wrong"), false));
+    }
+
+    #[test]
+    fn finish_auth_session_exchanges_a_pasted_code_once() {
+        use std::io::{Read, Write};
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let token = jwt_with_exp(None);
+        let response_token = token.clone();
+        let responder = std::thread::spawn(move || {
+            // Two requests: the token exchange resolves the endpoint through OIDC
+            // discovery first. 404 that, so the conventional `/oauth/token` this
+            // server answers is what gets posted to — the fallback a self-hosted
+            // issuer serving no discovery document takes.
+            let (mut stream, _) = server.accept().unwrap();
+            let mut discovery = [0; 1024];
+            let read = stream.read(&mut discovery).unwrap();
+            let discovery = String::from_utf8_lossy(&discovery[..read]).to_string();
+            assert!(
+                discovery.starts_with("GET /.well-known/openid-configuration HTTP/1.1"),
+                "{discovery}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\n{TENANT_API_TRACE_HEADER}: mock\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            drop(stream);
+
+            let (mut stream, _) = server.accept().unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = stream.read(&mut chunk).unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                if read == 0 || String::from_utf8_lossy(&request).contains("code_verifier=verifier")
+                {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /oauth/token HTTP/1.1"));
+            assert!(request.contains("code=auth-code"));
+            assert!(request.contains("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback"));
+            let body =
+                format!(r#"{{"access_token":"{response_token}","refresh_token":"refresh"}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let session = AuthSession {
+            url: "https://auth.example/authorize".to_string(),
+            inner: Mutex::new(Some(AuthSessionInner {
+                listener: None,
+                code_verifier: "verifier".to_string(),
+                redirect_uri: "http://localhost/callback".to_string(),
+                env: AuthEnv {
+                    domain: format!("http://{address}"),
+                    client_id: "client".to_string(),
+                    scopes: Vec::new(),
+                    authorize_params: BTreeMap::new(),
+                },
+                // A pasted code carries no state, which `require_state = false`
+                // allows; the nonce still has to be here for the flow to build.
+                expected_state: "nonce.54321".to_string(),
+                prefer_id_token: false,
+                issuer_kind: IssuerKind::Oidc,
+            })),
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+
+        let credentials = finish_auth_session(&session, Some("auth-code")).unwrap();
+        assert_eq!(credentials.access_token, token);
+        // The session was built when discovery had said nothing (plain OIDC); the
+        // 404 above still carried the tenant API's trace header, so the completed
+        // login records the tenant API rather than the earlier miss.
+        assert_eq!(credentials.issuer_kind, IssuerKind::TenantApi);
+        responder.join().unwrap();
+        assert!(
+            finish_auth_session(&session, Some("auth-code"))
+                .unwrap_err()
+                .to_string()
+                .contains("already consumed")
+        );
+    }
+
+    #[test]
+    fn is_remote_session_spots_ssh_without_a_forwarded_display() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+
+        assert!(is_remote_session(env(&[(
+            "SSH_CONNECTION",
+            "10.0.0.1 22 10.0.0.2 22"
+        )])));
+        assert!(is_remote_session(env(&[("SSH_TTY", "/dev/pts/0")])));
+
+        assert!(!is_remote_session(env(&[
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+            ("DISPLAY", "localhost:10.0"),
+        ])));
+        assert!(!is_remote_session(env(&[
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+            ("DISPLAY", "127.0.0.1:11"),
+        ])));
+
+        // A display on the remote host is not SSH-forwarded, even with a hostname.
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", ":0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "unix:0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "localhost:0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_CONNECTION", "127.0.0.1 22 127.0.0.1 22"),
+            ("DISPLAY", "workstation:10.0"),
+        ])));
+        assert!(is_remote_session(env(&[
+            ("SSH_TTY", "/dev/pts/0"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+        ])));
+
+        assert!(!is_remote_session(env(&[])));
+        assert!(!is_remote_session(env(&[("SSH_CONNECTION", "")])));
+        assert!(!is_remote_session(env(&[("DISPLAY", ":0")])));
+    }
+
+    #[test]
+    fn browser_launchers_has_a_platform_default() {
+        assert!(!browser_launchers().is_empty());
+    }
+
+    #[test]
+    fn launcher_probe_does_not_wait_for_a_long_running_child() {
+        if std::env::var("ASPECT_LAUNCHER_TEST_CHILD").as_deref() == Ok("sleep") {
+            std::thread::sleep(Duration::from_millis(500));
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("launcher_probe_does_not_wait_for_a_long_running_child")
+            .env("ASPECT_LAUNCHER_TEST_CHILD", "sleep")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        assert!(launcher_started(child, Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_failures_fall_through() {
+        assert!(launch_first(
+            &[&["false"], &["true"]],
+            "https://example.com"
+        ));
+        assert!(!launch_first(
+            &[&["false"], &["aspect-no-such-browser-launcher"]],
+            "https://example.com"
+        ));
     }
 }

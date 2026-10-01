@@ -1,12 +1,9 @@
 name: Pre-release Cleanup
-
 on:
   pull_request:
     types: [closed]
-
 permissions:
   contents: write
-
 jobs:
   cleanup:
     if: github.event.pull_request.merged == true

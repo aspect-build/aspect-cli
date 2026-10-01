@@ -639,7 +639,7 @@ def repro_prefix(ctx):
 _TOOLS_BAZEL_WRAPPER_MARKER = "aspect-build/tools-bazel-wrapper"
 
 # Hard cap on `tools/bazel`'s on-disk size before we bother reading it.
-# The Aspect wrapper is ~28 KiB; any reasonable fork stays well under
+# The Aspect wrapper is ~7 KiB; any reasonable fork stays well under
 # 64 KiB. Above this we assume the file isn't an Aspect-shaped wrapper
 # (could be a vendored binary or a megabyte-scale custom script) and
 # skip the read.

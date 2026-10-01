@@ -65,8 +65,8 @@ impl Wasm {
 #[starlark_value(type = "wasm.Wasm")]
 impl<'v> values::StarlarkValue<'v> for Wasm {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(wasm_methods)
+        static RES: MethodsStatic = MethodsStatic::new("wasm_methods", wasm_methods);
+        Some(RES.methods())
     }
 }
 

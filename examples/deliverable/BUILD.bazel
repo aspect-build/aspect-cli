@@ -97,3 +97,11 @@ exit 1
 )""",
     tags = ["manual"],
 )
+
+# Runs for 15s and fails unless the delivery task kept sending task updates
+# meanwhile (see slow_deliver.sh). Not tagged `deliverable`: only the
+# delivery-heartbeat CI job delivers it, naming it with --query.
+sh_binary(
+    name = "slow_deliverable",
+    srcs = ["slow_deliver.sh"],
+)

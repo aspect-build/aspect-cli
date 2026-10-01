@@ -14,4 +14,4 @@ allocative = "0.3.4"
 anyhow = "1"
 derive_more = { version = "2.0.1", features = ["display"] }
 dupe = "0.9.1"
-starlark = "0.13.0"
+starlark = "0.14.2"

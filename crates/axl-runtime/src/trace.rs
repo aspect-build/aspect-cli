@@ -184,8 +184,8 @@ impl<'v> StarlarkValue<'v> for Trace {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(trace_methods)
+        static RES: MethodsStatic = MethodsStatic::new("trace_methods", trace_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attr: &str, _heap: Heap<'v>) -> Option<Value<'v>> {

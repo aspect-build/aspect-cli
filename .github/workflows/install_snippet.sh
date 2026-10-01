@@ -2,7 +2,7 @@
 
 set -o errexit -o nounset -o pipefail
 
-# TAG is provided by the calling workflow (e.g. "v2026.19.2"). Strip the
+# TAG is provided by the calling workflow (e.g. "v2026.38.30"). Strip the
 # leading "v" to match the version string used in .aspect/version.axl.
 VERSION="${TAG#v}"
 

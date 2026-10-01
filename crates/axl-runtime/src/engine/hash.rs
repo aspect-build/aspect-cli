@@ -150,8 +150,8 @@ impl<'v> Freeze for HashObject<'v> {
 #[starlark_value(type = "hash")]
 impl<'v> StarlarkValue<'v> for HashObject<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(hash_object_methods)
+        static RES: MethodsStatic = MethodsStatic::new("hash_object_methods", hash_object_methods);
+        Some(RES.methods())
     }
 }
 
@@ -218,8 +218,9 @@ impl<'v> StarlarkValue<'v> for FrozenHashObject {
     type Canonical = HashObject<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(frozen_hash_object_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("frozen_hash_object_methods", frozen_hash_object_methods);
+        Some(RES.methods())
     }
 }
 

@@ -1,6 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use allocative::Allocative;
 use anyhow::anyhow;
@@ -26,8 +29,10 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
+use starlark::values::typing::StarlarkNever;
 
 use super::stream;
+use crate::eval::TaskExit;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Process>")]
@@ -42,8 +47,8 @@ impl Process {
 #[starlark_value(type = "std.process.Process")]
 impl<'v> values::StarlarkValue<'v> for Process {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(process_methods)
+        static RES: MethodsStatic = MethodsStatic::new("process_methods", process_methods);
+        Some(RES.methods())
     }
 }
 
@@ -57,6 +62,7 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<Command> {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
+            process_group: Cell::new(None),
         })
     }
 
@@ -71,6 +77,58 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     fn id<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<i32> {
         Ok(process::id() as i32)
     }
+
+    /// End the task with exit `code` (0..=255, no default, as in Rust's
+    /// `std::process::exit`) and, optionally, a `message`, with no traceback.
+    /// The message prints as an `ERROR:` line for a non-zero code and `INFO:`
+    /// for 0. Use it for an expected refusal, or an early "nothing to do",
+    /// from however deep in the call stack it is discovered; keep `fail()` for
+    /// bugs, where the traceback helps. `ASPECT_DEBUG=1` prints the traceback
+    /// after the message anyway.
+    ///
+    /// The exit unwinds through every caller like an error: `ctx.defer`
+    /// callbacks still run, but whatever the task body had yet to run does
+    /// not, including a status surface's final update. A task that reports to
+    /// a surface ends through its final `phases.update` instead.
+    fn exit<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] code: i32,
+        #[starlark(default = NoneOr::None)] message: NoneOr<&'v str>,
+    ) -> anyhow::Result<StarlarkNever> {
+        let code =
+            u8::try_from(code).map_err(|_| anyhow!("exit code must be 0..=255, got {code}"))?;
+        Err(TaskExit::new(code, message.into_option().map(str::to_owned)).into())
+    }
+
+    /// The absolute path `command(name)` would run, or `None` when no `PATH`
+    /// entry holds an executable of that name — `which` / `command -v`.
+    ///
+    /// A bare name is looked up along `PATH`; a name containing a path
+    /// separator is checked as given. On Unix the file must carry an execute
+    /// bit; on Windows the `PATHEXT` extensions are tried.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// helper = "aspect" if ctx.std.process.which("aspect") else ctx.std.env.current_exe()
+    /// ```
+    fn which<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] name: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        Ok(
+            match find_executable(name, std::env::var_os("PATH").as_deref()) {
+                Some(path) => NoneOr::Other(
+                    heap.alloc_str(
+                        path.to_str()
+                            .ok_or_else(|| anyhow::anyhow!("path of `{name}` is non utf-8"))?,
+                    ),
+                ),
+                None => NoneOr::None,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
@@ -78,6 +136,8 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
+    #[allocative(skip)]
+    process_group: Cell<Option<i32>>,
 }
 
 impl Command {
@@ -111,8 +171,8 @@ impl<'v> AllocValue<'v> for Command {
 #[starlark_value(type = "std.process.Command")]
 impl<'v> values::StarlarkValue<'v> for Command {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(command_methods)
+        static RES: MethodsStatic = MethodsStatic::new("command_methods", command_methods);
+        Some(RES.methods())
     }
 }
 
@@ -188,6 +248,26 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Assign the command to process group `group`.
+    ///
+    /// On Unix, `0` starts the command as the leader of a new process group.
+    /// A grouped child can be terminated together with the other processes in
+    /// that group by calling [`Child.kill_all`]. This setting has no effect on
+    /// Windows.
+    fn process_group<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] group: i32,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        if group < 0 {
+            return Err(anyhow!("process group must be non-negative, got {group}"));
+        }
+        #[cfg(unix)]
+        cmd.inner.borrow_mut().process_group(group);
+        cmd.process_group.set(Some(group));
+        Ok(this)
+    }
+
     /// Configuration for the child process's standard input (stdin) handle.
     ///
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
@@ -247,6 +327,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         let child = cmd.try_spawn()?;
         Ok(Child {
             inner: RefCell::new(Some(child)),
+            process_group: cmd.process_group.get(),
         })
     }
 
@@ -267,6 +348,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
+    process_group: Option<i32>,
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -278,8 +360,8 @@ impl<'v> AllocValue<'v> for Child {
 #[starlark_value(type = "std.process.Child")]
 impl<'v> values::StarlarkValue<'v> for Child {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(child_methods)
+        static RES: MethodsStatic = MethodsStatic::new("child_methods", child_methods);
+        Some(RES.methods())
     }
 }
 
@@ -365,6 +447,27 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
+    /// Force the child and every process in its configured process group to exit.
+    ///
+    /// Use this with a command configured by [`Command.process_group`]. A
+    /// command without that configuration falls back to killing only the
+    /// immediate child.
+    ///
+    /// **Warning:** On Windows this is equivalent to calling [`Child.kill`].
+    fn kill_all<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        let mut inner = child.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        if let Some(process_group) = child.process_group {
+            kill_process_group(inner, process_group)?;
+        } else {
+            inner.kill()?;
+        }
+        Ok(NoneType)
+    }
+
     /// Waits for the child to exit completely, returning the status that it
     /// exited with. This function will continue to have the same return value
     /// after it has been called at least once.
@@ -439,8 +542,8 @@ pub struct ExitStatus(#[allocative(skip)] pub process::ExitStatus);
 #[starlark_value(type = "std.process.ExitStatus")]
 impl<'v> values::StarlarkValue<'v> for ExitStatus {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(exit_status_methods)
+        static RES: MethodsStatic = MethodsStatic::new("exit_status_methods", exit_status_methods);
+        Some(RES.methods())
     }
 }
 starlark_simple_value!(ExitStatus);
@@ -516,8 +619,8 @@ pub struct Output(#[allocative(skip)] pub process::Output);
 #[starlark_value(type = "std.process.Output")]
 impl<'v> values::StarlarkValue<'v> for Output {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(output_methods)
+        static RES: MethodsStatic = MethodsStatic::new("output_methods", output_methods);
+        Some(RES.methods())
     }
 }
 starlark_simple_value!(Output);
@@ -555,6 +658,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_spawn().unwrap_err().to_string();
@@ -567,6 +671,7 @@ mod tests {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
+            process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
         let err_msg = cmd.try_status().unwrap_err().to_string();
@@ -578,6 +683,7 @@ mod tests {
     fn describe_excludes_env_vars() {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
+            process_group: Cell::new(None),
         };
         cmd.inner
             .borrow_mut()
@@ -585,5 +691,165 @@ mod tests {
             .env("SECRET_TOKEN", "super_secret");
         let description = cmd.describe();
         assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &mut process::Child, process_group: i32) -> anyhow::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let process_group = if process_group == 0 {
+        i32::try_from(child.id()).map_err(|_| anyhow!("child process ID is too large"))?
+    } else {
+        process_group
+    };
+    match signal::kill(Pid::from_raw(-process_group), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut process::Child, _process_group: i32) -> anyhow::Result<()> {
+    child.kill()?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod process_group_tests {
+    use super::kill_process_group;
+    use nix::errno::Errno;
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    use std::os::unix::process::CommandExt;
+    use std::process::{self, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn killing_process_group_terminates_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut command = process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$DESCENDANT_PID_FILE\"")
+            .env("DESCENDANT_PID_FILE", &pid_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid file was not created")
+            .trim()
+            .parse()
+            .unwrap();
+
+        child.wait().unwrap();
+        kill_process_group(&mut child, 0).unwrap();
+
+        let descendant = Pid::from_raw(descendant_pid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match signal::kill(descendant, None) {
+                Err(Errno::ESRCH) => break,
+                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                result => panic!("descendant survived process-group kill: {result:?}"),
+            }
+        }
+    }
+}
+
+/// Resolve `name` the way a shell does against `path` (the `PATH` value): a
+/// bare name against each entry in order, a name with a separator as given.
+/// The first existing executable wins. Behind `which` above.
+fn find_executable(name: &str, path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let candidate = std::path::Path::new(name);
+    if candidate.components().count() > 1 {
+        return executable_variants(candidate)
+            .into_iter()
+            .find(|p| is_executable(p));
+    }
+    std::env::split_paths(path?)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| executable_variants(&dir.join(name)))
+        .find(|p| is_executable(p))
+}
+
+#[cfg(unix)]
+fn executable_variants(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![base.to_path_buf()]
+}
+
+#[cfg(windows)]
+fn executable_variants(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut variants = vec![base.to_path_buf()];
+    if let Some(exts) = std::env::var_os("PATHEXT") {
+        for ext in std::env::split_paths(&exts) {
+            let mut with_ext = base.as_os_str().to_owned();
+            with_ext.push(ext.as_os_str());
+            variants.push(std::path::PathBuf::from(with_ext));
+        }
+    }
+    variants
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(all(test, unix))]
+mod which_tests {
+    use super::find_executable;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn file(dir: &std::path::Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn which_walks_path_in_order_and_requires_an_execute_bit() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        file(first.path(), "aspect", 0o644);
+        let runnable = file(second.path(), "aspect", 0o755);
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        // The non-executable file in the first entry is skipped; the second wins.
+        assert_eq!(
+            find_executable("aspect", Some(&path)),
+            Some(runnable.clone())
+        );
+        assert_eq!(find_executable("bazel", Some(&path)), None);
+        assert_eq!(find_executable("aspect", None), None);
+
+        // A name with a separator is checked as given, not along PATH.
+        assert_eq!(
+            find_executable(runnable.to_str().unwrap(), Some(&path)),
+            Some(runnable)
+        );
+        assert_eq!(
+            find_executable(first.path().join("aspect").to_str().unwrap(), Some(&path)),
+            None
+        );
     }
 }

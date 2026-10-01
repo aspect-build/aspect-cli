@@ -41,11 +41,11 @@ use super::sink::execlog::ExecLogSink;
 use super::sink::grpc;
 use super::sink::retry::{RetryConfig, SinkOutcome, SinkStats};
 use super::sink::tracing as tracing_sink;
-use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::Subscriber;
 use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
+use super::stream::{BuildEventEnvelope, BuildEventStream};
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
 /// as a child's stdio slot.
@@ -109,8 +109,9 @@ impl<'v> AllocValue<'v> for BuildStatus {
 #[starlark_value(type = "bazel.build.BuildStatus")]
 impl<'v> values::StarlarkValue<'v> for BuildStatus {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_status_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_status_methods", build_status_methods);
+        Some(RES.methods())
     }
 }
 
@@ -346,8 +347,9 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
 #[starlark_value(type = "bazel.build.BuildEventSink")]
 impl<'v> values::StarlarkValue<'v> for BuildEventSink {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_event_sink_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_event_sink_methods", build_event_sink_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
@@ -444,7 +446,9 @@ enum IterState {
     /// Created but not yet bound to a build.
     Pending,
     /// `Build::spawn` subscribed us; iteration reads from `recv`.
-    Live { recv: Subscriber<BuildEvent> },
+    Live {
+        recv: Subscriber<Arc<BuildEventEnvelope>>,
+    },
     /// Stream ended (clean close or caller drained).
     Done,
 }
@@ -495,10 +499,12 @@ impl BuildEventIter {
         let mut state = self.state.lock().unwrap();
         match *state {
             IterState::Pending => {
-                let filter: Option<SubscriberFilter<BuildEvent>> =
+                let filter: Option<SubscriberFilter<Arc<BuildEventEnvelope>>> =
                     self.config.kinds.clone().map(|kinds| {
-                        let f: SubscriberFilter<BuildEvent> =
-                            Arc::new(move |event: &BuildEvent| event_kind_in(event, &kinds));
+                        let f: SubscriberFilter<Arc<BuildEventEnvelope>> =
+                            Arc::new(move |envelope: &Arc<BuildEventEnvelope>| {
+                                event_kind_in(&envelope.event, &kinds)
+                            });
                         f
                     });
                 let recv = stream.subscribe_filtered(filter);
@@ -532,8 +538,9 @@ impl<'v> UnpackValue<'v> for BuildEventIter {
 #[starlark_value(type = "bazel.build.BuildEventIter")]
 impl<'v> values::StarlarkValue<'v> for BuildEventIter {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_event_iter_methods)
+        static RES: MethodsStatic =
+            MethodsStatic::new("build_event_iter_methods", build_event_iter_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
@@ -573,9 +580,9 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
             // Heartbeat mode: yield an event, or a Starlark `None` when the
             // stream goes quiet for `ms`, so the caller's loop keeps ticking.
             Some(ms) => match recv.recv_timeout(Duration::from_millis(ms)) {
-                Ok(event) => {
+                Ok(envelope) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(event.alloc_value(heap))
+                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
@@ -588,9 +595,9 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
             },
             // Blocking mode: yield events until the stream closes.
             None => match recv.recv() {
-                Ok(event) => {
+                Ok(envelope) => {
                     *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(event.alloc_value(heap))
+                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
                 }
                 Err(_) => {
                     *self.state.lock().unwrap() = IterState::Done;
@@ -629,7 +636,7 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
             _ => return Ok(NoneOr::None),
         };
         match recv.try_recv() {
-            Ok(event) => Ok(NoneOr::Other(event)),
+            Ok(envelope) => Ok(NoneOr::Other(BuildEventEnvelope::into_event(envelope))),
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(NoneOr::None),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 *state = IterState::Done;
@@ -859,10 +866,14 @@ impl Build {
         // find the path when it opens the BEP file. The reader-side thread
         // is started later — once we have the spawned child's pid in hand
         // for the per-invocation liveness check.
+        //
+        // Bazel's default action publishing (failed actions only) is all any
+        // consumer of the stream reads; per-action data comes from the
+        // execution log, so `--build_event_publish_all_actions` is not asked
+        // for.
         let bes_path = if build_events {
             let p = BuildEventStream::reserve_path()?;
-            cmd.arg("--build_event_publish_all_actions")
-                .arg("--build_event_binary_file_upload_mode=fully_async")
+            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
                 .arg(&p);
             Some(p)
@@ -889,7 +900,10 @@ impl Build {
             }
         }
 
-        let mut execlog_stream = if execution_logs {
+        // Reserved before the spawn so bazel can be told where to write, but the
+        // reader is started after it — once the client pid exists (see the BES
+        // reader below for the same split, and why).
+        let execlog_path = if execution_logs {
             // If there is a CompactFile sink, let Bazel write directly to its path
             // so no separate temp file or tee step is needed for that copy.
             let direct_path = if compact_paths.is_empty() {
@@ -897,14 +911,9 @@ impl Build {
             } else {
                 Some(std::path::PathBuf::from(compact_paths.remove(0)))
             };
-            let (out, stream) = ExecLogStream::spawn_with_file(
-                pid,
-                direct_path,
-                compact_paths,
-                !decoded_sinks.is_empty(),
-            )?;
+            let out = ExecLogStream::reserve_path(direct_path);
             cmd.arg("--execution_log_compact_file").arg(&out);
-            Some(stream)
+            Some(out)
         } else {
             None
         };
@@ -937,6 +946,19 @@ impl Build {
         // end-of-build, which is why we want a separate per-invocation pid.
         let build_event_stream = match bes_path {
             Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            None => None,
+        };
+
+        // Same two-pid split for the execution log: the daemon writes the file, but
+        // only the client can say the invocation is over and none is coming.
+        let mut execlog_stream = match execlog_path {
+            Some(p) => Some(ExecLogStream::spawn_with_file(
+                p,
+                pid,
+                child.id(),
+                compact_paths,
+                !decoded_sinks.is_empty(),
+            )?),
             None => None,
         };
 
@@ -1028,8 +1050,8 @@ impl<'v> AllocValue<'v> for Build {
 #[starlark_value(type = "bazel.build.Build")]
 impl<'v> values::StarlarkValue<'v> for Build {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(build_methods)
+        static RES: MethodsStatic = MethodsStatic::new("build_methods", build_methods);
+        Some(RES.methods())
     }
 
     fn get_attr(&self, attribute: &str, heap: values::Heap<'v>) -> Option<values::Value<'v>> {
@@ -1243,6 +1265,68 @@ Test = task(implementation = _impl)
                 exit.expect("run_task"),
                 Some(0),
                 "expected an empty stream and bazel's exit code 2"
+            ),
+        }
+    }
+
+    /// The same rejected command line with the execution log stream on. Bazel
+    /// writes no execution log and exits, leaving its daemon idling behind it for
+    /// `--max_idle_secs`; the reader has to take the client's death as the answer,
+    /// because the daemon's is minutes away. `BASIL_SERVER_PID` stands a live
+    /// process in for that daemon — without it basil reports its own already-reaped
+    /// pid and the wait would end for the wrong reason, passing either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_rejected_command_line_does_not_hang_the_execlog_reader() {
+        use std::time::Duration;
+
+        let mut daemon = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn the daemon stand-in");
+        // SAFETY: process-wide env mutation. A concurrent bazel test reading this
+        // as its server pid gets a live process that holds none of its paths open
+        // — the same answer the dead pid it reads today produces.
+        unsafe {
+            std::env::set_var("BASIL_SERVER_PID", daemon.id().to_string());
+        }
+
+        // Generous: the timeout is here to catch a hang, not to bound a
+        // healthy run, which finishes in well under a second.
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=rejects_command_line"],
+        execution_log = True,
+        stderr = None,
+    )
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("BASIL_SERVER_PID");
+        }
+
+        match result {
+            None => panic!("timed out: a rejected command line hung the execlog reader"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "expected no execution log and bazel's exit code 2"
             ),
         }
     }

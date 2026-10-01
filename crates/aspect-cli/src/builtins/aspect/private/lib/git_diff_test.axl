@@ -1,0 +1,78 @@
+"""Tests for `lib/git_diff.axl`.
+
+Each case runs against a scratch repo whose local config rewrites porcelain
+`git diff` output (`OUTPUT_REWRITING_DIFF_CONFIG`), from a subdirectory, and
+checks the output shapes callers rely on: a plain unified patch with `a/` /
+`b/` headers and no ANSI, and git-root-relative `--name-only` paths.
+
+Run with:
+  aspect dev test-git-diff
+"""
+
+load("./git_diff.axl", "run_git_diff")
+load("./git_scratch.axl", "git_run", "write_output_rewriting_diff_config")
+
+def _scratch_repo(ctx):
+    """Repo with `top.txt` and `sub/f.txt` committed, both modified in the
+    working tree, and output-rewriting diff config. Returns the repo root."""
+    repo = ctx.std.fs.mkdtemp(prefix = "axl-git-diff-test-")
+    git_run(ctx, repo, ["init", "-q", "--initial-branch=main"])
+    ctx.std.fs.create_dir_all(repo + "/sub")
+    ctx.std.fs.write(repo + "/top.txt", "x\n")
+    ctx.std.fs.write(repo + "/sub/f.txt", "a\n")
+    git_run(ctx, repo, ["add", "."])
+    git_run(ctx, repo, ["commit", "-q", "-m", "init"])
+    ctx.std.fs.write(repo + "/top.txt", "x\ny\n")
+    ctx.std.fs.write(repo + "/sub/f.txt", "a\nb\n")
+    write_output_rewriting_diff_config(ctx, repo)
+    return repo
+
+def _diff_ok(ctx, cwd, *args):
+    out = run_git_diff(ctx, cwd, *args)
+    if not out.status.success:
+        fail("git diff %s failed in %s: %s" % (" ".join(args), cwd, out.stderr.strip()))
+    return out.stdout
+
+def _test_patch(ctx):
+    repo = _scratch_repo(ctx)
+    out = _diff_ok(ctx, repo + "/sub", "HEAD")
+    for want in ["--- a/sub/f.txt\n", "+++ b/sub/f.txt\n", "\n+b\n", "--- a/top.txt\n", "+++ b/top.txt\n", "\n+y\n"]:
+        if want not in out:
+            fail("patch — missing %r in:\n%s" % (want, out))
+    if "\x1b" in out:
+        fail("patch — contains ANSI escapes:\n%r" % out)
+    ctx.std.fs.remove_dir_all(repo)
+
+def _test_name_only(ctx):
+    repo = _scratch_repo(ctx)
+    out = _diff_ok(ctx, repo + "/sub", "--name-only", "HEAD")
+    got = sorted([f for f in out.strip().split("\n") if f])
+    if got != ["sub/f.txt", "top.txt"]:
+        fail("name-only — got %r, want git-root-relative [sub/f.txt, top.txt]" % got)
+    ctx.std.fs.remove_dir_all(repo)
+
+def _test_failure_is_reported(ctx):
+    repo = _scratch_repo(ctx)
+    if run_git_diff(ctx, repo, "not-a-revision").status.success:
+        fail("failure — `git diff not-a-revision` should exit non-zero")
+    ctx.std.fs.remove_dir_all(repo)
+
+_TESTS = [
+    _test_patch,
+    _test_name_only,
+    _test_failure_is_reported,
+]
+
+def _test_impl(ctx):
+    for t in _TESTS:
+        t(ctx)
+    print("git_diff.axl: OK (%d tests)" % len(_TESTS))
+    return 0
+
+git_diff_tests = task(
+    summary = "Run the git_diff AXL unit tests.",
+    kind = "test-git-diff",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

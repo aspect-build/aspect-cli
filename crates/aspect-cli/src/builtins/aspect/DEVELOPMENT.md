@@ -889,7 +889,7 @@ These run end-to-end through `render_check_output` — they exercise the actual 
 
 ### Live CI
 
-Each task is exercised on every CI provider (GitHub Actions, Buildkite, CircleCI, GitLab) via the per-task pipeline definitions in [`.buildkite/pipeline.yaml`](../../../../../.buildkite/pipeline.yaml), [`.github/workflows/ci.yaml`](../../../../../.github/workflows/ci.yaml), [`.gitlab-ci.yml`](../../../../../.gitlab-ci.yml), and [`.circleci/config.yml`](../../../../../.circleci/config.yml). Each task runs twice per CI host: once with `ASPECT_DEBUG=1` (the debug variant) and once without — debug emits the `target: "axl.log"` trace lines that the per-task `_impl` printers go to, which is the fastest way to diagnose live failures.
+Each task is exercised live on GitHub Actions and Buildkite via the per-task pipeline definitions in [`.buildkite/pipeline.yaml`](../../../../../.buildkite/pipeline.yaml) and [`.github/workflows/ci.yaml`](../../../../../.github/workflows/ci.yaml). CircleCI and GitLab support is covered only by the `private/lib/circleci_test.axl` and `gitlab_*_test.axl` unit tests. Each task runs twice per CI host: once with `ASPECT_DEBUG=1` (the debug variant) and once without — debug emits the `target: "axl.log"` trace lines that the per-task `_impl` printers go to, which is the fastest way to diagnose live failures.
 
 When a task you change works in snapshots but fails live (artifact URL malformed, BK section missing, etc.), capture the `ASPECT_DEBUG=1` step's stdout from the BK / GHA UI — every helper logs enough state to pin down the failure mode without re-running locally.
 
