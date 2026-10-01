@@ -353,7 +353,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         directory = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
-        stdout = results_json.bazel_stdout(ctx),
+        stdout = results_json.child_stdout(ctx.std.io, ctx.args),
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns. Populate

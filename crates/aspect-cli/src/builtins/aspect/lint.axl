@@ -852,7 +852,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_version = announce_version,
         announce_command = announce_command,
         flags = endpoint_auth_flags,
-        stdout = results_json.bazel_stdout(ctx),
+        stdout = results_json.child_stdout(ctx.std.io, ctx.args),
         *ctx.args.targets
     )
 
@@ -1050,11 +1050,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
-            # `patch` narrates each file it touches on stdout, which under
-            # --output=json belongs to the result document.
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()) \
-                .stdout(results_json.bazel_stdout(ctx)).spawn().wait()
+                .stdout(results_json.child_stdout(ctx.std.io, ctx.args)).spawn().wait()
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:

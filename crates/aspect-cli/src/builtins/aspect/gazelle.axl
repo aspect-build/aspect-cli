@@ -522,7 +522,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         directory = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
-        stdout = results_json.bazel_stdout(ctx),
+        stdout = results_json.child_stdout(ctx.std.io, ctx.args),
     )
 
     # sink_invocation_id is minted in Build::spawn before it returns. Populate

@@ -201,6 +201,38 @@ def _test_document_is_encodable(ctx):
     doc = results_json.document(ctx.std.env, _data_with_secrets(), "build", "failed", 1)
     _true("round-trips", json.decode(json.encode(doc))["task"] == "build")
 
+def _test_child_stdout_keeps_the_document_alone_on_stdout(ctx):
+    """Every spawned child routes through this. Getting it backwards puts
+    Bazel's result summary inside the document, which stops being JSON — and
+    nothing downstream would catch that.
+    """
+    # Two `Writable`s for the same stream are distinct values, so these compare
+    # the stream each handle names rather than the handle itself.
+    io = ctx.std.io
+    _eq("text keeps stdout", str(results_json.child_stdout(io, struct(output = "text"))), str(io.stdout))
+    _eq("json diverts to stderr", str(results_json.child_stdout(io, struct(output = "json"))), str(io.stderr))
+    _eq("no --output at all", str(results_json.child_stdout(io, struct())), str(io.stdout))
+
+def _test_output_arg_contributes_exactly_one_flag(ctx):
+    """Five tasks splat this into their own args. A second key would collide
+    with whatever a task already calls it, and a renamed one would silently
+    take `--output` away from all of them. (`args.Arg` is opaque from AXL, so
+    the default and the accepted values are covered by `wants_json` instead.)
+    """
+    _eq("one arg named output", sorted(results_json.output_arg().keys()), ["output"])
+
+def _test_counts_and_timing_default_to_zero(ctx):
+    """A task that never reached Bazel still emits the full envelope: a
+    consumer indexing `counts.tests_failed` must not have to guard for absence.
+    """
+    doc = results_json.document(ctx.std.env, init_data(), "build", "aborted", 1)
+    for key in ["targets_configured", "targets_completed", "tests_failed", "tests_passed"]:
+        _eq("counts." + key, doc["counts"][key], 0)
+    for key in ["wall_time_ms", "critical_path_ms"]:
+        _eq("timing." + key, doc["timing"][key], 0)
+    _eq("no failures", doc["failures"]["tests"], [])
+    _eq("nothing truncated", doc["failures"]["truncated"]["tests"], False)
+
 _UNIT_TESTS = [
     _test_secrets_never_reach_the_document,
     _test_resolved_flag_lists_are_not_exposed,
@@ -215,6 +247,9 @@ _UNIT_TESTS = [
     _test_envelope_fields,
     _test_wants_json_defaults_off,
     _test_document_is_encodable,
+    _test_child_stdout_keeps_the_document_alone_on_stdout,
+    _test_output_arg_contributes_exactly_one_flag,
+    _test_counts_and_timing_default_to_zero,
 ]
 
 def _test_impl(ctx):

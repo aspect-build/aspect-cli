@@ -50,13 +50,9 @@ _Invocation = record(
     announce_version = field(bool),
     announce_command = field(bool),
     max_attempts = field(int),
-    # Where Bazel's own stdout goes, always a `Writable` so `_do_spawn` needs no
-    # conditional (the builtin distinguishes "not passed" = inherit from `None` =
-    # discard). Defaults to our own stdout, which duplicates the fd and is
-    # therefore the same thing as inheriting. A task whose stdout carries a
-    # machine payload passes `ctx.std.io.stderr` instead: Bazel writes its result
-    # summary and test output to stdout — only its progress goes to stderr — and
-    # that would otherwise land in the middle of the payload.
+    # Where Bazel's own stdout goes. Always a `Writable`, never None: the
+    # builtin reads None as "discard", and `_do_spawn` should not need a
+    # conditional. See `build()`.
     stdout = field(typing.Any),
 )
 
@@ -290,11 +286,14 @@ def _handle(ctx, command: str, stdout = None):
 def build(ctx, stdout = None):
     """High-level `bazel build` invocation handle. See module docstring.
 
-    `stdout` redirects Bazel's own stdout (see `_Invocation.stdout`)."""
+    `stdout` redirects Bazel's own stdout; the default inherits ours. Bazel
+    writes its result summary and test output there — only progress goes to
+    stderr — so a task whose stdout carries a machine payload must redirect it.
+    """
     return _handle(ctx, "build", stdout = stdout)
 
 def test(ctx, stdout = None):
     """High-level `bazel test` invocation handle. See module docstring.
 
-    `stdout` redirects Bazel's own stdout (see `_Invocation.stdout`)."""
+    `stdout` redirects Bazel's own stdout; see `build()`."""
     return _handle(ctx, "test", stdout = stdout)

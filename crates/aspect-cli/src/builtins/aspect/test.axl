@@ -55,10 +55,6 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
     extra ceremony. A non-zero exit code from the tool is surfaced as a
     warning — it does not fail the test task, so uploaders (e.g. codecov)
     can still publish partial coverage when some tests failed.
-
-    Under `--output=json` the tool's stdout is redirected to stderr: stdout
-    carries the result document, and an uploader chattering into it would
-    leave the consumer with something that is no longer JSON.
     """
     bin, bin_matched = _substitute(bin, report_path)
     final_args = []
@@ -71,10 +67,8 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         final_args.append(report_path)
 
     print("Running coverage tool: " + bin + " " + " ".join(final_args))
-    cmd = ctx.std.process.command(bin).args(final_args)
-    if results_json.wants_json(ctx.args):
-        cmd = cmd.stdout(ctx.std.io.stderr)
-    status = cmd.spawn().wait()
+    status = ctx.std.process.command(bin).args(final_args) \
+        .stdout(results_json.child_stdout(ctx.std.io, ctx.args)).spawn().wait()
     if status.code != 0:
         ctx.std.io.stderr.write(
             "--coverage-tool: '" + bin + "' exited with code " + str(status.code) +
@@ -89,7 +83,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    bz = bzl.test(ctx, stdout = results_json.bazel_stdout(ctx))
+    bz = bzl.test(ctx, stdout = results_json.child_stdout(ctx.std.io, ctx.args))
     rs = results.test(ctx)
 
     rs.setup(bz.targets, bz.rc, bz.bazel_streams_bes, bz.results_url)

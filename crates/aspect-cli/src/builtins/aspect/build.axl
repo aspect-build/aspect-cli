@@ -17,7 +17,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # immutable record. Deployment endpoints/auth are injected by the Deployment
     # feature through the trait (see `feature/deployment.axl`). The whole flow is
     # visible below as thin verbs over the handle.
-    bz = bzl.build(ctx, stdout = results_json.bazel_stdout(ctx))
+    bz = bzl.build(ctx, stdout = results_json.child_stdout(ctx.std.io, ctx.args))
     rs = results.build(ctx)
 
     # Surface init + health checks (rc already active); also seeds the resolved
