@@ -1,20 +1,29 @@
-"""Unit tests for gc.axl — the output-base classifier.
+"""Unit tests for gc.axl — what gets deleted, and whether deleting may proceed.
 
 Run with:
   aspect dev test-gc
 
-The classifier is what decides whether a directory gets deleted, so the tests
-build a real output-base-shaped tree under a temp dir and run the real `_scan`
-against it. The fixture covers every state plus the one that would be a data-loss
-bug: `install/` and `cache/` sit beside the output bases under the same root
-and are shared by every workspace on the machine. Counting them as bases reports
-tens of gigabytes of working cache as garbage.
+Two things decide whether a multi-gigabyte tree is removed, so both are covered
+directly:
+
+  - **Classification.** The tests build a real output-base-shaped tree under a
+    temp dir and run the real `_scan` over it, every state included. The
+    data-loss case is `install/` and `cache/`, which sit beside the output bases
+    under the same root and are shared by every workspace on the machine —
+    counting them as bases offers tens of gigabytes of live cache for deletion.
+  - **Consent.** `_delete_decision` is pure, so the whole flag/terminal table is
+    asserted row by row, and `_answered_yes` is held to treating anything short
+    of a deliberate `y` as no.
+
+`_reap` is exercised against real trees rather than mocked: it has to survive
+the read-only directories Bazel leaves under `bazel-out/`, and it must not
+follow the execroot's symlinks out into the user's checkout.
 
 Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_answered_yes", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_answered_yes", "testonly_delete_decision", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -76,6 +85,34 @@ def _fixture(ctx: TaskContext) -> str:
     ctx.std.fs.create_dir_all(root + "/install/abc123")
     ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
     return root
+
+def _test_deletion_never_happens_unasked(ctx):
+    """The whole policy as a table. Every row that deletes has either --force or
+    a terminal behind it, and no row deletes on its own — this is the guard
+    between a listing and `rm -rf` on multi-gigabyte trees.
+
+    Columns: has_orphans, dry_run, force, is_tty.
+    """
+    cases = [
+        # Nothing to do.
+        ((False, False, False, True), "skip"),
+        ((False, False, True, False), "skip"),
+        # --dry-run always wins, even with --force.
+        ((True, True, False, True), "skip"),
+        ((True, True, True, True), "skip"),
+        ((True, True, True, False), "skip"),
+        # --force is the explicit yes, terminal or not.
+        ((True, False, True, True), "go"),
+        ((True, False, True, False), "go"),
+        # A terminal gets asked.
+        ((True, False, False, True), "ask"),
+        # No terminal and no --force: refuse rather than assume.
+        ((True, False, False, False), "needs-force"),
+    ]
+    for args, want in cases:
+        has_orphans, dry_run, force, is_tty = args
+        got = testonly_delete_decision(has_orphans, dry_run, force, is_tty)
+        _eq("decision%r" % (args,), got, want)
 
 def _test_only_an_explicit_y_consents_to_deletion(ctx):
     """This answer is the only thing between a listing and `rm -rf` on
@@ -201,6 +238,7 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
     _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
 
 _UNIT_TESTS = [
+    _test_deletion_never_happens_unasked,
     _test_only_an_explicit_y_consents_to_deletion,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,

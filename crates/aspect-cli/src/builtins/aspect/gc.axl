@@ -51,6 +51,26 @@ _UNKNOWN = "unknown"
 # download and repo-contents caches every workspace shares.
 _NOT_A_BASE = ["install", "cache"]
 
+# Bazel's own layout under the output user root, for the caches this task sizes
+# but never prunes. Each is reported with the reason it is left alone.
+_CACHES = [
+    (
+        "download_cache_kb",
+        "cache/repos/v1/content_addressable",
+        "no GC exists; prune by hand if it grows",
+    ),
+    (
+        "repo_contents_cache_kb",
+        "cache/repos/v1/contents",
+        "GC'd by Bazel while a server sits idle",
+    ),
+    (
+        "install_bases_kb",
+        "install",
+        "see --experimental_install_base_gc_max_age",
+    ),
+]
+
 _Base = record(
     name = field(str),
     path = field(str),
@@ -268,16 +288,16 @@ def _make_writable(ctx: TaskContext, path: str) -> None:
         .stdout("null").stderr("null").spawn().wait()
 
 def _cache_report(ctx: TaskContext, root: str) -> dict:
-    """Sizes of the caches this task reports but does not touch."""
-    downloads = root + "/cache/repos/v1/content_addressable"
-    contents = root + "/cache/repos/v1/contents"
-    installs = root + "/install"
-    sizes = _du_kb(ctx, [p for p in [downloads, contents, installs] if ctx.std.fs.exists(p)])
-    return {
-        "download_cache_kb": sizes.get(downloads, 0),
-        "repo_contents_cache_kb": sizes.get(contents, 0),
-        "install_bases_kb": sizes.get(installs, 0),
-    }
+    """Sizes of the caches this task reports but does not touch, keyed for the
+    document. A cache the install has never created reports zero."""
+    paths = {}
+    for key, rel, _reason in _CACHES:
+        paths[key] = root + "/" + rel
+    sizes = _du_kb(ctx, [p for p in paths.values() if ctx.std.fs.exists(p)])
+    report = {}
+    for key in paths:
+        report[key] = sizes.get(paths[key], 0)
+    return report
 
 def _answered_yes(answer: str) -> bool:
     """True when the answer begins with `y` or `Y`.
@@ -289,13 +309,12 @@ def _answered_yes(answer: str) -> bool:
     return trimmed.startswith("y") or trimmed.startswith("Y")
 
 def _read_line(ctx: TaskContext) -> str:
-    """One line from the terminal.
+    """One line from the terminal, through `head -n 1`.
 
-    Read through `head -n 1`, which inherits the console and hands the line back
-    as a string. `ctx.std.io.stdin` yields `bytes`, and AXL's `bytes` has no
-    decode — only `elems()`, over length-1 `bytes` whose literals buildifier
-    rejects, Bazel's Starlark having no such syntax. Shelling out is what the
-    rest of this task already does for `du`, `ps` and `chmod`.
+    `ctx.std.io.stdin` yields `bytes`, which AXL cannot decode and whose
+    literals buildifier rejects, Bazel's Starlark having no bytes syntax. A
+    child that inherits the console hands the line back as a string instead,
+    the way `du`, `ps` and `chmod` are already reached here.
     """
     out = ctx.std.process.command("head").args(["-n", "1"]) \
         .stdout("piped").stderr("null").spawn().wait_with_output()
@@ -310,8 +329,14 @@ def _ask(ctx: TaskContext, count: int, kb: int) -> bool:
     ctx.std.io.stderr.write("  Delete %d output base(s) and free %s? [y/N] " % (count, _fmt_kb(kb)))
     return _answered_yes(_read_line(ctx))
 
-def _should_delete(ctx: TaskContext, orphans: list, kb: int) -> struct:
-    """Whether to go ahead, as `(go, conclusion)` — a conclusion ends the task.
+# What `_delete_decision` concluded. `_ASK` is the only one that needs a human.
+_SKIP = "skip"
+_GO = "go"
+_ASK = "ask"
+_NEEDS_FORCE = "needs-force"
+
+def _delete_decision(has_orphans: bool, dry_run: bool, force: bool, is_tty: bool) -> str:
+    """Whether deleting may proceed. Pure, so the whole table can be tested.
 
     Deleting is the destructive half of this task, so it is never reached
     without either an explicit `--force` or a terminal answer. Off a terminal
@@ -319,24 +344,52 @@ def _should_delete(ctx: TaskContext, orphans: list, kb: int) -> struct:
     rather than inferred: a `gc` wired into a CI job or a cron should say out
     loud that it deletes.
     """
-    if not orphans or ctx.args.dry_run:
-        return struct(go = False, conclusion = None)
-    if ctx.args.force:
-        return struct(go = True, conclusion = None)
-    if not ctx.std.io.stdin.is_tty:
-        return struct(go = False, conclusion = TaskConclusion(
-            exit_code = 1,
-            message = ("refusing to delete %d output base(s) with no terminal to confirm at. " +
-                       "Pass --force to delete them, or --dry-run to look without deleting.") % len(orphans),
-        ))
-    if _ask(ctx, len(orphans), kb):
-        return struct(go = True, conclusion = None)
-    return struct(go = False, conclusion = TaskConclusion(
-        exit_code = 0,
-        message = "left alone; nothing was deleted.",
-    ))
+    if not has_orphans or dry_run:
+        return _SKIP
+    if force:
+        return _GO
+    return _ASK if is_tty else _NEEDS_FORCE
 
-def _say(ctx: TaskContext, streaming: bool, line: str) -> None:
+def _needs_force_message(count: int) -> str:
+    return ("refusing to delete %d output base(s) with no terminal to confirm at. " +
+            "Pass --force to delete them, or --dry-run to look without deleting.") % count
+
+def _document(
+        root: str,
+        dry_run: bool,
+        live: list,
+        unknown: list,
+        orphans: list,
+        reclaimable: int,
+        reaped: int,
+        freed: int,
+        caches: dict) -> dict:
+    """The `--output=json` document.
+
+    `reclaimable_kb` is what the orphans hold and `freed_kb` what was actually
+    removed; under `--dry-run`, or when a removal failed, they differ. The key
+    names are a contract, so `_SCHEMA_VERSION` moves when they do.
+    """
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "output_user_root": root,
+        "dry_run": dry_run,
+        "output_bases": {
+            "live": len(live),
+            "orphaned": len(orphans),
+            "undetermined": len(unknown),
+        },
+        "orphans": [
+            {"path": b.path, "workspace": b.workspace, "kb": b.kb, "pid": b.pid}
+            for b in orphans
+        ],
+        "reclaimable_kb": reclaimable,
+        "reaped": reaped,
+        "freed_kb": freed,
+        "caches": caches,
+    }
+
+def _say(streaming: bool, line: str) -> None:
     """A progress line, suppressed under `--output=json`.
 
     The JSON document reports the finished state, so narrating to a script that
@@ -361,20 +414,20 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     streaming = ctx.args.output != "json"
     info(ctx.std, "output user root: " + root)
 
-    _say(ctx, streaming, "  scanning output bases…")
+    _say(streaming, "  scanning output bases…")
     bases = _scan(ctx, root)
     live = [b for b in bases if b.state == _LIVE]
     unknown = [b for b in bases if b.state == _UNKNOWN]
-    found = [b for b in bases if b.state == _ORPHAN]
-    _say(ctx, streaming, "  %d bases: %d live, %d orphaned, %d undetermined" %
-                         (len(bases), len(live), len(found), len(unknown)))
+    orphaned = [b for b in bases if b.state == _ORPHAN]
+    _say(streaming, "  %d bases: %d live, %d orphaned, %d undetermined" %
+                    (len(bases), len(live), len(orphaned), len(unknown)))
     if unknown:
-        _say(ctx, streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
-        _say(ctx, streaming, "     the base cannot be attributed to a workspace. Left alone.)")
+        _say(streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
+        _say(streaming, "     the base cannot be attributed to a workspace. Left alone.)")
 
-    if found:
-        _say(ctx, streaming, "  measuring %d orphaned base(s)…" % len(found))
-    orphans = _with_sizes(ctx, found)
+    if orphaned:
+        _say(streaming, "  measuring %d orphaned base(s)…" % len(orphaned))
+    orphans = _with_sizes(ctx, orphaned)
     reclaimable = 0
     for b in orphans:
         reclaimable += b.kb
@@ -382,50 +435,50 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Sizing the shared caches walks tens of gigabytes and costs more than the
     # rest of the task put together, so it is asked for rather than assumed.
     if ctx.args.report_caches:
-        _say(ctx, streaming, "  measuring the shared caches… (this is the slow part)")
+        _say(streaming, "  measuring the shared caches… (this is the slow part)")
     caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
 
     # The full list goes out before anything is deleted, so the confirmation
     # below is answered with the whole picture rather than a count.
     if orphans:
-        _say(ctx, streaming, "  %d orphaned output base(s), %s:" % (len(orphans), _fmt_kb(reclaimable)))
+        _say(streaming, "  %d orphaned output base(s), %s:" % (len(orphans), _fmt_kb(reclaimable)))
     for b in orphans:
-        _say(ctx, streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
+        _say(streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
 
-    proceed = _should_delete(ctx, orphans, reclaimable)
-    if proceed.conclusion != None:
-        return proceed.conclusion
+    verdict = _delete_decision(
+        len(orphans) > 0,
+        ctx.args.dry_run,
+        ctx.args.force,
+        ctx.std.io.stdin.is_tty,
+    )
+    if verdict == _NEEDS_FORCE:
+        return TaskConclusion(exit_code = 1, message = _needs_force_message(len(orphans)))
+    if verdict == _ASK and not _ask(ctx, len(orphans), reclaimable):
+        return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
 
     reaped = 0
     freed = 0
-    if proceed.go:
+    if verdict != _SKIP:
         for i, b in enumerate(orphans):
             # Printed before the work, not after: a 1 GB tree takes seconds to
             # unlink, and this line is what says where that time is going.
-            _say(ctx, streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(orphans), _fmt_kb(b.kb), b.name))
+            _say(streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(orphans), _fmt_kb(b.kb), b.name))
             if _reap(ctx, b.path, b.pid):
                 reaped += 1
                 freed += b.kb
 
     if ctx.args.output == "json":
-        ctx.std.io.stdout.write(json.encode({
-            "schema_version": _SCHEMA_VERSION,
-            "output_user_root": root,
-            "dry_run": ctx.args.dry_run,
-            "output_bases": {
-                "live": len(live),
-                "orphaned": len(orphans),
-                "undetermined": len(unknown),
-            },
-            "orphans": [
-                {"path": b.path, "workspace": b.workspace, "kb": b.kb, "pid": b.pid}
-                for b in orphans
-            ],
-            "reclaimable_kb": reclaimable,
-            "reaped": reaped,
-            "freed_kb": freed,
-            "caches": caches,
-        }, indent = 2) + "\n")
+        ctx.std.io.stdout.write(json.encode(_document(
+            root = root,
+            dry_run = ctx.args.dry_run,
+            live = live,
+            unknown = unknown,
+            orphans = orphans,
+            reclaimable = reclaimable,
+            reaped = reaped,
+            freed = freed,
+            caches = caches,
+        ), indent = 2) + "\n")
         return 0
 
     if not orphans:
@@ -444,9 +497,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # release, so its size is the number a reader most needs to see.
     if caches:
         print("")
-        print("  download cache      " + _fmt_kb(caches["download_cache_kb"]) + "   (no GC exists; prune by hand if it grows)")
-        print("  repo contents cache " + _fmt_kb(caches["repo_contents_cache_kb"]) + "   (GC'd by Bazel while a server sits idle)")
-        print("  install bases       " + _fmt_kb(caches["install_bases_kb"]) + "   (see --experimental_install_base_gc_max_age)")
+
+        # Padded by hand: AXL's `%` formatting takes no width flags.
+        width = max([len(rel) for _key, rel, _reason in _CACHES])
+        for key, rel, reason in _CACHES:
+            print("  " + rel + " " * (width - len(rel)) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
     return 0
 
 gc = task(
@@ -486,6 +541,7 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 
 # Exposed for gc_test.axl; not part of the task's surface.
 testonly_answered_yes = _answered_yes
+testonly_delete_decision = _delete_decision
 testonly_fmt_kb = _fmt_kb
 testonly_reap = _reap
 testonly_scan = _scan
