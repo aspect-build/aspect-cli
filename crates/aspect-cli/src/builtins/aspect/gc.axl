@@ -102,12 +102,25 @@ def _capitalize(s: str) -> str:
     starts with it and one that embeds it."""
     return s[:1].upper() + s[1:]
 
-def _default_output_user_root(ctx: TaskContext) -> str:
-    """Bazel's default output user root for this platform.
+def _configured_output_user_root(ctx: TaskContext, root: str = "") -> str:
+    """`--output_user_root` from a workspace's rc, or "".
 
-    Only consulted when `--output-user-root` is not given. A workspace that sets
-    `--output_user_root` in its rc is not discovered here; point the flag at it.
+    `startup` is a section like any other to the rc parser, so this picks the
+    flag up wherever Bazel itself would read it — the workspace `.bazelrc`, the
+    user's `~/.bazelrc`, the system one — with the same last-wins resolution.
+
+    `root` defaults to the surrounding workspace. Outside one there is no rc to
+    read and the parse fails, which is "" rather than an error: the platform
+    default is still a usable answer.
     """
+    err, rc = catch(ctx.bazel.parse_rc, root = root) if root else catch(ctx.bazel.parse_rc)
+    if err != None:
+        return ""
+    value = rc.flag_value("--output_user_root", command = "startup")
+    return value or ""
+
+def _platform_output_user_root(ctx: TaskContext) -> str:
+    """Bazel's default output user root for this platform."""
     home = ctx.std.env.home_dir()
     user = ctx.std.env.var("USER") or ctx.std.env.var("LOGNAME") or ""
     if not user:
@@ -374,7 +387,11 @@ def _say(streaming: bool, line: str) -> None:
         print(line)
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    root = ctx.args.output_user_root or _default_output_user_root(ctx)
+    # Explicit flag, then whatever the surrounding workspace configured, then
+    # the platform default.
+    root = (ctx.args.output_user_root or
+            _configured_output_user_root(ctx) or
+            _platform_output_user_root(ctx))
     if not ctx.std.fs.exists(root):
         return TaskConclusion(
             exit_code = 1,
@@ -501,7 +518,7 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
     args = {
         "output_user_root": args.string(
             default = "",
-            description = "The Bazel output user root to collect. Defaults to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere). Pass this when a workspace sets `--output_user_root` in its rc, since that value is not discovered here.",
+            description = "The Bazel output user root to collect. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere). Pass this to collect a root other than the one this workspace uses.",
         ),
         "dry_run": args.boolean(
             default = False,
@@ -528,6 +545,7 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 )
 
 # Exposed for gc_test.axl; not part of the task's surface.
+testonly_configured_output_user_root = _configured_output_user_root
 testonly_document = _document
 testonly_fmt_kb = _fmt_kb
 testonly_reap = _reap

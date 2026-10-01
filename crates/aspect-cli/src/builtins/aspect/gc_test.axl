@@ -22,7 +22,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_configured_output_user_root", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -128,6 +128,24 @@ def _test_verbose_is_additive_only(ctx):
     _eq("none by default either", "undetermined_bases" in plain, False)
     for key in plain:
         _eq("key %s unchanged" % key, verbose[key], plain[key])
+
+def _test_a_workspace_rc_names_the_root_to_collect(ctx):
+    """`--output_user_root` is a startup option, so it is the one thing that
+    decides which root a workspace's bases live under. Reading it means `gc`
+    collects the right root in a repo that relocates it, rather than reporting
+    an empty platform default."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
+    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
+    ctx.std.fs.write(tmp + "/.bazelrc", "startup --output_user_root=/somewhere/else\n")
+    _eq("read from the rc", testonly_configured_output_user_root(ctx, tmp), "/somewhere/else")
+
+def _test_a_workspace_without_the_flag_defers(ctx):
+    """No override means no opinion, so the caller falls back to the platform
+    default rather than being handed a guess."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
+    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
+    ctx.std.fs.write(tmp + "/.bazelrc", "build --jobs=4\n")
+    _eq("nothing to report", testonly_configured_output_user_root(ctx, tmp), "")
 
 def _test_fmt_kb(ctx):
     _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
@@ -242,6 +260,8 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
+    _test_a_workspace_rc_names_the_root_to_collect,
+    _test_a_workspace_without_the_flag_defers,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
     _test_scan_classifies_the_three_outcomes,
