@@ -299,35 +299,32 @@ def _cache_report(ctx: TaskContext, root: str) -> dict:
         report[key] = sizes.get(paths[key], 0)
     return report
 
-def _answered_yes(answer: str) -> bool:
-    """True when the answer begins with `y` or `Y`.
+# Compared against the answer a byte at a time: `bytes.elems()` yields length-1
+# `bytes`, and `bytes()` builds the same from a string.
+_YES = [bytes("y"), bytes("Y")]
+_BLANK = [bytes(" "), bytes("\t")]
+
+def _answered_yes(answer) -> bool:
+    """True when the first non-blank byte of `answer` is `y` or `Y`.
 
     Anything else, an empty line included, is a no: the destructive branch
     should take a deliberate keystroke, not merely a non-matching one.
     """
-    trimmed = answer.strip()
-    return trimmed.startswith("y") or trimmed.startswith("Y")
-
-def _read_line(ctx: TaskContext) -> str:
-    """One line from the terminal, through `head -n 1`.
-
-    `ctx.std.io.stdin` yields `bytes`, which AXL cannot decode and whose
-    literals buildifier rejects, Bazel's Starlark having no bytes syntax. A
-    child that inherits the console hands the line back as a string instead,
-    the way `du`, `ps` and `chmod` are already reached here.
-    """
-    out = ctx.std.process.command("head").args(["-n", "1"]) \
-        .stdout("piped").stderr("null").spawn().wait_with_output()
-    return out.stdout if out.status.code == 0 else ""
+    for b in answer.elems():
+        if b in _BLANK:
+            continue
+        return b in _YES
+    return False
 
 def _ask(ctx: TaskContext, count: int, kb: int) -> bool:
     """Ask on the terminal whether to delete, defaulting to no.
 
     The prompt goes to the console rather than stdout, which may be carrying a
-    results document.
+    results document. The read is bounded rather than to EOF: a terminal hands
+    back the line as soon as Enter is pressed.
     """
     ctx.std.io.stderr.write("  Delete %d output base(s) and free %s? [y/N] " % (count, _fmt_kb(kb)))
-    return _answered_yes(_read_line(ctx))
+    return _answered_yes(ctx.std.io.stdin.read(64))
 
 # What `_delete_decision` concluded. `_ASK` is the only one that needs a human.
 _SKIP = "skip"

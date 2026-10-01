@@ -165,10 +165,10 @@ def _test_only_an_explicit_y_consents_to_deletion(ctx):
     no.
     """
     for yes in ["y", "y\n", "Y\n", "yes\n", "  y\n", "\ty\n"]:
-        if not testonly_answered_yes(yes):
+        if not testonly_answered_yes(bytes(yes)):
             fail("expected %r to consent" % yes)
     for no in ["", "\n", "n", "n\n", "N\n", "no\n", "later\n", " \n", "maybe"]:
-        if testonly_answered_yes(no):
+        if testonly_answered_yes(bytes(no)):
             fail("expected %r NOT to consent" % no)
 
 def _test_fmt_kb(ctx):
