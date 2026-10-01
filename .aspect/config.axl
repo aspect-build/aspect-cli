@@ -22,6 +22,7 @@ load("@aspect//private/lib/cache_selection_test.axl", "cache_selection_tests")
 load("@aspect//private/lib/changedetector_test.axl", "changedetector_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
+load("@aspect//private/lib/confirm_test.axl", "confirm_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
@@ -423,6 +424,7 @@ def config(ctx: ConfigContext):
     # guard that keeps the shared install+cache directories out of the scan.
     # Run with: aspect dev test-gc
     ctx.tasks.add(gc_tests)
+    ctx.tasks.add(confirm_tests)
 
     # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
     # independence, prefer_app_when_env_critical, watermark badge.

@@ -11,9 +11,8 @@ directly:
     data-loss case is `install/` and `cache/`, which sit beside the output bases
     under the same root and are shared by every workspace on the machine —
     counting them as bases offers tens of gigabytes of live cache for deletion.
-  - **Consent.** `_delete_decision` is pure, so the whole flag/terminal table is
-    asserted row by row, and `_answered_yes` is held to treating anything short
-    of a deliberate `y` as no.
+  - **Consent.** Shared with every other destructive task, so it lives in
+    `lib/confirm.axl` and is covered by `aspect dev test-confirm`.
 
 `_reap` is exercised against real trees rather than mocked: it has to survive
 the read-only directories Bazel leaves under `bazel-out/`, and it must not
@@ -23,7 +22,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
 """
 
-load("@aspect//gc.axl", "testonly_answered_yes", "testonly_delete_decision", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
 
 def _eq(label, got, want):
     if got != want:
@@ -129,47 +128,6 @@ def _test_verbose_is_additive_only(ctx):
     _eq("none by default either", "undetermined_bases" in plain, False)
     for key in plain:
         _eq("key %s unchanged" % key, verbose[key], plain[key])
-
-def _test_deletion_never_happens_unasked(ctx):
-    """The whole policy as a table. Every row that deletes has either --force or
-    a terminal behind it, and no row deletes on its own — this is the guard
-    between a listing and `rm -rf` on multi-gigabyte trees.
-
-    Columns: has_orphans, dry_run, force, is_tty.
-    """
-    cases = [
-        # Nothing to do.
-        ((False, False, False, True), "skip"),
-        ((False, False, True, False), "skip"),
-        # --dry-run always wins, even with --force.
-        ((True, True, False, True), "skip"),
-        ((True, True, True, True), "skip"),
-        ((True, True, True, False), "skip"),
-        # --force is the explicit yes, terminal or not.
-        ((True, False, True, True), "go"),
-        ((True, False, True, False), "go"),
-        # A terminal gets asked.
-        ((True, False, False, True), "ask"),
-        # No terminal and no --force: refuse rather than assume.
-        ((True, False, False, False), "needs-force"),
-    ]
-    for args, want in cases:
-        has_orphans, dry_run, force, is_tty = args
-        got = testonly_delete_decision(has_orphans, dry_run, force, is_tty)
-        _eq("decision%r" % (args,), got, want)
-
-def _test_only_an_explicit_y_consents_to_deletion(ctx):
-    """This answer is the only thing between a listing and `rm -rf` on
-    multi-gigabyte trees, so everything that is not a deliberate yes — an empty
-    line, Enter alone, a stray word, EOF from a closed stdin — has to read as
-    no.
-    """
-    for yes in ["y", "y\n", "Y\n", "yes\n", "  y\n", "\ty\n"]:
-        if not testonly_answered_yes(bytes(yes)):
-            fail("expected %r to consent" % yes)
-    for no in ["", "\n", "n", "n\n", "N\n", "no\n", "later\n", " \n", "maybe"]:
-        if testonly_answered_yes(bytes(no)):
-            fail("expected %r NOT to consent" % no)
 
 def _test_fmt_kb(ctx):
     _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
@@ -284,8 +242,6 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
-    _test_deletion_never_happens_unasked,
-    _test_only_an_explicit_y_consents_to_deletion,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
     _test_scan_classifies_the_three_outcomes,

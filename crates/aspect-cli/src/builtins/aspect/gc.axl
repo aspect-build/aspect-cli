@@ -36,6 +36,7 @@ until a build gets past loading, and `server/cmdline` is absent once `server/`
 is cleaned. A base that neither resolves is reported and left alone.
 """
 
+load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
 
 # Bumped whenever a key in the `--output=json` document is renamed, removed, or
@@ -95,6 +96,11 @@ def _fmt_kb(kb: int) -> str:
     if kb >= 1024:
         return str((kb + 512) // 1024) + " MB"
     return str(kb) + " KB"
+
+def _capitalize(s: str) -> str:
+    """First letter upper-cased, so one phrase can serve both a sentence that
+    starts with it and one that embeds it."""
+    return s[:1].upper() + s[1:]
 
 def _default_output_user_root(ctx: TaskContext) -> str:
     """Bazel's default output user root for this platform.
@@ -299,58 +305,6 @@ def _cache_report(ctx: TaskContext, root: str) -> dict:
         report[key] = sizes.get(paths[key], 0)
     return report
 
-# Compared against the answer a byte at a time: `bytes.elems()` yields length-1
-# `bytes`, and `bytes()` builds the same from a string.
-_YES = [bytes("y"), bytes("Y")]
-_BLANK = [bytes(" "), bytes("\t")]
-
-def _answered_yes(answer) -> bool:
-    """True when the first non-blank byte of `answer` is `y` or `Y`.
-
-    Anything else, an empty line included, is a no: the destructive branch
-    should take a deliberate keystroke, not merely a non-matching one.
-    """
-    for b in answer.elems():
-        if b in _BLANK:
-            continue
-        return b in _YES
-    return False
-
-def _ask(ctx: TaskContext, count: int, kb: int) -> bool:
-    """Ask on the terminal whether to delete, defaulting to no.
-
-    The prompt goes to the console rather than stdout, which may be carrying a
-    results document. The read is bounded rather than to EOF: a terminal hands
-    back the line as soon as Enter is pressed.
-    """
-    ctx.std.io.stderr.write("  Delete %d output base(s) and free %s? [y/N] " % (count, _fmt_kb(kb)))
-    return _answered_yes(ctx.std.io.stdin.read(64))
-
-# What `_delete_decision` concluded. `_ASK` is the only one that needs a human.
-_SKIP = "skip"
-_GO = "go"
-_ASK = "ask"
-_NEEDS_FORCE = "needs-force"
-
-def _delete_decision(has_orphans: bool, dry_run: bool, force: bool, is_tty: bool) -> str:
-    """Whether deleting may proceed. Pure, so the whole table can be tested.
-
-    Deleting is the destructive half of this task, so it is never reached
-    without either an explicit `--force` or a terminal answer. Off a terminal
-    there is nobody to ask and no safe assumption, so `--force` is required
-    rather than inferred: a `gc` wired into a CI job or a cron should say out
-    loud that it deletes.
-    """
-    if not has_orphans or dry_run:
-        return _SKIP
-    if force:
-        return _GO
-    return _ASK if is_tty else _NEEDS_FORCE
-
-def _needs_force_message(count: int) -> str:
-    return ("refusing to delete %d output base(s) with no terminal to confirm at. " +
-            "Pass --force to delete them, or --dry-run to look without deleting.") % count
-
 def _kept_entries(bases: list) -> list:
     """Bases a run leaves alone, for the document. No `kb`: nothing sizes them."""
     return [{"path": b.path, "workspace": b.workspace, "pid": b.pid} for b in bases]
@@ -472,20 +426,22 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for b in orphans:
         _say(streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
 
-    verdict = _delete_decision(
-        len(orphans) > 0,
-        ctx.args.dry_run,
-        ctx.args.force,
-        ctx.std.io.stdin.is_tty,
+    doomed = "delete %d output base(s)" % len(orphans)
+    verdict = confirm.decide(
+        has_work = len(orphans) > 0,
+        dry_run = ctx.args.dry_run,
+        force = ctx.args.force,
+        is_tty = ctx.std.io.stdin.is_tty,
     )
-    if verdict == _NEEDS_FORCE:
-        return TaskConclusion(exit_code = 1, message = _needs_force_message(len(orphans)))
-    if verdict == _ASK and not _ask(ctx, len(orphans), reclaimable):
+    if verdict == confirm.NEEDS_FORCE:
+        return TaskConclusion(exit_code = 1, message = confirm.needs_force_message(doomed))
+    question = _capitalize(doomed) + " and free " + _fmt_kb(reclaimable) + "?"
+    if verdict == confirm.ASK and not confirm.ask(ctx, question):
         return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
 
     reaped = 0
     freed = 0
-    if verdict != _SKIP:
+    if verdict != confirm.SKIP:
         for i, b in enumerate(orphans):
             # Printed before the work, not after: a 1 GB tree takes seconds to
             # unlink, and this line is what says where that time is going.
@@ -572,8 +528,6 @@ The download cache (`cache/repos/v1/content_addressable`) is reported but not pr
 )
 
 # Exposed for gc_test.axl; not part of the task's surface.
-testonly_answered_yes = _answered_yes
-testonly_delete_decision = _delete_decision
 testonly_document = _document
 testonly_fmt_kb = _fmt_kb
 testonly_reap = _reap

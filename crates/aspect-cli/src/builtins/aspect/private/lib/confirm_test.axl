@@ -1,0 +1,91 @@
+"""Unit tests for lib/confirm.axl — consent for a destructive task.
+
+Run with:
+  aspect dev test-confirm
+
+This is the guard between a listing and an irreversible delete, so the decision
+table is asserted row by row rather than sampled, and the answer parser is held
+to treating anything short of a deliberate `y` as no.
+
+`ask` itself is not tested here: it needs a terminal, so its two halves are
+covered instead — `decide` says when to call it, `answered_yes` says what the
+answer meant.
+"""
+
+load("./confirm.axl", "confirm")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_nothing_to_do_is_never_a_prompt(ctx):
+    """With no work, the flags and the terminal are all irrelevant — a task
+    should not ask about an empty list."""
+    for dry_run in [True, False]:
+        for force in [True, False]:
+            for is_tty in [True, False]:
+                _eq(
+                    "no work (dry_run=%r force=%r tty=%r)" % (dry_run, force, is_tty),
+                    confirm.decide(False, dry_run, force, is_tty),
+                    confirm.SKIP,
+                )
+
+def _test_dry_run_wins_over_force(ctx):
+    """Asking to look and to leap at once is a mistake; the safe reading is to
+    look."""
+    for is_tty in [True, False]:
+        _eq("dry-run + force (tty=%r)" % is_tty, confirm.decide(True, True, True, is_tty), confirm.SKIP)
+        _eq("dry-run alone (tty=%r)" % is_tty, confirm.decide(True, True, False, is_tty), confirm.SKIP)
+
+def _test_force_is_the_explicit_yes(ctx):
+    """--force is consent given in advance, and holds with or without a
+    terminal — that is what makes it usable from CI."""
+    _eq("force on a terminal", confirm.decide(True, False, True, True), confirm.GO)
+    _eq("force off a terminal", confirm.decide(True, False, True, False), confirm.GO)
+
+def _test_a_terminal_gets_asked_and_a_pipe_gets_refused(ctx):
+    """The whole point of the split: off a terminal there is nobody to ask, and
+    silence must not be read as yes."""
+    _eq("terminal", confirm.decide(True, False, False, True), confirm.ASK)
+    _eq("no terminal", confirm.decide(True, False, False, False), confirm.NEEDS_FORCE)
+
+def _test_only_a_deliberate_y_consents(ctx):
+    """Everything that is not a yes — Enter alone, a stray word, the empty read
+    a closed stdin returns — has to read as no."""
+    for yes in ["y", "y\n", "Y\n", "yes\n", "  y\n", "\ty\n", "Yes please\n"]:
+        if not confirm.answered_yes(bytes(yes)):
+            fail("expected %r to consent" % yes)
+    for no in ["", "\n", "n", "n\n", "N\n", "no\n", "later\n", " \n", "maybe", "1\n"]:
+        if confirm.answered_yes(bytes(no)):
+            fail("expected %r NOT to consent" % no)
+
+def _test_the_refusal_names_both_ways_out(ctx):
+    """A reader who hits this has to learn how to proceed and how to preview,
+    or they will go looking for a flag that does not exist."""
+    message = confirm.needs_force_message("delete 4 output base(s)")
+    for expected in ["delete 4 output base(s)", "--force", "--dry-run"]:
+        if expected not in message:
+            fail("refusal does not mention %r: %s" % (expected, message))
+
+_UNIT_TESTS = [
+    _test_nothing_to_do_is_never_a_prompt,
+    _test_dry_run_wins_over_force,
+    _test_force_is_the_explicit_yes,
+    _test_a_terminal_gets_asked_and_a_pipe_gets_refused,
+    _test_only_a_deliberate_y_consents,
+    _test_the_refusal_names_both_ways_out,
+]
+
+def _impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("confirm.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+confirm_tests = task(
+    summary = "Run the destructive-action confirmation unit tests.",
+    kind = "test-confirm",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)
