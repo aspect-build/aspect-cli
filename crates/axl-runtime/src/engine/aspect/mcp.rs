@@ -1,11 +1,23 @@
-//! `ctx.aspect.mcp` — an MCP (Model Context Protocol) server over a Workflows
-//! deployment's `/api/v1` build-results REST API.
+//! `ctx.aspect.mcp` — the CLI's MCP (Model Context Protocol) server.
 //!
 //! The server speaks MCP over stdio (stdout carries the protocol; every
-//! diagnostic goes to stderr) and exposes read-only tools for the build data
-//! behind the Build & Test UI. It authenticates each upstream request with the
-//! bearer `aspect auth login` minted for the deployment, resolved fresh per
-//! call so the CLI's refresh flow keeps a long-lived session alive.
+//! diagnostic goes to stderr) and serves two things.
+//!
+//! **Usage guidance, always.** The CLI's task surface is defined per-repository
+//! by that repo's own `.aspect/*.axl` files, so it is in no training data and
+//! cannot be described from here. The server's `instructions` therefore point at
+//! `aspect describe`, which can. Keeping that pointer short is deliberate: it is
+//! loaded into every session, while `describe` is paid for only when something
+//! needs it. This half needs no deployment, no login and no network, which is
+//! what lets `aspect mcp` be registered by anyone who has installed the CLI.
+//!
+//! **Build results, when a deployment is configured.** Read-only tools over a
+//! Workflows deployment's `/api/v1`, for the build data behind the Build & Test
+//! UI. Each upstream request carries the bearer `aspect auth login` minted for
+//! the deployment, resolved fresh per call so the CLI's refresh flow keeps a
+//! long-lived session alive. With no deployment these tools are not advertised
+//! at all — a tool that would answer every call with "configure a deployment"
+//! is worse than one that was never offered.
 //!
 //! The API host comes from the deployment's advertised build-results viewer URL
 //! (`aspect_bes_results_url`, recorded by `aspect auth configure`). The REST
@@ -26,7 +38,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     ErrorData as McpError, Implementation, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -717,17 +729,33 @@ impl BuildResultsServer {
 /// only when negotiated, as rmcp's own `#[tool_handler]` does. The list is the
 /// same for every caller and never changes within a session: `Public`, fresh
 /// for 0ms to match rmcp's generated handler.
-fn list_tools_result(version: Option<&ProtocolVersion>) -> ListToolsResult {
-    let tools = tool_defs()
-        .iter()
-        .map(|def| {
-            let schema = match (def.schema)() {
-                serde_json::Value::Object(map) => map,
-                _ => unreachable!("tool schemas are objects by construction"),
-            };
-            Tool::new(def.name, def.description, Arc::new(schema))
-        })
-        .collect();
+/// `build_results` is false when no deployment is configured, in which case the
+/// list is empty: a tool that would answer every call with "configure a
+/// deployment" is worse than one that was never advertised.
+///
+/// Every tool here is a read-only query, declared as such so a host can apply a
+/// policy like "auto-approve reads, prompt on the rest" — which it can only do
+/// for properties the server states.
+fn list_tools_result(version: Option<&ProtocolVersion>, build_results: bool) -> ListToolsResult {
+    let tools = if build_results {
+        tool_defs()
+            .iter()
+            .map(|def| {
+                let schema = match (def.schema)() {
+                    serde_json::Value::Object(map) => map,
+                    _ => unreachable!("tool schemas are objects by construction"),
+                };
+                Tool::new(def.name, def.description, Arc::new(schema)).annotate(
+                    ToolAnnotations::new()
+                        .read_only(true)
+                        .destructive(false)
+                        .idempotent(true),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let result = ListToolsResult::with_all_items(tools);
     if version.is_some_and(|v| *v >= ProtocolVersion::V_2026_07_28) {
         result.with_ttl_ms(0).with_cache_scope(CacheScope::Public)
@@ -740,16 +768,33 @@ impl ServerHandler for BuildResultsServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info =
-            Implementation::new("aspect-workflows-build-results", env!("CARGO_PKG_VERSION"))
-                .with_title("Aspect Workflows build results");
-        info.instructions = Some(format!(
-            "Read-only build and test results from the Aspect Workflows deployment '{}'. \
-             Builds are addressed by their `id` from list_invocations — when you only have \
-             the invocation UUID Bazel printed, resolve it first with \
-             list_invocations(invocation_id=...). Responses carry `links` objects; follow \
-             them rather than constructing URLs.",
-            self.deployment
-        ));
+            Implementation::new("aspect-cli", env!("CARGO_PKG_VERSION")).with_title("Aspect CLI");
+
+        // The CLI's own surface is per-repo and cannot be described from here,
+        // so this points at the command that can rather than trying to
+        // summarize it. Keeping that pointer short is the whole design: it is
+        // loaded into every session, while `aspect describe` is paid for only
+        // when something needs it.
+        let mut instructions = String::from(
+            "The Aspect CLI is available in this environment. Its task surface is defined \
+             per-repository by that repo's own `.aspect/*.axl` files, so it is not in any \
+             training data and differs between repositories.\n\n\
+             Run `aspect describe` in the repository to get the authoritative list of tasks, \
+             each with a one-line summary, plus guidance on working in that repo. Run \
+             `aspect describe '<task>'` for one task's full flag surface with types and \
+             defaults. Both emit JSON.",
+        );
+        if !self.deployment.is_empty() {
+            instructions.push_str(&format!(
+                "\n\nThis server also exposes read-only build and test results from the Aspect \
+                 Workflows deployment '{}'. Builds are addressed by their `id` from \
+                 list_invocations — when you only have the invocation UUID Bazel printed, \
+                 resolve it first with list_invocations(invocation_id=...). Responses carry \
+                 `links` objects; follow them rather than constructing URLs.",
+                self.deployment
+            ));
+        }
+        info.instructions = Some(instructions);
         info
     }
 
@@ -758,7 +803,10 @@ impl ServerHandler for BuildResultsServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(list_tools_result(context.protocol_version().as_ref()))
+        Ok(list_tools_result(
+            context.protocol_version().as_ref(),
+            !self.deployment.is_empty(),
+        ))
     }
 
     async fn call_tool(
@@ -781,39 +829,65 @@ impl ServerHandler for BuildResultsServer {
     }
 }
 
-/// Resolve the deployment, probe the API, and serve MCP over stdio until the
-/// client disconnects. Blocking; returns the process's exit code.
-fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
-    let deployments = auth::load_deployments()?;
-    let deployment = auth::select_deployment(&deployments, deployment_name)?;
+/// What a deployment contributes to the server, when one is configured.
+///
+/// `None` is an ordinary state, not an error: a developer who has installed the
+/// CLI and never configured a Workflows deployment still gets a server, because
+/// the instructions it carries are useful on their own. Refusing to start would
+/// make `claude mcp add aspect -- aspect mcp` fail for most first-time users.
+struct BuildResultsGroup {
+    deployment: String,
+    origin: String,
+    confirmed: bool,
+}
+
+/// Resolve the deployment if there is one, probing its API.
+///
+/// Every failure here is reported and swallowed. The deployment is one group of
+/// an otherwise useful server, so a missing, misconfigured or unreachable one
+/// costs its tools and nothing else.
+fn resolve_build_results(
+    deployment_name: Option<&str>,
+    http: &reqwest::Client,
+) -> Option<BuildResultsGroup> {
+    let deployments = match auth::load_deployments() {
+        Ok(d) => d,
+        Err(e) => {
+            errln!("aspect mcp: no deployments could be read ({e}); serving without build results");
+            return None;
+        }
+    };
+    let deployment = match auth::select_deployment(&deployments, deployment_name) {
+        Ok(d) => d,
+        Err(e) => {
+            errln!("aspect mcp: {e}; serving without build results");
+            return None;
+        }
+    };
     let results_url = deployment.endpoints.results_url.clone();
     if results_url.is_empty() {
-        anyhow::bail!(
-            "deployment '{}' does not advertise a build-results URL, so it has no web/API host to \
-             serve build results from. Re-run `aspect auth configure <remote-host>` against a \
-             deployment with the Build & Test UI enabled.",
+        errln!(
+            "aspect mcp: deployment '{}' advertises no build-results URL, so it has no web/API \
+             host to serve from; serving without build results. `aspect auth configure \
+             <remote-host>` against a deployment with the Build & Test UI enabled adds them.",
             deployment.name
         );
+        return None;
     }
-    let origin = url_origin(&results_url).ok_or_else(|| {
-        anyhow::anyhow!(
-            "deployment '{}' advertises an invalid results URL: {results_url}",
+    let Some(origin) = url_origin(&results_url) else {
+        errln!(
+            "aspect mcp: deployment '{}' advertises an invalid results URL ({results_url}); \
+             serving without build results",
             deployment.name
-        )
-    })?;
-
-    let http = reqwest::Client::builder()
-        // A no-bearer request to a cookie-fronted edge 302s to the IdP; seeing
-        // that status (rather than the IdP's HTML) is what the probe and the
-        // per-call error mapping key on.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+        );
+        return None;
+    };
 
     // Warm the availability check so a misconfigured deployment is visible in
-    // the server's own stderr at startup — but never latch a failure: the
-    // probe re-runs per tool call until it succeeds (see api_confirmed).
+    // the server's own stderr at startup — but never latch a failure: the probe
+    // re-runs per tool call until it succeeds (see api_confirmed).
     let probe_url = format!("{origin}{DISCOVERY_PATH}");
-    let api_confirmed = auth::block_on(async {
+    let confirmed = auth::block_on(async {
         match http.get(&probe_url).send().await {
             Ok(r) if r.status().is_success() => true,
             Ok(r) => {
@@ -833,19 +907,52 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
             }
         }
     });
+    Some(BuildResultsGroup {
+        deployment: deployment.name.clone(),
+        origin,
+        confirmed,
+    })
+}
+
+/// Serve MCP over stdio until the client disconnects. Blocking; returns the
+/// process's exit code.
+///
+/// Starts whether or not a deployment is configured: the usage guidance it
+/// carries is useful on its own, and the build-results tools are one optional
+/// group on top of it.
+fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
+    let http = reqwest::Client::builder()
+        // A no-bearer request to a cookie-fronted edge 302s to the IdP; seeing
+        // that status (rather than the IdP's HTML) is what the probe and the
+        // per-call error mapping key on.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
+    let group = resolve_build_results(deployment_name, &http);
+    match &group {
+        Some(g) => errln!(
+            "aspect mcp: serving usage guidance and build results for deployment '{}' ({}) over stdio",
+            g.deployment,
+            g.origin
+        ),
+        None => errln!(
+            "aspect mcp: serving usage guidance over stdio; no Workflows deployment is \
+             configured, so no build-results tools are advertised"
+        ),
+    }
 
     let server = BuildResultsServer {
-        deployment: deployment.name.clone(),
-        api_origin: origin.clone(),
-        api_confirmed: std::sync::atomic::AtomicBool::new(api_confirmed),
+        deployment: group
+            .as_ref()
+            .map(|g| g.deployment.clone())
+            .unwrap_or_default(),
+        api_origin: group.as_ref().map(|g| g.origin.clone()).unwrap_or_default(),
+        api_confirmed: std::sync::atomic::AtomicBool::new(
+            group.as_ref().is_some_and(|g| g.confirmed),
+        ),
         token_cache: std::sync::Mutex::new(None),
         http,
     };
-
-    errln!(
-        "aspect mcp: serving build results for deployment '{}' ({origin}) over stdio",
-        deployment.name
-    );
 
     auth::block_on(async {
         let service = server.serve(rmcp::transport::stdio()).await?;
@@ -916,6 +1023,33 @@ mod tests {
         json
     }
 
+    #[test]
+    fn no_deployment_advertises_no_tools() {
+        // Every one of these tools reaches a deployment's REST API. With no
+        // deployment they would each answer "configure one", which is worse
+        // than never offering them: the agent pays their schemas in context and
+        // learns nothing it could not have been told once in `instructions`.
+        let result = list_tools_result(Some(&ProtocolVersion::V_2026_07_28), false);
+        assert!(result.tools.is_empty());
+    }
+
+    #[test]
+    fn tools_declare_themselves_read_only() {
+        // A host can only apply a policy like "auto-approve reads, prompt on
+        // the rest" to properties the server states. Every tool here is a
+        // query, and saying so is what makes that policy expressible.
+        let result = list_tools_result(Some(&ProtocolVersion::V_2026_07_28), true);
+        assert!(!result.tools.is_empty());
+        for tool in &result.tools {
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} declares no annotations", tool.name));
+            assert_eq!(annotations.read_only_hint, Some(true), "{}", tool.name);
+            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
+        }
+    }
+
     fn route(name: &str, arguments: serde_json::Value) -> Result<String, String> {
         let def = tool_defs()
             .iter()
@@ -927,8 +1061,11 @@ mod tests {
 
     #[test]
     fn tools_list_carries_cache_hints_from_2026_07_28() {
-        let current =
-            serde_json::to_value(list_tools_result(Some(&ProtocolVersion::V_2026_07_28))).unwrap();
+        let current = serde_json::to_value(list_tools_result(
+            Some(&ProtocolVersion::V_2026_07_28),
+            true,
+        ))
+        .unwrap();
         assert_eq!(current["ttlMs"], 0);
         assert_eq!(current["cacheScope"], "public");
         assert_eq!(
@@ -937,7 +1074,7 @@ mod tests {
         );
 
         for older in [Some(ProtocolVersion::V_2025_06_18), None] {
-            let json = serde_json::to_value(list_tools_result(older.as_ref())).unwrap();
+            let json = serde_json::to_value(list_tools_result(older.as_ref(), true)).unwrap();
             assert!(json.get("ttlMs").is_none(), "{older:?}: {json}");
             assert!(json.get("cacheScope").is_none(), "{older:?}: {json}");
         }

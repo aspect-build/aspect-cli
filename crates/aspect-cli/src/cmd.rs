@@ -1511,7 +1511,64 @@ fn describe_index(
             "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
             "feature_flags": "aspect feature <name>",
         },
+        "guidance": agent_guidance(tasks),
     })
+}
+
+/// How to work in this repository, for a reader that has just discovered it.
+///
+/// Every line is derived from what this repo actually has, so nothing here can
+/// claim a task that does not exist or outlive one that is removed. Phrased as
+/// capability rather than instruction — "X wraps Y" rather than "prefer X" — so
+/// it stays true for a reader who has their own reasons to call the underlying
+/// tool, and so the CLI is not asserting a preference on a repo's behalf.
+fn agent_guidance(tasks: &[&dyn TaskLike<'_>]) -> Vec<String> {
+    let has = |path: &str| {
+        tasks.iter().any(|t| {
+            let mut p = t.group().clone();
+            p.push(t.kind());
+            p.join(" ") == path
+        })
+    };
+
+    let mut lines = vec![
+        "This repository's task surface is defined by its own `.aspect/*.axl` files, so it \
+         differs from every other repo and is not in any training data. Treat this listing as \
+         the authority."
+            .to_string(),
+    ];
+
+    if has("build") || has("test") {
+        lines.push(
+            "`aspect build` / `aspect test` wrap the corresponding Bazel commands with this \
+             repo's resolved flags, remote cache and BES wiring, retries, and CI reporting. \
+             Calling `bazel` directly still works and skips all of that."
+                .to_string(),
+        );
+    }
+    if has("setup tools-bazel-wrapper") {
+        lines.push(
+            "`aspect setup tools-bazel-wrapper` installs a `tools/bazel` shim that routes plain \
+             `bazel` invocations through the CLI, if you would rather not change which command \
+             you type."
+                .to_string(),
+        );
+    }
+    if has("worktree add") {
+        lines.push(
+            "`aspect worktree add <branch>` creates a git worktree backed by a pooled, already \
+             warm Bazel output base. `git worktree add` gives Bazel a workspace path it has \
+             never seen, which costs a full server start and a cold analysis cache on the first \
+             build — the one case where the plain git command is materially worse."
+                .to_string(),
+        );
+    }
+    lines.push(
+        "Tasks accept `--output=json` where they produce a result worth parsing; \
+         `aspect describe '<task>'` lists every flag with its type and default."
+            .to_string(),
+    );
+    lines
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
@@ -2488,6 +2545,49 @@ mod tests {
         assert!(au_at < tips_at, "rows should be alphabetical by slug");
         assert!(out.contains("Upload artifacts."), "summary missing");
         assert!(out.contains("aspect feature <NAME>"), "footer missing");
+    }
+
+    #[test]
+    fn guidance_is_derived_from_the_tasks_that_exist() {
+        // Every guidance line names a command, so a line for a task this repo
+        // does not define would point an agent at something that is not there.
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let build = stub_task("build", &[], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&build];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("aspect build"), "names the task that exists");
+        assert!(
+            !text.contains("worktree"),
+            "must not advertise a task this repo has not defined"
+        );
+        assert!(
+            !text.contains("tools-bazel-wrapper"),
+            "must not advertise a task this repo has not defined"
+        );
+    }
+
+    #[test]
+    fn guidance_mentions_worktrees_only_when_the_task_is_present() {
+        let empty: SmallMap<String, Arg> = SmallMap::new();
+        let add = stub_task("add", &["worktree"], empty.clone());
+        let tasks: Vec<&dyn TaskLike> = vec![&add];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+
+        assert!(text.contains("aspect worktree add"));
+        // The reason travels with the advice: without it an agent has no basis
+        // to prefer this over the git command it already knows.
+        assert!(text.contains("never seen"));
+    }
+
+    #[test]
+    fn guidance_always_states_that_the_surface_is_per_repo() {
+        // True of every repository, and the reason the rest of the document is
+        // worth reading at all.
+        let tasks: Vec<&dyn TaskLike> = vec![];
+        let text = describe_index("1.2.3", &tasks, &[])["guidance"].to_string();
+        assert!(text.contains(".aspect/"));
+        assert!(text.contains("training data"));
     }
 
     #[test]
