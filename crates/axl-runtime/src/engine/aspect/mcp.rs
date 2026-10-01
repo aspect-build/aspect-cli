@@ -222,8 +222,8 @@ fn label_prop() -> serde_json::Value {
 }
 
 /// The published tool surface. Read-only build data only: the API's
-/// org/profile/session management routes are deliberately not exposed, and
-/// `list_tools_result` annotates every tool `readOnlyHint` on that basis.
+/// org/profile/session management routes are deliberately not exposed. A
+/// mutating tool must not be added here: every entry is published `readOnlyHint`.
 fn tool_defs() -> &'static [ToolDef] {
     &[
         ToolDef {
@@ -712,6 +712,9 @@ impl BuildResultsServer {
 
 /// The `tools/list` response for a client that negotiated `version`.
 ///
+/// Every tool is annotated `readOnlyHint` so hosts can call it without a
+/// confirmation prompt; `tool_defs` holds read-only routes only.
+///
 /// Protocol 2026-07-28 requires `ttlMs` and `cacheScope` on list results, and
 /// a client on that version rejects a list without them, leaving the server
 /// with no tools. Older versions do not define the fields, so they are sent
@@ -948,7 +951,9 @@ mod tests {
     #[test]
     fn every_tool_is_annotated_read_only() {
         let json = serde_json::to_value(list_tools_result(None)).unwrap();
-        for tool in json["tools"].as_array().unwrap() {
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), tool_defs().len());
+        for tool in tools {
             assert_eq!(
                 tool["annotations"]["readOnlyHint"], true,
                 "{}",
