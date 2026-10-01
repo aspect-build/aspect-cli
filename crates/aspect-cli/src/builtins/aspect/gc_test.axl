@@ -5,11 +5,14 @@ Run with:
 
 The classifier is what decides whether a directory gets deleted, so the tests
 build a real output-base-shaped tree under a temp dir and run the real `_scan`
-against it. The fixture covers the three outcomes plus the one that would be a
-data-loss bug: `install/` and `cache/` sit beside the output bases under the
-same root and are shared by every workspace on the machine. Counting them as
-bases reports tens of gigabytes of working cache as garbage, which is exactly
-the mistake a first pass makes.
+against it. The fixture covers every state plus the two that would be data-loss
+bugs:
+
+  - `install/` and `cache/` sit beside the output bases under the same root and
+    are shared by every workspace on the machine. Counting them as bases
+    reports tens of gigabytes of working cache as garbage.
+  - A worktree-pool base has no worktree at its workspace path, by design, so
+    it is indistinguishable from an orphan without the pool-specific test.
 
 Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation.
@@ -32,6 +35,17 @@ def _make_base(ctx: TaskContext, root: str, name: str, workspace: str) -> None:
     ctx.std.fs.create_dir_all(execroot)
     _symlink(ctx, workspace + "/MODULE.bazel", execroot + "/MODULE.bazel")
 
+def _write_cmdline(ctx: TaskContext, base: str, workspace: str) -> None:
+    """A `server/cmdline` shaped like Bazel's: NUL-separated argv."""
+    ctx.std.fs.create_dir_all(base + "/server")
+    argv = [
+        "/usr/local/bin/bazel",
+        "--output_base=" + base,
+        "--workspace_directory=" + workspace,
+        "build",
+    ]
+    ctx.std.fs.write(base + "/server/cmdline", "\x00".join(argv))
+
 def _fixture(ctx: TaskContext) -> str:
     """A root holding one live base, one orphan, one unattributable base, and
     the two shared directories that must never be classified."""
@@ -45,10 +59,28 @@ def _fixture(ctx: TaskContext) -> str:
     _make_base(ctx, root, "livebase", live_ws)
     _make_base(ctx, root, "deadbase", tmp + "/workspace-that-was-deleted")
 
-    # A base whose execroot never got a symlink forest: an invocation that
-    # failed before analysis. Real, and must not be guessed at.
+    # A base whose execroot never got a symlink forest and whose server left no
+    # command line behind: nothing can attribute it, and it must not be guessed
+    # at.
     ctx.std.fs.create_dir_all(root + "/weirdbase/execroot")
     ctx.std.fs.write(root + "/weirdbase/execroot/DO_NOT_BUILD_HERE", "")
+
+    # An invocation that died before analysis: Bazel created the execroot on
+    # server start but never populated it, so only `server/cmdline` names the
+    # workspace. A tenth of the bases on a developer machine look like this.
+    _write_cmdline(ctx, root + "/cmdlinebase", tmp + "/workspace-also-deleted")
+    ctx.std.fs.create_dir_all(root + "/cmdlinebase/execroot")
+
+    # Both sources present and disagreeing. The execroot reflects the last
+    # build, `server/cmdline` the last server start, so the execroot wins.
+    _make_base(ctx, root, "bothbase", live_ws)
+    _write_cmdline(ctx, root + "/bothbase", tmp + "/stale-from-cmdline")
+
+    # Two shapes of worktree-pool base, both of which look exactly like orphans:
+    # one named by the pool, one built in a slot before the pool pinned a base.
+    # The slot directories are deliberately absent — that is what a free slot is.
+    _make_base(ctx, root, "aspect-wt-abc123", tmp + "/pool/aspect-worktree-abc123")
+    _make_base(ctx, root, "hashnamed", tmp + "/.aspect/worktrees/github.com/acme/repo/aspect-worktree-def456")
 
     # Shared infrastructure, not output bases.
     ctx.std.fs.create_dir_all(root + "/install/abc123")
@@ -68,12 +100,6 @@ def _test_workspace_resolves_from_the_execroot_symlink(ctx):
     live = testonly_workspace_of(ctx, root + "/livebase")
     _eq("resolved workspace ends with live-workspace", live.endswith("/live-workspace"), True)
 
-def _test_unattributable_base_resolves_to_empty(ctx):
-    """No symlink in the execroot means no workspace can be named. Returning ""
-    is what keeps the base out of the delete list."""
-    root = _fixture(ctx)
-    _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
-
 def _test_scan_classifies_the_three_outcomes(ctx):
     root = _fixture(ctx)
     bases = testonly_scan(ctx, root)
@@ -92,7 +118,7 @@ def _test_shared_directories_are_never_classified(ctx):
     names = [b.name for b in testonly_scan(ctx, root)]
     _eq("install is not a base", "install" in names, False)
     _eq("cache is not a base", "cache" in names, False)
-    _eq("only the three real bases", len(names), 3)
+    _eq("only the real bases", sorted(names), ["aspect-wt-abc123", "bothbase", "cmdlinebase", "deadbase", "hashnamed", "livebase", "weirdbase"])
 
 def _test_orphan_carries_the_workspace_it_lost(ctx):
     """The report names the workspace that went away; without it a reader can't
@@ -104,13 +130,63 @@ def _test_orphan_carries_the_workspace_it_lost(ctx):
             return
     fail("deadbase was not scanned")
 
+def _test_cmdline_attributes_a_base_with_an_empty_execroot(ctx):
+    """A build that died before analysis leaves the execroot empty, and on a
+    developer machine that is a tenth of all bases. Without the `server/cmdline`
+    fallback they stay undetermined and are never reclaimed."""
+    root = _fixture(ctx)
+    ws = testonly_workspace_of(ctx, root + "/cmdlinebase")
+    _eq("resolved from cmdline", ws.endswith("/workspace-also-deleted"), True)
+
+    for b in testonly_scan(ctx, root):
+        if b.name == "cmdlinebase":
+            _eq("classified, not left undetermined", b.state, "orphan")
+            return
+    fail("cmdlinebase was not scanned")
+
+def _test_execroot_wins_over_a_stale_cmdline(ctx):
+    """`server/cmdline` records the last server *start*; the execroot records
+    the last build. When they disagree the execroot is the fresher answer, and
+    reading the stale one could call a live base an orphan."""
+    root = _fixture(ctx)
+    ws = testonly_workspace_of(ctx, root + "/bothbase")
+    _eq("execroot wins", ws.endswith("/live-workspace"), True)
+
+def _test_worktree_pool_bases_are_never_reaped(ctx):
+    """The cross-feature data-loss case. `aspect worktree remove` deletes a
+    slot's worktree and keeps its output base on purpose — that warm server and
+    `external/` tree are the whole point of the pool — so a free slot's base is
+    indistinguishable from an orphan by workspace alone. Reaping it would undo
+    the feature.
+    """
+    root = _fixture(ctx)
+    states = {}
+    for b in testonly_scan(ctx, root):
+        states[b.name] = b.state
+    _eq("recognized by base name", states["aspect-wt-abc123"], "pooled")
+    _eq("recognized by slot workspace", states["hashnamed"], "pooled")
+
+    # The reap list is built from orphans alone, so being anything else is what
+    # protects them.
+    _eq("not offered for deletion", states["aspect-wt-abc123"] == "orphan", False)
+    _eq("not offered for deletion", states["hashnamed"] == "orphan", False)
+
+def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
+    """The conservative end of the fallback: no symlinks and no cmdline means
+    no deletion."""
+    root = _fixture(ctx)
+    _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
+
 _UNIT_TESTS = [
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
-    _test_unattributable_base_resolves_to_empty,
     _test_scan_classifies_the_three_outcomes,
     _test_shared_directories_are_never_classified,
     _test_orphan_carries_the_workspace_it_lost,
+    _test_cmdline_attributes_a_base_with_an_empty_execroot,
+    _test_execroot_wins_over_a_stale_cmdline,
+    _test_worktree_pool_bases_are_never_reaped,
+    _test_a_base_neither_source_resolves_stays_undetermined,
 ]
 
 def _test_impl(ctx):

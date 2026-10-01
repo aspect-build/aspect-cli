@@ -23,17 +23,39 @@ What it never touches, and why:
   - **`install/` and `cache/`.** They sit beside the output bases under the same
     root and are shared by every workspace on the machine. Treating them as
     output bases reports tens of gigabytes of working cache as garbage.
+  - **A base pinned to an `aspect worktree` pool slot.** A free slot has no
+    worktree — the pool destroys it and keeps the base on purpose — so one is
+    indistinguishable from an orphan by workspace alone, and reaping it would
+    throw away exactly the warm state the pool exists to hold.
 
-A base's workspace is resolved from the execroot's own source symlinks rather
-than from `server/cmdline`, so a base whose server has exited since its last
-build is still classified correctly.
+A base's workspace is resolved from the execroot's own source symlinks, falling
+back to the `--workspace_directory` in `server/cmdline`. Neither source alone
+covers the machine: the execroot survives a server that has exited but is empty
+until a build gets past loading, and `server/cmdline` is absent once `server/`
+is cleaned. A base that neither resolves is reported and left alone.
 """
 
 load("@aspect//private/lib/environment.axl", "info", "warn")
 
+# Bumped whenever a key in the `--output=json` document is renamed, removed, or
+# changes meaning. Additive keys do not bump it.
+_SCHEMA_VERSION = 1
+
 _LIVE = "live"
 _ORPHAN = "orphan"
 _UNKNOWN = "unknown"
+_POOLED = "pooled"
+
+# How a worktree-pool output base is recognized, mirroring `aspect worktree`'s
+# own constants (`_OUTPUT_BASE_PREFIX` and `pools_root` in
+# `private/lib/worktree.axl`). Spelled out here rather than imported so this
+# task stays independent of whether the pool feature is present.
+#
+# These bases look exactly like orphans and must never be reaped: the pool
+# destroys a slot's worktree while keeping its output base on purpose, because
+# the warm server and `external/` tree are the whole reason the pool exists.
+_POOL_BASE_PREFIX = "aspect-wt-"
+_POOL_WORKTREES_SUBDIR = "/.aspect/worktrees/"
 
 # Directories under the output user root that are shared infrastructure, not
 # output bases. `install/` holds the extracted Bazel binaries; `cache/` holds the
@@ -82,13 +104,15 @@ def _default_output_user_root(ctx: TaskContext) -> str:
         return home + "/Library/Caches/bazel/_bazel_" + user
     return home + "/.cache/bazel/_bazel_" + user
 
-def _workspace_of(ctx: TaskContext, base: str) -> str:
-    """The workspace directory `base` was last built from, or "".
+_WORKSPACE_FLAG = "--workspace_directory="
+
+def _workspace_from_execroot(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the execroot's source symlinks, or "".
 
     Bazel materializes each top-level source entry as an absolute symlink into
-    `execroot/<name>/`, so any one of them names the workspace. Reading the
-    execroot rather than `server/cmdline` means a base whose server has exited
-    still resolves.
+    `execroot/<name>/`, so any one of them names the workspace. `bazel-out` and
+    `external` are real directories there, not symlinks, so they are skipped by
+    the same test.
     """
     execroot = base + "/execroot"
     if not ctx.std.fs.exists(execroot):
@@ -109,6 +133,36 @@ def _workspace_of(ctx: TaskContext, base: str) -> str:
             if idx > 0:
                 return target[:idx]
     return ""
+
+def _workspace_from_cmdline(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the base's recorded server command line, or "".
+
+    `server/cmdline` is the NUL-separated argv of the last server started here,
+    carrying an explicit `--workspace_directory=`. An output base is a hash of
+    exactly one workspace, so this names it unambiguously.
+    """
+    raw = ctx.std.fs.try_read_to_string(base + "/server/cmdline")
+    if not raw:
+        return ""
+    for arg in raw.split("\x00"):
+        if arg.startswith(_WORKSPACE_FLAG):
+            return arg[len(_WORKSPACE_FLAG):]
+    return ""
+
+def _workspace_of(ctx: TaskContext, base: str) -> str:
+    """The workspace directory `base` belongs to, or "".
+
+    The execroot is tried first because it survives anything: a base whose
+    server has exited, or whose `server/` directory was cleaned, still resolves
+    from the symlinks its last build left behind.
+
+    `server/cmdline` is the fallback, and it is what attributes a base that
+    never finished a build — the execroot is created empty on the first server
+    start, so a run that failed in loading leaves nothing to read there. Those
+    are a tenth of the bases on a developer machine, and without this they stay
+    undetermined and are never reclaimed.
+    """
+    return _workspace_from_execroot(ctx, base) or _workspace_from_cmdline(ctx, base)
 
 def _server_pid(ctx: TaskContext, base: str) -> int:
     """PID recorded in the base's server directory, or 0."""
@@ -151,6 +205,15 @@ def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
             sizes[parts[1].strip()] = int(parts[0].strip())
     return sizes
 
+def _is_pooled(name: str, workspace: str) -> bool:
+    """True when this base belongs to an `aspect worktree` pool slot.
+
+    Either signal is enough: the pool names the bases it creates, and a base
+    built inside a slot before the pool pinned one still points its workspace
+    there.
+    """
+    return name.startswith(_POOL_BASE_PREFIX) or _POOL_WORKTREES_SUBDIR in workspace
+
 def _scan(ctx: TaskContext, root: str) -> list:
     """Classify every output base under `root`."""
     bases = []
@@ -159,7 +222,9 @@ def _scan(ctx: TaskContext, root: str) -> list:
             continue
         path = root + "/" + entry.path
         workspace = _workspace_of(ctx, path)
-        if not workspace:
+        if _is_pooled(entry.path, workspace):
+            state = _POOLED
+        elif not workspace:
             state = _UNKNOWN
         elif ctx.std.fs.exists(workspace):
             state = _LIVE
@@ -231,6 +296,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     orphans = _with_sizes(ctx, [b for b in bases if b.state == _ORPHAN])
     live = [b for b in bases if b.state == _LIVE]
     unknown = [b for b in bases if b.state == _UNKNOWN]
+    pooled = [b for b in bases if b.state == _POOLED]
     reclaimable = 0
     for b in orphans:
         reclaimable += b.kb
@@ -248,12 +314,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
             "output_user_root": root,
             "dry_run": ctx.args.dry_run,
             "output_bases": {
                 "live": len(live),
                 "orphaned": len(orphans),
                 "undetermined": len(unknown),
+                "worktree_pool": len(pooled),
             },
             "orphans": [
                 {"path": b.path, "workspace": b.workspace, "kb": b.kb, "pid": b.pid}
@@ -267,10 +335,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     info(ctx.std, "output user root: " + root)
-    print("  %d live, %d orphaned, %d undetermined" % (len(live), len(orphans), len(unknown)))
+    print("  %d live, %d orphaned, %d undetermined, %d held by the worktree pool" %
+          (len(live), len(orphans), len(unknown), len(pooled)))
     if unknown:
-        print("    (undetermined = no workspace symlink in the execroot, so the base cannot be")
-        print("     attributed to a workspace. Left alone.)")
+        print("    (undetermined = no execroot symlinks and no recorded server command line, so")
+        print("     the base cannot be attributed to a workspace. Left alone.)")
+    if pooled:
+        print("    (worktree pool = pinned to an `aspect worktree` slot. A free slot has no")
+        print("     worktree, which is what keeps its server warm. Left alone.)")
     for b in orphans:
         print("    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
 
