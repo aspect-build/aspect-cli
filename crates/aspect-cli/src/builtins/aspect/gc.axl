@@ -121,7 +121,15 @@ def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags
     if err != None:
         return ""
     value = rc.flag_value("--output_user_root", command = "startup")
-    return value or ""
+    if not value:
+        return ""
+    if value.startswith("/"):
+        return value
+
+    # Bazel resolves a relative value against the workspace root, not the
+    # caller's cwd. Reading it as cwd-relative agrees only when the two happen
+    # to coincide, and sends `gc` somewhere else from any subdirectory.
+    return (root or ctx.std.env.bazel_root_dir()) + "/" + value
 
 def _platform_output_user_root(ctx: TaskContext) -> str:
     """Bazel's default output user root for this platform."""

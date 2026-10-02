@@ -156,6 +156,23 @@ def _test_a_workspace_without_the_flag_defers(ctx):
     tmp = _rc_fixture(ctx, "build --jobs=4\n")
     _eq("nothing to report", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "")
 
+def _test_a_relative_root_resolves_against_the_workspace(ctx):
+    """Bazel resolves a relative `--output_user_root` against the workspace
+    root. Reading it as cwd-relative instead agrees only when the two coincide,
+    so `gc` run from any subdirectory would scan somewhere else — or, worse,
+    whatever happened to sit at that relative path.
+    """
+    tmp = _rc_fixture(ctx, "startup --output_user_root=relroot\n")
+    _eq(
+        "joined to the workspace root",
+        testonly_configured_output_user_root(ctx, tmp, _ISOLATED),
+        tmp + "/relroot",
+    )
+
+def _test_an_absolute_root_is_left_alone(ctx):
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/already/absolute\n")
+    _eq("untouched", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/already/absolute")
+
 def _test_the_last_rc_entry_wins(ctx):
     """The rc chain is last-wins, which is what lets a `~/.bazelrc` relocate the
     root for a whole machine over any workspace's own setting. Asserted within
@@ -279,6 +296,8 @@ _UNIT_TESTS = [
     _test_a_workspace_rc_names_the_root_to_collect,
     _test_a_workspace_without_the_flag_defers,
     _test_the_last_rc_entry_wins,
+    _test_a_relative_root_resolves_against_the_workspace,
+    _test_an_absolute_root_is_left_alone,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
     _test_scan_classifies_the_three_outcomes,
