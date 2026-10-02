@@ -24,7 +24,15 @@ INFO: Build Event Protocol files produced successfully.
     🧪 Test   1.2s  Run bazel tests
 ```
 
-Every `aspect <task>` ends with that per-phase breakdown, so the slow part of a CI step is always called out by name. The same content gets posted back to your PR as Buildkite annotations, GitHub Status Checks, and a PR task summary comment (see [examples below](#see-it-in-action)). [The CLI overview](https://aspect.build/docs/cli/overview#what-youll-see) shows `aspect format`, `aspect buildifier`, and `aspect lint` runs too — including the hold-the-line output (linter surfaces findings in unmodified files; the task still passes because no *new* violations were introduced).
+By default, `aspect <task>` ends with that per-phase breakdown, so the slow part of a CI step is always called out by name. The same content gets posted back to your PR as Buildkite annotations, GitHub Status Checks, and a PR task summary comment (see [examples below](#see-it-in-action)). [The CLI overview](https://aspect.build/docs/cli/overview#what-youll-see) shows `aspect format`, `aspect buildifier`, and `aspect lint` runs too — including the hold-the-line output (linter surfaces findings in unmodified files; the task still passes because no *new* violations were introduced).
+
+Use `--task:quiet` to hide Aspect's task header, progress lines, and timing breakdown. Task output, warnings and errors, exit codes, and CI status updates stay the same:
+
+```shell
+aspect test --task:quiet //...
+```
+
+Tasks can default to quiet mode too — use `--task:quiet=false` to show the header, progress lines, and breakdown for one run. See [quiet mode](docs/design.md#quiet-mode) for task and alias defaults.
 
 ## Configure and extend in AXL
 

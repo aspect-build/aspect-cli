@@ -23,7 +23,7 @@ def _impl(ctx: TaskContext) -> int:
     if environment.runner == None:
         info(ctx.std, "Not on an Aspect Workflows runner; no runner metadata available.")
         return 0
-    print_environment_info(ctx.std, environment)
+    print_environment_info(ctx.std, environment, quiet = ctx.task.quiet)
     return 0
 
 runner_metadata = task(
