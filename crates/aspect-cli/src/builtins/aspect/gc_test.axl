@@ -1,0 +1,325 @@
+"""Unit tests for gc.axl — what gets deleted, and whether deleting may proceed.
+
+Run with:
+  aspect dev test-gc
+
+Two things decide whether a multi-gigabyte tree is removed, so both are covered
+directly:
+
+  - **Classification.** The tests build a real output-base-shaped tree under a
+    temp dir and run the real `_scan` over it, every state included. The
+    data-loss case is `install/` and `cache/`, which sit beside the output bases
+    under the same root and are shared by every workspace on the machine —
+    counting them as bases offers tens of gigabytes of live cache for deletion.
+  - **Consent.** Shared with every other destructive task, so it lives in
+    `lib/confirm.axl` and is covered by `aspect dev test-confirm`.
+
+`_reap` is exercised against real trees rather than mocked: it has to survive
+the read-only directories Bazel leaves under `bazel-out/`, and it must not
+follow the execroot's symlinks out into the user's checkout.
+
+Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
+symlink creation.
+"""
+
+load("@aspect//gc.axl", "testonly_configured_output_user_root", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _symlink(ctx: TaskContext, target: str, link: str) -> None:
+    ctx.std.process.command("ln").args(["-s", target, link]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _make_base(ctx: TaskContext, root: str, name: str, workspace: str) -> None:
+    """An output base shaped like Bazel's: an execroot holding an absolute
+    source symlink back into `workspace`."""
+    execroot = root + "/" + name + "/execroot/_main"
+    ctx.std.fs.create_dir_all(execroot)
+    _symlink(ctx, workspace + "/MODULE.bazel", execroot + "/MODULE.bazel")
+
+def _write_cmdline(ctx: TaskContext, base: str, workspace: str) -> None:
+    """A `server/cmdline` shaped like Bazel's: NUL-separated argv."""
+    ctx.std.fs.create_dir_all(base + "/server")
+    argv = [
+        "/usr/local/bin/bazel",
+        "--output_base=" + base,
+        "--workspace_directory=" + workspace,
+        "build",
+    ]
+    ctx.std.fs.write(base + "/server/cmdline", "\x00".join(argv))
+
+def _fixture(ctx: TaskContext) -> str:
+    """A root holding one live base, one orphan, one unattributable base, and
+    the two shared directories that must never be classified."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-test")
+    root = tmp + "/root"
+    live_ws = tmp + "/live-workspace"
+    ctx.std.fs.create_dir_all(root)
+    ctx.std.fs.create_dir_all(live_ws)
+    ctx.std.fs.write(live_ws + "/MODULE.bazel", "module(name = \"live\")\n")
+
+    _make_base(ctx, root, "livebase", live_ws)
+    _make_base(ctx, root, "deadbase", tmp + "/workspace-that-was-deleted")
+
+    # A base whose execroot never got a symlink forest and whose server left no
+    # command line behind: nothing can attribute it, and it must not be guessed
+    # at.
+    ctx.std.fs.create_dir_all(root + "/weirdbase/execroot")
+    ctx.std.fs.write(root + "/weirdbase/execroot/DO_NOT_BUILD_HERE", "")
+
+    # An invocation that died before analysis: Bazel created the execroot on
+    # server start but never populated it, so only `server/cmdline` names the
+    # workspace. A tenth of the bases on a developer machine look like this.
+    _write_cmdline(ctx, root + "/cmdlinebase", tmp + "/workspace-also-deleted")
+    ctx.std.fs.create_dir_all(root + "/cmdlinebase/execroot")
+
+    # Both sources present and disagreeing. The execroot reflects the last
+    # build, `server/cmdline` the last server start, so the execroot wins.
+    _make_base(ctx, root, "bothbase", live_ws)
+    _write_cmdline(ctx, root + "/bothbase", tmp + "/stale-from-cmdline")
+
+    # Shared infrastructure, not output bases.
+    ctx.std.fs.create_dir_all(root + "/install/abc123")
+    ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
+    return root
+
+def _doc(ctx, root, verbose):
+    """The document for `root`'s real classification, at a given verbosity."""
+    bases = testonly_scan(ctx, root)
+    return testonly_document(
+        root = root,
+        dry_run = True,
+        verbose = verbose,
+        live = [b for b in bases if b.state == "live"],
+        unknown = [b for b in bases if b.state == "unknown"],
+        orphans = [b for b in bases if b.state == "orphan"],
+        reclaimable = 0,
+        reaped = 0,
+        freed = 0,
+        caches = {},
+    )
+
+def _test_verbose_lists_what_was_left_alone(ctx):
+    """`--verbose` exists so a classification can be checked rather than taken
+    on trust, so the kept bases have to carry the workspace each was attributed
+    to — that is the part a reader is auditing."""
+    root = _fixture(ctx)
+    doc = _doc(ctx, root, True)
+
+    _eq("every live base listed", len(doc["live_bases"]), 2)
+    _eq("every undetermined base listed", len(doc["undetermined_bases"]), 1)
+    _eq("live entries name their workspace", all([e["workspace"] for e in doc["live_bases"]]), True)
+    _eq("an undetermined base has none to name", doc["undetermined_bases"][0]["workspace"], "")
+
+    # Nothing sizes the kept bases: a `du` over every live base on the machine
+    # would cost more than the run, to report what will not be reclaimed.
+    _eq("no sizes claimed", all(["kb" not in e for e in doc["live_bases"]]), True)
+
+def _test_verbose_is_additive_only(ctx):
+    """A consumer that never passes `--verbose` must see the same document, so
+    the flag may only add keys."""
+    root = _fixture(ctx)
+    plain = _doc(ctx, root, False)
+    verbose = _doc(ctx, root, True)
+
+    _eq("no kept bases by default", "live_bases" in plain, False)
+    _eq("none by default either", "undetermined_bases" in plain, False)
+    for key in plain:
+        _eq("key %s unchanged" % key, verbose[key], plain[key])
+
+# Shuts the machine's own rc files out, so these assert what the fixture says
+# rather than whatever the host configured. An Aspect Workflows runner sets
+# --output_user_root for the machine, and without this it answers for the
+# fixture.
+_ISOLATED = ["--nosystem_rc", "--nohome_rc"]
+
+def _rc_fixture(ctx, body):
+    """A workspace whose `.bazelrc` is `body`."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
+    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
+    ctx.std.fs.write(tmp + "/.bazelrc", body)
+    return tmp
+
+def _test_a_workspace_rc_names_the_root_to_collect(ctx):
+    """`--output_user_root` is a startup option, so it is the one thing that
+    decides which root a workspace's bases live under. Reading it means `gc`
+    collects the right root in a repo that relocates it, rather than reporting
+    an empty platform default."""
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/somewhere/else\n")
+    _eq("read from the rc", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/somewhere/else")
+
+def _test_a_workspace_without_the_flag_defers(ctx):
+    """No override means no opinion, so the caller falls back to the platform
+    default rather than being handed a guess."""
+    tmp = _rc_fixture(ctx, "build --jobs=4\n")
+    _eq("nothing to report", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "")
+
+def _test_a_relative_root_resolves_against_the_workspace(ctx):
+    """Bazel resolves a relative `--output_user_root` against the workspace
+    root. Reading it as cwd-relative instead agrees only when the two coincide,
+    so `gc` run from any subdirectory would scan somewhere else — or, worse,
+    whatever happened to sit at that relative path.
+    """
+    tmp = _rc_fixture(ctx, "startup --output_user_root=relroot\n")
+    _eq(
+        "joined to the workspace root",
+        testonly_configured_output_user_root(ctx, tmp, _ISOLATED),
+        tmp + "/relroot",
+    )
+
+def _test_an_absolute_root_is_left_alone(ctx):
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/already/absolute\n")
+    _eq("untouched", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/already/absolute")
+
+def _test_the_last_rc_entry_wins(ctx):
+    """The rc chain is last-wins, which is what lets a `~/.bazelrc` relocate the
+    root for a whole machine over any workspace's own setting. Asserted within
+    one file, since the chain across files is the parser's to get right."""
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/first\nstartup --output_user_root=/second\n")
+    _eq("last wins", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/second")
+
+def _test_fmt_kb(ctx):
+    _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
+    _eq("exact MB", testonly_fmt_kb(1024), "1 MB")
+    _eq("MB rounds to nearest", testonly_fmt_kb(2047), "2 MB")
+    _eq("GB keeps one decimal", testonly_fmt_kb(1048576), "1.0 GB")
+    _eq("7.6 GB", testonly_fmt_kb(7969177), "7.6 GB")
+    _eq("zero", testonly_fmt_kb(0), "0 KB")
+
+def _test_workspace_resolves_from_the_execroot_symlink(ctx):
+    root = _fixture(ctx)
+    live = testonly_workspace_of(ctx, root + "/livebase")
+    _eq("resolved workspace ends with live-workspace", live.endswith("/live-workspace"), True)
+
+def _test_scan_classifies_the_three_outcomes(ctx):
+    root = _fixture(ctx)
+    bases = testonly_scan(ctx, root)
+    states = {}
+    for b in bases:
+        states[b.name] = b.state
+    _eq("live workspace still exists", states["livebase"], "live")
+    _eq("deleted workspace", states["deadbase"], "orphan")
+    _eq("no symlink to resolve", states["weirdbase"], "unknown")
+
+def _test_shared_directories_are_never_classified(ctx):
+    """The data-loss case: `install/` and `cache/` are shared by every workspace
+    and sit beside the output bases. Classifying them would offer tens of
+    gigabytes of live cache for deletion."""
+    root = _fixture(ctx)
+    names = [b.name for b in testonly_scan(ctx, root)]
+    _eq("install is not a base", "install" in names, False)
+    _eq("cache is not a base", "cache" in names, False)
+    _eq("only the real bases", sorted(names), ["bothbase", "cmdlinebase", "deadbase", "livebase", "weirdbase"])
+
+def _test_orphan_carries_the_workspace_it_lost(ctx):
+    """The report names the workspace that went away; without it a reader can't
+    tell whether the deletion is safe."""
+    root = _fixture(ctx)
+    for b in testonly_scan(ctx, root):
+        if b.name == "deadbase":
+            _eq("names the vanished workspace", b.workspace.endswith("/workspace-that-was-deleted"), True)
+            return
+    fail("deadbase was not scanned")
+
+def _test_cmdline_attributes_a_base_with_an_empty_execroot(ctx):
+    """A build that died before analysis leaves the execroot empty, and on a
+    developer machine that is a tenth of all bases. Without the `server/cmdline`
+    fallback they stay undetermined and are never reclaimed."""
+    root = _fixture(ctx)
+    ws = testonly_workspace_of(ctx, root + "/cmdlinebase")
+    _eq("resolved from cmdline", ws.endswith("/workspace-also-deleted"), True)
+
+    for b in testonly_scan(ctx, root):
+        if b.name == "cmdlinebase":
+            _eq("classified, not left undetermined", b.state, "orphan")
+            return
+    fail("cmdlinebase was not scanned")
+
+def _test_execroot_wins_over_a_stale_cmdline(ctx):
+    """`server/cmdline` records the last server *start*; the execroot records
+    the last build. When they disagree the execroot is the fresher answer, and
+    reading the stale one could call a live base an orphan."""
+    root = _fixture(ctx)
+    ws = testonly_workspace_of(ctx, root + "/bothbase")
+    _eq("execroot wins", ws.endswith("/live-workspace"), True)
+
+def _test_reap_removes_a_base_bazel_left_read_only(ctx):
+    """Bazel strips the owner-write bit from action output directories under
+    `bazel-out/`, and unlinking a child needs write on its parent. Without the
+    `chmod` this fails with EACCES on every base that completed a build — which
+    is every base large enough to be worth reclaiming.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-perm")
+    base = tmp + "/base"
+    locked = base + "/execroot/_main/bazel-out/k8-fastbuild/bin/pkg/build_script.out_dir"
+    ctx.std.fs.create_dir_all(locked)
+    ctx.std.fs.write(locked + "/out.txt", "an action output\n")
+    ctx.std.fs.set_permissions(locked, 0o555)
+
+    reaped = testonly_reap(ctx, base, 0)
+    _eq("reported as reaped", reaped, True)
+    _eq("actually gone", ctx.std.fs.exists(base), False)
+
+def _test_reap_does_not_reach_outside_the_base(ctx):
+    """The execroot is a forest of absolute symlinks into the user's checkout,
+    so the `chmod -R` that makes a base removable must not follow them. If it
+    did, `aspect gc` would quietly relax permissions across real source trees —
+    and the `rm` that follows must not reach them either.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-escape")
+    ws = tmp + "/workspace"
+    base = tmp + "/base"
+    execroot = base + "/execroot/_main"
+    ctx.std.fs.create_dir_all(ws)
+    ctx.std.fs.create_dir_all(execroot)
+    ctx.std.fs.write(ws + "/source.txt", "a file the user owns\n")
+    ctx.std.fs.set_permissions(ws + "/source.txt", 0o444)
+    _symlink(ctx, ws + "/source.txt", execroot + "/source.txt")
+    _symlink(ctx, ws, execroot + "/wsdir")
+
+    _eq("reaped", testonly_reap(ctx, base, 0), True)
+    _eq("base is gone", ctx.std.fs.exists(base), False)
+    _eq("the workspace survives", ctx.std.fs.exists(ws + "/source.txt"), True)
+    _eq("and is still read-only", ctx.std.fs.metadata(ws + "/source.txt").readonly, True)
+
+def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
+    """The conservative end of the fallback: no symlinks and no cmdline means
+    no deletion."""
+    root = _fixture(ctx)
+    _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
+
+_UNIT_TESTS = [
+    _test_verbose_lists_what_was_left_alone,
+    _test_verbose_is_additive_only,
+    _test_a_workspace_rc_names_the_root_to_collect,
+    _test_a_workspace_without_the_flag_defers,
+    _test_the_last_rc_entry_wins,
+    _test_a_relative_root_resolves_against_the_workspace,
+    _test_an_absolute_root_is_left_alone,
+    _test_fmt_kb,
+    _test_workspace_resolves_from_the_execroot_symlink,
+    _test_scan_classifies_the_three_outcomes,
+    _test_shared_directories_are_never_classified,
+    _test_orphan_carries_the_workspace_it_lost,
+    _test_cmdline_attributes_a_base_with_an_empty_execroot,
+    _test_execroot_wins_over_a_stale_cmdline,
+    _test_reap_removes_a_base_bazel_left_read_only,
+    _test_reap_does_not_reach_outside_the_base,
+    _test_a_base_neither_source_resolves_stays_undetermined,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("gc.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+gc_tests = task(
+    summary = "Run the gc output-base classifier unit tests.",
+    kind = "test-gc",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

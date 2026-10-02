@@ -1,0 +1,96 @@
+"""Consent for a task that is about to destroy something.
+
+A task that deletes needs the same four-way decision every time: there may be
+nothing to do, the caller may have asked only to look, they may have said yes in
+advance, or they may need to be asked. Getting any of it wrong is expensive in
+one direction only, so the policy lives here once rather than being reinvented
+per task.
+
+    verdict = confirm.decide(
+        has_work = len(doomed) > 0,
+        dry_run = ctx.args.dry_run,
+        force = ctx.args.force,
+        is_tty = ctx.std.io.stdin.is_tty,
+    )
+    if verdict == confirm.NEEDS_FORCE:
+        return TaskConclusion(exit_code = 1, message = confirm.needs_force_message("delete 4 caches"))
+    if verdict == confirm.ASK and not confirm.ask(ctx, "Delete 4 caches?"):
+        return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
+    go = verdict != confirm.SKIP
+
+`decide` is pure, so a caller can cover its own wiring without a terminal. The
+two rules it encodes:
+
+  - **`--dry-run` wins over `--force`.** Asking to look and to leap at once is a
+    mistake, and the safe reading of it is to look.
+  - **Off a terminal, `--force` is required rather than inferred.** There is
+    nobody to ask and no safe assumption, so a destructive task running from CI
+    or cron has to say out loud that it destroys.
+
+The `--force` and `--dry-run` flags stay with each task: their help text has to
+name what is being destroyed, which only the task knows.
+"""
+
+# A `read` large enough for any answer worth honouring. Bounded rather than read
+# to EOF: a terminal hands back the line as soon as Enter is pressed, and
+# waiting for a close that never comes would hang.
+_ANSWER_MAX = 64
+
+# Compared against the answer a byte at a time: `bytes.elems()` yields length-1
+# `bytes`, and `bytes()` builds the same from a string.
+_YES = [bytes("y"), bytes("Y")]
+_BLANK = [bytes(" "), bytes("\t")]
+
+# What `decide` concluded. `ASK` is the only one that needs a human.
+SKIP = "skip"
+GO = "go"
+ASK = "ask"
+NEEDS_FORCE = "needs-force"
+
+def decide(has_work: bool, dry_run: bool, force: bool, is_tty: bool) -> str:
+    """Whether the destructive step may proceed. See the module docstring."""
+    if not has_work or dry_run:
+        return SKIP
+    if force:
+        return GO
+    return ASK if is_tty else NEEDS_FORCE
+
+def answered_yes(answer) -> bool:
+    """True when the first non-blank byte of `answer` is `y` or `Y`.
+
+    Anything else, an empty line included, is a no: a destructive branch should
+    take a deliberate keystroke, not merely a non-matching one.
+    """
+    for b in answer.elems():
+        if b in _BLANK:
+            continue
+        return b in _YES
+    return False
+
+def ask(ctx: TaskContext, question: str) -> bool:
+    """Put `question` to the terminal and read the answer, defaulting to no.
+
+    The prompt goes to the console rather than stdout, which may be carrying a
+    machine-readable document. Call only when `decide` returned `ASK`: nothing
+    here checks for a terminal, and off one the read returns empty, which reads
+    as no.
+    """
+    ctx.std.io.stderr.write("  " + question + " [y/N] ")
+    return answered_yes(ctx.std.io.stdin.read(_ANSWER_MAX))
+
+def needs_force_message(action: str) -> str:
+    """The refusal for `NEEDS_FORCE`. `action` names what was declined, as a
+    verb phrase — "delete 4 output base(s)"."""
+    return ("refusing to %s with no terminal to confirm at. " +
+            "Pass --force to proceed, or --dry-run to look without changing anything.") % action
+
+confirm = namespace(
+    ASK = ASK,
+    GO = GO,
+    NEEDS_FORCE = NEEDS_FORCE,
+    SKIP = SKIP,
+    answered_yes = answered_yes,
+    ask = ask,
+    decide = decide,
+    needs_force_message = needs_force_message,
+)

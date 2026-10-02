@@ -1,0 +1,565 @@
+"""`aspect gc` — reclaim Bazel state that nothing else collects.
+
+Bazel ships a garbage collector for the disk cache, the action cache, the
+install base and the repo *contents* cache. It ships none for two things that
+grow without bound:
+
+  - **Output bases whose workspace is gone.** Deleting a git worktree leaves its
+    output base behind forever, holding its `external/` tree and action cache. A
+    machine that creates a worktree per task — which is what coding agents do —
+    accumulates one per task, permanently.
+  - **The download cache** (`cache/repos/v1/content_addressable`). There is no
+    `--repository_cache_gc_*` flag in any Bazel release; entries are written once
+    and never collected.
+
+This task reaps the first and reports the second.
+
+Nothing is deleted without saying so first: the orphans are listed in full, then
+confirmed on the terminal. `--force` answers for you and is **required** off a
+terminal, so a `gc` wired into CI or a cron has to state that it deletes rather
+than inheriting it from a default.
+
+What it never touches, and why:
+
+  - **An output base whose workspace still exists.** Its analysis cache is the
+    expensive thing, and a live server holding it is the thing worth protecting.
+  - **A live server.** Shutting one down to "tidy up" just means paying for
+    analysis again on the next build.
+  - **`install/` and `cache/`.** They sit beside the output bases under the same
+    root and are shared by every workspace on the machine. Treating them as
+    output bases reports tens of gigabytes of working cache as garbage.
+
+A base's workspace is resolved from the execroot's own source symlinks, falling
+back to the `--workspace_directory` in `server/cmdline`. Neither source alone
+covers the machine: the execroot survives a server that has exited but is empty
+until a build gets past loading, and `server/cmdline` is absent once `server/`
+is cleaned. A base that neither resolves is reported and left alone.
+"""
+
+load("./private/lib/confirm.axl", "confirm")
+load("./private/lib/environment.axl", "info", "warn")
+
+# Bumped whenever a key in the `--output=json` document is renamed, removed, or
+# changes meaning. Additive keys do not bump it.
+_SCHEMA_VERSION = 1
+
+_LIVE = "live"
+_ORPHAN = "orphan"
+_UNKNOWN = "unknown"
+
+# Directories under the output user root that are shared infrastructure, not
+# output bases. `install/` holds the extracted Bazel binaries; `cache/` holds the
+# download and repo-contents caches every workspace shares.
+_NOT_A_BASE = ["install", "cache"]
+
+# Bazel's own layout under the output user root, for the caches this task sizes
+# but never prunes. Each is reported with the reason it is left alone.
+_CACHES = [
+    (
+        "download_cache_kb",
+        "cache/repos/v1/content_addressable",
+        "no GC exists; prune by hand if it grows",
+    ),
+    (
+        "repo_contents_cache_kb",
+        "cache/repos/v1/contents",
+        "GC'd by Bazel while a server sits idle",
+    ),
+    (
+        "install_bases_kb",
+        "install",
+        "see --experimental_install_base_gc_max_age",
+    ),
+]
+
+_Base = record(
+    name = field(str),
+    path = field(str),
+    # The workspace this base belongs to; "" when it could not be resolved.
+    workspace = field(str),
+    state = field(str),
+    # PID of its Bazel server, or 0 when none is recorded or the record is stale.
+    pid = field(int),
+    kb = field(int, default = 0),
+)
+
+def _fmt_kb(kb: int) -> str:
+    """Kilobytes as a short human string, rounded to nearest.
+
+    Integer math throughout: AXL's `%` formatting rejects width and precision
+    flags, so there is no `%.1f` to reach for. Rounding rather than truncating
+    keeps a report of 7.5996 GB from reading as 7.5.
+    """
+    if kb >= 1048576:
+        tenths = (kb * 10 + 524288) // 1048576
+        return str(tenths // 10) + "." + str(tenths % 10) + " GB"
+    if kb >= 1024:
+        return str((kb + 512) // 1024) + " MB"
+    return str(kb) + " KB"
+
+def _capitalize(s: str) -> str:
+    """First letter upper-cased, so one phrase can serve both a sentence that
+    starts with it and one that embeds it."""
+    return s[:1].upper() + s[1:]
+
+def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags: list[str] = []) -> str:
+    """`--output_user_root` as the rc chain resolves it, or "".
+
+    `startup` is a section like any other to the rc parser, so this picks the
+    flag up wherever Bazel itself would read it — the system rc, the workspace
+    `.bazelrc`, the user's `~/.bazelrc` — in that order, last wins. A home rc
+    therefore beats a workspace one, which is Bazel's own precedence and the
+    case that matters most: a root set there relocates every build on the
+    machine.
+
+    `root` defaults to the surrounding workspace. Outside one there is no rc to
+    read and the parse fails, which is "" rather than an error: the platform
+    default is still a usable answer. `startup_flags` is for tests that need to
+    shut the ambient rc files out (`--nosystem_rc --nohome_rc`).
+    """
+    err, rc = catch(ctx.bazel.parse_rc, root = root, startup_flags = startup_flags) if root else catch(ctx.bazel.parse_rc, startup_flags = startup_flags)
+    if err != None:
+        return ""
+    value = rc.flag_value("--output_user_root", command = "startup")
+    if not value:
+        return ""
+    if value.startswith("/"):
+        return value
+
+    # Bazel resolves a relative value against the workspace root, not the
+    # caller's cwd. Reading it as cwd-relative agrees only when the two happen
+    # to coincide, and sends `gc` somewhere else from any subdirectory.
+    return (root or ctx.std.env.bazel_root_dir()) + "/" + value
+
+def _platform_output_user_root(ctx: TaskContext) -> str:
+    """Bazel's default output user root for this platform."""
+    home = ctx.std.env.home_dir()
+    user = ctx.std.env.var("USER") or ctx.std.env.var("LOGNAME") or ""
+    if not user:
+        # The home directory's last segment is the user name on every platform
+        # whose default root we know how to build.
+        idx = home.rfind("/")
+        user = home[idx + 1:] if idx >= 0 else home
+    if ctx.std.env.os() == "macos":
+        return home + "/Library/Caches/bazel/_bazel_" + user
+    return home + "/.cache/bazel/_bazel_" + user
+
+_WORKSPACE_FLAG = "--workspace_directory="
+
+def _workspace_from_execroot(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the execroot's source symlinks, or "".
+
+    Bazel materializes each top-level source entry as an absolute symlink into
+    `execroot/<name>/`, so any one of them names the workspace. `bazel-out` and
+    `external` are real directories there, not symlinks, so they are skipped by
+    the same test.
+    """
+    execroot = base + "/execroot"
+    if not ctx.std.fs.exists(execroot):
+        return ""
+    for ws in ctx.std.fs.read_dir(execroot):
+        if not ws.is_dir:
+            continue
+        wsdir = execroot + "/" + ws.path
+        for entry in ctx.std.fs.read_dir(wsdir):
+            child = wsdir + "/" + entry.path
+            meta = ctx.std.fs.symlink_metadata(child)
+            if not meta.is_symlink:
+                continue
+            target = ctx.std.fs.read_link(child)
+            if not target.startswith("/"):
+                continue
+            idx = target.rfind("/")
+            if idx > 0:
+                return target[:idx]
+    return ""
+
+def _workspace_from_cmdline(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the base's recorded server command line, or "".
+
+    `server/cmdline` is the NUL-separated argv of the last server started here,
+    carrying an explicit `--workspace_directory=`. An output base is a hash of
+    exactly one workspace, so this names it unambiguously.
+    """
+    raw = ctx.std.fs.try_read_to_string(base + "/server/cmdline")
+    if not raw:
+        return ""
+    for arg in raw.split("\x00"):
+        if arg.startswith(_WORKSPACE_FLAG):
+            return arg[len(_WORKSPACE_FLAG):]
+    return ""
+
+def _workspace_of(ctx: TaskContext, base: str) -> str:
+    """The workspace directory `base` belongs to, or "".
+
+    The execroot is tried first because it survives anything: a base whose
+    server has exited, or whose `server/` directory was cleaned, still resolves
+    from the symlinks its last build left behind.
+
+    `server/cmdline` is the fallback, and it is what attributes a base that
+    never finished a build — the execroot is created empty on the first server
+    start, so a run that failed in loading leaves nothing to read there. Those
+    are a tenth of the bases on a developer machine, and without this they stay
+    undetermined and are never reclaimed.
+    """
+    return _workspace_from_execroot(ctx, base) or _workspace_from_cmdline(ctx, base)
+
+def _server_pid(ctx: TaskContext, base: str) -> int:
+    """PID recorded in the base's server directory, or 0."""
+    txt = ctx.std.fs.try_read_to_string(base + "/server/server.pid.txt").strip()
+    if not txt:
+        return 0
+    for ch in txt.elems():
+        if ch < "0" or ch > "9":
+            return 0
+    return int(txt)
+
+def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
+    """True when `pid` is live AND is the Bazel server for `base`.
+
+    A recorded PID outlives the process that wrote it, and the OS reuses PIDs.
+    Matching the base path against the process's own command line is what keeps
+    this from signalling an unrelated process that inherited the number.
+    """
+    if pid <= 0:
+        return False
+    out = ctx.std.process.command("ps").args(["-p", str(pid), "-o", "command="]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    if out.status.code != 0:
+        return False
+    return base in out.stdout
+
+def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
+    """Apparent size in KB per path, via `du -sk`. Empty when `du` is
+    unavailable, which costs the report its numbers and nothing else."""
+    if not paths:
+        return {}
+    out = ctx.std.process.command("du").args(["-sk"] + paths) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    if out.status.code != 0:
+        return {}
+    sizes = {}
+    for line in out.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2:
+            sizes[parts[1].strip()] = int(parts[0].strip())
+    return sizes
+
+def _scan(ctx: TaskContext, root: str) -> list:
+    """Classify every output base under `root`."""
+    bases = []
+    for entry in ctx.std.fs.read_dir(root):
+        if not entry.is_dir or entry.path in _NOT_A_BASE:
+            continue
+        path = root + "/" + entry.path
+        workspace = _workspace_of(ctx, path)
+        if not workspace:
+            state = _UNKNOWN
+        elif ctx.std.fs.exists(workspace):
+            state = _LIVE
+        else:
+            state = _ORPHAN
+        bases.append(_Base(
+            name = entry.path,
+            path = path,
+            workspace = workspace,
+            state = state,
+            pid = _server_pid(ctx, path),
+        ))
+    return bases
+
+def _with_sizes(ctx: TaskContext, bases: list) -> list:
+    """`bases` with `kb` filled in for the ones we may delete."""
+    sizes = _du_kb(ctx, [b.path for b in bases])
+    return [
+        _Base(
+            name = b.name,
+            path = b.path,
+            workspace = b.workspace,
+            state = b.state,
+            pid = b.pid,
+            kb = sizes.get(b.path, 0),
+        )
+        for b in bases
+    ]
+
+def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
+    """Stop the base's server if it is really its server, then delete the base.
+
+    The server is signalled rather than asked to shut down over its RPC port:
+    `bazel shutdown` against a dead workspace would start a server to shut it
+    down, and everything the running one holds lives in the directory about to
+    be removed.
+
+    The tree is made writable first. Bazel strips the owner-write bit from the
+    action output directories under `bazel-out/`, and unlinking a child needs
+    write on its parent, so a base that completed a build cannot be removed as
+    it stands — which is every base large enough to be worth reclaiming. This is
+    the same `chmod` `bazel clean` does for the same reason.
+    """
+    if _is_this_bases_server(ctx, pid, path):
+        ctx.std.process.command("kill").args([str(pid)]) \
+            .stdout("null").stderr("null").spawn().wait()
+    _make_writable(ctx, path)
+    err, _ = catch(ctx.std.fs.remove_dir_all, path)
+    if err != None:
+        warn(ctx.std, "could not remove " + path + ": " + str(err))
+        return False
+    return True
+
+def _make_writable(ctx: TaskContext, path: str) -> None:
+    """Restore the owner-write bit across `path`, so the tree can be unlinked.
+
+    One `chmod -R` rather than an AXL walk: a single output base holds hundreds
+    of read-only directories and tens of thousands of files, and spawning once
+    beats a per-entry round trip. Failure is not reported here — the removal
+    that follows reports it, with the error the caller actually cares about.
+    """
+    ctx.std.process.command("chmod").args(["-R", "u+w", path]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _cache_report(ctx: TaskContext, root: str) -> dict:
+    """Sizes of the caches this task reports but does not touch, keyed for the
+    document. A cache the install has never created reports zero."""
+    paths = {}
+    for key, rel, _reason in _CACHES:
+        paths[key] = root + "/" + rel
+    sizes = _du_kb(ctx, [p for p in paths.values() if ctx.std.fs.exists(p)])
+    report = {}
+    for key in paths:
+        report[key] = sizes.get(paths[key], 0)
+    return report
+
+def _kept_entries(bases: list) -> list:
+    """Bases a run leaves alone, for the document. No `kb`: nothing sizes them."""
+    return [{"path": b.path, "workspace": b.workspace, "pid": b.pid} for b in bases]
+
+def _document(
+        root: str,
+        dry_run: bool,
+        verbose: bool,
+        live: list,
+        unknown: list,
+        orphans: list,
+        reclaimable: int,
+        reaped: int,
+        freed: int,
+        caches: dict) -> dict:
+    """The `--output=json` document.
+
+    `reclaimable_kb` is what the orphans hold and `freed_kb` what was actually
+    removed; under `--dry-run`, or when a removal failed, they differ. The key
+    names are a contract, so `_SCHEMA_VERSION` moves when they do — `--verbose`
+    only adds keys, which consumers already have to tolerate.
+    """
+    doc = {
+        "schema_version": _SCHEMA_VERSION,
+        "output_user_root": root,
+        "dry_run": dry_run,
+        "output_bases": {
+            "live": len(live),
+            "orphaned": len(orphans),
+            "undetermined": len(unknown),
+        },
+        "orphans": [
+            {"path": b.path, "workspace": b.workspace, "kb": b.kb, "pid": b.pid}
+            for b in orphans
+        ],
+        "reclaimable_kb": reclaimable,
+        "reaped": reaped,
+        "freed_kb": freed,
+        "caches": caches,
+    }
+    if verbose:
+        doc["live_bases"] = _kept_entries(live)
+        doc["undetermined_bases"] = _kept_entries(unknown)
+    return doc
+
+def _list_kept(streaming: bool, heading: str, bases: list) -> None:
+    """List bases this run will not touch, under `--verbose`.
+
+    Sizes are deliberately absent: measuring them means a `du` over every live
+    base on the machine, tens of gigabytes, to report something nothing is going
+    to reclaim. The path and the workspace are what make a classification
+    checkable, which is what this flag is for.
+    """
+    if not bases:
+        return
+    _say(streaming, "  %s (%d):" % (heading, len(bases)))
+    for b in bases:
+        _say(streaming, "    " + b.name + ("  " + b.workspace if b.workspace else ""))
+
+def _say(streaming: bool, line: str) -> None:
+    """A progress line, suppressed under `--output=json`.
+
+    The JSON document reports the finished state, so narrating to a script that
+    is waiting to parse one is noise.
+    """
+    if streaming:
+        print(line)
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    # Explicit flag, then whatever the surrounding workspace configured, then
+    # the platform default.
+    root = (ctx.args.output_user_root or
+            _configured_output_user_root(ctx) or
+            _platform_output_user_root(ctx))
+    if not ctx.std.fs.exists(root):
+        return TaskConclusion(
+            exit_code = 1,
+            message = "no Bazel output user root at " + root +
+                      " — pass --output-user-root to point at one",
+        )
+
+    # Everything below narrates as it goes rather than reporting at the end:
+    # classifying walks every base, sizing shells out to `du`, and deleting a
+    # multi-gigabyte tree takes seconds apiece. A reader needs to see which of
+    # those it is waiting on.
+    streaming = ctx.args.output != "json"
+    info(ctx.std, "output user root: " + root)
+
+    _say(streaming, "  scanning output bases…")
+    bases = _scan(ctx, root)
+    live = [b for b in bases if b.state == _LIVE]
+    unknown = [b for b in bases if b.state == _UNKNOWN]
+    orphaned = [b for b in bases if b.state == _ORPHAN]
+    _say(streaming, "  %d bases: %d live, %d orphaned, %d undetermined" %
+                    (len(bases), len(live), len(orphaned), len(unknown)))
+    if unknown:
+        _say(streaming, "    (undetermined = no execroot symlinks and no recorded server command line, so")
+        _say(streaming, "     the base cannot be attributed to a workspace. Left alone.)")
+
+    if ctx.args.verbose:
+        _say(streaming, "")
+        _list_kept(streaming, "live — workspace still exists", live)
+        _list_kept(streaming, "undetermined — cannot be attributed", unknown)
+        _say(streaming, "")
+
+    if orphaned:
+        _say(streaming, "  measuring %d orphaned base(s)…" % len(orphaned))
+    orphans = _with_sizes(ctx, orphaned)
+    reclaimable = 0
+    for b in orphans:
+        reclaimable += b.kb
+
+    # Sizing the shared caches walks tens of gigabytes and costs more than the
+    # rest of the task put together, so it is asked for rather than assumed.
+    if ctx.args.report_caches:
+        _say(streaming, "  measuring the shared caches… (this is the slow part)")
+    caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
+
+    # The full list goes out before anything is deleted, so the confirmation
+    # below is answered with the whole picture rather than a count.
+    if orphans:
+        _say(streaming, "  %d orphaned output base(s), %s:" % (len(orphans), _fmt_kb(reclaimable)))
+    for b in orphans:
+        _say(streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (workspace gone: " + b.workspace + ")")
+
+    doomed = "delete %d output base(s)" % len(orphans)
+    verdict = confirm.decide(
+        has_work = len(orphans) > 0,
+        dry_run = ctx.args.dry_run,
+        force = ctx.args.force,
+        is_tty = ctx.std.io.stdin.is_tty,
+    )
+    if verdict == confirm.NEEDS_FORCE:
+        return TaskConclusion(exit_code = 1, message = confirm.needs_force_message(doomed))
+    question = _capitalize(doomed) + " and free " + _fmt_kb(reclaimable) + "?"
+    if verdict == confirm.ASK and not confirm.ask(ctx, question):
+        return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
+
+    reaped = 0
+    freed = 0
+    if verdict != confirm.SKIP:
+        for i, b in enumerate(orphans):
+            # Printed before the work, not after: a 1 GB tree takes seconds to
+            # unlink, and this line is what says where that time is going.
+            _say(streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(orphans), _fmt_kb(b.kb), b.name))
+            if _reap(ctx, b.path, b.pid):
+                reaped += 1
+                freed += b.kb
+
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode(_document(
+            root = root,
+            dry_run = ctx.args.dry_run,
+            verbose = ctx.args.verbose,
+            live = live,
+            unknown = unknown,
+            orphans = orphans,
+            reclaimable = reclaimable,
+            reaped = reaped,
+            freed = freed,
+            caches = caches,
+        ), indent = 2) + "\n")
+        return 0
+
+    if not orphans:
+        print("  nothing to reclaim")
+    elif ctx.args.dry_run:
+        print("  would reclaim " + _fmt_kb(reclaimable) + " from " + str(len(orphans)) + " output base(s)")
+    elif reaped == len(orphans):
+        print("  reclaimed " + _fmt_kb(freed) + " from " + str(reaped) + " output base(s)")
+    else:
+        # The per-base warnings above say which ones and why; this is the total,
+        # so a reader does not have to count the warnings to know what is left.
+        print("  reclaimed %s from %d of %d output base(s); %s could not be removed" %
+              (_fmt_kb(freed), reaped, len(orphans), _fmt_kb(reclaimable - freed)))
+
+    # Reported, never touched: the download cache has no collector in any Bazel
+    # release, so its size is the number a reader most needs to see.
+    if caches:
+        print("")
+
+        # Padded by hand: AXL's `%` formatting takes no width flags.
+        width = max([len(rel) for _key, rel, _reason in _CACHES])
+        for key, rel, reason in _CACHES:
+            print("  " + rel + " " * (width - len(rel)) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
+    return 0
+
+gc = task(
+    summary = "Reclaim Bazel output bases whose workspace is gone, and report cache sizes.",
+    description = """Delete Bazel output bases left behind by deleted workspaces, and report the sizes of the caches Bazel shares between them.
+
+Deleting a git worktree leaves its Bazel output base behind forever — nothing in Bazel collects it. On a machine that creates a worktree per task this accumulates one output base, and one `external/` tree, per task.
+
+Never touches an output base whose workspace still exists, a running Bazel server for such a workspace, or the shared `install/` and `cache/` directories that sit beside the output bases.
+
+The download cache (`cache/repos/v1/content_addressable`) is reported but not pruned: no Bazel release has a `--repository_cache_gc_*` flag, and evicting from it costs only a re-download, so a size-capped policy is coming separately.""",
+    implementation = _impl,
+    args = {
+        "output_user_root": args.string(
+            default = "",
+            description = "The Bazel output user root to collect. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere). Pass this to collect a root other than the one this workspace uses.",
+        ),
+        "dry_run": args.boolean(
+            default = False,
+            description = "Report what would be reclaimed without deleting anything, and without prompting.",
+        ),
+        "force": args.boolean(
+            default = False,
+            description = "Delete without asking. Required when stdin is not a terminal, since there is nobody to confirm with — a `gc` running from CI or cron has to say that it deletes.",
+        ),
+        "verbose": args.boolean(
+            default = False,
+            description = "Also list the bases that are left alone — the live ones with the workspace each still belongs to, and the undetermined ones — so a classification can be checked rather than taken on trust. Sizes are not reported for them: measuring would mean walking every live base on the machine to size something nothing will reclaim. Adds `live_bases` and `undetermined_bases` to `--output=json`.",
+        ),
+        "report_caches": args.boolean(
+            default = False,
+            description = "Also report the sizes of the caches shared between output bases (download cache, repo contents cache, install bases). Off by default because measuring them walks tens of gigabytes and takes longer than everything else this task does.",
+        ),
+        "output": args.string(
+            default = "text",
+            values = ["text", "json"],
+            description = "stdout format. `text` (default): a human-readable report on stderr, stdout empty. `json`: one document on stdout with the classification, the orphans and their sizes, what was reaped, and the cache sizes.",
+        ),
+    },
+)
+
+# Exposed for gc_test.axl; not part of the task's surface.
+testonly_configured_output_user_root = _configured_output_user_root
+testonly_document = _document
+testonly_fmt_kb = _fmt_kb
+testonly_reap = _reap
+testonly_scan = _scan
+testonly_workspace_of = _workspace_of
