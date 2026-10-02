@@ -102,18 +102,22 @@ def _capitalize(s: str) -> str:
     starts with it and one that embeds it."""
     return s[:1].upper() + s[1:]
 
-def _configured_output_user_root(ctx: TaskContext, root: str = "") -> str:
-    """`--output_user_root` from a workspace's rc, or "".
+def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags: list[str] = []) -> str:
+    """`--output_user_root` as the rc chain resolves it, or "".
 
     `startup` is a section like any other to the rc parser, so this picks the
-    flag up wherever Bazel itself would read it — the workspace `.bazelrc`, the
-    user's `~/.bazelrc`, the system one — with the same last-wins resolution.
+    flag up wherever Bazel itself would read it — the system rc, the workspace
+    `.bazelrc`, the user's `~/.bazelrc` — in that order, last wins. A home rc
+    therefore beats a workspace one, which is Bazel's own precedence and the
+    case that matters most: a root set there relocates every build on the
+    machine.
 
     `root` defaults to the surrounding workspace. Outside one there is no rc to
     read and the parse fails, which is "" rather than an error: the platform
-    default is still a usable answer.
+    default is still a usable answer. `startup_flags` is for tests that need to
+    shut the ambient rc files out (`--nosystem_rc --nohome_rc`).
     """
-    err, rc = catch(ctx.bazel.parse_rc, root = root) if root else catch(ctx.bazel.parse_rc)
+    err, rc = catch(ctx.bazel.parse_rc, root = root, startup_flags = startup_flags) if root else catch(ctx.bazel.parse_rc, startup_flags = startup_flags)
     if err != None:
         return ""
     value = rc.flag_value("--output_user_root", command = "startup")

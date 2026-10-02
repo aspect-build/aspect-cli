@@ -129,23 +129,39 @@ def _test_verbose_is_additive_only(ctx):
     for key in plain:
         _eq("key %s unchanged" % key, verbose[key], plain[key])
 
+# Shuts the machine's own rc files out, so these assert what the fixture says
+# rather than whatever the host configured. An Aspect Workflows runner sets
+# --output_user_root for the machine, and without this it answers for the
+# fixture.
+_ISOLATED = ["--nosystem_rc", "--nohome_rc"]
+
+def _rc_fixture(ctx, body):
+    """A workspace whose `.bazelrc` is `body`."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
+    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
+    ctx.std.fs.write(tmp + "/.bazelrc", body)
+    return tmp
+
 def _test_a_workspace_rc_names_the_root_to_collect(ctx):
     """`--output_user_root` is a startup option, so it is the one thing that
     decides which root a workspace's bases live under. Reading it means `gc`
     collects the right root in a repo that relocates it, rather than reporting
     an empty platform default."""
-    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
-    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
-    ctx.std.fs.write(tmp + "/.bazelrc", "startup --output_user_root=/somewhere/else\n")
-    _eq("read from the rc", testonly_configured_output_user_root(ctx, tmp), "/somewhere/else")
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/somewhere/else\n")
+    _eq("read from the rc", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/somewhere/else")
 
 def _test_a_workspace_without_the_flag_defers(ctx):
     """No override means no opinion, so the caller falls back to the platform
     default rather than being handed a guess."""
-    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rc")
-    ctx.std.fs.write(tmp + "/MODULE.bazel", "")
-    ctx.std.fs.write(tmp + "/.bazelrc", "build --jobs=4\n")
-    _eq("nothing to report", testonly_configured_output_user_root(ctx, tmp), "")
+    tmp = _rc_fixture(ctx, "build --jobs=4\n")
+    _eq("nothing to report", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "")
+
+def _test_the_last_rc_entry_wins(ctx):
+    """The rc chain is last-wins, which is what lets a `~/.bazelrc` relocate the
+    root for a whole machine over any workspace's own setting. Asserted within
+    one file, since the chain across files is the parser's to get right."""
+    tmp = _rc_fixture(ctx, "startup --output_user_root=/first\nstartup --output_user_root=/second\n")
+    _eq("last wins", testonly_configured_output_user_root(ctx, tmp, _ISOLATED), "/second")
 
 def _test_fmt_kb(ctx):
     _eq("bytes stay KB", testonly_fmt_kb(512), "512 KB")
@@ -262,6 +278,7 @@ _UNIT_TESTS = [
     _test_verbose_is_additive_only,
     _test_a_workspace_rc_names_the_root_to_collect,
     _test_a_workspace_without_the_flag_defers,
+    _test_the_last_rc_entry_wins,
     _test_fmt_kb,
     _test_workspace_resolves_from_the_execroot_symlink,
     _test_scan_classifies_the_three_outcomes,
