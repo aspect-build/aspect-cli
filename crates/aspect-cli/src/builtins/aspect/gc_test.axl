@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -509,6 +509,25 @@ def _test_du_keeps_sizes_when_one_path_is_missing(ctx):
     _eq("measured", sizes.get(tmp + "/present", 0) >= 8, True)
     _eq("missing has no entry", tmp + "/missing" in sizes, False)
 
+def _test_select_by_hash_or_path(ctx):
+    """`--bazel-output-base` takes a hash or a path; either names a base the scan
+    found, whatever its state."""
+    root = _fixture(ctx)
+    bases = _scan(ctx, root)
+    selected, unmatched = testonly_select(bases, root, [_WEIRD, root + "/" + _LIVE + "/", _WEIRD])
+    _eq("both found, once each", [b.name for b in selected], [_WEIRD, _LIVE])
+    _eq("an undetermined base can be named", selected[0].state, "unknown")
+    _eq("nothing unmatched", unmatched, [])
+
+def _test_select_refuses_what_the_scan_did_not_find(ctx):
+    """It deletes what it is pointed at, so a name that is not an output base
+    under the root — a typo, `install`, or a path elsewhere — matches nothing."""
+    root = _fixture(ctx)
+    bases = _scan(ctx, root)
+    elsewhere = "/somewhere/else/" + _LIVE
+    _selected, unmatched = testonly_select(bases, root, ["install", elsewhere, "deadbeef"])
+    _eq("all refused", unmatched, ["install", elsewhere, "deadbeef"])
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -545,6 +564,8 @@ _UNIT_TESTS = [
     _test_a_running_server_vetoes_the_age_rule,
     _test_remove_tree_clears_read_only_directories,
     _test_du_keeps_sizes_when_one_path_is_missing,
+    _test_select_by_hash_or_path,
+    _test_select_refuses_what_the_scan_did_not_find,
 ]
 
 def _test_impl(ctx):

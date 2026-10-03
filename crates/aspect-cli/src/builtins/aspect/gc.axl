@@ -33,9 +33,10 @@ than inheriting it from a default.
 
 What it never touches, and why:
 
-  - **A base with a running server whose workspace exists.** Shutting one down
-    to "tidy up" just means paying for analysis again on the next build. An
-    orphan's server is stopped before its base is removed: nothing can use it.
+  - **A base with a running server whose workspace exists**, unless it is
+    named with `--bazel-output-base`. Shutting one down to "tidy up" just means
+    paying for analysis again on the next build. An orphan's server is stopped
+    before its base is removed: nothing can use it.
   - **Anything under the output user root not named like an output base**, or
     like this task's own trash (below). Bases are the md5 of their workspace
     path, so `install/`, `cache/`, and whatever Bazel or a user puts there next
@@ -45,6 +46,11 @@ A base's workspace is read from the `DO_NOT_BUILD_HERE` file Bazel writes into
 it, falling back to the execroot's source symlinks and then to the
 `--workspace_directory` in `server/cmdline` for a base that lost the file. A
 base none of them resolves is undetermined and is collected only by age.
+
+`--bazel-output-base` names bases to remove outright, by hash or by path, in
+place of the rules above: for a base nothing would otherwise collect, such as an
+undetermined one, without reaching for `rm -rf`. A named base is removed whatever
+its state, its server stopped first, and the download cache is left alone.
 
 A base is renamed to `.gc-trash-<name>` before it is deleted. A delete that fails
 part way would otherwise leave a base that has lost what attributes it to a
@@ -623,8 +629,32 @@ def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int) -> N
             _say(streaming, "    " + pad_left(_fmt_age(now_us - b.last_used), 4) + "  " + b.name + ("  " + b.workspace if b.workspace else ""))
     _say(streaming, "")
 
+def _select(bases: list, root: str, requested: list[str]) -> tuple:
+    """`(selected, unmatched)` for the bases `--bazel-output-base` names.
+
+    Each name is a base's directory name (its md5) or its path. A path must sit
+    directly under `root`: this deletes what it is pointed at, so it only ever
+    points at something the scan found there.
+    """
+    by_name = {b.name: b for b in bases}
+    selected = []
+    unmatched = []
+    for req in requested:
+        name = req.rstrip("/")
+        idx = name.rfind("/")
+        if idx >= 0:
+            name = name[idx + 1:] if name[:idx] == root else ""
+        b = by_name.get(name)
+        if b == None:
+            unmatched.append(req)
+        elif b not in selected:
+            selected.append(b)
+    return (selected, unmatched)
+
 def _why(b, now_us: int) -> str:
     """The reason a base is being removed, for the listing."""
+    if not _STATES[b.state].removable:
+        return "requested; " + _STATES[b.state].label + ("; workspace " + b.workspace if b.workspace else "")
     if b.state == _TRASH:
         return "left by an interrupted gc"
     if b.state == _ORPHAN:
@@ -711,13 +741,22 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     _say(streaming, "  scanning output bases…")
     bases = _scan(ctx, root, now_us, base_max_age_days * _DAY_US)
-    _print_census(streaming, bases, ctx.args.verbose, now_us)
 
-    removals = [b for b in bases if _STATES[b.state].removable]
+    requested = ctx.args.bazel_output_bases
+    if requested:
+        removals, unmatched = _select(bases, root, requested)
+        if unmatched:
+            return TaskConclusion(
+                exit_code = 1,
+                message = "no output base " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
+            )
+    else:
+        _print_census(streaming, bases, ctx.args.verbose, now_us)
+        removals = [b for b in bases if _STATES[b.state].removable]
     if removals:
         _say(streaming, "  measuring %s…" % pluralize(len(removals), "output base"))
     cache_entries, stale = 0, []
-    if cache_max_age_days > 0:
+    if cache_max_age_days > 0 and not requested:
         _say(streaming, "  scanning the download cache…")
         cache_entries, stale = _scan_download_cache(ctx, root, now_us - cache_max_age_days * _DAY_US)
     plan = _Plan(
@@ -765,6 +804,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             "base_max_age_days": base_max_age_days,
             "download_cache_max_age_days": cache_max_age_days,
             "orphan_grace_ms": _ORPHAN_GRACE_US // 1000,
+            "bazel_output_bases": requested,
         }
         ctx.std.io.stdout.write(json.encode(
             _document(root, ctx.args.dry_run, ctx.args.verbose, policy, plan, outcome, caches),
@@ -796,7 +836,9 @@ Deleting a git worktree leaves its Bazel output base behind forever — nothing 
 
 An output base is removed when its workspace is gone (and it has not been used in the last hour), or when it has not been used in `--base-max-age-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-age-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
 
-Never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`).""",
+`--bazel-output-base` removes the named bases instead, whatever their state.
+
+Otherwise never touches a running Bazel server whose workspace still exists, and never anything beside the output bases that is not named like one (`install/`, `cache/`).""",
     implementation = _impl,
     args = {
         "output_user_root": args.string(
@@ -810,6 +852,11 @@ Never touches a running Bazel server whose workspace still exists, or anything b
         "download_cache_max_age_days": args.int(
             default = 30,
             description = "Remove a download-cache entry no fetch has used in this many days. 0 turns this off.",
+        ),
+        "bazel_output_bases": args.string_list(
+            long = "bazel-output-base",
+            default = [],
+            description = "Remove this output base, by hash or by path under the output user root, instead of applying the age and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first — and the download cache is not pruned. Still listed and confirmed like any other removal.",
         ),
         "dry_run": args.boolean(
             default = False,
@@ -850,4 +897,5 @@ testonly_reap = _reap
 testonly_remove_tree = _remove_tree
 testonly_scan = _scan
 testonly_scan_download_cache = _scan_download_cache
+testonly_select = _select
 testonly_workspace_of = _workspace_of
