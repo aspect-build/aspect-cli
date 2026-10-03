@@ -290,11 +290,15 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
 
     The pid is read again rather than taken from the scan: a server started
     while the prompt waited — which the freshness check catches for a rule's
-    pick, but not for a named base — is the one to stop.
+    pick, but not for a named base — is the one to stop. Only an orphan, trash
+    or a named base is ever stopped; an idle base whose server has come up is
+    in use again, and skipped.
     """
     if not requested and b.state != output_bases.TRASH and output_bases.last_used(ctx, b.path) > b.last_used:
         return _SKIPPED
     pid = output_bases.server_pid(ctx, b.path)
+    if not requested and b.state == output_bases.IDLE and output_bases.may_be_this_bases_server(ctx, pid, b.path):
+        return _SKIPPED
     if output_bases.is_this_bases_server(ctx, pid, b.path):
         if not _stop(ctx, pid):
             warn(ctx.std, "left " + b.name + " alone: its Bazel server, pid " + str(pid) + ", did not exit")
@@ -315,11 +319,15 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
 _EXIT_POLLS = 50
 
 def _exited(ctx: TaskContext, pid: int) -> bool:
-    """True once `pid` has exited, polling for up to `_EXIT_POLLS` polls."""
+    """True once `pid` has exited, polling for up to `_EXIT_POLLS` polls.
+    False when `kill` cannot run to ask, since then it cannot be stopped
+    either."""
     for _ in range(_EXIT_POLLS):
         alive, _out = output_bases.run(ctx, "kill", ["-0", str(pid)])
-        if alive != 0:
+        if alive > 0:
             return True
+        if alive < 0:
+            return False
         time.sleep(100)
     return False
 

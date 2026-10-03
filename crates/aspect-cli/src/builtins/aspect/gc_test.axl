@@ -354,6 +354,33 @@ def _test_a_server_that_ignores_sigterm_is_killed(ctx):
     _eq("reaped", result, "reaped")
     _eq("killed", alive != 0, True)
 
+def _test_an_idle_base_whose_server_came_up_is_skipped(ctx):
+    """An idle base is chosen for being unused; a server running in it at
+    removal means it is in use again, so it is skipped, not stopped."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.LIVE
+    pid = _start_server(ctx, base, _SERVER)
+    b = output_bases.Base(name = fx.LIVE, path = base, workspace = "/ws", state = "idle", pid = 0, last_used = output_bases.last_used(ctx, base))
+    result = testonly_reap(ctx, b, False)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", [str(pid)])
+    _eq("skipped", result, "skipped")
+    _eq("its server left running", alive, 0)
+    _eq("still there", ctx.std.fs.exists(base), True)
+
+def _test_a_server_running_in_trash_is_stopped(ctx):
+    root = fx.fixture(ctx)
+    trash = root + "/.gc-trash-" + fx.DEAD
+    ctx.std.fs.create_dir_all(trash)
+    pid = _start_server(ctx, root + "/" + fx.DEAD, _SERVER)
+    ctx.std.fs.rename(root + "/" + fx.DEAD + "/server", trash + "/server")
+    b = output_bases.Base(name = ".gc-trash-" + fx.DEAD, path = trash, workspace = "", state = "trash", pid = 0, last_used = 0)
+    result = testonly_reap(ctx, b, False)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("reaped", result, "reaped")
+    _eq("stopped", alive != 0, True)
+
 def _test_summary(ctx):
     def outcome(skipped):
         return testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = skipped, pruned = 0, pruned_kb = 0)
@@ -387,6 +414,8 @@ _UNIT_TESTS = [
     _test_a_base_whose_server_cannot_be_identified_is_not_removed,
     _test_reap_stops_the_server_and_waits_for_it,
     _test_a_server_that_ignores_sigterm_is_killed,
+    _test_an_idle_base_whose_server_came_up_is_skipped,
+    _test_a_server_running_in_trash_is_stopped,
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
     _test_a_pooled_base_says_so_when_removed,

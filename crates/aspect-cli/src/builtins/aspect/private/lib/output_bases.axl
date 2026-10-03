@@ -424,7 +424,9 @@ def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
     code, out = _run(ctx, "ps", ["-p", str(pid), "-o", "rss=", "-o", "command="])
     rss, _, command = out.strip().partition(" ")
     if code == 0 and rss.isdigit():
-        return int(rss) if _output_base_name(command) == base[base.rfind("/") + 1:] else None
+        # A server still running in trash was started under the base's own name.
+        name = base[base.rfind("/") + 1:].removeprefix(TRASH_PREFIX)
+        return int(rss) if _output_base_name(command) == name else None
 
     # `ps` could not say. Only a pid known to be gone is ruled out: with no
     # `kill` to ask either, as on an image without procps, it might be live.
