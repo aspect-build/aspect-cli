@@ -285,15 +285,22 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
 
     A live process that may be its server but that `ps` cannot identify, as on
     an image without procps, can be neither confirmed nor stopped, so the base
-    is left alone: skipped when a rule chose it, failed when it was named.
+    is left alone: skipped when a rule chose it, failed when it was named. So is
+    a server that outlives `SIGKILL`.
+
+    The pid is read again rather than taken from the scan: a server started
+    while the prompt waited — which the freshness check catches for a rule's
+    pick, but not for a named base — is the one to stop.
     """
     if not requested and b.state != output_bases.TRASH and output_bases.last_used(ctx, b.path) > b.last_used:
         return _SKIPPED
-    if output_bases.is_this_bases_server(ctx, b.pid, b.path):
-        output_bases.run(ctx, "kill", [str(b.pid)])
-        _await_exit(ctx, b.pid)
-    elif output_bases.may_be_this_bases_server(ctx, b.pid, b.path):
-        warn(ctx.std, "left " + b.name + " alone: pid " + str(b.pid) + " may be its Bazel server, and `ps` cannot tell; stop it, then run again")
+    pid = output_bases.server_pid(ctx, b.path)
+    if output_bases.is_this_bases_server(ctx, pid, b.path):
+        if not _stop(ctx, pid):
+            warn(ctx.std, "left " + b.name + " alone: its Bazel server, pid " + str(pid) + ", did not exit")
+            return _FAILED
+    elif output_bases.may_be_this_bases_server(ctx, pid, b.path):
+        warn(ctx.std, "left " + b.name + " alone: pid " + str(pid) + " may be its Bazel server, and `ps` cannot tell; stop it, then run again")
         return _FAILED if requested else _SKIPPED
     trash = _move_to_trash(ctx, b.path)
     if not trash:
@@ -304,16 +311,26 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
         return _FAILED
     return _REAPED
 
-# How long `_reap` waits for a signalled server to exit, in 100ms polls.
+# How long `_stop` waits for a signalled server to exit, in 100ms polls.
 _EXIT_POLLS = 50
 
-def _await_exit(ctx: TaskContext, pid: int) -> None:
-    """Wait until `pid` has exited, for up to `_EXIT_POLLS` polls."""
+def _exited(ctx: TaskContext, pid: int) -> bool:
+    """True once `pid` has exited, polling for up to `_EXIT_POLLS` polls."""
     for _ in range(_EXIT_POLLS):
         alive, _out = output_bases.run(ctx, "kill", ["-0", str(pid)])
         if alive != 0:
-            return
+            return True
         time.sleep(100)
+    return False
+
+def _stop(ctx: TaskContext, pid: int) -> bool:
+    """`SIGTERM` `pid`, then `SIGKILL` it if it has not exited within the
+    wait; true once it is gone."""
+    output_bases.run(ctx, "kill", [str(pid)])
+    if _exited(ctx, pid):
+        return True
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    return _exited(ctx, pid)
 
 def _select(bases: list, root: str, requested: list[str], canonical = lambda p: p) -> tuple:
     """`(selected, unmatched)` for the bases `--bazel-output-base` names.

@@ -906,6 +906,7 @@ output_bases = namespace(
     resolve_root = _resolve_root,
     run = _run,
     scan_root = _scan_root,
+    server_pid = _server_pid,
     servers = _servers,
     tilde = _tilde,
     print_caches = _print_caches,

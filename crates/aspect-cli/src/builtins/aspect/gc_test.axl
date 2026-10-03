@@ -311,23 +311,48 @@ def _test_a_base_whose_server_cannot_be_identified_is_not_removed(ctx):
     _eq("named, failed", named, "failed")
     _eq("still there", ctx.std.fs.exists(base), True)
 
+# A stand-in Bazel server: `sh <script> --output_base=<base>`, which takes its
+# `sleep` down with it on SIGTERM so nothing outlives the test. `IGNORE_TERM`
+# makes one that only SIGKILL stops.
+_SERVER = "trap 'kill $c; exit' TERM\nsleep 30 & c=$!\nwait\n"
+_IGNORE_TERM = "trap '' TERM\nwhile :; do sleep 1; done\n"
+
+def _start_server(ctx, base, script):
+    """Start a detached stand-in server for `base` and record its pid where
+    Bazel does. Detached, as a real server is: a child of this process would
+    linger as a zombie after the signal and still answer `kill -0`."""
+    path = ctx.std.fs.mkdtemp(prefix = "aspect-gc-server") + "/server.sh"
+    ctx.std.fs.write(path, script)
+    _code, out = output_bases.run(ctx, "sh", ["-c", "sh " + path + " --output_base=" + base + " >/dev/null 2>&1 & echo $!"])
+    pid = int(out.strip())
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(pid))
+    return pid
+
 def _test_reap_stops_the_server_and_waits_for_it(ctx):
-    """The server is signalled and gone before its tree is moved, so it is not
-    writing into the trash as it is deleted."""
+    """The server is signalled and gone before its tree is moved. Its pid is
+    read at removal, not taken from the scan: this base had none when scanned."""
     root = fx.fixture(ctx)
     base = root + "/" + fx.DEAD
-
-    # Detached, as a real server is: a child of this process would linger as a
-    # zombie after the signal and still answer `kill -0`.
-    _code, out = output_bases.run(ctx, "sh", ["-c", "sh -c 'sleep 30; :' --output_base=" + base + " >/dev/null 2>&1 & echo $!"])
-    pid = int(out.strip())
-    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = pid, last_used = 0)
+    pid = _start_server(ctx, base, _SERVER)
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = 0, last_used = 0)
     result = testonly_reap(ctx, b, True)
     alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
     output_bases.run(ctx, "kill", ["-9", str(pid)])
     _eq("reaped", result, "reaped")
     _eq("the server has exited", alive != 0, True)
     _eq("gone", ctx.std.fs.exists(base), False)
+
+def _test_a_server_that_ignores_sigterm_is_killed(ctx):
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+    pid = _start_server(ctx, base, _IGNORE_TERM)
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = 0, last_used = 0)
+    result = testonly_reap(ctx, b, True)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("reaped", result, "reaped")
+    _eq("killed", alive != 0, True)
 
 def _test_summary(ctx):
     def outcome(skipped):
@@ -361,6 +386,7 @@ _UNIT_TESTS = [
     _test_summary,
     _test_a_base_whose_server_cannot_be_identified_is_not_removed,
     _test_reap_stops_the_server_and_waits_for_it,
+    _test_a_server_that_ignores_sigterm_is_killed,
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
     _test_a_pooled_base_says_so_when_removed,

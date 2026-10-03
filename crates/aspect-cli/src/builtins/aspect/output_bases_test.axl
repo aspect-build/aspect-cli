@@ -215,9 +215,10 @@ def _test_fmt_age(ctx):
 def _server(ctx, base, output_base = ""):
     """A stand-in Bazel server for `base`: a live process whose command line
     carries `--output_base=<output_base or base>`, with its pid recorded where
-    Bazel records it."""
-    proc = ctx.std.process.command("sh").args(["-c", "sleep 10; :", "--output_base=" + (output_base or base)]) \
-        .stdout("null").stderr("null").spawn()
+    Bazel records it. It blocks reading a pipe rather than in a `sleep` child,
+    so killing it leaves nothing behind."""
+    proc = ctx.std.process.command("sh").args(["-c", "read x", "--output_base=" + (output_base or base)]) \
+        .stdin("piped").stdout("null").stderr("null").spawn()
     ctx.std.fs.create_dir_all(base + "/server")
     ctx.std.fs.write(base + "/server/server.pid.txt", str(proc.id()))
     fx.backdate(ctx, base)
@@ -248,7 +249,7 @@ def _test_a_process_that_is_not_a_server_does_not_veto(ctx):
     """A reused pid whose process merely mentions the base is not its server."""
     root = fx.fixture(ctx)
     base = root + "/" + fx.LIVE
-    proc = ctx.std.process.command("sh").args(["-c", "sleep 10; :", base]).stdout("null").stderr("null").spawn()
+    proc = ctx.std.process.command("sh").args(["-c", "read x", base]).stdin("piped").stdout("null").stderr("null").spawn()
     ctx.std.fs.create_dir_all(base + "/server")
     ctx.std.fs.write(base + "/server/server.pid.txt", str(proc.id()))
     fx.backdate(ctx, base)
