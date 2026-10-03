@@ -39,6 +39,8 @@ load("@aspect//private/lib/gitlab_features_test.axl", "gitlab_features_tests")
 load("@aspect//private/lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
 load("@aspect//private/lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//private/lib/health_check_ready_test.axl", "health_check_ready_tests")
+load("@aspect//private/lib/incremental_build_protocol_host_test.axl", "incremental_build_protocol_host_tests")
+load("@aspect//private/lib/incremental_build_protocol_test.axl", "incremental_build_protocol_tests")
 load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
@@ -53,6 +55,7 @@ load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
+load("@aspect//private/lib/watch_protocol_test.axl", "watch_protocol_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
@@ -376,6 +379,18 @@ def config(ctx: ConfigContext):
     # Runfiles manifests, execution logs, and changed-runfile calculation.
     # Run with: aspect dev test-changedetector
     ctx.tasks.add(changedetector_tests)
+
+    # Incremental Build Protocol message and capability compatibility.
+    # Run with: aspect dev test-incremental-build-protocol
+    ctx.tasks.add(incremental_build_protocol_tests)
+
+    # Incremental Build Protocol host negotiation and compatibility.
+    # Run with: aspect dev test-incremental-build-protocol-host
+    ctx.tasks.add(incremental_build_protocol_host_tests)
+
+    # Watch-protocol delayed selection and permanent restart fallback.
+    # Run with: aspect dev test-watch-protocol
+    ctx.tasks.add(watch_protocol_tests)
 
     # Workspace-watch batch dispatch and queued-batch coalescing.
     # Run with: aspect dev test-watch

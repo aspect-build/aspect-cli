@@ -1,0 +1,30 @@
+"""Shared build-result and strategy-outcome contracts for watched children."""
+
+_FALLBACK = "fallback"
+_KEEP = "keep"
+_RESTART = "restart"
+
+def _result(success: bool, restart_required: bool = False, outputs_changed: bool = False, runfiles = None, sources = None) -> struct:
+    """A build result; None deltas are unknown/restart, while {} is unchanged.
+
+    Launch changes and output changes stay separate because notification-based
+    strategies can keep running across rebuilt outputs.
+    """
+    return struct(
+        outputs_changed = outputs_changed,
+        restart_required = restart_required,
+        runfiles = runfiles,
+        sources = sources,
+        success = success,
+    )
+
+def _outcome(action: str, status = None, error = None) -> struct:
+    return struct(action = action, error = error, status = status)
+
+watch_result = namespace(
+    FALLBACK = _FALLBACK,
+    KEEP = _KEEP,
+    RESTART = _RESTART,
+    outcome = _outcome,
+    result = _result,
+)

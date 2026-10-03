@@ -1,0 +1,195 @@
+"""Workspace-file mirror for source-scoped watch protocols."""
+
+load("./path_helpers.axl", "path_helpers")
+
+_SOURCE = {"is_source": True}
+_SYMLINK = {"is_symlink": True}
+
+def _is_ignored(path: str, ignored_paths: list[str]) -> bool:
+    path = path_helpers.normalize(path).rstrip("/")
+    for ignored in ignored_paths:
+        if path == ignored or path.startswith(ignored + "/"):
+            return True
+    return False
+
+def _workspace_sources(ctx: TaskContext, root: str, ignored_paths: list[str] = [], start: str = "") -> dict | error:
+    """Workspace-relative files visible to the workspace watcher."""
+    sources = {}
+    ignored_paths = [path_helpers.normalize(path).rstrip("/") for path in ignored_paths]
+    pending = [start.strip("/")]
+    for _ in range(1000000):
+        if not pending:
+            break
+        relative_dir = pending.pop()
+        absolute_dir = root if not relative_dir else root + "/" + relative_dir
+        read_err, entries = catch(ctx.std.fs.try_read_dir, absolute_dir, types = [std.io.Error])
+        if read_err != None:
+            return read_err
+        for entry in entries:
+            relative = entry.path if not relative_dir else relative_dir + "/" + entry.path
+            absolute = root + "/" + relative
+            if _is_ignored(absolute, ignored_paths):
+                continue
+            if entry.is_symlink:
+                sources[path_helpers.normalize(relative)] = _SYMLINK
+            elif entry.is_dir:
+                pending.append(relative)
+            elif entry.is_file:
+                sources[path_helpers.normalize(relative)] = _SOURCE
+    return sources
+
+def _source_fs(ctx: TaskContext, root: str, ignored_paths: list[str]) -> struct:
+    def metadata(path):
+        err, value = catch(ctx.std.fs.try_metadata, root + "/" + path, types = [std.io.Error])
+        return err if err != None else value
+
+    return struct(
+        baseline = lambda: _workspace_sources(ctx, root, ignored_paths),
+        directory = lambda path: _workspace_sources(ctx, root, ignored_paths, start = path),
+        metadata = metadata,
+    )
+
+def _source_directories(sources: dict) -> dict:
+    directories = {}
+    for path in sources:
+        for parent in path_helpers.parents(path):
+            directories[parent] = directories.get(parent, 0) + 1
+    return directories
+
+def _source_state(sources: dict) -> struct:
+    return struct(
+        directories = _source_directories(sources),
+        files = sources,
+    )
+
+def _update_source_directories(directories: dict, path: str, delta: int) -> None:
+    for parent in path_helpers.parents(path):
+        count = directories.get(parent, 0) + delta
+        if count > 0:
+            directories[parent] = count
+        else:
+            directories.pop(parent, None)
+
+def _workspace_path(path: str, root: str) -> str | None:
+    path = path_helpers.normalize(path)
+    if path.startswith(root + "/"):
+        return path[len(root) + 1:]
+    return None if path_helpers.is_absolute(path) else path.removeprefix("./")
+
+def _source_changes(paths: list[str], removed_paths: list[str], root: str, source_state, source_fs: struct, rescan: bool = False) -> dict | None:
+    """Workspace-relative source changes reported by the file watcher."""
+    if rescan:
+        return None
+
+    removed = {}
+    for raw_path in removed_paths:
+        path = _workspace_path(raw_path, root)
+        if path != None and path:
+            removed[path] = True
+    changes = {}
+    known_sources = source_state.files
+    known_directories = source_state.directories
+    removed_directories = {}
+    for path in removed:
+        if path in known_sources:
+            changes[path] = None
+        elif path in known_directories:
+            removed_directories[path.rstrip("/")] = True
+
+    walked_directories = {}
+    walked_sources = {}
+    for raw_path in paths:
+        path = _workspace_path(raw_path, root)
+        if path == None or not path or path in removed:
+            continue
+        metadata = source_fs.metadata(path)
+        if isinstance(metadata, error):
+            return None
+        if metadata == None:
+            if path in known_sources:
+                changes[path] = None
+            continue
+        if metadata.is_dir:
+            if path in known_sources:
+                changes[path] = None
+            directory_sources = source_fs.directory(path)
+            if isinstance(directory_sources, error):
+                return None
+            changes.update(directory_sources)
+            if path in known_directories:
+                walked_directories[path.rstrip("/")] = True
+                walked_sources.update(directory_sources)
+            continue
+        if metadata.is_symlink:
+            info = _SYMLINK
+        elif metadata.is_file:
+            info = _SOURCE
+        else:
+            if path in known_sources:
+                changes[path] = None
+            if path in known_directories:
+                removed_directories[path.rstrip("/")] = True
+            continue
+        changes[path] = info
+        if path in known_directories:
+            removed_directories[path.rstrip("/")] = True
+
+    if removed_directories or walked_directories:
+        for known in known_sources:
+            for parent in path_helpers.parents(known):
+                if parent in removed_directories or (parent in walked_directories and known not in walked_sources):
+                    changes[known] = None
+                    break
+    return changes
+
+def _apply_changes(source_state, changes: dict) -> None:
+    for path, info in changes.items():
+        previous = source_state.files.get(path)
+        if previous == None and info != None:
+            _update_source_directories(source_state.directories, path, 1)
+        elif previous != None and info == None:
+            _update_source_directories(source_state.directories, path, -1)
+        if info == None:
+            source_state.files.pop(path, None)
+        else:
+            source_state.files[path] = info
+
+def _new(ctx: TaskContext, root: str, ignored_paths: list[str] = [], source_fs = None) -> struct:
+    root = path_helpers.normalize(root).rstrip("/")
+    state = {"sources": None}
+    fs = source_fs or _source_fs(ctx, root, ignored_paths)
+
+    def baseline() -> dict | None:
+        sources = fs.baseline()
+        if isinstance(sources, error):
+            state["sources"] = None
+            return None
+        state["sources"] = _source_state(sources)
+        return dict(sources)
+
+    def delta(paths: list[str], removed_paths: list[str], rescan: bool = False) -> dict | None:
+        source_state = state["sources"]
+        if source_state == None:
+            return None if rescan else {}
+        changes = _source_changes(paths, removed_paths, root, source_state, fs, rescan = rescan)
+        if changes == None:
+            state["sources"] = None
+        else:
+            _apply_changes(source_state, changes)
+        return changes
+
+    def stop() -> None:
+        state["sources"] = None
+
+    return struct(
+        baseline = baseline,
+        delta = delta,
+        stop = stop,
+    )
+
+source_tracker = namespace(
+    new = _new,
+    source_changes = _source_changes,
+    source_state = _source_state,
+    workspace_sources = _workspace_sources,
+)

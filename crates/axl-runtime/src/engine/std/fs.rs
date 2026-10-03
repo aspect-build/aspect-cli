@@ -13,6 +13,8 @@ use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::engine::error::IoError;
+
 use super::stream;
 use super::watch;
 
@@ -27,11 +29,12 @@ use starlark::values::Trace;
 use starlark::values::starlark_value;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<fs.DirEntry path:{path} is_dir:{is_dir} is_file:{is_file}>")]
+#[display("<fs.DirEntry path:{path} is_dir:{is_dir} is_file:{is_file} is_symlink:{is_symlink}>")]
 pub struct DirEntry<'v> {
     path: StringValue<'v>,
     is_file: values::Value<'v>,
     is_dir: values::Value<'v>,
+    is_symlink: values::Value<'v>,
 }
 
 #[starlark_value(type = "fs.DirEntry")]
@@ -41,11 +44,17 @@ impl<'v> values::StarlarkValue<'v> for DirEntry<'v> {
             "path" => Some(self.path.to_value()),
             "is_file" => Some(self.is_file),
             "is_dir" => Some(self.is_dir),
+            "is_symlink" => Some(self.is_symlink),
             _ => None,
         }
     }
     fn dir_attr(&self) -> Vec<String> {
-        vec!["path".into(), "is_file".into(), "is_dir".into()]
+        vec![
+            "path".into(),
+            "is_file".into(),
+            "is_dir".into(),
+            "is_symlink".into(),
+        ]
     }
 }
 
@@ -61,6 +70,7 @@ pub struct FrozenDirEntry {
     path: values::FrozenValue,
     is_file: values::FrozenValue,
     is_dir: values::FrozenValue,
+    is_symlink: values::FrozenValue,
 }
 
 #[starlark_value(type = "fs.DirEntry")]
@@ -75,6 +85,7 @@ impl<'v> values::Freeze for DirEntry<'v> {
             path: freezer.freeze(self.path.to_value())?,
             is_dir: freezer.freeze(self.is_dir)?,
             is_file: freezer.freeze(self.is_file)?,
+            is_symlink: freezer.freeze(self.is_symlink)?,
         })
     }
 }
@@ -366,6 +377,28 @@ fn poll_read(path: &str, timeout: Duration, expected_len: Option<u64>) -> Option
     }
 }
 
+fn create_temp_dir(base: &std::path::Path, prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    fs::create_dir_all(base)?;
+    for _ in 0..100 {
+        let dir = base.join(format!("{}{}", prefix, uuid::Uuid::new_v4()));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique temporary directory",
+    ))
+}
+
 #[starlark_module]
 pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// Copies the contents of one file to another. This function will also copy the permission bits of the original file to the destination file.
@@ -433,9 +466,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             std::path::PathBuf::from(parent)
         };
         let prefix = if prefix.is_empty() { "axl-" } else { prefix };
-        // Use uuid v4 for a collision-free unique suffix.
-        let dir = base.join(format!("{}{}", prefix, uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir)?;
+        let dir = create_temp_dir(&base, prefix)?;
         let path = dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("temp dir path is non-UTF-8"))?;
@@ -544,10 +575,69 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
                     // TODO: implement a filetype and expose that.
                     is_dir: heap.alloc(file_type.is_dir()),
                     is_file: heap.alloc(file_type.is_file()),
+                    is_symlink: heap.alloc(file_type.is_symlink()),
                 }
                 // TODO: return a iterator of DirEntry type.
             })))
             .cast())
+    }
+
+    /// Returns the entries within a directory, or an empty list when the
+    /// directory disappears. Other I/O errors are raised as `std.io.Error`.
+    fn try_read_dir<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<ValueOfUnchecked<'v, UnpackList<DirEntry<'v>>>> {
+        let entries = match fs::read_dir(path.as_str()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(heap
+                    .alloc_typed_unchecked(values::list::AllocList(Vec::<DirEntry<'v>>::new()))
+                    .cast());
+            }
+            Err(err) => return Err(IoError::from(err).into()),
+        };
+        let mut result = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(IoError::from(err).into()),
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(IoError::from(err).into()),
+            };
+            let path = entry.file_name();
+            let Some(path) = path.to_str() else {
+                continue;
+            };
+            result.push(DirEntry {
+                path: heap.alloc_str(path),
+                is_dir: heap.alloc(file_type.is_dir()),
+                is_file: heap.alloc(file_type.is_file()),
+                is_symlink: heap.alloc(file_type.is_symlink()),
+            });
+        }
+        Ok(heap
+            .alloc_typed_unchecked(values::list::AllocList(result))
+            .cast())
+    }
+
+    /// Returns metadata without following symlinks, or None when the path
+    /// disappears. Other I/O errors are raised as `std.io.Error`.
+    fn try_metadata<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<Metadata<'v>>> {
+        Ok(match fs::symlink_metadata(path.as_str()) {
+            Ok(metadata) => NoneOr::Other(marshal_metadata(&metadata, heap)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => NoneOr::None,
+            Err(err) => return Err(IoError::from(err).into()),
+        })
     }
 
     /// Reads a symbolic link, returning the file that the link points to.
@@ -963,6 +1053,57 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_directories_are_unique() {
+        let parent = tempfile::tempdir().unwrap();
+        let first = create_temp_dir(parent.path(), "secure-").unwrap();
+        let second = create_temp_dir(parent.path(), "secure-").unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_directories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let path = create_temp_dir(parent.path(), "secure-").unwrap();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn try_inspection_only_swallows_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "content").unwrap();
+        let file = serde_json::to_string(file.to_str().unwrap()).unwrap();
+        let missing = serde_json::to_string(dir.path().join("missing").to_str().unwrap()).unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    err, metadata = catch(ctx.std.fs.try_metadata, {file} + "/child", types = [std.io.Error])
+    if err == None or metadata != None:
+        fail("metadata I/O error was swallowed")
+    err, entries = catch(ctx.std.fs.try_read_dir, {file}, types = [std.io.Error])
+    if err == None or entries != None:
+        fail("read_dir I/O error was swallowed")
+    if ctx.std.fs.try_metadata({missing}) != None:
+        fail("missing metadata was not None")
+    if ctx.std.fs.try_read_dir({missing}) != []:
+        fail("missing directory was not empty")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
 
     #[test]
     fn poll_read_returns_content_for_readable_file() {

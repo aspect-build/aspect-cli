@@ -1,0 +1,200 @@
+"""Unit tests for the Incremental Build Protocol host."""
+
+load("./incremental_build_protocol.axl", "incremental_build_protocol")
+load("./incremental_build_protocol_host.axl", "incremental_build_protocol_host")
+load("./watch_result.axl", "watch_result")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _error_message(err):
+    return err.message if err != None else None
+
+def _test_v0_cycle_has_fresh_flag_and_no_scope(_ctx):
+    initial = incremental_build_protocol_host.cycle_message(0, 1, "runfiles", {"_main/app": {}})
+    later = incremental_build_protocol_host.cycle_message(0, 2, "runfiles", {})
+    _eq("v0 initial is fresh", initial["is_fresh"], True)
+    _eq("v0 later is not fresh", later["is_fresh"], False)
+    _eq("v0 omits scope", "scope" in initial, False)
+
+def _test_v1_cycle_has_negotiated_scope(_ctx):
+    message = incremental_build_protocol_host.cycle_message(1, 3, "sources", {"app.py": {"is_source": True}})
+    _eq("v1 scope", message["scope"], "sources")
+    _eq("v1 omits legacy freshness", "is_fresh" in message, False)
+
+def _test_caps_default_and_clamping(_ctx):
+    err, caps = incremental_build_protocol_host.negotiate_caps({})
+    _eq("default caps error", err, None)
+    _eq("default scope", caps, {"scope": ["runfiles"]})
+
+    err, caps = incremental_build_protocol_host.negotiate_caps(None)
+    _eq("omitted caps error", err, None)
+    _eq("omitted caps", caps, {"scope": ["runfiles"]})
+
+    err, caps = incremental_build_protocol_host.negotiate_caps({"scope": ["sources", "runfiles"], "otel": True})
+    _eq("requested caps error", err, None)
+    _eq("negotiated caps", caps, {"scope": ["sources"], "otel": False})
+
+    err, caps = incremental_build_protocol_host.negotiate_caps({"scope": ["sources"]})
+    _eq("source caps error", err, None)
+    _eq("source scope", caps, {"scope": ["sources"]})
+
+    err, caps = incremental_build_protocol_host.negotiate_caps({"scope": ["runfiles"], "otel": False})
+    _eq("disabled otel error", err, None)
+    _eq("disabled otel omitted", caps, {"scope": ["runfiles"]})
+
+def _test_caps_reject_invalid_scope(_ctx):
+    err, _ = incremental_build_protocol_host.negotiate_caps({"scope": ["unknown"]})
+    _eq("invalid scope rejected", err != None, True)
+    err, _ = incremental_build_protocol_host.negotiate_caps({"scope": []})
+    _eq("empty scope rejected", err != None, True)
+    err, _ = incremental_build_protocol_host.negotiate_caps({"scope": "sources"})
+    _eq("non-list scope rejected", err != None, True)
+    err, _ = incremental_build_protocol_host.negotiate_caps([])
+    _eq("non-object caps rejected", err != None, True)
+
+def _test_cycle_terminal_responses(_ctx):
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_STARTED", "cycle_id": 7}, 7)
+    _eq("started is not terminal", (done, err), (False, None))
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_COMPLETED", "cycle_id": 7}, 7)
+    _eq("completed succeeds", (done, err), (True, None))
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_ABORTED", "cycle_id": 7}, 7)
+    _eq("aborted fails", (done, _error_message(err)), (True, "protocol cycle 7 was aborted"))
+    _eq("aborted error type", isinstance(err, incremental_build_protocol.Error), True)
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_FAILED", "cycle_id": 7, "description": "bundle failed"}, 7)
+    _eq("failed includes description", (done, _error_message(err)), (True, "protocol cycle 7 failed: bundle failed"))
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "EXIT", "description": "shutting down"}, 7)
+    _eq("peer exit is terminal", (done, _error_message(err)), (True, "protocol peer exited: shutting down"))
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_COMPLETED", "cycle_id": 8}, 7)
+    _eq("wrong cycle rejected", done and err != None, True)
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "CYCLE_COMPLETED"}, 7)
+    _eq("missing cycle rejected", done and err != None, True)
+    done, err = incremental_build_protocol_host.cycle_response({"kind": "INFO", "cycle_id": 7}, 7)
+    _eq("unexpected response rejected", done and err != None, True)
+
+def _test_build_finished_selects_negotiated_scope(_ctx):
+    cycles = []
+    result = watch_result.result(
+        True,
+        runfiles = {"_main/generated": {}},
+        sources = {"app.py": {"is_source": True}},
+    )
+    outcome = incremental_build_protocol_host.build_finished("sources", result, lambda changes: cycles.append(changes))
+    _eq("sources update status", (outcome.action, outcome.status, outcome.error), (watch_result.KEEP, "updated", None))
+    _eq("sources cycle", cycles, [{"app.py": {"is_source": True}}])
+
+    cycles = []
+    outcome = incremental_build_protocol_host.build_finished("runfiles", result, lambda changes: cycles.append(changes))
+    _eq("runfiles update status", (outcome.action, outcome.status, outcome.error), (watch_result.KEEP, "updated", None))
+    _eq("runfiles cycle", cycles, [{"_main/generated": {}}])
+
+def _test_build_finished_handles_lifecycle_results(_ctx):
+    cycle_calls = []
+    cycle = lambda changes: cycle_calls.append(changes)
+
+    outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(False), cycle)
+    _eq("failed build kept", (outcome.action, outcome.status), (watch_result.KEEP, None))
+    outcome = incremental_build_protocol_host.build_finished(
+        "sources",
+        watch_result.result(False, sources = {"broken.py": {"is_source": True}}),
+        cycle,
+    )
+    _eq("failed build sources updated", (outcome.action, outcome.status), (watch_result.KEEP, "updated"))
+    _eq("failed build source cycle", cycle_calls, [{"broken.py": {"is_source": True}}])
+    cycle_calls.clear()
+    outcome = incremental_build_protocol_host.build_finished("sources", watch_result.result(False), cycle)
+    _eq("failed build unknown sources restart", outcome.action, watch_result.RESTART)
+    outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(True, runfiles = {}, sources = {}), cycle)
+    _eq("empty delta unchanged", (outcome.action, outcome.status), (watch_result.KEEP, "unchanged"))
+    outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(True), cycle)
+    _eq("unknown delta restarts", outcome.action, watch_result.RESTART)
+    outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(True, outputs_changed = True), cycle)
+    _eq("output change restarts", outcome.action, watch_result.RESTART)
+    outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(True, restart_required = True), cycle)
+    _eq("launch change restarts", outcome.action, watch_result.RESTART)
+    _eq("non-update results send no additional cycles", cycle_calls, [])
+
+def _test_build_finished_reports_cycle_error(_ctx):
+    outcome = incremental_build_protocol_host.build_finished(
+        "runfiles",
+        watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}),
+        lambda _changes: "write failed",
+    )
+    _eq("cycle failure", (outcome.action, outcome.status, outcome.error), (watch_result.RESTART, None, "write failed"))
+
+def _test_baseline_selects_negotiated_scope(_ctx):
+    calls = []
+    sources = struct(baseline = lambda: calls.append("sources") or {"app.py": {"is_source": True}})
+    runfiles = lambda: calls.append("runfiles") or {"_main/app": {}}
+
+    _eq("sources baseline", incremental_build_protocol_host.baseline("sources", runfiles, sources), {"app.py": {"is_source": True}})
+    _eq("runfiles baseline", incremental_build_protocol_host.baseline("runfiles", runfiles, sources), {"_main/app": {}})
+    _eq("only selected baselines evaluated", calls, ["sources", "runfiles"])
+
+def _test_server_uses_unique_socket_paths(ctx):
+    if ctx.std.env.os() == "windows":
+        return
+    first = incremental_build_protocol_host.new(ctx)
+    second = incremental_build_protocol_host.new(ctx)
+    ctx.defer(first.close)
+    ctx.defer(second.close)
+
+    first_path = first.environment[incremental_build_protocol.socket_environment]
+    second_path = second.environment[incremental_build_protocol.socket_environment]
+    _eq("legacy socket environment", first.environment[incremental_build_protocol.legacy_socket_environment], first_path)
+    _eq("socket paths are unique", first_path != second_path, True)
+    _eq("first socket exists", ctx.std.fs.exists(first_path), True)
+    _eq("second socket exists", ctx.std.fs.exists(second_path), True)
+
+    first.close()
+    _eq("closed socket removed", ctx.std.fs.exists(first_path), False)
+
+def _test_empty_listener_poll_returns_not_connected(ctx):
+    if ctx.std.env.os() == "windows":
+        return
+    host = incremental_build_protocol_host.new(ctx)
+    ctx.defer(host.close)
+
+    _eq("empty listener", host.try_connect(), (False, None))
+
+def _test_close_stops_source_tracking(ctx):
+    if ctx.std.env.os() == "windows":
+        return
+    calls = []
+    sources = struct(stop = lambda: calls.append(True))
+    host = incremental_build_protocol_host.new(ctx, sources = sources)
+
+    host.close()
+    host.close()
+
+    _eq("source tracking stopped once", calls, [True])
+
+_UNIT_TESTS = [
+    _test_v0_cycle_has_fresh_flag_and_no_scope,
+    _test_v1_cycle_has_negotiated_scope,
+    _test_caps_default_and_clamping,
+    _test_caps_reject_invalid_scope,
+    _test_cycle_terminal_responses,
+    _test_build_finished_selects_negotiated_scope,
+    _test_build_finished_handles_lifecycle_results,
+    _test_build_finished_reports_cycle_error,
+    _test_baseline_selects_negotiated_scope,
+    _test_server_uses_unique_socket_paths,
+    _test_empty_listener_poll_returns_not_connected,
+    _test_close_stops_source_tracking,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("incremental_build_protocol_host.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+incremental_build_protocol_host_tests = task(
+    summary = "Run the Incremental Build Protocol host AXL unit tests.",
+    kind = "test-incremental-build-protocol-host",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

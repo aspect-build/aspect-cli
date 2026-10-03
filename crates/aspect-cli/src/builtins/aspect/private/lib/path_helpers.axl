@@ -1,0 +1,18 @@
+"""Path operations shared by watch change tracking."""
+
+def _normalize(path: str) -> str:
+    return path.replace("\\", "/")
+
+def _is_absolute(path: str) -> bool:
+    return path.startswith("/") or (len(path) >= 3 and path[1] == ":" and path[2] == "/")
+
+def _parents(path: str, nearest_first: bool = False) -> list[str]:
+    parts = path.split("/")
+    parents = ["/".join(parts[:i]) for i in range(1, len(parts))]
+    return parents[::-1] if nearest_first else parents
+
+path_helpers = namespace(
+    is_absolute = _is_absolute,
+    normalize = _normalize,
+    parents = _parents,
+)
