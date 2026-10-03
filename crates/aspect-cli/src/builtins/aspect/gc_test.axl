@@ -125,7 +125,7 @@ def _policy(max_age_us = 0, grace_us = _HOUR_US):
 def _scan(ctx, root, max_age_us = 0, grace_us = _HOUR_US):
     return testonly_scan(ctx, root, _now_us(), _policy(max_age_us, grace_us))
 
-def _doc(ctx, root, verbose, sizes = {}, stale = []):
+def _doc(ctx, root, verbose, sizes = {}, stale = [], sized_all = False):
     """The document for `root`'s real classification, at a given verbosity,
     as a dry run that would remove the orphans."""
     bases = _scan(ctx, root)
@@ -135,6 +135,7 @@ def _doc(ctx, root, verbose, sizes = {}, stale = []):
         sizes = sizes,
         cache_entries = len(stale),
         stale = stale,
+        sized_all = sized_all,
     )
     outcome = testonly_outcome(reaped = 0, reaped_kb = 0, pruned = 0, pruned_kb = 0)
     return testonly_document(root, True, verbose, {"base_max_age_days": 30}, plan, outcome, {})
@@ -568,6 +569,20 @@ def _test_verbose_is_hinted_only_when_it_would_list_something(ctx):
     removable_only = [b for b in _scan(ctx, root) if b.state == "orphan"]
     _eq("nothing kept, no hint", testonly_verbose_hint(removable_only), "")
 
+def _test_report_sizes_adds_sizes_without_changing_reclaimable(ctx):
+    """Under `--report-sizes` every base is measured, but only the removals
+    count towards what a run reclaims."""
+    root = _fixture(ctx)
+    sizes = {b.path: 100 for b in _scan(ctx, root)}
+    plain = _doc(ctx, root, True, sizes = {root + "/" + _DEAD: 100, root + "/" + _CMDLINE: 100})
+    sized = _doc(ctx, root, True, sizes = sizes, sized_all = True)
+
+    _eq("no per-state sizes unless measured", "output_bases_kb" in plain, False)
+    _eq("per-state sizes", sized["output_bases_kb"]["live"], 200)
+    _eq("every state keyed", sorted(sized["output_bases_kb"].keys()), sorted(sized["output_bases"].keys()))
+    _eq("reclaimable is only the removals", sized["reclaimable_kb"], plain["reclaimable_kb"])
+    _eq("listed bases carry their size", all([e["kb"] == 100 for e in sized["live_bases"]]), True)
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -609,6 +624,7 @@ _UNIT_TESTS = [
     _test_the_orphan_note_states_the_grace_period,
     _test_the_undetermined_note_states_the_max_age,
     _test_verbose_is_hinted_only_when_it_would_list_something,
+    _test_report_sizes_adds_sizes_without_changing_reclaimable,
 ]
 
 def _test_impl(ctx):

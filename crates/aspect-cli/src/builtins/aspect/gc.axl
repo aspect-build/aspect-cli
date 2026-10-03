@@ -59,6 +59,7 @@ workspace; the trash name keeps it recognisable, and the next run finishes it.
 """
 
 load("@std//time.axl", "time")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/text.axl", "pad_left", "pad_right", "pluralize")
@@ -125,7 +126,7 @@ _STATES = {
     _TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True),
 }
 
-# The caches `--report-caches` sizes, with what collects each.
+# The caches `--report-sizes` measures, with what collects each.
 _CACHES = [
     ("download_cache_kb", _DOWNLOAD_CACHE, "pruned by --download-cache-max-age-days"),
     ("repo_contents_cache_kb", "cache/repos/v1/contents", "GC'd by Bazel while a server sits idle"),
@@ -156,14 +157,17 @@ _CacheEntry = record(
     kb = field(int),
 )
 
-# What a run found, and what it would remove. `sizes` maps each removal's path
-# to its `du` size in KB.
+# What a run found, and what it would remove. `sizes` maps each measured base's
+# path to its `du` size in KB: the removals, or every base under
+# `--report-sizes`.
 _Plan = record(
     bases = field(list),
     removals = field(list),
     sizes = field(dict),
     cache_entries = field(int),
     stale = field(list),
+    # True when `sizes` covers every base (`--report-sizes`), not only removals.
+    sized_all = field(bool, default = False),
 )
 
 _Outcome = record(
@@ -460,6 +464,27 @@ def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
                 stale.append(_CacheEntry(path = path, kb = kb))
     return (seen, stale)
 
+def _measure(ctx: TaskContext, streaming: bool, what: str, items: list, slow: bool = False) -> dict:
+    """`du` sizes in KB for `items`, a list of `(label, path)`, keyed by path.
+
+    One `du` per path, so a run that measures tens of gigabytes can say how far
+    it has got: `[i/N] <label>` is redrawn in place on a terminal. Off one,
+    only the opening line is printed, so a log is not flooded with a line per
+    directory. A launch per path costs nothing against the walk itself.
+    """
+    if not items:
+        return {}
+    _say(streaming, "  measuring %s…%s" % (what, " (this is the slow part)" if slow else ""))
+    progress = streaming and ctx.std.io.stderr.is_tty
+    sizes = {}
+    for i, (label, path) in enumerate(items):
+        if progress:
+            ctx.std.io.stderr.write("\r" + ansi.CLEAR_LINE + "    [%d/%d] %s" % (i + 1, len(items), label))
+        sizes.update(_du_kb(ctx, [path]))
+    if progress:
+        ctx.std.io.stderr.write("\r" + ansi.CLEAR_LINE)
+    return sizes
+
 def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
     """Disk usage in KB per path, via `du -sk`.
 
@@ -545,12 +570,15 @@ def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
         return False
     return True
 
-def _cache_report(ctx: TaskContext, root: str) -> dict:
+def _removal_kb(plan) -> int:
+    return _total_kb([plan.sizes.get(b.path, 0) for b in plan.removals])
+
+def _cache_report(ctx: TaskContext, streaming: bool, root: str) -> dict:
     """Sizes of the shared caches, keyed for the document. A cache the install
     has never created reports zero."""
-    paths = {key: root + "/" + rel for key, rel, _reason in _CACHES}
-    sizes = _du_kb(ctx, [p for p in paths.values() if ctx.std.fs.exists(p)])
-    return {key: sizes.get(path, 0) for key, path in paths.items()}
+    present = [(rel, root + "/" + rel) for _key, rel, _reason in _CACHES if ctx.std.fs.exists(root + "/" + rel)]
+    sizes = _measure(ctx, streaming, pluralize(len(present), "shared cache"), present)
+    return {key: sizes.get(root + "/" + rel, 0) for key, rel, _reason in _CACHES}
 
 def _base_entry(b, sizes: dict = {}) -> dict:
     """One base, for the document. `kb` only for a base that was measured."""
@@ -571,8 +599,8 @@ def _document(root: str, dry_run: bool, verbose: bool, policy: dict, plan, outco
     `reclaimable_kb` is what the removals and stale download-cache entries hold,
     and `freed_kb` what was actually removed; under `--dry-run`, or when a
     removal failed, they differ. The key names are a contract, so
-    `_SCHEMA_VERSION` moves when they do — `--verbose` only adds keys, which
-    consumers already have to tolerate.
+    `_SCHEMA_VERSION` moves when they do — `--verbose` and `--report-sizes`
+    only add keys, which consumers already have to tolerate.
     """
     stale_kb = _total_kb([e.kb for e in plan.stale])
     doc = {
@@ -589,15 +617,20 @@ def _document(root: str, dry_run: bool, verbose: bool, policy: dict, plan, outco
             "pruned": outcome.pruned,
             "freed_kb": outcome.pruned_kb,
         },
-        "reclaimable_kb": _total_kb(plan.sizes.values()) + stale_kb,
+        "reclaimable_kb": _removal_kb(plan) + stale_kb,
         "reaped": outcome.reaped,
         "freed_kb": outcome.reaped_kb + outcome.pruned_kb,
         "caches": caches,
     }
+    if plan.sized_all:
+        doc["output_bases_kb"] = {
+            s.key: _total_kb([plan.sizes.get(b.path, 0) for b in _in_state(plan.bases, state)])
+            for state, s in _STATES.items()
+        }
     if verbose:
         for state, s in _STATES.items():
             if s.heading:
-                doc[s.key + "_bases"] = [_base_entry(b) for b in _in_state(plan.bases, state)]
+                doc[s.key + "_bases"] = [_base_entry(b, plan.sizes) for b in _in_state(plan.bases, state)]
     return doc
 
 def _say(streaming: bool, line: str) -> None:
@@ -635,21 +668,24 @@ def _verbose_hint(bases: list) -> str:
         return ""
     return "Run with --verbose to list the kept output bases (" + ", ".join(shown) + ")."
 
-def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, policy) -> None:
+def _print_census(streaming: bool, bases: list, sizes: dict, verbose: bool, now_us: int, policy) -> None:
     """How many bases are in each state, what the less obvious states mean, and
     the kept ones, youngest first — under `--verbose`, or else a pointer to it.
 
-    Kept bases are listed without sizes: measuring them means a `du` over every
-    live base on the machine, tens of gigabytes, to report something nothing is
-    going to reclaim. The path, the workspace and the age are what make a
-    classification checkable, which is what `--verbose` is for.
+    `sizes` is empty unless `--report-sizes` measured every base; when it is
+    not, each count and each listed base carries its size.
     """
+
+    def size(kb):
+        return " (" + _fmt_kb(kb) + ")" if sizes else ""
+
     counts = []
     for state, s in _STATES.items():
-        n = len(_in_state(bases, state))
-        if n or state == _LIVE:
-            counts.append("%d %s" % (n, s.label))
-    _say(streaming, "  %s: %s" % (pluralize(len(bases), "base"), ", ".join(counts)))
+        in_state = _in_state(bases, state)
+        if in_state or state == _LIVE:
+            counts.append("%d %s%s" % (len(in_state), s.label, size(_total_kb([sizes.get(b.path, 0) for b in in_state]))))
+    total = ", " + _fmt_kb(_total_kb(sizes.values())) if sizes else ""
+    _say(streaming, "  %s%s: %s" % (pluralize(len(bases), "base"), total, ", ".join(counts)))
     notes = []
     for state, s in _STATES.items():
         if s.note and s.note not in notes and _in_state(bases, state):
@@ -671,7 +707,8 @@ def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, poli
         _say(streaming, "")
         _say(streaming, "  %s (%d):" % (s.heading, len(kept)))
         for b in kept:
-            _say(streaming, "    " + pad_left(_fmt_age(now_us - b.last_used), 4) + "  " + b.name + ("  " + b.workspace if b.workspace else ""))
+            kb = pad_left(_fmt_kb(sizes.get(b.path, 0)), 8) + "  " if sizes else ""
+            _say(streaming, "    " + pad_left(_fmt_age(now_us - b.last_used), 4) + "  " + kb + b.name + ("  " + b.workspace if b.workspace else ""))
     _say(streaming, "")
 
 def _select(bases: list, root: str, requested: list[str]) -> tuple:
@@ -710,7 +747,7 @@ def _print_plan(streaming: bool, plan, cache_max_age_days: int, now_us: int) -> 
     """Everything a run will remove, listed before it asks, so the confirmation
     is answered with the whole picture rather than a count."""
     if plan.removals:
-        _say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), "output base"), _fmt_kb(_total_kb(plan.sizes.values()))))
+        _say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), "output base"), _fmt_kb(_removal_kb(plan))))
     for b in plan.removals:
         _say(streaming, "    " + _fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us) + ")")
     if plan.stale:
@@ -798,10 +835,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 message = "no output base " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
             )
     else:
-        _print_census(streaming, bases, ctx.args.verbose, now_us, policy)
         removals = [b for b in bases if _STATES[b.state].removable]
-    if removals:
-        _say(streaming, "  measuring %s…" % pluralize(len(removals), "output base"))
+
+    report_sizes = ctx.args.report_sizes
+    measured = bases if report_sizes else removals
+    sizes = _measure(ctx, streaming, pluralize(len(measured), "output base"), [(b.name, b.path) for b in measured], slow = report_sizes)
+    if not requested:
+        _print_census(streaming, bases, sizes if report_sizes else {}, ctx.args.verbose, now_us, policy)
+
     cache_entries, stale = 0, []
     if cache_max_age_days > 0 and not requested:
         _say(streaming, "  scanning the download cache…")
@@ -809,12 +850,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     plan = _Plan(
         bases = bases,
         removals = removals,
-        sizes = _du_kb(ctx, [b.path for b in removals]),
+        sizes = sizes,
         cache_entries = cache_entries,
         stale = stale,
+        sized_all = report_sizes,
     )
     _print_plan(streaming, plan, cache_max_age_days, now_us)
-    reclaimable = _total_kb(plan.sizes.values()) + _total_kb([e.kb for e in stale])
+    reclaimable = _removal_kb(plan) + _total_kb([e.kb for e in stale])
 
     actions = []
     if removals:
@@ -842,9 +884,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     freed = outcome.reaped_kb + outcome.pruned_kb
 
     # After collecting, so the sizes are what is left.
-    if ctx.args.report_caches:
-        _say(streaming, "  measuring the shared caches… (this is the slow part)")
-    caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
+    caches = _cache_report(ctx, streaming, root) if report_sizes else {}
 
     if ctx.args.output == "json":
         policy = {
@@ -919,11 +959,11 @@ Otherwise never touches a running Bazel server whose workspace still exists, and
         ),
         "verbose": args.boolean(
             default = False,
-            description = "Also list the bases that are left alone, youngest first, with the age and workspace of each, so a classification can be checked rather than taken on trust. Sizes are not reported for them: measuring would mean walking every live base on the machine to size something nothing will reclaim. Adds `live_bases`, `orphaned_within_grace_bases` and `undetermined_bases` to `--output=json`.",
+            description = "Also list the bases that are left alone, youngest first, with the age and workspace of each (and the size, under `--report-sizes`), so a classification can be checked rather than taken on trust. Adds `live_bases`, `orphaned_within_grace_bases` and `undetermined_bases` to `--output=json`.",
         ),
-        "report_caches": args.boolean(
+        "report_sizes": args.boolean(
             default = False,
-            description = "Also report the sizes of the caches shared between output bases (download cache, repo contents cache, install bases), measured after collecting. Off by default because measuring them walks tens of gigabytes and takes longer than everything else this task does.",
+            description = "Also measure every output base, not only the ones being removed, and the caches shared between them (download cache, repo contents cache, install bases, measured after collecting). Adds a size to each state's count, to each base `--verbose` lists, and `output_bases_kb` to `--output=json`. Off by default because it walks every file under the output user root, which takes far longer than everything else this task does — most of a minute on a machine with tens of gigabytes of bases.",
         ),
         "output": args.string(
             default = "text",
