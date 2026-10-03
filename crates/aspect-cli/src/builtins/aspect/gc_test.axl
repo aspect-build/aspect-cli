@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_reap", "testonly_scan", "testonly_scan_download_cache", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -122,22 +122,40 @@ def _fixture(ctx: TaskContext) -> str:
 def _scan(ctx, root, max_age_us = 0):
     return testonly_scan(ctx, root, _now_us(), max_age_us)
 
-def _doc(ctx, root, verbose):
-    """The document for `root`'s real classification, at a given verbosity."""
+def _doc(ctx, root, verbose, sizes = {}, stale = []):
+    """The document for `root`'s real classification, at a given verbosity,
+    as a dry run that would remove the orphans."""
     bases = _scan(ctx, root)
-    return testonly_document(
-        root = root,
-        dry_run = True,
-        verbose = verbose,
-        policy = {},
+    plan = testonly_plan(
         bases = bases,
         removals = [b for b in bases if b.state == "orphan"],
-        download_cache = {},
-        reclaimable = 0,
-        reaped = 0,
-        freed = 0,
-        caches = {},
+        sizes = sizes,
+        cache_entries = len(stale),
+        stale = stale,
     )
+    outcome = testonly_outcome(reaped = 0, reaped_kb = 0, pruned = 0, pruned_kb = 0)
+    return testonly_document(root, True, verbose, {"base_max_age_days": 30}, plan, outcome, {})
+
+def _test_document_counts_every_state(ctx):
+    """`output_bases` carries a count for every state, zero included, so a
+    consumer reads a key rather than probing for it."""
+    root = _fixture(ctx)
+    counts = _doc(ctx, root, False)["output_bases"]
+    _eq("keys", sorted(counts.keys()), ["idle", "live", "orphaned", "orphaned_within_grace", "trash", "undetermined"])
+    _eq("live", counts["live"], 2)
+    _eq("orphaned", counts["orphaned"], 2)
+    _eq("undetermined", counts["undetermined"], 1)
+
+def _test_document_removals_carry_state_and_size(ctx):
+    root = _fixture(ctx)
+    path = root + "/" + _DEAD
+    doc = _doc(ctx, root, False, sizes = {path: 300})
+    removals = {r["path"]: r for r in doc["removals"]}
+    _eq("state", removals[path]["state"], "orphan")
+    _eq("measured size", removals[path]["kb"], 300)
+    _eq("an unmeasured base claims no size", "kb" in removals[root + "/" + _CMDLINE], False)
+    _eq("policy passed through", doc["policy"], {"base_max_age_days": 30})
+    _eq("reclaimable sums bases and cache", _doc(ctx, root, False, sizes = {path: 300}, stale = [struct(path = "x", kb = 4)])["reclaimable_kb"], 304)
 
 def _test_verbose_lists_what_was_left_alone(ctx):
     """`--verbose` exists so a classification can be checked rather than taken
@@ -452,6 +470,45 @@ def _test_fmt_age(ctx):
     _eq("days", testonly_fmt_age(45 * _DAY_US), "45d")
     _eq("clock skew reads as zero", testonly_fmt_age(-5), "0m")
 
+def _test_a_running_server_vetoes_the_age_rule(ctx):
+    """An idle base whose workspace exists is kept while its server runs:
+    deleting it would pull the server's state out from under it. The stand-in
+    server is a process whose command line names the base, which is what
+    `_is_this_bases_server` matches on."""
+    root = _fixture(ctx)
+    base = root + "/" + _LIVE
+    server = ctx.std.process.command("sh").args(["-c", "sleep 10; :", base]) \
+        .stdout("null").stderr("null").spawn()
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()))
+    _backdate(ctx, base)
+    states = {b.name: b.state for b in _scan(ctx, root, 30 * _DAY_US)}
+    server.kill()
+    _eq("kept while its server runs", states[_LIVE], "live")
+
+    states = {b.name: b.state for b in _scan(ctx, root, 30 * _DAY_US)}
+    _eq("idle once it has stopped", states[_LIVE], "idle")
+
+def _test_remove_tree_clears_read_only_directories(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-rm")
+    entry = tmp + "/sha256/abc"
+    ctx.std.fs.create_dir_all(entry)
+    ctx.std.fs.write(entry + "/file", "payload")
+    ctx.std.fs.set_permissions(entry, 0o555)
+    _eq("no error", testonly_remove_tree(ctx, entry), "")
+    _eq("gone", ctx.std.fs.exists(entry), False)
+    _eq("already gone is success", testonly_remove_tree(ctx, entry), "")
+
+def _test_du_keeps_sizes_when_one_path_is_missing(ctx):
+    """`du` exits non-zero when any path fails, as a base removed since the scan
+    does; the paths it did measure must still be reported."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-du")
+    ctx.std.fs.create_dir_all(tmp + "/present")
+    ctx.std.fs.write(tmp + "/present/f", "x" * 8192)
+    sizes = testonly_du_kb(ctx, [tmp + "/present", tmp + "/missing"])
+    _eq("measured", sizes.get(tmp + "/present", 0) >= 8, True)
+    _eq("missing has no entry", tmp + "/missing" in sizes, False)
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -483,6 +540,11 @@ _UNIT_TESTS = [
     _test_download_cache_honours_a_recent_atime,
     _test_no_download_cache_is_nothing_to_do,
     _test_fmt_age,
+    _test_document_counts_every_state,
+    _test_document_removals_carry_state_and_size,
+    _test_a_running_server_vetoes_the_age_rule,
+    _test_remove_tree_clears_read_only_directories,
+    _test_du_keeps_sizes_when_one_path_is_missing,
 ]
 
 def _test_impl(ctx):

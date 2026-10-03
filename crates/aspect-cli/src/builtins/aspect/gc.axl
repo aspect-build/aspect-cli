@@ -13,7 +13,7 @@ without bound:
     `--repository_cache_gc_*` flag in any Bazel release; entries are written once
     and never collected.
 
-This task collects both. An output base is removed when, first match wins:
+An output base is removed when, first match wins:
 
   1. **its workspace is gone**, and nothing has used it in the last hour. The
      hour keeps a worktree that is being torn down and recreated at the same
@@ -34,7 +34,8 @@ than inheriting it from a default.
 What it never touches, and why:
 
   - **A base with a running server whose workspace exists.** Shutting one down
-    to "tidy up" just means paying for analysis again on the next build.
+    to "tidy up" just means paying for analysis again on the next build. An
+    orphan's server is stopped before its base is removed: nothing can use it.
   - **Anything under the output user root not named like an output base**, or
     like this task's own trash (below). Bases are the md5 of their workspace
     path, so `install/`, `cache/`, and whatever Bazel or a user puts there next
@@ -53,10 +54,23 @@ workspace; the trash name keeps it recognisable, and the next run finishes it.
 load("@std//time.axl", "time")
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
+load("./private/lib/text.axl", "pad_left", "pad_right", "pluralize")
 
 # Bumped whenever a key in the `--output=json` document is renamed, removed, or
 # changes meaning. Additive keys do not bump it.
 _SCHEMA_VERSION = 2
+
+_HOUR_US = 3600 * 1000000
+_DAY_US = 24 * _HOUR_US
+_ORPHAN_GRACE_US = _HOUR_US
+
+_TRASH_PREFIX = ".gc-trash-"
+_DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
+
+# Rewritten by Bazel as a server starts or runs a command, so statting these few
+# answers "last used" without walking a base's hundred thousand files. The two
+# symlinks are followed to the current profile and log.
+_FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
 
 _LIVE = "live"
 _IDLE = "idle"
@@ -65,39 +79,47 @@ _GRACE = "grace"
 _UNKNOWN = "unknown"
 _TRASH = "trash"
 
-_REMOVABLE = [_ORPHAN, _IDLE, _TRASH]
+_State = record(
+    # Key in the document's `output_bases` counts; `<key>_bases` lists the
+    # state's bases under `--verbose`.
+    key = field(str),
+    # How the census line counts it.
+    label = field(str),
+    removable = field(bool),
+    # Heading for the `--verbose` listing of a kept state; "" leaves it out.
+    heading = field(str, default = ""),
+    # Printed under the census when any base is in the state.
+    note = field(str, default = ""),
+)
 
-_TRASH_PREFIX = ".gc-trash-"
+# Every state a base can be in, in census order.
+_STATES = {
+    _LIVE: _State(key = "live", label = "live", removable = False, heading = "live — workspace still exists"),
+    _IDLE: _State(key = "idle", label = "idle", removable = True),
+    _ORPHAN: _State(key = "orphaned", label = "orphaned", removable = True),
+    _GRACE: _State(
+        key = "orphaned_within_grace",
+        label = "orphaned within the hour",
+        removable = False,
+        heading = "orphaned within the hour",
+        note = "orphaned within the hour = workspace gone but the base was just used; left for now, " +
+               "since a worktree being recreated at the same path will want it.",
+    ),
+    _UNKNOWN: _State(
+        key = "undetermined",
+        label = "undetermined",
+        removable = False,
+        heading = "undetermined — cannot be attributed",
+        note = "undetermined = nothing in the base names its workspace. Removed only by age.",
+    ),
+    _TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True),
+}
 
-_HOUR_US = 3600 * 1000000
-_DAY_US = 24 * _HOUR_US
-_ORPHAN_GRACE_US = _HOUR_US
-
-_DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
-
-# Rewritten by Bazel as a server starts or runs a command. Statting these few is
-# what "last used" costs, rather than walking a base's hundred thousand files.
-# The two symlinks are followed to the current profile and log.
-_FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
-
-# Bazel's own layout under the output user root, for the caches this task sizes
-# under `--report-caches`. Each is reported with what collects it.
+# The caches `--report-caches` sizes, with what collects each.
 _CACHES = [
-    (
-        "download_cache_kb",
-        _DOWNLOAD_CACHE,
-        "pruned by --download-cache-max-age-days",
-    ),
-    (
-        "repo_contents_cache_kb",
-        "cache/repos/v1/contents",
-        "GC'd by Bazel while a server sits idle",
-    ),
-    (
-        "install_bases_kb",
-        "install",
-        "see --experimental_install_base_gc_max_age",
-    ),
+    ("download_cache_kb", _DOWNLOAD_CACHE, "pruned by --download-cache-max-age-days"),
+    ("repo_contents_cache_kb", "cache/repos/v1/contents", "GC'd by Bazel while a server sits idle"),
+    ("install_bases_kb", "install", "see --experimental_install_base_gc_max_age"),
 ]
 
 _Base = record(
@@ -106,16 +128,32 @@ _Base = record(
     # The workspace this base belongs to; "" when it could not be resolved.
     workspace = field(str),
     state = field(str),
-    # PID of its Bazel server, or 0 when none is recorded or the record is stale.
+    # PID recorded in `server/server.pid.txt`, or 0. Not checked for liveness.
     pid = field(int),
     # Newest mtime among the freshness markers, in microseconds since the epoch.
     last_used = field(int),
-    kb = field(int, default = 0),
 )
 
 _CacheEntry = record(
     path = field(str),
     kb = field(int),
+)
+
+# What a run found, and what it would remove. `sizes` maps each removal's path
+# to its `du` size in KB.
+_Plan = record(
+    bases = field(list),
+    removals = field(list),
+    sizes = field(dict),
+    cache_entries = field(int),
+    stale = field(list),
+)
+
+_Outcome = record(
+    reaped = field(int),
+    reaped_kb = field(int),
+    pruned = field(int),
+    pruned_kb = field(int),
 )
 
 def _fmt_kb(kb: int) -> str:
@@ -147,6 +185,15 @@ def _capitalize(s: str) -> str:
     """First letter upper-cased, so one phrase can serve both a sentence that
     starts with it and one that embeds it."""
     return s[:1].upper() + s[1:]
+
+def _entries(n: int) -> str:
+    return pluralize(n, "download cache entry", "download cache entries")
+
+def _total_kb(sizes: list[int]) -> int:
+    total = 0
+    for kb in sizes:
+        total += kb
+    return total
 
 def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags: list[str] = []) -> str:
     """`--output_user_root` as the rc chain resolves it, or "".
@@ -312,7 +359,7 @@ def _classify(workspace: str, workspace_exists: bool, age_us: int, max_age_us: i
     order can be tested without building bases of every age.
 
     `max_age_us` of 0 turns the age rule off. A running server is not decided
-    here: it costs a process lookup, so the caller vetoes `_IDLE` afterwards
+    here: it costs a process lookup, so `_scan` vetoes `_IDLE` afterwards, and
     only for the bases this returns it for.
     """
     if workspace and not workspace_exists:
@@ -322,8 +369,8 @@ def _classify(workspace: str, workspace_exists: bool, age_us: int, max_age_us: i
     return _LIVE if workspace else _UNKNOWN
 
 def _scan(ctx: TaskContext, root: str, now_us: int, max_age_us: int) -> list:
-    """Classify every output base under `root`, and pick up any trash an
-    earlier run failed to finish removing."""
+    """Classify every output base under `root`, youngest first, including any
+    trash an earlier run failed to finish removing."""
     bases = []
     for entry in ctx.std.fs.read_dir(root):
         if not entry.is_dir:
@@ -360,10 +407,10 @@ def _scan(ctx: TaskContext, root: str, now_us: int, max_age_us: int) -> list:
             pid = pid,
             last_used = last_used,
         ))
-    return _youngest_first(bases)
-
-def _youngest_first(bases: list) -> list:
     return sorted(bases, key = lambda b: -b.last_used)
+
+def _in_state(bases: list, state: str) -> list:
+    return [b for b in bases if b.state == state]
 
 def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
     """`(entries_seen, stale_entries)` for the download cache under `root`.
@@ -371,8 +418,8 @@ def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
     An entry is `<algo>/<hash>/`, holding the `file` and any `id-*` canonical-id
     markers beside it, and is removed as a unit. Its last use is the newer of
     the file's mtime and atime: Bazel touches the mtime on every cache hit, and
-    atime is unreliable — APFS does not update it on read, and Linux `relatime`
-    lags it by up to a day.
+    atime alone is unreliable — APFS does not update it on read, and Linux
+    `relatime` lags it by up to a day.
     """
     cas = root + "/" + _DOWNLOAD_CACHE
     if not ctx.std.fs.exists(cas):
@@ -390,24 +437,25 @@ def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
             path = algo_dir + "/" + entry.path
             err, meta = catch(ctx.std.fs.metadata, path + "/file")
             if err != None:
-                used = _mtime_us(ctx, path)
-                kb = 0
+                used, kb = _mtime_us(ctx, path), 0
             else:
-                used = max(meta.modified or 0, meta.accessed or 0)
-                kb = (meta.size + 1023) // 1024
+                used, kb = max(meta.modified or 0, meta.accessed or 0), (meta.size + 1023) // 1024
             if used < cutoff_us:
                 stale.append(_CacheEntry(path = path, kb = kb))
     return (seen, stale)
 
 def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
-    """Apparent size in KB per path, via `du -sk`. Empty when `du` is
-    unavailable, which costs the report its numbers and nothing else."""
+    """Disk usage in KB per path, via `du -sk`.
+
+    `du` exits non-zero when any one path fails, such as a base removed since
+    the scan, so its output is read regardless and a missing path simply has no
+    entry. Empty when `du` is unavailable, which costs the report its numbers
+    and nothing else.
+    """
     if not paths:
         return {}
     out = ctx.std.process.command("du").args(["-sk"] + paths) \
         .stdout("piped").stderr("null").spawn().wait_with_output()
-    if out.status.code != 0:
-        return {}
     sizes = {}
     for line in out.stdout.splitlines():
         parts = line.split("\t")
@@ -415,52 +463,35 @@ def _du_kb(ctx: TaskContext, paths: list[str]) -> dict:
             sizes[parts[1].strip()] = int(parts[0].strip())
     return sizes
 
-def _with_sizes(ctx: TaskContext, bases: list) -> list:
-    """`bases` with `kb` filled in for the ones we may delete."""
-    sizes = _du_kb(ctx, [b.path for b in bases])
-    return [
-        _Base(
-            name = b.name,
-            path = b.path,
-            workspace = b.workspace,
-            state = b.state,
-            pid = b.pid,
-            last_used = b.last_used,
-            kb = sizes.get(b.path, 0),
-        )
-        for b in bases
-    ]
+def _remove_tree(ctx: TaskContext, path: str) -> str:
+    """Delete `path` and everything under it; "" on success, else the error.
 
-def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
-    """Stop the base's server if it is really its server, then delete the base.
-
-    The server is signalled rather than asked to shut down over its RPC port:
-    `bazel shutdown` against a dead workspace would start a server to shut it
-    down, and everything the running one holds lives in the directory about to
-    be removed.
-
-    The base is renamed to `.gc-trash-<name>` first, so a delete that fails part
-    way leaves a directory the next run recognises and finishes, rather than a
-    half-base that no longer names its workspace. A path already in the trash is
-    deleted where it is.
-
-    The tree is made writable before removal. Bazel strips the owner-write bit
-    from the action output directories under `bazel-out/`, and unlinking a child
-    needs write on its parent, so a base that completed a build cannot be
-    removed as it stands. This is the same `chmod` `bazel clean` does.
+    A first attempt that fails is retried once the tree is writable. Bazel
+    strips the owner-write bit from the action output directories under
+    `bazel-out/`, and unlinking a child needs write on its parent — the same
+    reason `bazel clean` runs a `chmod`. Trying first skips that `chmod` for the
+    trees that never needed it, such as each of thousands of download-cache
+    entries. A path already gone counts as removed.
     """
-    if _is_this_bases_server(ctx, pid, path):
-        ctx.std.process.command("kill").args([str(pid)]) \
-            .stdout("null").stderr("null").spawn().wait()
-    trash = _move_to_trash(ctx, path)
-    if not trash:
-        return False
-    _make_writable(ctx, trash)
-    err, _ = catch(ctx.std.fs.remove_dir_all, trash)
-    if err != None and ctx.std.fs.exists(trash):
-        warn(ctx.std, "could not remove " + trash + ": " + str(err) + " (the next `aspect gc` retries it)")
-        return False
-    return True
+    err, _ = catch(ctx.std.fs.remove_dir_all, path)
+    if err == None or not ctx.std.fs.exists(path):
+        return ""
+    _make_writable(ctx, path)
+    err, _ = catch(ctx.std.fs.remove_dir_all, path)
+    if err == None or not ctx.std.fs.exists(path):
+        return ""
+    return str(err)
+
+def _make_writable(ctx: TaskContext, path: str) -> None:
+    """Restore the owner-write bit across `path`, so the tree can be unlinked.
+
+    One `chmod -R` rather than an AXL walk: a single output base holds hundreds
+    of read-only directories and tens of thousands of files, and spawning once
+    beats a per-entry round trip. Failure is not reported here — the removal
+    that follows reports it, with the error the caller actually cares about.
+    """
+    ctx.std.process.command("chmod").args(["-R", "u+w", path]) \
+        .stdout("null").stderr("null").spawn().wait()
 
 def _move_to_trash(ctx: TaskContext, path: str) -> str:
     """Rename `path` to `.gc-trash-<name>` beside it and return the new path,
@@ -477,60 +508,48 @@ def _move_to_trash(ctx: TaskContext, path: str) -> str:
         return ""
     return trash
 
-def _make_writable(ctx: TaskContext, path: str) -> None:
-    """Restore the owner-write bit across `path`, so the tree can be unlinked.
+def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
+    """Stop the base's server if it is really its server, then delete the base
+    by way of the trash.
 
-    One `chmod -R` rather than an AXL walk: a single output base holds hundreds
-    of read-only directories and tens of thousands of files, and spawning once
-    beats a per-entry round trip. Failure is not reported here — the removal
-    that follows reports it, with the error the caller actually cares about.
+    The server is signalled rather than asked to shut down over its RPC port:
+    `bazel shutdown` against a dead workspace would start a server to shut it
+    down, and everything the running one holds lives in the directory about to
+    be removed.
     """
-    ctx.std.process.command("chmod").args(["-R", "u+w", path]) \
-        .stdout("null").stderr("null").spawn().wait()
-
-def _remove_cache_entry(ctx: TaskContext, path: str) -> bool:
-    """Delete one download-cache entry; true when it is gone."""
-    err, _ = catch(ctx.std.fs.remove_dir_all, path)
-    if err == None or not ctx.std.fs.exists(path):
-        return True
-    _make_writable(ctx, path)
-    err, _ = catch(ctx.std.fs.remove_dir_all, path)
-    return err == None or not ctx.std.fs.exists(path)
+    if _is_this_bases_server(ctx, pid, path):
+        ctx.std.process.command("kill").args([str(pid)]) \
+            .stdout("null").stderr("null").spawn().wait()
+    trash = _move_to_trash(ctx, path)
+    if not trash:
+        return False
+    err = _remove_tree(ctx, trash)
+    if err:
+        warn(ctx.std, "could not remove " + trash + ": " + err + " (the next `aspect gc` retries it)")
+        return False
+    return True
 
 def _cache_report(ctx: TaskContext, root: str) -> dict:
     """Sizes of the shared caches, keyed for the document. A cache the install
     has never created reports zero."""
-    paths = {}
-    for key, rel, _reason in _CACHES:
-        paths[key] = root + "/" + rel
+    paths = {key: root + "/" + rel for key, rel, _reason in _CACHES}
     sizes = _du_kb(ctx, [p for p in paths.values() if ctx.std.fs.exists(p)])
-    report = {}
-    for key in paths:
-        report[key] = sizes.get(paths[key], 0)
-    return report
+    return {key: sizes.get(path, 0) for key, path in paths.items()}
 
-def _ms(us: int) -> int:
-    return us // 1000
+def _base_entry(b, sizes: dict = {}) -> dict:
+    """One base, for the document. `kb` only for a base that was measured."""
+    entry = {
+        "path": b.path,
+        "workspace": b.workspace,
+        "state": b.state,
+        "pid": b.pid,
+        "last_used_ms": b.last_used // 1000,
+    }
+    if b.path in sizes:
+        entry["kb"] = sizes[b.path]
+    return entry
 
-def _kept_entries(bases: list) -> list:
-    """Bases a run leaves alone, for the document. No `kb`: nothing sizes them."""
-    return [
-        {"path": b.path, "workspace": b.workspace, "pid": b.pid, "last_used_ms": _ms(b.last_used)}
-        for b in bases
-    ]
-
-def _document(
-        root: str,
-        dry_run: bool,
-        verbose: bool,
-        policy: dict,
-        bases: list,
-        removals: list,
-        download_cache: dict,
-        reclaimable: int,
-        reaped: int,
-        freed: int,
-        caches: dict) -> dict:
+def _document(root: str, dry_run: bool, verbose: bool, policy: dict, plan, outcome, caches: dict) -> dict:
     """The `--output=json` document.
 
     `reclaimable_kb` is what the removals and stale download-cache entries hold,
@@ -539,60 +558,31 @@ def _document(
     `_SCHEMA_VERSION` moves when they do — `--verbose` only adds keys, which
     consumers already have to tolerate.
     """
-    counts = {}
-    for state, key in [(_LIVE, "live"), (_IDLE, "idle"), (_ORPHAN, "orphaned"), (_GRACE, "orphaned_within_grace"), (_UNKNOWN, "undetermined"), (_TRASH, "trash")]:
-        counts[key] = len([b for b in bases if b.state == state])
+    stale_kb = _total_kb([e.kb for e in plan.stale])
     doc = {
         "schema_version": _SCHEMA_VERSION,
         "output_user_root": root,
         "dry_run": dry_run,
         "policy": policy,
-        "output_bases": counts,
-        "removals": [
-            {
-                "path": b.path,
-                "workspace": b.workspace,
-                "state": b.state,
-                "kb": b.kb,
-                "pid": b.pid,
-                "last_used_ms": _ms(b.last_used),
-            }
-            for b in removals
-        ],
-        "download_cache": download_cache,
-        "reclaimable_kb": reclaimable,
-        "reaped": reaped,
-        "freed_kb": freed,
+        "output_bases": {s.key: len(_in_state(plan.bases, state)) for state, s in _STATES.items()},
+        "removals": [_base_entry(b, plan.sizes) for b in plan.removals],
+        "download_cache": {
+            "entries": plan.cache_entries,
+            "stale_entries": len(plan.stale),
+            "stale_kb": stale_kb,
+            "pruned": outcome.pruned,
+            "freed_kb": outcome.pruned_kb,
+        },
+        "reclaimable_kb": _total_kb(plan.sizes.values()) + stale_kb,
+        "reaped": outcome.reaped,
+        "freed_kb": outcome.reaped_kb + outcome.pruned_kb,
         "caches": caches,
     }
     if verbose:
-        doc["live_bases"] = _kept_entries([b for b in bases if b.state == _LIVE])
-        doc["orphaned_within_grace_bases"] = _kept_entries([b for b in bases if b.state == _GRACE])
-        doc["undetermined_bases"] = _kept_entries([b for b in bases if b.state == _UNKNOWN])
+        for state, s in _STATES.items():
+            if s.heading:
+                doc[s.key + "_bases"] = [_base_entry(b) for b in _in_state(plan.bases, state)]
     return doc
-
-def _why(b, now_us: int) -> str:
-    """The reason a base is being removed, for the listing."""
-    if b.state == _TRASH:
-        return "left by an interrupted gc"
-    if b.state == _ORPHAN:
-        return "workspace gone: " + b.workspace
-    return "unused for " + _fmt_age(now_us - b.last_used) + ("; workspace " + b.workspace if b.workspace else "")
-
-def _list_kept(streaming: bool, heading: str, bases: list, now_us: int) -> None:
-    """List bases this run will not touch, youngest first, under `--verbose`.
-
-    Sizes are deliberately absent: measuring them means a `du` over every live
-    base on the machine, tens of gigabytes, to report something nothing is going
-    to reclaim. The path, the workspace and the age are what make a
-    classification checkable, which is what this flag is for.
-    """
-    if not bases:
-        return
-    _say(streaming, "  %s (%d):" % (heading, len(bases)))
-    for b in bases:
-        age = _fmt_age(now_us - b.last_used)
-        _say(streaming, "    " + " " * max(0, 4 - len(age)) + age + "  " + b.name + ("  " + b.workspace if b.workspace else ""))
 
 def _say(streaming: bool, line: str) -> None:
     """A progress line, suppressed under `--output=json`.
@@ -603,20 +593,111 @@ def _say(streaming: bool, line: str) -> None:
     if streaming:
         print(line)
 
-def _plural(n: int, noun: str) -> str:
-    return "%d %s" % (n, noun if n == 1 else noun + "s")
+def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int) -> None:
+    """How many bases are in each state, and under `--verbose` the kept ones,
+    youngest first.
+
+    Kept bases are listed without sizes: measuring them means a `du` over every
+    live base on the machine, tens of gigabytes, to report something nothing is
+    going to reclaim. The path, the workspace and the age are what make a
+    classification checkable, which is what `--verbose` is for.
+    """
+    counts = []
+    for state, s in _STATES.items():
+        n = len(_in_state(bases, state))
+        if n or state == _LIVE:
+            counts.append("%d %s" % (n, s.label))
+    _say(streaming, "  %s: %s" % (pluralize(len(bases), "base"), ", ".join(counts)))
+    for state, s in _STATES.items():
+        if s.note and _in_state(bases, state):
+            _say(streaming, "    (" + s.note + ")")
+    if not verbose:
+        return
+    for state, s in _STATES.items():
+        kept = _in_state(bases, state)
+        if not s.heading or not kept:
+            continue
+        _say(streaming, "")
+        _say(streaming, "  %s (%d):" % (s.heading, len(kept)))
+        for b in kept:
+            _say(streaming, "    " + pad_left(_fmt_age(now_us - b.last_used), 4) + "  " + b.name + ("  " + b.workspace if b.workspace else ""))
+    _say(streaming, "")
+
+def _why(b, now_us: int) -> str:
+    """The reason a base is being removed, for the listing."""
+    if b.state == _TRASH:
+        return "left by an interrupted gc"
+    if b.state == _ORPHAN:
+        return "workspace gone: " + b.workspace
+    return "unused for " + _fmt_age(now_us - b.last_used) + ("; workspace " + b.workspace if b.workspace else "")
+
+def _print_plan(streaming: bool, plan, cache_max_age_days: int, now_us: int) -> None:
+    """Everything a run will remove, listed before it asks, so the confirmation
+    is answered with the whole picture rather than a count."""
+    if plan.removals:
+        _say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), "output base"), _fmt_kb(_total_kb(plan.sizes.values()))))
+    for b in plan.removals:
+        _say(streaming, "    " + _fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us) + ")")
+    if plan.stale:
+        _say(streaming, "  download cache: %d of %s unused for %dd or more, %s" % (
+            len(plan.stale),
+            pluralize(plan.cache_entries, "entry", "entries"),
+            cache_max_age_days,
+            _fmt_kb(_total_kb([e.kb for e in plan.stale])),
+        ))
+
+def _collect(ctx: TaskContext, streaming: bool, plan):
+    """Remove everything in `plan`, narrating each base before its removal: a
+    gigabyte tree takes seconds to unlink, and the line says where that time
+    goes."""
+    reaped, reaped_kb = 0, 0
+    for i, b in enumerate(plan.removals):
+        kb = plan.sizes.get(b.path, 0)
+        _say(streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(plan.removals), _fmt_kb(kb), b.name))
+        if _reap(ctx, b.path, b.pid):
+            reaped += 1
+            reaped_kb += kb
+    if plan.stale:
+        _say(streaming, "  pruning %s…" % _entries(len(plan.stale)))
+    pruned, pruned_kb = 0, 0
+    for e in plan.stale:
+        if not _remove_tree(ctx, e.path):
+            pruned += 1
+            pruned_kb += e.kb
+    return _Outcome(reaped = reaped, reaped_kb = reaped_kb, pruned = pruned, pruned_kb = pruned_kb)
+
+def _failure(plan, outcome):
+    """The conclusion for a run that could not remove everything, or None."""
+    failed = []
+    if outcome.reaped < len(plan.removals):
+        failed.append(pluralize(len(plan.removals) - outcome.reaped, "output base"))
+    if outcome.pruned < len(plan.stale):
+        failed.append(_entries(len(plan.stale) - outcome.pruned))
+    if not failed:
+        return None
+    return TaskConclusion(exit_code = 1, message = " and ".join(failed) + " could not be removed")
+
+def _output_user_root(ctx: TaskContext) -> str:
+    """The explicit flag, then what the surrounding workspace configures, then
+    the platform default."""
+    return (ctx.args.output_user_root or
+            _configured_output_user_root(ctx) or
+            _platform_output_user_root(ctx))
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    """Scan, list, confirm, collect, report.
+
+    It narrates as it goes rather than reporting at the end: classifying walks
+    every base, sizing shells out to `du`, and deleting a multi-gigabyte tree
+    takes seconds apiece, so a reader needs to see which of those it is waiting
+    on.
+    """
     base_max_age_days = ctx.args.base_max_age_days
     cache_max_age_days = ctx.args.download_cache_max_age_days
     if base_max_age_days < 0 or cache_max_age_days < 0:
         return TaskConclusion(exit_code = 1, message = "max ages are days, 0 or more (0 turns the rule off)")
 
-    # Explicit flag, then whatever the surrounding workspace configured, then
-    # the platform default.
-    root = (ctx.args.output_user_root or
-            _configured_output_user_root(ctx) or
-            _platform_output_user_root(ctx))
+    root = _output_user_root(ctx)
     if not ctx.std.fs.exists(root):
         return TaskConclusion(
             exit_code = 1,
@@ -624,70 +705,36 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                       " — pass --output-user-root to point at one",
         )
 
-    # Everything below narrates as it goes rather than reporting at the end:
-    # classifying walks every base, sizing shells out to `du`, and deleting a
-    # multi-gigabyte tree takes seconds apiece. A reader needs to see which of
-    # those it is waiting on.
     streaming = ctx.args.output != "json"
     info(ctx.std, "output user root: " + root)
     now_us = time.now_ms() * 1000
 
     _say(streaming, "  scanning output bases…")
     bases = _scan(ctx, root, now_us, base_max_age_days * _DAY_US)
+    _print_census(streaming, bases, ctx.args.verbose, now_us)
 
-    def of(state):
-        return [b for b in bases if b.state == state]
-
-    parts = ["%d live" % len(of(_LIVE))]
-    for state, label in [(_IDLE, "idle"), (_ORPHAN, "orphaned"), (_GRACE, "orphaned within the hour"), (_UNKNOWN, "undetermined"), (_TRASH, "left from an interrupted gc")]:
-        if of(state):
-            parts.append("%d %s" % (len(of(state)), label))
-    _say(streaming, "  %s: %s" % (_plural(len(bases), "base"), ", ".join(parts)))
-    if of(_GRACE):
-        _say(streaming, "    (orphaned within the hour = workspace gone but the base was just used; left")
-        _say(streaming, "     for now, since a worktree being recreated at the same path will want it.)")
-    if of(_UNKNOWN):
-        _say(streaming, "    (undetermined = nothing in the base names its workspace. Removed only by age.)")
-
-    if ctx.args.verbose:
-        _say(streaming, "")
-        _list_kept(streaming, "live — workspace still exists", of(_LIVE), now_us)
-        _list_kept(streaming, "orphaned within the hour", of(_GRACE), now_us)
-        _list_kept(streaming, "undetermined — cannot be attributed", of(_UNKNOWN), now_us)
-        _say(streaming, "")
-
-    doomed = [b for b in bases if b.state in _REMOVABLE]
-    if doomed:
-        _say(streaming, "  measuring %s…" % _plural(len(doomed), "output base"))
-    removals = _with_sizes(ctx, doomed)
-    bases_kb = 0
-    for b in removals:
-        bases_kb += b.kb
-
-    cache_seen, stale = 0, []
+    removals = [b for b in bases if _STATES[b.state].removable]
+    if removals:
+        _say(streaming, "  measuring %s…" % pluralize(len(removals), "output base"))
+    cache_entries, stale = 0, []
     if cache_max_age_days > 0:
         _say(streaming, "  scanning the download cache…")
-        cache_seen, stale = _scan_download_cache(ctx, root, now_us - cache_max_age_days * _DAY_US)
-    stale_kb = 0
-    for e in stale:
-        stale_kb += e.kb
-    reclaimable = bases_kb + stale_kb
-
-    # The full list goes out before anything is deleted, so the confirmation
-    # below is answered with the whole picture rather than a count.
-    if removals:
-        _say(streaming, "  %s to remove, %s:" % (_plural(len(removals), "output base"), _fmt_kb(bases_kb)))
-    for b in removals:
-        _say(streaming, "    " + _fmt_kb(b.kb) + "  " + b.name + "  (" + _why(b, now_us) + ")")
-    if stale:
-        _say(streaming, "  download cache: %d of %d entries unused for %dd or more, %s" %
-                        (len(stale), cache_seen, cache_max_age_days, _fmt_kb(stale_kb)))
+        cache_entries, stale = _scan_download_cache(ctx, root, now_us - cache_max_age_days * _DAY_US)
+    plan = _Plan(
+        bases = bases,
+        removals = removals,
+        sizes = _du_kb(ctx, [b.path for b in removals]),
+        cache_entries = cache_entries,
+        stale = stale,
+    )
+    _print_plan(streaming, plan, cache_max_age_days, now_us)
+    reclaimable = _total_kb(plan.sizes.values()) + _total_kb([e.kb for e in stale])
 
     actions = []
     if removals:
-        actions.append("delete " + _plural(len(removals), "output base"))
+        actions.append("delete " + pluralize(len(removals), "output base"))
     if stale:
-        actions.append("prune %d download cache %s" % (len(stale), "entry" if len(stale) == 1 else "entries"))
+        actions.append("prune " + _entries(len(stale)))
     action = " and ".join(actions)
     verdict = confirm.decide(
         has_work = len(actions) > 0,
@@ -697,70 +744,32 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
     if verdict == confirm.NEEDS_FORCE:
         return TaskConclusion(exit_code = 1, message = confirm.needs_force_message(action))
-    question = _capitalize(action) + ", freeing " + _fmt_kb(reclaimable) + "?"
-    if verdict == confirm.ASK and not confirm.ask(ctx, question):
+    if verdict == confirm.ASK and not confirm.ask(ctx, _capitalize(action) + ", freeing " + _fmt_kb(reclaimable) + "?"):
         return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
 
-    reaped = 0
-    freed = 0
-    pruned = 0
-    pruned_kb = 0
-    if verdict != confirm.SKIP:
-        for i, b in enumerate(removals):
-            # Printed before the work, not after: a 1 GB tree takes seconds to
-            # unlink, and this line is what says where that time is going.
-            _say(streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(removals), _fmt_kb(b.kb), b.name))
-            if _reap(ctx, b.path, b.pid):
-                reaped += 1
-                freed += b.kb
-        if stale:
-            _say(streaming, "  pruning %d download cache entries…" % len(stale))
-        for e in stale:
-            if _remove_cache_entry(ctx, e.path):
-                pruned += 1
-                pruned_kb += e.kb
-        freed += pruned_kb
+    if verdict == confirm.SKIP:
+        outcome = _Outcome(reaped = 0, reaped_kb = 0, pruned = 0, pruned_kb = 0)
+        failure = None
+    else:
+        outcome = _collect(ctx, streaming, plan)
+        failure = _failure(plan, outcome)
+    freed = outcome.reaped_kb + outcome.pruned_kb
 
-    # Measured after the work, so the sizes are what is left.
+    # After collecting, so the sizes are what is left.
     if ctx.args.report_caches:
         _say(streaming, "  measuring the shared caches… (this is the slow part)")
     caches = _cache_report(ctx, root) if ctx.args.report_caches else {}
 
-    failed_bases = 0 if verdict == confirm.SKIP else len(removals) - reaped
-    failed_entries = 0 if verdict == confirm.SKIP else len(stale) - pruned
-    failed = []
-    if failed_bases:
-        failed.append(_plural(failed_bases, "output base"))
-    if failed_entries:
-        failed.append("%d download cache %s" % (failed_entries, "entry" if failed_entries == 1 else "entries"))
-    failure = None
-    if failed:
-        failure = TaskConclusion(exit_code = 1, message = " and ".join(failed) + " could not be removed")
-
     if ctx.args.output == "json":
-        ctx.std.io.stdout.write(json.encode(_document(
-            root = root,
-            dry_run = ctx.args.dry_run,
-            verbose = ctx.args.verbose,
-            policy = {
-                "base_max_age_days": base_max_age_days,
-                "download_cache_max_age_days": cache_max_age_days,
-                "orphan_grace_ms": _ms(_ORPHAN_GRACE_US),
-            },
-            bases = bases,
-            removals = removals,
-            download_cache = {
-                "entries": cache_seen,
-                "stale_entries": len(stale),
-                "stale_kb": stale_kb,
-                "pruned": pruned,
-                "freed_kb": pruned_kb,
-            },
-            reclaimable = reclaimable,
-            reaped = reaped,
-            freed = freed,
-            caches = caches,
-        ), indent = 2) + "\n")
+        policy = {
+            "base_max_age_days": base_max_age_days,
+            "download_cache_max_age_days": cache_max_age_days,
+            "orphan_grace_ms": _ORPHAN_GRACE_US // 1000,
+        }
+        ctx.std.io.stdout.write(json.encode(
+            _document(root, ctx.args.dry_run, ctx.args.verbose, policy, plan, outcome, caches),
+            indent = 2,
+        ) + "\n")
         return failure or 0
 
     if not actions:
@@ -770,17 +779,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     elif failure == None:
         print("  reclaimed " + _fmt_kb(freed))
     else:
-        # The per-base warnings above say which ones and why; this is the total,
-        # so a reader does not have to count the warnings to know what is left.
         print("  reclaimed %s; %s could not be removed" % (_fmt_kb(freed), _fmt_kb(reclaimable - freed)))
 
     if caches:
         print("")
-
-        # Padded by hand: AXL's `%` formatting takes no width flags.
         width = max([len(rel) for _key, rel, _reason in _CACHES])
         for key, rel, reason in _CACHES:
-            print("  " + rel + " " * (width - len(rel)) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
+            print("  " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
     return failure or 0
 
 gc = task(
@@ -834,11 +839,15 @@ Never touches a running Bazel server whose workspace still exists, or anything b
 testonly_classify = _classify
 testonly_configured_output_user_root = _configured_output_user_root
 testonly_document = _document
+testonly_du_kb = _du_kb
 testonly_fmt_age = _fmt_age
 testonly_fmt_kb = _fmt_kb
 testonly_is_output_base_name = _is_output_base_name
 testonly_move_to_trash = _move_to_trash
+testonly_outcome = _Outcome
+testonly_plan = _Plan
 testonly_reap = _reap
+testonly_remove_tree = _remove_tree
 testonly_scan = _scan
 testonly_scan_download_cache = _scan_download_cache
 testonly_workspace_of = _workspace_of

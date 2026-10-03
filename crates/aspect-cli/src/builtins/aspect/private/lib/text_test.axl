@@ -1,0 +1,56 @@
+"""Unit tests for lib/text.axl — the shared text-formatting helpers.
+
+Run with:
+  aspect dev test-text
+"""
+
+load("./text.axl", "format_bytes_iec", "format_int_comma", "join_url", "pad_left", "pad_right", "pluralize", "truncate_for_title")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_pad(ctx):
+    _eq("pad_left aligns right", pad_left("7d", 4), "  7d")
+    _eq("pad_right aligns left", pad_right("ab", 4), "ab  ")
+    _eq("exact width is unchanged", pad_left("abcd", 4), "abcd")
+    _eq("pad_left never truncates", pad_left("abcdef", 4), "abcdef")
+    _eq("pad_right never truncates", pad_right("abcdef", 4), "abcdef")
+
+def _test_pluralize(ctx):
+    _eq("one", pluralize(1, "base"), "1 base")
+    _eq("zero is plural", pluralize(0, "base"), "0 bases")
+    _eq("irregular", pluralize(2, "entry", "entries"), "2 entries")
+    _eq("thousands", pluralize(6682, "entry", "entries"), "6,682 entries")
+
+def _test_format_numbers(ctx):
+    _eq("bytes", format_bytes_iec(512), "512 B")
+    _eq("KiB", format_bytes_iec(1536), "1.5 KiB")
+    _eq("negative comma", format_int_comma(-1234567), "-1,234,567")
+
+def _test_strings(ctx):
+    _eq("fits", truncate_for_title("short", 10), "short")
+    _eq("word boundary", truncate_for_title("one two three four", 12), "one two…")
+    _eq("join adds a slash", join_url("https://x", "y"), "https://x/y")
+    _eq("join keeps one slash", join_url("https://x/", "y"), "https://x/y")
+
+_UNIT_TESTS = [
+    _test_pad,
+    _test_pluralize,
+    _test_format_numbers,
+    _test_strings,
+]
+
+def _impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("text.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+text_tests = task(
+    summary = "Run the shared text-formatting helper unit tests.",
+    kind = "test-text",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)

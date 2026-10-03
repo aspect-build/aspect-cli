@@ -8,6 +8,8 @@ Currently:
   - `truncate_for_title(text, max_len)` — word-boundary truncation with a
     `…` suffix, for status-surface titles.
   - `join_url(base, segment)` — single-slash URL join.
+  - `pad_left(s, width)` / `pad_right(s, width)` — space-padding to a column
+    width, for the table alignment `%` formatting cannot do.
 
 All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
@@ -98,3 +100,11 @@ def join_url(base: str, segment: str) -> str:
     """Join `base` + `segment` with exactly one slash, tolerating a trailing slash on
     `base` (an advertised results URL may or may not carry one)."""
     return (base if base.endswith("/") else base + "/") + segment
+
+def pad_left(s: str, width: int) -> str:
+    """`s` right-aligned in `width` columns. Longer strings are not truncated."""
+    return " " * (width - len(s)) + s
+
+def pad_right(s: str, width: int) -> str:
+    """`s` left-aligned in `width` columns. Longer strings are not truncated."""
+    return s + " " * (width - len(s))

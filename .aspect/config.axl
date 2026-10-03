@@ -51,6 +51,7 @@ load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
+load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
@@ -426,6 +427,10 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-gc
     ctx.tasks.add(gc_tests)
     ctx.tasks.add(confirm_tests)
+
+    # Shared text helpers (padding, pluralize, number formatting).
+    # Run with: aspect dev test-text
+    ctx.tasks.add(text_tests)
 
     # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
     # independence, prefer_app_when_env_critical, watermark badge.
