@@ -396,12 +396,17 @@ def _may_be_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
     return _server_rss_kb(ctx, pid, base) != None
 
 def _output_base_name(command: str) -> str:
-    """The last path segment of the `--output_base=` in a command line, or ""."""
-    for token in command.split(" "):
-        if token.startswith("--output_base="):
-            value = token[len("--output_base="):].rstrip("/")
-            return value[value.rfind("/") + 1:]
-    return ""
+    """The last path segment of the `--output_base=` in a command line, or "".
+
+    The value runs to the next ` --` flag rather than the next space, so a root
+    with a space in it still yields the base's own name.
+    """
+    flag = "--output_base="
+    i = command.find(flag)
+    if i < 0:
+        return ""
+    value = command[i + len(flag):].split(" --")[0].strip().rstrip("/")
+    return value[value.rfind("/") + 1:]
 
 def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
     """The resident memory in KB of `base`'s Bazel server; None when `pid` is
@@ -420,8 +425,11 @@ def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
     rss, _, command = out.strip().partition(" ")
     if code == 0 and rss.isdigit():
         return int(rss) if _output_base_name(command) == base[base.rfind("/") + 1:] else None
+
+    # `ps` could not say. Only a pid known to be gone is ruled out: with no
+    # `kill` to ask either, as on an image without procps, it might be live.
     alive, _ = _run(ctx, "kill", ["-0", str(pid)])
-    return _UNSEEN if alive == 0 else None
+    return None if alive > 0 else _UNSEEN
 
 def _servers(ctx: TaskContext, bases: list) -> dict:
     """Resident memory in KB of each base's running Bazel server, by base path."""
@@ -579,15 +587,19 @@ def _pool_slot(ctx: TaskContext, workspace: str):
         return None
     repository = "/".join(pool.split("/")[-2:])
     err, registry = catch(json.decode, ctx.std.fs.try_read_to_string(pool + "/registry.json") or "{}")
-    record = (registry.get("slots") or {}).get(slot[len(_SLOT_PREFIX):]) if err == None and type(registry) == "dict" else None
+    slots = registry.get("slots") if err == None and type(registry) == "dict" else None
+    record = slots.get(slot[len(_SLOT_PREFIX):]) if type(slots) == "dict" else None
     if type(record) != "dict":
         return git_checkout.Checkout(root = workspace, repository = repository, branch = "")
-    lease = record.get("lease") or {}
-    if type(lease) == "dict" and lease.get("name"):
-        branch = "leased · " + lease["name"]
+    lease = record.get("lease")
+    name = lease.get("name") if type(lease) == "dict" else None
+    last = record.get("last_branch")
+    if type(name) == "string" and name:
+        branch = "leased · " + name
+    elif type(last) == "string" and last:
+        branch = "free · last " + last
     else:
-        last = record.get("last_branch") or ""
-        branch = "free · last " + last if last else "free"
+        branch = "free"
     return git_checkout.Checkout(root = workspace, repository = repository, branch = branch)
 
 def _checkouts(ctx: TaskContext, bases: list) -> dict:

@@ -29,11 +29,15 @@ than inheriting it from a default.
 It never touches a base with a running server whose workspace exists, or anything
 under the output user root not named like an output base, and never treats an
 `aspect worktree` pool slot as orphaned — a free slot has no worktree on purpose
-— though an idle one goes by age like any base. `--bazel-output-base` overrides
-all of that. That removes the named
-bases outright, whatever their state, stopping a running server first, and
-leaves the download cache alone. An orphan's server is stopped before its base
-is removed: nothing can use it.
+— though an idle one goes by age like any base. An orphan's server is stopped
+before its base is removed: nothing can use it.
+
+`--bazel-output-base` overrides those rules: it removes the named bases
+outright, whatever their state, stopping a running server first, and leaves the
+download cache alone.
+
+A base whose possible server `ps` cannot identify, as on an image without
+procps, is never removed: it cannot be confirmed idle or stopped.
 
 Each base not named on the command line is checked again just before it goes,
 and left alone if Bazel has used it since the scan — the confirmation can sit at
@@ -43,6 +47,7 @@ part way would otherwise leave a base that has lost what attributes it to a
 workspace; the trash name keeps it recognisable, and the next run finishes it.
 """
 
+load("@std//time.axl", "time")
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
@@ -274,14 +279,22 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
     or an idle base woken up — must not lose its output base mid-run.
 
     Its server, if it is really its server, is then signalled rather than asked
-    to shut down over its RPC port: `bazel shutdown` against a dead workspace
-    would start a server to shut it down, and everything the running one holds
-    lives in the directory about to be removed.
+    to shut down over its RPC port — `bazel shutdown` against a dead workspace
+    would start a server to shut it down — and given a few seconds to exit
+    before the tree is moved, so it is not still writing into it.
+
+    A live process that may be its server but that `ps` cannot identify, as on
+    an image without procps, can be neither confirmed nor stopped, so the base
+    is left alone: skipped when a rule chose it, failed when it was named.
     """
     if not requested and b.state != output_bases.TRASH and output_bases.last_used(ctx, b.path) > b.last_used:
         return _SKIPPED
     if output_bases.is_this_bases_server(ctx, b.pid, b.path):
         output_bases.run(ctx, "kill", [str(b.pid)])
+        _await_exit(ctx, b.pid)
+    elif output_bases.may_be_this_bases_server(ctx, b.pid, b.path):
+        warn(ctx.std, "left " + b.name + " alone: pid " + str(b.pid) + " may be its Bazel server, and `ps` cannot tell; stop it, then run again")
+        return _FAILED if requested else _SKIPPED
     trash = _move_to_trash(ctx, b.path)
     if not trash:
         return _FAILED
@@ -290,6 +303,17 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
         warn(ctx.std, "could not remove " + trash + ": " + err + " (the next `aspect gc` retries it)")
         return _FAILED
     return _REAPED
+
+# How long `_reap` waits for a signalled server to exit, in 100ms polls.
+_EXIT_POLLS = 50
+
+def _await_exit(ctx: TaskContext, pid: int) -> None:
+    """Wait until `pid` has exited, for up to `_EXIT_POLLS` polls."""
+    for _ in range(_EXIT_POLLS):
+        alive, _out = output_bases.run(ctx, "kill", ["-0", str(pid)])
+        if alive != 0:
+            return
+        time.sleep(100)
 
 def _select(bases: list, root: str, requested: list[str], canonical = lambda p: p) -> tuple:
     """`(selected, unmatched)` for the bases `--bazel-output-base` names.
@@ -506,7 +530,7 @@ Otherwise never touches a running Bazel server whose workspace still exists, or 
         "bazel_output_bases": args.string_list(
             long = "bazel-output-base",
             default = [],
-            description = "Remove this output base, by hash or by path under the output user root, instead of applying the age and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first — and the download cache is not pruned. Still listed and confirmed like any other removal.",
+            description = "Remove this output base, by hash or by path under the output user root, instead of applying the age and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first, and a process `ps` cannot identify as its server makes the removal fail rather than happen under it — and the download cache is not pruned. Still listed and confirmed like any other removal.",
         ),
         "dry_run": args.boolean(
             default = False,

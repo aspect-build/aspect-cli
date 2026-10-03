@@ -294,6 +294,41 @@ def _test_a_pooled_base_says_so_when_removed(ctx):
     b = output_bases.Base(name = "n", path = "/root/n", workspace = "/home/.aspect/worktrees/x", state = "idle", pid = 0, last_used = 0, pooled = True)
     _eq("pool slot", testonly_why(b, 45 * fx.DAY_US), "unused for 45d; worktree pool slot /home/.aspect/worktrees/x")
 
+def _test_a_base_whose_server_cannot_be_identified_is_not_removed(ctx):
+    """Without `ps` a live pid can be neither confirmed nor stopped: a rule's
+    pick is skipped, a named base fails, and either way the tree stays."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", "4242")
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = 4242, last_used = output_bases.last_used(ctx, base))
+    path = ctx.std.env.var("PATH")
+    ctx.std.env.set_var("PATH", "/aspect-no-such-dir")
+    by_rule = testonly_reap(ctx, b, False)
+    named = testonly_reap(ctx, b, True)
+    ctx.std.env.set_var("PATH", path)
+    _eq("skipped", by_rule, "skipped")
+    _eq("named, failed", named, "failed")
+    _eq("still there", ctx.std.fs.exists(base), True)
+
+def _test_reap_stops_the_server_and_waits_for_it(ctx):
+    """The server is signalled and gone before its tree is moved, so it is not
+    writing into the trash as it is deleted."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+
+    # Detached, as a real server is: a child of this process would linger as a
+    # zombie after the signal and still answer `kill -0`.
+    _code, out = output_bases.run(ctx, "sh", ["-c", "sh -c 'sleep 30; :' --output_base=" + base + " >/dev/null 2>&1 & echo $!"])
+    pid = int(out.strip())
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = pid, last_used = 0)
+    result = testonly_reap(ctx, b, True)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("reaped", result, "reaped")
+    _eq("the server has exited", alive != 0, True)
+    _eq("gone", ctx.std.fs.exists(base), False)
+
 def _test_summary(ctx):
     def outcome(skipped):
         return testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = skipped, pruned = 0, pruned_kb = 0)
@@ -324,6 +359,8 @@ _UNIT_TESTS = [
     _test_a_base_renames_onto_leftover_trash,
     _test_select_resolves_another_spelling_of_the_root,
     _test_summary,
+    _test_a_base_whose_server_cannot_be_identified_is_not_removed,
+    _test_reap_stops_the_server_and_waits_for_it,
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
     _test_a_pooled_base_says_so_when_removed,

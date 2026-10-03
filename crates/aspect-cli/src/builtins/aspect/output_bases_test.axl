@@ -321,6 +321,42 @@ def _test_the_no_workspace_base_is_named(ctx):
     other = output_bases.Base(name = fx.WEIRD, path = "/r/y", workspace = "", state = "unknown", pid = 0, last_used = 0)
     _eq("others stay blank", output_bases.workspace_label(other, ""), "")
 
+def _test_without_ps_or_kill_a_recorded_pid_keeps_its_base(ctx):
+    """On an image without procps neither `ps` nor `kill` can say whether a
+    recorded pid is the base's server, so the base must be kept."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.LIVE
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", "4242")
+    fx.backdate(ctx, base)
+    path = ctx.std.env.var("PATH")
+    ctx.std.env.set_var("PATH", "/aspect-no-such-dir")
+    unseen = output_bases.may_be_this_bases_server(ctx, 4242, base)
+    signal = output_bases.is_this_bases_server(ctx, 4242, base)
+    ctx.std.env.set_var("PATH", path)
+    _eq("might be its server", unseen, True)
+    _eq("but is never signalled", signal, False)
+    _eq("a dead pid is ruled out once `kill` can say", output_bases.may_be_this_bases_server(ctx, 999999, base), False)
+
+def _test_a_root_with_a_space_still_matches_its_server(ctx):
+    cmd = "java -jar A-server.jar --output_base=/x/my root/" + fx.LIVE + " --workspace_directory=/w"
+    _eq("whole value", output_bases.output_base_name(cmd), fx.LIVE)
+    _eq("trailing slash", output_bases.output_base_name("j --output_base=/a b/" + fx.LIVE + "/"), fx.LIVE)
+
+def _test_a_malformed_registry_does_not_crash(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-badpool")
+    pool = tmp + "/github.com/acme/web"
+    ctx.std.fs.create_dir_all(pool)
+    for registry in [
+        {"slots": []},
+        {"slots": {"aaa": {"lease": {"name": 7}, "last_branch": 3}}},
+        {"slots": {"aaa": "free"}},
+        [],
+    ]:
+        ctx.std.fs.write(pool + "/registry.json", json.encode(registry))
+        c = output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa")
+        _eq("still attributed to the pool", c.repository, "acme/web")
+
 def _test_tilde(ctx):
     _eq("under home", output_bases.tilde("/home/u/src/repo", "/home/u"), "~/src/repo")
     _eq("home itself", output_bases.tilde("/home/u", "/home/u"), "~")
@@ -567,6 +603,9 @@ _UNIT_TESTS = [
     _test_a_pooled_slot_with_a_server_stays_pooled,
     _test_canonical,
     _test_tilde,
+    _test_without_ps_or_kill_a_recorded_pid_keeps_its_base,
+    _test_a_root_with_a_space_still_matches_its_server,
+    _test_a_malformed_registry_does_not_crash,
     _test_an_empty_pool_slot_is_attributed_from_its_pool,
     _test_the_no_workspace_base_is_named,
     _test_output_base_name_reads_the_flag_itself,
