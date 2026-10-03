@@ -45,8 +45,14 @@ BASE = "Bazel output base"
 TRASH_PREFIX = ".gc-trash-"
 DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
 
-# Under the home directory: where `aspect worktree` keeps its pool slots.
+# Under the home directory: where `aspect worktree` keeps its pools, one per
+# normalized origin remote (`<host>/<owner>/<name>`), each holding a
+# `registry.json` and its slots, `aspect-worktree-<id>`.
 _POOLS = "/.aspect/worktrees"
+_SLOT_PREFIX = "aspect-worktree-"
+
+# `md5("")`: the output base Bazel uses when it runs outside any workspace.
+_NO_WORKSPACE = "d41d8cd98f00b204e9800998ecf8427e"
 
 # Rewritten by Bazel as a server starts or runs a command, so statting these few
 # answers "last used" without walking a base's hundred thousand files. The two
@@ -101,9 +107,9 @@ STATES = {
         key = "undetermined",
         label = "undetermined",
         removable = False,
-        heading = "undetermined — cannot be attributed",
+        heading = "undetermined — no workspace recorded in it",
         note = ("undetermined: nothing in the base names its workspace, so it cannot be orphaned.\n" +
-                "{max_age}, or now with `aspect gc --bazel-output-base=<hash>`."),
+                "{max_age}, or now with `{gc} --bazel-output-base=<hash>`."),
     ),
     TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True, heading = "left from an interrupted gc"),
 }
@@ -375,35 +381,54 @@ def _run(ctx: TaskContext, cmd: str, args: list[str]):
         return (-1, "")
     return (out.status.code, out.stdout)
 
+# `_server_rss_kb` for a live pid whose process `ps` cannot describe.
+_UNSEEN = -1
+
 def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
+    """True only when `pid` is certainly `base`'s Bazel server — what it takes
+    to signal it."""
+    rss = _server_rss_kb(ctx, pid, base)
+    return rss != None and rss != _UNSEEN
+
+def _may_be_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
+    """True unless `pid` is certainly not `base`'s server — what it takes to
+    keep the base."""
     return _server_rss_kb(ctx, pid, base) != None
 
+def _output_base_name(command: str) -> str:
+    """The last path segment of the `--output_base=` in a command line, or ""."""
+    for token in command.split(" "):
+        if token.startswith("--output_base="):
+            value = token[len("--output_base="):].rstrip("/")
+            return value[value.rfind("/") + 1:]
+    return ""
+
 def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
-    """The resident memory in KB of `base`'s Bazel server, or None when `pid`
-    is not live AND the Bazel server for `base`.
+    """The resident memory in KB of `base`'s Bazel server; None when `pid` is
+    certainly not it; `_UNSEEN` when `pid` is live but `ps` cannot say what it
+    is — no `ps`, or one without `-p`/`-o`, as on a slim image.
 
     A recorded PID outlives the process that wrote it, and the OS reuses PIDs,
-    so the process's own command line must carry `--output_base=` ending in
-    this base's md5 name. The name rather than the whole path: the server
-    records the path as its client spelled it, which need not match this scan's
-    spelling of the root — a trailing slash, `./`, or a symlink such as `/var`
-    for `/private/var`.
+    so the process's own `--output_base=` must end in this base's md5 name. The
+    name rather than the whole path: the server records the path as its client
+    spelled it, which need not match this scan's spelling of the root — a
+    trailing slash, `./`, or a symlink such as `/var` for `/private/var`.
     """
     if pid <= 0:
         return None
     code, out = _run(ctx, "ps", ["-p", str(pid), "-o", "rss=", "-o", "command="])
     rss, _, command = out.strip().partition(" ")
-    name = base[base.rfind("/") + 1:]
-    if code != 0 or not rss.isdigit() or "--output_base=" not in command or ("/" + name) not in command:
-        return None
-    return int(rss)
+    if code == 0 and rss.isdigit():
+        return int(rss) if _output_base_name(command) == base[base.rfind("/") + 1:] else None
+    alive, _ = _run(ctx, "kill", ["-0", str(pid)])
+    return _UNSEEN if alive == 0 else None
 
 def _servers(ctx: TaskContext, bases: list) -> dict:
     """Resident memory in KB of each base's running Bazel server, by base path."""
     found = {}
     for b in bases:
         rss = _server_rss_kb(ctx, b.pid, b.path)
-        if rss != None:
+        if rss != None and rss != _UNSEEN:
             found[b.path] = rss
     return found
 
@@ -461,13 +486,24 @@ def _say(streaming: bool, line: str) -> None:
     if streaming:
         print(line)
 
-def _render(text: str, policy) -> list[str]:
+def _render(text: str, policy, root_flag: str = "") -> list[str]:
     """`text` as lines, with each `PERIODS` placeholder replaced by the
-    sentence for the period in force."""
+    sentence for the period in force, and `{gc}` by the `aspect gc` command
+    for this root."""
     for placeholder, p in PERIODS.items():
         us = getattr(policy, p.field)
         text = text.replace(placeholder, p.on % _fmt_age(us) if us else p.off)
-    return text.split("\n")
+    return text.replace("{gc}", _command("gc", root_flag)).split("\n")
+
+def _command(name: str, root_flag: str) -> str:
+    """`aspect <name>` as a reader should run it: against the same root this
+    run looked at, when that was not the default."""
+    return "aspect " + name + root_flag
+
+def _root_flag(explicit: str, root: str) -> str:
+    """The `--output-user-root` to repeat in suggested commands: the root, when
+    one was passed; "" when the default was used."""
+    return " --output-user-root=" + root if explicit else ""
 
 def _classify(workspace: str, workspace_exists: bool, pooled: bool, age_us: int, policy) -> str:
     """The state of a base, from facts already gathered. Pure, so the rule
@@ -495,7 +531,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
         if not entry.is_dir:
             continue
         path = root + "/" + entry.path
-        if entry.path.startswith(TRASH_PREFIX):
+        if entry.path.startswith(TRASH_PREFIX) and _is_output_base_name(entry.path[len(TRASH_PREFIX):]):
             bases.append(Base(
                 name = entry.path,
                 path = path,
@@ -518,7 +554,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
             now_us - last_used,
             policy,
         )
-        if state == IDLE and _is_this_bases_server(ctx, pid, path):
+        if state == IDLE and _may_be_this_bases_server(ctx, pid, path):
             state = POOLED if pooled else LIVE if workspace else UNKNOWN
         bases.append(Base(
             name = entry.path,
@@ -531,20 +567,57 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
         ))
     return sorted(bases, key = lambda b: -b.last_used)
 
-def _checkouts(ctx: TaskContext, bases: list) -> dict:
-    """The git `Checkout` of each base whose workspace exists, by base path.
+def _pool_slot(ctx: TaskContext, workspace: str):
+    """A `Checkout` for an `aspect worktree` slot with no worktree in it, from
+    the pool: the repository its path is keyed by, and, from the pool's
+    `registry.json`, the slot's lease or the branch it last held. Read
+    leniently — whatever the registry lacks is left blank — and None when the
+    path is not a slot."""
+    idx = workspace.rfind("/")
+    pool, slot = workspace[:idx], workspace[idx + 1:]
+    if not slot.startswith(_SLOT_PREFIX):
+        return None
+    repository = "/".join(pool.split("/")[-2:])
+    err, registry = catch(json.decode, ctx.std.fs.try_read_to_string(pool + "/registry.json") or "{}")
+    record = (registry.get("slots") or {}).get(slot[len(_SLOT_PREFIX):]) if err == None and type(registry) == "dict" else None
+    if type(record) != "dict":
+        return git_checkout.Checkout(root = workspace, repository = repository, branch = "")
+    lease = record.get("lease") or {}
+    if type(lease) == "dict" and lease.get("name"):
+        branch = "leased · " + lease["name"]
+    else:
+        last = record.get("last_branch") or ""
+        branch = "free · last " + last if last else "free"
+    return git_checkout.Checkout(root = workspace, repository = repository, branch = branch)
 
-    A missing workspace is skipped rather than walked up from: the nearest
-    `.git` above a deleted worktree is usually the main clone, which would
-    report the wrong branch.
+def _checkouts(ctx: TaskContext, bases: list) -> dict:
+    """The git `Checkout` of each base, by base path: read from `.git` when its
+    workspace exists, from the pool when it is an empty worktree slot.
+
+    Any other missing workspace is skipped rather than walked up from: the
+    nearest `.git` above a deleted worktree is usually the main clone, which
+    would report the wrong branch.
     """
     found = {}
     for b in bases:
         if b.workspace and ctx.std.fs.exists(b.workspace):
             c = git_checkout.checkout_of(ctx.std, b.workspace)
-            if c:
-                found[b.path] = c
+        elif b.pooled:
+            c = _pool_slot(ctx, b.workspace)
+        else:
+            c = None
+        if c:
+            found[b.path] = c
     return found
+
+def _workspace_label(b, home: str) -> str:
+    """The workspace column: the path, with `~` for home, or what Bazel's own
+    naming says when the base records none."""
+    if b.workspace:
+        return _tilde(b.workspace, home)
+    if b.name == _NO_WORKSPACE:
+        return "(Bazel run outside any workspace)"
+    return ""
 
 def _text_key(value: str):
     """Ascending, with blanks last."""
@@ -642,7 +715,7 @@ COLUMNS = [
     _Column(header = "output base", cell = lambda b, v: b.name),
     _Column(header = "repository", cell = lambda b, v: _git(v, b, "repository"), max_width = 32, optional = True),
     _Column(header = "branch", cell = lambda b, v: _git(v, b, "branch"), max_width = 40, optional = True),
-    _Column(header = "workspace", cell = lambda b, v: _tilde(b.workspace, v.home), optional = True),
+    _Column(header = "workspace", cell = lambda b, v: _workspace_label(b, v.home), optional = True),
 ]
 
 def _clip(cell: str, max_width: int) -> str:
@@ -683,15 +756,15 @@ def _print_listing(bases: list, view, sort: str) -> None:
         for line in _group_table(group, view):
             print(line)
 
-def _listing_hint(bases: list) -> str:
+def _listing_hint(bases: list, root_flag: str = "") -> str:
     """The pointer from `aspect gc` to the listing, naming the kept states it
     would show; "" when nothing is kept."""
     shown = [s.label for state, s in STATES.items() if not s.removable and _in_state(bases, state)]
     if not shown:
         return ""
-    return "Run `aspect output-bases` to list the kept " + BASE + "s (" + ", ".join(shown) + ")."
+    return "Run `" + _command("output-bases", root_flag) + "` to list the kept " + BASE + "s (" + ", ".join(shown) + ")."
 
-def _print_census(streaming: bool, bases: list, sizes: dict, policy, hint: bool) -> None:
+def _print_census(streaming: bool, bases: list, sizes: dict, policy, hint: bool, root_flag: str = "") -> None:
     """How many bases are in each state and, when `sizes` covers them, how much
     each state holds; what the less obvious states mean; and, with `hint`, the
     pointer to `aspect output-bases`."""
@@ -711,12 +784,12 @@ def _print_census(streaming: bool, bases: list, sizes: dict, policy, hint: bool)
         if s.note and s.note not in notes and _in_state(bases, state):
             notes.append(s.note)
     for note in notes:
-        lines = _render(note, policy)
+        lines = _render(note, policy, root_flag)
         _say(streaming, "    " + lines[0])
         for line in lines[1:]:
             _say(streaming, "      " + line)
-    if hint and _listing_hint(bases):
-        _say(streaming, "    " + _listing_hint(bases))
+    if hint and _listing_hint(bases, root_flag):
+        _say(streaming, "    " + _listing_hint(bases, root_flag))
 
 def _output_user_root(ctx: TaskContext, explicit: str) -> str:
     """`explicit`, then what the surrounding workspace configures, then the
@@ -791,6 +864,10 @@ output_bases = namespace(
     UNKNOWN = UNKNOWN,
     base_entry = _base_entry,
     canonical = _canonical,
+    command = _command,
+    may_be_this_bases_server = _may_be_this_bases_server,
+    output_base_name = _output_base_name,
+    root_flag = _root_flag,
     cache_report = _cache_report,
     checkouts = _checkouts,
     classify = _classify,
@@ -811,6 +888,8 @@ output_bases = namespace(
     mtime_us = _mtime_us,
     output_user_root = _output_user_root,
     output_user_root_arg = _output_user_root_arg,
+    pool_slot = _pool_slot,
+    workspace_label = _workspace_label,
     policy_entry = _policy_entry,
     resolve_root = _resolve_root,
     run = _run,

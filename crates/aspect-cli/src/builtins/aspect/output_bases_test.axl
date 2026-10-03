@@ -271,6 +271,56 @@ def _test_a_missing_command_is_an_answer_not_a_crash(ctx):
     _eq("missing", output_bases.run(ctx, "aspect-no-such-command", []), (-1, ""))
     _eq("present", output_bases.run(ctx, "sh", ["-c", "echo hi"]), (0, "hi\n"))
 
+def _test_output_base_name_reads_the_flag_itself(ctx):
+    """Every Bazel server also names its base in `-Djava.util.logging…`; only
+    the `--output_base=` value counts."""
+    cmd = "java -Dlog=/r/" + fx.LIVE + "/javalog.properties -jar A-server.jar --output_base=/r/" + fx.DEAD + "/ --x"
+    _eq("the flag's base", output_bases.output_base_name(cmd), fx.DEAD)
+    _eq("none", output_bases.output_base_name("sleep 10"), "")
+
+def _test_trash_must_be_named_like_a_base(ctx):
+    """`.gc-trash-` alone does not make a directory `gc`'s to remove."""
+    root = fx.fixture(ctx)
+    ctx.std.fs.create_dir_all(root + "/.gc-trash-" + fx.DEAD)
+    ctx.std.fs.create_dir_all(root + "/.gc-trash-notes")
+    names = [b.name for b in fx.scan(ctx, root) if b.state == "trash"]
+    _eq("only the md5-named trash", names, [".gc-trash-" + fx.DEAD])
+
+def _test_suggested_commands_carry_the_root(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+    flag = output_bases.root_flag("/mnt/bazel", "/mnt/bazel")
+    _eq("flag", flag, " --output-user-root=/mnt/bazel")
+    _eq("none for the default", output_bases.root_flag("", "/default"), "")
+    _eq("listing hint", output_bases.listing_hint(bases, flag).startswith("Run `aspect output-bases --output-user-root=/mnt/bazel`"), True)
+    note = output_bases.render(output_bases.STATES["unknown"].note, fx.policy(30 * fx.DAY_US), flag)[1]
+    _eq("note", note.endswith("`aspect gc --output-user-root=/mnt/bazel --bazel-output-base=<hash>`."), True)
+
+def _test_an_empty_pool_slot_is_attributed_from_its_pool(ctx):
+    """A free slot has no `.git`; its pool says whose it is and what it last held."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-pool")
+    pool = tmp + "/github.com/acme/web"
+    ctx.std.fs.create_dir_all(pool)
+    ctx.std.fs.write(pool + "/registry.json", json.encode({"version": 1, "slots": {
+        "aaa": {"state": "free", "last_branch": "fix/login", "lease": None},
+        "bbb": {"state": "leased", "lease": {"name": "feat/x"}},
+    }}))
+    free = output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa")
+    _eq("repository from the pool's path", free.repository, "acme/web")
+    _eq("free, with its last branch", free.branch, "free · last fix/login")
+    _eq("leased", output_bases.pool_slot(ctx, pool + "/aspect-worktree-bbb").branch, "leased · feat/x")
+    _eq("unknown to the registry", output_bases.pool_slot(ctx, pool + "/aspect-worktree-ccc").branch, "")
+    ctx.std.fs.write(pool + "/registry.json", "not json")
+    _eq("a broken registry leaves the branch blank", output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa").branch, "")
+    _eq("not a slot", output_bases.pool_slot(ctx, pool + "/elsewhere"), None)
+
+def _test_the_no_workspace_base_is_named(ctx):
+    """`md5("")` is the base Bazel uses outside any workspace."""
+    outside = output_bases.Base(name = "d41d8cd98f00b204e9800998ecf8427e", path = "/r/x", workspace = "", state = "unknown", pid = 0, last_used = 0)
+    _eq("named", output_bases.workspace_label(outside, ""), "(Bazel run outside any workspace)")
+    other = output_bases.Base(name = fx.WEIRD, path = "/r/y", workspace = "", state = "unknown", pid = 0, last_used = 0)
+    _eq("others stay blank", output_bases.workspace_label(other, ""), "")
+
 def _test_tilde(ctx):
     _eq("under home", output_bases.tilde("/home/u/src/repo", "/home/u"), "~/src/repo")
     _eq("home itself", output_bases.tilde("/home/u", "/home/u"), "~")
@@ -292,10 +342,12 @@ def _test_next_steps_point_at_gc_and_sizes(ctx):
     bases = fx.scan(ctx, root)
     view = output_bases.View(now_us = 0)
     steps = testonly_next_steps(bases, view, False)
-    _eq("gc for the removable", steps[0], "Run `aspect gc --dry-run` to preview removing the 2 removable Bazel output bases — orphaned, `aspect gc` to remove them.")
+    _eq("gc for the removable", steps[0], "Run `aspect gc --dry-run` to preview removing the 2 removable Bazel output bases — orphaned; `aspect gc` to remove them.")
     _eq("sizes when unmeasured", steps[1].startswith("Add --measure-sizes"), True)
     measured = testonly_next_steps(bases, output_bases.View(now_us = 0, sizes = {b.path: 1024 for b in bases}), True)
-    _eq("with their size once measured", "orphaned (2 MB)" in measured[0], True)
+    _eq("with their size once measured", "bases (2 MB) — orphaned" in measured[0], True)
+    elsewhere = testonly_next_steps(bases, view, True, " --output-user-root=/mnt/bazel")
+    _eq("against the same root", elsewhere[0].count("aspect gc --output-user-root=/mnt/bazel"), 2)
     _eq("nothing to suggest", testonly_next_steps([b for b in bases if b.state == "live"], view, True), [])
 
 def _test_canonical(ctx):
@@ -515,6 +567,11 @@ _UNIT_TESTS = [
     _test_a_pooled_slot_with_a_server_stays_pooled,
     _test_canonical,
     _test_tilde,
+    _test_an_empty_pool_slot_is_attributed_from_its_pool,
+    _test_the_no_workspace_base_is_named,
+    _test_output_base_name_reads_the_flag_itself,
+    _test_trash_must_be_named_like_a_base,
+    _test_suggested_commands_carry_the_root,
     _test_servers_report_resident_memory,
     _test_next_steps_point_at_gc_and_sizes,
     _test_a_missing_command_is_an_answer_not_a_crash,

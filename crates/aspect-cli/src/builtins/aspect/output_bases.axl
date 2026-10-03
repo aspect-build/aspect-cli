@@ -44,7 +44,7 @@ def _document(root: str, sort: str, policy: dict, bases: list, measured: bool, v
         doc["caches"] = caches
     return doc
 
-def _next_steps(bases: list, view, measured: bool) -> list[str]:
+def _next_steps(bases: list, view, measured: bool, root_flag: str = "") -> list[str]:
     """What to run next, given what the listing found."""
     steps = []
     removable = [b for b in bases if output_bases.STATES[b.state].removable]
@@ -54,9 +54,13 @@ def _next_steps(bases: list, view, measured: bool) -> list[str]:
             if s.removable and output_bases.in_state(removable, state):
                 labels.append(s.label)
         size = " (" + output_bases.fmt_kb(output_bases.total_kb([view.sizes.get(b.path, 0) for b in removable])) + ")" if measured else ""
-        steps.append("Run `aspect gc --dry-run` to preview removing the %s%s, `aspect gc` to remove them." % (
-            pluralize(len(removable), "removable " + output_bases.BASE) + " — " + ", ".join(labels),
+        gc = output_bases.command("gc", root_flag)
+        steps.append("Run `%s --dry-run` to preview removing the %s%s — %s; `%s` to remove them." % (
+            gc,
+            pluralize(len(removable), "removable " + output_bases.BASE),
             size,
+            ", ".join(labels),
+            gc,
         ))
     if not measured and bases:
         steps.append("Add --measure-sizes to see how much disk each base holds (walks every base; can take a minute).")
@@ -90,7 +94,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ) + "\n")
         return 0
 
-    output_bases.print_census(streaming, bases, sizes, policy, hint = False)
+    root_flag = output_bases.root_flag(ctx.args.output_user_root, root)
+    output_bases.print_census(streaming, bases, sizes, policy, hint = False, root_flag = root_flag)
     if view.servers:
         print("    %s running, holding %s of memory." % (
             pluralize(len(view.servers), "Bazel server"),
@@ -99,7 +104,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     output_bases.print_listing(bases, view, sort)
     if caches:
         output_bases.print_caches(caches, policy)
-    steps = _next_steps(bases, view, measured)
+    steps = _next_steps(bases, view, measured, root_flag)
     if steps:
         print("")
         for step in steps:

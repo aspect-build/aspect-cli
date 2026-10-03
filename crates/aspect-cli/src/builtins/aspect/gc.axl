@@ -410,7 +410,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 message = "no " + output_bases.BASE + " " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
             )
     else:
-        output_bases.print_census(streaming, bases, {}, policy, hint = True)
+        output_bases.print_census(streaming, bases, {}, policy, hint = True, root_flag = output_bases.root_flag(ctx.args.output_user_root, root))
         removals = [b for b in bases if output_bases.STATES[b.state].removable]
 
     sizes = output_bases.measure(ctx, streaming, pluralize(len(removals), output_bases.BASE), [(b.name, b.path) for b in removals])
