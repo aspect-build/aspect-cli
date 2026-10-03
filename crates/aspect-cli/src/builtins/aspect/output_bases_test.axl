@@ -12,7 +12,7 @@ gigabytes of live cache for deletion. The rule order is tested on the pure
 states each period are covered directly.
 """
 
-load("@aspect//output_bases.axl", "testonly_document")
+load("@aspect//output_bases.axl", "testonly_document", "testonly_next_steps")
 load("@aspect//private/lib/output_bases.axl", "output_bases")
 load("@aspect//private/lib/output_bases_fixtures.axl", fx = "fixtures")
 
@@ -271,6 +271,33 @@ def _test_a_missing_command_is_an_answer_not_a_crash(ctx):
     _eq("missing", output_bases.run(ctx, "aspect-no-such-command", []), (-1, ""))
     _eq("present", output_bases.run(ctx, "sh", ["-c", "echo hi"]), (0, "hi\n"))
 
+def _test_tilde(ctx):
+    _eq("under home", output_bases.tilde("/home/u/src/repo", "/home/u"), "~/src/repo")
+    _eq("home itself", output_bases.tilde("/home/u", "/home/u"), "~")
+    _eq("a sibling with the same prefix", output_bases.tilde("/home/user2/x", "/home/u"), "/home/user2/x")
+    _eq("no home", output_bases.tilde("/home/u/x", ""), "/home/u/x")
+
+def _test_servers_report_resident_memory(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+    live = [b for b in bases if b.name == fx.LIVE][0]
+    server = _server(ctx, live.path)
+    found = output_bases.servers(ctx, fx.scan(ctx, root))
+    server.kill()
+    _eq("only the base with a server", list(found.keys()), [live.path])
+    _eq("memory in KB", found[live.path] > 0, True)
+
+def _test_next_steps_point_at_gc_and_sizes(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+    view = output_bases.View(now_us = 0)
+    steps = testonly_next_steps(bases, view, False)
+    _eq("gc for the removable", steps[0], "Run `aspect gc --dry-run` to preview removing the 2 removable Bazel output bases — orphaned, `aspect gc` to remove them.")
+    _eq("sizes when unmeasured", steps[1].startswith("Add --measure-sizes"), True)
+    measured = testonly_next_steps(bases, output_bases.View(now_us = 0, sizes = {b.path: 1024 for b in bases}), True)
+    _eq("with their size once measured", "orphaned (2 MB)" in measured[0], True)
+    _eq("nothing to suggest", testonly_next_steps([b for b in bases if b.state == "live"], view, True), [])
+
 def _test_canonical(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-canon")
     real = output_bases.canonical(ctx, tmp)
@@ -353,7 +380,7 @@ def _test_sort_orders_within_a_state(ctx):
     }
 
     def names(by):
-        return [x.name for x in output_bases.sort([a, b, c], by, sizes, checkouts)]
+        return [x.name for x in output_bases.sort([a, b, c], by, output_bases.View(now_us = 0, sizes = sizes, checkouts = checkouts))]
 
     _eq("last-used, most recent first", names("last-used"), ["b", "c", "a"])
     _eq("size, largest first", names("size"), ["b", "c", "a"])
@@ -414,17 +441,21 @@ def _test_output_bases_document(ctx):
     and their totals appear only when measured."""
     root = fx.fixture(ctx)
     bases = fx.scan(ctx, root)
-    plain = testonly_document(root, "workspace", {}, bases, False, {}, {}, {})
+    plain = testonly_document(root, "workspace", {}, bases, False, output_bases.View(now_us = 0), {})
     _eq("every base", len(plain["output_bases"]), len(bases))
     _eq("grouped by state", [e["state"] for e in plain["output_bases"]], ["live", "live", "orphan", "orphan", "unknown"])
     _eq("no sizes unless measured", "kb" in plain or "kb" in plain["output_bases"][0], False)
 
     sizes = {b.path: 100 for b in bases}
-    sized = testonly_document(root, "size", {}, bases, True, sizes, {}, {"download_cache_kb": 7})
+    sized = testonly_document(root, "size", {}, bases, True, output_bases.View(now_us = 0, sizes = sizes, servers = {bases[0].path: 10}), {"download_cache_kb": 7})
     _eq("per-state totals", sized["kb"]["live"], 200)
     _eq("per-base size", sized["output_bases"][0]["kb"], 100)
     _eq("caches", sized["caches"], {"download_cache_kb": 7})
-    empty = testonly_document(root, "size", {}, [], True, {}, {}, {})
+    _eq("servers summary", sized["servers"], {"running": 1, "rss_kb": 10})
+    by_path = {e["path"]: e for e in sized["output_bases"]}
+    _eq("a running server's memory", by_path[bases[0].path]["server_rss_kb"], 10)
+    _eq("none without one", "server_rss_kb" in by_path[bases[1].path], False)
+    empty = testonly_document(root, "size", {}, [], True, output_bases.View(now_us = 0), {})
     _eq("measured but empty still has the keys", "kb" in empty and "caches" in empty, True)
 
 def _test_a_group_drops_columns_it_has_no_values_for(ctx):
@@ -433,11 +464,14 @@ def _test_a_group_drops_columns_it_has_no_values_for(ctx):
     a = _base("a", "/ws/a", last_used = 1)
     b = _base("b", "", last_used = 1)
     checkouts = {a.path: struct(repository = "acme/web", branch = "main")}
-    with_git = output_bases.group_table([a, b], {}, checkouts, 0)[0]
+    with_git = output_bases.group_table([a, b], output_bases.View(now_us = 0, checkouts = checkouts))[0]
     _eq("kept when any base has one", "repository" in with_git and "workspace" in with_git, True)
-    bare = output_bases.group_table([b], {}, {}, 0)[0]
+    bare = output_bases.group_table([b], output_bases.View(now_us = 0))[0]
     _eq("dropped when none does", bare, "    last used  output base")
-    _eq("size only when measured", "size" in output_bases.group_table([a], {a.path: 4}, {}, 0)[0], True)
+    _eq("size only when measured", "size" in output_bases.group_table([a], output_bases.View(now_us = 0, sizes = {a.path: 4}))[0], True)
+    served = output_bases.group_table([a, b], output_bases.View(now_us = 0, servers = {a.path: 2048}))
+    _eq("server memory when one runs", "server memory" in served[0], True)
+    _eq("its value", "2 MB" in served[1], True)
 
 def _test_resolve_root_refuses_a_missing_root(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-root")
@@ -480,6 +514,9 @@ _UNIT_TESTS = [
     _test_a_process_that_is_not_a_server_does_not_veto,
     _test_a_pooled_slot_with_a_server_stays_pooled,
     _test_canonical,
+    _test_tilde,
+    _test_servers_report_resident_memory,
+    _test_next_steps_point_at_gc_and_sizes,
     _test_a_missing_command_is_an_answer_not_a_crash,
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_the_orphan_note_states_the_grace_period,

@@ -150,19 +150,21 @@ def _policy_from_args(args):
         us[p.field] = value * p.unit_us
     return output_bases.Policy(**us)
 
-def _why(b, now_us: int) -> str:
-    """The reason a base is being removed, for the listing."""
+def _why(b, now_us: int, home: str = "") -> str:
+    """The reason a base is being removed, for the listing; paths under `home`
+    are shown with `~`."""
     s = output_bases.STATES[b.state]
-    workspace = ("; worktree pool slot " if b.pooled else "; workspace ") + b.workspace if b.workspace else ""
+    shown = output_bases.tilde(b.workspace, home)
+    workspace = ("; worktree pool slot " if b.pooled else "; workspace ") + shown if b.workspace else ""
     if not s.removable:
         return "requested; " + s.label + workspace
     if b.state == output_bases.TRASH:
         return "left by an interrupted gc"
     if b.state == output_bases.ORPHAN:
-        return "workspace gone: " + b.workspace
+        return "workspace gone: " + shown
     return "unused for " + output_bases.fmt_age(now_us - b.last_used) + workspace
 
-def _print_plan(streaming: bool, plan, policy, now_us: int) -> None:
+def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
     """Everything a run will remove, listed before it asks, so the confirmation
     is answered with the whole picture rather than a count."""
     say = output_bases.say
@@ -170,7 +172,7 @@ def _print_plan(streaming: bool, plan, policy, now_us: int) -> None:
     if plan.removals:
         say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), output_bases.BASE), fmt_kb(_removal_kb(plan))))
     for b in plan.removals:
-        say(streaming, "    " + fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us) + ")")
+        say(streaming, "    " + fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us, home) + ")")
     if plan.stale:
         say(streaming, "  Bazel download cache: %d of %s unused for %s or more, %s" % (
             len(plan.stale),
@@ -425,7 +427,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         stale = stale,
         cache_cutoff_us = cutoff_us,
     )
-    _print_plan(streaming, plan, policy, now_us)
+    _print_plan(streaming, plan, policy, now_us, ctx.std.env.home_dir())
     reclaimable = _removal_kb(plan) + _stale_kb(plan)
 
     actions = []
@@ -467,7 +469,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not actions:
         print("  nothing to reclaim")
     elif ctx.args.dry_run:
-        print("  would reclaim " + fmt_kb(reclaimable))
+        print("  would reclaim " + fmt_kb(reclaimable) + "; run without --dry-run to remove it")
     else:
         print("  " + _summary(outcome, failure != None))
     return failure or 0

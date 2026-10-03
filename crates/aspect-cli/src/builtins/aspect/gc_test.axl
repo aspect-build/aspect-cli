@@ -217,6 +217,7 @@ def _test_why_names_the_rule_that_removes_a_base(ctx):
     _eq("idle, undetermined", testonly_why(_base("idle"), now), "unused for 45d")
     _eq("trash", testonly_why(_base("trash"), now), "left by an interrupted gc")
     _eq("a kept state is only removed on request", testonly_why(_base("live", "/ws"), now), "requested; live; workspace /ws")
+    _eq("home shown as ~", testonly_why(_base("orphan", "/home/u/gone"), now, "/home/u"), "workspace gone: ~/gone")
 
 def _test_failure_names_only_what_failed(ctx):
     root = fx.fixture(ctx)

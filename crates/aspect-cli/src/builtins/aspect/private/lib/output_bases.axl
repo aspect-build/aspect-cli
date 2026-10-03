@@ -376,7 +376,11 @@ def _run(ctx: TaskContext, cmd: str, args: list[str]):
     return (out.status.code, out.stdout)
 
 def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
-    """True when `pid` is live AND is the Bazel server for `base`.
+    return _server_rss_kb(ctx, pid, base) != None
+
+def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
+    """The resident memory in KB of `base`'s Bazel server, or None when `pid`
+    is not live AND the Bazel server for `base`.
 
     A recorded PID outlives the process that wrote it, and the OS reuses PIDs,
     so the process's own command line must carry `--output_base=` ending in
@@ -386,12 +390,28 @@ def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
     for `/private/var`.
     """
     if pid <= 0:
-        return False
-    code, command = _run(ctx, "ps", ["-p", str(pid), "-o", "command="])
-    if code != 0:
-        return False
+        return None
+    code, out = _run(ctx, "ps", ["-p", str(pid), "-o", "rss=", "-o", "command="])
+    rss, _, command = out.strip().partition(" ")
     name = base[base.rfind("/") + 1:]
-    return "--output_base=" in command and ("/" + name) in command
+    if code != 0 or not rss.isdigit() or "--output_base=" not in command or ("/" + name) not in command:
+        return None
+    return int(rss)
+
+def _servers(ctx: TaskContext, bases: list) -> dict:
+    """Resident memory in KB of each base's running Bazel server, by base path."""
+    found = {}
+    for b in bases:
+        rss = _server_rss_kb(ctx, b.pid, b.path)
+        if rss != None:
+            found[b.path] = rss
+    return found
+
+def _tilde(path: str, home: str) -> str:
+    """`path` with the home directory written `~`, for display."""
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
 
 def _in_state(bases: list, state: str) -> list:
     return [b for b in bases if b.state == state]
@@ -533,17 +553,17 @@ def _text_key(value: str):
 # `--sort` keys: how each orders bases within a state. Ages and sizes go
 # largest-impact first: most recently used, then biggest.
 SORTS = {
-    "last-used": lambda b, sizes, checkouts: -b.last_used,
-    "size": lambda b, sizes, checkouts: -sizes.get(b.path, 0),
-    "workspace": lambda b, sizes, checkouts: _text_key(b.workspace),
-    "repository": lambda b, sizes, checkouts: _text_key(checkouts[b.path].repository if b.path in checkouts else ""),
-    "branch": lambda b, sizes, checkouts: _text_key(checkouts[b.path].branch if b.path in checkouts else ""),
+    "last-used": lambda b, v: -b.last_used,
+    "size": lambda b, v: -v.sizes.get(b.path, 0),
+    "workspace": lambda b, v: _text_key(b.workspace),
+    "repository": lambda b, v: _text_key(_git(v, b, "repository")),
+    "branch": lambda b, v: _text_key(_git(v, b, "branch")),
 }
 
-def _sort(bases: list, by: str, sizes: dict = {}, checkouts: dict = {}) -> list:
+def _sort(bases: list, by: str, view) -> list:
     """`bases` ordered by the `SORTS` key `by`; ties keep their order."""
     key = SORTS[by]
-    return sorted(bases, key = lambda b: key(b, sizes, checkouts))
+    return sorted(bases, key = lambda b: key(b, view))
 
 def _cache_report(ctx: TaskContext, streaming: bool, root: str) -> dict:
     """Sizes of the shared caches, keyed as in `CACHES`. A cache the install
@@ -560,9 +580,10 @@ def _print_caches(caches: dict, policy) -> None:
     for key, rel, reason in CACHES:
         print("    " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + _render(reason, policy)[0] + ")")
 
-def _base_entry(b, sizes: dict = {}, checkouts: dict = {}) -> dict:
+def _base_entry(b, sizes: dict = {}, checkouts: dict = {}, servers: dict = {}) -> dict:
     """One base, for a document. `kb` only when measured; `repository` and
-    `branch` only when its workspace is a git checkout."""
+    `branch` only when its workspace is a git checkout; `server_rss_kb` only
+    while its server runs."""
     entry = {
         "path": b.path,
         "workspace": b.workspace,
@@ -575,6 +596,8 @@ def _base_entry(b, sizes: dict = {}, checkouts: dict = {}) -> dict:
     if b.path in checkouts:
         entry["repository"] = checkouts[b.path].repository
         entry["branch"] = checkouts[b.path].branch
+    if b.path in servers:
+        entry["server_rss_kb"] = servers[b.path]
     return entry
 
 def _counts(bases: list) -> dict:
@@ -583,9 +606,25 @@ def _counts(bases: list) -> dict:
 def _kb_by_state(bases: list, sizes: dict) -> dict:
     return {s.key: _total_kb([sizes.get(b.path, 0) for b in _in_state(bases, state)]) for state, s in STATES.items()}
 
+# What a listing knows beyond the bases themselves, for cells and sort keys.
+View = record(
+    now_us = field(int),
+    # Shown as `~`; "" to show paths whole.
+    home = field(str, default = ""),
+    # `du` sizes in KB by base path; empty unless measured.
+    sizes = field(dict, default = {}),
+    # git `Checkout` by base path.
+    checkouts = field(dict, default = {}),
+    # Running server's resident memory in KB by base path.
+    servers = field(dict, default = {}),
+)
+
+def _git(v, b, attr: str) -> str:
+    return getattr(v.checkouts[b.path], attr) if b.path in v.checkouts else ""
+
 _Column = record(
     header = field(str),
-    # Cell for a base, from (base, sizes, checkouts, now_us).
+    # Cell for a base, from (base, view).
     cell = field(typing.Callable),
     right = field(bool, default = False),
     # Cells longer than this are cut to it with a trailing `…`; 0 for no limit.
@@ -597,12 +636,13 @@ _Column = record(
 # The listing's columns, in order. `size` is dropped unless sizes were
 # measured.
 COLUMNS = [
-    _Column(header = "last used", cell = lambda b, sizes, checkouts, now_us: _fmt_age(now_us - b.last_used) + " ago", right = True),
-    _Column(header = "size", cell = lambda b, sizes, checkouts, now_us: _fmt_kb(sizes.get(b.path, 0)), right = True),
-    _Column(header = "output base", cell = lambda b, sizes, checkouts, now_us: b.name),
-    _Column(header = "repository", cell = lambda b, sizes, checkouts, now_us: checkouts[b.path].repository if b.path in checkouts else "", max_width = 32, optional = True),
-    _Column(header = "branch", cell = lambda b, sizes, checkouts, now_us: checkouts[b.path].branch if b.path in checkouts else "", max_width = 40, optional = True),
-    _Column(header = "workspace", cell = lambda b, sizes, checkouts, now_us: b.workspace, optional = True),
+    _Column(header = "last used", cell = lambda b, v: _fmt_age(v.now_us - b.last_used) + " ago", right = True),
+    _Column(header = "size", cell = lambda b, v: _fmt_kb(v.sizes.get(b.path, 0)), right = True),
+    _Column(header = "server memory", cell = lambda b, v: _fmt_kb(v.servers[b.path]) if b.path in v.servers else "", right = True, optional = True),
+    _Column(header = "output base", cell = lambda b, v: b.name),
+    _Column(header = "repository", cell = lambda b, v: _git(v, b, "repository"), max_width = 32, optional = True),
+    _Column(header = "branch", cell = lambda b, v: _git(v, b, "branch"), max_width = 40, optional = True),
+    _Column(header = "workspace", cell = lambda b, v: _tilde(b.workspace, v.home), optional = True),
 ]
 
 def _clip(cell: str, max_width: int) -> str:
@@ -623,24 +663,24 @@ def _table(columns: list, rows: list[list[str]]) -> list[str]:
         lines.append(("    " + "  ".join(cells)).rstrip())
     return lines
 
-def _group_table(group: list, sizes: dict, checkouts: dict, now_us: int) -> list[str]:
+def _group_table(group: list, view) -> list[str]:
     """The table for one state's bases: `size` only when measured, and an
     optional column only when some base in the group has a value for it."""
-    columns = [c for c in COLUMNS if sizes or c.header != "size"]
-    rows = [[c.cell(b, sizes, checkouts, now_us) for c in columns] for b in group]
+    columns = [c for c in COLUMNS if view.sizes or c.header != "size"]
+    rows = [[c.cell(b, view) for c in columns] for b in group]
     keep = [i for i, c in enumerate(columns) if not c.optional or any([r[i] for r in rows])]
     return _table([columns[i] for i in keep], [[r[i] for i in keep] for r in rows])
 
-def _print_listing(bases: list, sizes: dict, checkouts: dict, now_us: int, sort: str) -> None:
+def _print_listing(bases: list, view, sort: str) -> None:
     """Every base, grouped by state in `STATES` order and sorted within each
     group by `sort`, under a heading and a header row."""
     for state, s in STATES.items():
-        group = _sort(_in_state(bases, state), sort, sizes, checkouts)
+        group = _sort(_in_state(bases, state), sort, view)
         if not group:
             continue
         print("")
         print("  %s (%d):" % (s.heading, len(group)))
-        for line in _group_table(group, sizes, checkouts, now_us):
+        for line in _group_table(group, view):
             print(line)
 
 def _listing_hint(bases: list) -> str:
@@ -712,7 +752,7 @@ def _resolve_root(ctx: TaskContext, explicit: str) -> tuple:
 def _scan_root(ctx: TaskContext, streaming: bool, root: str, policy) -> tuple:
     """`(bases, now_us)`: `root` announced and scanned under `policy`, against
     one clock reading that the caller's ages also use."""
-    info(ctx.std, "Bazel output user root: " + root)
+    info(ctx.std, "Bazel output user root: " + _tilde(root, ctx.std.env.home_dir()))
     now_us = time.now_ms() * 1000
     _say(streaming, "  scanning %ss…" % BASE)
     return (_scan(ctx, root, now_us, policy), now_us)
@@ -731,6 +771,7 @@ def _output_user_root_arg():
 output_bases = namespace(
     BASE = BASE,
     Base = Base,
+    View = View,
     CACHES = CACHES,
     COLUMNS = COLUMNS,
     DAY_US = DAY_US,
@@ -774,6 +815,8 @@ output_bases = namespace(
     resolve_root = _resolve_root,
     run = _run,
     scan_root = _scan_root,
+    servers = _servers,
+    tilde = _tilde,
     print_caches = _print_caches,
     print_census = _print_census,
     print_listing = _print_listing,
