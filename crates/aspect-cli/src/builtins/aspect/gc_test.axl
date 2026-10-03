@@ -15,6 +15,10 @@ directly:
   - **Consent.** Shared with every other destructive task, so it lives in
     `lib/confirm.axl` and is covered by `aspect dev test-confirm`.
 
+Around those, the download-cache scan, the `--output=json` document, the
+policy the period flags build, and the wording that states it are covered
+directly too.
+
 `_reap` is exercised against real trees rather than mocked: it has to survive
 the read-only directories Bazel leaves under `bazel-out/`, and it must not
 follow the execroot's symlinks out into the user's checkout.
@@ -23,7 +27,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_caches", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_render_note", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_caches", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_render", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -119,8 +123,8 @@ def _fixture(ctx: TaskContext) -> str:
     _backdate(ctx, root)
     return root
 
-def _policy(max_age_us = 0, grace_us = _HOUR_US):
-    return testonly_policy(base_max_age_us = max_age_us, orphan_grace_us = grace_us)
+def _policy(max_age_us = 0, grace_us = _HOUR_US, cache_us = 0):
+    return testonly_policy(base_max_age_us = max_age_us, orphan_grace_us = grace_us, download_cache_max_age_us = cache_us)
 
 def _scan(ctx, root, max_age_us = 0, grace_us = _HOUR_US):
     return testonly_scan(ctx, root, _now_us(), _policy(max_age_us, grace_us))
@@ -505,15 +509,32 @@ def _test_remove_tree_clears_read_only_directories(ctx):
     _eq("gone", ctx.std.fs.exists(entry), False)
     _eq("already gone is success", testonly_remove_tree(ctx, entry), "")
 
-def _test_du_keeps_sizes_when_one_path_is_missing(ctx):
-    """`du` exits non-zero when any path fails, as a base removed since the scan
-    does; the paths it did measure must still be reported."""
+def _test_du_measures_a_path_and_reports_none_for_a_missing_one(ctx):
+    """A base removed since the scan has no size rather than failing the run."""
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-du")
     ctx.std.fs.create_dir_all(tmp + "/present")
     ctx.std.fs.write(tmp + "/present/f", "x" * 8192)
-    sizes = testonly_du_kb(ctx, [tmp + "/present", tmp + "/missing"])
-    _eq("measured", sizes.get(tmp + "/present", 0) >= 8, True)
-    _eq("missing has no entry", tmp + "/missing" in sizes, False)
+    _eq("measured", testonly_du_kb(ctx, tmp + "/present") >= 8, True)
+    _eq("missing", testonly_du_kb(ctx, tmp + "/missing"), None)
+
+def _test_policy_from_args(ctx):
+    """Each period flag lands in its policy field in microseconds, and a
+    negative one is refused."""
+    args = struct(base_max_age_days = 30, orphan_grace_hours = 2, download_cache_max_age_days = 0)
+    p = testonly_policy_from_args(args)
+    _eq("days", p.base_max_age_us, 30 * _DAY_US)
+    _eq("hours", p.orphan_grace_us, 2 * _HOUR_US)
+    _eq("zero", p.download_cache_max_age_us, 0)
+    _eq("negative refused", testonly_policy_from_args(struct(base_max_age_days = -1, orphan_grace_hours = 1, download_cache_max_age_days = 30)), None)
+
+def _test_policy_entry_reports_the_flags_units(ctx):
+    entry = testonly_policy_entry(_policy(30 * _DAY_US, 2 * _HOUR_US, 7 * _DAY_US), ["abc"])
+    _eq("entry", entry, {
+        "orphan_grace_hours": 2,
+        "base_max_age_days": 30,
+        "download_cache_max_age_days": 7,
+        "bazel_output_bases": ["abc"],
+    })
 
 def _test_select_by_hash_or_path(ctx):
     """`--bazel-output-base` takes a hash or a path; either names a base the scan
@@ -538,24 +559,24 @@ def _test_the_orphan_note_states_the_grace_period(ctx):
     """The census explains an orphan with the grace period actually in force,
     so the number a reader sees is the one that decided."""
     note = testonly_states["orphan"].note
-    _eq("default", testonly_render_note(note, _policy())[1], "Removed 1h after last use (--orphan-grace-hours=N to change, 0 to remove immediately).")
-    _eq("configured", testonly_render_note(note, _policy(0, 6 * _HOUR_US))[1].startswith("Removed 6h after last use"), True)
-    _eq("off", testonly_render_note(note, _policy(0, 0))[1], "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use).")
+    _eq("default", testonly_render(note, _policy())[1], "Removed 1h after last use (--orphan-grace-hours=N to change, 0 to remove immediately).")
+    _eq("configured", testonly_render(note, _policy(0, 6 * _HOUR_US))[1].startswith("Removed 6h after last use"), True)
+    _eq("off", testonly_render(note, _policy(0, 0))[1], "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use).")
     _eq("shared with the grace state", testonly_states["grace"].note, note)
 
 def _test_the_undetermined_note_states_the_max_age(ctx):
     """An undetermined base goes only by age, so its note gives the age in force
     and the way to remove one now."""
     note = testonly_states["unknown"].note
-    _eq("defined", testonly_render_note(note, _policy(30 * _DAY_US))[0], "undetermined: nothing in the base names its workspace, so it cannot be orphaned.")
+    _eq("defined", testonly_render(note, _policy(30 * _DAY_US))[0], "undetermined: nothing in the base names its workspace, so it cannot be orphaned.")
     _eq(
         "age in force",
-        testonly_render_note(note, _policy(30 * _DAY_US))[1],
+        testonly_render(note, _policy(30 * _DAY_US))[1],
         "Removed 30d after last use (--base-max-age-days=N to change, 0 to keep), or now with --bazel-output-base=<hash>.",
     )
     _eq(
         "age rule off",
-        testonly_render_note(note, _policy(0))[1],
+        testonly_render(note, _policy(0))[1],
         "Kept (--base-max-age-days=N removes one N days after last use), or now with --bazel-output-base=<hash>.",
     )
 
@@ -589,8 +610,8 @@ def _test_the_download_cache_reason_states_the_age(ctx):
     reason = [r for key, _rel, r in testonly_caches if key == "download_cache_kb"][0]
     month = testonly_policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 30 * _DAY_US)
     off = testonly_policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 0)
-    _eq("default", testonly_render_note(reason, month), ["pruned after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
-    _eq("off", testonly_render_note(reason, off), ["not pruned; --download-cache-max-age-days=N prunes after N days unused"])
+    _eq("default", testonly_render(reason, month), ["pruned after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
+    _eq("off", testonly_render(reason, off), ["not pruned; --download-cache-max-age-days=N prunes after N days unused"])
 
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
@@ -627,7 +648,9 @@ _UNIT_TESTS = [
     _test_document_removals_carry_state_and_size,
     _test_a_running_server_vetoes_the_age_rule,
     _test_remove_tree_clears_read_only_directories,
-    _test_du_keeps_sizes_when_one_path_is_missing,
+    _test_du_measures_a_path_and_reports_none_for_a_missing_one,
+    _test_policy_from_args,
+    _test_policy_entry_reports_the_flags_units,
     _test_select_by_hash_or_path,
     _test_select_refuses_what_the_scan_did_not_find,
     _test_the_orphan_note_states_the_grace_period,
