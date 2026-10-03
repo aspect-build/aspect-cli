@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_grace_sentence", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -119,8 +119,11 @@ def _fixture(ctx: TaskContext) -> str:
     _backdate(ctx, root)
     return root
 
-def _scan(ctx, root, max_age_us = 0):
-    return testonly_scan(ctx, root, _now_us(), max_age_us)
+def _policy(max_age_us = 0, grace_us = _HOUR_US):
+    return testonly_policy(base_max_age_us = max_age_us, orphan_grace_us = grace_us)
+
+def _scan(ctx, root, max_age_us = 0, grace_us = _HOUR_US):
+    return testonly_scan(ctx, root, _now_us(), _policy(max_age_us, grace_us))
 
 def _doc(ctx, root, verbose, sizes = {}, stale = []):
     """The document for `root`'s real classification, at a given verbosity,
@@ -352,14 +355,16 @@ def _test_classify_rule_order(ctx):
     holds back a just-used orphan, and age applies whether or not the
     workspace exists."""
     month = 30 * _DAY_US
-    _eq("orphan past grace", testonly_classify("/ws", False, 2 * _HOUR_US, month), "orphan")
-    _eq("orphan within grace", testonly_classify("/ws", False, _HOUR_US // 2, month), "grace")
-    _eq("an old orphan is still an orphan", testonly_classify("/ws", False, 2 * month, month), "orphan")
-    _eq("live and recent", testonly_classify("/ws", True, _DAY_US, month), "live")
-    _eq("live but idle", testonly_classify("/ws", True, month, month), "idle")
-    _eq("age 0 turns the age rule off", testonly_classify("/ws", True, 100 * month, 0), "live")
-    _eq("undetermined and recent", testonly_classify("", False, _DAY_US, month), "unknown")
-    _eq("undetermined and idle", testonly_classify("", False, month, month), "idle")
+    _eq("orphan past grace", testonly_classify("/ws", False, 2 * _HOUR_US, _policy(month)), "orphan")
+    _eq("orphan within grace", testonly_classify("/ws", False, _HOUR_US // 2, _policy(month)), "grace")
+    _eq("an old orphan is still an orphan", testonly_classify("/ws", False, 2 * month, _policy(month)), "orphan")
+    _eq("live and recent", testonly_classify("/ws", True, _DAY_US, _policy(month)), "live")
+    _eq("live but idle", testonly_classify("/ws", True, month, _policy(month)), "idle")
+    _eq("age 0 turns the age rule off", testonly_classify("/ws", True, 100 * month, _policy(0)), "live")
+    _eq("undetermined and recent", testonly_classify("", False, _DAY_US, _policy(month)), "unknown")
+    _eq("undetermined and idle", testonly_classify("", False, month, _policy(month)), "idle")
+    _eq("a longer grace period", testonly_classify("/ws", False, 2 * _HOUR_US, _policy(month, 3 * _HOUR_US)), "grace")
+    _eq("grace 0 removes at once", testonly_classify("/ws", False, 0, _policy(month, 0)), "orphan")
 
 def _test_output_base_names_are_md5_shaped(ctx):
     _eq("md5", testonly_is_output_base_name("d41d8cd98f00b204e9800998ecf8427e"), True)
@@ -528,6 +533,13 @@ def _test_select_refuses_what_the_scan_did_not_find(ctx):
     _selected, unmatched = testonly_select(bases, root, ["install", elsewhere, "deadbeef"])
     _eq("all refused", unmatched, ["install", elsewhere, "deadbeef"])
 
+def _test_the_orphan_note_states_the_grace_period(ctx):
+    """The census explains an orphan with the grace period actually in force,
+    so the number a reader sees is the one that decided."""
+    _eq("default", "nothing has used it for 1h" in testonly_grace_sentence(_policy()), True)
+    _eq("configured", "nothing has used it for 6h" in testonly_grace_sentence(_policy(0, 6 * _HOUR_US)), True)
+    _eq("off", testonly_grace_sentence(_policy(0, 0)), "One is removed immediately: the grace period is off.")
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -566,6 +578,7 @@ _UNIT_TESTS = [
     _test_du_keeps_sizes_when_one_path_is_missing,
     _test_select_by_hash_or_path,
     _test_select_refuses_what_the_scan_did_not_find,
+    _test_the_orphan_note_states_the_grace_period,
 ]
 
 def _test_impl(ctx):

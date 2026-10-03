@@ -15,15 +15,16 @@ without bound:
 
 An output base is removed when, first match wins:
 
-  1. **its workspace is gone**, and nothing has used it in the last hour. The
-     hour keeps a worktree that is being torn down and recreated at the same
-     path from losing the base the path was kept stable for.
+  1. **its workspace is gone** — it is *orphaned* — and nothing has used it in
+     `--orphan-grace-hours` (default 1). The grace period keeps a worktree
+     that is being torn down and recreated at the same path from losing the
+     base the path was kept stable for.
   2. **nothing has used it in `--base-max-age-days`** (default 30), whether or
      not its workspace still exists, unless a Bazel server is running in it.
 
 A download-cache entry is removed when nothing has used it in
-`--download-cache-max-age-days` (default 30). Both ages take 0 to turn the rule
-off. Everything removed is re-creatable: a pruned base costs a cold build, a
+`--download-cache-max-age-days` (default 30). Each of the three periods takes 0:
+the grace period to remove orphans at once, the ages to turn their rule off. Everything removed is re-creatable: a pruned base costs a cold build, a
 pruned download one re-fetch.
 
 Nothing is deleted without saying so first: what will go is listed in full, then
@@ -68,7 +69,6 @@ _SCHEMA_VERSION = 2
 
 _HOUR_US = 3600 * 1000000
 _DAY_US = 24 * _HOUR_US
-_ORPHAN_GRACE_US = _HOUR_US
 
 _TRASH_PREFIX = ".gc-trash-"
 _DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
@@ -94,29 +94,34 @@ _State = record(
     removable = field(bool),
     # Heading for the `--verbose` listing of a kept state; "" leaves it out.
     heading = field(str, default = ""),
-    # Printed under the census when any base is in the state.
+    # Printed under the census when any base is in the state, once however
+    # many states share it; one line per `\n`. `{grace}` stands for the orphan
+    # grace period.
     note = field(str, default = ""),
 )
+
+_ORPHAN_NOTE = ("orphaned: the base's workspace directory no longer exists, e.g. a deleted worktree.\n" +
+                "{grace}\n" +
+                "Set the grace period with --orphan-grace-hours=N; 0 removes orphans immediately.")
 
 # Every state a base can be in, in census order.
 _STATES = {
     _LIVE: _State(key = "live", label = "live", removable = False, heading = "live — workspace still exists"),
     _IDLE: _State(key = "idle", label = "idle", removable = True),
-    _ORPHAN: _State(key = "orphaned", label = "orphaned", removable = True),
+    _ORPHAN: _State(key = "orphaned", label = "orphaned", removable = True, note = _ORPHAN_NOTE),
     _GRACE: _State(
         key = "orphaned_within_grace",
-        label = "orphaned within the hour",
+        label = "orphaned within the grace period",
         removable = False,
-        heading = "orphaned within the hour",
-        note = "orphaned within the hour = workspace gone but the base was just used; left for now, " +
-               "since a worktree being recreated at the same path will want it.",
+        heading = "orphaned within the grace period",
+        note = _ORPHAN_NOTE,
     ),
     _UNKNOWN: _State(
         key = "undetermined",
         label = "undetermined",
         removable = False,
         heading = "undetermined — cannot be attributed",
-        note = "undetermined = nothing in the base names its workspace. Removed only by age.",
+        note = "undetermined: nothing in the base names its workspace. Removed only by age.",
     ),
     _TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True),
 }
@@ -127,6 +132,13 @@ _CACHES = [
     ("repo_contents_cache_kb", "cache/repos/v1/contents", "GC'd by Bazel while a server sits idle"),
     ("install_bases_kb", "install", "see --experimental_install_base_gc_max_age"),
 ]
+
+# The rules a run applies, from its flags. A period of 0 turns its rule off —
+# for the grace period, that removes orphans without waiting.
+_Policy = record(
+    base_max_age_us = field(int),
+    orphan_grace_us = field(int),
+)
 
 _Base = record(
     name = field(str),
@@ -360,21 +372,20 @@ def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
         return False
     return base in out.stdout
 
-def _classify(workspace: str, workspace_exists: bool, age_us: int, max_age_us: int) -> str:
+def _classify(workspace: str, workspace_exists: bool, age_us: int, policy) -> str:
     """The state of a base, from facts already gathered. Pure, so the rule
     order can be tested without building bases of every age.
 
-    `max_age_us` of 0 turns the age rule off. A running server is not decided
-    here: it costs a process lookup, so `_scan` vetoes `_IDLE` afterwards, and
-    only for the bases this returns it for.
+    A running server is not decided here: it costs a process lookup, so `_scan`
+    vetoes `_IDLE` afterwards, and only for the bases this returns it for.
     """
     if workspace and not workspace_exists:
-        return _GRACE if age_us < _ORPHAN_GRACE_US else _ORPHAN
-    if max_age_us > 0 and age_us >= max_age_us:
+        return _GRACE if age_us < policy.orphan_grace_us else _ORPHAN
+    if policy.base_max_age_us > 0 and age_us >= policy.base_max_age_us:
         return _IDLE
     return _LIVE if workspace else _UNKNOWN
 
-def _scan(ctx: TaskContext, root: str, now_us: int, max_age_us: int) -> list:
+def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
     """Classify every output base under `root`, youngest first, including any
     trash an earlier run failed to finish removing."""
     bases = []
@@ -401,7 +412,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, max_age_us: int) -> list:
             workspace,
             bool(workspace) and ctx.std.fs.exists(workspace),
             now_us - last_used,
-            max_age_us,
+            policy,
         )
         if state == _IDLE and _is_this_bases_server(ctx, pid, path):
             state = _LIVE if workspace else _UNKNOWN
@@ -599,9 +610,16 @@ def _say(streaming: bool, line: str) -> None:
     if streaming:
         print(line)
 
-def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int) -> None:
-    """How many bases are in each state, and under `--verbose` the kept ones,
-    youngest first.
+def _grace_sentence(policy) -> str:
+    """What happens to an orphan, for the census note."""
+    if policy.orphan_grace_us == 0:
+        return "One is removed immediately: the grace period is off."
+    return ("One is removed once nothing has used it for %s, the grace period that spares a " +
+            "worktree being recreated at the same path.") % _fmt_age(policy.orphan_grace_us)
+
+def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, policy) -> None:
+    """How many bases are in each state, what the less obvious states mean, and
+    under `--verbose` the kept ones, youngest first.
 
     Kept bases are listed without sizes: measuring them means a `du` over every
     live base on the machine, tens of gigabytes, to report something nothing is
@@ -614,9 +632,15 @@ def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int) -> N
         if n or state == _LIVE:
             counts.append("%d %s" % (n, s.label))
     _say(streaming, "  %s: %s" % (pluralize(len(bases), "base"), ", ".join(counts)))
+    notes = []
     for state, s in _STATES.items():
-        if s.note and _in_state(bases, state):
-            _say(streaming, "    (" + s.note + ")")
+        if s.note and s.note not in notes and _in_state(bases, state):
+            notes.append(s.note)
+    for note in notes:
+        lines = note.replace("{grace}", _grace_sentence(policy)).split("\n")
+        _say(streaming, "    " + lines[0])
+        for line in lines[1:]:
+            _say(streaming, "      " + line)
     if not verbose:
         return
     for state, s in _STATES.items():
@@ -724,8 +748,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     """
     base_max_age_days = ctx.args.base_max_age_days
     cache_max_age_days = ctx.args.download_cache_max_age_days
-    if base_max_age_days < 0 or cache_max_age_days < 0:
-        return TaskConclusion(exit_code = 1, message = "max ages are days, 0 or more (0 turns the rule off)")
+    grace_hours = ctx.args.orphan_grace_hours
+    if base_max_age_days < 0 or cache_max_age_days < 0 or grace_hours < 0:
+        return TaskConclusion(exit_code = 1, message = "ages and the grace period are 0 or more")
+    policy = _Policy(base_max_age_us = base_max_age_days * _DAY_US, orphan_grace_us = grace_hours * _HOUR_US)
 
     root = _output_user_root(ctx)
     if not ctx.std.fs.exists(root):
@@ -740,7 +766,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     now_us = time.now_ms() * 1000
 
     _say(streaming, "  scanning output bases…")
-    bases = _scan(ctx, root, now_us, base_max_age_days * _DAY_US)
+    bases = _scan(ctx, root, now_us, policy)
 
     requested = ctx.args.bazel_output_bases
     if requested:
@@ -751,7 +777,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 message = "no output base " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
             )
     else:
-        _print_census(streaming, bases, ctx.args.verbose, now_us)
+        _print_census(streaming, bases, ctx.args.verbose, now_us, policy)
         removals = [b for b in bases if _STATES[b.state].removable]
     if removals:
         _say(streaming, "  measuring %s…" % pluralize(len(removals), "output base"))
@@ -803,7 +829,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         policy = {
             "base_max_age_days": base_max_age_days,
             "download_cache_max_age_days": cache_max_age_days,
-            "orphan_grace_ms": _ORPHAN_GRACE_US // 1000,
+            "orphan_grace_hours": grace_hours,
             "bazel_output_bases": requested,
         }
         ctx.std.io.stdout.write(json.encode(
@@ -834,7 +860,7 @@ gc = task(
 
 Deleting a git worktree leaves its Bazel output base behind forever — nothing in Bazel collects it — and so does a workspace nobody builds in any more. Nothing collects the download cache (`cache/repos/v1/content_addressable`) either.
 
-An output base is removed when its workspace is gone (and it has not been used in the last hour), or when it has not been used in `--base-max-age-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-age-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
+An output base is removed when its workspace is gone (once it has not been used in `--orphan-grace-hours`), or when it has not been used in `--base-max-age-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-age-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
 
 `--bazel-output-base` removes the named bases instead, whatever their state.
 
@@ -848,6 +874,10 @@ Otherwise never touches a running Bazel server whose workspace still exists, and
         "base_max_age_days": args.int(
             default = 30,
             description = "Remove an output base no Bazel command has used in this many days, even if its workspace still exists. A base with a running server is kept. 0 turns this off, leaving only bases whose workspace is gone.",
+        ),
+        "orphan_grace_hours": args.int(
+            default = 1,
+            description = "Keep an orphaned output base — one whose workspace no longer exists, such as a deleted worktree — until nothing has used it for this many hours, so a worktree being recreated at the same path keeps its base. 0 removes orphans immediately.",
         ),
         "download_cache_max_age_days": args.int(
             default = 30,
@@ -889,9 +919,11 @@ testonly_document = _document
 testonly_du_kb = _du_kb
 testonly_fmt_age = _fmt_age
 testonly_fmt_kb = _fmt_kb
+testonly_grace_sentence = _grace_sentence
 testonly_is_output_base_name = _is_output_base_name
 testonly_move_to_trash = _move_to_trash
 testonly_outcome = _Outcome
+testonly_policy = _Policy
 testonly_plan = _Plan
 testonly_reap = _reap
 testonly_remove_tree = _remove_tree
