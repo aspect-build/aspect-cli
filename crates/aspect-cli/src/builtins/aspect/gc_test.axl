@@ -564,13 +564,13 @@ def _test_verbose_is_hinted_only_when_it_would_list_something(ctx):
     _eq(
         "names the kept states present",
         testonly_verbose_hint(_scan(ctx, root)),
-        "Run with --verbose to list the kept output bases (live, undetermined).",
+        "Run with --verbose to list the kept Bazel output bases (live, undetermined).",
     )
     removable_only = [b for b in _scan(ctx, root) if b.state == "orphan"]
     _eq("nothing kept, no hint", testonly_verbose_hint(removable_only), "")
 
-def _test_report_sizes_adds_sizes_without_changing_reclaimable(ctx):
-    """Under `--report-sizes` every base is measured, but only the removals
+def _test_measure_sizes_adds_sizes_without_changing_reclaimable(ctx):
+    """Under `--measure-sizes` every base is measured, but only the removals
     count towards what a run reclaims."""
     root = _fixture(ctx)
     sizes = {b.path: 100 for b in _scan(ctx, root)}
@@ -624,7 +624,7 @@ _UNIT_TESTS = [
     _test_the_orphan_note_states_the_grace_period,
     _test_the_undetermined_note_states_the_max_age,
     _test_verbose_is_hinted_only_when_it_would_list_something,
-    _test_report_sizes_adds_sizes_without_changing_reclaimable,
+    _test_measure_sizes_adds_sizes_without_changing_reclaimable,
 ]
 
 def _test_impl(ctx):

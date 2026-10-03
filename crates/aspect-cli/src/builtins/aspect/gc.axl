@@ -71,6 +71,11 @@ _SCHEMA_VERSION = 2
 _HOUR_US = 3600 * 1000000
 _DAY_US = 24 * _HOUR_US
 
+# How the output names what it collects. `gc` may one day collect for more than
+# Bazel, so nothing it reports is a bare "output base" or "cache".
+_BASE = "Bazel output base"
+_CACHE_ENTRY = ("Bazel download cache entry", "Bazel download cache entries")
+
 _TRASH_PREFIX = ".gc-trash-"
 _DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
 
@@ -126,11 +131,11 @@ _STATES = {
     _TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True),
 }
 
-# The caches `--report-sizes` measures, with what collects each.
+# The caches `--measure-sizes` measures, with what collects each.
 _CACHES = [
-    ("download_cache_kb", _DOWNLOAD_CACHE, "pruned by --download-cache-max-age-days"),
-    ("repo_contents_cache_kb", "cache/repos/v1/contents", "GC'd by Bazel while a server sits idle"),
-    ("install_bases_kb", "install", "see --experimental_install_base_gc_max_age"),
+    ("download_cache_kb", _DOWNLOAD_CACHE, "pruned by aspect gc --download-cache-max-age-days"),
+    ("repo_contents_cache_kb", "cache/repos/v1/contents", "collected by Bazel while a server sits idle"),
+    ("install_bases_kb", "install", "collected by Bazel's --experimental_install_base_gc_max_age"),
 ]
 
 # The rules a run applies, from its flags. A period of 0 turns its rule off —
@@ -159,14 +164,14 @@ _CacheEntry = record(
 
 # What a run found, and what it would remove. `sizes` maps each measured base's
 # path to its `du` size in KB: the removals, or every base under
-# `--report-sizes`.
+# `--measure-sizes`.
 _Plan = record(
     bases = field(list),
     removals = field(list),
     sizes = field(dict),
     cache_entries = field(int),
     stale = field(list),
-    # True when `sizes` covers every base (`--report-sizes`), not only removals.
+    # True when `sizes` covers every base (`--measure-sizes`), not only removals.
     sized_all = field(bool, default = False),
 )
 
@@ -208,7 +213,7 @@ def _capitalize(s: str) -> str:
     return s[:1].upper() + s[1:]
 
 def _entries(n: int) -> str:
-    return pluralize(n, "download cache entry", "download cache entries")
+    return pluralize(n, _CACHE_ENTRY[0], _CACHE_ENTRY[1])
 
 def _total_kb(sizes: list[int]) -> int:
     total = 0
@@ -464,7 +469,7 @@ def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
                 stale.append(_CacheEntry(path = path, kb = kb))
     return (seen, stale)
 
-def _measure(ctx: TaskContext, streaming: bool, what: str, items: list, slow: bool = False) -> dict:
+def _measure(ctx: TaskContext, streaming: bool, what: str, items: list) -> dict:
     """`du` sizes in KB for `items`, a list of `(label, path)`, keyed by path.
 
     One `du` per path, so a run that measures tens of gigabytes can say how far
@@ -474,7 +479,7 @@ def _measure(ctx: TaskContext, streaming: bool, what: str, items: list, slow: bo
     """
     if not items:
         return {}
-    _say(streaming, "  measuring %s…%s" % (what, " (this is the slow part)" if slow else ""))
+    _say(streaming, "  measuring sizes of %s…" % what)
     progress = streaming and ctx.std.io.stderr.is_tty
     sizes = {}
     for i, (label, path) in enumerate(items):
@@ -577,7 +582,7 @@ def _cache_report(ctx: TaskContext, streaming: bool, root: str) -> dict:
     """Sizes of the shared caches, keyed for the document. A cache the install
     has never created reports zero."""
     present = [(rel, root + "/" + rel) for _key, rel, _reason in _CACHES if ctx.std.fs.exists(root + "/" + rel)]
-    sizes = _measure(ctx, streaming, pluralize(len(present), "shared cache"), present)
+    sizes = _measure(ctx, streaming, pluralize(len(present), "Bazel shared cache"), present)
     return {key: sizes.get(root + "/" + rel, 0) for key, rel, _reason in _CACHES}
 
 def _base_entry(b, sizes: dict = {}) -> dict:
@@ -599,7 +604,7 @@ def _document(root: str, dry_run: bool, verbose: bool, policy: dict, plan, outco
     `reclaimable_kb` is what the removals and stale download-cache entries hold,
     and `freed_kb` what was actually removed; under `--dry-run`, or when a
     removal failed, they differ. The key names are a contract, so
-    `_SCHEMA_VERSION` moves when they do — `--verbose` and `--report-sizes`
+    `_SCHEMA_VERSION` moves when they do — `--verbose` and `--measure-sizes`
     only add keys, which consumers already have to tolerate.
     """
     stale_kb = _total_kb([e.kb for e in plan.stale])
@@ -666,13 +671,13 @@ def _verbose_hint(bases: list) -> str:
     shown = [s.label for state, s in _STATES.items() if s.heading and _in_state(bases, state)]
     if not shown:
         return ""
-    return "Run with --verbose to list the kept output bases (" + ", ".join(shown) + ")."
+    return "Run with --verbose to list the kept " + _BASE + "s (" + ", ".join(shown) + ")."
 
 def _print_census(streaming: bool, bases: list, sizes: dict, verbose: bool, now_us: int, policy) -> None:
     """How many bases are in each state, what the less obvious states mean, and
     the kept ones, youngest first — under `--verbose`, or else a pointer to it.
 
-    `sizes` is empty unless `--report-sizes` measured every base; when it is
+    `sizes` is empty unless `--measure-sizes` measured every base; when it is
     not, each count and each listed base carries its size.
     """
 
@@ -685,7 +690,7 @@ def _print_census(streaming: bool, bases: list, sizes: dict, verbose: bool, now_
         if in_state or state == _LIVE:
             counts.append("%d %s%s" % (len(in_state), s.label, size(_total_kb([sizes.get(b.path, 0) for b in in_state]))))
     total = ", " + _fmt_kb(_total_kb(sizes.values())) if sizes else ""
-    _say(streaming, "  %s%s: %s" % (pluralize(len(bases), "base"), total, ", ".join(counts)))
+    _say(streaming, "  %s%s: %s" % (pluralize(len(bases), _BASE), total, ", ".join(counts)))
     notes = []
     for state, s in _STATES.items():
         if s.note and s.note not in notes and _in_state(bases, state):
@@ -747,11 +752,11 @@ def _print_plan(streaming: bool, plan, cache_max_age_days: int, now_us: int) -> 
     """Everything a run will remove, listed before it asks, so the confirmation
     is answered with the whole picture rather than a count."""
     if plan.removals:
-        _say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), "output base"), _fmt_kb(_removal_kb(plan))))
+        _say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), _BASE), _fmt_kb(_removal_kb(plan))))
     for b in plan.removals:
         _say(streaming, "    " + _fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us) + ")")
     if plan.stale:
-        _say(streaming, "  download cache: %d of %s unused for %dd or more, %s" % (
+        _say(streaming, "  Bazel download cache: %d of %s unused for %dd or more, %s" % (
             len(plan.stale),
             pluralize(plan.cache_entries, "entry", "entries"),
             cache_max_age_days,
@@ -782,7 +787,7 @@ def _failure(plan, outcome):
     """The conclusion for a run that could not remove everything, or None."""
     failed = []
     if outcome.reaped < len(plan.removals):
-        failed.append(pluralize(len(plan.removals) - outcome.reaped, "output base"))
+        failed.append(pluralize(len(plan.removals) - outcome.reaped, _BASE))
     if outcome.pruned < len(plan.stale):
         failed.append(_entries(len(plan.stale) - outcome.pruned))
     if not failed:
@@ -820,10 +825,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         )
 
     streaming = ctx.args.output != "json"
-    info(ctx.std, "output user root: " + root)
+    info(ctx.std, "Bazel output user root: " + root)
     now_us = time.now_ms() * 1000
 
-    _say(streaming, "  scanning output bases…")
+    _say(streaming, "  scanning %ss…" % _BASE)
     bases = _scan(ctx, root, now_us, policy)
 
     requested = ctx.args.bazel_output_bases
@@ -832,20 +837,20 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if unmatched:
             return TaskConclusion(
                 exit_code = 1,
-                message = "no output base " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
+                message = "no " + _BASE + " " + ", ".join(unmatched) + " under " + root + "; nothing was deleted.",
             )
     else:
         removals = [b for b in bases if _STATES[b.state].removable]
 
-    report_sizes = ctx.args.report_sizes
-    measured = bases if report_sizes else removals
-    sizes = _measure(ctx, streaming, pluralize(len(measured), "output base"), [(b.name, b.path) for b in measured], slow = report_sizes)
+    measure_sizes = ctx.args.measure_sizes
+    measured = bases if measure_sizes else removals
+    sizes = _measure(ctx, streaming, pluralize(len(measured), _BASE), [(b.name, b.path) for b in measured])
     if not requested:
-        _print_census(streaming, bases, sizes if report_sizes else {}, ctx.args.verbose, now_us, policy)
+        _print_census(streaming, bases, sizes if measure_sizes else {}, ctx.args.verbose, now_us, policy)
 
     cache_entries, stale = 0, []
     if cache_max_age_days > 0 and not requested:
-        _say(streaming, "  scanning the download cache…")
+        _say(streaming, "  scanning the Bazel download cache…")
         cache_entries, stale = _scan_download_cache(ctx, root, now_us - cache_max_age_days * _DAY_US)
     plan = _Plan(
         bases = bases,
@@ -853,14 +858,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         sizes = sizes,
         cache_entries = cache_entries,
         stale = stale,
-        sized_all = report_sizes,
+        sized_all = measure_sizes,
     )
     _print_plan(streaming, plan, cache_max_age_days, now_us)
     reclaimable = _removal_kb(plan) + _total_kb([e.kb for e in stale])
 
     actions = []
     if removals:
-        actions.append("delete " + pluralize(len(removals), "output base"))
+        actions.append("delete " + pluralize(len(removals), _BASE))
     if stale:
         actions.append("prune " + _entries(len(stale)))
     action = " and ".join(actions)
@@ -884,7 +889,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     freed = outcome.reaped_kb + outcome.pruned_kb
 
     # After collecting, so the sizes are what is left.
-    caches = _cache_report(ctx, streaming, root) if report_sizes else {}
+    caches = _cache_report(ctx, streaming, root) if measure_sizes else {}
 
     if ctx.args.output == "json":
         policy = {
@@ -910,9 +915,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if caches:
         print("")
+        print("  Bazel shared caches:")
         width = max([len(rel) for _key, rel, _reason in _CACHES])
         for key, rel, reason in _CACHES:
-            print("  " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
+            print("    " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
     return failure or 0
 
 gc = task(
@@ -959,11 +965,11 @@ Otherwise never touches a running Bazel server whose workspace still exists, and
         ),
         "verbose": args.boolean(
             default = False,
-            description = "Also list the bases that are left alone, youngest first, with the age and workspace of each (and the size, under `--report-sizes`), so a classification can be checked rather than taken on trust. Adds `live_bases`, `orphaned_within_grace_bases` and `undetermined_bases` to `--output=json`.",
+            description = "Also list the bases that are left alone, youngest first, with the age and workspace of each (and the size, under `--measure-sizes`), so a classification can be checked rather than taken on trust. Adds `live_bases`, `orphaned_within_grace_bases` and `undetermined_bases` to `--output=json`.",
         ),
-        "report_sizes": args.boolean(
+        "measure_sizes": args.boolean(
             default = False,
-            description = "Also measure every output base, not only the ones being removed, and the caches shared between them (download cache, repo contents cache, install bases, measured after collecting). Adds a size to each state's count, to each base `--verbose` lists, and `output_bases_kb` to `--output=json`. Off by default because it walks every file under the output user root, which takes far longer than everything else this task does — most of a minute on a machine with tens of gigabytes of bases.",
+            description = "Also measure the size of every Bazel output base, not only the ones being removed, and of the Bazel caches shared between them (download cache, repo contents cache, install bases, measured after collecting). Adds a size to each state's count, to each base `--verbose` lists, and `output_bases_kb` to `--output=json`. Off by default because it walks every file under the output user root, which takes far longer than everything else this task does — most of a minute on a machine with tens of gigabytes of bases.",
         ),
         "output": args.string(
             default = "text",
