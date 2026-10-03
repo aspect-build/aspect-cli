@@ -12,36 +12,31 @@ small files for each instead. The layouts covered:
 checkout — a nested Bazel workspace, say — reports the checkout around it.
 """
 
+load("./path_normalize.axl", "normpath")
+
 Checkout = record(
     # The directory holding `.git`.
     root = field(str),
     # `owner/name` from the `origin` remote, else the main checkout's directory
     # name.
     repository = field(str),
-    # The checked-out branch, or `detached@<sha>` for a detached HEAD.
+    # The checked-out branch; another ref HEAD points at, as written; or
+    # `detached@<sha>` for a detached HEAD. "" when it cannot be read.
     branch = field(str),
 )
 
-_REF_PREFIX = "ref: refs/heads/"
+_REF = "ref: "
+_BRANCH_REF = "refs/heads/"
 _GITDIR_PREFIX = "gitdir: "
 
-def _normpath(path: str) -> str:
-    """`path` with `.` and `..` segments resolved, without touching the disk."""
-    out = []
-    for seg in path.split("/"):
-        if seg == "" or seg == ".":
-            continue
-        if seg == "..":
-            if out:
-                out.pop()
-            continue
-        out.append(seg)
-    return "/" + "/".join(out)
+# What a reftable repository writes into `HEAD`; the real branch lives in the
+# reftable, which this does not read.
+_REFTABLE_HEAD = "refs/heads/.invalid"
 
 def _join(base: str, path: str) -> str:
     """`path` resolved against the directory `base`, as git resolves the
     relative paths it writes into `.git` files and `commondir`."""
-    return _normpath(path if path.startswith("/") else base + "/" + path)
+    return normpath(path if path.startswith("/") else base + "/" + path)
 
 def repository_name(url: str) -> str:
     """`owner/name` for a remote URL in any of the forms git accepts, or "".
@@ -75,7 +70,7 @@ def _origin_url(config: str) -> str:
 
 def _find_dot_git(std, path: str) -> str:
     """The nearest `.git` at or above `path`, or ""."""
-    path = _normpath(path)
+    path = normpath(path)
     for _ in range(64):
         candidate = ("" if path == "/" else path) + "/.git"
         if std.fs.exists(candidate):
@@ -84,6 +79,15 @@ def _find_dot_git(std, path: str) -> str:
             return ""
         path = path[:path.rfind("/")] or "/"
     return ""
+
+def _branch(head: str) -> str:
+    """What a `HEAD` file's text names, for display."""
+    if head.startswith(_REF):
+        ref = head[len(_REF):].strip()
+        if ref == _REFTABLE_HEAD:
+            return ""
+        return ref[len(_BRANCH_REF):] if ref.startswith(_BRANCH_REF) else ref
+    return "detached@" + head[:12] if head else ""
 
 def checkout_of(std, path: str):
     """The `Checkout` that `path` sits in, or None when it is in none."""
@@ -102,13 +106,7 @@ def checkout_of(std, path: str):
         common = std.fs.try_read_to_string(git_dir + "/commondir").strip()
         common_dir = _join(git_dir, common) if common else git_dir
 
-    head = std.fs.try_read_to_string(git_dir + "/HEAD").strip()
-    if head.startswith(_REF_PREFIX):
-        branch = head[len(_REF_PREFIX):]
-    elif head:
-        branch = "detached@" + head[:12]
-    else:
-        branch = ""
+    branch = _branch(std.fs.try_read_to_string(git_dir + "/HEAD").strip())
 
     repository = repository_name(_origin_url(std.fs.try_read_to_string(common_dir + "/config")))
     if not repository:
@@ -118,6 +116,7 @@ def checkout_of(std, path: str):
 
 git_checkout = namespace(
     Checkout = Checkout,
+    branch = _branch,
     checkout_of = checkout_of,
     repository_name = repository_name,
 )

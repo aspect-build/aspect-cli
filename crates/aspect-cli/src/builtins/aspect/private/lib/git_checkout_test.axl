@@ -60,6 +60,13 @@ def _test_a_detached_head(ctx):
     _git(ctx, repo, ["checkout", "-q", "--detach"])
     _eq("detached", git_checkout.checkout_of(ctx.std, repo).branch.startswith("detached@"), True)
 
+def _test_branch_display(ctx):
+    _eq("branch", git_checkout.branch("ref: refs/heads/fix/login"), "fix/login")
+    _eq("another ref, as written", git_checkout.branch("ref: refs/remotes/origin/main"), "refs/remotes/origin/main")
+    _eq("reftable placeholder", git_checkout.branch("ref: refs/heads/.invalid"), "")
+    _eq("detached", git_checkout.branch("0123456789abcdef0123"), "detached@0123456789ab")
+    _eq("unreadable", git_checkout.branch(""), "")
+
 def _test_outside_any_checkout(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-git-none")
     _eq("none", git_checkout.checkout_of(ctx.std, tmp), None)
@@ -79,6 +86,7 @@ _UNIT_TESTS = [
     _test_a_directory_inside_a_clone,
     _test_a_linked_worktree,
     _test_a_detached_head,
+    _test_branch_display,
     _test_outside_any_checkout,
     _test_repository_name,
 ]

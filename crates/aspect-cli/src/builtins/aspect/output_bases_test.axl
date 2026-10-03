@@ -47,17 +47,21 @@ def _test_a_workspace_without_the_flag_defers(ctx):
     tmp = _rc_fixture(ctx, "build --jobs=4\n")
     _eq("nothing to report", output_bases.configured_output_user_root(ctx, tmp, _ISOLATED), "")
 
-def _test_a_relative_root_resolves_against_the_workspace(ctx):
-    """Bazel resolves a relative `--output_user_root` against the workspace
-    root. Reading it as cwd-relative instead agrees only when the two coincide,
-    so `gc` run from any subdirectory would scan somewhere else — or, worse,
-    whatever happened to sit at that relative path.
-    """
+def _test_a_relative_root_resolves_as_bazel_resolves_it(ctx):
+    """Bazel's `AbsolutePathFromFlag` takes a relative `--output_user_root`
+    against the directory it was started from — it parses startup options
+    before changing into the workspace — and expands a leading `~`."""
     tmp = _rc_fixture(ctx, "startup --output_user_root=relroot\n")
     _eq(
-        "joined to the workspace root",
+        "joined to the current directory",
         output_bases.configured_output_user_root(ctx, tmp, _ISOLATED),
-        tmp + "/relroot",
+        ctx.std.env.current_dir() + "/relroot",
+    )
+    tilde = _rc_fixture(ctx, "startup --output_user_root=~/bazel-root\n")
+    _eq(
+        "home directory",
+        output_bases.configured_output_user_root(ctx, tilde, _ISOLATED),
+        ctx.std.env.home_dir() + "/bazel-root",
     )
 
 def _test_an_absolute_root_is_left_alone(ctx):
@@ -208,24 +212,68 @@ def _test_fmt_age(ctx):
     _eq("days", output_bases.fmt_age(45 * fx.DAY_US), "45d")
     _eq("clock skew reads as zero", output_bases.fmt_age(-5), "0m")
 
-def _test_a_running_server_vetoes_the_age_rule(ctx):
-    """An idle base whose workspace exists is kept while its server runs:
-    deleting it would pull the server's state out from under it. The stand-in
-    server is a process whose command line names the base, which is what
-    `_is_this_bases_server` matches on."""
-    root = fx.fixture(ctx)
-    base = root + "/" + fx.LIVE
-    server = ctx.std.process.command("sh").args(["-c", "sleep 10; :", base]) \
+def _server(ctx, base, output_base = ""):
+    """A stand-in Bazel server for `base`: a live process whose command line
+    carries `--output_base=<output_base or base>`, with its pid recorded where
+    Bazel records it."""
+    proc = ctx.std.process.command("sh").args(["-c", "sleep 10; :", "--output_base=" + (output_base or base)]) \
         .stdout("null").stderr("null").spawn()
     ctx.std.fs.create_dir_all(base + "/server")
-    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()))
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(proc.id()))
     fx.backdate(ctx, base)
+    return proc
+
+def _test_a_running_server_vetoes_the_age_rule(ctx):
+    """An idle base whose workspace exists is kept while its server runs:
+    deleting it would pull the server's state out from under it."""
+    root = fx.fixture(ctx)
+    server = _server(ctx, root + "/" + fx.LIVE)
     states = {b.name: b.state for b in fx.scan(ctx, root, 30 * fx.DAY_US)}
     server.kill()
     _eq("kept while its server runs", states[fx.LIVE], "live")
 
     states = {b.name: b.state for b in fx.scan(ctx, root, 30 * fx.DAY_US)}
     _eq("idle once it has stopped", states[fx.LIVE], "idle")
+
+def _test_the_server_veto_survives_another_spelling_of_the_root(ctx):
+    """The server records the root as its client spelled it; a scan of the same
+    root spelled differently must still recognise it."""
+    root = fx.fixture(ctx)
+    server = _server(ctx, root + "/" + fx.LIVE, output_base = "/elsewhere/spelled/" + fx.LIVE)
+    bases = output_bases.scan(ctx, root + "/./", fx.now_us(), fx.policy(30 * fx.DAY_US))
+    server.kill()
+    _eq("kept", {b.name: b.state for b in bases}[fx.LIVE], "live")
+
+def _test_a_process_that_is_not_a_server_does_not_veto(ctx):
+    """A reused pid whose process merely mentions the base is not its server."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.LIVE
+    proc = ctx.std.process.command("sh").args(["-c", "sleep 10; :", base]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(proc.id()))
+    fx.backdate(ctx, base)
+    states = {b.name: b.state for b in fx.scan(ctx, root, 30 * fx.DAY_US)}
+    proc.kill()
+    _eq("idle", states[fx.LIVE], "idle")
+
+def _test_a_pooled_slot_with_a_server_stays_pooled(ctx):
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.MARKER
+    ctx.std.fs.create_dir_all(base)
+    ctx.std.fs.write(base + "/DO_NOT_BUILD_HERE", ctx.std.env.home_dir() + "/.aspect/worktrees/acme/aspect-worktree-0123\n")
+    server = _server(ctx, base)
+    states = {b.name: b.state for b in fx.scan(ctx, root, 30 * fx.DAY_US)}
+    server.kill()
+    _eq("pooled", states[fx.MARKER], "pooled")
+
+def _test_canonical(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-canon")
+    real = output_bases.canonical(ctx, tmp)
+    ctx.std.fs.create_dir_all(tmp + "/a")
+    _eq("dot and trailing slash", output_bases.canonical(ctx, tmp + "/./a/"), real + "/a")
+    _eq("missing, absolute", output_bases.canonical(ctx, "/no/such/../path/"), "/no/path")
+    fx.symlink(ctx, tmp + "/a", tmp + "/link")
+    _eq("symlink resolved", output_bases.canonical(ctx, tmp + "/link"), real + "/a")
 
 def _test_du_measures_a_path_and_reports_none_for_a_missing_one(ctx):
     """A base removed since the scan has no size rather than failing the run."""
@@ -317,6 +365,7 @@ def _test_checkouts_attribute_existing_workspaces_only(ctx):
     ws = tmp + "/live-workspace"
     for args in [["init", "-q", "-b", "trunk"], ["remote", "add", "origin", "git@github.com:acme/live.git"]]:
         ctx.std.process.command("git").args(["-C", ws] + args).stdout("null").stderr("null").spawn().wait()
+
     # A worktree deleted from inside the live checkout: walking up from it
     # would land on the live checkout's `.git`.
     ctx.std.fs.create_dir_all(root + "/" + fx.MARKER)
@@ -360,16 +409,18 @@ def _test_output_bases_document(ctx):
     and their totals appear only when measured."""
     root = fx.fixture(ctx)
     bases = fx.scan(ctx, root)
-    plain = testonly_document(root, "workspace", {}, bases, {}, {}, {})
+    plain = testonly_document(root, "workspace", {}, bases, False, {}, {}, {})
     _eq("every base", len(plain["output_bases"]), len(bases))
     _eq("grouped by state", [e["state"] for e in plain["output_bases"]], ["live", "live", "orphan", "orphan", "unknown"])
     _eq("no sizes unless measured", "kb" in plain or "kb" in plain["output_bases"][0], False)
 
     sizes = {b.path: 100 for b in bases}
-    sized = testonly_document(root, "size", {}, bases, sizes, {}, {"download_cache_kb": 7})
+    sized = testonly_document(root, "size", {}, bases, True, sizes, {}, {"download_cache_kb": 7})
     _eq("per-state totals", sized["kb"]["live"], 200)
     _eq("per-base size", sized["output_bases"][0]["kb"], 100)
     _eq("caches", sized["caches"], {"download_cache_kb": 7})
+    empty = testonly_document(root, "size", {}, [], True, {}, {}, {})
+    _eq("measured but empty still has the keys", "kb" in empty and "caches" in empty, True)
 
 def _test_a_group_drops_columns_it_has_no_values_for(ctx):
     """Undetermined bases have no workspace and non-git workspaces no branch;
@@ -383,10 +434,25 @@ def _test_a_group_drops_columns_it_has_no_values_for(ctx):
     _eq("dropped when none does", bare, "    last used  output base")
     _eq("size only when measured", "size" in output_bases.group_table([a], {a.path: 4}, {}, 0)[0], True)
 
+def _test_resolve_root_refuses_a_missing_root(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-root")
+    real = output_bases.canonical(ctx, tmp)
+    _eq("present, canonical", output_bases.resolve_root(ctx, tmp + "/./"), (real, None))
+    root, missing = output_bases.resolve_root(ctx, tmp + "/nope")
+    _eq("a missing root is reported as written", root, tmp + "/nope")
+    _eq("refused", missing.exit_code, 1)
+
+def _test_policy_entry_is_in_the_flags_units(ctx):
+    _eq("defaults", output_bases.policy_entry(output_bases.default_policy()), {
+        "orphan_grace_hours": 1,
+        "base_max_age_days": 30,
+        "download_cache_max_age_days": 30,
+    })
+
 _UNIT_TESTS = [
     _test_a_workspace_rc_names_the_root_to_collect,
     _test_a_workspace_without_the_flag_defers,
-    _test_a_relative_root_resolves_against_the_workspace,
+    _test_a_relative_root_resolves_as_bazel_resolves_it,
     _test_an_absolute_root_is_left_alone,
     _test_the_last_rc_entry_wins,
     _test_fmt_kb,
@@ -405,6 +471,10 @@ _UNIT_TESTS = [
     _test_scan_lists_youngest_first,
     _test_fmt_age,
     _test_a_running_server_vetoes_the_age_rule,
+    _test_the_server_veto_survives_another_spelling_of_the_root,
+    _test_a_process_that_is_not_a_server_does_not_veto,
+    _test_a_pooled_slot_with_a_server_stays_pooled,
+    _test_canonical,
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_the_orphan_note_states_the_grace_period,
     _test_the_undetermined_note_states_the_max_age,
@@ -417,6 +487,8 @@ _UNIT_TESTS = [
     _test_default_policy_is_gcs,
     _test_output_bases_document,
     _test_a_group_drops_columns_it_has_no_values_for,
+    _test_resolve_root_refuses_a_missing_root,
+    _test_policy_entry_is_in_the_flags_units,
 ]
 
 def _test_impl(ctx):

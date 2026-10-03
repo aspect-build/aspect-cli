@@ -33,14 +33,16 @@ bases outright, whatever their state, stopping a running server first, and
 leaves the download cache alone. An orphan's server is stopped before its base
 is removed: nothing can use it.
 
-A base is renamed to `.gc-trash-<name>` before it is deleted. A delete that fails
+Each base not named on the command line is checked again just before it goes,
+and left alone if Bazel has used it since the scan — the confirmation can sit at
+the prompt for minutes. A base is renamed to `.gc-trash-<name>` before it is
+deleted. A delete that fails
 part way would otherwise leave a base that has lost what attributes it to a
 workspace; the trash name keeps it recognisable, and the next run finishes it.
 """
 
-load("@std//time.axl", "time")
 load("./private/lib/confirm.axl", "confirm")
-load("./private/lib/environment.axl", "info", "warn")
+load("./private/lib/environment.axl", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/text.axl", "pluralize")
 
@@ -66,9 +68,15 @@ _Plan = record(
 _Outcome = record(
     reaped = field(int),
     reaped_kb = field(int),
+    # Bases left alone because something used them after the scan.
+    skipped = field(int),
     pruned = field(int),
     pruned_kb = field(int),
 )
+
+_REAPED = "reaped"
+_SKIPPED = "skipped"
+_FAILED = "failed"
 
 def _capitalize(s: str) -> str:
     """First letter upper-cased, so one phrase can serve both a sentence that
@@ -98,7 +106,7 @@ def _document(root: str, dry_run: bool, policy: dict, plan, outcome) -> dict:
         "output_user_root": root,
         "dry_run": dry_run,
         "policy": policy,
-        "output_bases": output_bases.counts(plan.bases),
+        "counts": output_bases.counts(plan.bases),
         "removals": [output_bases.base_entry(b, plan.sizes) for b in plan.removals],
         "download_cache": {
             "entries": plan.cache_entries,
@@ -109,14 +117,14 @@ def _document(root: str, dry_run: bool, policy: dict, plan, outcome) -> dict:
         },
         "reclaimable_kb": _removal_kb(plan) + stale_kb,
         "reaped": outcome.reaped,
+        "skipped": outcome.skipped,
         "freed_kb": outcome.reaped_kb + outcome.pruned_kb,
     }
 
 def _policy_entry(policy, requested: list[str]) -> dict:
-    """The policy for the document, in the units its flags take."""
-    entry = {p.arg: getattr(policy, p.field) // p.unit_us for p in output_bases.PERIODS.values()}
-    entry["bazel_output_bases"] = requested
-    return entry
+    """The policy for the document: the periods, and the bases named with
+    `--bazel-output-base`."""
+    return output_bases.policy_entry(policy) | {"bazel_output_bases": requested}
 
 def _policy_from_args(args):
     """The `Policy` the period flags ask for, or None when one is negative."""
@@ -222,45 +230,55 @@ def _make_writable(ctx: TaskContext, path: str) -> None:
 def _move_to_trash(ctx: TaskContext, path: str) -> str:
     """Rename `path` to `.gc-trash-<name>` beside it and return the new path,
     or "" when the rename failed. A path already in the trash is returned as
-    is."""
+    is. Trash an earlier run left under the same name is cleared first, since
+    a rename onto a non-empty directory fails."""
     idx = path.rfind("/")
     name = path[idx + 1:]
     if name.startswith(output_bases.TRASH_PREFIX):
         return path
     trash = path[:idx + 1] + output_bases.TRASH_PREFIX + name
+    if ctx.std.fs.exists(trash):
+        _remove_tree(ctx, trash)
     err, _ = catch(ctx.std.fs.rename, path, trash)
     if err != None:
         warn(ctx.std, "could not move " + path + " aside to delete it: " + str(err))
         return ""
     return trash
 
-def _reap(ctx: TaskContext, path: str, pid: int) -> bool:
-    """Stop the base's server if it is really its server, then delete the base
-    by way of the trash.
+def _reap(ctx: TaskContext, b, requested: bool) -> str:
+    """Remove base `b` by way of the trash: `_REAPED`, `_SKIPPED` or `_FAILED`.
 
-    The server is signalled rather than asked to shut down over its RPC port:
-    `bazel shutdown` against a dead workspace would start a server to shut it
-    down, and everything the running one holds lives in the directory about to
-    be removed.
+    A base not named on the command line is checked again first, and skipped
+    when Bazel has used it since the scan: the confirmation may have sat at the
+    prompt for minutes, and a build started meanwhile — in a recreated worktree,
+    or an idle base woken up — must not lose its output base mid-run.
+
+    Its server, if it is really its server, is then signalled rather than asked
+    to shut down over its RPC port: `bazel shutdown` against a dead workspace
+    would start a server to shut it down, and everything the running one holds
+    lives in the directory about to be removed.
     """
-    if output_bases.is_this_bases_server(ctx, pid, path):
-        ctx.std.process.command("kill").args([str(pid)]) \
+    if not requested and b.state != output_bases.TRASH and output_bases.last_used(ctx, b.path) > b.last_used:
+        return _SKIPPED
+    if output_bases.is_this_bases_server(ctx, b.pid, b.path):
+        ctx.std.process.command("kill").args([str(b.pid)]) \
             .stdout("null").stderr("null").spawn().wait()
-    trash = _move_to_trash(ctx, path)
+    trash = _move_to_trash(ctx, b.path)
     if not trash:
-        return False
+        return _FAILED
     err = _remove_tree(ctx, trash)
     if err:
         warn(ctx.std, "could not remove " + trash + ": " + err + " (the next `aspect gc` retries it)")
-        return False
-    return True
+        return _FAILED
+    return _REAPED
 
-def _select(bases: list, root: str, requested: list[str]) -> tuple:
+def _select(bases: list, root: str, requested: list[str], canonical = lambda p: p) -> tuple:
     """`(selected, unmatched)` for the bases `--bazel-output-base` names.
 
-    Each name is a base's directory name (its md5) or its path. A path must sit
-    directly under `root`: this deletes what it is pointed at, so it only ever
-    points at something the scan found there.
+    Each name is a base's directory name (its md5) or its path. A path's
+    directory must be `root` once `canonical` resolves it: this deletes what it
+    is pointed at, so it only ever points at something the scan found there,
+    however the path was spelled.
     """
     by_name = {b.name: b for b in bases}
     selected = []
@@ -269,7 +287,7 @@ def _select(bases: list, root: str, requested: list[str]) -> tuple:
         name = req.rstrip("/")
         idx = name.rfind("/")
         if idx >= 0:
-            name = name[idx + 1:] if name[:idx] == root else ""
+            name = name[idx + 1:] if canonical(name[:idx] or "/") == root else ""
         b = by_name.get(name)
         if b == None:
             unmatched.append(req)
@@ -277,17 +295,21 @@ def _select(bases: list, root: str, requested: list[str]) -> tuple:
             selected.append(b)
     return (selected, unmatched)
 
-def _collect(ctx: TaskContext, streaming: bool, plan):
+def _collect(ctx: TaskContext, streaming: bool, plan, requested: bool):
     """Remove everything in `plan`, narrating each base before its removal: a
     gigabyte tree takes seconds to unlink, and the line says where that time
     goes."""
-    reaped, reaped_kb = 0, 0
+    reaped, reaped_kb, skipped = 0, 0, 0
     for i, b in enumerate(plan.removals):
         kb = plan.sizes.get(b.path, 0)
         output_bases.say(streaming, "  [%d/%d] removing %s  %s" % (i + 1, len(plan.removals), output_bases.fmt_kb(kb), b.name))
-        if _reap(ctx, b.path, b.pid):
+        result = _reap(ctx, b, requested)
+        if result == _REAPED:
             reaped += 1
             reaped_kb += kb
+        elif result == _SKIPPED:
+            skipped += 1
+            output_bases.say(streaming, "        left alone: Bazel used it after the scan")
     if plan.stale:
         output_bases.say(streaming, "  pruning %s…" % _entries(len(plan.stale)))
     pruned, pruned_kb = 0, 0
@@ -295,18 +317,28 @@ def _collect(ctx: TaskContext, streaming: bool, plan):
         if not _remove_tree(ctx, e.path):
             pruned += 1
             pruned_kb += e.kb
-    return _Outcome(reaped = reaped, reaped_kb = reaped_kb, pruned = pruned, pruned_kb = pruned_kb)
+    return _Outcome(reaped = reaped, reaped_kb = reaped_kb, skipped = skipped, pruned = pruned, pruned_kb = pruned_kb)
 
 def _failure(plan, outcome):
     """The conclusion for a run that could not remove everything, or None."""
     failed = []
-    if outcome.reaped < len(plan.removals):
-        failed.append(pluralize(len(plan.removals) - outcome.reaped, output_bases.BASE))
+    failed_bases = len(plan.removals) - outcome.reaped - outcome.skipped
+    if failed_bases:
+        failed.append(pluralize(failed_bases, output_bases.BASE))
     if outcome.pruned < len(plan.stale):
         failed.append(_entries(len(plan.stale) - outcome.pruned))
     if not failed:
         return None
     return TaskConclusion(exit_code = 1, message = " and ".join(failed) + " could not be removed")
+
+def _summary(outcome, failed: bool) -> str:
+    """The closing line of a run that removed things."""
+    line = "reclaimed " + output_bases.fmt_kb(outcome.reaped_kb + outcome.pruned_kb)
+    if outcome.skipped:
+        line += "; left %s alone, used after the scan" % pluralize(outcome.skipped, output_bases.BASE)
+    if failed:
+        line += "; the rest could not be removed"
+    return line
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     """Scan, list, confirm, collect, report.
@@ -325,24 +357,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             message = ", ".join(["--" + p.arg.replace("_", "-") for p in output_bases.PERIODS.values()]) + " take 0 or more",
         )
 
-    root = output_bases.output_user_root(ctx, ctx.args.output_user_root)
-    if not ctx.std.fs.exists(root):
-        return TaskConclusion(
-            exit_code = 1,
-            message = "no Bazel output user root at " + root +
-                      " — pass --output-user-root to point at one",
-        )
-
+    root, missing = output_bases.resolve_root(ctx, ctx.args.output_user_root)
+    if missing:
+        return missing
     streaming = ctx.args.output != "json"
-    info(ctx.std, "Bazel output user root: " + root)
-    now_us = time.now_ms() * 1000
-
-    say(streaming, "  scanning %ss…" % output_bases.BASE)
-    bases = output_bases.scan(ctx, root, now_us, policy)
+    bases, now_us = output_bases.scan_root(ctx, streaming, root, policy)
 
     requested = ctx.args.bazel_output_bases
     if requested:
-        removals, unmatched = _select(bases, root, requested)
+        removals, unmatched = _select(bases, root, requested, lambda p: output_bases.canonical(ctx, p))
         if unmatched:
             return TaskConclusion(
                 exit_code = 1,
@@ -379,10 +402,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
 
     if verdict == confirm.SKIP:
-        outcome = _Outcome(reaped = 0, reaped_kb = 0, pruned = 0, pruned_kb = 0)
+        outcome = _Outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0)
         failure = None
     else:
-        outcome = _collect(ctx, streaming, plan)
+        outcome = _collect(ctx, streaming, plan, requested = bool(requested))
         failure = _failure(plan, outcome)
     freed = outcome.reaped_kb + outcome.pruned_kb
 
@@ -397,10 +420,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("  nothing to reclaim")
     elif ctx.args.dry_run:
         print("  would reclaim " + fmt_kb(reclaimable))
-    elif failure == None:
-        print("  reclaimed " + fmt_kb(freed))
     else:
-        print("  reclaimed %s; %s could not be removed" % (fmt_kb(freed), fmt_kb(reclaimable - freed)))
+        print("  " + _summary(outcome, failure != None))
     return failure or 0
 
 def _period_arg(placeholder: str, description: str):
@@ -419,10 +440,7 @@ An output base is removed when its workspace is gone (once it has not been used 
 Otherwise never touches a running Bazel server whose workspace still exists, a pooled `aspect worktree` slot, or anything beside the output bases that is not named like one (`install/`, `cache/`). `aspect output-bases` lists every base and its state, read-only.""",
     implementation = _impl,
     args = {
-        "output_user_root": args.string(
-            default = "",
-            description = "The Bazel output user root to collect. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere). Pass this to collect a root other than the one this workspace uses.",
-        ),
+        "output_user_root": output_bases.output_user_root_arg(),
         "base_max_age_days": _period_arg(
             "{max_age}",
             "Remove an output base no Bazel command has used in this many days, even if its workspace still exists. A base with a running server is kept. 0 turns this off, leaving only bases whose workspace is gone.",
@@ -458,6 +476,7 @@ Otherwise never touches a running Bazel server whose workspace still exists, a p
 
 # Exposed for gc_test.axl; not part of the task's surface.
 testonly_document = _document
+testonly_failure = _failure
 testonly_move_to_trash = _move_to_trash
 testonly_outcome = _Outcome
 testonly_plan = _Plan
@@ -467,3 +486,5 @@ testonly_reap = _reap
 testonly_remove_tree = _remove_tree
 testonly_scan_download_cache = _scan_download_cache
 testonly_select = _select
+testonly_summary = _summary
+testonly_why = _why

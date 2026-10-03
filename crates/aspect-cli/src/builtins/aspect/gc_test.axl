@@ -14,7 +14,8 @@ the read-only directories Bazel leaves under `bazel-out/`, and it must not
 follow the execroot's symlinks out into the user's checkout.
 """
 
-load("@aspect//gc.axl", "testonly_document", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select")
+load("@aspect//gc.axl", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select", "testonly_summary", "testonly_why")
+load("@aspect//private/lib/output_bases.axl", "output_bases")
 load("@aspect//private/lib/output_bases_fixtures.axl", fx = "fixtures")
 
 def _eq(label, got, want):
@@ -32,14 +33,14 @@ def _doc(ctx, root, sizes = {}, stale = []):
         cache_entries = len(stale),
         stale = stale,
     )
-    outcome = testonly_outcome(reaped = 0, reaped_kb = 0, pruned = 0, pruned_kb = 0)
+    outcome = testonly_outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0)
     return testonly_document(root, True, {"base_max_age_days": 30}, plan, outcome)
 
 def _test_document_counts_every_state(ctx):
     """`output_bases` carries a count for every state, zero included, so a
     consumer reads a key rather than probing for it."""
     root = fx.fixture(ctx)
-    counts = _doc(ctx, root)["output_bases"]
+    counts = _doc(ctx, root)["counts"]
     _eq("keys", sorted(counts.keys()), ["idle", "live", "orphaned", "orphaned_within_grace", "pooled", "trash", "undetermined"])
     _eq("live", counts["live"], 2)
     _eq("orphaned", counts["orphaned"], 2)
@@ -69,8 +70,7 @@ def _test_reap_removes_a_base_bazel_left_read_only(ctx):
     ctx.std.fs.write(locked + "/out.txt", "an action output\n")
     ctx.std.fs.set_permissions(locked, 0o555)
 
-    reaped = testonly_reap(ctx, base, 0)
-    _eq("reported as reaped", reaped, True)
+    _eq("reported as reaped", testonly_reap(ctx, _named(base), True), "reaped")
     _eq("actually gone", ctx.std.fs.exists(base), False)
 
 def _test_reap_does_not_reach_outside_the_base(ctx):
@@ -90,14 +90,14 @@ def _test_reap_does_not_reach_outside_the_base(ctx):
     fx.symlink(ctx, ws + "/source.txt", execroot + "/source.txt")
     fx.symlink(ctx, ws, execroot + "/wsdir")
 
-    _eq("reaped", testonly_reap(ctx, base, 0), True)
+    _eq("reaped", testonly_reap(ctx, _named(base), True), "reaped")
     _eq("base is gone", ctx.std.fs.exists(base), False)
     _eq("the workspace survives", ctx.std.fs.exists(ws + "/source.txt"), True)
     _eq("and is still read-only", ctx.std.fs.metadata(ws + "/source.txt").readonly, True)
 
 def _test_reap_leaves_no_trash(ctx):
     root = fx.fixture(ctx)
-    _eq("reaped", testonly_reap(ctx, root + "/" + fx.DEAD, 0), True)
+    _eq("reaped", testonly_reap(ctx, _named(root + "/" + fx.DEAD), True), "reaped")
     _eq("base gone", ctx.std.fs.exists(root + "/" + fx.DEAD), False)
     _eq("trash gone", ctx.std.fs.exists(root + "/.gc-trash-" + fx.DEAD), False)
 
@@ -121,7 +121,7 @@ def _test_trash_from_an_interrupted_run_is_finished(ctx):
     found = [b for b in fx.scan(ctx, root) if b.name == ".gc-trash-" + fx.DEAD]
     _eq("picked up", len(found), 1)
     _eq("as trash", found[0].state, "trash")
-    _eq("reaped where it lies", testonly_reap(ctx, trash, 0), True)
+    _eq("reaped where it lies", testonly_reap(ctx, _named(trash, "trash"), False), "reaped")
     _eq("gone", ctx.std.fs.exists(trash), False)
 
 def _cache_entry(ctx, root, digest, size):
@@ -203,6 +203,72 @@ def _test_select_refuses_what_the_scan_did_not_find(ctx):
     _selected, unmatched = testonly_select(bases, root, ["install", elsewhere, "deadbeef"])
     _eq("all refused", unmatched, ["install", elsewhere, "deadbeef"])
 
+def _named(path, state = "orphan"):
+    """A base for `_reap`, as `--bazel-output-base` would name it."""
+    return output_bases.Base(name = path[path.rfind("/") + 1:], path = path, workspace = "", state = state, pid = 0, last_used = 0)
+
+def _base(state, workspace = "", last_used = 0):
+    return output_bases.Base(name = "n", path = "/root/n", workspace = workspace, state = state, pid = 0, last_used = last_used)
+
+def _test_why_names_the_rule_that_removes_a_base(ctx):
+    now = 45 * fx.DAY_US
+    _eq("orphan", testonly_why(_base("orphan", "/gone"), now), "workspace gone: /gone")
+    _eq("idle", testonly_why(_base("idle", "/ws"), now), "unused for 45d; workspace /ws")
+    _eq("idle, undetermined", testonly_why(_base("idle"), now), "unused for 45d")
+    _eq("trash", testonly_why(_base("trash"), now), "left by an interrupted gc")
+    _eq("a kept state is only removed on request", testonly_why(_base("live", "/ws"), now), "requested; live; workspace /ws")
+
+def _test_failure_names_only_what_failed(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+    plan = testonly_plan(bases = bases, removals = bases[:2], sizes = {}, cache_entries = 3, stale = [1, 2, 3])
+
+    def outcome(reaped, pruned):
+        return testonly_outcome(reaped = reaped, reaped_kb = 0, skipped = 0, pruned = pruned, pruned_kb = 0)
+
+    _eq("all removed", testonly_failure(plan, outcome(2, 3)), None)
+    skipped = testonly_outcome(reaped = 1, reaped_kb = 0, skipped = 1, pruned = 3, pruned_kb = 0)
+    _eq("a skipped base is not a failure", testonly_failure(plan, skipped), None)
+    _eq("a base", testonly_failure(plan, outcome(1, 3)).message, "1 Bazel output base could not be removed")
+    _eq("both", testonly_failure(plan, outcome(0, 2)).message, "2 Bazel output bases and 1 Bazel download cache entry could not be removed")
+    _eq("exit code", testonly_failure(plan, outcome(0, 0)).exit_code, 1)
+
+def _test_a_base_used_after_the_scan_is_left_alone(ctx):
+    """The prompt can sit for minutes; a build started meanwhile keeps its
+    output base. One named on the command line goes regardless."""
+    root = fx.fixture(ctx)
+    dead = [b for b in fx.scan(ctx, root) if b.name == fx.DEAD][0]
+    ctx.std.fs.write(dead.path + "/java.log", "")
+    _eq("skipped", testonly_reap(ctx, dead, False), "skipped")
+    _eq("still there", ctx.std.fs.exists(dead.path), True)
+    _eq("named, removed anyway", testonly_reap(ctx, dead, True), "reaped")
+
+def _test_a_base_renames_onto_leftover_trash(ctx):
+    """Trash an earlier run could not finish must not block the next rename."""
+    root = fx.fixture(ctx)
+    ctx.std.fs.create_dir_all(root + "/.gc-trash-" + fx.DEAD + "/leftover")
+    _eq("reaped", testonly_reap(ctx, _named(root + "/" + fx.DEAD), True), "reaped")
+    _eq("trash gone", ctx.std.fs.exists(root + "/.gc-trash-" + fx.DEAD), False)
+
+def _test_select_resolves_another_spelling_of_the_root(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+
+    def canonical(p):
+        return root if p in [root + "/.", "/symlinked/root"] else p
+
+    selected, unmatched = testonly_select(bases, root, [root + "/./" + fx.LIVE, "/symlinked/root/" + fx.DEAD], canonical)
+    _eq("both found", sorted([b.name for b in selected]), sorted([fx.LIVE, fx.DEAD]))
+    _eq("none unmatched", unmatched, [])
+
+def _test_summary(ctx):
+    def outcome(skipped):
+        return testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = skipped, pruned = 0, pruned_kb = 0)
+
+    _eq("clean", testonly_summary(outcome(0), False), "reclaimed 2 MB")
+    _eq("skipped", testonly_summary(outcome(1), False), "reclaimed 2 MB; left 1 Bazel output base alone, used after the scan")
+    _eq("failed", testonly_summary(outcome(0), True), "reclaimed 2 MB; the rest could not be removed")
+
 _UNIT_TESTS = [
     _test_document_counts_every_state,
     _test_document_removals_carry_state_and_size,
@@ -219,6 +285,12 @@ _UNIT_TESTS = [
     _test_policy_entry_reports_the_flags_units,
     _test_select_by_hash_or_path,
     _test_select_refuses_what_the_scan_did_not_find,
+    _test_why_names_the_rule_that_removes_a_base,
+    _test_failure_names_only_what_failed,
+    _test_a_base_used_after_the_scan_is_left_alone,
+    _test_a_base_renames_onto_leftover_trash,
+    _test_select_resolves_another_spelling_of_the_root,
+    _test_summary,
 ]
 
 def _test_impl(ctx):

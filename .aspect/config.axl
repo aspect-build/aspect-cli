@@ -45,6 +45,7 @@ load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
+load("@aspect//private/lib/path_normalize_test.axl", "path_normalize_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
@@ -436,6 +437,10 @@ def config(ctx: ConfigContext):
     # Repository and branch from `.git`, against real clones and worktrees.
     # Run with: aspect dev test-git-checkout
     ctx.tasks.add(git_checkout_tests)
+
+    # Path normalization: cwd rebasing and `normpath`.
+    # Run with: aspect dev test-path-normalize
+    ctx.tasks.add(path_normalize_tests)
 
     # Shared text helpers (padding, pluralize, number formatting).
     # Run with: aspect dev test-text

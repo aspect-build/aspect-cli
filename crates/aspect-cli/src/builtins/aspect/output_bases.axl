@@ -11,8 +11,6 @@ machine with tens of gigabytes of them. `--sort=size` measures them on its own,
 since there is nothing to sort by otherwise.
 """
 
-load("@std//time.axl", "time")
-load("./private/lib/environment.axl", "info")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/text.axl", "pluralize")
 
@@ -20,9 +18,10 @@ load("./private/lib/text.axl", "pluralize")
 # changes meaning. Additive keys do not bump it.
 _SCHEMA_VERSION = 1
 
-def _document(root: str, sort: str, policy: dict, bases: list, sizes: dict, checkouts: dict, caches: dict) -> dict:
-    """The `--output=json` document. `kb` keys appear only when sizes were
-    measured; `repository` and `branch` only for a base checked out from git."""
+def _document(root: str, sort: str, policy: dict, bases: list, measured: bool, sizes: dict, checkouts: dict, caches: dict) -> dict:
+    """The `--output=json` document. `kb` and `caches` appear when sizes were
+    `measured`, even if nothing was there to measure; `repository` and `branch`
+    only for a base checked out from git."""
     doc = {
         "schema_version": _SCHEMA_VERSION,
         "output_user_root": root,
@@ -35,28 +34,19 @@ def _document(root: str, sort: str, policy: dict, bases: list, sizes: dict, chec
             for b in output_bases.sort(output_bases.in_state(bases, state), sort, sizes, checkouts)
         ],
     }
-    if sizes:
+    if measured:
         doc["kb"] = output_bases.kb_by_state(bases, sizes)
         doc["caches"] = caches
     return doc
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    root = output_bases.output_user_root(ctx, ctx.args.output_user_root)
-    if not ctx.std.fs.exists(root):
-        return TaskConclusion(
-            exit_code = 1,
-            message = "no Bazel output user root at " + root +
-                      " — pass --output-user-root to point at one",
-        )
-
+    root, missing = output_bases.resolve_root(ctx, ctx.args.output_user_root)
+    if missing:
+        return missing
     streaming = ctx.args.output != "json"
-    info(ctx.std, "Bazel output user root: " + root)
-    now_us = time.now_ms() * 1000
     policy = output_bases.default_policy()
     sort = ctx.args.sort
-
-    output_bases.say(streaming, "  scanning %ss…" % output_bases.BASE)
-    bases = output_bases.scan(ctx, root, now_us, policy)
+    bases, now_us = output_bases.scan_root(ctx, streaming, root, policy)
     measure = ctx.args.measure_sizes or sort == "size"
     sizes = {}
     if measure:
@@ -65,9 +55,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     caches = output_bases.cache_report(ctx, streaming, root) if measure else {}
 
     if ctx.args.output == "json":
-        policy_entry = {p.arg: p.default for p in output_bases.PERIODS.values()}
         ctx.std.io.stdout.write(json.encode(
-            _document(root, sort, policy_entry, bases, sizes, checkouts, caches),
+            _document(root, sort, output_bases.policy_entry(policy), bases, measure, sizes, checkouts, caches),
             indent = 2,
         ) + "\n")
         return 0
@@ -90,10 +79,7 @@ Bases are grouped by the state `aspect gc` would give them with its default peri
 `aspect gc` removes what this lists as removable.""",
     implementation = _impl,
     args = {
-        "output_user_root": args.string(
-            default = "",
-            description = "The Bazel output user root to list. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere).",
-        ),
+        "output_user_root": output_bases.output_user_root_arg(),
         "sort": args.string(
             default = "last-used",
             values = list(output_bases.SORTS.keys()),

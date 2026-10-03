@@ -17,7 +17,8 @@ A base's state, first match wins (`classify`):
   - **orphaned** — its workspace is gone; within the grace period after its last
     use it is held back instead, so a worktree recreated at the same path keeps
     it.
-  - **idle** — unused for the maximum age, whatever its workspace.
+  - **idle** — unused for the maximum age, whatever its workspace, unless a
+    Bazel server is running in it.
   - **live** or **undetermined** otherwise.
 
 `aspect gc` renames a base to `.gc-trash-<name>` before deleting it; the scan
@@ -27,8 +28,11 @@ The rules' periods (`PERIODS`) default to what `aspect gc` applies, so a listing
 classifies bases as a default `gc` run would.
 """
 
+load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
+load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
+load("./path_normalize.axl", "normpath")
 load("./text.axl", "pad_left", "pad_right", "pluralize")
 
 HOUR_US = 3600 * 1000000
@@ -41,7 +45,7 @@ BASE = "Bazel output base"
 TRASH_PREFIX = ".gc-trash-"
 DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
 
-# `aspect worktree` keeps its pool slots here; see `private/lib/worktree.axl`.
+# Under the home directory: where `aspect worktree` keeps its pool slots.
 _POOLS = "/.aspect/worktrees"
 
 # Rewritten by Bazel as a server starts or runs a command, so statting these few
@@ -224,6 +228,12 @@ def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags
     read and the parse fails, which is "" rather than an error: the platform
     default is still a usable answer. `startup_flags` is for tests that need to
     shut the ambient rc files out (`--nosystem_rc --nohome_rc`).
+
+    A value is made absolute as Bazel's `AbsolutePathFromFlag` does: a leading
+    `~` is the home directory, and a relative path is taken against the
+    directory the command runs in. Bazel parses its startup options before it
+    changes into the workspace, so that is the caller's directory, not the
+    workspace root.
     """
     err, rc = catch(ctx.bazel.parse_rc, root = root, startup_flags = startup_flags) if root else catch(ctx.bazel.parse_rc, startup_flags = startup_flags)
     if err != None:
@@ -231,13 +241,12 @@ def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags
     value = rc.flag_value("--output_user_root", command = "startup")
     if not value:
         return ""
+    if value.startswith("~"):
+        rest = value[1:]
+        return ctx.std.env.home_dir() + (rest if rest.startswith("/") else "/" + rest)
     if value.startswith("/"):
         return value
-
-    # Bazel resolves a relative value against the workspace root, not the
-    # caller's cwd. Reading it as cwd-relative agrees only when the two happen
-    # to coincide, and sends `gc` somewhere else from any subdirectory.
-    return (root or ctx.std.env.bazel_root_dir()) + "/" + value
+    return ctx.std.env.current_dir() + "/" + value
 
 def _platform_output_user_root(ctx: TaskContext) -> str:
     """Bazel's default output user root for this platform."""
@@ -357,9 +366,12 @@ def _server_pid(ctx: TaskContext, base: str) -> int:
 def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
     """True when `pid` is live AND is the Bazel server for `base`.
 
-    A recorded PID outlives the process that wrote it, and the OS reuses PIDs.
-    Matching the base path against the process's own command line is what keeps
-    this from signalling an unrelated process that inherited the number.
+    A recorded PID outlives the process that wrote it, and the OS reuses PIDs,
+    so the process's own command line must carry `--output_base=` ending in
+    this base's md5 name. The name rather than the whole path: the server
+    records the path as its client spelled it, which need not match this scan's
+    spelling of the root — a trailing slash, `./`, or a symlink such as `/var`
+    for `/private/var`.
     """
     if pid <= 0:
         return False
@@ -367,7 +379,8 @@ def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
         .stdout("piped").stderr("null").spawn().wait_with_output()
     if out.status.code != 0:
         return False
-    return base in out.stdout
+    name = base[base.rfind("/") + 1:]
+    return "--output_base=" in out.stdout and ("/" + name) in out.stdout
 
 def _in_state(bases: list, state: str) -> list:
     return [b for b in bases if b.state == state]
@@ -445,7 +458,8 @@ def _classify(workspace: str, workspace_exists: bool, pooled: bool, age_us: int,
 def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
     """Classify every output base under `root`, youngest first, including any
     trash an earlier `gc` failed to finish removing."""
-    pools = ctx.std.env.home_dir() + _POOLS + "/"
+    home = ctx.std.env.home_dir()
+    pools = {h + _POOLS + "/": True for h in [home, _canonical(ctx, home)]}.keys()
     bases = []
     for entry in ctx.std.fs.read_dir(root):
         if not entry.is_dir:
@@ -464,17 +478,18 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
         if not _is_output_base_name(entry.path):
             continue
         workspace = _workspace_of(ctx, path)
+        pooled = any([workspace.startswith(p) for p in pools])
         last_used = _last_used(ctx, path)
         pid = _server_pid(ctx, path)
         state = _classify(
             workspace,
             bool(workspace) and ctx.std.fs.exists(workspace),
-            workspace.startswith(pools),
+            pooled,
             now_us - last_used,
             policy,
         )
         if state == IDLE and _is_this_bases_server(ctx, pid, path):
-            state = LIVE if workspace else UNKNOWN
+            state = POOLED if pooled else LIVE if workspace else UNKNOWN
         bases.append(Base(
             name = entry.path,
             path = path,
@@ -659,6 +674,50 @@ def _output_user_root(ctx: TaskContext, explicit: str) -> str:
             _configured_output_user_root(ctx) or
             _platform_output_user_root(ctx))
 
+def _canonical(ctx: TaskContext, path: str) -> str:
+    """`path` with symlinks, `.` and `..` resolved, via `realpath`. A path
+    `realpath` cannot resolve — missing, or no `realpath` — comes back
+    normalized if absolute, else as given."""
+    err, out = catch(lambda: ctx.std.process.command("realpath").args([path])
+        .stdout("piped").stderr("null").spawn().wait_with_output())
+    if err == None and out.status.code == 0 and out.stdout.strip():
+        return out.stdout.strip()
+    return normpath(path) if path.startswith("/") else path
+
+def _resolve_root(ctx: TaskContext, explicit: str) -> tuple:
+    """`(root, None)` for the output user root to work on, or `(root,
+    conclusion)` when it does not exist.
+
+    The root is canonical, so every path built from it has one spelling: what
+    `--bazel-output-base` is compared against, and what the listing shows.
+    """
+    root = _canonical(ctx, _output_user_root(ctx, explicit))
+    if ctx.std.fs.exists(root):
+        return (root, None)
+    return (root, TaskConclusion(
+        exit_code = 1,
+        message = "no Bazel output user root at " + root + " — pass --output-user-root to point at one",
+    ))
+
+def _scan_root(ctx: TaskContext, streaming: bool, root: str, policy) -> tuple:
+    """`(bases, now_us)`: `root` announced and scanned under `policy`, against
+    one clock reading that the caller's ages also use."""
+    info(ctx.std, "Bazel output user root: " + root)
+    now_us = time.now_ms() * 1000
+    _say(streaming, "  scanning %ss…" % BASE)
+    return (_scan(ctx, root, now_us, policy), now_us)
+
+def _policy_entry(policy) -> dict:
+    """`policy` for a document, keyed by `aspect gc`'s period flags in their
+    units."""
+    return {p.arg: getattr(policy, p.field) // p.unit_us for p in PERIODS.values()}
+
+def _output_user_root_arg():
+    return args.string(
+        default = "",
+        description = "The Bazel output user root to work on. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere).",
+    )
+
 output_bases = namespace(
     BASE = BASE,
     Base = Base,
@@ -680,6 +739,7 @@ output_bases = namespace(
     TRASH_PREFIX = TRASH_PREFIX,
     UNKNOWN = UNKNOWN,
     base_entry = _base_entry,
+    canonical = _canonical,
     cache_report = _cache_report,
     checkouts = _checkouts,
     classify = _classify,
@@ -694,10 +754,15 @@ output_bases = namespace(
     is_output_base_name = _is_output_base_name,
     is_this_bases_server = _is_this_bases_server,
     kb_by_state = _kb_by_state,
+    last_used = _last_used,
     listing_hint = _listing_hint,
     measure = _measure,
     mtime_us = _mtime_us,
     output_user_root = _output_user_root,
+    output_user_root_arg = _output_user_root_arg,
+    policy_entry = _policy_entry,
+    resolve_root = _resolve_root,
+    scan_root = _scan_root,
     print_caches = _print_caches,
     print_census = _print_census,
     print_listing = _print_listing,
