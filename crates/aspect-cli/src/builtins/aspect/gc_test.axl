@@ -27,7 +27,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_caches", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_render", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_caches", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_kept_columns", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_render", "testonly_row", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -613,6 +613,21 @@ def _test_the_download_cache_reason_states_the_age(ctx):
     _eq("default", testonly_render(reason, month), ["pruned after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
     _eq("off", testonly_render(reason, off), ["not pruned; --download-cache-max-age-days=N prunes after N days unused"])
 
+def _test_kept_listing_columns_line_up_under_headers(ctx):
+    columns = testonly_kept_columns
+    header = testonly_row(columns, {c.header: c.header for c in columns})
+    row = testonly_row(columns, {
+        "last used": "3d ago",
+        "size": "109 MB",
+        "output base": _LIVE,
+        "workspace": "/ws",
+    })
+    _eq("header", header, "    last used      size  output base                       workspace")
+    _eq("row", row, "       3d ago    109 MB  " + _LIVE + "  /ws")
+    _eq("output base column aligned", header.index("output base"), row.index(_LIVE))
+    _eq("workspace column aligned", header.index("workspace"), row.index("/ws"))
+    _eq("an empty last cell leaves no trailing space", testonly_row(columns, {"last used": "", "size": "", "output base": _WEIRD, "workspace": ""}).endswith(_WEIRD), True)
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -651,6 +666,7 @@ _UNIT_TESTS = [
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_policy_from_args,
     _test_policy_entry_reports_the_flags_units,
+    _test_kept_listing_columns_line_up_under_headers,
     _test_select_by_hash_or_path,
     _test_select_refuses_what_the_scan_did_not_find,
     _test_the_orphan_note_states_the_grace_period,

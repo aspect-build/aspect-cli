@@ -703,6 +703,30 @@ def _policy_entry(policy, requested: list[str]) -> dict:
     entry["bazel_output_bases"] = requested
     return entry
 
+_Column = record(
+    header = field(str),
+    width = field(int),
+    right = field(bool, default = False),
+)
+
+# The `--verbose` listing of kept bases. `size` is dropped unless
+# `--measure-sizes` measured them; the last column is not padded.
+_KEPT_COLUMNS = [
+    _Column(header = "last used", width = 9, right = True),
+    _Column(header = "size", width = 8, right = True),
+    _Column(header = "output base", width = 32),
+    _Column(header = "workspace", width = 0),
+]
+
+def _row(columns: list, cells: dict) -> str:
+    """One line of a listing: each column's cell padded to its width and
+    aligned, two spaces apart."""
+    out = []
+    for c in columns:
+        cell = cells[c.header]
+        out.append(pad_left(cell, c.width) if c.right else pad_right(cell, c.width))
+    return ("    " + "  ".join(out)).rstrip()
+
 def _verbose_hint(bases: list) -> str:
     """The pointer to `--verbose` when it would list something, naming the kept
     states it would show; "" when there is nothing to list."""
@@ -749,9 +773,15 @@ def _print_census(streaming: bool, bases: list, sizes: dict, verbose: bool, now_
             continue
         _say(streaming, "")
         _say(streaming, "  %s (%d):" % (s.heading, len(kept)))
+        columns = [c for c in _KEPT_COLUMNS if sizes or c.header != "size"]
+        _say(streaming, _row(columns, {c.header: c.header for c in columns}))
         for b in kept:
-            kb = pad_left(_fmt_kb(sizes.get(b.path, 0)), 8) + "  " if sizes else ""
-            _say(streaming, "    " + pad_left(_fmt_age(now_us - b.last_used), 4) + "  " + kb + b.name + ("  " + b.workspace if b.workspace else ""))
+            _say(streaming, _row(columns, {
+                "last used": _fmt_age(now_us - b.last_used) + " ago",
+                "size": _fmt_kb(sizes.get(b.path, 0)),
+                "output base": b.name,
+                "workspace": b.workspace,
+            }))
     _say(streaming, "")
 
 def _select(bases: list, root: str, requested: list[str]) -> tuple:
@@ -1039,6 +1069,8 @@ testonly_render = _render
 testonly_remove_tree = _remove_tree
 testonly_scan = _scan
 testonly_scan_download_cache = _scan_download_cache
+testonly_row = _row
+testonly_kept_columns = _KEPT_COLUMNS
 testonly_select = _select
 testonly_verbose_hint = _verbose_hint
 testonly_workspace_of = _workspace_of
