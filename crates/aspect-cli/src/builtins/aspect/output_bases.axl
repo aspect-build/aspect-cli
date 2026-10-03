@@ -1,0 +1,115 @@
+"""`aspect output-bases` — list the Bazel output bases on this machine. Read-only.
+
+Every base under the output user root, grouped by the state `aspect gc` would
+give it with its default periods — live, idle, orphaned, pooled, undetermined —
+with when it was last used, the git repository and branch its workspace is
+checked out on, and the workspace itself. `--measure-sizes` adds each base's
+size and the shared caches'. `--sort` orders the bases within each state.
+
+Sizes are opt-in because they take a `du` of every base: tens of seconds on a
+machine with tens of gigabytes of them. `--sort=size` measures them on its own,
+since there is nothing to sort by otherwise.
+"""
+
+load("@std//time.axl", "time")
+load("./private/lib/environment.axl", "info")
+load("./private/lib/output_bases.axl", "output_bases")
+load("./private/lib/text.axl", "pluralize")
+
+# Bumped whenever a key in the `--output=json` document is renamed, removed, or
+# changes meaning. Additive keys do not bump it.
+_SCHEMA_VERSION = 1
+
+def _document(root: str, sort: str, policy: dict, bases: list, sizes: dict, checkouts: dict, caches: dict) -> dict:
+    """The `--output=json` document. `kb` keys appear only when sizes were
+    measured; `repository` and `branch` only for a base checked out from git."""
+    doc = {
+        "schema_version": _SCHEMA_VERSION,
+        "output_user_root": root,
+        "sort": sort,
+        "policy": policy,
+        "counts": output_bases.counts(bases),
+        "output_bases": [
+            output_bases.base_entry(b, sizes, checkouts)
+            for state in output_bases.STATES
+            for b in output_bases.sort(output_bases.in_state(bases, state), sort, sizes, checkouts)
+        ],
+    }
+    if sizes:
+        doc["kb"] = output_bases.kb_by_state(bases, sizes)
+        doc["caches"] = caches
+    return doc
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    root = output_bases.output_user_root(ctx, ctx.args.output_user_root)
+    if not ctx.std.fs.exists(root):
+        return TaskConclusion(
+            exit_code = 1,
+            message = "no Bazel output user root at " + root +
+                      " — pass --output-user-root to point at one",
+        )
+
+    streaming = ctx.args.output != "json"
+    info(ctx.std, "Bazel output user root: " + root)
+    now_us = time.now_ms() * 1000
+    policy = output_bases.default_policy()
+    sort = ctx.args.sort
+
+    output_bases.say(streaming, "  scanning %ss…" % output_bases.BASE)
+    bases = output_bases.scan(ctx, root, now_us, policy)
+    measure = ctx.args.measure_sizes or sort == "size"
+    sizes = {}
+    if measure:
+        sizes = output_bases.measure(ctx, streaming, pluralize(len(bases), output_bases.BASE), [(b.name, b.path) for b in bases])
+    checkouts = output_bases.checkouts(ctx, bases)
+    caches = output_bases.cache_report(ctx, streaming, root) if measure else {}
+
+    if ctx.args.output == "json":
+        policy_entry = {p.arg: p.default for p in output_bases.PERIODS.values()}
+        ctx.std.io.stdout.write(json.encode(
+            _document(root, sort, policy_entry, bases, sizes, checkouts, caches),
+            indent = 2,
+        ) + "\n")
+        return 0
+
+    output_bases.print_census(streaming, bases, sizes, policy, hint = False)
+    output_bases.print_listing(bases, sizes, checkouts, now_us, sort)
+    if caches:
+        output_bases.print_caches(caches, policy)
+    return 0
+
+output_bases_task = task(
+    kind = "output-bases",
+    summary = "List the Bazel output bases on this machine, with their state, workspace, git branch and size.",
+    description = """List every Bazel output base under the output user root, read-only.
+
+Bases are grouped by the state `aspect gc` would give them with its default periods — live, idle, orphaned, in a worktree pool, undetermined — and show when each was last used, the git repository and branch its workspace is checked out on, and the workspace.
+
+`--measure-sizes` adds each base's size and the shared caches'. It takes a `du` of every base, so it is off by default. `--sort` orders the bases within each state; `--sort=size` measures sizes on its own.
+
+`aspect gc` removes what this lists as removable.""",
+    implementation = _impl,
+    args = {
+        "output_user_root": args.string(
+            default = "",
+            description = "The Bazel output user root to list. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere).",
+        ),
+        "sort": args.string(
+            default = "last-used",
+            values = list(output_bases.SORTS.keys()),
+            description = "Order of the bases within each state: `last-used` (most recent first, default), `size` (largest first; measures sizes), `workspace`, `repository` or `branch` (alphabetical, blanks last).",
+        ),
+        "measure_sizes": args.boolean(
+            default = False,
+            description = "Also measure the size of every Bazel output base and of the Bazel caches shared between them (download cache, repo contents cache, install bases). Adds a size to each state's count and each listed base, and `kb` and `caches` to `--output=json`. Off by default because it walks every file under the output user root — most of a minute on a machine with tens of gigabytes of bases.",
+        ),
+        "output": args.string(
+            default = "text",
+            values = ["text", "json"],
+            description = "stdout format. `text` (default): a human-readable listing on stderr, stdout empty. `json`: one document on stdout with every base, its state and attribution, and sizes when measured.",
+        ),
+    },
+)
+
+# Exposed for output_bases_test.axl; not part of the task's surface.
+testonly_document = _document

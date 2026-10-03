@@ -1,0 +1,98 @@
+"""Unit tests for lib/git_checkout.axl — repository and branch from `.git`.
+
+Run with:
+  aspect dev test-git-checkout
+
+The checkouts are made by real `git` — a clone with a remote, a linked worktree,
+a detached HEAD — so the files read are the ones git actually writes, not a
+guess at their shape.
+"""
+
+load("./git_checkout.axl", "git_checkout")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _git(ctx, cwd, args):
+    out = ctx.std.process.command("git").args(["-C", cwd] + args) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    if out.status.code != 0:
+        fail("git %s: %s" % (" ".join(args), out.stderr))
+
+def _repo(ctx, remote = ""):
+    """A fresh repository on `main` with one commit, and `remote` as origin."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-git-checkout")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    _git(ctx, repo, ["init", "-q", "-b", "main"])
+    _git(ctx, repo, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"])
+    if remote:
+        _git(ctx, repo, ["remote", "add", "origin", remote])
+    return repo
+
+def _test_a_clone(ctx):
+    repo = _repo(ctx, "git@github.com:aspect-build/aspect-cli.git")
+    c = git_checkout.checkout_of(ctx.std, repo)
+    _eq("root", c.root, repo)
+    _eq("repository from origin", c.repository, "aspect-build/aspect-cli")
+    _eq("branch", c.branch, "main")
+
+def _test_a_directory_inside_a_clone(ctx):
+    """A nested Bazel workspace reports the checkout around it."""
+    repo = _repo(ctx)
+    ctx.std.fs.create_dir_all(repo + "/examples/large_bes")
+    c = git_checkout.checkout_of(ctx.std, repo + "/examples/large_bes")
+    _eq("root", c.root, repo)
+    _eq("no origin falls back to the directory name", c.repository, "repo")
+
+def _test_a_linked_worktree(ctx):
+    repo = _repo(ctx, "https://github.com/aspect-build/aspect-cli")
+    wt = repo[:repo.rfind("/")] + "/wt"
+    _git(ctx, repo, ["worktree", "add", "-q", "-b", "fix/login", wt])
+    c = git_checkout.checkout_of(ctx.std, wt)
+    _eq("root", c.root, wt)
+    _eq("repository through commondir", c.repository, "aspect-build/aspect-cli")
+    _eq("the worktree's own branch", c.branch, "fix/login")
+
+def _test_a_detached_head(ctx):
+    repo = _repo(ctx)
+    _git(ctx, repo, ["checkout", "-q", "--detach"])
+    _eq("detached", git_checkout.checkout_of(ctx.std, repo).branch.startswith("detached@"), True)
+
+def _test_outside_any_checkout(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-git-none")
+    _eq("none", git_checkout.checkout_of(ctx.std, tmp), None)
+
+def _test_repository_name(ctx):
+    for url in [
+        "git@github.com:aspect-build/aspect-cli.git",
+        "https://github.com/aspect-build/aspect-cli",
+        "https://github.com/aspect-build/aspect-cli.git/",
+        "ssh://git@github.com/aspect-build/aspect-cli.git",
+    ]:
+        _eq(url, git_checkout.repository_name(url), "aspect-build/aspect-cli")
+    _eq("empty", git_checkout.repository_name(""), "")
+
+_UNIT_TESTS = [
+    _test_a_clone,
+    _test_a_directory_inside_a_clone,
+    _test_a_linked_worktree,
+    _test_a_detached_head,
+    _test_outside_any_checkout,
+    _test_repository_name,
+]
+
+def _impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("git_checkout.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+git_checkout_tests = task(
+    summary = "Run the git checkout attribution unit tests.",
+    kind = "test-git-checkout",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)
