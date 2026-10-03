@@ -1,8 +1,8 @@
 """Bazel output bases on this machine: finding, attributing, classifying, measuring.
 
-Shared by `aspect output-bases`, which lists them, and `aspect gc`, which
-collects them. Both see the same states, so what one lists as orphaned is what
-the other removes.
+Each base has a lifecycle state, defined here. `aspect output-bases` lists bases
+by state; `aspect gc` removes them by state, so what one lists as orphaned is
+what the other removes.
 
 Bazel keys one output base per workspace path, named `md5(workspace)`, under the
 output user root. Each base's workspace is read from the `DO_NOT_BUILD_HERE`
@@ -24,8 +24,8 @@ A base's state, first match wins (`classify`):
 `aspect gc` renames a base to `.gc-trash-<name>` before deleting it; the scan
 reports any such leftover as **trash**.
 
-The rules' periods (`PERIODS`) default to what `aspect gc` applies, so a listing
-classifies bases as a default `gc` run would.
+The periods behind idle and orphaned (`PERIODS`) have defaults; `aspect gc`
+takes flags to change them.
 """
 
 load("@std//time.axl", "time")

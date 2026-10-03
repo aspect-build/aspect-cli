@@ -15,8 +15,8 @@ follow the execroot's symlinks out into the user's checkout.
 """
 
 load("@aspect//gc.axl", "testonly_collect", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select", "testonly_summary", "testonly_why")
-load("@aspect//private/lib/output_bases.axl", "output_bases")
-load("@aspect//private/lib/output_bases_fixtures.axl", fx = "fixtures")
+load("./private/lib/output_bases.axl", "output_bases")
+load("./private/lib/output_bases_fixtures.axl", fx = "fixtures")
 
 def _eq(label, got, want):
     if got != want:

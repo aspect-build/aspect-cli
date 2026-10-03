@@ -13,8 +13,8 @@ states each period are covered directly.
 """
 
 load("@aspect//output_bases.axl", "testonly_document", "testonly_next_steps")
-load("@aspect//private/lib/output_bases.axl", "output_bases")
-load("@aspect//private/lib/output_bases_fixtures.axl", fx = "fixtures")
+load("./private/lib/output_bases.axl", "output_bases")
+load("./private/lib/output_bases_fixtures.axl", fx = "fixtures")
 
 def _eq(label, got, want):
     if got != want:

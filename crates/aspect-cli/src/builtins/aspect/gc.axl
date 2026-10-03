@@ -13,14 +13,13 @@ without bound:
     `--repository_cache_gc_*` flag in any Bazel release; entries are written once
     and never collected.
 
-This task removes the bases `lib/output_bases.axl` classifies as removable —
-orphaned past `--orphan-grace-hours`, idle past `--base-max-age-days`, or trash
-an earlier run left — and download-cache entries unused for
+This task removes output bases by their lifecycle state, as `aspect
+output-bases` lists them (`lib/output_bases.axl`): orphaned past
+`--orphan-grace-hours`, idle past `--base-max-age-days`, and trash an earlier
+run left. It also prunes download-cache entries unused for
 `--download-cache-max-age-days`. Each period takes 0: the grace period to remove
 orphans at once, the ages to turn their rule off. Everything removed is
 re-creatable: a pruned base costs a cold build, a pruned download one re-fetch.
-`aspect output-bases` lists what it sees, read-only.
-
 Nothing is deleted without saying so first: what will go is listed in full, then
 confirmed on the terminal. `--force` answers for you and is **required** off a
 terminal, so a `gc` wired into CI or a cron has to state that it deletes rather
@@ -427,7 +426,7 @@ def _summary(outcome, failed: bool) -> str:
         line += "; the rest could not be removed"
     return line
 
-def _impl(ctx: TaskContext) -> int | TaskConclusion:
+def _gc_impl(ctx: TaskContext) -> int | TaskConclusion:
     """Scan, list, confirm, collect, report.
 
     It narrates as it goes rather than reporting at the end: classifying walks
@@ -537,7 +536,7 @@ An output base is removed when its workspace is gone (once it has not been used 
 `--bazel-output-base` removes the named bases instead, whatever their state.
 
 Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`), and never treats an `aspect worktree` pool slot as orphaned; an idle one still goes by age. `aspect output-bases` lists every base and its state, read-only.""",
-    implementation = _impl,
+    implementation = _gc_impl,
     args = {
         "output_user_root": output_bases.output_user_root_arg(),
         "base_max_age_days": _period_arg(
