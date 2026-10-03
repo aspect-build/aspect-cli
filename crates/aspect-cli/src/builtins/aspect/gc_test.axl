@@ -6,11 +6,12 @@ Run with:
 Two things decide whether a multi-gigabyte tree is removed, so both are covered
 directly:
 
-  - **Classification.** The tests build a real output-base-shaped tree under a
-    temp dir and run the real `_scan` over it, every state included. The
-    data-loss case is `install/` and `cache/`, which sit beside the output bases
-    under the same root and are shared by every workspace on the machine —
-    counting them as bases offers tens of gigabytes of live cache for deletion.
+  - **Classification.** The rule order is tested on the pure `_classify`, and
+    the tests build a real output-base-shaped tree under a temp dir and run the
+    real `_scan` over it, every state included. The data-loss case is
+    `install/` and `cache/`, which sit beside the output bases under the same
+    root and are shared by every workspace on the machine — counting them as
+    bases offers tens of gigabytes of live cache for deletion.
   - **Consent.** Shared with every other destructive task, so it lives in
     `lib/confirm.axl` and is covered by `aspect dev test-confirm`.
 
@@ -19,14 +20,38 @@ the read-only directories Bazel leaves under `bazel-out/`, and it must not
 follow the execroot's symlinks out into the user's checkout.
 
 Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
-symlink creation.
+symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_configured_output_user_root", "testonly_document", "testonly_fmt_kb", "testonly_reap", "testonly_scan", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_reap", "testonly_scan", "testonly_scan_download_cache", "testonly_workspace_of")
+load("@std//time.axl", "time")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+# Output bases are md5-named; `_scan` ignores anything else under the root.
+_LIVE = "11111111111111111111111111111111"
+_DEAD = "22222222222222222222222222222222"
+_WEIRD = "33333333333333333333333333333333"
+_CMDLINE = "44444444444444444444444444444444"
+_BOTH = "55555555555555555555555555555555"
+_MARKER = "66666666666666666666666666666666"
+
+_HOUR_US = 3600 * 1000000
+_DAY_US = 24 * _HOUR_US
+
+# Long enough ago to be past any age the tests configure.
+_LONG_AGO = "202001010000"
+
+def _now_us():
+    return time.now_ms() * 1000
+
+def _backdate(ctx: TaskContext, path: str) -> None:
+    """Set the mtime and atime of `path` and everything under it to
+    `_LONG_AGO`, without following symlinks out of it."""
+    ctx.std.process.command("find").args([path, "-exec", "touch", "-h", "-t", _LONG_AGO, "{}", "+"]) \
+        .stdout("null").stderr("null").spawn().wait()
 
 def _symlink(ctx: TaskContext, target: str, link: str) -> None:
     ctx.std.process.command("ln").args(["-s", target, link]) \
@@ -52,7 +77,11 @@ def _write_cmdline(ctx: TaskContext, base: str, workspace: str) -> None:
 
 def _fixture(ctx: TaskContext) -> str:
     """A root holding one live base, one orphan, one unattributable base, and
-    the two shared directories that must never be classified."""
+    the two shared directories that must never be classified.
+
+    Every base is backdated, so the orphans are past the grace period; tests
+    that care about age pass the max age they mean.
+    """
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-test")
     root = tmp + "/root"
     live_ws = tmp + "/live-workspace"
@@ -60,41 +89,50 @@ def _fixture(ctx: TaskContext) -> str:
     ctx.std.fs.create_dir_all(live_ws)
     ctx.std.fs.write(live_ws + "/MODULE.bazel", "module(name = \"live\")\n")
 
-    _make_base(ctx, root, "livebase", live_ws)
-    _make_base(ctx, root, "deadbase", tmp + "/workspace-that-was-deleted")
+    _make_base(ctx, root, _LIVE, live_ws)
+    _make_base(ctx, root, _DEAD, tmp + "/workspace-that-was-deleted")
 
     # A base whose execroot never got a symlink forest and whose server left no
     # command line behind: nothing can attribute it, and it must not be guessed
     # at.
-    ctx.std.fs.create_dir_all(root + "/weirdbase/execroot")
-    ctx.std.fs.write(root + "/weirdbase/execroot/DO_NOT_BUILD_HERE", "")
+    ctx.std.fs.create_dir_all(root + "/" + _WEIRD + "/execroot")
+    ctx.std.fs.write(root + "/" + _WEIRD + "/execroot/DO_NOT_BUILD_HERE", "")
 
     # An invocation that died before analysis: Bazel created the execroot on
     # server start but never populated it, so only `server/cmdline` names the
     # workspace. A tenth of the bases on a developer machine look like this.
-    _write_cmdline(ctx, root + "/cmdlinebase", tmp + "/workspace-also-deleted")
-    ctx.std.fs.create_dir_all(root + "/cmdlinebase/execroot")
+    _write_cmdline(ctx, root + "/" + _CMDLINE + "", tmp + "/workspace-also-deleted")
+    ctx.std.fs.create_dir_all(root + "/" + _CMDLINE + "/execroot")
 
     # Both sources present and disagreeing. The execroot reflects the last
     # build, `server/cmdline` the last server start, so the execroot wins.
-    _make_base(ctx, root, "bothbase", live_ws)
-    _write_cmdline(ctx, root + "/bothbase", tmp + "/stale-from-cmdline")
+    _make_base(ctx, root, _BOTH, live_ws)
+    _write_cmdline(ctx, root + "/" + _BOTH + "", tmp + "/stale-from-cmdline")
 
     # Shared infrastructure, not output bases.
     ctx.std.fs.create_dir_all(root + "/install/abc123")
     ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
+
+    # Not md5-shaped, so not a base, whatever it holds.
+    _make_base(ctx, root, "not-a-base", tmp + "/workspace-that-was-deleted")
+
+    _backdate(ctx, root)
     return root
+
+def _scan(ctx, root, max_age_us = 0):
+    return testonly_scan(ctx, root, _now_us(), max_age_us)
 
 def _doc(ctx, root, verbose):
     """The document for `root`'s real classification, at a given verbosity."""
-    bases = testonly_scan(ctx, root)
+    bases = _scan(ctx, root)
     return testonly_document(
         root = root,
         dry_run = True,
         verbose = verbose,
-        live = [b for b in bases if b.state == "live"],
-        unknown = [b for b in bases if b.state == "unknown"],
-        orphans = [b for b in bases if b.state == "orphan"],
+        policy = {},
+        bases = bases,
+        removals = [b for b in bases if b.state == "orphan"],
+        download_cache = {},
         reclaimable = 0,
         reaped = 0,
         freed = 0,
@@ -190,35 +228,36 @@ def _test_fmt_kb(ctx):
 
 def _test_workspace_resolves_from_the_execroot_symlink(ctx):
     root = _fixture(ctx)
-    live = testonly_workspace_of(ctx, root + "/livebase")
+    live = testonly_workspace_of(ctx, root + "/" + _LIVE)
     _eq("resolved workspace ends with live-workspace", live.endswith("/live-workspace"), True)
 
 def _test_scan_classifies_the_three_outcomes(ctx):
     root = _fixture(ctx)
-    bases = testonly_scan(ctx, root)
+    bases = _scan(ctx, root)
     states = {}
     for b in bases:
         states[b.name] = b.state
-    _eq("live workspace still exists", states["livebase"], "live")
-    _eq("deleted workspace", states["deadbase"], "orphan")
-    _eq("no symlink to resolve", states["weirdbase"], "unknown")
+    _eq("live workspace still exists", states[_LIVE], "live")
+    _eq("deleted workspace", states[_DEAD], "orphan")
+    _eq("no symlink to resolve", states[_WEIRD], "unknown")
 
 def _test_shared_directories_are_never_classified(ctx):
     """The data-loss case: `install/` and `cache/` are shared by every workspace
     and sit beside the output bases. Classifying them would offer tens of
     gigabytes of live cache for deletion."""
     root = _fixture(ctx)
-    names = [b.name for b in testonly_scan(ctx, root)]
+    names = [b.name for b in _scan(ctx, root)]
     _eq("install is not a base", "install" in names, False)
     _eq("cache is not a base", "cache" in names, False)
-    _eq("only the real bases", sorted(names), ["bothbase", "cmdlinebase", "deadbase", "livebase", "weirdbase"])
+    _eq("nor is a directory not named like one", "not-a-base" in names, False)
+    _eq("only the real bases", sorted(names), [_LIVE, _DEAD, _WEIRD, _CMDLINE, _BOTH])
 
 def _test_orphan_carries_the_workspace_it_lost(ctx):
     """The report names the workspace that went away; without it a reader can't
     tell whether the deletion is safe."""
     root = _fixture(ctx)
-    for b in testonly_scan(ctx, root):
-        if b.name == "deadbase":
+    for b in _scan(ctx, root):
+        if b.name == _DEAD:
             _eq("names the vanished workspace", b.workspace.endswith("/workspace-that-was-deleted"), True)
             return
     fail("deadbase was not scanned")
@@ -228,11 +267,11 @@ def _test_cmdline_attributes_a_base_with_an_empty_execroot(ctx):
     developer machine that is a tenth of all bases. Without the `server/cmdline`
     fallback they stay undetermined and are never reclaimed."""
     root = _fixture(ctx)
-    ws = testonly_workspace_of(ctx, root + "/cmdlinebase")
+    ws = testonly_workspace_of(ctx, root + "/" + _CMDLINE + "")
     _eq("resolved from cmdline", ws.endswith("/workspace-also-deleted"), True)
 
-    for b in testonly_scan(ctx, root):
-        if b.name == "cmdlinebase":
+    for b in _scan(ctx, root):
+        if b.name == _CMDLINE:
             _eq("classified, not left undetermined", b.state, "orphan")
             return
     fail("cmdlinebase was not scanned")
@@ -242,7 +281,7 @@ def _test_execroot_wins_over_a_stale_cmdline(ctx):
     the last build. When they disagree the execroot is the fresher answer, and
     reading the stale one could call a live base an orphan."""
     root = _fixture(ctx)
-    ws = testonly_workspace_of(ctx, root + "/bothbase")
+    ws = testonly_workspace_of(ctx, root + "/" + _BOTH + "")
     _eq("execroot wins", ws.endswith("/live-workspace"), True)
 
 def _test_reap_removes_a_base_bazel_left_read_only(ctx):
@@ -288,7 +327,130 @@ def _test_a_base_neither_source_resolves_stays_undetermined(ctx):
     """The conservative end of the fallback: no symlinks and no cmdline means
     no deletion."""
     root = _fixture(ctx)
-    _eq("no workspace", testonly_workspace_of(ctx, root + "/weirdbase"), "")
+    _eq("no workspace", testonly_workspace_of(ctx, root + "/" + _WEIRD), "")
+
+def _test_classify_rule_order(ctx):
+    """First match wins: a gone workspace decides before age, the grace hour
+    holds back a just-used orphan, and age applies whether or not the
+    workspace exists."""
+    month = 30 * _DAY_US
+    _eq("orphan past grace", testonly_classify("/ws", False, 2 * _HOUR_US, month), "orphan")
+    _eq("orphan within grace", testonly_classify("/ws", False, _HOUR_US // 2, month), "grace")
+    _eq("an old orphan is still an orphan", testonly_classify("/ws", False, 2 * month, month), "orphan")
+    _eq("live and recent", testonly_classify("/ws", True, _DAY_US, month), "live")
+    _eq("live but idle", testonly_classify("/ws", True, month, month), "idle")
+    _eq("age 0 turns the age rule off", testonly_classify("/ws", True, 100 * month, 0), "live")
+    _eq("undetermined and recent", testonly_classify("", False, _DAY_US, month), "unknown")
+    _eq("undetermined and idle", testonly_classify("", False, month, month), "idle")
+
+def _test_output_base_names_are_md5_shaped(ctx):
+    _eq("md5", testonly_is_output_base_name("d41d8cd98f00b204e9800998ecf8427e"), True)
+    _eq("install", testonly_is_output_base_name("install"), False)
+    _eq("upper-case hex", testonly_is_output_base_name("D41D8CD98F00B204E9800998ECF8427E"), False)
+    _eq("31 chars", testonly_is_output_base_name("d41d8cd98f00b204e9800998ecf8427"), False)
+    _eq("trash", testonly_is_output_base_name(".gc-trash-d41d8cd98f00b204e9800998ecf8427e"), False)
+
+def _test_do_not_build_here_is_read_first(ctx):
+    """Bazel's own record of the workspace beats the symlinks a last build left."""
+    root = _fixture(ctx)
+    tmp = root[:root.rfind("/")]
+    _make_base(ctx, root, _MARKER, tmp + "/live-workspace")
+    ctx.std.fs.write(root + "/" + _MARKER + "/DO_NOT_BUILD_HERE", tmp + "/from-the-marker\n")
+    _eq("marker wins", testonly_workspace_of(ctx, root + "/" + _MARKER), tmp + "/from-the-marker")
+
+def _test_a_just_used_orphan_is_held_back(ctx):
+    """A worktree recreated at the same path wants its base back; deleting it in
+    the gap between teardown and setup throws away the reason the path was kept."""
+    root = _fixture(ctx)
+    ctx.std.fs.write(root + "/" + _DEAD + "/java.log", "")
+    states = {b.name: b.state for b in _scan(ctx, root)}
+    _eq("held back", states[_DEAD], "grace")
+
+def _test_an_idle_base_is_removed_even_with_its_workspace(ctx):
+    root = _fixture(ctx)
+    states = {b.name: b.state for b in _scan(ctx, root, 30 * _DAY_US)}
+    _eq("live workspace, idle base", states[_LIVE], "idle")
+    _eq("undetermined, idle", states[_WEIRD], "idle")
+    _eq("orphan stays an orphan", states[_DEAD], "orphan")
+
+    ctx.std.fs.write(root + "/" + _LIVE + "/command.profile.gz", "")
+    states = {b.name: b.state for b in _scan(ctx, root, 30 * _DAY_US)}
+    _eq("a fresh marker keeps it", states[_LIVE], "live")
+
+def _test_scan_lists_youngest_first(ctx):
+    root = _fixture(ctx)
+    ctx.std.fs.write(root + "/" + _CMDLINE + "/java.log", "")
+    names = [b.name for b in _scan(ctx, root)]
+    _eq("the just-used base leads", names[0], _CMDLINE)
+    ages = [b.last_used for b in _scan(ctx, root)]
+    _eq("descending last use", ages, sorted(ages, reverse = True))
+
+def _test_reap_leaves_no_trash(ctx):
+    root = _fixture(ctx)
+    _eq("reaped", testonly_reap(ctx, root + "/" + _DEAD, 0), True)
+    _eq("base gone", ctx.std.fs.exists(root + "/" + _DEAD), False)
+    _eq("trash gone", ctx.std.fs.exists(root + "/.gc-trash-" + _DEAD), False)
+
+def _test_a_base_is_moved_to_the_trash_before_deletion(ctx):
+    """What makes a failed delete retryable: once renamed, whatever is left of
+    the base is found by name rather than by the files a partial delete may
+    have taken with it."""
+    root = _fixture(ctx)
+    trash = testonly_move_to_trash(ctx, root + "/" + _DEAD)
+    _eq("renamed beside it", trash, root + "/.gc-trash-" + _DEAD)
+    _eq("original gone", ctx.std.fs.exists(root + "/" + _DEAD), False)
+    _eq("contents moved", ctx.std.fs.exists(trash + "/execroot"), True)
+    _eq("trash stays put", testonly_move_to_trash(ctx, trash), trash)
+
+def _test_trash_from_an_interrupted_run_is_finished(ctx):
+    """A delete that failed part way leaves `.gc-trash-<name>`; the next run
+    must recognise it, even though nothing in it names a workspace any more."""
+    root = _fixture(ctx)
+    trash = root + "/.gc-trash-" + _DEAD
+    ctx.std.fs.rename(root + "/" + _DEAD, trash)
+    found = [b for b in _scan(ctx, root) if b.name == ".gc-trash-" + _DEAD]
+    _eq("picked up", len(found), 1)
+    _eq("as trash", found[0].state, "trash")
+    _eq("reaped where it lies", testonly_reap(ctx, trash, 0), True)
+    _eq("gone", ctx.std.fs.exists(trash), False)
+
+def _cache_entry(ctx, root, digest, size):
+    entry = root + "/cache/repos/v1/content_addressable/sha256/" + digest
+    ctx.std.fs.create_dir_all(entry)
+    ctx.std.fs.write(entry + "/file", "x" * size)
+    return entry
+
+def _test_download_cache_prunes_by_last_use(ctx):
+    root = _fixture(ctx)
+    old = _cache_entry(ctx, root, "a" * 64, 4096)
+    fresh = _cache_entry(ctx, root, "b" * 64, 10)
+    _backdate(ctx, old)
+    seen, stale = testonly_scan_download_cache(ctx, root, _now_us() - 30 * _DAY_US)
+    _eq("both seen", seen, 2)
+    _eq("only the old one", [e.path for e in stale], [old])
+    _eq("sized from the file", stale[0].kb, 4)
+    _eq("the fresh one is not touched", ctx.std.fs.exists(fresh), True)
+
+def _test_download_cache_honours_a_recent_atime(ctx):
+    """Either timestamp keeps an entry: Bazel touches the mtime on a hit, and
+    where the filesystem records reads, a recent atime counts too."""
+    root = _fixture(ctx)
+    entry = _cache_entry(ctx, root, "c" * 64, 10)
+    _backdate(ctx, entry)
+    ctx.std.process.command("touch").args(["-a", entry + "/file"]).stdout("null").stderr("null").spawn().wait()
+    _seen, stale = testonly_scan_download_cache(ctx, root, _now_us() - 30 * _DAY_US)
+    _eq("kept", len(stale), 0)
+
+def _test_no_download_cache_is_nothing_to_do(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-nocas")
+    _eq("empty", testonly_scan_download_cache(ctx, tmp, _now_us()), (0, []))
+
+def _test_fmt_age(ctx):
+    _eq("minutes", testonly_fmt_age(5 * 60 * 1000000), "5m")
+    _eq("hours", testonly_fmt_age(3 * _HOUR_US), "3h")
+    _eq("hours up to two days", testonly_fmt_age(47 * _HOUR_US), "47h")
+    _eq("days", testonly_fmt_age(45 * _DAY_US), "45d")
+    _eq("clock skew reads as zero", testonly_fmt_age(-5), "0m")
 
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
@@ -308,6 +470,19 @@ _UNIT_TESTS = [
     _test_reap_removes_a_base_bazel_left_read_only,
     _test_reap_does_not_reach_outside_the_base,
     _test_a_base_neither_source_resolves_stays_undetermined,
+    _test_classify_rule_order,
+    _test_output_base_names_are_md5_shaped,
+    _test_do_not_build_here_is_read_first,
+    _test_a_just_used_orphan_is_held_back,
+    _test_an_idle_base_is_removed_even_with_its_workspace,
+    _test_scan_lists_youngest_first,
+    _test_reap_leaves_no_trash,
+    _test_a_base_is_moved_to_the_trash_before_deletion,
+    _test_trash_from_an_interrupted_run_is_finished,
+    _test_download_cache_prunes_by_last_use,
+    _test_download_cache_honours_a_recent_atime,
+    _test_no_download_cache_is_nothing_to_do,
+    _test_fmt_age,
 ]
 
 def _test_impl(ctx):

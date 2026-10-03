@@ -420,8 +420,9 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-repro-commands
     ctx.tasks.add(repro_commands_tests)
 
-    # gc: output-base classification (live / orphan / unattributable) and the
-    # guard that keeps the shared install+cache directories out of the scan.
+    # gc: output-base classification (live / idle / orphan / grace / trash /
+    # undetermined), download-cache pruning, and the guard that keeps the shared
+    # install+cache directories out of the scan.
     # Run with: aspect dev test-gc
     ctx.tasks.add(gc_tests)
     ctx.tasks.add(confirm_tests)
