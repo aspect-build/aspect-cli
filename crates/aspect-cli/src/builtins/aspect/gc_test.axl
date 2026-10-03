@@ -536,9 +536,9 @@ def _test_select_refuses_what_the_scan_did_not_find(ctx):
 def _test_the_orphan_note_states_the_grace_period(ctx):
     """The census explains an orphan with the grace period actually in force,
     so the number a reader sees is the one that decided."""
-    _eq("default", "nothing has used it for 1h" in testonly_grace_sentence(_policy()), True)
-    _eq("configured", "nothing has used it for 6h" in testonly_grace_sentence(_policy(0, 6 * _HOUR_US)), True)
-    _eq("off", testonly_grace_sentence(_policy(0, 0)), "One is removed immediately: the grace period is off.")
+    _eq("default", testonly_grace_sentence(_policy()), "Removed 1h after last use (--orphan-grace-hours=N to change, 0 to remove immediately).")
+    _eq("configured", testonly_grace_sentence(_policy(0, 6 * _HOUR_US)).startswith("Removed 6h after last use"), True)
+    _eq("off", testonly_grace_sentence(_policy(0, 0)), "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use).")
 
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,

@@ -101,8 +101,7 @@ _State = record(
 )
 
 _ORPHAN_NOTE = ("orphaned: the base's workspace directory no longer exists, e.g. a deleted worktree.\n" +
-                "{grace}\n" +
-                "Set the grace period with --orphan-grace-hours=N; 0 removes orphans immediately.")
+                "{grace}")
 
 # Every state a base can be in, in census order.
 _STATES = {
@@ -613,9 +612,8 @@ def _say(streaming: bool, line: str) -> None:
 def _grace_sentence(policy) -> str:
     """What happens to an orphan, for the census note."""
     if policy.orphan_grace_us == 0:
-        return "One is removed immediately: the grace period is off."
-    return ("One is removed once nothing has used it for %s, the grace period that spares a " +
-            "worktree being recreated at the same path.") % _fmt_age(policy.orphan_grace_us)
+        return "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use)."
+    return "Removed %s after last use (--orphan-grace-hours=N to change, 0 to remove immediately)." % _fmt_age(policy.orphan_grace_us)
 
 def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, policy) -> None:
     """How many bases are in each state, what the less obvious states mean, and
