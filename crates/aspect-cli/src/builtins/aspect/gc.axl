@@ -615,9 +615,17 @@ def _grace_sentence(policy) -> str:
         return "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use)."
     return "Removed %s after last use (--orphan-grace-hours=N to change, 0 to remove immediately)." % _fmt_age(policy.orphan_grace_us)
 
+def _verbose_hint(bases: list) -> str:
+    """The pointer to `--verbose` when it would list something, naming the kept
+    states it would show; "" when there is nothing to list."""
+    shown = [s.label for state, s in _STATES.items() if s.heading and _in_state(bases, state)]
+    if not shown:
+        return ""
+    return "Run with --verbose to list the kept output bases (" + ", ".join(shown) + ")."
+
 def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, policy) -> None:
     """How many bases are in each state, what the less obvious states mean, and
-    under `--verbose` the kept ones, youngest first.
+    the kept ones, youngest first — under `--verbose`, or else a pointer to it.
 
     Kept bases are listed without sizes: measuring them means a `du` over every
     live base on the machine, tens of gigabytes, to report something nothing is
@@ -640,6 +648,9 @@ def _print_census(streaming: bool, bases: list, verbose: bool, now_us: int, poli
         for line in lines[1:]:
             _say(streaming, "      " + line)
     if not verbose:
+        hint = _verbose_hint(bases)
+        if hint:
+            _say(streaming, "    " + hint)
         return
     for state, s in _STATES.items():
         kept = _in_state(bases, state)
@@ -928,4 +939,5 @@ testonly_remove_tree = _remove_tree
 testonly_scan = _scan
 testonly_scan_download_cache = _scan_download_cache
 testonly_select = _select
+testonly_verbose_hint = _verbose_hint
 testonly_workspace_of = _workspace_of

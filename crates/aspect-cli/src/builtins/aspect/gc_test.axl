@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_grace_sentence", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_grace_sentence", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_verbose_hint", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -540,6 +540,16 @@ def _test_the_orphan_note_states_the_grace_period(ctx):
     _eq("configured", testonly_grace_sentence(_policy(0, 6 * _HOUR_US)).startswith("Removed 6h after last use"), True)
     _eq("off", testonly_grace_sentence(_policy(0, 0)), "Removed immediately (--orphan-grace-hours=N keeps one N hours after last use).")
 
+def _test_verbose_is_hinted_only_when_it_would_list_something(ctx):
+    root = _fixture(ctx)
+    _eq(
+        "names the kept states present",
+        testonly_verbose_hint(_scan(ctx, root)),
+        "Run with --verbose to list the kept output bases (live, undetermined).",
+    )
+    removable_only = [b for b in _scan(ctx, root) if b.state == "orphan"]
+    _eq("nothing kept, no hint", testonly_verbose_hint(removable_only), "")
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -579,6 +589,7 @@ _UNIT_TESTS = [
     _test_select_by_hash_or_path,
     _test_select_refuses_what_the_scan_did_not_find,
     _test_the_orphan_note_states_the_grace_period,
+    _test_verbose_is_hinted_only_when_it_would_list_something,
 ]
 
 def _test_impl(ctx):
