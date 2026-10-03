@@ -584,7 +584,7 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False, extra_environment: dict = {}) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
@@ -634,6 +634,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
         .args(getattr(ep, "args", []) + list(args))
     for k, v in runfiles_env(ep).items():
+        cmd = cmd.env(k, v)
+    for k, v in extra_environment.items():
         cmd = cmd.env(k, v)
     if stdout_path:
         cmd = cmd.stdout(ctx.std.fs.create(stdout_path))
@@ -748,7 +750,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           Forget the prior build's default output group before starting the
           next build, preventing an incomplete build from leaving stale paths.
 
-      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False) → Child
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False, extra_environment={}) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -761,6 +763,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
           `process_group=True` starts the child in a separate process group so
           the caller can terminate the child and its descendants together.
+          `extra_environment` is applied last for caller-owned protocols and
+          other per-spawn integration variables.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -797,5 +801,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         clear_default_outputs = lambda target: _clear_default_outputs(state, target),
         get_output_group_outputs = lambda target, group: _get_output_group_outputs(state, target, group),
         clear_output_group_outputs = lambda target, group: _clear_output_group_outputs(state, target, group),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False, extra_environment = {}: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group, extra_environment),
     )

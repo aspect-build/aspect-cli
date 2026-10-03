@@ -29,7 +29,7 @@ load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
-load("./private/lib/path_normalize.axl", "normalize_files_for_cwd")
+load("./private/lib/path_utils.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/text.axl", "pluralize")

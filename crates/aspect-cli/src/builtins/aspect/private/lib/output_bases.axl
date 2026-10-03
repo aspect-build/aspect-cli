@@ -30,7 +30,7 @@ load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
-load("./path_normalize.axl", "normpath")
+load("./path_utils.axl", "normpath")
 load("./text.axl", "pad_left", "pad_right", "pluralize")
 
 # --- constants ---------------------------------------------------------------

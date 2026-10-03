@@ -44,12 +44,34 @@ def _test_disabled_or_absolute_symlink_prefix(_ctx):
     _eq("disabled symlinks", watch.ignores("/repo/ws", "/"), base)
     _eq("absolute bin symlink", "/repo/ws/links/bazel-bin" in watch.ignores("/repo/ws", "/repo/ws/links/bazel-"), True)
 
+def _test_workspace_ignore_files_filter_events(_ctx):
+    batch = watch.filter_batch(struct(
+        events = [
+            struct(path = ".cache/data"),
+            struct(path = "app/node_modules/pkg/index.js"),
+            struct(path = "src/app.js"),
+        ],
+        rescan = False,
+    ), "/repo", ["/repo/.cache"], ["/repo/**/node_modules"])
+    _eq("filtered event paths", [event.path for event in batch.events], ["src/app.js"])
+    _eq(
+        "ignored-only batch",
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = False), "/repo", ["/repo/.cache"]),
+        None,
+    )
+    _eq(
+        "rescan retained",
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = True), "/repo", ["/repo/.cache"]).rescan,
+        True,
+    )
+
 _UNIT_TESTS = [
     _test_no_batch_does_not_run,
     _test_batch_runs_once,
     _test_queued_batches_are_coalesced,
     _test_bazel_symlink_ignores_follow_resolved_prefix,
     _test_disabled_or_absolute_symlink_prefix,
+    _test_workspace_ignore_files_filter_events,
 ]
 
 def _test_impl(ctx):

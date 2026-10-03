@@ -1,0 +1,92 @@
+"""Unit tests for Bazel workspace ignore readers."""
+
+load("./bazel_ignores.axl", "bazel_ignores")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _fs(files):
+    return struct(try_read_to_string = lambda path: files.get(path, ""))
+
+def _test_read_bazelignore(_ctx):
+    fs = _fs({
+        "/repo/.bazelignore": "node_modules\n./generated/\nwindows\\cache\n\n# comment\n../outside\n/absolute\nC:\\outside\n",
+    })
+    _eq(
+        ".bazelignore paths",
+        bazel_ignores.read_bazelignore(fs, "/repo"),
+        ["/repo/node_modules", "/repo/generated", "/repo/windows/cache"],
+    )
+
+def _test_read_repo_bazel(_ctx):
+    fs = _fs({
+        "/repo/REPO.bazel": '''
+"""ignore_directories(["from_docstring"])"""
+# ignore_directories(["from_comment"])
+repo(default_visibility = ["//visibility:public"])
+ignore_directories(
+    dirs = [
+        "**/node_modules",
+        'generated/*',
+        "./vendor/**",
+        "../outside",
+        "/absolute",
+    ],
+)
+''',
+    })
+    _eq(
+        "REPO.bazel globs",
+        bazel_ignores.read_repo_bazel(fs, "/repo"),
+        ["/repo/**/node_modules", "/repo/generated/*", "/repo/vendor/**"],
+    )
+
+def _test_missing_files(_ctx):
+    fs = _fs({})
+    _eq("missing .bazelignore", bazel_ignores.read_bazelignore(fs, "/repo"), [])
+    _eq("missing REPO.bazel", bazel_ignores.read_repo_bazel(fs, "/repo"), [])
+
+def _test_ignore_matching(_ctx):
+    ignores = [
+        "/repo/.cache",
+        "/repo/**/node_modules",
+        "/repo/generated/*",
+    ]
+    patterns = ignores[1:]
+    prefixes = ignores[:1]
+    _eq("literal directory", bazel_ignores.is_ignored("/repo/.cache/data", prefixes, patterns), True)
+    _eq("root glob", bazel_ignores.is_ignored("/repo/node_modules/pkg/index.js", prefixes, patterns), True)
+    _eq("nested glob", bazel_ignores.is_ignored("/repo/app/node_modules/pkg/index.js", prefixes, patterns), True)
+    _eq("single segment glob", bazel_ignores.is_ignored("/repo/generated/client/api.ts", prefixes, patterns), True)
+    _eq("similar name", bazel_ignores.is_ignored("/repo/node_modules-old/file", prefixes, patterns), False)
+    _eq("unmatched", bazel_ignores.is_ignored("/repo/src/app.ts", prefixes, patterns), False)
+
+def _test_literal_patterns(_ctx):
+    _eq(
+        "literal patterns",
+        bazel_ignores.literal_patterns(["/repo/cache", "/repo/**/node_modules", "/repo/generated/?"]),
+        ["/repo/cache"],
+    )
+
+_UNIT_TESTS = [
+    _test_read_bazelignore,
+    _test_read_repo_bazel,
+    _test_missing_files,
+    _test_ignore_matching,
+    _test_literal_patterns,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bazel_ignores.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+bazel_ignores_tests = task(
+    summary = "Run the Bazel workspace ignore reader AXL unit tests.",
+    kind = "test-bazel-ignores",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

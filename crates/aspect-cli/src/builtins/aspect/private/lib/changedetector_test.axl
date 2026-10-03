@@ -1,6 +1,7 @@
 """Unit tests for runfiles-aware build change detection."""
 
 load("./changedetector.axl", "changedetector")
+load("./source_tracker.axl", "source_tracker")
 
 def _eq(label, got, want):
     if got != want:
@@ -24,7 +25,19 @@ def _entrypoint(args = [], environment = {}, inherited_environment = []):
     )
 
 def _manifest(entries):
-    return struct(entries = entries, origins = {origin: logical for logical, origin in entries.items() if origin})
+    origins = {}
+    for logical, origin in entries.items():
+        if origin:
+            origins.setdefault(origin, []).append(logical)
+    return struct(entries = entries, origins = origins)
+
+def _source_fs(metadata = {}, directories = {}, baseline = {}):
+    file_metadata = struct(is_dir = False, is_file = True, is_symlink = False)
+    return struct(
+        baseline = lambda: dict(baseline),
+        directory = lambda path: directories.get(path, {}),
+        metadata = lambda path: metadata.get(path, file_metadata),
+    )
 
 def _test_manifest_parses_source_and_generated_origins(_ctx):
     manifest = changedetector.parse_manifest(
@@ -33,15 +46,15 @@ def _test_manifest_parses_source_and_generated_origins(_ctx):
         "_main/link ../../somewhere\n",
         "/repo",
     )
-    _eq("source origin absolute", manifest.origins["/repo/src/app.py"], "_main/src/app.py")
-    _eq("source origin watcher-relative", manifest.origins["src/app.py"], "_main/src/app.py")
-    _eq("generated origin execroot-relative", manifest.origins["bazel-out/k8-fastbuild/bin/app"], "_main/bin/app")
+    _eq("source origin absolute", manifest.origins["/repo/src/app.py"], ["_main/src/app.py"])
+    _eq("source origin watcher-relative", manifest.origins["src/app.py"], ["_main/src/app.py"])
+    _eq("generated origin execroot-relative", manifest.origins["bazel-out/k8-fastbuild/bin/app"], ["_main/bin/app"])
     _eq("relative symlink origin ignored", "../../somewhere" in manifest.origins, False)
 
 def _test_manifest_decodes_escaped_fields(_ctx):
     manifest = changedetector.parse_manifest(" _main/path\\swith\\sspace /repo/path\\swith\\sspace\n", "/repo")
     _eq("escaped logical path", manifest.entries["_main/path with space"], "/repo/path with space")
-    _eq("escaped source origin", manifest.origins["path with space"], "_main/path with space")
+    _eq("escaped source origin", manifest.origins["path with space"], ["_main/path with space"])
 
 def _test_source_runfile_change_is_reported(_ctx):
     state = _manifest({"_main/app.py": "app.py"})
@@ -52,6 +65,38 @@ def _test_source_directory_runfile_change_is_reported(_ctx):
     state = _manifest({"_main/assets": "assets"})
     _eq("source directory child changed", changedetector.changed_runfiles(state, state, ["assets/config.json"], []), ["_main/assets/config.json"])
     _eq("source directory sibling ignored", changedetector.changed_runfiles(state, state, ["assets-old/config.json"], []), [])
+
+def _test_nearest_runfile_directory_wins(_ctx):
+    state = _manifest({
+        "_main/assets": "assets",
+        "_main/icons": "assets/icons",
+    })
+    _eq(
+        "nearest directory mapping",
+        changedetector.changed_runfiles(state, state, ["assets/icons/logo.svg"], []),
+        ["_main/icons/logo.svg"],
+    )
+
+def _test_all_runfile_aliases_are_reported(_ctx):
+    files = _manifest({
+        "_main/app.py": "app.py",
+        "_main/alias.py": "app.py",
+    })
+    _eq(
+        "source aliases",
+        changedetector.changed_runfiles(files, files, ["app.py"], []),
+        ["_main/alias.py", "_main/app.py"],
+    )
+
+    directories = _manifest({
+        "_main/assets": "assets",
+        "_main/public": "assets",
+    })
+    _eq(
+        "directory aliases",
+        changedetector.changed_runfiles(directories, directories, ["assets/config.json"], []),
+        ["_main/assets/config.json", "_main/public/config.json"],
+    )
 
 def _test_generated_runfile_change_is_reported(_ctx):
     state = _manifest({"_main/app": "bazel-out/k8/bin/app"})
@@ -74,6 +119,423 @@ def _test_manifest_changes_are_reported(_ctx):
         changedetector.changed_runfiles(before, after, [], []),
         ["_main/app", "_main/new", "_main/old"],
     )
+
+def _test_protocol_runfiles_include_metadata(_ctx):
+    manifest = _manifest({
+        "_main/generated": "/tmp/output/execroot/_main/bazel-out/k8/bin/generated",
+        "_main/link": "../source/link",
+        "_main/source": "/repo/source.txt",
+    })
+    _eq(
+        "protocol runfiles",
+        changedetector.runfiles(manifest, "/repo"),
+        {
+            "_main/generated": {},
+            "_main/link": {"is_symlink": True},
+            "_main/source": {"is_source": True},
+        },
+    )
+
+def _test_protocol_delta_marks_deletions(_ctx):
+    before = _manifest({"_main/old": "/repo/old", "_main/source": "/repo/source"})
+    after = _manifest({"_main/source": "/repo/source", "_main/new": "/repo/new"})
+    _eq(
+        "protocol delta",
+        changedetector.runfile_changes(before, after, ["/repo/source"], [], [], "/repo"),
+        {
+            "_main/new": {"is_source": True},
+            "_main/old": None,
+            "_main/source": {"is_source": True},
+        },
+    )
+
+def _test_protocol_delta_updates_all_aliases(_ctx):
+    manifest = _manifest({
+        "_main/app.py": "/repo/app.py",
+        "_main/alias.py": "/repo/app.py",
+    })
+    _eq(
+        "protocol aliases",
+        changedetector.runfile_changes(manifest, manifest, ["/repo/app.py"], [], [], "/repo"),
+        {
+            "_main/alias.py": {"is_source": True},
+            "_main/app.py": {"is_source": True},
+        },
+    )
+
+def _test_protocol_directory_runfile_delta_marks_deleted_child(_ctx):
+    manifest = _manifest({"_main/assets": "/repo/assets"})
+    _eq(
+        "deleted directory runfile child",
+        changedetector.runfile_changes(
+            manifest,
+            manifest,
+            ["/repo/assets/config.json"],
+            ["/repo/assets/config.json"],
+            [],
+            "/repo",
+        ),
+        {"_main/assets/config.json": None},
+    )
+
+def _test_protocol_source_delta_includes_all_workspace_paths(_ctx):
+    _eq(
+        "all workspace sources changed",
+        source_tracker.source_changes(["README.md", "app.py"], [], "/repo", source_tracker.source_state({}), _source_fs()),
+        {
+            "README.md": {"is_source": True},
+            "app.py": {"is_source": True},
+        },
+    )
+
+def _test_protocol_source_delta_ignores_paths_outside_workspace(_ctx):
+    _eq(
+        "outside path ignored",
+        source_tracker.source_changes(["/other/repo/file.py", "/repo/app.py"], [], "/repo", source_tracker.source_state({}), _source_fs()),
+        {"app.py": {"is_source": True}},
+    )
+
+def _test_protocol_source_delta_marks_deletions_and_rescans(_ctx):
+    _eq(
+        "deleted workspace source",
+        source_tracker.source_changes(["app.py"], ["app.py"], "/repo", source_tracker.source_state({"app.py": {"is_source": True}}), _source_fs()),
+        {"app.py": None},
+    )
+    _eq("source rescan", source_tracker.source_changes([], [], "/repo", source_tracker.source_state({}), _source_fs(), rescan = True), None)
+
+def _test_protocol_source_delta_expands_removed_directory(_ctx):
+    known = {
+        "assets/a.txt": {"is_source": True},
+        "assets/nested/b.txt": {"is_source": True},
+        "other.txt": {"is_source": True},
+    }
+    _eq(
+        "removed directory children",
+        source_tracker.source_changes(["assets"], ["assets"], "/repo", source_tracker.source_state(known), _source_fs()),
+        {
+            "assets/a.txt": None,
+            "assets/nested/b.txt": None,
+        },
+    )
+
+def _test_protocol_source_delta_reports_files_and_symlinks(_ctx):
+    metadata = {
+        "dir": struct(is_dir = True, is_file = False, is_symlink = False),
+        "file": struct(is_dir = False, is_file = True, is_symlink = False),
+        "link": struct(is_dir = False, is_file = False, is_symlink = True),
+    }
+    _eq(
+        "files and symlinks reported",
+        source_tracker.source_changes(
+            ["dir", "file", "link"],
+            [],
+            "/repo",
+            source_tracker.source_state({}),
+            _source_fs(metadata = metadata),
+        ),
+        {
+            "file": {"is_source": True},
+            "link": {"is_symlink": True},
+        },
+    )
+
+def _test_protocol_source_delta_does_not_walk_symlink(_ctx):
+    symlink_metadata = struct(is_dir = False, is_file = False, is_symlink = True)
+    walks = []
+
+    def directory(path):
+        walks.append(path)
+        return {}
+
+    source_fs = struct(
+        directory = directory,
+        metadata = lambda _path: symlink_metadata,
+    )
+    known = {"link": {"is_symlink": True}}
+    _eq(
+        "retargeted directory symlink",
+        source_tracker.source_changes(["link"], [], "/repo", source_tracker.source_state(known), source_fs),
+        {"link": {"is_symlink": True}},
+    )
+    _eq("symlink target not walked", walks, [])
+    _eq(
+        "deleted symlink",
+        source_tracker.source_changes(["link"], ["link"], "/repo", source_tracker.source_state(known), source_fs),
+        {"link": None},
+    )
+
+def _test_protocol_source_state_indexes_directories(_ctx):
+    state = source_tracker.source_state({
+        "assets/a.txt": {"is_source": True},
+        "assets/nested/b.txt": {"is_source": True},
+        "root.txt": {"is_source": True},
+    })
+    _eq(
+        "source directory counts",
+        state.directories,
+        {
+            "assets": 2,
+            "assets/nested": 1,
+        },
+    )
+
+def _test_protocol_source_tracker_updates_state_across_deltas(ctx):
+    file_metadata = struct(is_dir = False, is_file = True, is_symlink = False)
+    directory_metadata = struct(is_dir = True, is_file = False, is_symlink = False)
+    metadata = {"assets": file_metadata}
+    directories = {}
+    tracker = source_tracker.new(
+        ctx,
+        "/repo",
+        source_fs = _source_fs(
+            baseline = {"assets/old.txt": {"is_source": True}},
+            metadata = metadata,
+            directories = directories,
+        ),
+    )
+    _eq("tracker baseline", tracker.baseline(), {"assets/old.txt": {"is_source": True}})
+    _eq(
+        "tracked directory replaced by file",
+        tracker.delta(["assets"], []),
+        {
+            "assets": {"is_source": True},
+            "assets/old.txt": None,
+        },
+    )
+
+    metadata["assets"] = directory_metadata
+    directories["assets"] = {"assets/new.txt": {"is_source": True}}
+    _eq(
+        "tracked file replaced by directory",
+        tracker.delta(["assets"], []),
+        {
+            "assets": None,
+            "assets/new.txt": {"is_source": True},
+        },
+    )
+    _eq(
+        "tracked replacement directory removed",
+        tracker.delta(["assets"], ["assets"]),
+        {"assets/new.txt": None},
+    )
+
+def _test_protocol_source_tracker_skips_work_until_baseline(ctx):
+    metadata_paths = []
+    file_metadata = struct(is_dir = False, is_file = True, is_symlink = False)
+
+    def metadata(path):
+        metadata_paths.append(path)
+        return file_metadata
+
+    tracker = source_tracker.new(
+        ctx,
+        "C:\\repo\\",
+        source_fs = struct(
+            baseline = lambda: {},
+            directory = lambda _path: {},
+            metadata = metadata,
+        ),
+    )
+    _eq("inactive tracker delta", tracker.delta(["C:\\repo\\app.py"], []), {})
+    _eq("inactive tracker metadata calls", metadata_paths, [])
+
+    tracker.baseline()
+    _eq(
+        "normalized tracker root",
+        tracker.delta(["C:\\repo\\app.py"], []),
+        {"app.py": {"is_source": True}},
+    )
+    _eq("active tracker metadata calls", metadata_paths, ["app.py"])
+
+    _eq("tracker rescan", tracker.delta([], [], rescan = True), None)
+    _eq("post-rescan tracker delta", tracker.delta(["C:\\repo\\other.py"], []), {})
+    _eq("post-rescan metadata calls", metadata_paths, ["app.py"])
+
+def _test_protocol_source_delta_expands_created_directory(_ctx):
+    directory_metadata = struct(is_dir = True, is_file = False, is_symlink = False)
+    added = {
+        "renamed/a.txt": {"is_source": True},
+        "renamed/nested/b.txt": {"is_source": True},
+    }
+    _eq(
+        "created directory children",
+        source_tracker.source_changes(
+            ["renamed"],
+            [],
+            "/repo",
+            source_tracker.source_state({}),
+            _source_fs(
+                metadata = {"renamed": directory_metadata},
+                directories = {"renamed": added},
+            ),
+        ),
+        added,
+    )
+
+def _test_protocol_source_delta_reconciles_created_classified_directory(_ctx):
+    directory_metadata = struct(is_dir = True, is_file = False, is_symlink = False)
+    current = {
+        "assets/kept.txt": {"is_source": True},
+        "assets/new.txt": {"is_source": True},
+    }
+    known = {
+        "assets/kept.txt": {"is_source": True},
+        "assets/stale.txt": {"is_source": True},
+        "other.txt": {"is_source": True},
+    }
+    _eq(
+        "recreated directory children",
+        source_tracker.source_changes(
+            ["assets"],
+            [],
+            "/repo",
+            source_tracker.source_state(known),
+            _source_fs(
+                metadata = {"assets": directory_metadata},
+                directories = {"assets": current},
+            ),
+        ),
+        {
+            "assets/kept.txt": {"is_source": True},
+            "assets/new.txt": {"is_source": True},
+            "assets/stale.txt": None,
+        },
+    )
+
+def _test_protocol_source_delta_removes_descendants_replaced_by_leaf(_ctx):
+    known = {
+        "assets/a.txt": {"is_source": True},
+        "assets/nested/b.txt": {"is_source": True},
+        "other.txt": {"is_source": True},
+    }
+    for label, metadata, info in [
+        ("file", struct(is_dir = False, is_file = True, is_symlink = False), {"is_source": True}),
+        ("symlink", struct(is_dir = False, is_file = False, is_symlink = True), {"is_symlink": True}),
+    ]:
+        _eq(
+            "directory replaced by %s" % label,
+            source_tracker.source_changes(
+                ["assets"],
+                [],
+                "/repo",
+                source_tracker.source_state(known),
+                _source_fs(metadata = {"assets": metadata}),
+            ),
+            {
+                "assets": info,
+                "assets/a.txt": None,
+                "assets/nested/b.txt": None,
+            },
+        )
+
+def _test_protocol_source_delta_removes_entries_replaced_by_special(_ctx):
+    special = struct(is_dir = False, is_file = False, is_symlink = False)
+    known = {
+        "assets/a.txt": {"is_source": True},
+        "assets/nested/b.txt": {"is_source": True},
+        "file.txt": {"is_source": True},
+        "other.txt": {"is_source": True},
+    }
+    _eq(
+        "special entry replacements",
+        source_tracker.source_changes(
+            ["assets", "file.txt"],
+            [],
+            "/repo",
+            source_tracker.source_state(known),
+            _source_fs(metadata = {
+                "assets": special,
+                "file.txt": special,
+            }),
+        ),
+        {
+            "assets/a.txt": None,
+            "assets/nested/b.txt": None,
+            "file.txt": None,
+        },
+    )
+
+def _test_protocol_source_delta_ignores_generated_runfiles(_ctx):
+    _eq(
+        "generated runfile is outside sources scope",
+        source_tracker.source_changes([], [], "/repo", source_tracker.source_state({}), _source_fs()),
+        {},
+    )
+
+def _test_protocol_source_delta_resets_on_filesystem_errors(ctx):
+    known = {"assets/known.txt": {"is_source": True}}
+    _eq(
+        "metadata error resets source state",
+        source_tracker.source_changes(
+            ["assets/known.txt"],
+            [],
+            "/repo",
+            source_tracker.source_state(known),
+            struct(
+                directory = lambda _path: {},
+                metadata = lambda _path: error("permission denied"),
+            ),
+        ),
+        None,
+    )
+    directory_metadata = struct(is_dir = True, is_file = False, is_symlink = False)
+    _eq(
+        "directory read error resets source state",
+        source_tracker.source_changes(
+            ["assets"],
+            [],
+            "/repo",
+            source_tracker.source_state(known),
+            struct(
+                directory = lambda _path: error("input/output error"),
+                metadata = lambda _path: directory_metadata,
+            ),
+        ),
+        None,
+    )
+    tracker = source_tracker.new(
+        ctx,
+        "/repo",
+        source_fs = struct(
+            baseline = lambda: error("permission denied"),
+            directory = lambda _path: {},
+            metadata = lambda _path: None,
+        ),
+    )
+    _eq("baseline error leaves tracker inactive", tracker.baseline(), None)
+    _eq("delta after baseline error stays inactive", tracker.delta(["app.py"], []), {})
+
+def _test_protocol_source_baseline_scans_workspace(ctx):
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-changedetector-sources-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root) if ctx.std.fs.exists(root) else None)
+    ctx.std.fs.create_dir_all(root + "/pkg")
+    ctx.std.fs.create_dir_all(root + "/pkg/node_modules")
+    ctx.std.fs.create_dir_all(root + "/ignored")
+    ctx.std.fs.write(root + "/README.md", "")
+    ctx.std.fs.write(root + "/pkg/app.py", "")
+    ctx.std.fs.write(root + "/pkg/node_modules/noise", "")
+    ctx.std.fs.write(root + "/ignored/noise", "")
+
+    expected = {
+        "README.md": {"is_source": True},
+        "pkg/app.py": {"is_source": True},
+    }
+    if ctx.std.env.os() != "windows":
+        status = ctx.std.process.command("ln").args(["-s", "pkg", root + "/pkg-link"]).spawn().wait()
+        _eq("create workspace source symlink", status.code, 0)
+        expected["pkg-link"] = {"is_symlink": True}
+
+    _eq(
+        "workspace source baseline",
+        source_tracker.workspace_sources(ctx, root, [root + "/ignored"], [root + "/**/node_modules"]),
+        expected,
+    )
+    _eq(
+        "workspace source subtree",
+        source_tracker.workspace_sources(ctx, root, ignored_patterns = [root + "/**/node_modules"], start = "pkg"),
+        {"pkg/app.py": {"is_source": True}},
+    )
+    _eq("vanished baseline root", source_tracker.workspace_sources(ctx, root + "/gone"), {})
 
 def _test_manifest_fallbacks_are_conservative(_ctx):
     state = _manifest({"_main/app": "/repo/app"})
@@ -103,19 +565,77 @@ def _test_runinfo_changes_entrypoint_state(_ctx):
     after = changedetector.entrypoint_state(_entrypoint(args = ["serve", "--debug"], environment = {"PORT": "3001"}))
     _eq("runinfo changed", before != after, True)
 
+def _test_detector_separates_unknown_deltas_from_restart_reasons(ctx):
+    directory = ctx.std.fs.mkdtemp(prefix = "aspect-changedetector-state-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory) if ctx.std.fs.exists(directory) else None)
+    manifest_path = directory + "/app.runfiles_manifest"
+    ctx.std.fs.write(manifest_path, "_main/app.py /repo/app.py\n")
+    state = {
+        "default_outputs": [],
+        "entrypoint": _entrypoint(args = ["serve"]),
+    }
+    runnable = struct(
+        clear_default_outputs = lambda _target: None,
+        clear_output_group_outputs = lambda _target, _group: None,
+        determine_entrypoint = lambda _target: state["entrypoint"],
+        get_default_outputs = lambda _target: state["default_outputs"],
+        get_output_group_outputs = lambda _target, _group: [manifest_path],
+    )
+    detector = changedetector.new(ctx, runnable, "//:app", "/repo")
+    detector.capture_baseline()
+
+    detector.begin_build()
+    detector.record_build_failure()
+    result = detector.changes(["app.py"], [], [])
+    _eq("failed-build changes unknown", result.changes_unknown, True)
+    _eq("unknown runfile delta", result.runfiles, None)
+    _eq("unknown delta is not universal restart", result.restart_required, False)
+    _eq("unchanged outputs remain separate", result.outputs_changed, False)
+
+    detector.begin_build()
+    state["entrypoint"] = _entrypoint(args = ["serve", "--debug"])
+    state["default_outputs"] = ["/tmp/output/execroot/_main/bazel-out/k8/bin/app"]
+    result = detector.changes([], [], ["bazel-out/k8/bin/app"])
+    _eq("launch-state change requires restart", result.restart_required, True)
+    _eq("default-output change remains separate", result.outputs_changed, True)
+    _eq("subsequent deltas are precise", result.changes_unknown, False)
+
 _UNIT_TESTS = [
     _test_missing_execution_log_is_safe,
     _test_manifest_parses_source_and_generated_origins,
     _test_manifest_decodes_escaped_fields,
     _test_source_runfile_change_is_reported,
     _test_source_directory_runfile_change_is_reported,
+    _test_nearest_runfile_directory_wins,
+    _test_all_runfile_aliases_are_reported,
     _test_generated_runfile_change_is_reported,
     _test_default_output_change_restarts_without_manifest_entry,
     _test_manifest_changes_are_reported,
+    _test_protocol_runfiles_include_metadata,
+    _test_protocol_delta_marks_deletions,
+    _test_protocol_delta_updates_all_aliases,
+    _test_protocol_directory_runfile_delta_marks_deleted_child,
+    _test_protocol_source_delta_includes_all_workspace_paths,
+    _test_protocol_source_delta_ignores_paths_outside_workspace,
+    _test_protocol_source_delta_marks_deletions_and_rescans,
+    _test_protocol_source_delta_expands_removed_directory,
+    _test_protocol_source_delta_reports_files_and_symlinks,
+    _test_protocol_source_delta_does_not_walk_symlink,
+    _test_protocol_source_state_indexes_directories,
+    _test_protocol_source_tracker_updates_state_across_deltas,
+    _test_protocol_source_tracker_skips_work_until_baseline,
+    _test_protocol_source_delta_expands_created_directory,
+    _test_protocol_source_delta_reconciles_created_classified_directory,
+    _test_protocol_source_delta_removes_descendants_replaced_by_leaf,
+    _test_protocol_source_delta_removes_entries_replaced_by_special,
+    _test_protocol_source_delta_ignores_generated_runfiles,
+    _test_protocol_source_delta_resets_on_filesystem_errors,
+    _test_protocol_source_baseline_scans_workspace,
     _test_manifest_fallbacks_are_conservative,
     _test_manifest_output_path,
     _test_unchanged_entrypoint_state_is_equal,
     _test_runinfo_changes_entrypoint_state,
+    _test_detector_separates_unknown_deltas_from_restart_reasons,
 ]
 
 def _test_impl(ctx):

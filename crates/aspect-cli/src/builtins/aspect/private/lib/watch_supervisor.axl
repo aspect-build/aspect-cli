@@ -1,0 +1,174 @@
+"""Watched-child supervision with incremental-update and restart modes."""
+
+load("./environment.axl", "warn")
+load("./watch_result.axl", "watch_result")
+
+def _stop_child(child) -> None:
+    child.kill_all()
+    child.wait()
+
+def _restart_outcome(result: struct) -> struct:
+    if not result.success:
+        return watch_result.outcome(watch_result.KEEP)
+    if result.restart_required or result.outputs_changed or result.runfiles != {}:
+        return watch_result.outcome(watch_result.RESTART)
+    return watch_result.outcome(watch_result.KEEP, status = "unchanged")
+
+def _new(ctx: TaskContext, spawn, candidate_factory = None) -> struct:
+    """Own a watched child and delegate build results to its update mode.
+
+    A candidate may connect after the child starts. Once active it owns update
+    interpretation; the supervisor only applies its keep, restart, or fallback
+    action. Negotiation or initialization failure permanently selects process
+    restarts, while an update failure retries with a fresh child.
+    """
+    state = {
+        "child": None,
+        "pending": [],
+        "protocol": None,
+        "protocol_disabled": False,
+        # Set by build-start or update failures; acted on after a successful build.
+        "deferred_restart": False,
+    }
+
+    def new_candidates():
+        if state["protocol_disabled"]:
+            return []
+        return candidate_factory() if candidate_factory != None else []
+
+    def close_pending():
+        for candidate in state["pending"]:
+            candidate.close()
+        state["pending"] = []
+
+    def close_protocol(description = ""):
+        protocol = state["protocol"]
+        if protocol != None:
+            protocol.close(description)
+            state["protocol"] = None
+
+    def stop():
+        close_protocol("watch process stopped")
+        close_pending()
+        child = state["child"]
+        if child != None:
+            _stop_child(child)
+            state["child"] = None
+
+    def restart_without_protocol(description):
+        state["protocol_disabled"] = True
+        close_protocol(description)
+        restart()
+
+    def poll_candidates():
+        pending_candidates = state["pending"]
+        if not pending_candidates or state["protocol"] != None:
+            return
+
+        remaining = []
+        for index in range(len(pending_candidates)):
+            candidate = pending_candidates[index]
+            connected, err = candidate.try_connect()
+            if not connected:
+                remaining.append(candidate)
+                continue
+
+            for other in remaining:
+                other.close()
+            for other in pending_candidates[index + 1:]:
+                other.close()
+            state["pending"] = []
+            if err != None:
+                candidate.close()
+                warn(ctx.std, "%s negotiation failed; falling back to process restarts: %s" % (candidate.name, err))
+                restart_without_protocol(err)
+                return
+
+            state["protocol"] = candidate
+            init_err = candidate.initialize()
+            if init_err != None:
+                warn(ctx.std, "%s initialization failed; falling back to process restarts: %s" % (candidate.name, init_err))
+                restart_without_protocol(init_err)
+            return
+        state["pending"] = remaining
+
+    def poll():
+        child = state["child"]
+        if child == None:
+            return None
+        status = child.try_wait()
+        if status != None:
+            close_protocol("watch process exited")
+            close_pending()
+            child.wait()
+            state["child"] = None
+            return status
+        poll_candidates()
+        return None
+
+    def restart():
+        stop()
+        candidates = new_candidates()
+        environment = {}
+        for candidate in candidates:
+            environment.update(candidate.environment)
+
+        child = spawn(environment)
+        state["child"] = child
+        if child == None:
+            for candidate in candidates:
+                candidate.close()
+            return
+        state["pending"] = candidates
+        poll_candidates()
+
+    def build_started():
+        protocol = state["protocol"]
+        if protocol == None:
+            return
+        err = protocol.build_started()
+        if err != None:
+            warn(ctx.std, "%s build-start notification failed; restarting after the next successful build: %s" % (protocol.name, err))
+            state["deferred_restart"] = True
+
+    def build_finished(result):
+        """Apply a build result; return its user-facing status when kept."""
+        if state["deferred_restart"] and result.success:
+            state["deferred_restart"] = False
+            restart()
+            return None
+        if state["child"] == None:
+            if result.success:
+                restart()
+            return None
+
+        protocol = state["protocol"]
+        outcome = protocol.build_finished(result) if protocol != None else _restart_outcome(result)
+        if outcome.action == watch_result.KEEP:
+            return outcome.status
+        if outcome.action == watch_result.FALLBACK:
+            description = outcome.error or "protocol requested fallback"
+            warn(ctx.std, "%s requested process-restart fallback: %s" % (protocol.name, description))
+            restart_without_protocol(description)
+            return None
+        if not result.success:
+            state["deferred_restart"] = True
+            if outcome.error != None:
+                warn(ctx.std, "%s failed; restarting after the next successful build: %s" % (protocol.name, outcome.error))
+                close_protocol(str(outcome.error))
+            return None
+        if outcome.error != None:
+            warn(ctx.std, "%s failed; restarting the process: %s" % (protocol.name, outcome.error))
+
+        restart()
+        return None
+
+    ctx.defer(stop)
+    return struct(
+        build_finished = build_finished,
+        build_started = build_started,
+        poll = poll,
+        restart = restart,
+    )
+
+watch_supervisor = namespace(new = _new)

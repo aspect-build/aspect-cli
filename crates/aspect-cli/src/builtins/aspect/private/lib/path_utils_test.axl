@@ -1,6 +1,6 @@
-"""Unit tests for lib/path_normalize.axl."""
+"""Unit tests for lib/path_utils.axl."""
 
-load("./path_normalize.axl", "normalize_files_for_cwd", "normpath")
+load("./path_utils.axl", "normalize_files_for_cwd", "normpath", "path_utils")
 
 def _eq(label, got, want):
     if got != want:
@@ -13,6 +13,20 @@ def _test_normpath(_ctx):
     _eq("doubled", normpath("/a//b"), "/a/b")
     _eq("above the root", normpath("/../a"), "/a")
     _eq("root", normpath("/"), "/")
+
+def _test_path_utilities(_ctx):
+    _eq("normalize separators", path_utils.normalize_separators("a\\b\\c"), "a/b/c")
+    _eq("Unix absolute", path_utils.is_absolute("/a/b"), True)
+    _eq("Windows absolute", path_utils.is_absolute("C:/a/b"), True)
+    _eq("relative", path_utils.is_absolute("a/b"), False)
+    _eq("parents", path_utils.parents("a/b/c"), ["a", "a/b"])
+    _eq("nearest parents first", path_utils.parents("a/b/c", nearest_first = True), ["a/b", "a"])
+
+def _test_glob_matches(_ctx):
+    _eq("recursive glob at root", path_utils.glob_matches("**/node_modules", "node_modules"), True)
+    _eq("recursive glob nested", path_utils.glob_matches("**/node_modules", "app/node_modules"), True)
+    _eq("single segment", path_utils.glob_matches("generated/*", "generated/client"), True)
+    _eq("single segment does not recurse", path_utils.glob_matches("generated/*", "generated/client/api"), False)
 
 def _test_at_git_root(_ctx):
     """cwd == git_root → no rebasing needed, return files unchanged."""
@@ -126,6 +140,8 @@ def _test_git_root_under_cwd_empty_files(_ctx):
 
 _UNIT_TESTS = [
     _test_normpath,
+    _test_path_utilities,
+    _test_glob_matches,
     _test_at_git_root,
     _test_direct_child,
     _test_nested_cwd,
@@ -145,12 +161,12 @@ _UNIT_TESTS = [
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("path_normalize.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    print("path_utils.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
-path_normalize_tests = task(
-    summary = "Run the path normalize AXL unit tests.",
-    kind = "test-path-normalize",
+path_utils_tests = task(
+    summary = "Run the path utilities AXL unit tests.",
+    kind = "test-path-utils",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
