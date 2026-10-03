@@ -14,7 +14,7 @@ the read-only directories Bazel leaves under `bazel-out/`, and it must not
 follow the execroot's symlinks out into the user's checkout.
 """
 
-load("@aspect//gc.axl", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select", "testonly_summary", "testonly_why")
+load("@aspect//gc.axl", "testonly_collect", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select", "testonly_summary", "testonly_why")
 load("@aspect//private/lib/output_bases.axl", "output_bases")
 load("@aspect//private/lib/output_bases_fixtures.axl", fx = "fixtures")
 
@@ -261,6 +261,38 @@ def _test_select_resolves_another_spelling_of_the_root(ctx):
     _eq("both found", sorted([b.name for b in selected]), sorted([fx.LIVE, fx.DEAD]))
     _eq("none unmatched", unmatched, [])
 
+def _test_a_cache_entry_fetched_after_the_scan_is_left_alone(ctx):
+    root = fx.fixture(ctx)
+    old = _cache_entry(ctx, root, "d" * 64, 10)
+    fresh_since = _cache_entry(ctx, root, "e" * 64, 10)
+    fx.backdate(ctx, old)
+    fx.backdate(ctx, fresh_since)
+    cutoff = fx.now_us() - 30 * fx.DAY_US
+    _seen, stale = testonly_scan_download_cache(ctx, root, cutoff)
+    ctx.std.fs.write(fresh_since + "/file", "fetched again")
+    plan = testonly_plan(bases = [], removals = [], sizes = {}, cache_entries = 2, stale = stale, cache_cutoff_us = cutoff)
+    outcome = testonly_collect(ctx, False, plan, False)
+    _eq("pruned", outcome.pruned, 1)
+    _eq("skipped", outcome.cache_skipped, 1)
+    _eq("the fetched entry stays", ctx.std.fs.exists(fresh_since), True)
+    _eq("not a failure", testonly_failure(plan, outcome), None)
+
+def _test_removals_carry_their_outcome(ctx):
+    root = fx.fixture(ctx)
+    bases = fx.scan(ctx, root)
+    orphans = [b for b in bases if b.state == "orphan"]
+    plan = testonly_plan(bases = bases, removals = orphans, sizes = {}, cache_entries = 0, stale = [])
+    ctx.std.fs.write(orphans[0].path + "/java.log", "")
+    outcome = testonly_collect(ctx, False, plan, False)
+    doc = testonly_document(root, False, {}, plan, outcome)
+    _eq("per-base outcome", sorted([r["outcome"] for r in doc["removals"]]), ["reaped", "skipped"])
+    dry = testonly_document(root, True, {}, plan, testonly_outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0))
+    _eq("a dry run attempts nothing", [r["outcome"] for r in dry["removals"]], ["not attempted", "not attempted"])
+
+def _test_a_pooled_base_says_so_when_removed(ctx):
+    b = output_bases.Base(name = "n", path = "/root/n", workspace = "/home/.aspect/worktrees/x", state = "idle", pid = 0, last_used = 0, pooled = True)
+    _eq("pool slot", testonly_why(b, 45 * fx.DAY_US), "unused for 45d; worktree pool slot /home/.aspect/worktrees/x")
+
 def _test_summary(ctx):
     def outcome(skipped):
         return testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = skipped, pruned = 0, pruned_kb = 0)
@@ -291,6 +323,9 @@ _UNIT_TESTS = [
     _test_a_base_renames_onto_leftover_trash,
     _test_select_resolves_another_spelling_of_the_root,
     _test_summary,
+    _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
+    _test_removals_carry_their_outcome,
+    _test_a_pooled_base_says_so_when_removed,
 ]
 
 def _test_impl(ctx):

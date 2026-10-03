@@ -181,6 +181,8 @@ Base = record(
     pid = field(int),
     # Newest mtime among the freshness markers, in microseconds since the epoch.
     last_used = field(int),
+    # Its workspace is an `aspect worktree` pool slot.
+    pooled = field(bool, default = False),
 )
 
 def _fmt_kb(kb: int) -> str:
@@ -363,6 +365,16 @@ def _server_pid(ctx: TaskContext, base: str) -> int:
             return 0
     return int(txt)
 
+def _run(ctx: TaskContext, cmd: str, args: list[str]):
+    """`(exit code, stdout)` of `cmd args`, stderr discarded; `(-1, "")` when
+    the command cannot be started at all — a slim image without `ps` or
+    `realpath` is a missing answer, not a crash."""
+    err, out = catch(lambda: ctx.std.process.command(cmd).args(args)
+        .stdout("piped").stderr("null").spawn().wait_with_output())
+    if err != None:
+        return (-1, "")
+    return (out.status.code, out.stdout)
+
 def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
     """True when `pid` is live AND is the Bazel server for `base`.
 
@@ -375,12 +387,11 @@ def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
     """
     if pid <= 0:
         return False
-    out = ctx.std.process.command("ps").args(["-p", str(pid), "-o", "command="]) \
-        .stdout("piped").stderr("null").spawn().wait_with_output()
-    if out.status.code != 0:
+    code, command = _run(ctx, "ps", ["-p", str(pid), "-o", "command="])
+    if code != 0:
         return False
     name = base[base.rfind("/") + 1:]
-    return "--output_base=" in out.stdout and ("/" + name) in out.stdout
+    return "--output_base=" in command and ("/" + name) in command
 
 def _in_state(bases: list, state: str) -> list:
     return [b for b in bases if b.state == state]
@@ -415,9 +426,8 @@ def _du_kb(ctx: TaskContext, path: str):
     entry yet still prints the total for the rest. None — a path removed since
     the scan, or no `du` at all — costs the report a number and nothing else.
     """
-    out = ctx.std.process.command("du").args(["-sk", path]) \
-        .stdout("piped").stderr("null").spawn().wait_with_output()
-    parts = out.stdout.strip().split("\t")
+    _code, out = _run(ctx, "du", ["-sk", path])
+    parts = out.strip().split("\t")
     if len(parts) != 2 or not parts[0].isdigit():
         return None
     return int(parts[0])
@@ -497,6 +507,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
             state = state,
             pid = pid,
             last_used = last_used,
+            pooled = pooled,
         ))
     return sorted(bases, key = lambda b: -b.last_used)
 
@@ -678,10 +689,9 @@ def _canonical(ctx: TaskContext, path: str) -> str:
     """`path` with symlinks, `.` and `..` resolved, via `realpath`. A path
     `realpath` cannot resolve — missing, or no `realpath` — comes back
     normalized if absolute, else as given."""
-    err, out = catch(lambda: ctx.std.process.command("realpath").args([path])
-        .stdout("piped").stderr("null").spawn().wait_with_output())
-    if err == None and out.status.code == 0 and out.stdout.strip():
-        return out.stdout.strip()
+    code, out = _run(ctx, "realpath", [path])
+    if code == 0 and out.strip():
+        return out.strip()
     return normpath(path) if path.startswith("/") else path
 
 def _resolve_root(ctx: TaskContext, explicit: str) -> tuple:
@@ -762,6 +772,7 @@ output_bases = namespace(
     output_user_root_arg = _output_user_root_arg,
     policy_entry = _policy_entry,
     resolve_root = _resolve_root,
+    run = _run,
     scan_root = _scan_root,
     print_caches = _print_caches,
     print_census = _print_census,

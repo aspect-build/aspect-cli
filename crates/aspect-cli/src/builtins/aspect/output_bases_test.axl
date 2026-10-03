@@ -266,6 +266,11 @@ def _test_a_pooled_slot_with_a_server_stays_pooled(ctx):
     server.kill()
     _eq("pooled", states[fx.MARKER], "pooled")
 
+def _test_a_missing_command_is_an_answer_not_a_crash(ctx):
+    """A slim image without `ps`, `du` or `realpath` loses the answer, not the run."""
+    _eq("missing", output_bases.run(ctx, "aspect-no-such-command", []), (-1, ""))
+    _eq("present", output_bases.run(ctx, "sh", ["-c", "echo hi"]), (0, "hi\n"))
+
 def _test_canonical(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-canon")
     real = output_bases.canonical(ctx, tmp)
@@ -475,6 +480,7 @@ _UNIT_TESTS = [
     _test_a_process_that_is_not_a_server_does_not_veto,
     _test_a_pooled_slot_with_a_server_stays_pooled,
     _test_canonical,
+    _test_a_missing_command_is_an_answer_not_a_crash,
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_the_orphan_note_states_the_grace_period,
     _test_the_undetermined_note_states_the_max_age,
