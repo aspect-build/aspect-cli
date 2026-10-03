@@ -23,7 +23,7 @@ Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
 symlink creation, and ages are set with `touch -t` for want of a `utimes`.
 """
 
-load("@aspect//gc.axl", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_render_note", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
+load("@aspect//gc.axl", "testonly_caches", "testonly_classify", "testonly_configured_output_user_root", "testonly_document", "testonly_du_kb", "testonly_fmt_age", "testonly_fmt_kb", "testonly_is_output_base_name", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy", "testonly_reap", "testonly_remove_tree", "testonly_render_note", "testonly_scan", "testonly_scan_download_cache", "testonly_select", "testonly_states", "testonly_verbose_hint", "testonly_workspace_of")
 load("@std//time.axl", "time")
 
 def _eq(label, got, want):
@@ -583,6 +583,15 @@ def _test_measure_sizes_adds_sizes_without_changing_reclaimable(ctx):
     _eq("reclaimable is only the removals", sized["reclaimable_kb"], plain["reclaimable_kb"])
     _eq("listed bases carry their size", all([e["kb"] == 100 for e in sized["live_bases"]]), True)
 
+def _test_the_download_cache_reason_states_the_age(ctx):
+    """Pruning is on by default, so the shared-cache table gives the age in
+    force rather than naming the flag as if it were needed."""
+    reason = [r for key, _rel, r in testonly_caches if key == "download_cache_kb"][0]
+    month = testonly_policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 30 * _DAY_US)
+    off = testonly_policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 0)
+    _eq("default", testonly_render_note(reason, month), ["pruned after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
+    _eq("off", testonly_render_note(reason, off), ["not pruned; --download-cache-max-age-days=N prunes after N days unused"])
+
 _UNIT_TESTS = [
     _test_verbose_lists_what_was_left_alone,
     _test_verbose_is_additive_only,
@@ -625,6 +634,7 @@ _UNIT_TESTS = [
     _test_the_undetermined_note_states_the_max_age,
     _test_verbose_is_hinted_only_when_it_would_list_something,
     _test_measure_sizes_adds_sizes_without_changing_reclaimable,
+    _test_the_download_cache_reason_states_the_age,
 ]
 
 def _test_impl(ctx):

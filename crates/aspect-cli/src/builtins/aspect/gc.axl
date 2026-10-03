@@ -131,9 +131,10 @@ _STATES = {
     _TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True),
 }
 
-# The caches `--measure-sizes` measures, with what collects each.
+# The caches `--measure-sizes` measures, with what collects each. A reason is
+# rendered by `_render_note`, for the placeholders it fills.
 _CACHES = [
-    ("download_cache_kb", _DOWNLOAD_CACHE, "pruned by aspect gc --download-cache-max-age-days"),
+    ("download_cache_kb", _DOWNLOAD_CACHE, "{cache_age}"),
     ("repo_contents_cache_kb", "cache/repos/v1/contents", "collected by Bazel while a server sits idle"),
     ("install_bases_kb", "install", "collected by Bazel's --experimental_install_base_gc_max_age"),
 ]
@@ -143,6 +144,7 @@ _CACHES = [
 _Policy = record(
     base_max_age_us = field(int),
     orphan_grace_us = field(int),
+    download_cache_max_age_us = field(int, default = 0),
 )
 
 _Base = record(
@@ -648,8 +650,9 @@ def _say(streaming: bool, line: str) -> None:
         print(line)
 
 def _render_note(note: str, policy) -> list[str]:
-    """A state's census note as lines, with the policy's periods filled in, so
-    the numbers a reader sees are the ones that decided.
+    """A census note or cache reason as lines, with the policy's periods filled
+    in (`{grace}`, `{max_age}`, `{cache_age}`), so the numbers a reader sees are
+    the ones that decided.
 
     An undetermined base can only go by age, so its line also offers the way
     to remove one now.
@@ -663,7 +666,11 @@ def _render_note(note: str, policy) -> list[str]:
     else:
         max_age = "Removed %s after last use (--base-max-age-days=N to change, 0 to keep)" % _fmt_age(policy.base_max_age_us)
     max_age += ", or now with --bazel-output-base=<hash>."
-    return note.replace("{grace}", grace).replace("{max_age}", max_age).split("\n")
+    if policy.download_cache_max_age_us == 0:
+        cache_age = "not pruned; --download-cache-max-age-days=N prunes after N days unused"
+    else:
+        cache_age = "pruned after %s unused; --download-cache-max-age-days=N to change, 0 to keep" % _fmt_age(policy.download_cache_max_age_us)
+    return note.replace("{grace}", grace).replace("{max_age}", max_age).replace("{cache_age}", cache_age).split("\n")
 
 def _verbose_hint(bases: list) -> str:
     """The pointer to `--verbose` when it would list something, naming the kept
@@ -814,7 +821,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     grace_hours = ctx.args.orphan_grace_hours
     if base_max_age_days < 0 or cache_max_age_days < 0 or grace_hours < 0:
         return TaskConclusion(exit_code = 1, message = "ages and the grace period are 0 or more")
-    policy = _Policy(base_max_age_us = base_max_age_days * _DAY_US, orphan_grace_us = grace_hours * _HOUR_US)
+    policy = _Policy(
+        base_max_age_us = base_max_age_days * _DAY_US,
+        orphan_grace_us = grace_hours * _HOUR_US,
+        download_cache_max_age_us = cache_max_age_days * _DAY_US,
+    )
 
     root = _output_user_root(ctx)
     if not ctx.std.fs.exists(root):
@@ -851,7 +862,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     cache_entries, stale = 0, []
     if cache_max_age_days > 0 and not requested:
         _say(streaming, "  scanning the Bazel download cache…")
-        cache_entries, stale = _scan_download_cache(ctx, root, now_us - cache_max_age_days * _DAY_US)
+        cache_entries, stale = _scan_download_cache(ctx, root, now_us - policy.download_cache_max_age_us)
     plan = _Plan(
         bases = bases,
         removals = removals,
@@ -918,7 +929,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("  Bazel shared caches:")
         width = max([len(rel) for _key, rel, _reason in _CACHES])
         for key, rel, reason in _CACHES:
-            print("    " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + reason + ")")
+            print("    " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + _render_note(reason, policy)[0] + ")")
     return failure or 0
 
 gc = task(
@@ -980,6 +991,7 @@ Otherwise never touches a running Bazel server whose workspace still exists, and
 )
 
 # Exposed for gc_test.axl; not part of the task's surface.
+testonly_caches = _CACHES
 testonly_classify = _classify
 testonly_configured_output_user_root = _configured_output_user_root
 testonly_document = _document
