@@ -1,0 +1,63 @@
+"""Transport-neutral Incremental Build Protocol (IBP) definitions.
+
+Protocol definition: https://github.com/aspect-extensions/watchdog/blob/main/protocol.axl
+"""
+
+KIND = enum(
+    "NEGOTIATE",
+    "NEGOTIATE_RESPONSE",
+    "CAPS",
+    "CAPS_RESPONSE",
+    "INFO",
+    "EXIT",
+    "CYCLE",
+    "CYCLE_RESET",
+    "CYCLE_ABORT",
+    "CYCLE_STARTED",
+    "CYCLE_COMPLETED",
+    "CYCLE_ABORTED",
+    "CYCLE_FAILED",
+)
+
+WATCH_SCOPE = enum(
+    "sources",
+    "runfiles",
+)
+
+ProtocolError = error.type()
+
+PROTOCOL_SOCKET_ENV = "IBP_WATCH_SOCKET_FILE"
+
+# Older watchdog clients still read this name. Remove it once those clients
+# have migrated to IBP_WATCH_SOCKET_FILE.
+LEGACY_PROTOCOL_SOCKET_ENV = "ABAZEL_WATCH_SOCKET_FILE"
+
+def _message(kind: str, **fields) -> dict:
+    result = {"kind": kind}
+    result.update(fields)
+    return result
+
+def _parse_message(raw: str) -> tuple:
+    message = json.try_decode(raw, None)
+    if type(message) != "dict":
+        return ProtocolError("message is not a JSON object"), None
+    kind = message.get("kind")
+    if kind not in KIND.values():
+        return ProtocolError("unknown or missing `kind`: %r" % kind), None
+    return None, message
+
+def _take_line(buffer: str) -> tuple:
+    newline = buffer.find("\n")
+    if newline < 0:
+        return None, buffer
+    return buffer[:newline], buffer[newline + 1:]
+
+incremental_build_protocol = namespace(
+    Error = ProtocolError,
+    legacy_socket_environment = LEGACY_PROTOCOL_SOCKET_ENV,
+    message = _message,
+    parse_message = _parse_message,
+    socket_environment = PROTOCOL_SOCKET_ENV,
+    take_line = _take_line,
+    watch_scopes = WATCH_SCOPE,
+)

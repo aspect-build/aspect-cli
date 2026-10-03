@@ -1,0 +1,236 @@
+"""Host implementation of the Incremental Build Protocol (IBP)."""
+
+load("./incremental_build_protocol.axl", protocol = "incremental_build_protocol")
+load("./watch_result.axl", "watch_result")
+
+SUPPORTED_VERSIONS = [1, 0]
+_NEGOTIATION_TIMEOUT_MS = 1000
+_CYCLE_TIMEOUT_MS = 5 * 60 * 1000
+_READ_SIZE = 64 * 1024
+
+def _build_finished(scope: str, result: struct, cycle) -> struct:
+    """Apply one build result according to the negotiated IBP scope."""
+    if scope == "sources":
+        # Source clients consume workspace files directly, so a failed Bazel
+        # build does not make their delta stale.
+        if result.success and (result.restart_required or result.outputs_changed):
+            return watch_result.outcome(watch_result.RESTART)
+        changes = result.sources
+    else:
+        if not result.success:
+            return watch_result.outcome(watch_result.KEEP)
+        if result.restart_required or result.outputs_changed:
+            return watch_result.outcome(watch_result.RESTART)
+        changes = result.runfiles
+
+    if changes == {}:
+        return watch_result.outcome(watch_result.KEEP, status = "unchanged")
+    if changes == None:
+        return watch_result.outcome(watch_result.RESTART)
+
+    err = cycle(changes)
+    if err != None:
+        return watch_result.outcome(watch_result.RESTART, error = err)
+    return watch_result.outcome(watch_result.KEEP, status = "updated")
+
+def _baseline(scope: str, runfiles_baseline, sources):
+    if scope == "sources":
+        return sources.baseline() if sources != None else None
+    return runfiles_baseline() if runfiles_baseline != None else None
+
+def _read(state: dict) -> tuple:
+    for _ in range(1000000):
+        line, remainder = protocol.take_line(state["buffer"])
+        if line != None:
+            state["buffer"] = remainder
+            return protocol.parse_message(line)
+
+        err, chunk = state["stream"].try_read(_READ_SIZE)
+        if err != None:
+            return protocol.Error("failed to read protocol message: %s" % err, cause = err), None
+        if len(chunk) == 0:
+            return protocol.Error("protocol peer closed the connection"), None
+        state["buffer"] += str(chunk)
+    return protocol.Error("protocol message exceeded the read iteration limit"), None
+
+def _write(state: dict, message: dict) -> error | None:
+    err, _ = state["stream"].try_write_all(json.encode(message) + "\n")
+    return protocol.Error("failed to write protocol message: %s" % err, cause = err) if err != None else None
+
+def _negotiate_caps(raw) -> tuple:
+    if raw == None:
+        raw = {}
+    if type(raw) != "dict":
+        return protocol.Error("`caps` is not an object"), None
+
+    # Omitted scope defaults to runfiles as specified by v1.
+    requested = raw.get("scope", ["runfiles"])
+    if type(requested) != "list" or not requested:
+        return protocol.Error("`scope` capability must be a non-empty list"), None
+    for scope in requested:
+        if scope not in protocol.watch_scopes.values():
+            return protocol.Error("unknown watch scope: %r" % scope), None
+
+    # The CLI currently emits one scope per cycle. Prefer sources when both are
+    # requested and report only the scope the host will actually deliver.
+    caps = {"scope": ["sources" if "sources" in requested else "runfiles"]}
+    if raw.get("otel") == True:
+        # Trace context is not wired through this AXL host yet.
+        caps["otel"] = False
+    return None, caps
+
+def _cycle_message(version: int, cycle_id: int, scope: str, sources: dict) -> dict:
+    fields = {
+        "cycle_id": cycle_id,
+        "sources": sources,
+    }
+    if version >= 1:
+        fields["scope"] = scope
+    else:
+        # v0 clients distinguish the initial full baseline from later deltas.
+        fields["is_fresh"] = cycle_id == 1
+    return protocol.message("CYCLE", **fields)
+
+def _cycle_response(response: dict, cycle_id: int) -> tuple:
+    kind = response["kind"]
+    if kind == "EXIT":
+        return True, protocol.Error("protocol peer exited: %s" % response.get("description", ""))
+    if response.get("cycle_id") != cycle_id:
+        return True, protocol.Error("unexpected cycle response: %r" % response)
+    if kind == "CYCLE_STARTED":
+        return False, None
+    if kind == "CYCLE_COMPLETED":
+        return True, None
+    if kind == "CYCLE_ABORTED":
+        return True, protocol.Error("protocol cycle %d was aborted" % cycle_id)
+    if kind == "CYCLE_FAILED":
+        return True, protocol.Error("protocol cycle %d failed: %s" % (cycle_id, response.get("description", "")))
+    return True, protocol.Error("unexpected cycle response: %r" % response)
+
+def _await_cycle(state: dict, cycle_id: int) -> error | None:
+    for _ in range(1000000):
+        err, response = _read(state)
+        if err != None:
+            return err
+        done, response_err = _cycle_response(response, cycle_id)
+        if done:
+            return response_err
+    return protocol.Error("protocol cycle exceeded the response iteration limit")
+
+def _new(ctx: TaskContext, runfiles_baseline = None, sources = None):
+    if ctx.std.env.os() == "windows":
+        return None
+
+    # Keep the Unix socket under its platform limit (104 bytes on macOS) while
+    # using a securely-created directory to avoid stale-path collisions.
+    socket_dir = ctx.std.fs.mkdtemp(prefix = "aspect-watch-", parent = "/tmp")
+    socket_path = socket_dir + "/socket"
+    err, listener = ctx.std.net.unix.try_listen(socket_path)
+    if err != None:
+        ctx.std.fs.remove_dir_all(socket_dir)
+        return None
+
+    state = {
+        "buffer": "",
+        "closed": False,
+        "cycle_id": 0,
+        "listener": listener,
+        "stream": None,
+        "scope": "runfiles",
+        "version": -1,
+    }
+
+    def close(description: str = ""):
+        if state["closed"]:
+            return
+        state["closed"] = True
+        if sources != None:
+            sources.stop()
+        if state["stream"] != None:
+            if state["version"] >= 0:
+                _write(state, protocol.message("EXIT", description = description))
+            state["stream"].close()
+            state["stream"] = None
+        state["listener"].close()
+        if ctx.std.fs.exists(socket_dir):
+            ctx.std.fs.remove_dir_all(socket_dir)
+
+    def negotiate(accepted, timeout_ms: int) -> error | None:
+        stream, _peer = accepted
+        state["stream"] = stream
+        stream.set_read_timeout(timeout_ms)
+        stream.set_write_timeout(timeout_ms)
+
+        send_err = _write(state, protocol.message("NEGOTIATE", versions = SUPPORTED_VERSIONS))
+        if send_err != None:
+            return send_err
+        read_err, response = _read(state)
+        if read_err != None:
+            return read_err
+        if response["kind"] != "NEGOTIATE_RESPONSE":
+            return protocol.Error("expected NEGOTIATE_RESPONSE, got %r" % response)
+        version = response.get("version")
+        if type(version) != "int" or version not in SUPPORTED_VERSIONS:
+            return protocol.Error("peer selected unsupported protocol version: %r" % version)
+
+        if version >= 1:
+            read_err, request = _read(state)
+            if read_err != None:
+                return read_err
+            if request["kind"] != "CAPS":
+                return protocol.Error("expected CAPS, got %r" % request)
+            caps_err, caps = _negotiate_caps(request.get("caps"))
+            if caps_err != None:
+                return caps_err
+            send_err = _write(state, protocol.message("CAPS_RESPONSE", caps = caps))
+            if send_err != None:
+                return send_err
+            state["scope"] = caps["scope"][0]
+
+        if state["scope"] != "sources" and sources != None:
+            sources.stop()
+
+        state["version"] = version
+        stream.set_read_timeout(_CYCLE_TIMEOUT_MS)
+        stream.set_write_timeout(_CYCLE_TIMEOUT_MS)
+        return None
+
+    def try_connect() -> tuple:
+        accept_err, accepted = state["listener"].try_accept(timeout_ms = 1)
+        if accept_err != None:
+            return False, None
+        return True, negotiate(accepted, _NEGOTIATION_TIMEOUT_MS)
+
+    def cycle(sources: dict) -> error | None:
+        if state["version"] < 0:
+            return protocol.Error("protocol handshake is not complete")
+        state["cycle_id"] += 1
+        cycle_id = state["cycle_id"]
+        err = _write(state, _cycle_message(state["version"], cycle_id, state["scope"], sources))
+        return err if err != None else _await_cycle(state, cycle_id)
+
+    def initialize() -> error | None:
+        baseline = _baseline(state["scope"], runfiles_baseline, sources)
+        return cycle(baseline) if baseline != None else protocol.Error("no baseline for the negotiated scope")
+
+    return struct(
+        build_finished = lambda result: _build_finished(state["scope"], result, cycle),
+        build_started = lambda: None,
+        close = close,
+        environment = {
+            protocol.legacy_socket_environment: socket_path,
+            protocol.socket_environment: socket_path,
+        },
+        initialize = initialize,
+        name = "incremental-build-protocol",
+        try_connect = try_connect,
+    )
+
+incremental_build_protocol_host = namespace(
+    baseline = _baseline,
+    build_finished = _build_finished,
+    cycle_response = _cycle_response,
+    cycle_message = _cycle_message,
+    negotiate_caps = _negotiate_caps,
+    new = _new,
+)

@@ -8,10 +8,14 @@ load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init
 load("./private/lib/changedetector.axl", "changedetector")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
+load("./private/lib/incremental_build_protocol_host.axl", "incremental_build_protocol_host")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./private/lib/source_tracker.axl", "source_tracker")
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/watch.axl", "watch")
+load("./private/lib/watch_protocol.axl", "watch_protocol")
+load("./private/lib/watch_result.axl", "watch_result")
 
 _WATCH_TICK_MS = 100
 
@@ -82,42 +86,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
         status = build_status,
     )
 
-def _stop_child(child: std.process.Child) -> None:
-    """Stop the running target and reap it before the next spawn."""
-    child.kill_all()
-    child.wait()
-
-def _child_supervisor(ctx: TaskContext) -> struct:
-    """Own the watched target's child and guarantee process-group cleanup."""
-    state = {"child": None}
-
-    def stop():
-        child = state["child"]
-        if child != None:
-            _stop_child(child)
-            state["child"] = None
-
-    def poll():
-        child = state["child"]
-        if child == None:
-            return None
-        status = child.try_wait()
-        if status != None:
-            stop()
-        return status
-
-    def restart(spawn):
-        stop()
-        state["child"] = spawn()
-
-    ctx.defer(stop)
-    return struct(
-        current = lambda: state["child"],
-        poll = poll,
-        restart = restart,
-    )
-
-def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool) -> std.process.Child | None:
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_environment: dict = {}) -> std.process.Child | None:
     """Resolve the entrypoint and spawn the target; None when unresolvable."""
     entrypoint = r.determine_entrypoint(target)
     if entrypoint == None:
@@ -132,15 +101,27 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         ),
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
-    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd, process_group = watching)
+    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd, process_group = watching, extra_environment = extra_environment)
 
 def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
-    """Restart-mode watch: rebuild on each settled batch of workspace changes,
-    then terminate and respawn the target. Runs until Ctrl-C."""
+    """Rebuild on workspace changes, incrementally updating protocol-aware
+    targets and restarting other targets. Runs until Ctrl-C."""
     ws = watch.new(ctx, rc = rc)
     detector = changedetector.new(ctx, r, target, ws.root)
+    sources = source_tracker.new(ctx, ws.root, ws.ignored_paths)
+
+    def protocol_candidates():
+        candidate = incremental_build_protocol_host.new(ctx, detector.current_runfiles, sources)
+        return [candidate] if candidate != None else []
+
+    supervisor = watch_protocol.new(
+        ctx,
+        lambda environment: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_environment = environment),
+        candidate_factory = protocol_candidates,
+    )
 
     detector.begin_build()
+    supervisor.build_started()
     build_result = _build_once(
         ctx,
         ph,
@@ -155,10 +136,9 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         extra_aspects = detector.aspects,
     )
     build_status = build_result.status
-    supervisor = _child_supervisor(ctx)
     if build_status.success:
         detector.capture_baseline()
-        supervisor.restart(lambda: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True))
+        supervisor.restart()
     else:
         detector.record_build_failure()
         ph.update(
@@ -186,6 +166,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         cycle += 1
         ph.reset(init_data())
         detector.begin_build()
+        supervisor.build_started()
         build_result = _build_once(
             ctx,
             ph,
@@ -210,8 +191,17 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         # pending events here are the user's own mid-build edits — dropping
         # them would silently miss a rebuild.
 
+        source_paths = [event.path for event in batch.events]
+        removed_paths = [event.path for event in batch.events if isinstance(event, std.fs.watch.RemovedEvent)]
+        source_changes = sources.delta(
+            source_paths,
+            removed_paths,
+            rescan = batch.rescan,
+        )
+
         if not build_status.success:
             detector.record_build_failure()
+            supervisor.build_finished(watch_result.result(False, sources = source_changes))
             ph.update(
                 "running",
                 phases.ProgressStyles(body = "Build failed — watching for changes..."),
@@ -223,23 +213,25 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         # progress. Reap it before deciding whether an unchanged build can keep
         # using the existing child.
         supervisor.poll()
-        running_child = supervisor.current()
-        changed_runfiles = detector.changed_runfiles(
-            [event.path for event in batch.events],
+        detected = detector.changes(
+            source_paths,
+            removed_paths,
             build_result.execution_outputs,
             rescan = batch.rescan,
         )
-
-        # None means the delta is unknown, so only [] can safely reuse the child.
-        if running_child != None and changed_runfiles == []:
+        result = supervisor.build_finished(watch_result.result(
+            True,
+            restart_required = detected.restart_required or detected.changes_unknown,
+            outputs_changed = detected.outputs_changed,
+            runfiles = detected.runfiles,
+            sources = source_changes,
+        ))
+        if result != None:
             ph.update(
                 "running",
-                phases.ProgressStyles(body = "%s unchanged — watching for changes..." % target),
+                phases.ProgressStyles(body = "%s %s — watching for changes..." % (target, result)),
                 kind = "bazel_results",
             )
-            continue
-
-        supervisor.restart(lambda: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True))
 
 def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
@@ -393,7 +385,7 @@ run = task(
         ),
         "watch": args.boolean(
             default = False,
-            description = "Stay running after the first build, watching the workspace and rebuilding the target after each settled batch of changes. A successful rebuild restarts the target; a failed rebuild leaves the current process running. Stop with Ctrl-C.",
+            description = "Stay running after the first build, watching the workspace and rebuilding the target after each settled batch of changes. Targets that connect to the incremental build protocol receive changes in place; others restart when their runfiles change. A failed rebuild leaves the current process running. Stop with Ctrl-C.",
         ),
     } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
     traits = [

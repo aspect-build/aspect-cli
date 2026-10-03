@@ -44,12 +44,20 @@ def _test_disabled_or_absolute_symlink_prefix(_ctx):
     _eq("disabled symlinks", watch.ignores("/repo/ws", "/"), base)
     _eq("absolute bin symlink", "/repo/ws/links/bazel-bin" in watch.ignores("/repo/ws", "/repo/ws/links/bazel-"), True)
 
+def _test_bazelignore_paths(_ctx):
+    _eq(
+        "bazel ignores",
+        watch.bazel_ignores("/repo/ws", "node_modules\nthird_party/generated/\n\n# comment\n../outside\n"),
+        ["/repo/ws/node_modules", "/repo/ws/third_party/generated"],
+    )
+
 _UNIT_TESTS = [
     _test_no_batch_does_not_run,
     _test_batch_runs_once,
     _test_queued_batches_are_coalesced,
     _test_bazel_symlink_ignores_follow_resolved_prefix,
     _test_disabled_or_absolute_symlink_prefix,
+    _test_bazelignore_paths,
 ]
 
 def _test_impl(ctx):
