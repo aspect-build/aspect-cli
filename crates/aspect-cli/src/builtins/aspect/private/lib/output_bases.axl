@@ -12,6 +12,8 @@ resolves is undetermined.
 
 A base's state, first match wins (`classify`):
 
+  - **pooled** — its workspace is an `aspect worktree` pool slot. A free slot has
+    no worktree on purpose, so it is never treated as orphaned.
   - **orphaned** — its workspace is gone; within the grace period after its last
     use it is held back instead, so a worktree recreated at the same path keeps
     it.
@@ -47,6 +49,12 @@ TRASH_PREFIX = ".gc-trash-"
 
 DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
 
+# Under the home directory: where `aspect worktree` keeps its pools, one per
+# normalized origin remote (`<host>/<owner>/<name>`), each holding a
+# `registry.json` and its slots, `aspect-worktree-<id>`.
+_POOLS = "/.aspect/worktrees"
+_SLOT_PREFIX = "aspect-worktree-"
+
 # `md5("")`: the output base Bazel uses when it runs outside any workspace.
 _NO_WORKSPACE = "d41d8cd98f00b204e9800998ecf8427e"
 
@@ -64,6 +72,7 @@ IDLE = "idle"
 ORPHAN = "orphan"
 
 GRACE = "grace"
+POOLED = "pooled"
 
 UNKNOWN = "unknown"
 
@@ -97,6 +106,13 @@ STATES = {
         removable = False,
         heading = "orphaned within the grace period",
         note = _ORPHAN_NOTE,
+    ),
+    POOLED: _State(
+        key = "pooled",
+        label = "in a worktree pool",
+        removable = False,
+        heading = "worktree pool slots",
+        note = "in a worktree pool: an `aspect worktree` slot, kept so its next lease starts warm.\n{max_age}.",
     ),
     UNKNOWN: _State(
         key = "undetermined",
@@ -348,6 +364,8 @@ Base = record(
     pid = field(int),
     # Newest mtime among the freshness markers, in microseconds since the epoch.
     last_used = field(int),
+    # Its workspace is an `aspect worktree` pool slot.
+    pooled = field(bool, default = False),
 )
 
 def _is_output_base_name(name: str) -> bool:
@@ -517,22 +535,27 @@ def _servers(ctx: TaskContext, bases: list) -> dict:
 
 # --- scanning ----------------------------------------------------------------
 
-def _classify(workspace: str, workspace_exists: bool, age_us: int, policy) -> str:
+def _classify(workspace: str, workspace_exists: bool, pooled: bool, age_us: int, policy) -> str:
     """The state of a base, from facts already gathered. Pure, so the rule
     order can be tested without building bases of every age.
 
     A running server is not decided here: it costs a process lookup, so `_scan`
     vetoes `IDLE` afterwards, and only for the bases this returns it for.
     """
+    idle = policy.base_max_age_us > 0 and age_us >= policy.base_max_age_us
+    if pooled:
+        return IDLE if idle else POOLED
     if workspace and not workspace_exists:
         return GRACE if age_us < policy.orphan_grace_us else ORPHAN
-    if policy.base_max_age_us > 0 and age_us >= policy.base_max_age_us:
+    if idle:
         return IDLE
     return LIVE if workspace else UNKNOWN
 
 def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
     """Classify every output base under `root`, youngest first, including any
     trash an earlier `gc` failed to finish removing."""
+    home = ctx.std.env.home_dir()
+    pools = {h + _POOLS + "/": True for h in [home, _canonical(ctx, home)]}.keys()
     bases = []
     for entry in ctx.std.fs.read_dir(root):
         if not entry.is_dir:
@@ -551,16 +574,18 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
         if not _is_output_base_name(entry.path):
             continue
         workspace = _workspace_of(ctx, path)
+        pooled = any([workspace.startswith(p) for p in pools])
         last_used = _last_used(ctx, path)
         pid = _server_pid(ctx, path)
         state = _classify(
             workspace,
             bool(workspace) and ctx.std.fs.exists(workspace),
+            pooled,
             now_us - last_used,
             policy,
         )
         if state == IDLE and _may_be_this_bases_server(ctx, pid, path):
-            state = LIVE if workspace else UNKNOWN
+            state = POOLED if pooled else LIVE if workspace else UNKNOWN
         bases.append(Base(
             name = entry.path,
             path = path,
@@ -568,6 +593,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
             state = state,
             pid = pid,
             last_used = last_used,
+            pooled = pooled,
         ))
     return sorted(bases, key = lambda b: -b.last_used)
 
@@ -643,19 +669,51 @@ def _kb_by_state(bases: list, sizes: dict) -> dict:
 
 # --- git ---------------------------------------------------------------------
 
-def _checkouts(ctx: TaskContext, bases: list) -> dict:
-    """The git `Checkout` of each base whose workspace exists, by base path.
+def _pool_slot(ctx: TaskContext, workspace: str):
+    """A `Checkout` for an `aspect worktree` slot with no worktree in it, from
+    the pool: the repository its path is keyed by, and, from the pool's
+    `registry.json`, the slot's lease or the branch it last held. Read
+    leniently — whatever the registry lacks is left blank — and None when the
+    path is not a slot."""
+    idx = workspace.rfind("/")
+    pool, slot = workspace[:idx], workspace[idx + 1:]
+    if not slot.startswith(_SLOT_PREFIX):
+        return None
+    repository = "/".join(pool.split("/")[-2:])
+    err, registry = catch(json.decode, ctx.std.fs.try_read_to_string(pool + "/registry.json") or "{}")
+    slots = registry.get("slots") if err == None and type(registry) == "dict" else None
+    record = slots.get(slot[len(_SLOT_PREFIX):]) if type(slots) == "dict" else None
+    if type(record) != "dict":
+        return git_checkout.Checkout(root = workspace, repository = repository, branch = "")
+    lease = record.get("lease")
+    name = lease.get("name") if type(lease) == "dict" else None
+    last = record.get("last_branch")
+    if type(name) == "string" and name:
+        branch = "leased · " + name
+    elif type(last) == "string" and last:
+        branch = "free · last " + last
+    else:
+        branch = "free"
+    return git_checkout.Checkout(root = workspace, repository = repository, branch = branch)
 
-    A missing workspace is skipped rather than walked up from: the nearest
-    `.git` above a deleted worktree is usually the main clone, which would
-    report the wrong branch.
+def _checkouts(ctx: TaskContext, bases: list) -> dict:
+    """The git `Checkout` of each base, by base path: read from `.git` when its
+    workspace exists, from the pool when it is an empty worktree slot.
+
+    Any other missing workspace is skipped rather than walked up from: the
+    nearest `.git` above a deleted worktree is usually the main clone, which
+    would report the wrong branch.
     """
     found = {}
     for b in bases:
         if b.workspace and ctx.std.fs.exists(b.workspace):
             c = git_checkout.checkout_of(ctx.std, b.workspace)
-            if c:
-                found[b.path] = c
+        elif b.pooled:
+            c = _pool_slot(ctx, b.workspace)
+        else:
+            c = None
+        if c:
+            found[b.path] = c
     return found
 
 # --- listing -----------------------------------------------------------------
@@ -841,6 +899,7 @@ output_bases = namespace(
     IDLE = IDLE,
     ORPHAN = ORPHAN,
     PERIODS = PERIODS,
+    POOLED = POOLED,
     Policy = Policy,
     SORTS = SORTS,
     STATES = STATES,
@@ -872,6 +931,7 @@ output_bases = namespace(
     output_base_name = _output_base_name,
     output_user_root_arg = _output_user_root_arg,
     policy_entry = _policy_entry,
+    pool_slot = _pool_slot,
     print_caches = _print_caches,
     print_census = _print_census,
     print_listing = _print_listing,
