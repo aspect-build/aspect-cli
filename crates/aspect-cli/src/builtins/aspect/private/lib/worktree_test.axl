@@ -1,0 +1,455 @@
+"""Unit tests for lib/worktree.axl — pool keying, reuse scoring, and warmth.
+
+Run with:
+  aspect dev test-worktree
+
+The URL cases are taken from a real machine rather than invented: one clone
+there carries `ssh://git@github.com/...` with no `.git` suffix, a scp-like
+GitLab mirror of the same code, and a fork. A pool key that collapses the first
+two spellings but not the two hosts is the behaviour these pin down.
+"""
+
+load("@std//time.axl", "time")
+load(
+    "./worktree.axl",
+    "abandoned_lease",
+    "default_score",
+    "drop_slot",
+    "enabled",
+    "lock_digest",
+    "lock_digest_at",
+    "normalize_remote",
+    "output_base_of",
+    "owned_slots",
+    "prunable_slots",
+    "read_registry",
+    "run_git",
+    "slot_age_days",
+    "slug",
+    "warmth_of",
+    "write_registry",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_remote_spellings_collapse(ctx):
+    """The same repository is written at least three ways; a pool key has to be
+    stable across all of them or a clone silently gets its own pool."""
+    want = "github.com/aspect-build/site"
+    _eq("scp-like", normalize_remote("git@github.com:aspect-build/site.git"), want)
+    _eq("ssh scheme", normalize_remote("ssh://git@github.com/aspect-build/site"), want)
+    _eq("ssh scheme with suffix", normalize_remote("ssh://git@github.com/aspect-build/site.git"), want)
+    _eq("https", normalize_remote("https://github.com/aspect-build/site.git"), want)
+    _eq("https no suffix", normalize_remote("https://github.com/aspect-build/site"), want)
+    _eq("trailing slash", normalize_remote("https://github.com/aspect-build/site/"), want)
+    _eq("uppercase host", normalize_remote("https://GitHub.com/aspect-build/site"), want)
+
+def _test_suffix_behind_a_trailing_slash_is_still_stripped(ctx):
+    """A URL copied out of a browser can carry both; stripping them in the wrong
+    order leaves `.git` in the key and splits the pool."""
+    want = "github.com/aspect-build/site"
+    _eq("suffix then slash", normalize_remote("https://github.com/aspect-build/site.git/"), want)
+    _eq("several slashes", normalize_remote("https://github.com/aspect-build/site.git///"), want)
+
+def _test_mirrors_on_different_hosts_stay_separate(ctx):
+    """Deliberate: guessing that two hosts serve one repository is a worse
+    failure than keeping two pools, so a GitLab mirror is its own pool."""
+    gh = normalize_remote("ssh://git@github.com/aspect-build/aspect-cli")
+    gl = normalize_remote("git@gitlab.com:aspect-build/aspect-cli.git")
+    _eq("github", gh, "github.com/aspect-build/aspect-cli")
+    _eq("gitlab", gl, "gitlab.com/aspect-build/aspect-cli")
+    if gh == gl:
+        fail("mirrors on different hosts must not share a pool key")
+
+def _test_fork_is_its_own_pool(ctx):
+    """A fork is a different repository: same path, different owner."""
+    upstream = normalize_remote("git@github.com:aspect-build/aspect-cli.git")
+    fork = normalize_remote("git@github.com:someone-else/aspect-cli.git")
+    if upstream == fork:
+        fail("a fork must not share the upstream's pool key")
+
+def _test_empty_remote_yields_no_key(ctx):
+    _eq("empty", normalize_remote(""), "")
+    _eq("whitespace", normalize_remote("   "), "")
+
+def _test_slug_is_a_usable_path_component(ctx):
+    """Branch names carry slashes and dots, and the result is appended to a
+    clone path — anything that is not a single path component breaks it."""
+    _eq("slashes", slug("fix/login"), "fix-login")
+    _eq("case and dots", slug("Feature/API.v2"), "feature-api-v2")
+    _eq("leading and trailing junk", slug("/wip/"), "wip")
+    _eq("nothing usable", slug("///"), "worktree")
+    _eq("already clean", slug("main"), "main")
+
+def _test_disabled_on_a_workflows_runner(ctx):
+    """A runner builds one job in a checkout it discards, so there is nothing
+    to pool — every entry point is a no-op there.
+
+    Both states are set up explicitly and the ambient one restored afterwards:
+    this suite's own CI job runs on a Workflows runner, so neither value can be
+    assumed to be the one already in the environment.
+    """
+    env = ctx.std.env
+    ambient = env.var("ASPECT_WORKFLOWS_RUNNER")
+
+    env.remove_var("ASPECT_WORKFLOWS_RUNNER")
+    _eq("enabled off-runner", enabled(ctx.std), True)
+    env.set_var("ASPECT_WORKFLOWS_RUNNER", "runner-1")
+    _eq("disabled on a runner", enabled(ctx.std), False)
+    env.remove_var("ASPECT_WORKFLOWS_RUNNER")
+    _eq("enabled again", enabled(ctx.std), True)
+
+    if ambient:
+        env.set_var("ASPECT_WORKFLOWS_RUNNER", ambient)
+
+def _test_lock_mismatch_nearly_disqualifies(ctx):
+    """A different MODULE.bazel.lock means the repo fetches miss and
+    `external/` is rebuilt — the one mismatch worth refusing a warm slot over."""
+    want = {"lock_digest": "aaa", "commit": "c1"}
+    same = {"lock_digest": "aaa", "last_commit": "c1"}
+    other = {"lock_digest": "bbb", "last_commit": "c1"}
+    _eq("perfect match", default_score(same, want), 100)
+    _eq("lock mismatch", default_score(other, want), 1)
+
+def _test_commit_distance_only_breaks_a_tie(ctx):
+    """A different commit costs incremental invalidation, which Bazel handles.
+    It must stay far above a lock mismatch or the ordering is inverted."""
+    want = {"lock_digest": "aaa", "commit": "c1"}
+    wrong_commit = {"lock_digest": "aaa", "last_commit": "c2"}
+    wrong_lock = {"lock_digest": "bbb", "last_commit": "c1"}
+    if default_score(wrong_commit, want) <= default_score(wrong_lock, want):
+        fail("a commit difference must cost far less than a lock difference")
+
+def _test_unknown_lock_does_not_disqualify(ctx):
+    """A brand-new slot has no recorded lock digest. Treating that as a mismatch
+    would make a fresh pool refuse its own slots forever."""
+    want = {"lock_digest": "aaa", "commit": ""}
+    fresh = {"lock_digest": "", "last_commit": ""}
+    if default_score(fresh, want) <= 1:
+        fail("a slot with no recorded lock digest must stay eligible")
+
+def _test_output_base_matches_bazels_own_derivation(ctx):
+    """Bazel names a base `md5(workspace_path)` under the output user root. The
+    pool computes that rather than asking Bazel, which is what lets it inspect
+    a slot's state without starting a server — so it has to agree exactly. The
+    vector below was taken from a real Bazel-created base.
+    """
+    base = output_base_of(ctx.std, "/tmp/aspect-worktree-golden")
+    _eq("named by md5 of the path", base.rpartition("/")[2], "5095308adbe80a1457b370244b19f1ee")
+    _eq("under the output user root", base.startswith(ctx.std.env.home_dir()), True)
+
+    other = output_base_of(ctx.std, "/tmp/aspect-worktree-other")
+    if base == other:
+        fail("two slot paths must not share an output base")
+
+def _test_warmth_reads_what_is_really_there(ctx):
+    """`add` and `list` tell a developer how much a slot is worth taking. That
+    claim has to be checked: a server exits on idle and `aspect gc` can reclaim
+    a base, so asserting "warm" without looking would often be wrong.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-warm")
+    slot = tmp + "/aspect-worktree-probe"
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+
+    cold = warmth_of(ctx.std, slot, root = root)
+    _eq("no base yet", cold.base, False)
+    _eq("and so no server", cold.server, 0)
+
+    # Fabricate the base where Bazel would put it, with no server record.
+    base = output_base_of(ctx.std, slot, root = root)
+    _eq("fabricated under the temp root, not the real cache", base.startswith(root + "/"), True)
+    ctx.std.fs.create_dir_all(base + "/server")
+    partly = warmth_of(ctx.std, slot, root = root)
+    _eq("base present", partly.base, True)
+    _eq("but nothing holding it", partly.server, 0)
+
+    # A pid that is recorded but dead must not read as warm.
+    ctx.std.fs.write(base + "/server/server.pid.txt", "999999\n")
+    dead = warmth_of(ctx.std, slot, root = root)
+    _eq("a dead pid is not warmth", dead.server, 0)
+
+def _test_registry_round_trips(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    registry = {"version": 1, "slots": {"abc": {"state": "free", "last_branch": "x"}}}
+    write_registry(ctx.std, tmp, registry)
+    _eq("round trip", read_registry(ctx.std, tmp)["slots"]["abc"]["last_branch"], "x")
+
+def _test_unreadable_registry_starts_over(ctx):
+    """The registry is a cache rebuildable from git, so a corrupt one warns and
+    starts fresh rather than wedging the pool."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.write(tmp + "/registry.json", "{not json")
+    _eq("recovers", read_registry(ctx.std, tmp)["slots"], {})
+
+def _test_missing_registry_is_empty(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    _eq("no file yet", read_registry(ctx.std, tmp)["slots"], {})
+
+_DAY_MS = 24 * 60 * 60 * 1000
+
+def _slot(owner, state = "free", age_days = 0):
+    """A registry entry, aged by construction. `age_days` becomes the absolute
+    `last_used_ms` the library reads, so each test says what it means."""
+    return {
+        "owner_git_dir": owner,
+        "state": state,
+        "last_commit": "",
+        "last_branch": "",
+        "lock_digest": "",
+        "last_used_ms": time.now_ms() - age_days * _DAY_MS,
+    }
+
+def _test_age_of_a_record_written_before_timestamps_reads_as_new(ctx):
+    """Registries predating `last_used_ms` must not look infinitely old, or the
+    first prune after an upgrade would delete every warm slot in the pool."""
+    _eq("missing key", slot_age_days({"state": "free"}), 0)
+    _eq("explicit zero", slot_age_days({"state": "free", "last_used_ms": 0}), 0)
+    _eq("real age", slot_age_days({"last_used_ms": time.now_ms() - 3 * _DAY_MS}), 3)
+
+def _test_prune_never_takes_a_leased_slot(ctx):
+    """A lease means someone may be working in that checkout right now. Age is
+    not grounds for deleting it, however stale the pool thinks it is."""
+    pool = {"git_common_dir": "/clone/.git"}
+    registry = {"slots": {
+        "busy": _slot("/clone/.git", state = "leased", age_days = 900),
+        "idle": _slot("/clone/.git", age_days = 900),
+    }}
+    _eq("only the free one", prunable_slots(ctx.std, pool, registry, 30), ["idle"])
+
+def _test_prune_respects_the_age_threshold(ctx):
+    pool = {"git_common_dir": "/clone/.git"}
+    registry = {"slots": {
+        "fresh": _slot("/clone/.git", age_days = 3),
+        "stale": _slot("/clone/.git", age_days = 31),
+    }}
+    _eq("over the line", prunable_slots(ctx.std, pool, registry, 30), ["stale"])
+    _eq("everything, at zero", sorted(prunable_slots(ctx.std, pool, registry, 0)), ["fresh", "stale"])
+
+def _test_prune_leaves_a_live_clones_slots_alone(ctx):
+    """Two clones of one repository share a pool directory but not slots. A slot
+    owned by a clone that still exists is none of this clone's business; only one
+    stranded by a clone that is gone can be collected."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    live_owner = tmp + "/live/.git"
+    ctx.std.fs.create_dir_all(live_owner)
+    pool = {"git_common_dir": tmp + "/mine/.git"}
+    registry = {"slots": {
+        "theirs": _slot(live_owner, age_days = 900),
+        "stranded": _slot(tmp + "/moved-away/.git", age_days = 900),
+    }}
+    _eq("only the stranded one", prunable_slots(ctx.std, pool, registry, 30), ["stranded"])
+
+def _test_owned_slots_counts_only_this_clone(ctx):
+    """`max_slots` budgets what this clone can actually lease, so a sibling
+    clone's slots must not spend it."""
+    pool = {"git_common_dir": "/clone/.git"}
+    registry = {"slots": {
+        "mine": _slot("/clone/.git"),
+        "theirs": _slot("/other/.git"),
+    }}
+    _eq("one", owned_slots(pool, registry), ["mine"])
+
+def _test_drop_slot_removes_the_entry_and_the_base(ctx):
+    """A dropped slot must leave nothing behind in the registry. A caller that
+    persists afterwards would otherwise hand the next allocation a slot whose
+    recorded `lock_digest` describes state that has been deleted."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "cafe01"
+    path = tmp + "/pool/aspect-worktree-" + slot_id
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    base = output_base_of(ctx.std, path, root = root)
+    ctx.std.fs.create_dir_all(base + "/external")
+    ctx.std.fs.create_dir_all(path)
+    registry = {"slots": {slot_id: _slot(pool["git_common_dir"], age_days = 900)}}
+    registry["slots"][slot_id]["lock_digest"] = "stale"
+
+    outcome = drop_slot(ctx.std, pool, registry, slot_id, root = root)
+    _eq("dropped", outcome.dropped, True)
+    _eq("gone from the registry", slot_id in registry["slots"], False)
+    _eq("slot directory gone", ctx.std.fs.exists(path), False)
+    _eq("output base gone", ctx.std.fs.exists(base), False)
+
+def _test_drop_slot_refuses_while_a_server_holds_it(ctx):
+    """Unlinking an output base from under a running Bazel server leaves it
+    writing into directories that no longer exist. A free slot with a live server
+    is also the warmest thing in the pool, so it is kept rather than deleted."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "abc123"
+    path = tmp + "/pool/aspect-worktree-" + slot_id
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    base = output_base_of(ctx.std, path, root = root)
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.create_dir_all(path)
+
+    # This process is certainly alive, so its pid stands in for a live server.
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(ctx.std.process.id()) + "\n")
+    registry = {"slots": {slot_id: _slot(pool["git_common_dir"], age_days = 900)}}
+    outcome = drop_slot(ctx.std, pool, registry, slot_id, root = root)
+    _eq("refused", outcome.dropped, False)
+    _eq("slot kept in the registry", slot_id in registry["slots"], True)
+    _eq("base still there", ctx.std.fs.exists(base), True)
+
+def _test_lock_digest_agrees_between_a_file_and_a_ref(ctx):
+    """Allocation digests the lock from a git ref; `remove` digests it from the
+    checked-out file. The two must agree on identical content or no slot would
+    ever score as a match — `git show` cannot preserve trailing bytes, so both
+    sides normalize."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/MODULE.bazel.lock", '{"lockFileVersion": 42}\n')
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "lock"], repo)
+
+    from_file = lock_digest(ctx.std, repo)
+    from_ref = lock_digest_at(ctx.std, repo, "HEAD")
+    if not from_file:
+        fail("the checked-out lock file should digest to something")
+    _eq("same content, same digest", from_ref, from_file)
+    _eq(
+        "a ref with no lock file is unknown, not mismatched",
+        lock_digest_at(ctx.std, repo, "HEAD:nonexistent"),
+        "",
+    )
+
+def _leased(owner, name, agent):
+    return {
+        "owner_git_dir": owner,
+        "state": "leased",
+        "last_commit": "",
+        "last_branch": "",
+        "lock_digest": "",
+        "last_used_ms": time.now_ms(),
+        "lease": {"name": name, "since": str(time.now_ms()), "agent": agent},
+    }
+
+def _repo_with_worktree(ctx, dirty):
+    """A clone with one worktree at a pool slot path, optionally dirty."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/README", "x\n")
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "init"], repo)
+
+    pool = {"git_common_dir": repo + "/.git", "dir": tmp + "/pool"}
+    slot_id = "abc123"
+    path = tmp + "/pool/aspect-worktree-" + slot_id
+    ctx.std.fs.create_dir_all(pool["dir"])
+    run_git(ctx.std, ["worktree", "add", "-q", path, "-b", "wip"], repo + "/.git")
+    if dirty:
+        ctx.std.fs.write(path + "/README", "uncommitted\n")
+    return struct(pool = pool, slot_id = slot_id, path = path)
+
+_MISSING_SESSION = {
+    "kind": "claude-code",
+    "id": "00000000-dead-dead-dead-000000000000",
+    "pid": 0,
+    "pid_start": "",
+}
+
+def _test_a_lease_with_no_agent_is_never_abandoned(ctx):
+    """Only a lease that says who took it can be reasoned about. A worktree a
+    person made is not ours to reclaim on any evidence."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    _eq("no agent", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_a_gone_session_with_a_clean_checkout_is_abandoned(ctx):
+    """Commits live in the branch and survive `worktree remove`, so a clean tree
+    whose session cannot be resumed has nothing left to lose."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+    _eq("reclaimable", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
+
+def _test_uncommitted_changes_are_never_discarded(ctx):
+    """The case the whole rule exists to protect: a session that cannot be
+    resumed may still have left work nobody has committed."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+    _eq("kept", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_a_running_session_is_never_abandoned(ctx):
+    """A live harness is in use, whatever else is true — including a clean tree
+    and a session id with no transcript."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    me = ctx.std.process.id()
+    out = ctx.std.process.command("ps").args(["-o", "lstart=", "-p", str(me)]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    alive = {
+        "kind": "claude-code",
+        "id": "00000000-dead-dead-dead-000000000000",
+        "pid": me,
+        "pid_start": out.stdout.strip(),
+    }
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", alive)}}
+    _eq("in use", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_an_unverifiable_harness_is_never_abandoned(ctx):
+    """A harness whose session storage we cannot inspect reads as `unknown`, and
+    `unknown` must behave exactly like `resumable` — never reclaimed."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    unknown = {"kind": "codex", "id": "sess-abc", "pid": 0, "pid_start": ""}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unknown)}}
+    _eq("left alone", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+_UNIT_TESTS = [
+    _test_remote_spellings_collapse,
+    _test_suffix_behind_a_trailing_slash_is_still_stripped,
+    _test_mirrors_on_different_hosts_stay_separate,
+    _test_fork_is_its_own_pool,
+    _test_empty_remote_yields_no_key,
+    _test_slug_is_a_usable_path_component,
+    _test_disabled_on_a_workflows_runner,
+    _test_lock_mismatch_nearly_disqualifies,
+    _test_commit_distance_only_breaks_a_tie,
+    _test_unknown_lock_does_not_disqualify,
+    _test_output_base_matches_bazels_own_derivation,
+    _test_warmth_reads_what_is_really_there,
+    _test_registry_round_trips,
+    _test_unreadable_registry_starts_over,
+    _test_missing_registry_is_empty,
+    _test_age_of_a_record_written_before_timestamps_reads_as_new,
+    _test_prune_never_takes_a_leased_slot,
+    _test_prune_respects_the_age_threshold,
+    _test_prune_leaves_a_live_clones_slots_alone,
+    _test_owned_slots_counts_only_this_clone,
+    _test_drop_slot_removes_the_entry_and_the_base,
+    _test_drop_slot_refuses_while_a_server_holds_it,
+    _test_lock_digest_agrees_between_a_file_and_a_ref,
+    _test_a_lease_with_no_agent_is_never_abandoned,
+    _test_a_gone_session_with_a_clean_checkout_is_abandoned,
+    _test_uncommitted_changes_are_never_discarded,
+    _test_a_running_session_is_never_abandoned,
+    _test_an_unverifiable_harness_is_never_abandoned,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("worktree.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+worktree_tests = task(
+    summary = "Run the worktree pool AXL unit tests.",
+    kind = "test-worktree",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

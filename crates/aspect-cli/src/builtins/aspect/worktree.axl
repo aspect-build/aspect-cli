@@ -1,0 +1,817 @@
+"""`aspect worktree` — git worktrees that keep their Bazel server warm.
+
+`git worktree add` at a fresh path gives Bazel a workspace it has never seen:
+new server, loading and analysis from zero, `external/` rebuilt. These tasks
+hand out a worktree at a **reused** path instead, so Bazel's own derivation of
+the output base lands on the same directory as last time and the second and
+every later task in that slot starts warm. No flag is injected to arrange that.
+
+    aspect worktree add fix/login
+    cd "$(aspect worktree path fix/login)"
+    aspect test //...                  ->  warm server, warm analysis
+    aspect worktree remove fix/login   ->  the slot goes back to the pool
+
+A slot is reached by its own path — nothing is symlinked into place. `git
+worktree list` already reports that path, so a worktree stays legible to git
+and to anyone who falls back to managing it by hand, with nothing outside git
+left to dangle.
+
+Skipping `remove` costs nothing in correctness: git is the authority on whether
+a worktree exists, so a slot whose worktree git has forgotten is free whatever
+the registry says.
+
+An agent that dies with its checkout still in place is the harder case, because
+git still knows about that worktree. The lease is taken back only when the
+session behind it is positively gone and the checkout is clean — a harness that
+merely stopped running is usually a closed terminal, and `list` offers the
+command to resume it rather than offering the slot to someone else.
+
+Leases record who took them, so `list` names the session holding each slot.
+Detection is automatic for harnesses the CLI recognizes, and
+`ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID` or `--agent-kind` / `--agent-id` cover
+the rest.
+
+Every task here runs under the pool lock and leaves the registry consistent with
+git before returning. See `private/lib/worktree.axl` for the pool model, why
+slots have fixed paths, and how the pool is bounded. On Aspect Workflows runners
+these tasks refuse: a runner builds one job in a checkout it discards, so there
+is nothing to pool.
+"""
+
+load("@std//time.axl", "time")
+load(
+    "./private/lib/agent.axl",
+    "GONE",
+    "RESUMABLE",
+    "detect",
+    "label",
+    "resume_hint",
+    "session_state",
+)
+load("./private/lib/confirm.axl", "confirm")
+load("./private/lib/environment.axl", "info", "warn")
+load(
+    "./private/lib/worktree.axl",
+    "PRUNE_AGE_DAYS",
+    "abandoned_lease",
+    "acquire",
+    "default_score",
+    "drop_slot",
+    "enabled",
+    "lock_digest",
+    "lock_digest_at",
+    "new_slot_id",
+    "new_slot_record",
+    "output_base_of",
+    "owned_slots",
+    "pool_of",
+    "prunable_slots",
+    "read_registry",
+    "reconcile",
+    "release",
+    "run_git",
+    "slot_age_days",
+    "slot_path",
+    "slug",
+    "warmth_of",
+    "write_registry",
+)
+load("./private/lib/worktrees_trait.axl", "Worktrees")
+
+_ON_RUNNER = ("`aspect worktree` is disabled on Aspect Workflows runners: a runner builds " +
+              "one job in a checkout it sets up and discards, so there is no second worktree " +
+              "to share a slot with and nothing to keep warm between jobs.")
+
+_POOL_BUSY = "another `aspect worktree` call is holding this pool's lock; try again"
+
+# Contention is not failure: the caller's request was well-formed and will
+# succeed shortly. Agents allocate in parallel and need to tell "retry in a
+# moment" from "this is broken", which one exit code for both cannot express.
+# 75 is sysexits.h EX_TEMPFAIL, which is what it means.
+_EX_TEMPFAIL = 75
+
+_SCHEMA_VERSION = 1
+
+def _refuse(ctx: TaskContext, code: str, message: str, exit_code: int = 1, retryable: bool = False) -> TaskConclusion:
+    """A refusal in whichever form the caller asked for.
+
+    Every one of these is something an agent has to branch on, and a
+    `--output=json` consumer handed prose on stderr and an empty stdout would
+    have to parse English to do it. `code` is the stable token to branch on.
+    """
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "error": code,
+            "retryable": retryable,
+            "message": message,
+        }, indent = 2) + "\n")
+        return TaskConclusion(exit_code = exit_code)
+    return TaskConclusion(exit_code = exit_code, message = message)
+
+def _pool_busy(ctx: TaskContext) -> TaskConclusion:
+    """The refusal when another call holds the pool lock."""
+    return _refuse(ctx, "pool_busy", _POOL_BUSY, exit_code = _EX_TEMPFAIL, retryable = True)
+
+def _on_runner(ctx: TaskContext) -> TaskConclusion:
+    """The refusal on an Aspect Workflows runner, where there is nothing to
+    pool."""
+    return _refuse(ctx, "disabled_on_runner", _ON_RUNNER)
+
+def _git(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
+    """`git <args>` stdout. Fails the task when git does — for calls whose
+    failure means the operation cannot proceed."""
+    r = run_git(ctx.std, args, cwd)
+    if not r.ok:
+        fail("git " + " ".join(args) + " failed: " + r.err)
+    return r.out
+
+def _git_try(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
+    """`git <args>` stdout, or "" when git exits non-zero — for probes where a
+    failure is itself the answer, such as asking whether a branch exists."""
+    r = run_git(ctx.std, args, cwd)
+    return r.out if r.ok else ""
+
+def _pool(ctx: TaskContext) -> dict:
+    """The pool for the working directory."""
+    pool = pool_of(ctx.std, ctx.std.env.current_dir())
+    if not pool:
+        fail("not inside a git repository — run this from a clone")
+    return pool
+
+def _enter_pool(ctx: TaskContext) -> dict:
+    """The pool for the working directory, locked for the rest of the task, or
+    an empty dict when another caller holds the lock.
+
+    Only the tasks that write the registry take this. The lock's release is
+    deferred rather than written out at each exit: `ctx.defer` runs even when
+    the task dies on a fatal error, which is the only way to guarantee it is
+    dropped — a `fail()` between acquiring and releasing would otherwise wedge
+    the pool until the stale-lock timeout.
+    """
+    pool = _pool(ctx)
+    if not acquire(ctx.std, pool["dir"]):
+        return {}
+    ctx.defer(lambda: release(ctx.std, pool["dir"]))
+    return pool
+
+def _score_slot(ctx: TaskContext, slot: dict, want: dict) -> int:
+    """The repo's scoring hook if one is registered, else the built-in.
+
+    Allocation has no correctness consequence — a worse pick costs a colder
+    build — which is what makes it safe to hand to a config.axl hook.
+    """
+    for hook in ctx.traits[Worktrees].score_slot:
+        return hook(ctx, slot, want)
+    return default_score(slot, want)
+
+def _leased_slot(registry: dict, name: str) -> str:
+    """The slot id leased under `name`, or "". Leases are keyed by the name the
+    caller knows; the slot id is internal."""
+    for slot_id in registry["slots"]:
+        lease = registry["slots"][slot_id].get("lease") or {}
+        if lease.get("name", "") == name:
+            return slot_id
+    return ""
+
+def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
+    """The path of any worktree of this clone that has `name` checked out, or "".
+
+    Covers what the registry cannot see: worktrees created by hand, and the
+    clone's own main checkout. Git refuses to put one branch in two worktrees,
+    and without this the refusal arrives from inside `_materialize`, after the
+    chosen slot's previous occupant has already been force-removed — warm state
+    destroyed to no purpose, and an error naming a slot the caller never asked
+    about.
+    """
+    porcelain = _git_try(ctx, ["worktree", "list", "--porcelain"], pool["git_common_dir"])
+    at = ""
+    for line in porcelain.splitlines():
+        if line.startswith("worktree "):
+            at = line[len("worktree "):].strip()
+        elif line.strip() == "branch refs/heads/" + name:
+            return at
+    return ""
+
+def _pad(s: str, width: int) -> str:
+    """`s` padded to `width`. Starlark has no string formatting width flag —
+    `"%-8s"` fails at load time — so columns are padded by hand."""
+    return s + " " * (width - len(s))
+
+def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
+    return _refuse(
+        ctx,
+        "no_such_worktree",
+        "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
+    )
+
+def _age_out(ctx: TaskContext, pool: dict, registry: dict) -> int:
+    """Drop free slots nothing has touched in `PRUNE_AGE_DAYS`. Returns how many
+    went, so the caller can persist a registry that no longer matches the disk.
+
+    This is what actually bounds the pool, and it runs inside `add` because
+    nobody runs a cleanup command on a schedule. It never touches a leased slot
+    or one a live server still holds, so the worst case is reclaiming cache that
+    had already stopped paying for itself.
+    """
+    dropped = 0
+    for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_AGE_DAYS):
+        label = registry["slots"][slot_id].get("last_branch", "") or slot_id
+        age = slot_age_days(registry["slots"][slot_id])
+        if drop_slot(ctx.std, pool, registry, slot_id).dropped:
+            info(ctx.std, "pruned slot last used %d days ago (%s)" % (age, label))
+            dropped += 1
+    return dropped
+
+def _release_abandoned(ctx: TaskContext, pool: dict, registry: dict, slot_id: str) -> None:
+    """Free a lease whose session is gone, keeping the slot and its warm base.
+
+    Only the worktree goes. `abandoned_lease` has already established the tree
+    is clean, and dropping it here rather than leaving it for `_materialize`
+    keeps the branch out of `git worktree list` — otherwise the next check would
+    report it as checked out somewhere the pool does not manage, which is both
+    wrong and the opposite of helpful.
+    """
+    path = slot_path(pool, slot_id)
+    if ctx.std.fs.exists(path):
+        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+    slot = registry["slots"][slot_id]
+    slot["state"] = "free"
+    slot["lease"] = None
+
+def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict) -> struct:
+    """The best free slot this clone owns for `want`, creating one if none fits.
+
+    A slot is only a candidate when it belongs to this clone's object store:
+    `git worktree add` cannot hand a worktree to a different one.
+
+    Any free slot beats creating one, however badly it scores: a bad reuse pays
+    the same `external/` refetch a new slot would and skips the new JVM, the
+    from-zero analysis and one more output base on disk. A `score_slot` hook may
+    still veto with 0, and then a new slot is the only way to serve the caller —
+    but a hook that vetoes everything would otherwise grow the pool without
+    bound, so past `max_slots` the veto yields to the best available slot.
+    """
+    best = ""
+    best_score = 0
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] != "free" or slot.get("owner_git_dir", "") != pool["git_common_dir"]:
+            continue
+        score = _score_slot(ctx, slot, want)
+        if score > best_score:
+            best = slot_id
+            best_score = score
+
+    if best:
+        return struct(id = best, score = best_score, reused_from = registry["slots"][best].get("last_branch", ""))
+
+    # Before growing, look for a lease whose session no longer exists. This is
+    # checked here rather than in `reconcile` because it costs a `git status`
+    # per candidate, and the only moment the answer changes anything is the one
+    # where the alternative is another slot on disk.
+    for slot_id in registry["slots"]:
+        if registry["slots"][slot_id]["state"] != "leased":
+            continue
+        if registry["slots"][slot_id].get("owner_git_dir", "") != pool["git_common_dir"]:
+            continue
+        if not abandoned_lease(ctx.std, pool, registry, slot_id):
+            continue
+        lease = registry["slots"][slot_id].get("lease") or {}
+        info(ctx.std, "reclaimed the slot held by " + (lease.get("name", "") or "an earlier worktree") +
+                      ": its " + label(lease.get("agent") or {}) + " session no longer exists and the checkout was clean")
+        registry["slots"][slot_id]["state"] = "free"
+        registry["slots"][slot_id]["lease"] = None
+        return struct(
+            id = slot_id,
+            score = 0,
+            reused_from = registry["slots"][slot_id].get("last_branch", ""),
+        )
+
+    # Nothing scored. Either every owned slot is leased, or a hook refused them
+    # all; at the limit the second case has to give way, since the pool is a
+    # disk budget and growing it forever is the one outcome worse than a cold
+    # build.
+    budget = ctx.traits[Worktrees].max_slots
+    mine = owned_slots(pool, registry)
+    vetoed = _best_free_slot(ctx, pool, registry)
+    if len(mine) >= budget and vetoed:
+        warn(ctx.std, ("every slot is refused by this repo's score_slot hook and the pool is at " +
+                       "its limit of %d; reusing the least-bad slot instead of growing") % budget)
+        return struct(id = vetoed, score = 0, reused_from = registry["slots"][vetoed].get("last_branch", ""))
+
+    if len(mine) >= budget:
+        warn(ctx.std, ("pool is at its advisory limit of %d slots and all are in use; " +
+                       "creating one more checkout and output base. " +
+                       "`aspect worktree list` shows what is holding them") % budget)
+
+    slot_id = new_slot_id(ctx.std, pool, registry)
+    registry["slots"][slot_id] = new_slot_record(pool)
+    return struct(id = slot_id, score = 0, reused_from = "")
+
+def _best_free_slot(ctx: TaskContext, pool: dict, registry: dict) -> str:
+    """Any free slot this clone owns, ignoring scoring entirely. The fallback
+    for a hook that refused everything at the pool's limit."""
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] == "free" and slot.get("owner_git_dir", "") == pool["git_common_dir"]:
+            return slot_id
+    return ""
+
+def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: str) -> None:
+    """Put a git worktree for `name` at the slot, checked out on that branch.
+
+    Whatever the previous occupant left is removed first, so recycling never
+    has to care what state the slot was in.
+
+    HEAD is left attached to the branch, which matters more than it looks:
+    the branch is the only thing that names a worktree, so a detached HEAD
+    leaves `git branch --show-current` empty and the slot unidentifiable — and
+    nothing could be committed from it either. Git refuses outright if the
+    branch is checked out in another worktree, which is the right answer and
+    better than silently detaching.
+    """
+    if ctx.std.fs.exists(path):
+        _git(ctx, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+    ctx.std.fs.create_dir_all(pool["dir"])
+    existing = _git_try(ctx, ["rev-parse", "--verify", "--quiet", name], pool["git_common_dir"])
+    if existing:
+        _git(ctx, ["worktree", "add", path, name], pool["git_common_dir"])
+    else:
+        _git(ctx, ["worktree", "add", "-b", name, path, base_ref], pool["git_common_dir"])
+
+def _warmth_note(std, path: str, reused_from: str) -> str:
+    """One line on what this slot already holds, checked rather than assumed.
+
+    A slot's value is its Bazel state, and that state can be gone — the server
+    exits on idle, and `aspect gc` can reclaim the base — so claiming "warm"
+    without looking would be a lie often enough to matter.
+    """
+    warmth = warmth_of(std, path)
+    if warmth.server:
+        return "warm: a Bazel server is still holding this slot's analysis cache (pid %d)" % warmth.server
+    if warmth.base:
+        last = (", last used for " + reused_from) if reused_from else ""
+        return "partly warm: no server, but this slot's `external/` tree is already materialized" + last
+    return "cold: this slot has no Bazel state yet, so the first build pays for it"
+
+def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not enabled(ctx.std):
+        return _on_runner(ctx)
+
+    name = ctx.args.branch[0]
+    cwd = ctx.std.env.current_dir()
+    pool = _enter_pool(ctx)
+    if not pool:
+        return _pool_busy(ctx)
+
+    base_ref = ctx.args.base_ref or _git(ctx, ["rev-parse", "HEAD"], cwd)
+
+    # Score against the tree the slot will actually hold. An existing branch is
+    # checked out as itself and `--base-ref` is ignored; only a new branch comes
+    # from `base_ref`. Reading the caller's own working tree instead — which is
+    # the obvious thing to do and the wrong one — mislabels every `--base-ref`
+    # that leaves the current branch, and a dirty lock file mislabels the rest.
+    existing = _git_try(ctx, ["rev-parse", "--verify", "--quiet", name], pool["git_common_dir"])
+    checkout_ref = name if existing else base_ref
+    want = {
+        "lock_digest": lock_digest_at(ctx.std, pool["git_common_dir"], checkout_ref),
+        "commit": _git(ctx, ["rev-parse", checkout_ref], pool["git_common_dir"]),
+    }
+
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+
+    # Persisted before any early return below. Pruning deletes directories and
+    # output bases, so a registry still listing them would hand the next caller
+    # a slot whose recorded `lock_digest` describes state that is gone.
+    if _age_out(ctx, pool, registry):
+        write_registry(ctx.std, pool["dir"], registry)
+
+    # Git would refuse this at checkout anyway — a branch cannot be in two
+    # worktrees — but it refuses from inside `_materialize`, after a slot has
+    # been picked and its previous occupant force-removed. Both checks here
+    # answer before anything is destroyed; the pool's own leases get the better
+    # message, so they are tested first.
+    held = _leased_slot(registry, name)
+
+    # Asking for a branch whose own lease is abandoned is an agent restarting
+    # the task it died in. Hand the slot back instead of refusing: the session
+    # cannot be resumed and the tree is clean, so there is nothing to protect
+    # and the warm base is exactly what the caller wants.
+    if held and abandoned_lease(ctx.std, pool, registry, held):
+        info(ctx.std, "taking back " + name + "'s slot: the session that held it no longer exists")
+        _release_abandoned(ctx, pool, registry, held)
+        write_registry(ctx.std, pool["dir"], registry)
+        held = ""
+
+    if held:
+        return TaskConclusion(
+            exit_code = 1,
+            message = name + " is already checked out at " + slot_path(pool, held) +
+                      ". Use it, or `aspect worktree remove " + name + "` first.",
+        )
+    elsewhere = _worktree_holding_branch(ctx, pool, name)
+    if elsewhere:
+        return TaskConclusion(
+            exit_code = 1,
+            message = name + " is already checked out at " + elsewhere +
+                      ", which this pool does not manage. Work there, or move that " +
+                      "worktree off the branch first.",
+        )
+
+    chosen = _pick_slot(ctx, pool, registry, want)
+    slot = registry["slots"][chosen.id]
+    path = slot_path(pool, chosen.id)
+
+    # On failure the registry is never written, so the slot stays free — but git
+    # may already have the worktree, at a path nothing will point at again.
+    # Dropping it keeps git and the registry agreeing on "this slot is free".
+    err, _ = catch(_materialize, ctx, pool, path, name, base_ref)
+    if err != None:
+        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        fail("could not create the worktree: " + str(err))
+
+    slot["state"] = "leased"
+    slot["lease"] = {
+        "name": name,
+        "since": str(time.now_ms()),
+        # Who took it, so `list` can name the session holding each slot rather
+        # than only the branch. Empty for a person at a terminal.
+        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
+    }
+    slot["last_used_ms"] = time.now_ms()
+    write_registry(ctx.std, pool["dir"], registry)
+
+    warmth = warmth_of(ctx.std, path)
+    if ctx.args.output == "path":
+        ctx.std.io.stdout.write(path + "\n")
+        return 0
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "path": path,
+            "pool": pool["id"],
+            "score": chosen.score,
+            "reused_from": chosen.reused_from,
+            "server_pid": warmth.server,
+            "output_base_present": warmth.base,
+        }, indent = 2) + "\n")
+        return 0
+
+    info(ctx.std, "worktree ready: " + path)
+    print("  branch: " + name)
+    print("  " + _warmth_note(ctx.std, path, chosen.reused_from))
+    print("")
+    print("  cd \"$(aspect worktree path " + name + ")\"")
+    return 0
+
+def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not enabled(ctx.std):
+        return _on_runner(ctx)
+
+    name = ctx.args.name[0]
+    pool = _enter_pool(ctx)
+    if not pool:
+        return _pool_busy(ctx)
+
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+    target = _leased_slot(registry, name)
+    if not target:
+        return _no_such_worktree(ctx, name)
+
+    slot = registry["slots"][target]
+    path = slot_path(pool, target)
+
+    # What the slot is left holding is what the next allocation scores it on, so
+    # a slot whose checkout has vanished must record nothing rather than keep an
+    # earlier occupant's digest — which would score it 100 for state it does not
+    # have and send the next caller to the coldest slot in the pool.
+    head = ""
+    if ctx.std.fs.exists(path):
+        head = _git(ctx, ["rev-parse", "HEAD"], path)
+        slot["lock_digest"] = lock_digest(ctx.std, path)
+        dropped = run_git(ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        if not dropped.ok:
+            # Freeing the slot anyway is right — the next `add` force-removes
+            # whatever is in its way — but a silent failure leaves `list`
+            # claiming the slot is empty while git still holds a worktree there.
+            warn(ctx.std, "could not drop the worktree at " + path + ": " + dropped.err +
+                          "; the slot is free and the next allocation will clear it")
+    else:
+        slot["lock_digest"] = ""
+
+    slot["state"] = "free"
+    slot["last_commit"] = head
+    slot["last_branch"] = name
+    slot["lease"] = None
+    slot["last_used_ms"] = time.now_ms()
+    write_registry(ctx.std, pool["dir"], registry)
+
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "released": name,
+            "path": path,
+        }, indent = 2) + "\n")
+        return 0
+    info(ctx.std, "released " + name + "; the slot and its warm Bazel server stay in the pool")
+    return 0
+
+def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not enabled(ctx.std):
+        return TaskConclusion(exit_code = 1, message = _ON_RUNNER)
+
+    name = ctx.args.name[0]
+    pool = _pool(ctx)
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+    found = _leased_slot(registry, name)
+    if not found:
+        return _no_such_worktree(ctx, name)
+    ctx.std.io.stdout.write(slot_path(pool, found) + "\n")
+    return 0
+
+def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not enabled(ctx.std):
+        return _on_runner(ctx)
+
+    pool = _enter_pool(ctx)
+    if not pool:
+        return _pool_busy(ctx)
+
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+    victims = prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days)
+
+    # The whole list goes out before anything is deleted, so the confirmation is
+    # answered with the picture rather than a count.
+    candidates = []
+    if victims:
+        info(ctx.std, "%d slot(s) free and unused for %d+ days:" % (len(victims), ctx.args.max_age_days))
+    for slot_id in victims:
+        slot = registry["slots"][slot_id]
+        label = slot.get("last_branch", "") or "never used"
+        candidates.append({
+            "path": slot_path(pool, slot_id),
+            "idle_days": slot_age_days(slot),
+            "last_branch": slot.get("last_branch", ""),
+        })
+        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(slot), label))
+
+    doomed = "delete %d worktree slot(s) and their Bazel output bases" % len(victims)
+    verdict = confirm.decide(
+        has_work = len(victims) > 0,
+        dry_run = ctx.args.dry_run,
+        force = ctx.args.force,
+        is_tty = ctx.std.io.stdin.is_tty,
+    )
+    if verdict == confirm.NEEDS_FORCE:
+        return TaskConclusion(exit_code = 1, message = confirm.needs_force_message(doomed))
+    question = "Delete %d worktree slot(s) and their Bazel output bases?" % len(victims)
+    if verdict == confirm.ASK and not confirm.ask(ctx, question):
+        return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
+
+    pruned = []
+    kept = []
+    if verdict != confirm.SKIP:
+        for i, slot_id in enumerate(victims):
+            path = slot_path(pool, slot_id)
+            print("  [%d/%d] removing %s" % (i + 1, len(victims), path))
+            outcome = drop_slot(ctx.std, pool, registry, slot_id)
+            if outcome.dropped:
+                pruned.append(path)
+            else:
+                kept.append((path, outcome.reason))
+        write_registry(ctx.std, pool["dir"], registry)
+
+    for path, reason in kept:
+        warn(ctx.std, "kept " + path + ": " + reason)
+
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "pool": pool["id"],
+            "dry_run": ctx.args.dry_run,
+            "max_age_days": ctx.args.max_age_days,
+            # Candidates are reported whether or not anything was deleted, so a
+            # dry run says what it would do rather than only that it did
+            # nothing.
+            "candidates": candidates,
+            "pruned": pruned,
+            "kept": [{"path": p, "reason": r} for p, r in kept],
+        }, indent = 2) + "\n")
+        return 0
+
+    if not victims:
+        info(ctx.std, "nothing to prune: no free slot has been idle for %d days" % ctx.args.max_age_days)
+    elif verdict == confirm.SKIP:
+        info(ctx.std, "dry run; nothing was deleted")
+    else:
+        info(ctx.std, "pruned %d slot(s)" % len(pruned))
+    return 0
+
+def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
+    if not enabled(ctx.std):
+        return _on_runner(ctx)
+
+    # No lock: this only reads. `write_registry` renames into place, so a
+    # concurrent `add` can never be observed half-written, and reconciling
+    # without persisting costs nothing — `add` and `remove` reconcile too.
+    pool = _pool(ctx)
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+    rows = []
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        lease = slot.get("lease") or {}
+        path = slot_path(pool, slot_id)
+        warmth = warmth_of(ctx.std, path)
+        agent = lease.get("agent") or {}
+        rows.append({
+            "slot": slot_id,
+            "state": slot["state"],
+            "name": lease.get("name", ""),
+            "agent": agent,
+            "session_state": session_state(ctx.std, agent) if agent else "",
+            "path": path,
+            "last_branch": slot.get("last_branch", ""),
+            "owner": slot.get("owner_git_dir", ""),
+            "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
+            "idle_days": slot_age_days(slot),
+            "output_base": output_base_of(ctx.std, path),
+            "server_pid": warmth.server,
+            "output_base_present": warmth.base,
+        })
+
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "pool": pool["id"],
+            "remote": pool["remote"],
+            "slots": rows,
+        }, indent = 2) + "\n")
+        return 0
+
+    info(ctx.std, "pool " + pool["id"])
+    if not rows:
+        print("  no slots yet — `aspect worktree add <branch>` creates the first")
+        return 0
+
+    # Branch first: it is the only column a reader recognizes. The slot id is
+    # internal and comes last, for anyone cross-referencing `git worktree list`.
+    labels = [r["name"] or r["last_branch"] or "-" for r in rows]
+    warmths = []
+    for r in rows:
+        if r["server_pid"]:
+            warmths.append("warm (server %d)" % r["server_pid"])
+        elif r["output_base_present"]:
+            warmths.append("partly warm")
+        else:
+            warmths.append("cold")
+    label_w = max([len(s) for s in labels])
+    warm_w = max([len(s) for s in warmths])
+
+    foreign = 0
+    resumable = []
+    for i, r in enumerate(rows):
+        state = "in use" if r["state"] == "leased" else "free  "
+
+        # Idle days are what `prune` acts on, so a reader deciding whether to run
+        # it sees the same number the decision uses.
+        tail = "" if r["state"] == "leased" else "  idle %dd" % r["idle_days"]
+        if not r["owned_here"]:
+            foreign += 1
+            tail += "  [other clone]"
+        if r["agent"]:
+            tail += "  " + label(r["agent"])
+
+            # Only states a reader can act on are annotated. `unknown` is the
+            # normal answer for a harness whose session layout we cannot check,
+            # so printing it would put noise on most rows and say nothing.
+            if r["session_state"] == RESUMABLE or r["session_state"] == GONE:
+                tail += " (%s)" % r["session_state"]
+            if r["session_state"] == RESUMABLE:
+                hint = resume_hint(r["agent"])
+                if hint:
+                    resumable.append((r["name"], hint))
+        print("  " + _pad(labels[i], label_w) + "  " + state + "  " +
+              _pad(warmths[i], warm_w) + "  " + r["slot"] + tail)
+    print("")
+    if foreign:
+        print("  %d slot(s) belong to another clone of this repository and cannot be leased here." % foreign)
+
+    # A session whose process has exited is almost always a closed terminal, so
+    # the useful offer is how to get back into it, not how to take it away.
+    for name, hint in resumable:
+        print("  %s is held by a session that is not running. Resume it:" % name)
+        print("    " + hint)
+    print("  cd \"$(aspect worktree path <branch>)\" to enter one")
+    print("  aspect worktree prune --dry-run  to see what has gone stale")
+    return 0
+
+_OUTPUT_ARG = {
+    "output": args.string(
+        default = "text",
+        values = ["text", "json"],
+        description = "stdout format. `text` (default) writes a human-readable report to stderr and leaves stdout empty. `json` writes one document to stdout.",
+    ),
+}
+
+# `add` additionally offers `path`, so one command both creates a worktree and
+# tells a shell where to go: cd "$(aspect worktree add fix/login --output=path)"
+_ADD_OUTPUT_ARG = {
+    "output": args.string(
+        default = "text",
+        values = ["text", "json", "path"],
+        description = "stdout format. `text` (default) writes a human-readable report to stderr and leaves stdout empty. `json` writes one document to stdout. `path` writes only the worktree directory, for `cd \"$(aspect worktree add <branch> --output=path)\"`.",
+    ),
+}
+
+add = task(
+    group = ["worktree"],
+    summary = "Take a git worktree from a pool of reused paths, so Bazel starts warm.",
+    description = "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.\n\nDisabled on Aspect Workflows runners, which build one job in a checkout they discard.",
+    implementation = _add_impl,
+    traits = [Worktrees],
+    args = {
+        "branch": args.positional(
+            minimum = 1,
+            maximum = 1,
+            description = "Branch to check out. Created from --base-ref when it does not exist yet.",
+        ),
+        "base_ref": args.string(
+            default = "",
+            description = "Ref to branch from when creating a new branch. Defaults to the current HEAD.",
+        ),
+        "agent_kind": args.string(
+            default = "",
+            description = "Name of the agent harness taking this worktree, recorded on the lease and shown by `aspect worktree list`. Detected automatically for harnesses the CLI recognizes, or set `ASPECT_AGENT_KIND`; pass this when neither applies.",
+        ),
+        "agent_id": args.string(
+            default = "",
+            description = "Session identifier of the agent taking this worktree, recorded on the lease so a slot can be traced back to the session holding it. Detected automatically where the harness exports one, or set `ASPECT_AGENT_ID`.",
+        ),
+    } | _ADD_OUTPUT_ARG,
+)
+
+remove = task(
+    group = ["worktree"],
+    summary = "Release a worktree and return its slot to the pool, Bazel state intact.",
+    description = "Remove the worktree and return the slot to the pool. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, and is taken back only once the session that holds it is gone and the checkout is clean — so call this when you can.",
+    implementation = _remove_impl,
+    traits = [Worktrees],
+    args = {
+        "name": args.positional(
+            minimum = 1,
+            maximum = 1,
+            description = "The name the worktree was created with.",
+        ),
+    } | _OUTPUT_ARG,
+)
+
+path = task(
+    kind = "path",
+    group = ["worktree"],
+    summary = "Print a leased worktree's directory, for `cd`.",
+    description = "Print the slot directory a leased worktree lives in, and nothing else, so a shell can step into it:\n\n    cd \"$(aspect worktree path fix/login)\"\n\nA task cannot change its caller's directory, so this prints rather than moves. Define a shell function if you want one word:\n\n    aspect-cd() { cd \"$(aspect worktree path \"$1\")\"; }",
+    implementation = _path_impl,
+    traits = [Worktrees],
+    args = {
+        "name": args.positional(
+            minimum = 1,
+            maximum = 1,
+            description = "The name the worktree was created with.",
+        ),
+    },
+)
+
+# `list` would shadow the builtin type within this module, so the symbol is
+# named for its command and `kind` carries the command name.
+prune = task(
+    group = ["worktree"],
+    summary = "Delete pooled slots that have gone stale, and their Bazel output bases.",
+    description = "Reclaim the disk held by free slots nothing has used for a while. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots are considered — a slot someone is working in is never deleted, whatever its age — and a slot whose Bazel server is still running is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nSlots stranded by a clone that was moved or deleted are collected too: no clone can lease them again, because `git worktree add` is scoped to one object store.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
+    implementation = _prune_impl,
+    traits = [Worktrees],
+    args = {
+        "max_age_days": args.int(
+            default = PRUNE_AGE_DAYS,
+            description = "Delete free slots untouched for at least this many days. `0` considers every free slot.",
+        ),
+        "dry_run": args.boolean(
+            default = False,
+            description = "Report what would be deleted and delete nothing.",
+        ),
+        "force": args.boolean(
+            default = False,
+            description = "Delete without asking. Required when stdin is not a terminal, so a script or an agent has to opt in rather than have a prompt answered for it.",
+        ),
+    } | _OUTPUT_ARG,
+)
+
+worktree_list = task(
+    kind = "list",
+    group = ["worktree"],
+    summary = "List this repository's worktree slots, what holds them, and how warm each is.",
+    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.",
+    implementation = _list_impl,
+    traits = [Worktrees],
+    args = _OUTPUT_ARG,
+)
