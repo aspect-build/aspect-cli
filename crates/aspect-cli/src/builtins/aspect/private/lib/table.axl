@@ -30,13 +30,21 @@ Column = record(
     always = field(bool, default = False),
 )
 
+def shown_columns(rows: list[dict], columns: list) -> list:
+    """The columns a table of `rows` would actually print.
+
+    A column nothing fills is dropped, unless its absence would hide something.
+    The legend asks the same question, so it is answered in one place.
+    """
+    return [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
+
 def render(rows: list[dict], columns: list) -> list[str]:
     """`rows` as aligned lines, the header first.
 
     Each column is sized to the widest of its header and its cells. The last
     one is not padded, so no row carries trailing spaces.
     """
-    used = [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
+    used = shown_columns(rows, columns)
     widths = {c.key: max([len(c.header)] + [len(r.get(c.key, "")) for r in rows]) for c in used}
 
     def line(cells):
@@ -49,33 +57,44 @@ def render(rows: list[dict], columns: list) -> list[str]:
     return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
 
 def legend(rows: list[dict], notes: list, columns: list) -> list[str]:
-    """Definitions for the values `rows` actually contain, grouped by column.
+    """Definitions for what `rows` show, as a two-column lookup.
 
-    `notes` is `(column, value, definition)`. Only what is on screen is defined,
-    which is what keeps a legend short enough to be read, and each group is
-    labelled with its column's own header in a gutter:
+    `notes` is `(column, value, definition)` in three shapes:
 
-        warmth  warm         a live Bazel server still holds the analysis cache
-                partly warm  no server, but external/ is already materialized
+        ("warmth", "cold", …)  a value, shown when a row carries it
+        ("idle", "", …)        a column, shown when the column is printed
+        ("", "-", …)           a notation, shown when any cell carries it
 
-    The alternative — a flat list of `value: definition` — leaves the reader to
-    work out which column each term came from, and whether it is a value at all.
+    The term a reader saw in the table leads, since that is what they are looking
+    up, and the column it belongs to follows in parentheses:
+
+        free (state)    no worktree here; the slot keeps its Bazel state
+        cold (warmth)   no output base; the first build pays loading and fetches
+        idle            how long since Bazel last built here
+
+    Only what is on screen is defined, so the legend shrinks with the table.
     """
     headers = {c.key: c.header for c in columns}
-    shown = [(k, v, d) for k, v, d in notes if any([r.get(k, "") == v for r in rows])]
-    if not shown:
+    present = {c.key: True for c in shown_columns(rows, columns)}
+
+    terms = []
+    for key, value, definition in notes:
+        if not key:
+            # A notation, which may turn up in any column.
+            if any([any([cell == value for cell in r.values()]) for r in rows]):
+                terms.append((value, definition))
+        elif not value:
+            # The column itself, for a header that needs a sentence.
+            if key in present:
+                terms.append((headers.get(key, key), definition))
+        elif any([r.get(key, "") == value for r in rows]):
+            terms.append((value + " (" + headers.get(key, key) + ")", definition))
+
+    if not terms:
         return []
 
-    gutter = max([len(headers.get(k, k)) for k, _, _ in shown])
-    term = max([len(v) for _, v, _ in shown])
-
-    lines = []
-    previous = ""
-    for key, value, definition in shown:
-        label = headers.get(key, key) if key != previous else ""
-        previous = key
-        lines.append("  " + pad_right(label, gutter) + "  " + pad_right(value, term) + "  " + definition)
-    return lines
+    width = max([len(term) for term, _ in terms])
+    return ["  " + pad_right(term, width) + "  " + definition for term, definition in terms]
 
 def tilde(path: str, home: str) -> str:
     """`path` with the home directory written `~`, for display.
