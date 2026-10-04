@@ -144,6 +144,48 @@ def git_out(std, args: list[str], cwd: str = "") -> str:
     r = run_git(std, args, cwd)
     return r.out if r.ok else ""
 
+# Files a build generates that nobody authored. Only counted when git already
+# tracks them, where a change is a diff somebody may want to commit.
+_GENERATED_FILES = ["MODULE.bazel.lock"]
+
+def _is_bazel_leaving(std, worktree: str, base: str, entry: str) -> bool:
+    """Whether an untracked path in a worktree is something Bazel put there.
+
+    A convenience symlink is recognized by where it points — into this slot's
+    own output base — rather than by its name, so a repo that sets
+    `--symlink_prefix` is covered without naming its prefix.
+    """
+    if entry in _GENERATED_FILES:
+        return True
+    if not base or "/" in entry:
+        return False
+    err, meta = catch(std.fs.symlink_metadata, worktree + "/" + entry)
+    if err != None or not meta.is_symlink:
+        return False
+    err, target = catch(std.fs.read_link, worktree + "/" + entry)
+    return err == None and str(target).startswith(base)
+
+def uncommitted_work(std, worktree: str, base: str = "") -> list[str]:
+    """`git status --porcelain` lines for a worktree, minus Bazel's own leavings.
+
+    What a dirty check is for is protecting work, and build output is not work:
+    the convenience symlinks point into the output base and the next build
+    recreates them, and a generated lock file costs a re-resolution. Counting
+    them would make any slot that had been built in impossible to release or to
+    reclaim, which is every slot the pool is for.
+
+    Empty for a worktree that is gone — there is nothing there to lose.
+    """
+    if not std.fs.exists(worktree):
+        return []
+    kept = []
+    for line in git_out(std, ["status", "--porcelain"], worktree).splitlines():
+        if line.startswith("?? ") and _is_bazel_leaving(std, worktree, base, line[3:].strip()):
+            continue
+        if line:
+            kept.append(line)
+    return kept
+
 # --- pool keying -------------------------------------------------------------
 
 def _rstrip(s: str, ch: str) -> str:
@@ -745,7 +787,7 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str
         victims.append(slot_id)
     return victims
 
-def abandoned_lease(std, pool: dict, registry: dict, slot_id: str) -> bool:
+def abandoned_lease(std, pool: dict, registry: dict, slot_id: str, root: str = "") -> bool:
     """Whether a leased slot can be taken back without losing anything.
 
     Two conditions, both required, because the cost of being wrong is somebody's
@@ -758,6 +800,11 @@ def abandoned_lease(std, pool: dict, registry: dict, slot_id: str) -> bool:
     - the checkout is clean. Commits survive `git worktree remove` — they are in
       the branch — so a clean tree has nothing to lose. Uncommitted changes do,
       and no amount of elapsed time makes deleting them the right default.
+
+    Clean means no *work*: a slot that has been built in holds Bazel's output
+    and would otherwise never be reclaimable, which `root` is needed to
+    establish — it is the output user root the rc chain resolves, and without it
+    a relocated base cannot be recognized.
     """
     lease = registry["slots"][slot_id].get("lease") or {}
     agent = lease.get("agent") or {}
@@ -768,7 +815,7 @@ def abandoned_lease(std, pool: dict, registry: dict, slot_id: str) -> bool:
     path = slot_path(pool, slot_id)
     if not std.fs.exists(path):
         return True
-    return not git_out(std, ["status", "--porcelain"], path)
+    return not uncommitted_work(std, path, output_base_of(std, path, root))
 
 def drop_slot(std, pool: dict, registry: dict, slot_id: str, root: str = "") -> struct:
     """Delete a free slot outright: its worktree, its directory, its output base

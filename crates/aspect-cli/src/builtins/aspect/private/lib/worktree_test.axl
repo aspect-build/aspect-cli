@@ -46,6 +46,7 @@ load(
     "slot_created_days",
     "slot_path",
     "slug",
+    "uncommitted_work",
     "warmth_of",
     "write_registry",
 )
@@ -872,6 +873,85 @@ def _test_durations_read_coarsely(ctx):
     _eq("hours", duration_phrase(3 * 60 * 60 * 1000 + 20 * 60 * 1000), "3h 20m")
     _eq("days", duration_phrase(2 * _DAY_MS + 5 * 60 * 60 * 1000), "2d 5h")
 
+def _symlink(ctx, target: str, link: str) -> None:
+    """`ln -s`: AXL's `std.fs` can write a file but not create a link."""
+    ctx.std.process.command("ln").args(["-s", target, link]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _test_a_built_in_slot_is_not_dirty(ctx):
+    """The case three agents hit running the documented workflow: take a slot,
+    build in it, release it. Bazel leaves its convenience symlinks and a
+    generated lock file behind, and counting those as work made the release step
+    refuse — so a slot could never be released after its first build.
+    """
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    ctx.std.fs.create_dir_all(base + "/execroot/warmth")
+
+    # What a build leaves: symlinks into the output base, plus the lock file.
+    for link in ["bazel-bin", "bazel-out", "bazel-testlogs", "bazel-warmth"]:
+        _symlink(ctx, base + "/execroot/warmth", env.path + "/" + link)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 42}\n')
+
+    _eq("none of it is work", uncommitted_work(ctx.std, env.path, base), [])
+
+def _test_real_work_in_a_built_in_slot_still_counts(ctx):
+    """The filter must not swallow the thing it is next to. A file the caller
+    wrote is work even when Bazel's leavings are in the same listing."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    ctx.std.fs.create_dir_all(base)
+    _symlink(ctx, base, env.path + "/bazel-bin")
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", "{}\n")
+    ctx.std.fs.write(env.path + "/notes.md", "half-finished\n")
+
+    work = uncommitted_work(ctx.std, env.path, base)
+    _eq("just the one file", len(work), 1)
+    if "notes.md" not in work[0]:
+        fail("the caller's own file should be reported: got %r" % work)
+
+def _test_a_tracked_lock_file_that_changed_is_work(ctx):
+    """A lock file git already tracks is a diff somebody may want to commit, so
+    the exemption covers the generated case only."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 1}\n')
+    run_git(ctx.std, ["add", "MODULE.bazel.lock"], env.path)
+    run_git(ctx.std, ["commit", "-qm", "lock"], env.path)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 2}\n')
+
+    work = uncommitted_work(ctx.std, env.path, "")
+    if len(work) != 1 or "MODULE.bazel.lock" not in work[0]:
+        fail("a tracked lock file that changed is work: got %r" % work)
+
+def _test_a_symlink_pointing_elsewhere_is_work(ctx):
+    """A convenience symlink is recognized by pointing into this slot's output
+    base, not by its name — so a symlink someone else made is still reported,
+    whatever it is called."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    elsewhere = ctx.std.fs.mkdtemp(prefix = "aspect-wt-other")
+    _symlink(ctx, elsewhere, env.path + "/bazel-bin")
+
+    work = uncommitted_work(ctx.std, env.path, base)
+    if len(work) != 1 or "bazel-bin" not in work[0]:
+        fail("a symlink out of the pool's reach is not ours to ignore: got %r" % work)
+
+def _test_a_gone_session_with_only_build_output_is_abandoned(ctx):
+    """Reclaiming a crashed agent's slot ran the same check, so a slot that had
+    been built in was unreclaimable as well as unreleasable."""
+    previous = _with_empty_session_store(ctx)
+    env = _repo_with_worktree(ctx, dirty = False)
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    base = output_base_of(ctx.std, env.path, root)
+    ctx.std.fs.create_dir_all(base)
+    _symlink(ctx, base, env.path + "/bazel-out")
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", "{}\n")
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+
+    verdict = abandoned_lease(ctx.std, env.pool, registry, env.slot_id, root)
+    _restore_session_store(ctx, previous)
+    _eq("build output is not work to protect", verdict, True)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -930,6 +1010,11 @@ _UNIT_TESTS = [
     _test_a_handover_records_a_holder_without_counting_a_lease,
     _test_how_long_a_holder_had_it,
     _test_durations_read_coarsely,
+    _test_a_built_in_slot_is_not_dirty,
+    _test_real_work_in_a_built_in_slot_still_counts,
+    _test_a_tracked_lock_file_that_changed_is_work,
+    _test_a_symlink_pointing_elsewhere_is_work,
+    _test_a_gone_session_with_only_build_output_is_abandoned,
 ]
 
 def _test_impl(ctx):

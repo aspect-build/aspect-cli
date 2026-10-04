@@ -99,6 +99,7 @@ load(
     "slot_created_days",
     "slot_path",
     "slug",
+    "uncommitted_work",
     "warmth_of",
     "write_registry",
 )
@@ -269,16 +270,15 @@ def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
         "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
     )
 
-def _dirty_files(ctx: TaskContext, path: str) -> str:
-    """`git status --porcelain` for a slot, or "" when it is clean or gone.
+def _dirty_files(ctx: TaskContext, path: str, root: str) -> str:
+    """The uncommitted work in a slot, indented for a refusal, or "".
 
     Reported rather than counted: a caller deciding whether to discard work
-    needs to see which files, not a number.
+    needs to see which files, not a number. Bazel's own leavings are not work
+    and `uncommitted_work` drops them.
     """
-    if not ctx.std.fs.exists(path):
-        return ""
-    out = _git_try(ctx, ["status", "--porcelain"], path)
-    return "\n".join(["  " + line for line in out.splitlines()]) if out else ""
+    work = uncommitted_work(ctx.std, path, output_base_of(ctx.std, path, root))
+    return "\n".join(["  " + line for line in work])
 
 def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> str:
     """Why `name` cannot be taken, and what the caller can do instead.
@@ -390,7 +390,7 @@ def _drop_reservation(ctx: TaskContext, pool: dict, registry: dict, slot_id: str
     registry["slots"][slot_id]["state"] = FREE
     registry["slots"][slot_id]["reservation"] = None
 
-def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict) -> struct:
+def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: str) -> struct:
     """The best free slot this clone owns for `want`, creating one if none fits.
 
     A slot is only a candidate when it belongs to this clone's object store:
@@ -426,7 +426,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict) -> stru
             continue
         if registry["slots"][slot_id].get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
-        if not abandoned_lease(ctx.std, pool, registry, slot_id):
+        if not abandoned_lease(ctx.std, pool, registry, slot_id, root):
             continue
         lease = registry["slots"][slot_id].get("lease") or {}
         info(ctx.std, "reclaimed the slot held by " + (lease.get("name", "") or "an earlier worktree") +
@@ -797,7 +797,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # the task it died in. Hand the slot back instead of refusing: the session
     # cannot be resumed and the tree is clean, so there is nothing to protect
     # and the warm base is exactly what the caller wants.
-    if held and abandoned_lease(ctx.std, pool, registry, held):
+    if held and abandoned_lease(ctx.std, pool, registry, held, root):
         info(ctx.std, "taking back " + name + "'s slot: the session that held it no longer exists")
         free_slot(ctx.std, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
@@ -829,7 +829,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
             "worktree off the branch first.",
         )
 
-    chosen = _pick_slot(ctx, pool, registry, want)
+    chosen = _pick_slot(ctx, pool, registry, want, root)
     token = reserve_slot(ctx.std, registry, chosen.id, name)
     write_registry(ctx.std, pool["dir"], registry)
     return _check_out_and_lease(ctx, pool, lock, registry, chosen, name, base_ref, token)
@@ -854,7 +854,7 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Releasing drops the worktree, which takes anything uncommitted in it with
     # it. That is the last step of an ordinary task, so it must not be the step
     # that loses work: name the files and let the caller decide.
-    dirty = _dirty_files(ctx, path)
+    dirty = _dirty_files(ctx, path, root)
     if dirty and not ctx.args.force:
         return _refuse(
             ctx,
