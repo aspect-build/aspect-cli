@@ -17,7 +17,7 @@ A base's state, first match wins (`classify`):
   - **orphaned** — its workspace is gone; within the grace period after its last
     use it is held back instead, so a worktree recreated at the same path keeps
     it.
-  - **idle** — unused for the maximum age, whatever its workspace, unless a
+  - **idle** — unused for the maximum idle time, whatever its workspace, unless a
     Bazel server is running in it.
   - **live** or **undetermined** otherwise.
 
@@ -92,7 +92,7 @@ _ORPHAN_NOTE = ("orphaned: the base's workspace directory no longer exists, e.g.
 # Every state a base can be in, in census and listing order.
 STATES = {
     LIVE: _State(key = "live", label = "live", removable = False, heading = "live — workspace still exists"),
-    IDLE: _State(key = "idle", label = "idle", removable = True, heading = "idle — unused past the maximum age"),
+    IDLE: _State(key = "idle", label = "idle", removable = True, heading = "idle — unused past the maximum idle time"),
     ORPHAN: _State(key = "orphaned", label = "orphaned", removable = True, heading = "orphaned — workspace gone", note = _ORPHAN_NOTE),
     GRACE: _State(
         key = "orphaned_within_grace",
@@ -106,7 +106,7 @@ STATES = {
         label = "in a worktree pool",
         removable = False,
         heading = "worktree pool slots",
-        note = "in a worktree pool: an `aspect worktree` slot, kept so its next lease starts warm.\n{max_age}.",
+        note = "in a worktree pool: an `aspect worktree` slot, kept so its next lease starts warm.\n{max_idle}.",
     ),
     UNKNOWN: _State(
         key = "undetermined",
@@ -114,7 +114,7 @@ STATES = {
         removable = False,
         heading = "undetermined — no workspace recorded in it",
         note = ("undetermined: nothing in the base names its workspace, so it cannot be orphaned.\n" +
-                "{max_age}, or now with `{gc} --bazel-output-base=<hash>`."),
+                "{max_idle}, or now with `{gc} --bazel-output-base=<hash>`."),
     ),
     TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True, heading = "left from an interrupted gc"),
 }
@@ -124,9 +124,9 @@ STATES = {
 # The periods the rules apply. A period of 0 turns its rule off — for the grace
 # period, that removes orphans without waiting.
 Policy = record(
-    base_max_age_us = field(int),
+    base_max_idle_us = field(int),
     orphan_grace_us = field(int),
-    download_cache_max_age_us = field(int),
+    download_cache_max_idle_us = field(int),
 )
 
 _Period = record(
@@ -154,21 +154,21 @@ PERIODS = {
         on = "`aspect gc` removes one %s after last use (--orphan-grace-hours=N to change, 0 for immediately)",
         off = "`aspect gc` removes one immediately (--orphan-grace-hours=N waits N hours after last use)",
     ),
-    "{max_age}": _Period(
-        field = "base_max_age_us",
-        arg = "base_max_age_days",
+    "{max_idle}": _Period(
+        field = "base_max_idle_us",
+        arg = "base_max_idle_days",
         unit_us = DAY_US,
         default = 30,
-        on = "`aspect gc` removes one %s after last use (--base-max-age-days=N to change, 0 to keep)",
-        off = "`aspect gc` keeps it (--base-max-age-days=N removes one N days after last use)",
+        on = "`aspect gc` removes one %s after last use (--base-max-idle-days=N to change, 0 to keep)",
+        off = "`aspect gc` keeps it (--base-max-idle-days=N removes one N days after last use)",
     ),
-    "{cache_age}": _Period(
-        field = "download_cache_max_age_us",
-        arg = "download_cache_max_age_days",
+    "{cache_idle}": _Period(
+        field = "download_cache_max_idle_us",
+        arg = "download_cache_max_idle_days",
         unit_us = DAY_US,
         default = 30,
-        on = "pruned by `aspect gc` after %s unused; --download-cache-max-age-days=N to change, 0 to keep",
-        off = "not pruned; `aspect gc --download-cache-max-age-days=N` prunes after N days unused",
+        on = "pruned by `aspect gc` after %s unused; --download-cache-max-idle-days=N to change, 0 to keep",
+        off = "not pruned; `aspect gc --download-cache-max-idle-days=N` prunes after N days unused",
     ),
 }
 
@@ -490,7 +490,7 @@ def _classify(workspace: str, workspace_exists: bool, pooled: bool, age_us: int,
     A running server is not decided here: it costs a process lookup, so `_scan`
     vetoes `IDLE` afterwards, and only for the bases this returns it for.
     """
-    idle = policy.base_max_age_us > 0 and age_us >= policy.base_max_age_us
+    idle = policy.base_max_idle_us > 0 and age_us >= policy.base_max_idle_us
     if pooled:
         return IDLE if idle else POOLED
     if workspace and not workspace_exists:
@@ -600,9 +600,9 @@ def _du_kb(ctx: TaskContext, path: str):
 # The shared caches beside the bases, with what collects each. A reason may
 # hold `PERIODS` placeholders.
 CACHES = [
-    ("download_cache_kb", DOWNLOAD_CACHE, "{cache_age}"),
+    ("download_cache_kb", DOWNLOAD_CACHE, "{cache_idle}"),
     ("repo_contents_cache_kb", "cache/repos/v1/contents", "collected by Bazel while a server sits idle"),
-    ("install_bases_kb", "install", "collected by Bazel's --experimental_install_base_gc_max_age"),
+    ("install_bases_kb", "install", "collected by Bazel's --experimental_install_base_gc_max_idle"),
 ]
 
 def _cache_report(ctx: TaskContext, streaming: bool, root: str) -> dict:

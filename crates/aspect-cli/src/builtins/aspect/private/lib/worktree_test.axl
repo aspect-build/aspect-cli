@@ -54,9 +54,9 @@ load(
     "reserve_slot",
     "reserving_slot",
     "run_git",
-    "slot_age_days",
     "slot_age_ms",
     "slot_created_days",
+    "slot_idle_days",
     "slot_path",
     "slug",
     "uncommitted_work",
@@ -205,7 +205,7 @@ _DAY_MS = 24 * 60 * 60 * 1000
 def _slot(owner, state = FREE, age_days = 0):
     """A registry entry whose creation floor is `age_days` old.
 
-    With no output base on disk the floor is what `slot_age_days` reads, so this
+    With no output base on disk the floor is what `slot_idle_days` reads, so this
     is how a test says "this slot has been idle that long"."""
     return {
         "owner_git_dir": owner,
@@ -223,10 +223,10 @@ def _test_age_comes_from_the_base_and_falls_back_to_the_floor(ctx):
     """
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
     pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
-    _eq("nothing recorded at all", slot_age_days(ctx.std, pool, "nobase", {"state": "free"}), 0)
+    _eq("nothing recorded at all", slot_idle_days(ctx.std, pool, "nobase", {"state": "free"}), 0)
     _eq(
         "the creation floor, with no base on disk",
-        slot_age_days(ctx.std, pool, "nobase", {"created_ms": time.now_ms() - 3 * _DAY_MS}),
+        slot_idle_days(ctx.std, pool, "nobase", {"created_ms": time.now_ms() - 3 * _DAY_MS}),
         3,
     )
 
@@ -242,7 +242,7 @@ def _test_a_recently_used_base_outranks_an_old_creation_floor(ctx):
     ctx.std.fs.create_dir_all(base)
     ctx.std.fs.write(base + "/command.profile.gz", "x")
     old_floor = {"state": "free", "created_ms": time.now_ms() - 900 * _DAY_MS}
-    _eq("fresh despite the floor", slot_age_days(ctx.std, pool, slot_id, old_floor), 0)
+    _eq("fresh despite the floor", slot_idle_days(ctx.std, pool, slot_id, old_floor), 0)
     ctx.std.fs.remove_dir_all(base)
 
 def _test_prune_never_takes_a_leased_slot(ctx):
@@ -885,7 +885,7 @@ def _test_age_and_idleness_answer_in_milliseconds(ctx):
     _eq("nothing recorded", slot_age_ms({}), 0)
 
 def _test_creation_age_is_not_idleness(ctx):
-    """`slot_created_days` only grows; `slot_age_days` is what `prune` acts on
+    """`slot_created_days` only grows; `slot_idle_days` is what `prune` acts on
     and resets whenever Bazel touches the output base. Reporting one as the
     other would tell a reader a slot was new when it had been idle for a month,
     or ancient when it had just been used."""
@@ -898,7 +898,7 @@ def _test_creation_age_is_not_idleness(ctx):
     base = output_base_of(ctx.std, slot_path(pool, "s1"), tmp + "/root")
     ctx.std.fs.create_dir_all(base)
     _eq("created a month ago", slot_created_days(old), 30)
-    _eq("but used just now", slot_age_days(ctx.std, pool, "s1", old, tmp + "/root"), 0)
+    _eq("but used just now", slot_idle_days(ctx.std, pool, "s1", old, tmp + "/root"), 0)
 
 def _test_freeing_a_slot_closes_its_history_entry(ctx):
     """`free_slot` is one of the two ways a lease ends, so it has to close the

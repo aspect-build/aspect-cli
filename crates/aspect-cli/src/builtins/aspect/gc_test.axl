@@ -34,7 +34,7 @@ def _doc(ctx, root, sizes = {}, stale = []):
         stale = stale,
     )
     outcome = testonly_outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0)
-    return testonly_document(root, True, {"base_max_age_days": 30}, plan, outcome)
+    return testonly_document(root, True, {"base_max_idle_days": 30}, plan, outcome)
 
 def _test_document_counts_every_state(ctx):
     """`output_bases` carries a count for every state, zero included, so a
@@ -54,7 +54,7 @@ def _test_document_removals_carry_state_and_size(ctx):
     _eq("state", removals[path]["state"], "orphan")
     _eq("measured size", removals[path]["kb"], 300)
     _eq("an unmeasured base claims no size", "kb" in removals[root + "/" + fx.CMDLINE], False)
-    _eq("policy passed through", doc["policy"], {"base_max_age_days": 30})
+    _eq("policy passed through", doc["policy"], {"base_max_idle_days": 30})
     _eq("reclaimable sums bases and cache", _doc(ctx, root, sizes = {path: 300}, stale = [struct(path = "x", kb = 4)])["reclaimable_kb"], 304)
 
 def _test_reap_removes_a_base_bazel_left_read_only(ctx):
@@ -168,19 +168,19 @@ def _test_remove_tree_clears_read_only_directories(ctx):
 def _test_policy_from_args(ctx):
     """Each period flag lands in its policy field in microseconds, and a
     negative one is refused."""
-    args = struct(base_max_age_days = 30, orphan_grace_hours = 2, download_cache_max_age_days = 0)
+    args = struct(base_max_idle_days = 30, orphan_grace_hours = 2, download_cache_max_idle_days = 0)
     p = testonly_policy_from_args(args)
-    _eq("days", p.base_max_age_us, 30 * fx.DAY_US)
+    _eq("days", p.base_max_idle_us, 30 * fx.DAY_US)
     _eq("hours", p.orphan_grace_us, 2 * fx.HOUR_US)
-    _eq("zero", p.download_cache_max_age_us, 0)
-    _eq("negative refused", testonly_policy_from_args(struct(base_max_age_days = -1, orphan_grace_hours = 1, download_cache_max_age_days = 30)), None)
+    _eq("zero", p.download_cache_max_idle_us, 0)
+    _eq("negative refused", testonly_policy_from_args(struct(base_max_idle_days = -1, orphan_grace_hours = 1, download_cache_max_idle_days = 30)), None)
 
 def _test_policy_entry_reports_the_flags_units(ctx):
     entry = testonly_policy_entry(fx.policy(30 * fx.DAY_US, 2 * fx.HOUR_US, 7 * fx.DAY_US), ["abc"])
     _eq("entry", entry, {
         "orphan_grace_hours": 2,
-        "base_max_age_days": 30,
-        "download_cache_max_age_days": 7,
+        "base_max_idle_days": 30,
+        "download_cache_max_idle_days": 7,
         "bazel_output_bases": ["abc"],
     })
 

@@ -422,7 +422,7 @@ def _test_the_orphan_note_states_the_grace_period(ctx):
     _eq("off", output_bases.render(note, fx.policy(0, 0))[1], "`aspect gc` removes one immediately (--orphan-grace-hours=N waits N hours after last use).")
     _eq("shared with the grace state", output_bases.STATES["grace"].note, note)
 
-def _test_the_undetermined_note_states_the_max_age(ctx):
+def _test_the_undetermined_note_states_the_max_idle(ctx):
     """An undetermined base goes only by age, so its note gives the age in force
     and the way to remove one now."""
     note = output_bases.STATES["unknown"].note
@@ -430,22 +430,22 @@ def _test_the_undetermined_note_states_the_max_age(ctx):
     _eq(
         "age in force",
         output_bases.render(note, fx.policy(30 * fx.DAY_US))[1],
-        "`aspect gc` removes one 30d after last use (--base-max-age-days=N to change, 0 to keep), or now with `aspect gc --bazel-output-base=<hash>`.",
+        "`aspect gc` removes one 30d after last use (--base-max-idle-days=N to change, 0 to keep), or now with `aspect gc --bazel-output-base=<hash>`.",
     )
     _eq(
         "age rule off",
         output_bases.render(note, fx.policy(0))[1],
-        "`aspect gc` keeps it (--base-max-age-days=N removes one N days after last use), or now with `aspect gc --bazel-output-base=<hash>`.",
+        "`aspect gc` keeps it (--base-max-idle-days=N removes one N days after last use), or now with `aspect gc --bazel-output-base=<hash>`.",
     )
 
 def _test_the_download_cache_reason_states_the_age(ctx):
     """Pruning is on by default, so the shared-cache table gives the age in
     force rather than naming the flag as if it were needed."""
     reason = [r for key, _rel, r in output_bases.CACHES if key == "download_cache_kb"][0]
-    month = output_bases.Policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 30 * fx.DAY_US)
-    off = output_bases.Policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 0)
-    _eq("default", output_bases.render(reason, month), ["pruned by `aspect gc` after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
-    _eq("off", output_bases.render(reason, off), ["not pruned; `aspect gc --download-cache-max-age-days=N` prunes after N days unused"])
+    month = output_bases.Policy(base_max_idle_us = 0, orphan_grace_us = 0, download_cache_max_idle_us = 30 * fx.DAY_US)
+    off = output_bases.Policy(base_max_idle_us = 0, orphan_grace_us = 0, download_cache_max_idle_us = 0)
+    _eq("default", output_bases.render(reason, month), ["pruned by `aspect gc` after 30d unused; --download-cache-max-idle-days=N to change, 0 to keep"])
+    _eq("off", output_bases.render(reason, off), ["not pruned; `aspect gc --download-cache-max-idle-days=N` prunes after N days unused"])
 
 def _test_a_pooled_slot_is_never_orphaned(ctx):
     """A free `aspect worktree` slot has no worktree on purpose; its base is the
@@ -530,9 +530,9 @@ def _test_listing_hint_names_kept_states(ctx):
 
 def _test_default_policy_is_gcs(ctx):
     p = output_bases.default_policy()
-    _eq("max age", p.base_max_age_us, 30 * fx.DAY_US)
+    _eq("max age", p.base_max_idle_us, 30 * fx.DAY_US)
     _eq("grace", p.orphan_grace_us, fx.HOUR_US)
-    _eq("download cache", p.download_cache_max_age_us, 30 * fx.DAY_US)
+    _eq("download cache", p.download_cache_max_idle_us, 30 * fx.DAY_US)
 
 def _test_output_bases_document(ctx):
     """Bases come grouped by state in `STATES` order and sorted within; sizes
@@ -582,8 +582,8 @@ def _test_resolve_root_refuses_a_missing_root(ctx):
 def _test_policy_entry_is_in_the_flags_units(ctx):
     _eq("defaults", output_bases.policy_entry(output_bases.default_policy()), {
         "orphan_grace_hours": 1,
-        "base_max_age_days": 30,
-        "download_cache_max_age_days": 30,
+        "base_max_idle_days": 30,
+        "download_cache_max_idle_days": 30,
     })
 
 _UNIT_TESTS = [
@@ -626,7 +626,7 @@ _UNIT_TESTS = [
     _test_a_missing_command_is_an_answer_not_a_crash,
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_the_orphan_note_states_the_grace_period,
-    _test_the_undetermined_note_states_the_max_age,
+    _test_the_undetermined_note_states_the_max_idle,
     _test_the_download_cache_reason_states_the_age,
     _test_a_pooled_slot_is_never_orphaned,
     _test_sort_orders_within_a_state,

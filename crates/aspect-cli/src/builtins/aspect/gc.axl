@@ -15,10 +15,10 @@ without bound:
 
 This task removes output bases by their lifecycle state, as `aspect
 output-bases` lists them (`lib/output_bases.axl`): orphaned past
-`--orphan-grace-hours`, idle past `--base-max-age-days`, and trash an earlier
+`--orphan-grace-hours`, idle past `--base-max-idle-days`, and trash an earlier
 run left. It also prunes download-cache entries unused for
-`--download-cache-max-age-days`. Each period takes 0: the grace period to remove
-orphans at once, the ages to turn their rule off. Everything removed is
+`--download-cache-max-idle-days`. Each period takes 0: the grace period to remove
+orphans at once, the idle cutoffs to turn their rule off. Everything removed is
 re-creatable: a pruned base costs a cold build, a pruned download one re-fetch.
 
 Nothing is deleted without saying so first: what will go is listed in full, then
@@ -29,7 +29,7 @@ than inheriting it from a default.
 It never touches a base with a running server whose workspace exists, or anything
 under the output user root not named like an output base, and never treats an
 `aspect worktree` pool slot as orphaned — a free slot has no worktree on purpose
-— though an idle one goes by age like any base. An orphan's server is stopped
+— though an idle one goes by idle time like any base. An orphan's server is stopped
 before its base is removed: nothing can use it. A base whose possible server
 `ps` cannot identify, as on an image without procps, is never removed: it cannot
 be confirmed idle or stopped.
@@ -398,7 +398,7 @@ def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
         say(streaming, "  Bazel download cache: %d of %s unused for %s or more, %s" % (
             len(plan.stale),
             pluralize(plan.cache_entries, "entry", "entries"),
-            output_bases.fmt_age(policy.download_cache_max_age_us),
+            output_bases.fmt_age(policy.download_cache_max_idle_us),
             fmt_kb(_stale_kb(plan)),
         ))
 
@@ -488,8 +488,8 @@ def _gc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     sizes = output_bases.measure(ctx, streaming, pluralize(len(removals), output_bases.BASE), [(b.name, b.path) for b in removals])
     cache_entries, stale = 0, []
-    cutoff_us = now_us - policy.download_cache_max_age_us
-    if policy.download_cache_max_age_us and not requested:
+    cutoff_us = now_us - policy.download_cache_max_idle_us
+    if policy.download_cache_max_idle_us and not requested:
         say(streaming, "  scanning the Bazel download cache…")
         cache_entries, stale = _scan_download_cache(ctx, root, cutoff_us)
     plan = _Plan(
@@ -556,30 +556,30 @@ gc = task(
 
 Deleting a git worktree leaves its Bazel output base behind forever — nothing in Bazel collects it — and so does a workspace nobody builds in any more. Nothing collects the download cache (`cache/repos/v1/content_addressable`) either.
 
-An output base is removed when its workspace is gone (once it has not been used in `--orphan-grace-hours`), or when it has not been used in `--base-max-age-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-age-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
+An output base is removed when its workspace is gone (once it has not been used in `--orphan-grace-hours`), or when it has not been used in `--base-max-idle-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-idle-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
 
 `--bazel-output-base` removes the named bases instead, whatever their state.
 
-Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`), and never treats an `aspect worktree` pool slot as orphaned; an idle one still goes by age. `aspect output-bases` lists every base and its state, read-only.""",
+Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`), and never treats an `aspect worktree` pool slot as orphaned; an idle one still goes by idle time. `aspect output-bases` lists every base and its state, read-only.""",
     implementation = _gc_impl,
     args = {
         "output_user_root": output_bases.output_user_root_arg(),
-        "base_max_age_days": _period_arg(
-            "{max_age}",
+        "base_max_idle_days": _period_arg(
+            "{max_idle}",
             "Remove an output base no Bazel command has used in this many days, even if its workspace still exists. A base with a running server is kept. 0 turns this off, leaving only bases whose workspace is gone.",
         ),
         "orphan_grace_hours": _period_arg(
             "{grace}",
             "Keep an orphaned output base — one whose workspace no longer exists, such as a deleted worktree — until nothing has used it for this many hours, so a worktree being recreated at the same path keeps its base. 0 removes orphans immediately.",
         ),
-        "download_cache_max_age_days": _period_arg(
-            "{cache_age}",
+        "download_cache_max_idle_days": _period_arg(
+            "{cache_idle}",
             "Remove a download-cache entry no fetch has used in this many days. 0 turns this off.",
         ),
         "bazel_output_bases": args.string_list(
             long = "bazel-output-base",
             default = [],
-            description = "Remove this output base, by hash or by path under the output user root, instead of applying the age and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first, and a process `ps` cannot identify as its server makes the removal fail rather than happen under it — and the download cache is not pruned. Still listed and confirmed like any other removal.",
+            description = "Remove this output base, by hash or by path under the output user root, instead of applying the idle and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first, and a process `ps` cannot identify as its server makes the removal fail rather than happen under it — and the download cache is not pruned. Still listed and confirmed like any other removal.",
         ),
         "dry_run": args.boolean(
             default = False,

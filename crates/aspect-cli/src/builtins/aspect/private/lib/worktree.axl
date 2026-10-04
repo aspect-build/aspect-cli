@@ -60,9 +60,9 @@ peak concurrency. `max_slots` is advisory for the same reason: past it `add`
 warns and proceeds, because failing on a bookkeeping budget would send the
 caller back to plain `git worktree add`.
 
-Disk is held down by age, but only for **free** slots: `add` drops those nothing
-has touched in `PRUNE_AGE_DAYS`, and `aspect worktree prune` does the same on
-demand. A leased slot is never taken on age alone, however old, because a lease
+Disk is held down by idle time, but only for **free** slots: `add` drops those nothing
+has touched in `PRUNE_IDLE_DAYS`, and `aspect worktree prune` does the same on
+demand. A leased slot is never taken on idle time alone, however long, because a lease
 is a checkout someone may still want. The one exception is `abandoned_lease`.
 
 Nothing here is specific to a developer machine. A CI runner that builds one
@@ -113,7 +113,7 @@ _LOCK_STALE_MS = 10 * 60 * 1000
 # branch anyone is still working on. Set long rather than tight because the
 # automatic pass inside `add` does not ask first — a month is past the life of
 # any plausible branch, so reclaiming at that point surprises nobody.
-PRUNE_AGE_DAYS = 30
+PRUNE_IDLE_DAYS = 30
 
 _DAY_MS = 24 * 60 * 60 * 1000
 
@@ -458,7 +458,7 @@ def write_registry(std, pool_dir: str, registry: dict) -> None:
 def new_slot_record(pool: dict) -> dict:
     """A fresh slot's registry entry: owned by this clone, never used yet.
 
-    `created_ms` is a floor for `slot_age_days`, not a record of use. A slot
+    `created_ms` is a floor for `slot_idle_days`, not a record of use. A slot
     nothing has built in yet has no Bazel state to date, and without the floor
     it would read as infinitely old and be pruned before its first build
     finished.
@@ -826,11 +826,11 @@ def slot_idle_ms(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> i
     )
     return (time.now_ms() - newest) if newest else 0
 
-def slot_age_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+def slot_idle_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
     """`slot_idle_ms` in whole days, rounded down. What `prune` acts on."""
     return slot_idle_ms(std, pool, slot_id, slot, root) // _DAY_MS
 
-def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str = "") -> list[str]:
+def prunable_slots(std, pool: dict, registry: dict, max_idle_days: int, root: str = "") -> list[str]:
     """Free slots whose Bazel state has gone cold enough to be worth less than
     the disk it holds.
 
@@ -862,7 +862,7 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str
                 victims.append(slot_id)
                 continue
 
-        if slot_age_days(std, pool, slot_id, slot, root) < max_age_days:
+        if slot_idle_days(std, pool, slot_id, slot, root) < max_idle_days:
             continue
         owner = slot.get("owner_git_dir", "")
         if owner != pool["git_common_dir"] and std.fs.exists(owner):

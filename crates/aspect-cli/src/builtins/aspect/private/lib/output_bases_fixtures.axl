@@ -97,11 +97,11 @@ def _fixture(ctx: TaskContext) -> str:
     _backdate(ctx, root)
     return root
 
-def _policy(max_age_us = 0, grace_us = _HOUR_US, cache_us = 0):
-    return output_bases.Policy(base_max_age_us = max_age_us, orphan_grace_us = grace_us, download_cache_max_age_us = cache_us)
+def _policy(max_idle_us = 0, grace_us = _HOUR_US, cache_us = 0):
+    return output_bases.Policy(base_max_idle_us = max_idle_us, orphan_grace_us = grace_us, download_cache_max_idle_us = cache_us)
 
-def _scan(ctx, root, max_age_us = 0, grace_us = _HOUR_US):
-    return output_bases.scan(ctx, root, _now_us(), _policy(max_age_us, grace_us))
+def _scan(ctx, root, max_idle_us = 0, grace_us = _HOUR_US):
+    return output_bases.scan(ctx, root, _now_us(), _policy(max_idle_us, grace_us))
 
 fixtures = namespace(
     LIVE = _LIVE,
