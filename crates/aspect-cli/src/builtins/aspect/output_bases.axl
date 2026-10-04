@@ -114,7 +114,7 @@ def _output_bases_impl(ctx: TaskContext) -> int | TaskConclusion:
 
 output_bases_task = task(
     kind = "output-bases",
-    summary = "List the Bazel output bases on this machine: state, server memory, git branch, workspace and size.",
+    summary = "List the Bazel output bases on this machine: state, Bazel server memory, git branch, workspace and size.",
     description = """List every Bazel output base under the output user root, read-only.
 
 Bases are grouped by lifecycle state — live, idle, orphaned, undetermined — and show when each was last used, how much memory its Bazel server holds if one is running, the git repository and branch its workspace is checked out on, and the workspace. It ends with what to run next.
