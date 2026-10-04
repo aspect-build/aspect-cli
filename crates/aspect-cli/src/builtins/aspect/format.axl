@@ -635,6 +635,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ph, 0)
 
 format = task(
+    show_task_options = True,
     summary = "Format source files with the configured formatter target. Formats changed files by default; `--scope=all` for the whole tree.",
     args = {
         "scope": args.string(

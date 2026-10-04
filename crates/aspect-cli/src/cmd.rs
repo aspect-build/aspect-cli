@@ -132,52 +132,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .action(ArgAction::Version)
                     .help("Print version"),
             )
-            .arg(
-                ClapArg::new("task:name")
-                    .long("task:name")
-                    .value_name("NAME")
-                    .global(true)
-                    .value_parser(parse_task_name)
-                    .help("A short name uniquely identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Defaults to '<kind>-<suffix>' if not set."),
-            )
-            .arg(
-                ClapArg::new("task:friendly-name")
-                    .long("task:friendly-name")
-                    .value_name("FRIENDLY_NAME")
-                    .global(true)
-                    .help("A human-readable label for this task invocation, shown on status surfaces. Defaults to --task:name."),
-            )
-            .arg(
-                ClapArg::new("task-key")
-                    .long("task-key")
-                    .value_name("KEY")
-                    .global(true)
-                    .hide(true)
-                    .value_parser(parse_task_name)
-                    .help("Deprecated alias for --task:name; will be removed in a future release."),
-            )
-            .arg(
-                ClapArg::new("task:id")
-                    .long("task:id")
-                    .value_name("UUID")
-                    .global(true)
-                    .value_parser(parse_task_uuid)
-                    .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
-            )
-            .arg(
-                ClapArg::new("task:timing-summary")
-                    .long("task:timing-summary")
-                    .value_name("LEVEL")
-                    .global(true)
-                    .value_parser(parse_timing_mode)
-                    .default_value("detailed")
-                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default)."),
-            )
+            .args(task_option_args().map(|arg| arg.global(true).hide(true)))
             .subcommand(
                 // `feature` is not a task: its parsing exists only so `main`
                 // can route to `Cmd::print_feature_help`. Disable clap's auto
                 // help flag (otherwise `feature --help` renders clap's own
-                // help, leaking the global `--task:*` args) and accept a no-op
+                // help) and accept a no-op
                 // `-h`/`--help` so it falls through to our renderer instead.
                 Command::new("feature")
                     .about("List features and show a feature's flags")
@@ -1698,6 +1658,53 @@ fn render_feature_detail(
 
 // ── Per-task subcommand assembly ───────────────────────────────────────────
 
+/// Help heading for the `--task:*` flags on a task that shows them.
+const TASK_OPTIONS_HEADING: &str = "Task Options";
+/// Help heading for `-h, --help`, declared last so it closes the help output.
+const GENERIC_OPTIONS_HEADING: &str = "Options";
+
+/// The `--task:*` flags, which identify and tune one task invocation.
+///
+/// Each is declared twice under the same id. The root declares them as hidden
+/// globals, so they parse before the task name (`aspect --task:name=x build`)
+/// and stay out of the root and group help. Every task command declares them
+/// again (clap does not propagate a global over an arg the subcommand already
+/// has), which is where `show_task_options` decides whether `--help` lists them.
+fn task_option_args() -> [ClapArg; 5] {
+    [
+        ClapArg::new("task:name")
+            .long("task:name")
+            .value_name("NAME")
+            .value_parser(parse_task_name)
+            .help("A short name uniquely identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Defaults to '<kind>-<suffix>' if not set."),
+        ClapArg::new("task:friendly-name")
+            .long("task:friendly-name")
+            .value_name("FRIENDLY_NAME")
+            .help("A human-readable label for this task invocation, shown on status surfaces. Defaults to --task:name."),
+        ClapArg::new("task-key")
+            .long("task-key")
+            .value_name("KEY")
+            .hide(true)
+            .value_parser(parse_task_name)
+            .help("Deprecated alias for --task:name; will be removed in a future release."),
+        ClapArg::new("task:id")
+            .long("task:id")
+            .value_name("UUID")
+            .value_parser(parse_task_uuid)
+            .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
+        ClapArg::new("task:timing-summary")
+            .long("task:timing-summary")
+            .value_name("LEVEL")
+            .value_parser(parse_timing_mode)
+            .default_value("detailed")
+            .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default)."),
+    ]
+}
+
+/// Assemble one task's clap command. `--help` lists the task's own options
+/// first, then `Task Options` when the task sets `show_task_options`, then
+/// `-h, --help`; the features footer follows only on a task showing its task
+/// options, since both concern CI reporting.
 fn task_command(
     index: usize,
     task: &dyn TaskLike<'_>,
@@ -1739,6 +1746,7 @@ fn task_command(
     let mut cmd = Command::new(kind)
         .about(about)
         .display_order(TASK_COMMAND_DISPLAY_ORDER)
+        .disable_help_flag(true)
         .arg(
             ClapArg::new(TASK_ID_KEY)
                 .long(TASK_ID_KEY)
@@ -1761,9 +1769,15 @@ fn task_command(
         cmd = cmd.arg(clap_arg);
     }
 
+    let show_task_options = task.show_task_options();
+    cmd = cmd.args(task_option_args().map(|arg| {
+        let hidden = !show_task_options || arg.is_hide_set();
+        arg.help_heading(TASK_OPTIONS_HEADING).hide(hidden)
+    }));
+
     // Feature flags stay parseable on the task command but are hidden from
-    // `--help`; `aspect feature [<name>]` surfaces them instead (see the footer
-    // appended to the help template below).
+    // `--help`; `aspect feature [<name>]` surfaces them instead (see
+    // `help_footer`).
     //
     // A task's own args win a collision: a feature arg whose long flag matches
     // a task arg's name or long (e.g. a `long`-overridden `--deployment` vs the
@@ -1784,6 +1798,15 @@ fn task_command(
         }
     }
 
+    cmd = cmd.arg(
+        ClapArg::new("help")
+            .short('h')
+            .long("help")
+            .action(ArgAction::Help)
+            .help("Print help")
+            .help_heading(GENERIC_OPTIONS_HEADING),
+    );
+
     // Always use a custom template so the grey "Aspect CLI v… — docs URL"
     // header lands at the top. When the task supplies its own help_header
     // body (summary/description), attach it via `before_help` — clap writes
@@ -1800,14 +1823,24 @@ fn task_command(
         }
         None => "{about-with-newline}\n".to_string(),
     };
-    let feature_footer = "\x1b[2mFeatures add CI reporting and artifact integrations \
+    cmd.help_template(format!(
+        "{cli_header}\n\n{about_block}{{usage-heading}} {{usage}}\n\n{{all-args}}{}",
+        help_footer(task),
+    ))
+}
+
+/// Dimmed prose closing a task's `--help`, each paragraph led by a blank line:
+/// the passthrough notes, then a pointer to the hidden feature flags on a task
+/// that shows its task options. Empty when neither applies.
+fn help_footer(task: &dyn TaskLike<'_>) -> String {
+    const FEATURES: &str = "Features add CI reporting and artifact integrations \
          (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
-         but hidden; run `aspect feature` to list them.\x1b[0m";
-    cmd = cmd.help_template(format!(
-        "{cli_header}\n\n{about_block}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{}{feature_footer}",
-        passthrough_footer(task),
-    ));
-    cmd
+         but hidden; run `aspect feature` to list them.";
+    passthrough_notes(task)
+        .into_iter()
+        .chain(task.show_task_options().then(|| FEATURES.to_owned()))
+        .map(|paragraph| format!("\n\n\x1b[2m{paragraph}\x1b[0m"))
+        .collect()
 }
 
 /// The prose that tells a reader unrecognized flags are forwarded rather than
@@ -1815,14 +1848,14 @@ fn task_command(
 /// buckets (in declaration order) and empty when it declares none.
 ///
 /// A passthrough has no flag to list, so `{all-args}` cannot surface it and
-/// this footer is the only place `--help` can explain the behavior. The text is
+/// the help footer is the only place `--help` can explain the behavior. The text is
 /// the task author's, because only they know what the flags are forwarded to.
-fn passthrough_footer(task: &dyn TaskLike<'_>) -> String {
+fn passthrough_notes(task: &dyn TaskLike<'_>) -> Vec<String> {
     task.args()
         .iter()
         .filter(|(_, arg)| arg.passthrough_position().is_some())
         .filter_map(|(_, arg)| arg.description())
-        .map(|line| format!("\x1b[2m{line}\x1b[0m\n\n"))
+        .map(|line| line.to_string())
         .collect()
 }
 
@@ -2119,6 +2152,7 @@ mod tests {
         args: SmallMap<String, Arg>,
         path: PathBuf,
         summary: String,
+        show_task_options: bool,
     }
 
     impl<'v> TaskLike<'v> for StubTask {
@@ -2133,6 +2167,9 @@ mod tests {
         }
         fn friendly_kind(&self) -> String {
             String::new()
+        }
+        fn show_task_options(&self) -> bool {
+            self.show_task_options
         }
         fn group(&self) -> &Vec<String> {
             &self.group
@@ -2165,6 +2202,7 @@ mod tests {
             args,
             path: PathBuf::from("/repo/tasks/test.axl"),
             summary: format!("Stub {name} task."),
+            show_task_options: false,
         }
     }
 
@@ -2436,7 +2474,10 @@ mod tests {
     fn feature_flags_are_hidden_from_task_help() {
         let mut task_args: SmallMap<String, Arg> = SmallMap::new();
         task_args.insert("greeting".to_owned(), arg_string("hello"));
-        let t = stub_task("greet", &[], task_args);
+        let t = StubTask {
+            show_task_options: true,
+            ..stub_task("greet", &[], task_args)
+        };
         let f = stub_feature("ArtifactUpload");
         let cmd = Cmd {
             tasks: vec![&t],
@@ -2906,6 +2947,127 @@ mod tests {
         assert_eq!(parse(&["aspect", "greet"]).unwrap(), TimingMode::Detailed);
         // Invalid level is rejected by the value parser at parse time.
         assert!(parse(&["aspect", "greet", "--task:timing-summary=verbose"]).is_err());
+    }
+
+    // ── `--task:*` flags: help visibility and parse positions ──────────────
+
+    /// The `--help` of a `greet` task with one `recipient` arg, built through
+    /// the full root so the globals are propagated as they are in `main`.
+    fn greet_help(show_task_options: bool) -> String {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("recipient".to_owned(), arg_string("world"));
+        let t = StubTask {
+            show_task_options,
+            ..stub_task("greet", &[], args)
+        };
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        root.find_subcommand_mut("greet")
+            .expect("greet subcommand")
+            .render_help()
+            .to_string()
+    }
+
+    #[test]
+    fn help_omits_task_options_and_features_footer_by_default() {
+        let help = greet_help(false);
+        assert!(help.contains("Greet Options:"), "{help}");
+        assert!(help.contains("-h, --help"), "{help}");
+        for absent in ["Task Options:", "--task:", "--task-key", "aspect feature"] {
+            assert!(!help.contains(absent), "{absent:?} leaked into: {help}");
+        }
+        assert!(
+            help.trim_end().ends_with("Print help"),
+            "expected no footer after the options: {help}"
+        );
+    }
+
+    #[test]
+    fn help_lists_task_options_after_the_tasks_own_when_shown() {
+        let help = greet_help(true);
+        let position = |needle: &str| {
+            help.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from: {help}"))
+        };
+        let sections = [
+            position("Greet Options:"),
+            position("Task Options:"),
+            position("\nOptions:"),
+            position("aspect feature"),
+        ];
+        assert!(sections.is_sorted(), "sections out of order: {help}");
+        for flag in [
+            "--task:name",
+            "--task:friendly-name",
+            "--task:id",
+            "--task:timing-summary",
+        ] {
+            assert!(
+                position(flag) > sections[1] && position(flag) < sections[2],
+                "{flag} is not under Task Options: {help}"
+            );
+        }
+        assert!(!help.contains("--task-key"), "{help}");
+    }
+
+    #[test]
+    fn root_and_group_help_hide_task_options() {
+        let top = stub_task("greet", &[], SmallMap::new());
+        let nested = stub_task("login", &["auth"], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&top, &nested],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        let group = root
+            .find_subcommand_mut("auth")
+            .expect("auth group")
+            .render_help()
+            .to_string();
+        assert!(!group.contains("--task:"), "{group}");
+        let root_help = root.render_help().to_string();
+        assert!(!root_help.contains("--task:"), "{root_help}");
+    }
+
+    /// A `--task:*` flag typed before the task name reaches the task: the
+    /// root's global value wins over the task-level declaration's default.
+    #[test]
+    fn dispatch_reads_task_options_typed_before_the_task_name() {
+        let t = stub_task("greet", &["utils"], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let dispatch = |argv: &[&str]| {
+            let matches = root.clone().try_get_matches_from(argv).expect("parse ok");
+            cmd.dispatch(matches).expect("dispatch ok")
+        };
+
+        let before_group = dispatch(&[
+            "aspect",
+            "--task:name=early",
+            "--task:timing-summary=short",
+            "utils",
+            "greet",
+        ]);
+        assert_eq!(before_group.task_name, "early");
+        assert_eq!(before_group.timing, TimingMode::Short);
+
+        let before_task = dispatch(&["aspect", "utils", "--task:name=mid", "greet"]);
+        assert_eq!(before_task.task_name, "mid");
+        assert_eq!(before_task.timing, TimingMode::Detailed);
     }
 
     // ── Override merge (no heap path: no overrides applied) ────────────────

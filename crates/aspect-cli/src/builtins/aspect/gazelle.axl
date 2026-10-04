@@ -698,6 +698,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     return 0
 
 gazelle = task(
+    show_task_options = True,
     summary = "Generate and update BUILD files with gazelle. Applies the patch locally; detect-only on CI (`--check-only`).",
     args = {
         "severity": args.string(

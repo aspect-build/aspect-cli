@@ -1841,6 +1841,7 @@ def _delivery_impl(ctx):
     return _emit_final(ph, exit_code = exit_code)
 
 delivery = task(
+    show_task_options = True,
     kind = "delivery",
     summary = "Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.",
     description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
