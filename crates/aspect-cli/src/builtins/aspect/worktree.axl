@@ -372,27 +372,32 @@ def _checked_out_branches(ctx: TaskContext, pool: dict) -> dict:
             found[at] = line[len("branch refs/heads/"):].strip()
     return found
 
+_Column = record(
+    key = field(str),
+    header = field(str),
+    right = field(bool, default = False),
+    # Shown even when no row fills it. For a column whose absence would hide
+    # something the pool does rather than merely save width.
+    always = field(bool, default = False),
+)
+
 def _table(rows: list[dict], columns: list) -> list[str]:
     """`rows` as aligned lines, one header first.
 
-    `columns` is `(key, heading, align_right)`. A column no row has a value for
-    is dropped rather than printed empty, which keeps the common case — a couple
-    of free slots and nothing unusual — as narrow as it was without headers.
+    A column no row fills is dropped unless it is `always`, which keeps the
+    ordinary listing narrow without hiding what the pool keeps track of.
     """
-    used = [c for c in columns if any([r.get(c[0], "") for r in rows])]
-    widths = {}
-    for key, heading, _ in used:
-        widths[key] = max([len(heading)] + [len(r.get(key, "")) for r in rows])
+    used = [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
+    widths = {c.key: max([len(c.header)] + [len(r.get(c.key, "")) for r in rows]) for c in used}
 
     def line(cells):
         out = []
-        for i, (key, _, right) in enumerate(used):
-            cell = cells.get(key, "")
-            out.append(pad_left(cell, widths[key]) if right else (cell if i == len(used) - 1 else pad_right(cell, widths[key])))
+        for i, c in enumerate(used):
+            cell = cells.get(c.key, "")
+            out.append(pad_left(cell, widths[c.key]) if c.right else (cell if i == len(used) - 1 else pad_right(cell, widths[c.key])))
         return "  " + "  ".join(out)
 
-    header = {key: heading for key, heading, _ in used}
-    return [line(header).rstrip()] + [line(r).rstrip() for r in rows]
+    return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
 
 # What each value in the `state` and `warmth` columns means, as
 # `(column, value, definition)`. A listing defines only the values it shows, so
@@ -416,13 +421,15 @@ def _legend(cells: list[dict]) -> list[str]:
     return lines
 
 _LIST_COLUMNS = [
-    ("branch", "branch", False),
-    ("state", "state", False),
-    ("warmth", "warmth", False),
-    ("idle", "idle", True),
-    ("slot", "slot", False),
-    ("agent", "agent", False),
-    ("notes", "notes", False),
+    _Column(key = "branch", header = "branch", always = True),
+    _Column(key = "state", header = "state", always = True),
+    _Column(key = "warmth", header = "warmth", always = True),
+    _Column(key = "idle", header = "idle", right = True),
+    _Column(key = "slot", header = "slot", always = True),
+    # Always: a pool with no agents running would otherwise never show that it
+    # records which session holds a slot.
+    _Column(key = "agent", header = "agent", always = True),
+    _Column(key = "notes", header = "notes"),
 ]
 
 def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
