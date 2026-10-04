@@ -9,7 +9,7 @@ GitLab mirror of the same code, and a fork. A pool key that collapses the first
 two spellings but not the two hosts is the behaviour these pin down.
 """
 
-load("@aspect//worktree.axl", "testonly_legend", "testonly_list_columns", "testonly_table")
+load("@aspect//worktree.axl", "testonly_held_by", "testonly_legend", "testonly_list_columns", "testonly_table")
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
@@ -555,6 +555,38 @@ def _test_a_lock_mismatch_still_beats_everything_down(ctx):
     wrong_lock = {"lock_digest": "bbb", "last_commit": "c1", "last_branch": "fix/login"}
     _eq("still nearly disqualified", default_score(wrong_lock, want), 1)
 
+def _test_the_refusal_names_who_holds_the_slot(ctx):
+    """A refusal that reports only the slot path makes the caller go and find
+    out who has it. The lease already knows, so it says: who, whether that
+    session can be resumed, and that `--take-over` is the other way out."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    agent = {"kind": "claude-code", "id": "abcdef12-3456", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", agent)}}
+
+    # No session store, so the state is `unknown`: not resumable, not gone.
+    previous = ctx.std.env.var("CLAUDE_CONFIG_DIR") or ""
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", ctx.std.fs.mkdtemp(prefix = "aspect-nostore"))
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login")
+    if previous:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", previous)
+    else:
+        ctx.std.env.remove_var("CLAUDE_CONFIG_DIR")
+
+    _eq("names the branch", "fix/login" in msg, True)
+    _eq("names the holder", "claude-code abcdef12" in msg, True)
+    _eq("offers the override", "--take-over" in msg, True)
+
+def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
+    """A worktree a person took has no session to report, so the message stays
+    the short one rather than inventing a holder."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", {})}}
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login")
+    _eq("no holder claimed", "held by" in msg, False)
+    _eq("still says what to do", "aspect worktree remove" in msg, True)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -576,6 +608,8 @@ _UNIT_TESTS = [
     _test_missing_registry_is_empty,
     _test_the_listing_drops_only_the_columns_it_may,
     _test_the_listing_defines_only_the_values_it_shows,
+    _test_the_refusal_names_who_holds_the_slot,
+    _test_a_lease_with_no_agent_keeps_the_plain_refusal,
     _test_a_droppable_column_appears_as_soon_as_one_row_fills_it,
     _test_idle_is_right_aligned_so_the_numbers_line_up,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,

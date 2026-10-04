@@ -48,6 +48,7 @@ load(
     "./private/lib/agent.axl",
     "GONE",
     "RESUMABLE",
+    "RUNNING",
     "detect",
     "label",
     "resume_hint",
@@ -218,6 +219,58 @@ def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
         "no_such_worktree",
         "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
     )
+
+def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> str:
+    """Why `name` cannot be taken, and what the caller can do instead.
+
+    The lease knows which session holds it and whether that session is running,
+    suspended or deleted. A refusal that reports only the slot path makes the
+    caller go and find that out; one that reports it turns a dead end into a
+    choice between resuming the other session and taking the slot.
+    """
+    lease = registry["slots"][slot_id].get("lease") or {}
+    agent = lease.get("agent") or {}
+    where = slot_path(pool, slot_id)
+    if not agent:
+        return (name + " is already checked out at " + where +
+                ". Use it, or `aspect worktree remove " + name + "` first.")
+
+    state = session_state(ctx.std, agent)
+    who = label(agent)
+    if state == RUNNING:
+        held = name + " is checked out at " + where + ", held by a running " + who + " session."
+    elif state == RESUMABLE:
+        held = name + " is checked out at " + where + ", held by " + who + ", which is not running."
+    else:
+        held = name + " is checked out at " + where + ", held by " + who + "."
+
+    lines = [held]
+    hint = resume_hint(agent)
+    if hint and state == RESUMABLE:
+        lines.append("Resume that session: " + hint)
+    lines.append("Or claim the slot for this session, keeping the checkout as it is: " +
+                 "`aspect worktree add " + name + " --take-over`.")
+    if state == RUNNING:
+        lines.append("That session is still running, so check with whoever is driving it first.")
+    return " ".join(lines)
+
+def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> None:
+    """Re-attribute a lease to this caller, leaving the checkout untouched.
+
+    The slot already holds this branch, so nothing is recreated: no
+    `worktree remove`, no re-checkout, and whatever the previous session left
+    uncommitted is still there afterwards. The only thing that changes is who
+    the lease says is responsible for it.
+    """
+    lease = registry["slots"][slot_id].get("lease") or {}
+    previous = label(lease.get("agent") or {}) or "an unidentified session"
+    warn(ctx.std, "taking " + name + " over from " + previous +
+                  "; the checkout is untouched and anything uncommitted in it is now yours")
+    registry["slots"][slot_id]["lease"] = {
+        "name": name,
+        "since": str(time.now_ms()),
+        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
+    }
 
 def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
     """Drop free slots nothing has touched in `PRUNE_AGE_DAYS`. Returns how many
@@ -453,6 +506,40 @@ def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
 
 # --- task implementations ----------------------------------------------------
 
+def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str, chosen) -> int:
+    """Announce a slot the caller now holds, in whichever form it asked for.
+
+    Shared by a fresh lease and a taken-over one, which have to agree on
+    `--output=path` and the JSON document or a caller cannot treat them the
+    same.
+    """
+    root = _output_root(ctx)
+    path = slot_path(pool, slot_id)
+    warmth = warmth_of(ctx.std, path, root)
+    if ctx.args.output == "path":
+        ctx.std.io.stdout.write(path + "\n")
+        return 0
+    if ctx.args.output == "json":
+        lease = registry["slots"][slot_id].get("lease") or {}
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "path": path,
+            "pool": pool["id"],
+            "score": chosen.score,
+            "reused_from": chosen.reused_from,
+            "agent": lease.get("agent") or {},
+            "server_pid": warmth.server,
+            "output_base_present": warmth.base,
+        }, indent = 2) + "\n")
+        return 0
+
+    info(ctx.std, "worktree ready: " + path)
+    print("  branch: " + name)
+    print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
+    print("")
+    print("  slot=$(aspect worktree path " + name + ") && cd \"$slot\"")
+    return 0
+
 def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.branch[0]
     cwd = ctx.std.env.current_dir()
@@ -501,13 +588,13 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         write_registry(ctx.std, pool["dir"], registry)
         held = ""
 
+    if held and ctx.args.take_over:
+        _take_over(ctx, pool, registry, held, name)
+        write_registry(ctx.std, pool["dir"], registry)
+        return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name))
+
     if held:
-        return _refuse(
-            ctx,
-            "branch_in_use",
-            name + " is already checked out at " + slot_path(pool, held) +
-            ". Use it, or `aspect worktree remove " + name + "` first.",
-        )
+        return _refuse(ctx, "branch_in_use", _held_by(ctx, pool, registry, held, name))
     elsewhere = _worktree_holding_branch(ctx, pool, name)
     if elsewhere:
         return _refuse(
@@ -540,28 +627,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     }
     write_registry(ctx.std, pool["dir"], registry)
 
-    warmth = warmth_of(ctx.std, path, root)
-    if ctx.args.output == "path":
-        ctx.std.io.stdout.write(path + "\n")
-        return 0
-    if ctx.args.output == "json":
-        ctx.std.io.stdout.write(json.encode({
-            "schema_version": _SCHEMA_VERSION,
-            "path": path,
-            "pool": pool["id"],
-            "score": chosen.score,
-            "reused_from": chosen.reused_from,
-            "server_pid": warmth.server,
-            "output_base_present": warmth.base,
-        }, indent = 2) + "\n")
-        return 0
-
-    info(ctx.std, "worktree ready: " + path)
-    print("  branch: " + name)
-    print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
-    print("")
-    print("  slot=$(aspect worktree path " + name + ") && cd \"$slot\"")
-    return 0
+    return _report_slot(ctx, pool, registry, chosen.id, name, chosen)
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.name[0]
@@ -865,6 +931,10 @@ add = task(
             default = "",
             description = "Session identifier of the agent taking this worktree, recorded on the lease so a slot can be traced back to the session holding it. Detected automatically where the harness exports one, or set `ASPECT_AGENT_ID`.",
         ),
+        "take_over": args.boolean(
+            default = False,
+            description = "Claim a slot this pool already leases for the branch, re-assigning it to this session. The checkout is left exactly as it is, so anything the previous session had uncommitted is still there. Refused without this flag, because the other session may only be suspended and resumable.",
+        ),
     } | _ADD_OUTPUT_ARG,
 )
 
@@ -940,5 +1010,6 @@ worktree_list = task(
 
 # Exposed for worktree_test.axl; not part of any task's surface.
 testonly_table = _table
+testonly_held_by = _held_by
 testonly_legend = _legend
 testonly_list_columns = _LIST_COLUMNS
