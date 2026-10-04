@@ -423,12 +423,12 @@ def _test_the_orphan_note_states_the_grace_period(ctx):
     _eq("shared with the grace state", output_bases.STATES["grace"].note, note)
 
 def _test_the_undetermined_note_states_the_max_idle(ctx):
-    """An undetermined base goes only by age, so its note gives the age in force
+    """An undetermined base goes only by idle time, so its note gives the cutoff
     and the way to remove one now."""
     note = output_bases.STATES["unknown"].note
     _eq("defined", output_bases.render(note, fx.policy(30 * fx.DAY_US))[0], "undetermined: nothing in the base names its workspace, so it cannot be orphaned.")
     _eq(
-        "age in force",
+        "the cutoff in force",
         output_bases.render(note, fx.policy(30 * fx.DAY_US))[1],
         "`aspect gc` removes one 30d after last use (--base-max-idle-days=N to change, 0 to keep), or now with `aspect gc --bazel-output-base=<hash>`.",
     )

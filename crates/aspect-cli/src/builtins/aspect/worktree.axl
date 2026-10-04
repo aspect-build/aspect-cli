@@ -813,11 +813,15 @@ def _history_note(slot: dict) -> str:
     `lease_count` already includes the lease being handed over, so prior use is
     one less — otherwise a slot created a moment ago would report having been
     leased before.
+
+    A slot with no count at all is one nothing here wrote — a registry edited by
+    hand, say. Say what little is known rather than reporting zero reuse, which
+    would read as a fact.
     """
     if slot.get("lease_count") == None:
         if slot.get("last_branch", ""):
-            return "reused slot, last holding " + slot["last_branch"] + "; earlier use was not recorded"
-        return "slot carried over from an earlier pool; nothing is recorded about its use"
+            return "reused slot, last holding " + slot["last_branch"] + "; its use is not recorded"
+        return "this slot keeps no record of its use"
 
     prior = slot["lease_count"] - 1
     if prior <= 0:

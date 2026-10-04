@@ -26,6 +26,6 @@ Worktrees = trait(
     max_slots = attr(
         int,
         default = 8,
-        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Slots are reclaimed by age instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`.",
+        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Slots are reclaimed by idle time instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`.",
     ),
 )
