@@ -3,7 +3,9 @@
 Bazel keys its server on `--workspace_directory`, so a worktree at a fresh path
 gets a cold server: a new JVM, loading and analysis from zero, and a fresh
 `external/` tree. Creating a worktree per task — which is what coding agents do
-— pays that every time and strands the output base forever afterwards.
+— pays that every time and strands the output base afterwards: Bazel has no
+garbage collector for them, so one sits there until `aspect gc` or a person
+removes it.
 
 The fix is to stop letting the path move. A **slot** is a directory at a fixed
 path that holds a git worktree; the worktree inside it is destroyed and
