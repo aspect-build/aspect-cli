@@ -1,0 +1,31 @@
+"""The `Worktrees` trait — how a repo tunes pooled worktree reuse and size.
+
+Picking a slot has no correctness consequence: a worse pick costs a colder
+build and nothing else. That is what makes it safe to hand to `config.axl`
+(either the repo's or a developer's `~/.aspect/config.axl`), where a team that
+knows its own repo can score better than a general heuristic — a monorepo where
+one directory dominates analysis might weight commit distance far above the
+default does, for instance.
+
+The built-in scoring (`default_score` in `worktree.axl`) applies when nothing is
+registered.
+
+`max_slots` is the other dial, and the one that costs disk rather than time. It
+is advisory: a pool at its limit with every slot in use still hands out a new
+one, warning instead of failing, because the fallback to a refusal is plain
+`git worktree add` — a cold build and a stranded output base. See the module
+docstring in `worktree.axl` for how the pool is actually bounded.
+"""
+
+Worktrees = trait(
+    score_slot = attr(
+        list[typing.Callable[[TaskContext, dict, dict], int]],
+        default = [],
+        description = "Hooks scoring a free slot for reuse: `fn(ctx, slot, want) -> int`, higher wins, 0 refuses the slot outright. `slot` carries what its last occupant left behind (`lock_digest`, `last_commit`, `last_branch`, `created_ms`); `want` carries `name`, `lock_digest` and `commit` for the worktree being created. The first registered hook decides; with none registered the built-in scoring applies, which weights a matching MODULE.bazel.lock far above everything else because a mismatch is what forces `external/` to be rebuilt.",
+    ),
+    max_slots = attr(
+        int,
+        default = 8,
+        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Slots are reclaimed by age instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`.",
+    ),
+)

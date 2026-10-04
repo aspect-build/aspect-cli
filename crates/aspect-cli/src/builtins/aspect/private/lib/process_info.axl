@@ -1,0 +1,46 @@
+"""Asking the operating system about a process id.
+
+Both tasks that read a recorded pid need this: a worktree slot's warmth depends
+on whether the Bazel server that wrote `server.pid.txt` is still there, and a
+lease's agent carries the pid of the harness that took it.
+
+**A pid alone is ambiguous.** Pids are reused, and a recorded one outlives the
+process that wrote it, so "this pid exists" is not "this is the same process".
+`started_at` is what settles it, and a caller that has somewhere to record the
+start time should compare it. A caller whose recorded pid came from someone
+else's file — Bazel writes a pid and no start time — has only `alive`, and is
+left with the ambiguity rather than a false certainty.
+"""
+
+def alive(std, pid: int) -> bool:
+    """Whether `pid` is a live process. `kill -0` asks without signalling."""
+    if pid <= 0:
+        return False
+    out = std.process.command("kill").args(["-0", str(pid)]) \
+        .stdout("null").stderr("null").spawn().wait()
+    return out.code == 0
+
+def started_at(std, pid: int) -> str:
+    """When `pid` started, as the platform prints it, or "" if it is not running.
+
+    Opaque: the only thing asked of the value is whether it still matches one
+    recorded earlier, so the format never has to be parsed.
+    """
+    if pid <= 0:
+        return ""
+    out = std.process.command("ps").args(["-o", "lstart=", "-p", str(pid)]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip() if out.status.code == 0 else ""
+
+def is_same_process(std, pid: int, recorded_start: str) -> bool:
+    """Whether `pid` is still the process whose start time was `recorded_start`.
+
+    An empty `recorded_start` means nothing was recorded to compare against, so
+    liveness is the best available answer.
+    """
+    if pid <= 0:
+        return False
+    start = started_at(std, pid)
+    if not start:
+        return False
+    return start == recorded_start if recorded_start else True

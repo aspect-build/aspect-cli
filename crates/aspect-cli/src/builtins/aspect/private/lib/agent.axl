@@ -1,0 +1,253 @@
+"""Who is running this task — a coding agent, or a person at a terminal.
+
+Worktree leases record it so `aspect worktree list` can say which agent session
+holds which slot. On a machine running several agents at once that is the
+difference between a list of hashes and a list you can act on.
+
+Detection is layered, most explicit first, so a harness that reports itself is
+always believed over anything inferred:
+
+1. values passed on the command line
+2. `ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID` — the vendor-neutral contract, for a
+   harness or wrapper script that knows what it is
+3. a known harness's own variables, so the common case needs no configuration
+4. the process ancestry, which needs nothing from the harness at all: walk up
+   from this process until a recognized binary turns up
+5. `AI_AGENT`, last because it names a tool without naming a session: a kind
+   from it is weaker than one the process tree confirms
+
+**A missing agent means "not detected", never "no agent".** Only (1) and (2) are
+authoritative; the rest are inference, and a harness nobody has taught us about
+simply reports nothing. Everything here is therefore descriptive — nothing
+decides whether a slot can be taken on the strength of it.
+
+**Liveness is not abandonment.** A harness process that has exited usually means
+someone closed their terminal; `claude --resume <session>` picks the work
+straight back up, in the same worktree, expecting the same branch. So a dead
+holder is reported — with the command to get back to it — and never treated as
+permission to reclaim the slot.
+
+A **deleted session** is a different matter: there is nothing left to resume, so
+the lease is genuinely finished with. `session_state` answers that separately
+from liveness, and only where the answer is knowable:
+
+    running      the harness process is alive
+    resumable    the process is gone, but the session is still on disk
+    gone         the session itself has been deleted — unresumable
+    unknown      no way to tell, for this harness or this record
+
+`unknown` is the common case and is treated exactly like `resumable`: nothing is
+reclaimed unless we positively know the session is gone.
+"""
+
+load("@std//time.axl", "time")
+load("./process_info.axl", "is_same_process", "started_at")
+
+# Harnesses whose own environment names a session, so no configuration is
+# needed. `resume` is a format string for the command that returns to a session,
+# and is left empty where that command has not been confirmed — printing a
+# wrong one is worse than printing none.
+_ENV_DETECTORS = [
+    struct(
+        kind = "claude-code",
+        marker = "CLAUDECODE",
+        id_var = "CLAUDE_CODE_SESSION_ID",
+        pid_var = "CLAUDE_PID",
+        resume = "claude --resume %s",
+    ),
+]
+
+RUNNING = "running"
+RESUMABLE = "resumable"
+GONE = "gone"
+UNKNOWN = "unknown"
+
+# Harness binary names, for the ancestry walk. This is the layer that
+# generalizes: it asks nothing of the harness beyond being recognizable, so a
+# new one costs an entry here rather than a protocol.
+_BINARIES = {
+    "claude": "claude-code",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+    "aider": "aider",
+    "gemini": "gemini-cli",
+    "goose": "goose",
+    "opencode": "opencode",
+    "amp": "amp",
+}
+
+# `AI_AGENT` is spelled `<tool>_<version>_<role>`, e.g.
+# `claude-code_2-1-278_agent`. Read as a fallback for a harness that sets it
+# without anything else we recognize; only the tool segment is used, since the
+# rest is not a session identifier.
+_GENERIC_KIND_VAR = "AI_AGENT"
+
+# How far up the process tree to look. An agent shells out through a wrapper or
+# two, not twenty, and the walk stops at pid 1 regardless.
+_ANCESTRY_DEPTH = 12
+
+def _out(std, args: list[str]) -> str:
+    out = std.process.command(args[0]).args(args[1:]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip() if out.status.code == 0 else ""
+
+def _ancestry(std) -> struct:
+    """The nearest recognized harness above this process, or an empty kind.
+
+    Needs no cooperation: `ps` reports each process's parent and command, so
+    walking up from here finds the harness whatever it chose to export.
+    """
+    pid = std.process.id()
+    for _ in range(_ANCESTRY_DEPTH):
+        row = _out(std, ["ps", "-o", "ppid=,comm=", "-p", str(pid)])
+        if not row:
+            break
+        parts = row.split(None, 1)
+        if len(parts) < 2:
+            break
+        parent = int(parts[0]) if parts[0].isdigit() else 0
+        name = parts[1].strip().rpartition("/")[2]
+        if name in _BINARIES:
+            return struct(kind = _BINARIES[name], pid = pid)
+        if parent <= 1:
+            break
+        pid = parent
+    return struct(kind = "", pid = 0)
+
+def _generic_kind(std) -> str:
+    """The tool segment of `AI_AGENT`, or ""."""
+    raw = std.env.var(_GENERIC_KIND_VAR) or ""
+    return raw.partition("_")[0] if raw else ""
+
+def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
+    """Who is running this, as a lease-shaped record. Empty dict when nothing
+    identifies an agent, which is the ordinary case for a person at a terminal.
+
+    `source` records which layer answered, so a reader can tell a session id the
+    harness reported from a kind that was merely inferred from a process name.
+    """
+    if explicit_kind or explicit_id:
+        return _record(std, explicit_kind or "unknown", explicit_id, 0, "flag")
+
+    env_kind = std.env.var("ASPECT_AGENT_KIND") or ""
+    env_id = std.env.var("ASPECT_AGENT_ID") or ""
+    if env_kind or env_id:
+        return _record(std, env_kind or "unknown", env_id, 0, "env")
+
+    for d in _ENV_DETECTORS:
+        if not std.env.var(d.marker) and not std.env.var(d.id_var):
+            continue
+        pid_raw = std.env.var(d.pid_var) or ""
+        pid = int(pid_raw) if pid_raw.isdigit() else 0
+        return _record(std, d.kind, std.env.var(d.id_var) or "", pid, "env")
+
+    found = _ancestry(std)
+    if found.kind:
+        return _record(std, found.kind, "", found.pid, "ancestry")
+
+    generic = _generic_kind(std)
+    if generic:
+        return _record(std, generic, "", 0, "env")
+    return {}
+
+def _record(std, kind: str, id: str, pid: int, source: str) -> dict:
+    return {
+        "kind": kind,
+        "id": id,
+        "pid": pid,
+        "pid_start": started_at(std, pid),
+        "cwd": std.env.current_dir(),
+        "source": source,
+        "seen_ms": time.now_ms(),
+    }
+
+def is_running(std, agent: dict) -> bool:
+    """Whether the recorded harness process is verifiably alive.
+
+    Requires a pid that was captured *and* whose start time still matches, so a
+    reused pid does not resurrect a dead session. Anything less is "not known to
+    be running", which is a question for `session_state` rather than an answer
+    on its own — a record with no pid says nothing about the session behind it.
+    """
+    return is_same_process(std, agent.get("pid", 0), agent.get("pid_start", ""))
+
+def _sessions_root(std, kind: str) -> str:
+    """Where a harness keeps its sessions, or "" when that cannot be answered.
+
+    Empty for a harness whose layout has not been checked, and — just as
+    importantly — for one whose layout is known but whose directory is not
+    there. Both yield `unknown` rather than `gone`, because `gone` is the one
+    verdict that licenses taking a slot back and it must never rest on a guess.
+    Reading "the sessions directory is missing" as "the session is deleted"
+    would hand a resumable agent's slot to someone else.
+
+    Claude Code relocates its state with `CLAUDE_CONFIG_DIR`, so the default is
+    a fallback rather than the answer.
+    """
+    if kind != "claude-code":
+        return ""
+    configured = std.env.var("CLAUDE_CONFIG_DIR") or ""
+    root = (configured or (std.env.home_dir() + "/.claude")) + "/projects"
+    return root if std.fs.exists(root) else ""
+
+def _session_on_disk(std, kind: str, id: str) -> bool:
+    """Whether this session is still stored, searched by id across the harness's
+    project directories.
+
+    Searched rather than derived: a session's directory is named for the path the
+    harness was started in, which is not where a task necessarily runs, so a
+    path computed at lease time would usually be wrong. The search is a stat per
+    project directory, which is tens of them.
+    """
+    root = _sessions_root(std, kind)
+    if not root:
+        return False
+    for entry in std.fs.read_dir(root):
+        if entry.is_dir and std.fs.exists(root + "/" + entry.path + "/" + id + ".jsonl"):
+            return True
+    return False
+
+def session_state(std, agent: dict) -> str:
+    """Whether this lease's session is running, resumable, or really gone.
+
+    The three signals are consulted in order of how much they prove, and a
+    missing one never substitutes for the next: a live process means `running`,
+    a session still on disk means `resumable`, and only a *known* layout with
+    the session absent from it means `gone`.
+    """
+    if not agent:
+        return UNKNOWN
+    if is_running(std, agent):
+        return RUNNING
+
+    id = agent.get("id", "")
+    kind = agent.get("kind", "")
+    if not id or not _sessions_root(std, kind):
+        return UNKNOWN
+    return RESUMABLE if _session_on_disk(std, kind, id) else GONE
+
+def label(agent: dict) -> str:
+    """One short column for `list`: the kind, and the session id if there is one.
+
+    The id is truncated because it is a UUID and the column is a glance, not a
+    copy source — `--output=json` carries it whole.
+    """
+    if not agent:
+        return ""
+    kind = agent.get("kind", "") or "agent"
+    id = agent.get("id", "")
+    return (kind + " " + id[:8]) if id else kind
+
+def resume_hint(agent: dict) -> str:
+    """How to return to this session, or "" when that is not known.
+
+    Offered instead of reclaiming the slot: a harness that is no longer running
+    is usually a closed terminal, and the work is waiting to be picked up rather
+    than finished with.
+    """
+    if not agent or not agent.get("id", ""):
+        return ""
+    for d in _ENV_DETECTORS:
+        if d.kind == agent.get("kind", "") and d.resume:
+            return d.resume % agent["id"]
+    return ""
