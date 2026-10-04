@@ -115,7 +115,9 @@ _LOCK_STALE_MS = 10 * 60 * 1000
 # any plausible branch, so reclaiming at that point surprises nobody.
 PRUNE_AGE_DAYS = 30
 
-_DAY_MS = 24 * 60 * 60 * 1000
+_MINUTE_MS = 60 * 1000
+_HOUR_MS = 60 * _MINUTE_MS
+_DAY_MS = 24 * _HOUR_MS
 
 # How many past leases a slot remembers. Enough to see what a slot has been
 # holding lately, which is the question worth asking of it — a full history
@@ -417,21 +419,59 @@ def new_slot_record(pool: dict) -> dict:
         "history": [],
     }
 
-def record_lease(registry: dict, slot_id: str, name: str) -> None:
-    """Count a worktree created in this slot, and open its history entry.
+def _append_holder(slot: dict, name: str, agent: dict) -> None:
+    """Add an open history entry naming who is taking the slot.
 
-    Counted per checkout rather than per caller: `--take-over` hands an existing
-    worktree to somebody else and adds nothing here, because the slot did not
-    turn over.
+    The holder is trimmed to kind and id: a finished session's pid is not
+    evidence of anything, and keeping it would invite reading it as though it
+    were.
     """
-    slot = registry["slots"][slot_id]
-    slot["lease_count"] = slot.get("lease_count", 0) + 1
     history = (slot.get("history") or []) + [{
         "name": name,
+        "agent": {"kind": agent.get("kind", ""), "id": agent.get("id", "")} if agent else {},
         "leased_ms": time.now_ms(),
         "released_ms": 0,
     }]
     slot["history"] = history[-_HISTORY_LIMIT:]
+
+def record_lease(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Count a worktree created in this slot, and record who took it.
+
+    Counted per checkout rather than per holder, which is what makes the count
+    a measure of reuse: it is how many cold starts this slot has saved.
+    """
+    slot = registry["slots"][slot_id]
+    slot["lease_count"] = slot.get("lease_count", 0) + 1
+    _append_holder(slot, name, agent)
+
+def record_handover(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Record a second holder taking over the checkout already in this slot.
+
+    No lease is counted — the slot did not turn over, and nothing was rebuilt —
+    but a different session is now responsible for it, which is the question the
+    history exists to answer.
+    """
+    slot = registry["slots"][slot_id]
+    close_lease(registry, slot_id)
+    _append_holder(slot, name, agent)
+
+def duration_phrase(ms: int) -> str:
+    """A span of time, coarse: a reader judging whether a slot turns over
+    briskly or sits for days is not timing anything."""
+    if ms < _MINUTE_MS:
+        return "under a minute"
+    if ms < _HOUR_MS:
+        return "%dm" % (ms // _MINUTE_MS)
+    if ms < _DAY_MS:
+        return "%dh %dm" % (ms // _HOUR_MS, (ms % _HOUR_MS) // _MINUTE_MS)
+    return "%dd %dh" % (ms // _DAY_MS, (ms % _DAY_MS) // _HOUR_MS)
+
+def held_for_ms(entry: dict) -> int:
+    """How long a history entry's holder had the slot, so far if it still does."""
+    started = entry.get("leased_ms", 0)
+    if not started:
+        return 0
+    return (entry.get("released_ms", 0) or time.now_ms()) - started
 
 def close_lease(registry: dict, slot_id: str) -> None:
     """Close the slot's open history entry, if it has one.

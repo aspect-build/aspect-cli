@@ -21,8 +21,10 @@ load(
     "close_lease",
     "default_score",
     "drop_slot",
+    "duration_phrase",
     "free_slot",
     "git_out",
+    "held_for_ms",
     "holds_reservation",
     "lock_digest",
     "lock_digest_at",
@@ -33,6 +35,7 @@ load(
     "prunable_slots",
     "read_registry",
     "reconcile",
+    "record_handover",
     "record_lease",
     "release",
     "reservation_abandoned",
@@ -741,14 +744,16 @@ def _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch(ctx):
     if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
         fail("a worktree whose directory is gone should have been pruned from git")
 
+_A_SESSION = {"kind": "claude-code", "id": "b22fe20c-aaaa-bbbb-cccc-ddddeeeeffff", "pid": 123, "source": "env"}
+
 def _test_a_slot_counts_the_worktrees_it_has_held(ctx):
     """The count is the pool's claim measured rather than asserted: a slot on
     its seventh lease has saved six cold starts."""
     registry = {"slots": {"s1": _slot("/owner/.git")}}
 
-    record_lease(registry, "s1", "fix/login")
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
     close_lease(registry, "s1")
-    record_lease(registry, "s1", "spike/perf")
+    record_lease(registry, "s1", "spike/perf", {})
 
     slot = registry["slots"]["s1"]
     _eq("two leases", slot["lease_count"], 2)
@@ -762,7 +767,7 @@ def _test_the_history_is_bounded(ctx):
     forever to answer a question only the recent past bears on."""
     registry = {"slots": {"s1": _slot("/owner/.git")}}
     for i in range(25):
-        record_lease(registry, "s1", "branch-%d" % i)
+        record_lease(registry, "s1", "branch-%d" % i, {})
         close_lease(registry, "s1")
 
     slot = registry["slots"]["s1"]
@@ -776,7 +781,7 @@ def _test_closing_without_a_history_is_harmless(ctx):
     registry = {"slots": {"s1": {"state": LEASED}}}
     close_lease(registry, "s1")
 
-    record_lease(registry, "s1", "fix/login")
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
     close_lease(registry, "s1")
     first = registry["slots"]["s1"]["history"][0]["released_ms"]
     close_lease(registry, "s1")
@@ -804,13 +809,68 @@ def _test_freeing_a_slot_closes_its_history_entry(ctx):
     though every branch it ever held is still checked out."""
     env = _repo_with_worktree(ctx, dirty = False)
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
-    record_lease(registry, env.slot_id, "wip")
+    record_lease(registry, env.slot_id, "wip", _A_SESSION)
 
     free_slot(ctx.std, env.pool, registry, env.slot_id)
 
     entry = registry["slots"][env.slot_id]["history"][-1]
     if not entry["released_ms"]:
         fail("freeing the slot should have closed its history entry")
+
+def _test_the_history_says_who_held_each_lease(ctx):
+    """On a machine running several agents, which session had a slot is the
+    question worth asking of it — a cold build or an unexpected branch is
+    usually answered by "that session had it last"."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    entry = registry["slots"]["s1"]["history"][0]
+
+    _eq("the harness", entry["agent"]["kind"], "claude-code")
+    _eq("the session", entry["agent"]["id"], _A_SESSION["id"])
+    if "pid" in entry["agent"]:
+        fail("a finished session's pid is not evidence of anything and should not be kept")
+
+def _test_a_person_leaves_no_session_in_the_history(ctx):
+    """Nothing is invented for a worktree somebody took at a terminal."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    record_lease(registry, "s1", "fix/login", {})
+    _eq("no holder", registry["slots"]["s1"]["history"][0]["agent"], {})
+
+def _test_a_handover_records_a_holder_without_counting_a_lease(ctx):
+    """`--take-over` hands an existing checkout to a second session. Nothing is
+    rebuilt, so the slot has not turned over and the count must not move — but
+    the slot did change hands, which is what the history is for."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    other = {"kind": "claude-code", "id": "7f1e9a02-1111-2222-3333-444455556666"}
+
+    record_handover(registry, "s1", "fix/login", other)
+
+    slot = registry["slots"]["s1"]
+    _eq("still one lease", slot["lease_count"], 1)
+    _eq("two holders", len(slot["history"]), 2)
+    _eq("the new one holds it", slot["history"][1]["agent"]["id"], other["id"])
+    if not slot["history"][0]["released_ms"]:
+        fail("the handed-over entry should be closed")
+
+def _test_how_long_a_holder_had_it(ctx):
+    """An open entry is measured to now, which is what makes "still holding it"
+    a duration rather than a blank."""
+    closed = {"leased_ms": 1000, "released_ms": 1000 + 90 * 60 * 1000}
+    _eq("an hour and a half", duration_phrase(held_for_ms(closed)), "1h 30m")
+
+    open_now = {"leased_ms": time.now_ms() - 5 * 60 * 1000}
+    _eq("five minutes so far", duration_phrase(held_for_ms(open_now)), "5m")
+    _eq("nothing recorded", held_for_ms({}), 0)
+
+def _test_durations_read_coarsely(ctx):
+    """Judging whether a slot turns over briskly or sits for days needs no
+    precision, and spurious precision would just be noise in a table."""
+    _eq("seconds", duration_phrase(42 * 1000), "under a minute")
+    _eq("minutes", duration_phrase(7 * 60 * 1000), "7m")
+    _eq("hours", duration_phrase(3 * 60 * 60 * 1000 + 20 * 60 * 1000), "3h 20m")
+    _eq("days", duration_phrase(2 * _DAY_MS + 5 * 60 * 60 * 1000), "2d 5h")
 
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
@@ -865,6 +925,11 @@ _UNIT_TESTS = [
     _test_closing_without_a_history_is_harmless,
     _test_creation_age_is_not_idleness,
     _test_freeing_a_slot_closes_its_history_entry,
+    _test_the_history_says_who_held_each_lease,
+    _test_a_person_leaves_no_session_in_the_history,
+    _test_a_handover_records_a_holder_without_counting_a_lease,
+    _test_how_long_a_holder_had_it,
+    _test_durations_read_coarsely,
 ]
 
 def _test_impl(ctx):

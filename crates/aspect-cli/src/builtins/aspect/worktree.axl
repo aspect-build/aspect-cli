@@ -73,7 +73,9 @@ load(
     "close_lease",
     "default_score",
     "drop_slot",
+    "duration_phrase",
     "free_slot",
+    "held_for_ms",
     "holds_reservation",
     "leased_slot",
     "lock_digest",
@@ -86,6 +88,7 @@ load(
     "prunable_slots",
     "read_registry",
     "reconcile",
+    "record_handover",
     "record_lease",
     "release",
     "reservation_abandoned",
@@ -323,10 +326,12 @@ def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name:
     previous = label(lease.get("agent") or {}) or "an unidentified session"
     warn(ctx.std, "taking " + name + " over from " + previous +
                   "; the checkout is untouched and anything uncommitted in it is now yours")
+    agent = detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id)
+    record_handover(registry, slot_id, name, agent)
     registry["slots"][slot_id]["lease"] = {
         "name": name,
         "since": time.now_ms(),
-        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
+        "agent": agent,
     }
 
 def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
@@ -550,16 +555,18 @@ def _check_out_and_lease(
         warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
         return _pool_busy(ctx)
 
-    record_lease(registry, chosen.id, name)
+    # Who took it, so `list` can name the session holding each slot rather than
+    # only the branch, and so the slot's history says who has had it. Empty for
+    # a person at a terminal.
+    agent = detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id)
+    record_lease(registry, chosen.id, name, agent)
     slot = registry["slots"][chosen.id]
     slot["state"] = LEASED
     slot["reservation"] = None
     slot["lease"] = {
         "name": name,
         "since": time.now_ms(),
-        # Who took it, so `list` can name the session holding each slot rather
-        # than only the branch. Empty for a person at a terminal.
-        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
+        "agent": agent,
     }
     write_registry(ctx.std, pool["dir"], registry)
 
@@ -604,17 +611,49 @@ _COLUMN_NOTES = [
     ("warmth_kind", "cold", "no output base yet, so the first build pays for loading, analysis and fetches."),
 ]
 
+_LIST_FOOTNOTES = [
+    "age: how long the slot has existed. leases: how many worktrees it has held, which is how many cold starts it has saved.",
+]
+
 _LIST_COLUMNS = [
     Column(key = "branch", header = "branch", always = True),
     Column(key = "state", header = "state", always = True),
     Column(key = "warmth", header = "warmth", always = True),
     Column(key = "idle", header = "idle", right = True),
+    # Always: the two numbers that say whether the pool is earning the disk it
+    # holds. A reader should not have to pass a flag to see that.
+    Column(key = "age", header = "age", right = True, always = True),
+    Column(key = "leases", header = "leases", right = True, always = True),
     Column(key = "slot", header = "slot", always = True),
     # Always: a pool with no agents running would otherwise never show that it
     # records which session holds a slot.
     Column(key = "agent", header = "agent", always = True),
     Column(key = "notes", header = "notes"),
 ]
+
+_HISTORY_COLUMNS = [
+    Column(key = "branch", header = "branch", always = True),
+    Column(key = "agent", header = "agent", always = True),
+    Column(key = "held", header = "held", always = True),
+    Column(key = "when", header = "", always = True),
+]
+
+def _history_rows(history: list) -> list[dict]:
+    """A slot's holders, newest first, as cells for the table renderer.
+
+    Newest first because the recent past is what bears on a build happening
+    now; the oldest entry has usually aged out of the slot's memory anyway.
+    """
+    rows = []
+    for entry in reversed(history):
+        released = entry.get("released_ms", 0)
+        rows.append({
+            "branch": entry.get("name", "?"),
+            "agent": label(entry.get("agent") or {}),
+            "held": duration_phrase(held_for_ms(entry)),
+            "when": "still holding it" if not released else "ended %s ago" % duration_phrase(time.now_ms() - released),
+        })
+    return rows
 
 def _age_phrase(days: int) -> str:
     """How long ago, for a slot's creation date."""
@@ -1062,6 +1101,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             # run it sees the same number the decision uses. Only a free slot has
             # a meaningful age, and only a free slot can be pruned.
             "idle": "%dd" % r["idle_days"] if r["state"] == FREE else "",
+            "age": "%dd" % r["created_days"],
+            "leases": str(r["lease_count"]),
             "slot": r["slot"],
             "agent": label(r["agent"]),
             "notes": ", ".join(notes),
@@ -1072,6 +1113,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     print("")
     for line in legend(cells, _COLUMN_NOTES):
         print(line)
+    for note in _LIST_FOOTNOTES:
+        print("  " + note)
 
     # The paths behind each row. Warmth says whether a base is there; only this
     # says which one, which is what you need when one goes missing.
@@ -1083,9 +1126,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             print("    output base: " + r["output_base"] +
                   ("" if r["output_base_present"] else "  (missing)"))
             print("    leases:      %d, %s" % (r["lease_count"], _age_phrase(r["created_days"])))
-            for entry in reversed(r["history"]):
-                print("      " + entry.get("name", "?") +
-                      ("" if entry.get("released_ms", 0) else "  (current)"))
+            for line in render(_history_rows(r["history"]), _HISTORY_COLUMNS):
+                print("    " + line)
     print("")
     if foreign:
         print("  %d slot(s) belong to another clone of this repository and cannot be leased here." % foreign)
