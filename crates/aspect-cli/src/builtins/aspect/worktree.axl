@@ -1027,12 +1027,14 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     if verdict == confirm.NEEDS_FORCE:
         return _refuse(ctx, "needs_force", confirm.needs_force_message(doomed))
     question = "Delete %d worktree slot(s) and their Bazel output bases?" % len(victims)
-    if verdict == confirm.ASK and not confirm.ask(ctx, question):
-        return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
+
+    # Declining is an outcome like any other, and reported like one: returning
+    # early here left `--output=json` with no document at all.
+    declined = verdict == confirm.ASK and not confirm.ask(ctx, question)
 
     pruned = []
     kept = [] + spared
-    if verdict != confirm.SKIP:
+    if verdict != confirm.SKIP and not declined:
         for i, slot_id in enumerate(victims):
             path = slot_path(pool, slot_id)
             print("  [%d/%d] removing %s" % (i + 1, len(victims), path))
@@ -1063,6 +1065,9 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             "candidates": candidates,
             "pruned": pruned,
             "kept": [{"path": p, "reason": r} for p, r in kept],
+            # So a caller can tell "you said no" from "there was nothing to do",
+            # which an empty `pruned` alone does not.
+            "declined": declined,
         }, indent = 2) + "\n")
         return 0
 
@@ -1071,6 +1076,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     elif not victims:
         info(ctx.std, "nothing to prune: every slot idle for %d days is still held by a Bazel server" %
                       ctx.args.max_age_days)
+    elif declined:
+        info(ctx.std, "left alone; nothing was deleted")
     elif verdict == confirm.SKIP:
         info(ctx.std, "dry run; nothing was deleted")
     else:
@@ -1328,8 +1335,6 @@ path = task(
     },
 )
 
-# `list` would shadow the builtin type within this module, so the symbol is
-# named for its command and `kind` carries the command name.
 prune = task(
     group = ["worktree"],
     summary = "Delete pooled slots that have gone stale, and their Bazel output bases.",
@@ -1352,6 +1357,8 @@ prune = task(
     } | _OUTPUT_ARG,
 )
 
+# `list` would shadow the builtin type within this module, so the symbol is
+# named for its command and `kind` carries the command name.
 worktree_list = task(
     kind = "list",
     group = ["worktree"],
