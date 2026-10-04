@@ -9,7 +9,7 @@ GitLab mirror of the same code, and a fork. A pool key that collapses the first
 two spellings but not the two hosts is the behaviour these pin down.
 """
 
-load("@aspect//worktree.axl", "testonly_held_by", "testonly_legend", "testonly_list_columns", "testonly_table")
+load("@aspect//worktree.axl", "testonly_held_by", "testonly_list_columns")
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
@@ -440,53 +440,6 @@ def _test_an_unverifiable_harness_is_never_abandoned(ctx):
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unknown)}}
     _eq("left alone", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
 
-def _test_the_listing_drops_only_the_columns_it_may(ctx):
-    """An empty column is left out to keep the listing narrow — except `agent`,
-    which stays so a pool with nothing running still shows that the pool records
-    which session holds a slot. `notes` carries only exceptions, so hiding it
-    loses nothing."""
-    rows = [
-        {"branch": "fix/login", "state": "free", "warmth": "cold", "idle": "0d", "slot": "abc123"},
-        {"branch": "spike", "state": "free", "warmth": "cold", "idle": "3d", "slot": "def456"},
-    ]
-    lines = testonly_table(rows, testonly_list_columns)
-    _eq("header first", lines[0], "  branch     state  warmth  idle  slot    agent")
-    _eq("agent is advertised even with no agents", "agent" in lines[0], True)
-    _eq("notes is not", "notes" in lines[0], False)
-    _eq("a row leaves the agent cell blank", lines[1], "  fix/login  free   cold      0d  abc123")
-
-def _test_a_droppable_column_appears_as_soon_as_one_row_fills_it(ctx):
-    rows = [
-        {
-            "branch": "fix/login",
-            "state": "in use",
-            "warmth": "cold",
-            "slot": "abc123",
-            "agent": "claude-code b22fe20c",
-            "notes": "",
-        },
-        {
-            "branch": "spike",
-            "state": "free",
-            "warmth": "cold",
-            "idle": "3d",
-            "slot": "def456",
-            "agent": "",
-            "notes": "other clone",
-        },
-    ]
-    lines = testonly_table(rows, testonly_list_columns)
-    _eq("notes appears once one row has one", "notes" in lines[0], True)
-
-def _test_idle_is_right_aligned_so_the_numbers_line_up(ctx):
-    rows = [
-        {"branch": "a", "state": "free", "warmth": "cold", "idle": "3d", "slot": "s1"},
-        {"branch": "b", "state": "free", "warmth": "cold", "idle": "120d", "slot": "s2"},
-    ]
-    lines = testonly_table(rows, testonly_list_columns)
-    _eq("padded to the widest", "  3d" in lines[1], True)
-    _eq("widest unpadded", "120d" in lines[2], True)
-
 def _test_a_relocated_output_user_root_is_where_a_slot_looks(ctx):
     """The root a slot derives under is the caller's to choose, because a repo
     whose `.bazelrc` sets `startup --output_user_root=` keeps its bases
@@ -506,28 +459,6 @@ def _test_a_relocated_output_user_root_is_where_a_slot_looks(ctx):
     ctx.std.fs.create_dir_all(under_relocated)
     _eq("found with the root", warmth_of(ctx.std, slot, relocated).base, True)
     _eq("missed without it", warmth_of(ctx.std, slot).base, False)
-
-def _test_the_listing_defines_only_the_values_it_shows(ctx):
-    """The legend is there so a reader never has to leave the terminal to learn
-    what `partly warm` buys them — and short enough that they read it, which
-    means defining the values on screen and no others."""
-    cold_only = [{"state": "free", "warmth_kind": "cold"}]
-    lines = testonly_legend(cold_only)
-    _eq("two definitions", len(lines), 2)
-    _eq("free", lines[0].startswith("  free: "), True)
-    _eq("cold", lines[1].startswith("  cold: "), True)
-
-    everything = [
-        {"state": "in use", "warmth_kind": "warm"},
-        {"state": "free", "warmth_kind": "partly warm"},
-        {"state": "free", "warmth_kind": "cold"},
-    ]
-    all_lines = testonly_legend(everything)
-    _eq("both states and all three warmths", len(all_lines), 5)
-    _eq("table order: states first", all_lines[0].startswith("  in use: "), True)
-    _eq("then warmest first", all_lines[2].startswith("  warm: "), True)
-
-    _eq("nothing to define", testonly_legend([]), [])
 
 def _test_the_branchs_own_slot_outranks_an_unrelated_one(ctx):
     """An agent returning to a branch it released should land back on the slot
@@ -629,6 +560,15 @@ def _test_a_new_branch_does_not_adopt_its_bases_upstream(ctx):
         run_git(ctx.std, ["rev-parse", "refs/remotes/origin/main"], repo).out,
     )
 
+def _test_the_agent_column_is_never_dropped(ctx):
+    """A pool with nothing running must still show that it records which session
+    holds a slot, so `agent` is the one column kept when empty. The rest of the
+    table's behaviour is lib/table.axl's, and tested there."""
+    by_key = {c.key: c for c in testonly_list_columns}
+    _eq("agent survives an empty column", by_key["agent"].always, True)
+    _eq("notes does not, since it only ever carries exceptions", by_key["notes"].always, False)
+    _eq("idle is right-aligned", by_key["idle"].right, True)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -648,12 +588,9 @@ _UNIT_TESTS = [
     _test_registry_round_trips,
     _test_unreadable_registry_starts_over,
     _test_missing_registry_is_empty,
-    _test_the_listing_drops_only_the_columns_it_may,
-    _test_the_listing_defines_only_the_values_it_shows,
+    _test_the_agent_column_is_never_dropped,
     _test_the_refusal_names_who_holds_the_slot,
     _test_a_lease_with_no_agent_keeps_the_plain_refusal,
-    _test_a_droppable_column_appears_as_soon_as_one_row_fills_it,
-    _test_idle_is_right_aligned_so_the_numbers_line_up,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,
     _test_a_recently_used_base_outranks_an_old_creation_floor,
     _test_prune_never_takes_a_leased_slot,

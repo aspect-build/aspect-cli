@@ -1,0 +1,60 @@
+"""Aligned terminal tables that shrink to their content.
+
+A listing is read at a glance, so it should be as narrow as the rows allow: a
+column nothing fills is dropped rather than printed empty. The exception is a
+column whose absence would hide a capability — a pool with no agents running
+should still show that it records which session holds a slot — so each column
+says whether it may be dropped.
+
+Values mean nothing to a reader who has not read the docs, so a table can carry
+a legend defining the values it actually shows. Keeping those definitions beside
+the data, as `(column, value, definition)`, is what lets the legend shrink the
+same way the table does.
+
+`lib/text.axl` holds the padding primitives; this is the layer that decides what
+to pad.
+"""
+
+load("./text.axl", "pad_left", "pad_right")
+
+Column = record(
+    # Key into each row dict.
+    key = field(str),
+    header = field(str),
+    # Right-align, for numbers that should line up.
+    right = field(bool, default = False),
+    # Shown even when no row fills it, for a column whose absence would hide
+    # something rather than merely save width.
+    always = field(bool, default = False),
+)
+
+def render(rows: list[dict], columns: list) -> list[str]:
+    """`rows` as aligned lines, the header first.
+
+    Each column is sized to the widest of its header and its cells. The last
+    one is not padded, so no row carries trailing spaces.
+    """
+    used = [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
+    widths = {c.key: max([len(c.header)] + [len(r.get(c.key, "")) for r in rows]) for c in used}
+
+    def line(cells):
+        out = []
+        for i, c in enumerate(used):
+            cell = cells.get(c.key, "")
+            out.append(pad_left(cell, widths[c.key]) if c.right else (cell if i == len(used) - 1 else pad_right(cell, widths[c.key])))
+        return "  " + "  ".join(out)
+
+    return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
+
+def legend(rows: list[dict], notes: list) -> list[str]:
+    """Definitions for the values `rows` actually contain, in `notes` order.
+
+    `notes` is `(column, value, definition)`. Defining only what is on screen is
+    what keeps a legend short enough to be read: a listing showing two of five
+    possible values gets two lines, not five.
+    """
+    lines = []
+    for column, value, definition in notes:
+        if any([r.get(column, "") == value for r in rows]):
+            lines.append("  " + value + ": " + definition)
+    return lines

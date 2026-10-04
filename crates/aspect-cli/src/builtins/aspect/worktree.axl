@@ -57,7 +57,7 @@ load(
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
-load("./private/lib/text.axl", "pad_left", "pad_right")
+load("./private/lib/table.axl", "Column", "legend", "render")
 load(
     "./private/lib/worktree.axl",
     "PRUNE_AGE_DAYS",
@@ -65,6 +65,7 @@ load(
     "acquire",
     "default_score",
     "drop_slot",
+    "leased_slot",
     "lock_digest",
     "lock_digest_at",
     "new_slot_id",
@@ -185,15 +186,6 @@ def _score_slot(ctx: TaskContext, slot: dict, want: dict) -> int:
         return hook(ctx, slot, want)
     return default_score(slot, want)
 
-def _leased_slot(registry: dict, name: str) -> str:
-    """The slot id leased under `name`, or "". Leases are keyed by the name the
-    caller knows; the slot id is internal."""
-    for slot_id in registry["slots"]:
-        lease = registry["slots"][slot_id].get("lease") or {}
-        if lease.get("name", "") == name:
-            return slot_id
-    return ""
-
 def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
     """The path of any worktree of this clone that has `name` checked out, or "".
 
@@ -313,6 +305,10 @@ def _release_abandoned(ctx: TaskContext, pool: dict, registry: dict, slot_id: st
     path = slot_path(pool, slot_id)
     if ctx.std.fs.exists(path):
         catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+    else:
+        # Git still lists a worktree whose directory is gone, and would refuse
+        # to check the branch out again while it does.
+        catch(run_git, ctx.std, ["worktree", "prune"], pool["git_common_dir"])
     slot = registry["slots"][slot_id]
     slot["state"] = "free"
     slot["lease"] = None
@@ -444,33 +440,6 @@ def _checked_out_branches(ctx: TaskContext, pool: dict) -> dict:
             found[at] = line[len("branch refs/heads/"):].strip()
     return found
 
-_Column = record(
-    key = field(str),
-    header = field(str),
-    right = field(bool, default = False),
-    # Shown even when no row fills it. For a column whose absence would hide
-    # something the pool does rather than merely save width.
-    always = field(bool, default = False),
-)
-
-def _table(rows: list[dict], columns: list) -> list[str]:
-    """`rows` as aligned lines, one header first.
-
-    A column no row fills is dropped unless it is `always`, which keeps the
-    ordinary listing narrow without hiding what the pool keeps track of.
-    """
-    used = [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
-    widths = {c.key: max([len(c.header)] + [len(r.get(c.key, "")) for r in rows]) for c in used}
-
-    def line(cells):
-        out = []
-        for i, c in enumerate(used):
-            cell = cells.get(c.key, "")
-            out.append(pad_left(cell, widths[c.key]) if c.right else (cell if i == len(used) - 1 else pad_right(cell, widths[c.key])))
-        return "  " + "  ".join(out)
-
-    return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
-
 # What each value in the `state` and `warmth` columns means, as
 # `(column, value, definition)`. A listing defines only the values it shows, so
 # the common case stays short and a reader never has to leave the terminal to
@@ -484,24 +453,16 @@ _COLUMN_NOTES = [
     ("warmth_kind", "cold", "no output base yet, so the first build pays for loading, analysis and fetches."),
 ]
 
-def _legend(cells: list[dict]) -> list[str]:
-    """Definitions for the column values this listing shows, in table order."""
-    lines = []
-    for column, value, definition in _COLUMN_NOTES:
-        if any([c.get(column, "") == value for c in cells]):
-            lines.append("  " + value + ": " + definition)
-    return lines
-
 _LIST_COLUMNS = [
-    _Column(key = "branch", header = "branch", always = True),
-    _Column(key = "state", header = "state", always = True),
-    _Column(key = "warmth", header = "warmth", always = True),
-    _Column(key = "idle", header = "idle", right = True),
-    _Column(key = "slot", header = "slot", always = True),
+    Column(key = "branch", header = "branch", always = True),
+    Column(key = "state", header = "state", always = True),
+    Column(key = "warmth", header = "warmth", always = True),
+    Column(key = "idle", header = "idle", right = True),
+    Column(key = "slot", header = "slot", always = True),
     # Always: a pool with no agents running would otherwise never show that it
     # records which session holds a slot.
-    _Column(key = "agent", header = "agent", always = True),
-    _Column(key = "notes", header = "notes"),
+    Column(key = "agent", header = "agent", always = True),
+    Column(key = "notes", header = "notes"),
 ]
 
 def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
@@ -591,7 +552,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # been picked and its previous occupant force-removed. Both checks here
     # answer before anything is destroyed; the pool's own leases get the better
     # message, so they are tested first.
-    held = _leased_slot(registry, name)
+    held = leased_slot(registry, name)
 
     # Asking for a branch whose own lease is abandoned is an agent restarting
     # the task it died in. Hand the slot back instead of refusing: the session
@@ -603,10 +564,19 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         write_registry(ctx.std, pool["dir"], registry)
         held = ""
 
+    # Taking over is about inheriting a checkout, so it only applies when there
+    # is one. A lease pointing at a directory that has been removed behind git's
+    # back has nothing to inherit: free it and let ordinary allocation
+    # materialize a worktree, rather than reporting a path the caller cannot
+    # enter.
     if held and ctx.args.take_over:
-        _take_over(ctx, pool, registry, held, name)
+        if ctx.std.fs.exists(slot_path(pool, held)):
+            _take_over(ctx, pool, registry, held, name)
+            write_registry(ctx.std, pool["dir"], registry)
+            return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name))
+        _release_abandoned(ctx, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
-        return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name))
+        held = ""
 
     if held:
         return _refuse(ctx, "branch_in_use", _held_by(ctx, pool, registry, held, name))
@@ -652,7 +622,7 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    target = _leased_slot(registry, name)
+    target = leased_slot(registry, name)
     if not target:
         return _no_such_worktree(ctx, name)
 
@@ -710,7 +680,7 @@ def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.name[0]
     pool = _pool(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    found = _leased_slot(registry, name)
+    found = leased_slot(registry, name)
     if not found:
         return _no_such_worktree(ctx, name)
     ctx.std.io.stdout.write(slot_path(pool, found) + "\n")
@@ -886,10 +856,10 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "notes": ", ".join(notes),
         })
 
-    for line in _table(cells, _LIST_COLUMNS):
+    for line in render(cells, _LIST_COLUMNS):
         print(line)
     print("")
-    for line in _legend(cells):
+    for line in legend(cells, _COLUMN_NOTES):
         print(line)
 
     # The paths behind each row. Warmth says whether a base is there; only this
@@ -1040,7 +1010,5 @@ worktree_list = task(
 )
 
 # Exposed for worktree_test.axl; not part of any task's surface.
-testonly_table = _table
 testonly_held_by = _held_by
-testonly_legend = _legend
 testonly_list_columns = _LIST_COLUMNS

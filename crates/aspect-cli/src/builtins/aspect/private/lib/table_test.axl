@@ -1,0 +1,106 @@
+"""Unit tests for lib/table.axl.
+
+Run with:
+  aspect dev test-table
+
+The behaviour worth pinning is what the table leaves out: a column nothing fills
+is dropped so a listing stays readable, except where dropping it would hide a
+capability rather than save width.
+"""
+
+load("./table.axl", "Column", "legend", "render")
+
+_COLUMNS = [
+    Column(key = "name", header = "name", always = True),
+    Column(key = "size", header = "size", right = True),
+    Column(key = "notes", header = "notes"),
+    Column(key = "owner", header = "owner", always = True),
+]
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_a_column_nothing_fills_is_dropped(ctx):
+    rows = [{"name": "alpha", "size": "1"}, {"name": "b", "size": "22"}]
+    header = render(rows, _COLUMNS)[0]
+    _eq("notes left out", "notes" in header, False)
+    _eq("name kept", "name" in header, True)
+
+def _test_an_always_column_survives_being_empty(ctx):
+    """For a column whose absence would hide something the tool tracks rather
+    than merely save width."""
+    rows = [{"name": "alpha"}]
+    header = render(rows, _COLUMNS)[0]
+    _eq("owner shown although empty", "owner" in header, True)
+
+def _test_a_droppable_column_appears_once_one_row_fills_it(ctx):
+    rows = [{"name": "alpha"}, {"name": "b", "notes": "stale"}]
+    _eq("notes appears", "notes" in render(rows, _COLUMNS)[0], True)
+
+def _test_columns_are_sized_to_the_widest_cell_or_header(ctx):
+    rows = [{"name": "a"}, {"name": "considerably-longer"}]
+    lines = render(rows, _COLUMNS)
+    _eq("header padded to the widest cell", lines[0].startswith("  name" + " " * 15), True)
+
+def _test_right_alignment_lines_numbers_up(ctx):
+    rows = [{"name": "a", "size": "7"}, {"name": "b", "size": "1234"}]
+    lines = render(rows, _COLUMNS)
+    _eq("narrow value padded on the left", "     7" in lines[1], True)
+    _eq("widest value unpadded", "  1234" in lines[2], True)
+
+def _test_no_row_carries_trailing_whitespace(ctx):
+    """The last column is left unpadded, so a diff of this output has no
+    invisible changes in it."""
+    rows = [{"name": "alpha", "owner": ""}]
+    for line in render(rows, _COLUMNS):
+        _eq("no trailing space on %r" % line, line, line.rstrip())
+
+def _test_a_header_only_table_still_renders(ctx):
+    lines = render([], _COLUMNS)
+    _eq("just the header", len(lines), 1)
+    _eq("the always columns", lines[0], "  name  owner")
+
+_NOTES = [
+    ("state", "busy", "someone is using it."),
+    ("state", "free", "nobody is."),
+    ("kind", "warm", "ready to go."),
+]
+
+def _test_a_legend_defines_only_what_is_on_screen(ctx):
+    """A legend nobody reads is worse than none, so it shrinks with the data."""
+    rows = [{"state": "free", "kind": "warm"}]
+    lines = legend(rows, _NOTES)
+    _eq("two of three", len(lines), 2)
+    _eq("in notes order, so state first", lines[0].startswith("  free: "), True)
+    _eq("then kind", lines[1].startswith("  warm: "), True)
+
+def _test_a_legend_for_nothing_is_empty(ctx):
+    _eq("no rows", legend([], _NOTES), [])
+    _eq("no matching values", legend([{"state": "other"}], _NOTES), [])
+
+_UNIT_TESTS = [
+    _test_a_column_nothing_fills_is_dropped,
+    _test_an_always_column_survives_being_empty,
+    _test_a_droppable_column_appears_once_one_row_fills_it,
+    _test_columns_are_sized_to_the_widest_cell_or_header,
+    _test_right_alignment_lines_numbers_up,
+    _test_no_row_carries_trailing_whitespace,
+    _test_a_header_only_table_still_renders,
+    _test_a_legend_defines_only_what_is_on_screen,
+    _test_a_legend_for_nothing_is_empty,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("table.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+table_tests = task(
+    summary = "Run the terminal-table AXL unit tests.",
+    kind = "test-table",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

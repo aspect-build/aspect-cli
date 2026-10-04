@@ -432,6 +432,18 @@ def lock_digest_at(std, git_common_dir: str, ref: str) -> str:
 
 # --- bounds and pruning ------------------------------------------------------
 
+def leased_slot(registry: dict, name: str) -> str:
+    """The slot id leased under `name`, or "".
+
+    Leases are keyed by the name the caller asked for; the slot id is internal,
+    so this is how every command that takes a branch finds its slot.
+    """
+    for slot_id in registry["slots"]:
+        lease = registry["slots"][slot_id].get("lease") or {}
+        if lease.get("name", "") == name:
+            return slot_id
+    return ""
+
 def owned_slots(pool: dict, registry: dict) -> list[str]:
     """Slot ids this clone owns, in registry order. The only slots it can lease,
     and so the only ones its `max_slots` budget counts."""

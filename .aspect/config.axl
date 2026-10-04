@@ -55,6 +55,7 @@ load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
+load("@aspect//private/lib/table_test.axl", "table_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
@@ -451,6 +452,11 @@ def config(ctx: ConfigContext):
     # both the worktree pool and agent leases depend on.
     # Run with: aspect dev test-process-info
     ctx.tasks.add(process_info_tests)
+
+    # Terminal tables: which columns a listing drops and which it keeps when
+    # empty, and the legend that shrinks with the data.
+    # Run with: aspect dev test-table
+    ctx.tasks.add(table_tests)
 
     # Repository and branch from `.git`, against real clones and worktrees.
     # Run with: aspect dev test-git-checkout
