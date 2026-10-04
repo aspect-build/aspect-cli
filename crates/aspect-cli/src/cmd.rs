@@ -487,6 +487,12 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 .value_parser(value_parser!(String))
                 .value_name(id)
                 .help(help_text(description))
+                // `num_args` is cardinality, not requiredness: clap reads
+                // `num_args(1..=1)` as "one value if given at all", so without
+                // this a `minimum = 1` positional parses as absent and the task
+                // indexes an empty list. `describe` already derives
+                // requiredness the same way, and the two have to agree.
+                .required(*minimum >= 1)
                 .num_args(*minimum as usize..=*maximum as usize);
             if let Some(default) = default {
                 it = it.default_values(default);
@@ -2621,6 +2627,35 @@ mod tests {
             offenders.is_empty(),
             "built-in tasks must declare a summary; add `summary = \"…\"` at:\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn a_positional_with_a_minimum_reaches_clap_as_required() {
+        // `num_args(1..=1)` is cardinality: clap reads it as "one value if given
+        // at all", so without `required` the task runs with an empty list and
+        // indexes it. `describe` derives requiredness from the same cardinality,
+        // and the two have to agree or the help lies about the surface.
+        let required = Arg::Positional {
+            minimum: 1,
+            maximum: 1,
+            default: None,
+            description: None,
+        };
+        let optional = Arg::Positional {
+            minimum: 0,
+            maximum: 1,
+            default: None,
+            description: None,
+        };
+
+        assert!(
+            arg_to_clap(Scope::Task, "branch", &required).is_required_set(),
+            "a positional declared with `minimum = 1` must be required"
+        );
+        assert!(
+            !arg_to_clap(Scope::Task, "extras", &optional).is_required_set(),
+            "a positional that may be omitted must stay optional"
         );
     }
 
