@@ -1253,6 +1253,64 @@ def _test_the_listing_order_is_stable(ctx):
     second = [r["slot"] for r in sorted([row("aaa"), row("bbb")], key = testonly_list_order)]
     _eq("by slot, either way round", first, second)
 
+def _test_residue_from_an_older_registry_can_be_collected(ctx):
+    """An entry written before `created_ms` existed has no age, so a threshold
+    can never be met and nothing would ever collect it. With no output base and
+    no directory either, there is nothing behind it to protect — which is the
+    only reason it is safe to take at any age."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"old": {
+        "owner_git_dir": pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "warm-again",
+        "last_commit": "deadbeef",
+        "lock_digest": "",
+        "lease": None,
+    }}}
+
+    _eq("collectable at the default threshold", prunable_slots(ctx.std, pool, registry, 30), ["old"])
+
+def _test_residue_with_a_base_is_left_alone(ctx):
+    """The exemption is for entries with nothing behind them. An output base is
+    something: it is warm state, and deleting it over a missing field would
+    throw away the thing the pool exists to keep."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"old": {
+        "owner_git_dir": pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "warm-again",
+        "lease": None,
+    }}}
+    ctx.std.fs.create_dir_all(output_base_of(ctx.std, slot_path(pool, "old"), root))
+
+    _eq("kept", prunable_slots(ctx.std, pool, registry, 30, root), [])
+
+def _test_residue_with_a_checkout_is_left_alone(ctx):
+    """And a directory is something too, whatever the registry forgot: it may
+    hold somebody's work."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: {
+        "owner_git_dir": env.pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "wip",
+        "lease": None,
+    }}}
+
+    _eq("kept", prunable_slots(ctx.std, env.pool, registry, 30), [])
+
+def _test_an_unrecorded_count_is_not_zero(ctx):
+    """`last_branch` proves the slot held a worktree, so a missing
+    `lease_count` means unknown rather than none — and the listing has to be
+    able to tell the two apart."""
+    old = {"state": FREE, "last_branch": "warm-again"}
+    fresh = {"state": FREE, "lease_count": 0}
+    _eq("not recorded", old.get("lease_count"), None)
+    _eq("recorded as none", fresh.get("lease_count"), 0)
+    _eq("no creation time either", slot_age_ms(old), 0)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -1305,6 +1363,10 @@ _UNIT_TESTS = [
     _test_a_reservation_holds_the_slot_and_the_branch,
     _test_a_reservation_whose_process_died_is_reclaimable,
     _test_prune_never_takes_a_slot_being_set_up,
+    _test_residue_from_an_older_registry_can_be_collected,
+    _test_residue_with_a_base_is_left_alone,
+    _test_residue_with_a_checkout_is_left_alone,
+    _test_an_unrecorded_count_is_not_zero,
     _test_reconcile_leaves_a_reservation_alone,
     _test_freeing_a_slot_keeps_its_output_base,
     _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch,

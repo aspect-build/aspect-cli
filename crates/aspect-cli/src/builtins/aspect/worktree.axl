@@ -367,6 +367,16 @@ def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name:
         "agent": agent,
     }
 
+def _prune_reason(ctx: TaskContext, pool: dict, slot_id: str, slot: dict, root: str) -> str:
+    """Why this slot is collectable, in the terms that actually apply to it.
+
+    An entry with no recorded age is collectable because there is nothing behind
+    it, not because of a threshold it cannot be measured against.
+    """
+    if slot.get("created_ms", 0):
+        return "idle " + compact_ms(slot_idle_ms(ctx.std, pool, slot_id, slot, root))
+    return "no recorded age, nothing on disk"
+
 def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
     """Drop free slots nothing has touched in `PRUNE_AGE_DAYS`. Returns how many
     went, so the caller can persist a registry that no longer matches the disk.
@@ -378,10 +388,11 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
     """
     dropped = 0
     for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_AGE_DAYS, root):
-        label = registry["slots"][slot_id].get("last_branch", "") or slot_id
-        age = slot_age_days(ctx.std, pool, slot_id, registry["slots"][slot_id], root)
+        slot = registry["slots"][slot_id]
+        label = slot.get("last_branch", "") or slot_id
+        why = _prune_reason(ctx, pool, slot_id, slot, root)
         if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
-            info(ctx.std, "pruned slot last used %d days ago (%s)" % (age, label))
+            info(ctx.std, "pruned slot (%s): %s" % (why, label))
             dropped += 1
     return dropped
 
@@ -715,12 +726,25 @@ def _history_note(slot: dict) -> str:
     one less — otherwise a slot created a moment ago would report having been
     leased before.
     """
-    prior = slot.get("lease_count", 0) - 1
+    if slot.get("lease_count") == None:
+        if slot.get("last_branch", ""):
+            return "reused slot, last holding " + slot["last_branch"] + "; earlier use was not recorded"
+        return "slot carried over from an earlier pool; nothing is recorded about its use"
+
+    prior = slot["lease_count"] - 1
     if prior <= 0:
         return "new slot: this is the first worktree it has held"
 
     times = "once" if prior == 1 else ("twice" if prior == 2 else "%d times" % prior)
     return "created %s ago, reused %s before this" % (phrase_ms(slot_age_ms(slot)), times)
+
+def _unit(fmt, value) -> str:
+    """`value` formatted, or an em dash where the registry does not say.
+
+    A zero is an answer and "not recorded" is not, and an entry written before
+    a field existed has the second one.
+    """
+    return fmt(value) if value != None else "—"
 
 def _list_order(row: dict) -> tuple:
     """How slots sort: in use first, then warmest, then by slot for stability.
@@ -1018,16 +1042,19 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     # answered with the picture rather than a count.
     candidates = []
     if victims:
-        info(ctx.std, "%d slot(s) free and unused for %d+ days:" % (len(victims), ctx.args.max_age_days))
+        info(ctx.std, "%d slot(s) can be reclaimed:" % len(victims))
     for slot_id in victims:
         slot = registry["slots"][slot_id]
         label = slot.get("last_branch", "") or "never used"
+        aged = slot.get("created_ms", 0) != 0
+        why = _prune_reason(ctx, pool, slot_id, slot, root)
         candidates.append({
             "path": slot_path(pool, slot_id),
-            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root) if aged else None,
             "last_branch": slot.get("last_branch", ""),
+            "reason": why,
         })
-        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(ctx.std, pool, slot_id, slot, root), label))
+        print("    %s  %s  %s" % (slot_path(pool, slot_id), why, label))
 
     doomed = "delete %d worktree slot(s) and their Bazel output bases" % len(victims)
     verdict = confirm.decide(
@@ -1084,7 +1111,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     if not victims and not spared:
-        info(ctx.std, "nothing to prune: no free slot has been idle for %d days" % ctx.args.max_age_days)
+        info(ctx.std, "nothing to prune: no free slot has been idle for %d days, and none is empty" %
+                      ctx.args.max_age_days)
     elif not victims:
         info(ctx.std, "nothing to prune: every slot idle for %d days is still held by a Bazel server" %
                       ctx.args.max_age_days)
@@ -1113,6 +1141,11 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         path = slot_path(pool, slot_id)
         warmth = warmth_of(ctx.std, path, root)
         agent = lease.get("agent") or {}
+
+        # What the registry can actually answer. Age needs a creation time;
+        # idleness needs that or an output base whose freshness can be read.
+        knows_age = slot.get("created_ms", 0) != 0
+        knows_idle = knows_age or warmth.base
         rows.append({
             "slot": slot_id,
             "state": slot["state"],
@@ -1130,11 +1163,14 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "last_branch": slot.get("last_branch", ""),
             "owner": slot.get("owner_git_dir", ""),
             "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
-            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
-            "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root),
-            "created_days": slot_created_days(slot),
-            "age_ms": slot_age_ms(slot),
-            "lease_count": slot.get("lease_count", 0),
+            # None where the registry does not say. An entry written before
+            # one of these fields existed knows nothing about it, and reporting
+            # a zero would be inventing an answer.
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root) if knows_idle else None,
+            "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root) if knows_idle else None,
+            "created_days": slot_created_days(slot) if knows_age else None,
+            "age_ms": slot_age_ms(slot) if knows_age else None,
+            "lease_count": slot.get("lease_count"),
             "history": slot.get("history") or [],
             "output_base": output_base_of(ctx.std, path, root),
             "server_pid": warmth.server,
@@ -1211,9 +1247,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             # Idle days are what `prune` acts on, so a reader deciding whether to
             # run it sees the same number the decision uses. Only a free slot has
             # a meaningful age, and only a free slot can be pruned.
-            "idle": compact_ms(r["idle_ms"]) if r["state"] == FREE else "",
-            "age": compact_ms(r["age_ms"]),
-            "leases": str(r["lease_count"]),
+            "idle": _unit(compact_ms, r["idle_ms"]) if r["state"] == FREE else "",
+            "age": _unit(compact_ms, r["age_ms"]),
+            "leases": _unit(str, r["lease_count"]),
             "slot": r["slot"],
             "agent": label(r["agent"]),
             "notes": ", ".join(notes),

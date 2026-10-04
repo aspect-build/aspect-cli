@@ -851,6 +851,17 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str
         slot = registry["slots"][slot_id]
         if slot["state"] != FREE:
             continue
+
+        # Residue: an entry with no recorded age, no output base and no
+        # directory has nothing behind it to protect, and nothing to age it out
+        # by either — so without this it would sit in the registry forever. The
+        # usual case is a registry written before `created_ms` existed.
+        if not slot.get("created_ms", 0):
+            path = slot_path(pool, slot_id)
+            if not std.fs.exists(path) and not std.fs.exists(output_base_of(std, path, root)):
+                victims.append(slot_id)
+                continue
+
         if slot_age_days(std, pool, slot_id, slot, root) < max_age_days:
             continue
         owner = slot.get("owner_git_dir", "")
