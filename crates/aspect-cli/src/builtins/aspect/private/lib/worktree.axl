@@ -552,53 +552,92 @@ def slot_created_days(slot: dict) -> int:
         return 0
     return (time.now_ms() - created) // _DAY_MS
 
+def _live_worktrees(std, git_common_dir: str) -> dict:
+    """`{path: branch}` for every worktree of this clone, as git spells them.
+
+    The branch is "" for a detached head, which the pool never creates but a
+    person might.
+    """
+    live = {}
+    at = ""
+    for line in git_out(std, ["worktree", "list", "--porcelain"], git_common_dir).splitlines():
+        if line.startswith("worktree "):
+            at = line[len("worktree "):].strip()
+            live[at] = ""
+        elif line.startswith("branch refs/heads/") and at:
+            live[at] = line[len("branch refs/heads/"):].strip()
+    return live
+
+def _is_our_worktree(std, pool: dict, path: str) -> bool:
+    """Whether git says a worktree of *this* clone is at `path`.
+
+    Asked only when `git worktree list` named nothing matching a slot, which
+    means either the worktree is gone or the two sides spell the same directory
+    differently. Asking git from inside the directory settles it without
+    comparing paths at all: this answer and `pool["git_common_dir"]` are both
+    git's own, so they agree on spelling by construction.
+    """
+    if not std.fs.exists(path):
+        return False
+    common = git_out(std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], path)
+    return common != "" and common == pool["git_common_dir"]
+
 def reconcile(std, pool: dict, registry: dict) -> dict:
-    """Bring `registry` back in line with git and the filesystem, in place.
+    """Bring `registry` back in line with git, in place, in both directions.
 
     Git is the authority on whether a worktree exists, so a slot git has
-    forgotten is free regardless of what the registry claims. This is what
-    recovers from a hand-run `git worktree remove` — no lease protocol, no
-    timeouts.
+    forgotten is free regardless of what the registry claims — which is what
+    recovers from a hand-run `git worktree remove`, with no lease protocol and
+    no timeouts. A worktree the *registry* has forgotten is adopted for the same
+    reason: an unreadable registry starts over by design, and without this the
+    pool would report one of its own slots as a worktree it does not manage.
+
+    A lease is only ended when git says the worktree is gone from inside the
+    directory as well as from the list. The list is matched by path, and two
+    spellings of one directory would otherwise read as every lease having
+    ended — which hands the next caller an occupied slot to force-remove.
 
     Only slots this clone owns are judged. A `git worktree list` answers for one
-    object store, so another clone's lease is simply invisible here, not over:
-    freeing on that evidence would hand a second caller a slot that is still
-    checked out, and the eventual `git worktree add` would fail only after the
-    slot's previous occupant had been force-removed.
-
-    Reserved slots are left alone for the same reason read by a different light:
-    a reservation means the worktree does not exist *yet*, so git's silence
-    about it is expected rather than evidence. `reservation_abandoned` is what
-    judges those, and only a caller holding the lock may act on it.
+    object store, so another clone's lease is invisible here rather than over.
+    Reserved slots are left alone: a reservation means the worktree does not
+    exist *yet*, so git's silence about it is expected rather than evidence, and
+    `reservation_abandoned` is what judges those.
     """
-    known = git_out(std, ["worktree", "list", "--porcelain"], pool["git_common_dir"])
-    live_paths = {}
-    for line in known.splitlines():
-        if line.startswith("worktree "):
-            live_paths[line[len("worktree "):].strip()] = True
-
+    live = _live_worktrees(std, pool["git_common_dir"])
     slots = registry["slots"]
+
     for slot_id in slots:
         slot = slots[slot_id]
         if slot["state"] != LEASED:
             continue
         if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
-
-        # A lease is over when git has dropped the worktree AND the worktree is
-        # really gone. Git alone is not enough: if the two sides spell the same
-        # directory differently, every lease reads as ended, and the next `add`
-        # is handed an occupied slot to force-remove. A worktree that is plainly
-        # sitting there outranks git's silence about it.
         path = slot_path(pool, slot_id)
-        if path in live_paths:
-            continue
-        if std.fs.exists(path + "/.git"):
-            warn(std, "git does not list a worktree at " + path + " but one is there; " +
-                      "keeping the lease rather than handing the slot to someone else")
+        if path in live or _is_our_worktree(std, pool, path):
             continue
         slot["state"] = FREE
         slot["lease"] = None
+
+    # The other direction: a worktree in one of this clone's slots that the
+    # registry does not account for. Leased under the branch git has, with no
+    # agent, because who took it is not known.
+    prefix = pool["dir"] + "/" + SLOT_PREFIX
+    for path in live:
+        if not path.startswith(prefix):
+            continue
+        slot_id = path[len(prefix):]
+        if not slot_id or "/" in slot_id:
+            continue
+        slot = slots.get(slot_id) or new_slot_record(pool)
+        if slot["state"] != FREE or slot.get("owner_git_dir", "") != pool["git_common_dir"]:
+            continue
+        slot["state"] = LEASED
+        slot["lease"] = {"name": live[path], "since": time.now_ms(), "agent": {}}
+
+        # At least one worktree has been in here, which is more than the zero a
+        # new record would claim. The real count went with the registry.
+        slot["lease_count"] = max(slot.get("lease_count", 0), 1)
+        slots[slot_id] = slot
     return registry
 
 # --- slots and their warmth --------------------------------------------------

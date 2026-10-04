@@ -16,6 +16,7 @@ load(
     "FREE",
     "LEASED",
     "RESERVED",
+    "SLOT_PREFIX",
     "abandoned_lease",
     "acquire",
     "close_lease",
@@ -996,22 +997,75 @@ def _test_a_filesystem_origin_still_gets_one_pool_per_repository(ctx):
     if not pools[0]["dir"].startswith(pools_root_of(ctx.std.env.home_dir())):
         fail("the pool must sit under the pools root: %r" % pools[0]["dir"])
 
+def _git_common_dir(ctx, cwd: str) -> str:
+    """The common dir as `pool_of` gets it: from git, in git's own spelling.
+
+    A hand-built path is not the same thing. On macOS a `mkdtemp` directory
+    under `/var` comes back from git as `/private/var`, so a test that builds
+    the string itself is testing a configuration the product never has.
+    """
+    return git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
+
 def _test_a_lease_survives_git_not_naming_its_path(ctx):
     """The class of bug behind the one above: freeing a lease because git did
     not mention the path assumes both sides spell it identically. A symlinked
     home or another mount would differ the same way, and the next `add` would be
-    handed an occupied slot to force-remove. A worktree that is plainly there
-    outranks git's silence."""
+    handed an occupied slot to force-remove. Git is asked about the directory
+    itself, which settles it without comparing anyone's spelling."""
     env = _repo_with_worktree(ctx, dirty = False)
-    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+    registry = {"slots": {env.slot_id: _leased(common, "wip", {})}}
 
-    # A pool whose directory names the same slots by a path git will not report.
-    confused = {
-        "git_common_dir": env.pool["git_common_dir"],
-        "dir": env.pool["dir"] + "/.",
-    }
+    # A pool that names the same slot by a path git will not report back.
+    confused = {"git_common_dir": common, "dir": env.pool["dir"] + "/."}
     reconcile(ctx.std, confused, registry)
     _eq("the lease stands", registry["slots"][env.slot_id]["state"], LEASED)
+
+def _test_a_worktree_the_registry_forgot_is_adopted(ctx):
+    """An unreadable registry starts over by design, so the pool has to be able
+    to find its own worktrees again. Without this, `add` reports one of its own
+    slots as a worktree the pool does not manage and offers no way back."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+
+    # Git's spelling of the slot, so the pool directory is the one git reports.
+    at = ""
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX in line:
+            at = line[len("worktree "):].strip()
+    if not at:
+        fail("the fixture should have left a worktree in a slot")
+    pool = {"git_common_dir": common, "dir": at.rsplit("/", 1)[0]}
+    slot_id = at.rsplit(SLOT_PREFIX, 1)[1]
+
+    registry = reconcile(ctx.std, pool, {"version": 1, "slots": {}})
+
+    if slot_id not in registry["slots"]:
+        fail("the slot should have been adopted: %r" % registry["slots"])
+    adopted = registry["slots"][slot_id]
+    _eq("leased", adopted["state"], LEASED)
+    _eq("under the branch git has", adopted["lease"]["name"], "wip")
+    _eq("by nobody in particular", adopted["lease"]["agent"], {})
+
+def _test_adoption_does_not_disturb_a_reservation(ctx):
+    """A reserved slot is mid-checkout, so git may already list its worktree.
+    Adopting it would replace the reservation that another process is still
+    working through."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+    at = ""
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX in line:
+            at = line[len("worktree "):].strip()
+    pool = {"git_common_dir": common, "dir": at.rsplit("/", 1)[0]}
+    slot_id = at.rsplit(SLOT_PREFIX, 1)[1]
+
+    registry = {"slots": {slot_id: _slot(common)}}
+    token = reserve_slot(ctx.std, registry, slot_id, "being/made")
+    reconcile(ctx.std, pool, registry)
+
+    _eq("still reserved", registry["slots"][slot_id]["state"], RESERVED)
+    _eq("still ours", holds_reservation(registry, slot_id, token), True)
 
 def _test_a_lease_ends_when_the_worktree_really_is_gone(ctx):
     """The case `reconcile` exists for has to keep working: somebody ran
@@ -1092,6 +1146,8 @@ _UNIT_TESTS = [
     _test_a_key_cannot_climb_out_of_the_pools_root,
     _test_a_filesystem_origin_still_gets_one_pool_per_repository,
     _test_a_lease_survives_git_not_naming_its_path,
+    _test_a_worktree_the_registry_forgot_is_adopted,
+    _test_adoption_does_not_disturb_a_reservation,
     _test_a_lease_ends_when_the_worktree_really_is_gone,
 ]
 
