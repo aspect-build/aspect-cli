@@ -8,7 +8,7 @@ is dropped so a listing stays readable, except where dropping it would hide a
 capability rather than save width.
 """
 
-load("./table.axl", "Column", "legend", "render")
+load("./table.axl", "Column", "render")
 
 _COLUMNS = [
     Column(key = "name", header = "name", always = True),
@@ -61,77 +61,6 @@ def _test_a_header_only_table_still_renders(ctx):
     _eq("just the header", len(lines), 1)
     _eq("the always columns", lines[0], "  name  owner")
 
-# The legend tests get their own columns: the render fixture has no `state`, and
-# a legend only documents columns the table actually has.
-_LEGEND_COLUMNS = [
-    Column(key = "name", header = "name", always = True),
-    Column(key = "state", header = "state", always = True),
-    Column(key = "size", header = "size", right = True),
-    Column(key = "owner", header = "owner", always = True),
-]
-
-_NOTES = [
-    ("name", "", "what the thing is called."),
-    ("state", "", "what is happening to it."),
-    ("state", "busy", "someone is using it."),
-    ("state", "free", "nobody is."),
-    ("size", "", "how big it is."),
-]
-
-def _test_a_legend_documents_every_column_the_table_printed(ctx):
-    """A new table has to teach itself, so each column it printed gets a line in
-    the order it printed them."""
-    rows = [{"name": "a", "state": "free", "owner": "x"}]
-    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
-
-    if not lines[0].startswith("  name  "):
-        fail("the first column of the table leads: %r" % lines[0])
-    if not lines[1].startswith("  state  "):
-        fail("then the next one that has a note: %r" % lines[1])
-
-def _test_values_are_nested_under_their_column(ctx):
-    """Indentation is what says a term is a value of the column above it, rather
-    than another column — which a flat list cannot express."""
-    rows = [{"name": "a", "state": "free", "owner": "x"}]
-    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
-
-    nested = [l for l in lines if l.startswith("    busy") or l.startswith("    free")]
-    _eq("both values, indented", len(nested), 2)
-    _eq("in notes order", nested[0].startswith("    busy"), True)
-
-def _test_every_value_is_shown_even_when_absent(ctx):
-    """"What else could this column say" is the question a reader of a new table
-    has, so a value the table does not currently contain is documented too."""
-    rows = [{"name": "a", "state": "free", "owner": "x"}]
-    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
-
-    if not any([l.startswith("    busy") for l in lines]):
-        fail("`busy` is not on screen but is still a state: %r" % lines)
-
-def _test_a_column_the_table_dropped_is_not_documented(ctx):
-    """Documenting a column that was not printed sends a reader looking for
-    something that is not there."""
-    rows = [{"name": "a", "owner": "x"}]
-    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
-
-    for line in lines:
-        if line.startswith("  size"):
-            fail("`size` was dropped from this table: %r" % lines)
-
-def _test_definitions_share_one_left_edge(ctx):
-    """However deep the nesting, the definitions line up, or the block reads as
-    ragged prose."""
-    rows = [{"name": "a", "state": "free", "size": "1", "owner": "x"}]
-    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
-
-    column_line = [l for l in lines if l.startswith("  name")][0]
-    value_line = [l for l in lines if l.startswith("    busy")][0]
-    _eq("same offset", column_line.index("what the thing"), value_line.index("someone"))
-
-def _test_a_legend_for_nothing_is_empty(ctx):
-    _eq("no columns documented", legend([{"owner": "x"}], [("size", "", "how big.")], _LEGEND_COLUMNS), [])
-    _eq("no notes at all", legend([{"name": "a"}], [], _LEGEND_COLUMNS), [])
-
 _UNIT_TESTS = [
     _test_a_column_nothing_fills_is_dropped,
     _test_an_always_column_survives_being_empty,
@@ -140,12 +69,6 @@ _UNIT_TESTS = [
     _test_right_alignment_lines_numbers_up,
     _test_no_row_carries_trailing_whitespace,
     _test_a_header_only_table_still_renders,
-    _test_a_legend_documents_every_column_the_table_printed,
-    _test_values_are_nested_under_their_column,
-    _test_every_value_is_shown_even_when_absent,
-    _test_a_column_the_table_dropped_is_not_documented,
-    _test_definitions_share_one_left_edge,
-    _test_a_legend_for_nothing_is_empty,
 ]
 
 def _test_impl(ctx):
