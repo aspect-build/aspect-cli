@@ -13,6 +13,7 @@ load(
     "@aspect//worktree.axl",
     "testonly_held_by",
     "testonly_list_columns",
+    "testonly_list_order",
     "testonly_same_session",
 )
 load("@std//time.axl", "time")
@@ -660,8 +661,15 @@ def _test_the_agent_column_is_never_dropped(ctx):
     _eq("agent survives an empty column", by_key["agent"].always, True)
     _eq("notes does not, since it only ever carries exceptions", by_key["notes"].always, False)
     _eq("idle is right-aligned", by_key["idle"].right, True)
+
+    # The fixed-width columns come first and the two ragged ones last, so the
+    # numbers line up in a block and a long branch name cannot push them around.
     _eq("the slot leads", testonly_list_columns[0].key, "slot")
-    _eq("then what it holds", testonly_list_columns[1].key, "branch")
+    keys = [c.key for c in testonly_list_columns]
+    if keys.index("branch") < keys.index("leases"):
+        fail("branch belongs after the numbers: %r" % keys)
+    if keys.index("branch") > keys.index("agent"):
+        fail("branch belongs before the agent: %r" % keys)
 
 # A pid high enough that nothing is using it, for a record whose process is
 # gone. `kill -0` on it answers ESRCH, which is the whole question.
@@ -1208,6 +1216,43 @@ def _test_one_clones_lease_is_not_anothers(ctx):
     _eq("theirs to find", leased_slot(registry, "fix/login", "/other/clone/.git"), "theirs")
     _eq("unscoped still searches everything", leased_slot(registry, "fix/login"), "theirs")
 
+def _test_the_listing_leads_with_what_is_happening(ctx):
+    """Registry order is the order slots were created in, which tells a reader
+    nothing. What is in use belongs at the top, and among the slots they could
+    take, the one with the most state behind it."""
+
+    def row(slot, state, server = 0, base = False):
+        return {"slot": slot, "state": state, "server_pid": server, "output_base_present": base}
+
+    shuffled = [
+        row("e-cold-free", FREE),
+        row("d-partly-free", FREE, base = True),
+        row("c-warm-free", FREE, server = 4242, base = True),
+        row("b-reserved", RESERVED),
+        row("a-leased", LEASED),
+    ]
+
+    order = [r["slot"] for r in sorted(shuffled, key = testonly_list_order)]
+    _eq("in use, being set up, then free by warmth", order, [
+        "a-leased",
+        "b-reserved",
+        "c-warm-free",
+        "d-partly-free",
+        "e-cold-free",
+    ])
+
+def _test_the_listing_order_is_stable(ctx):
+    """Two slots alike in every way that matters still have to come out in the
+    same order every time, or a listing a reader is watching reshuffles itself
+    for no reason."""
+
+    def row(slot):
+        return {"slot": slot, "state": FREE, "server_pid": 0, "output_base_present": False}
+
+    first = [r["slot"] for r in sorted([row("bbb"), row("aaa")], key = testonly_list_order)]
+    second = [r["slot"] for r in sorted([row("aaa"), row("bbb")], key = testonly_list_order)]
+    _eq("by slot, either way round", first, second)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -1228,6 +1273,8 @@ _UNIT_TESTS = [
     _test_unreadable_registry_starts_over,
     _test_missing_registry_is_empty,
     _test_the_agent_column_is_never_dropped,
+    _test_the_listing_leads_with_what_is_happening,
+    _test_the_listing_order_is_stable,
     _test_the_refusal_names_who_holds_the_slot,
     _test_a_slot_you_already_hold_says_so,
     _test_a_different_session_is_still_a_refusal,

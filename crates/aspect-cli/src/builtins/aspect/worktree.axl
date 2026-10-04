@@ -658,11 +658,14 @@ _LIST_FOOTNOTES = [
     "a branch in (parentheses) is what a free slot last held — history, not somewhere to go. Allocation prefers the slot that last held the branch you ask for.",
 ]
 
+# The slot's own details first — what it is, what state it is in, how warm,
+# how old, how used — then what is using it. Fixed-width columns fall on the
+# left that way, so the numbers read as a block, and the two that vary in width
+# sit together at the end where a ragged edge costs nothing.
 _LIST_COLUMNS = [
     # The slot leads: it is the row's identity, the string that shows up in
     # `git worktree list` and in a path, and it is the same width every time.
     Column(key = "slot", header = "slot", always = True),
-    Column(key = "branch", header = "branch", always = True),
     Column(key = "state", header = "state", always = True),
     Column(key = "warmth", header = "warmth", always = True),
     Column(key = "idle", header = "idle", right = True),
@@ -670,6 +673,7 @@ _LIST_COLUMNS = [
     # holds. A reader should not have to pass a flag to see that.
     Column(key = "age", header = "age", right = True, always = True),
     Column(key = "leases", header = "leases", right = True, always = True),
+    Column(key = "branch", header = "branch", always = True),
     # Always: a pool with no agents running would otherwise never show that it
     # records which session holds a slot.
     Column(key = "agent", header = "agent", always = True),
@@ -717,6 +721,17 @@ def _history_note(slot: dict) -> str:
 
     times = "once" if prior == 1 else ("twice" if prior == 2 else "%d times" % prior)
     return "created %s ago, reused %s before this" % (phrase_ms(slot_age_ms(slot)), times)
+
+def _list_order(row: dict) -> tuple:
+    """How slots sort: in use first, then warmest, then by slot for stability.
+
+    Registry order is the order slots were created in, which tells a reader
+    nothing. What is happening now belongs at the top, and among the slots they
+    could actually take, the one with the most state behind it.
+    """
+    state = 0 if row["state"] == LEASED else (1 if row["state"] == RESERVED else 2)
+    warmth = 0 if row["server_pid"] else (1 if row["output_base_present"] else 2)
+    return (state, warmth, row["slot"])
 
 def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
@@ -1126,6 +1141,10 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "output_base_present": warmth.base,
         })
 
+    # Sorted before anything reads it, so the document, the table and
+    # `--verbose` all present the pool in the same order.
+    rows = sorted(rows, key = _list_order)
+
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
             "schema_version": _SCHEMA_VERSION,
@@ -1376,4 +1395,5 @@ worktree_list = task(
 # Exposed for worktree_test.axl; not part of any task's surface.
 testonly_held_by = _held_by
 testonly_list_columns = _LIST_COLUMNS
+testonly_list_order = _list_order
 testonly_same_session = _same_session
