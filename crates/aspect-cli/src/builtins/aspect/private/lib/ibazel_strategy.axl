@@ -1,0 +1,82 @@
+"""ibazel-compatible build notifications for watched targets."""
+
+load("./watch_result.axl", "watch_result")
+
+_NOTIFY_ENVIRONMENT = "IBAZEL_NOTIFY_CHANGES"
+_BUILD_STARTED = "IBAZEL_BUILD_STARTED\n"
+
+def _enabled(tags: list[str]) -> bool:
+    return "ibazel_notify_changes" in tags
+
+def _write(stream, message: str) -> error | None:
+    remaining = message
+    for _ in range(len(message) + 1):
+        if not remaining:
+            break
+        write_err, written = catch(stream.write, remaining)
+        if write_err != None:
+            return error("failed to write ibazel notification: %s" % write_err)
+        if written <= 0:
+            return error("failed to write ibazel notification: zero-byte write")
+        remaining = remaining[written:]
+    if remaining:
+        return error("failed to write complete ibazel notification")
+    flush_err, _ = catch(stream.flush)
+    return error("failed to flush ibazel notification: %s" % flush_err) if flush_err != None else None
+
+def _build_finished(result: struct, notify) -> struct:
+    status = "SUCCESS" if result.success else "FAILURE"
+    err = notify("IBAZEL_BUILD_COMPLETED %s\n" % status)
+    if err != None:
+        return watch_result.outcome(watch_result.RESTART, error = err)
+    if result.success and result.restart_required:
+        return watch_result.outcome(watch_result.RESTART)
+    return watch_result.outcome(watch_result.KEEP, status = "updated")
+
+def _new() -> struct:
+    state = {
+        "closed": False,
+        "stdin": None,
+    }
+
+    def attach(child) -> error | None:
+        attach_err, stream = catch(child.stdin)
+        if attach_err != None:
+            return error("failed to open child stdin for ibazel notifications: %s" % attach_err)
+        state["stdin"] = stream
+        return None
+
+    def notify(message: str) -> error | None:
+        stream = state["stdin"]
+        if stream == None:
+            return error("child stdin is unavailable for ibazel notifications")
+        return _write(stream, message)
+
+    def close(_description: str = "") -> None:
+        if state["closed"]:
+            return
+        state["closed"] = True
+        if state["stdin"] != None:
+            catch(state["stdin"].close)
+            state["stdin"] = None
+
+    return struct(
+        attach = attach,
+        build_finished = lambda result: _build_finished(result, notify),
+        build_started = lambda: notify(_BUILD_STARTED),
+        close = close,
+        connection_required = False,
+        connection_timeout_ms = None,
+        environment = {_NOTIFY_ENVIRONMENT: "y"},
+        initialize = lambda: None,
+        name = "ibazel",
+        stdin = "piped",
+        try_connect = lambda: (True, None),
+    )
+
+ibazel_strategy = namespace(
+    build_finished = _build_finished,
+    enabled = _enabled,
+    new = _new,
+    write = _write,
+)

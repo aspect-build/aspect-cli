@@ -15,18 +15,19 @@ def _stop_child(child) -> None:
 def _restart_outcome(result: struct) -> struct:
     if not result.success:
         return watch_result.outcome(watch_result.KEEP)
-    if result.restart_required or result.outputs_changed or result.runfiles != {}:
+    if result.restart_required or result.outputs_changed or result.changes_unknown or result.runfiles != {}:
         return watch_result.outcome(watch_result.RESTART)
     return watch_result.outcome(watch_result.KEEP, status = "unchanged")
 
 def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, on_fatal = None) -> struct:
     """Own a watched child and delegate build results to its update mode.
 
-    A candidate may connect after the child starts. Optional candidates remain
-    available for the child's lifetime; required candidates fail the watch if
-    their connection deadline expires. Once active, a candidate owns update
-    interpretation. A protocol fallback remains selected for the rest of the
-    watch session, while an update failure retries with a fresh child.
+    A candidate may activate immediately after spawn or connect later. Once
+    active it owns update interpretation. Optional candidates remain available
+    for the child's lifetime; required candidates fail the watch if their
+    connection deadline expires. Attachment, negotiation, initialization, or
+    explicit fallback permanently selects process restarts, while an update
+    failure retries with a fresh child.
     """
     state = {
         "child": None,
@@ -138,10 +139,14 @@ def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, o
         stop()
         candidates = new_candidates()
         environment = {}
+        stdin = None
         for candidate in candidates:
             environment.update(candidate.environment)
+            candidate_stdin = getattr(candidate, "stdin", None)
+            if candidate_stdin != None:
+                stdin = candidate_stdin
 
-        child = spawn(environment)
+        child = spawn(environment, stdin)
         state["child"] = child
         if child == None:
             for candidate in candidates:
@@ -149,6 +154,12 @@ def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, o
             return
         state["pending"] = candidates
         state["pending_started_at"] = clock()
+        for candidate in candidates:
+            attach_err = candidate.attach(child)
+            if attach_err != None:
+                warn(ctx.std, "%s attachment failed; falling back to process restarts: %s" % (candidate.name, attach_err))
+                restart_without_protocol(attach_err)
+                return
         poll_candidates()
 
     def build_started():
@@ -159,6 +170,7 @@ def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, o
         if err != None:
             warn(ctx.std, "%s build-start notification failed; restarting after the next successful build: %s" % (protocol.name, err))
             state["deferred_restart"] = True
+            close_protocol(str(err))
 
     def build_finished(result):
         """Apply a build result; return its user-facing status when kept."""

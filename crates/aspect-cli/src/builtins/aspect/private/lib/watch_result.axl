@@ -4,13 +4,14 @@ _FALLBACK = "fallback"
 _KEEP = "keep"
 _RESTART = "restart"
 
-def _result(success: bool, restart_required: bool = False, outputs_changed: bool = False, runfiles = None, sources = None) -> struct:
+def _result(success: bool, restart_required: bool = False, outputs_changed: bool = False, changes_unknown: bool = False, runfiles = None, sources = None) -> struct:
     """A build result; None deltas are unknown/restart, while {} is unchanged.
 
     Launch changes and output changes stay separate because notification-based
     strategies can keep running across rebuilt outputs.
     """
     return struct(
+        changes_unknown = changes_unknown,
         outputs_changed = outputs_changed,
         restart_required = restart_required,
         runfiles = runfiles,

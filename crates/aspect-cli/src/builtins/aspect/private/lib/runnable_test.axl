@@ -626,7 +626,7 @@ def _test_run_in_relative_dotdot(_ctx):
 # `determine_entrypoint` selects the exact `files_to_run` executable (pass 0)
 # and attaches the replayed `args` / `environment`.
 
-_RUNINFO_JSON = '{"executable": "_main/tools/format/format_real", "args": ["--config", "x"], "environment": {"FOO": "1"}, "inherited_environment": ["HOME"], "tags": ["supports_incremental_build_protocol"]}'
+_RUNINFO_JSON = '{"executable": "_main/tools/format/format_real", "args": ["--config", "x"], "environment": {"FOO": "1"}, "inherited_environment": ["HOME"], "tags": ["supports_incremental_build_protocol", "ibazel_notify_changes"]}'
 
 def _test_runinfo_selects_executable_over_heuristic(ctx):
     """Pass 0 picks the file whose basename matches the aspect's executable
@@ -664,7 +664,7 @@ def _test_runinfo_attaches_args_and_env(ctx):
     _eq("runinfo-args", ep.args, ["--config", "x"])
     _eq("runinfo-env", ep.environment, {"FOO": "1"})
     _eq("runinfo-inherited", ep.inherited_environment, ["HOME"])
-    _eq("runinfo-tags", ep.tags, ["supports_incremental_build_protocol"])
+    _eq("runinfo-tags", ep.tags, ["supports_incremental_build_protocol", "ibazel_notify_changes"])
 
 def _test_no_runinfo_yields_empty_args_env(ctx):
     """Without the aspect (no aspect_runinfo group), args/env default to empty

@@ -28,13 +28,13 @@ def _build_finished(scope: str, result: struct, run_cycle) -> struct:
     if scope == "sources":
         # Source clients consume workspace files directly, so a failed Bazel
         # build does not make their delta stale.
-        if result.success and (result.restart_required or result.outputs_changed):
+        if result.success and (result.restart_required or result.outputs_changed or result.changes_unknown):
             return watch_result.outcome(watch_result.RESTART)
         changes = result.sources
     else:
         if not result.success:
             return watch_result.outcome(watch_result.KEEP)
-        if result.restart_required or result.outputs_changed:
+        if result.restart_required or result.outputs_changed or result.changes_unknown:
             return watch_result.outcome(watch_result.RESTART)
         changes = result.runfiles
 
@@ -232,6 +232,7 @@ def _new(ctx: TaskContext, runfiles_baseline = None, sources = None, connection_
         return run_cycle(baseline) if baseline != None else protocol.Error("no baseline for the negotiated scope")
 
     return struct(
+        attach = lambda _child: None,
         build_finished = lambda result: _build_finished(state["scope"], result, run_cycle),
         build_started = lambda: None,
         close = close,
@@ -243,6 +244,7 @@ def _new(ctx: TaskContext, runfiles_baseline = None, sources = None, connection_
         },
         initialize = initialize,
         name = "incremental-build-protocol",
+        stdin = None,
         try_connect = try_connect,
     )
 

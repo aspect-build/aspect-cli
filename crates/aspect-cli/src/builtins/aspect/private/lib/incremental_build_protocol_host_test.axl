@@ -113,6 +113,8 @@ def _test_build_finished_handles_lifecycle_results(_ctx):
     _eq("output change restarts", outcome.action, watch_result.RESTART)
     outcome = incremental_build_protocol_host.build_finished("runfiles", watch_result.result(True, restart_required = True), cycle)
     _eq("launch change restarts", outcome.action, watch_result.RESTART)
+    outcome = incremental_build_protocol_host.build_finished("sources", watch_result.result(True, changes_unknown = True, sources = {}), cycle)
+    _eq("unknown prior changes restart sources", outcome.action, watch_result.RESTART)
     _eq("non-update results send no additional cycles", cycle_calls, [])
 
 def _test_build_finished_reports_cycle_error(_ctx):
