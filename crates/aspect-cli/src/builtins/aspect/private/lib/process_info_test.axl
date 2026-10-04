@@ -1,0 +1,78 @@
+"""Unit tests for lib/process_info.axl.
+
+Run with:
+  aspect dev test-process-info
+
+Everything here is asserted against this process, which is certainly alive, and
+against pid 0 and a pid nothing can own. The interesting case is pid reuse: a
+recorded pid that is live again under a different process must not read as the
+same one, because a worktree lease and a Bazel `server.pid.txt` both outlive
+whatever wrote them.
+"""
+
+load("./process_info.axl", "alive", "is_same_process", "started_at")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_this_process_is_alive(ctx):
+    _eq("alive", alive(ctx.std, ctx.std.process.id()), True)
+
+def _test_a_nonsense_pid_is_not_alive(ctx):
+    """0 and negatives are answered without asking the OS; `kill -0 0` signals
+    the whole process group, which must never be reached from here."""
+    _eq("zero", alive(ctx.std, 0), False)
+    _eq("negative", alive(ctx.std, -1), False)
+
+def _test_a_start_time_is_reported_and_stable(ctx):
+    me = ctx.std.process.id()
+    first = started_at(ctx.std, me)
+    if not first:
+        fail("this process should have a start time")
+    _eq("stable across calls", started_at(ctx.std, me), first)
+
+def _test_no_start_time_for_a_pid_that_is_not_running(ctx):
+    _eq("zero", started_at(ctx.std, 0), "")
+    _eq("negative", started_at(ctx.std, -1), "")
+
+def _test_a_matching_start_time_identifies_the_same_process(ctx):
+    me = ctx.std.process.id()
+    _eq("same process", is_same_process(ctx.std, me, started_at(ctx.std, me)), True)
+
+def _test_a_different_start_time_means_a_reused_pid(ctx):
+    """The case the start time exists for: the pid is live, but it belongs to
+    something else now. Treating that as the same process would resurrect a
+    session that has been gone for weeks."""
+    me = ctx.std.process.id()
+    _eq("not ours", is_same_process(ctx.std, me, "Thu  1 Jan 00:00:00 1970"), False)
+
+def _test_nothing_recorded_falls_back_to_liveness(ctx):
+    """A pid read from someone else's file — Bazel writes a pid and no start
+    time — has nothing to compare, so liveness is the best answer available."""
+    _eq("live, nothing recorded", is_same_process(ctx.std, ctx.std.process.id(), ""), True)
+    _eq("dead, nothing recorded", is_same_process(ctx.std, 0, ""), False)
+
+_UNIT_TESTS = [
+    _test_this_process_is_alive,
+    _test_a_nonsense_pid_is_not_alive,
+    _test_a_start_time_is_reported_and_stable,
+    _test_no_start_time_for_a_pid_that_is_not_running,
+    _test_a_matching_start_time_identifies_the_same_process,
+    _test_a_different_start_time_means_a_reused_pid,
+    _test_nothing_recorded_falls_back_to_liveness,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("process_info.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+process_info_tests = task(
+    summary = "Run the process-introspection AXL unit tests.",
+    kind = "test-process-info",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

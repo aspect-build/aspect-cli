@@ -1,8 +1,9 @@
 """Where Bazel keeps its own state on disk.
 
 Locations Bazel derives rather than publishes, for the tasks that have to find
-them without starting a server to ask. `aspect gc` needs them to know what it is
-looking at; `aspect worktree` needs them to pin an output base to a slot.
+them without starting a server to ask: `aspect gc` and `aspect output-bases` to
+know what they are looking at, `aspect worktree` to find the base a slot's path
+derives to.
 """
 
 def output_user_root(std) -> str:
@@ -21,7 +22,3 @@ def output_user_root(std) -> str:
     if std.env.os() == "macos":
         return home + "/Library/Caches/bazel/_bazel_" + user
     return home + "/.cache/bazel/_bazel_" + user
-
-bazel_paths = namespace(
-    output_user_root = output_user_root,
-)

@@ -41,6 +41,7 @@ reclaimed unless we positively know the session is gone.
 """
 
 load("@std//time.axl", "time")
+load("./process_info.axl", "is_same_process", "started_at")
 
 # Harnesses whose own environment names a session, so no configuration is
 # needed. `resume` is a format string for the command that returns to a session,
@@ -89,17 +90,6 @@ def _out(std, args: list[str]) -> str:
     out = std.process.command(args[0]).args(args[1:]) \
         .stdout("piped").stderr("null").spawn().wait_with_output()
     return out.stdout.strip() if out.status.code == 0 else ""
-
-def _process_start(std, pid: int) -> str:
-    """A process's start time, as the platform prints it.
-
-    Carried beside the pid because a pid alone is ambiguous: pids are reused,
-    and a lease outlives the process that took it. Compared as an opaque string
-    — the only thing asked of it is whether it still matches.
-    """
-    if pid <= 0:
-        return ""
-    return _out(std, ["ps", "-o", "lstart=", "-p", str(pid)])
 
 def _ancestry(std) -> struct:
     """The nearest recognized harness above this process, or an empty kind.
@@ -165,7 +155,7 @@ def _record(std, kind: str, id: str, pid: int, source: str) -> dict:
         "kind": kind,
         "id": id,
         "pid": pid,
-        "pid_start": _process_start(std, pid),
+        "pid_start": started_at(std, pid),
         "cwd": std.env.current_dir(),
         "source": source,
         "seen_ms": time.now_ms(),
@@ -179,14 +169,7 @@ def is_running(std, agent: dict) -> bool:
     be running", which is a question for `session_state` rather than an answer
     on its own — a record with no pid says nothing about the session behind it.
     """
-    pid = agent.get("pid", 0)
-    if pid <= 0:
-        return False
-    start = _process_start(std, pid)
-    if not start:
-        return False
-    recorded = agent.get("pid_start", "")
-    return start == recorded if recorded else True
+    return is_same_process(std, agent.get("pid", 0), agent.get("pid_start", ""))
 
 def _sessions_root(std, kind: str) -> str:
     """Where a harness keeps its sessions, or "" if that is not known for it.
