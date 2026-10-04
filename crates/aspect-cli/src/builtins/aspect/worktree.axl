@@ -36,9 +36,7 @@ the rest.
 
 Every task here runs under the pool lock and leaves the registry consistent with
 git before returning. See `private/lib/worktree.axl` for the pool model, why
-slots have fixed paths, and how the pool is bounded. On Aspect Workflows runners
-these tasks refuse: a runner builds one job in a checkout it discards, so there
-is nothing to pool.
+slots have fixed paths, and how the pool is bounded.
 """
 
 load("@std//time.axl", "time")
@@ -53,6 +51,7 @@ load(
 )
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
+load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/text.axl", "pad_left", "pad_right")
 load(
     "./private/lib/worktree.axl",
@@ -61,7 +60,6 @@ load(
     "acquire",
     "default_score",
     "drop_slot",
-    "enabled",
     "lock_digest",
     "lock_digest_at",
     "new_slot_id",
@@ -83,10 +81,6 @@ load(
 load("./private/lib/worktrees_trait.axl", "Worktrees")
 
 # --- constants ---------------------------------------------------------------
-
-_ON_RUNNER = ("`aspect worktree` is disabled on Aspect Workflows runners: a runner builds " +
-              "one job in a checkout it sets up and discards, so there is no second worktree " +
-              "to share a slot with and nothing to keep warm between jobs.")
 
 _POOL_BUSY = "another `aspect worktree` call is holding this pool's lock; try again"
 
@@ -121,11 +115,6 @@ def _pool_busy(ctx: TaskContext) -> TaskConclusion:
     """The refusal when another call holds the pool lock."""
     return _refuse(ctx, "pool_busy", _POOL_BUSY, exit_code = _EX_TEMPFAIL, retryable = True)
 
-def _on_runner(ctx: TaskContext) -> TaskConclusion:
-    """The refusal on an Aspect Workflows runner, where there is nothing to
-    pool."""
-    return _refuse(ctx, "disabled_on_runner", _ON_RUNNER)
-
 # --- git ---------------------------------------------------------------------
 
 def _git(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
@@ -143,6 +132,18 @@ def _git_try(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
     return r.out if r.ok else ""
 
 # --- entering the pool -------------------------------------------------------
+
+def _output_root(ctx: TaskContext) -> str:
+    """The output user root Bazel would use here, resolved as `aspect gc` and
+    `aspect output-bases` resolve it: the rc chain, else the platform default.
+
+    Resolved once per command and handed to everything that derives a slot's
+    output base. A repo with `startup --output_user_root=` in its `.bazelrc`
+    keeps its bases elsewhere, and a pool looking in the platform default finds
+    nothing there — every slot reads cold, and prune retires warm slots while
+    leaving the real bases behind.
+    """
+    return output_bases.output_user_root(ctx, "")
 
 def _pool(ctx: TaskContext) -> dict:
     """The pool for the working directory."""
@@ -214,7 +215,7 @@ def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
         "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
     )
 
-def _age_out(ctx: TaskContext, pool: dict, registry: dict) -> int:
+def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
     """Drop free slots nothing has touched in `PRUNE_AGE_DAYS`. Returns how many
     went, so the caller can persist a registry that no longer matches the disk.
 
@@ -224,10 +225,10 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict) -> int:
     had already stopped paying for itself.
     """
     dropped = 0
-    for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_AGE_DAYS):
+    for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_AGE_DAYS, root):
         label = registry["slots"][slot_id].get("last_branch", "") or slot_id
-        age = slot_age_days(ctx.std, pool, slot_id, registry["slots"][slot_id])
-        if drop_slot(ctx.std, pool, registry, slot_id).dropped:
+        age = slot_age_days(ctx.std, pool, slot_id, registry["slots"][slot_id], root)
+        if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
             info(ctx.std, "pruned slot last used %d days ago (%s)" % (age, label))
             dropped += 1
     return dropped
@@ -403,7 +404,7 @@ _LIST_COLUMNS = [
     ("notes", "notes", False),
 ]
 
-def _warmth_note(std, path: str, reused_from: str) -> str:
+def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
 
     A slot's value is its Bazel state, and that state can be gone — the server
@@ -421,15 +422,13 @@ def _warmth_note(std, path: str, reused_from: str) -> str:
 # --- task implementations ----------------------------------------------------
 
 def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
-    if not enabled(ctx.std):
-        return _on_runner(ctx)
-
     name = ctx.args.branch[0]
     cwd = ctx.std.env.current_dir()
     pool = _enter_pool(ctx)
     if not pool:
         return _pool_busy(ctx)
 
+    root = _output_root(ctx)
     base_ref = ctx.args.base_ref or _git(ctx, ["rev-parse", "HEAD"], cwd)
 
     # Score against the tree the slot will actually hold. An existing branch is
@@ -449,7 +448,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Persisted before any early return below. Pruning deletes directories and
     # output bases, so a registry still listing them would hand the next caller
     # a slot whose recorded `lock_digest` describes state that is gone.
-    if _age_out(ctx, pool, registry):
+    if _age_out(ctx, pool, registry, root):
         write_registry(ctx.std, pool["dir"], registry)
 
     # Git would refuse this at checkout anyway — a branch cannot be in two
@@ -506,7 +505,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     }
     write_registry(ctx.std, pool["dir"], registry)
 
-    warmth = warmth_of(ctx.std, path)
+    warmth = warmth_of(ctx.std, path, root)
     if ctx.args.output == "path":
         ctx.std.io.stdout.write(path + "\n")
         return 0
@@ -524,20 +523,18 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     info(ctx.std, "worktree ready: " + path)
     print("  branch: " + name)
-    print("  " + _warmth_note(ctx.std, path, chosen.reused_from))
+    print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
     print("")
     print("  cd \"$(aspect worktree path " + name + ")\"")
     return 0
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
-    if not enabled(ctx.std):
-        return _on_runner(ctx)
-
     name = ctx.args.name[0]
     pool = _enter_pool(ctx)
     if not pool:
         return _pool_busy(ctx)
 
+    root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
     target = _leased_slot(registry, name)
     if not target:
@@ -581,9 +578,6 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     return 0
 
 def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
-    if not enabled(ctx.std):
-        return TaskConclusion(exit_code = 1, message = _ON_RUNNER)
-
     name = ctx.args.name[0]
     pool = _pool(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
@@ -594,15 +588,13 @@ def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
     return 0
 
 def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
-    if not enabled(ctx.std):
-        return _on_runner(ctx)
-
     pool = _enter_pool(ctx)
     if not pool:
         return _pool_busy(ctx)
 
+    root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    victims = prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days)
+    victims = prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days, root)
 
     # The whole list goes out before anything is deleted, so the confirmation is
     # answered with the picture rather than a count.
@@ -614,10 +606,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         label = slot.get("last_branch", "") or "never used"
         candidates.append({
             "path": slot_path(pool, slot_id),
-            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot),
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
             "last_branch": slot.get("last_branch", ""),
         })
-        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(ctx.std, pool, slot_id, slot), label))
+        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(ctx.std, pool, slot_id, slot, root), label))
 
     doomed = "delete %d worktree slot(s) and their Bazel output bases" % len(victims)
     verdict = confirm.decide(
@@ -638,7 +630,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         for i, slot_id in enumerate(victims):
             path = slot_path(pool, slot_id)
             print("  [%d/%d] removing %s" % (i + 1, len(victims), path))
-            outcome = drop_slot(ctx.std, pool, registry, slot_id)
+            outcome = drop_slot(ctx.std, pool, registry, slot_id, root)
             if outcome.dropped:
                 pruned.append(path)
             else:
@@ -672,13 +664,11 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     return 0
 
 def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
-    if not enabled(ctx.std):
-        return _on_runner(ctx)
-
     # No lock: this only reads. `write_registry` renames into place, so a
     # concurrent `add` can never be observed half-written, and reconciling
     # without persisting costs nothing — `add` and `remove` reconcile too.
     pool = _pool(ctx)
+    root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
     checked_out = _checked_out_branches(ctx, pool)
     rows = []
@@ -686,7 +676,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         slot = registry["slots"][slot_id]
         lease = slot.get("lease") or {}
         path = slot_path(pool, slot_id)
-        warmth = warmth_of(ctx.std, path)
+        warmth = warmth_of(ctx.std, path, root)
         agent = lease.get("agent") or {}
         rows.append({
             "slot": slot_id,
@@ -701,8 +691,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "last_branch": slot.get("last_branch", ""),
             "owner": slot.get("owner_git_dir", ""),
             "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
-            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot),
-            "output_base": output_base_of(ctx.std, path),
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
+            "output_base": output_base_of(ctx.std, path, root),
             "server_pid": warmth.server,
             "output_base_present": warmth.base,
         })
@@ -814,7 +804,7 @@ _ADD_OUTPUT_ARG = {
 add = task(
     group = ["worktree"],
     summary = "Take a git worktree from a pool of reused paths, so Bazel starts warm.",
-    description = "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.\n\nDisabled on Aspect Workflows runners, which build one job in a checkout they discard.",
+    description = "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.",
     implementation = _add_impl,
     traits = [Worktrees],
     args = {

@@ -891,6 +891,7 @@ output_bases = namespace(
     classify = _classify,
     command = _command,
     configured_output_user_root = _configured_output_user_root,
+    output_user_root = _output_user_root,
     counts = _counts,
     default_policy = _default_policy,
     du_kb = _du_kb,
