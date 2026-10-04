@@ -14,8 +14,10 @@ load(
     "testonly_held_by",
     "testonly_list_columns",
     "testonly_list_order",
+    "testonly_nothing_to_release",
     "testonly_resolve_slot",
     "testonly_same_session",
+    "testonly_slot_in_use",
 )
 load("@std//time.axl", "time")
 load(
@@ -610,7 +612,7 @@ def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
     registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", {})}}
     msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", {})
     _eq("no holder claimed", "held by" in msg, False)
-    _eq("still says what to do", "aspect worktree remove" in msg, True)
+    _eq("still says what to do", "aspect worktree release" in msg, True)
 
 def _test_a_new_branch_does_not_adopt_its_bases_upstream(ctx):
     """Creating a branch from a remote-tracking ref records that ref as the new
@@ -1350,6 +1352,44 @@ def _test_another_clones_slot_does_not_resolve(ctx):
     _eq("not by id", testonly_resolve_slot(ctx, pool, registry, "cccc55556666"), "")
     _eq("not by name", testonly_resolve_slot(ctx, pool, registry, "their/work"), "")
 
+def _test_releasing_a_free_slot_points_at_prune(ctx):
+    """The case that renamed the command: a slot id handed to `release`. There is
+    no lease to end, and the command that does act on a free slot is named, with
+    the slot already substituted so the line can be pasted."""
+    registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
+    registry["slots"]["abc123abc123"]["last_branch"] = "dx-two"
+
+    msg = testonly_nothing_to_release(registry, "abc123abc123")
+
+    _eq("says it is free", "is free" in msg, True)
+    _eq("says what it last held", "dx-two" in msg, True)
+    _eq("and names the real command", "aspect worktree prune abc123abc123" in msg, True)
+
+def _test_pruning_a_leased_slot_points_at_release(ctx):
+    """The other direction, and the dangerous one: pruning a slot somebody is
+    working in would take the checkout and the warm base with it. Ending the
+    lease is the reversible thing and almost always what was meant."""
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", {})}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123")
+
+    _eq("names what it holds", "fix/login" in msg, True)
+    _eq("says what would be lost", "warm output base" in msg, True)
+    _eq("and names the reversible command", "aspect worktree release fix/login" in msg, True)
+
+def _test_pruning_a_slot_being_set_up_says_to_wait(ctx):
+    """A reserved slot is mid-checkout, so it is not there to delete and no
+    lease exists to release either. Neither of the other two messages fits."""
+    registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
+    reserve_slot(ctx.std, registry, "abc123abc123", "being/made")
+
+    msg = testonly_slot_in_use(registry, "abc123abc123")
+
+    _eq("says it is being set up", "being set up" in msg, True)
+    _eq("names the branch", "being/made" in msg, True)
+    if "release" in msg:
+        fail("there is no lease to release yet: %r" % msg)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -1379,6 +1419,9 @@ _UNIT_TESTS = [
     _test_reconcile_closes_the_history_entry_it_ends,
     _test_one_clones_lease_is_not_anothers,
     _test_a_slot_answers_to_its_id_and_to_its_branch,
+    _test_releasing_a_free_slot_points_at_prune,
+    _test_pruning_a_leased_slot_points_at_release,
+    _test_pruning_a_slot_being_set_up_says_to_wait,
     _test_a_leased_slots_old_branch_does_not_resolve,
     _test_another_clones_slot_does_not_resolve,
     _test_a_lease_with_no_agent_keeps_the_plain_refusal,

@@ -12,7 +12,7 @@ on a configuration change. No flag is injected to arrange any of it.
     slot=$(aspect worktree path fix/login) && cd "$slot"
     bazel test //...                   ->  the slot's output base, and its
                                            server too if the flags match
-    aspect worktree remove fix/login   ->  the slot goes back to the pool
+    aspect worktree release fix/login  ->  the slot goes back to the pool
 
 Nothing inside the slot has to be an Aspect command: Bazel derives the base
 from the workspace directory, so anything invoking Bazel there gets the same
@@ -324,17 +324,51 @@ def _free_slot(registry: dict, slot_id: str) -> str:
     last = registry["slots"][slot_id].get("last_branch", "")
     return "slot " + slot_id + " is free" + ((", last holding " + last) if last else "")
 
-def _nothing_to_release(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
-    """A free slot has no lease to end. Named for what the reader was looking at
-    rather than what they typed, since they came from a listing that showed it
-    as free, and the useful answer is which command acts on a free slot."""
-    return _refuse(
-        ctx,
-        "slot_not_leased",
-        _free_slot(registry, slot_id) + ", so there is nothing to release. " +
-        "A free slot keeps its Bazel state for whatever comes next; " +
-        "`aspect worktree prune --dry-run` shows which free slots can be deleted along with it.",
+def _nothing_to_release_message(registry: dict, slot_id: str) -> str:
+    """Why a free slot cannot be released, and what acts on one instead.
+
+    Named for what the reader was looking at rather than what they typed: they
+    came from a listing that showed this slot as free. The slot id is already
+    in the command, so the line can be pasted.
+    """
+    return (
+        _free_slot(registry, slot_id) + ", so there is no lease to release. " +
+        "A free slot keeps its Bazel output base, which is what makes the next `add` warm. " +
+        "To delete this slot and that output base now:\n\n" +
+        "  aspect worktree prune " + slot_id
     )
+
+def _nothing_to_release(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
+    return _refuse(ctx, "slot_not_leased", _nothing_to_release_message(registry, slot_id))
+
+def _slot_in_use_message(registry: dict, slot_id: str) -> str:
+    """Why a slot that is not free cannot be pruned.
+
+    Deleting one somebody is working in takes their checkout with it,
+    uncommitted work included, and the warm output base that is the reason to
+    keep the slot at all. Ending the lease is a different, reversible thing and
+    almost always what the caller meant — so that is the command offered, with
+    the branch already in it.
+
+    A slot being set up is a third case: no lease exists to release yet, and
+    nothing is there to delete, so the answer is to wait.
+    """
+    slot = registry["slots"][slot_id]
+    if slot["state"] == RESERVED:
+        pending = (slot.get("reservation") or {}).get("name", "")
+        return ("slot " + slot_id + " is being set up" + ((" for " + pending) if pending else "") +
+                " right now, so it is not there to delete. `aspect worktree list` shows when " +
+                "that has finished, or whether the `add` doing it has stopped.")
+
+    name = (slot.get("lease") or {}).get("name", "")
+    held = name or "a worktree this pool does not have a name for"
+    advice = ("  aspect worktree release " + name) if name else "  aspect worktree list --verbose"
+    return ("slot " + slot_id + " holds " + held + ", and pruning it would delete that " +
+            "checkout along with the slot's warm output base. To end the lease and keep " +
+            "the slot for the next `add`:\n\n" + advice)
+
+def _slot_in_use(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
+    return _refuse(ctx, "slot_in_use", _slot_in_use_message(registry, slot_id))
 
 def _nothing_checked_out(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
     """A free slot is a directory with no worktree in it, so there is nowhere to
@@ -391,7 +425,7 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
     where = slot_path(pool, slot_id)
     if not agent:
         return (name + " is already checked out at " + where +
-                ". Use it, or `aspect worktree remove " + name + "` first.")
+                ". Use it, or `aspect worktree release " + name + "` first.")
 
     # Reclaiming a slot you already hold needs nobody's permission, and a
     # refusal phrased for a stranger sends the reader to ask a question with no
@@ -399,7 +433,7 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
     if _same_session(mine, agent):
         return (name + " is already yours, checked out at " + where +
                 ". `aspect worktree path " + name + "` prints that path again, and " +
-                "`aspect worktree remove " + name + "` releases the slot when you are done.")
+                "`aspect worktree release " + name + "` hands the slot back when you are done.")
 
     state = session_state(ctx.std, agent)
     who = _holder(agent)
@@ -579,7 +613,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
         warn(ctx.std, ("pool is at its advisory limit of %d slots and all are in use; " +
                        "creating one more checkout and output base. " +
                        "`aspect worktree list` shows what is holding them, " +
-                       "`aspect worktree remove <branch>` releases one you are done with, and " +
+                       "`aspect worktree release <branch>` hands back one you are done with, and " +
                        "`aspect worktree prune --max-age-days=<days> --force` then deletes " +
                        "the free ones and their output bases") % budget)
 
@@ -970,7 +1004,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
                 ", which no lease accounts for — the slot was freed with that " +
                 "branch still in it, or something switched it there. " +
                 "`aspect worktree list` shows the slot; releasing it with " +
-                "`aspect worktree remove` under the branch it is leased as, or " +
+                "`aspect worktree release` under the branch it is leased as, or " +
                 "`git worktree remove " + elsewhere + "` from this clone, frees the branch.",
             )
         return _refuse(
@@ -986,7 +1020,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     write_registry(ctx.std, pool["dir"], registry)
     return _check_out_and_lease(ctx, pool, lock, registry, chosen, name, base_ref, token)
 
-def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
+def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.branch[0]
     pool = _pool(ctx)
     if not pool:
@@ -1088,13 +1122,27 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
 
-    # Age and state say which slots are eligible; a live Bazel server is what
-    # spares one. Applied here rather than only at deletion, so `--dry-run`
-    # previews what a real run would do instead of listing slots it would keep.
-    # The deletion loop checks again, for a server that started in between.
+    # Named a slot, or working by policy. Naming one says which, so age is not
+    # consulted — the argument is the decision.
+    eligible = []
+    if ctx.args.target:
+        asked = ctx.args.target[0]
+        found = _resolve_slot(ctx, pool, registry, asked)
+        if not found:
+            return _no_such_worktree(ctx, pool, registry, asked)
+        if registry["slots"][found]["state"] != FREE:
+            return _slot_in_use(ctx, registry, found)
+        eligible = [found]
+    else:
+        eligible = prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days, root)
+
+    # A live Bazel server is what spares a slot. Applied here rather than only at
+    # deletion, so `--dry-run` previews what a real run would do instead of
+    # listing slots it would keep. The deletion loop checks again, for a server
+    # that started in between.
     victims = []
     spared = []
-    for slot_id in prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days, root):
+    for slot_id in eligible:
         warmth = warmth_of(ctx.std, slot_path(pool, slot_id), root)
         if warmth.server:
             spared.append((
@@ -1177,8 +1225,11 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     if not victims and not spared:
-        info(ctx.std, "nothing to prune: no free slot has been idle for %d days, and none is empty" %
-                      ctx.args.max_age_days)
+        if ctx.args.target:
+            info(ctx.std, "nothing to prune")
+        else:
+            info(ctx.std, "nothing to prune: no free slot has been idle for %d days, and none is empty" %
+                          ctx.args.max_age_days)
     elif not victims:
         info(ctx.std, "nothing to prune: every slot idle for %d days is still held by a Bazel server" %
                       ctx.args.max_age_days)
@@ -1436,11 +1487,16 @@ add = task(
     } | _ADD_OUTPUT_ARG,
 )
 
-remove = task(
+# `release` and `list` would both shadow a name this module already uses — the
+# pool lock's `release`, and the builtin type — so these two symbols are named
+# for their command and `kind` carries the command name. A shadowed `release`
+# fails only when the deferred lock release runs, which no unit test reaches.
+worktree_release = task(
+    kind = "release",
     group = ["worktree"],
-    summary = "Release a worktree and return its slot to the pool, Bazel state intact.",
-    description = "Remove the worktree and return the slot to the pool. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, and is taken back only once the session that holds it is gone and the checkout is clean — so call this when you can.",
-    implementation = _remove_impl,
+    summary = "End the lease on <branch>: remove the worktree, keep the slot warm.",
+    description = "End the lease on a branch: the worktree goes, the slot stays. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, and is taken back only once the session that holds it is gone and the checkout is clean — so call this when you can.",
+    implementation = _release_impl,
     traits = [Worktrees],
     args = {
         "branch": args.positional(
@@ -1450,7 +1506,7 @@ remove = task(
         ),
         "force": args.boolean(
             default = False,
-            description = "Release the slot even when the worktree has uncommitted changes, discarding them. Without this, a dirty worktree is refused and the changed files are listed.",
+            description = "End the lease even when the worktree has uncommitted changes, discarding them. Without this, a dirty worktree is refused and the changed files are listed.",
         ),
     } | _OUTPUT_ARG,
 )
@@ -1481,14 +1537,19 @@ path = task(
 
 prune = task(
     group = ["worktree"],
-    summary = "Delete pooled slots that have gone stale, and their Bazel output bases.",
-    description = "Reclaim the disk held by free slots nothing has used for a while. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots are considered — a slot someone is working in is never deleted, whatever its age — and a slot whose Bazel server is still running is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nSlots stranded by a clone that was moved or deleted are collected too: no clone can lease them again, because `git worktree add` is scoped to one object store.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
+    summary = "Delete free slots and their Bazel output bases: one named, or all that have gone stale.",
+    description = "Reclaim the disk held by free slots. Name a branch or a slot id to delete that one whatever its age; name nothing and every free slot nothing has used for a while goes. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots are considered — a slot someone is working in is never deleted, whatever its age — and a slot whose Bazel server is still running is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nSlots stranded by a clone that was moved or deleted are collected too: no clone can lease them again, because `git worktree add` is scoped to one object store.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
     implementation = _prune_impl,
     traits = [Worktrees],
     args = {
+        "target": args.positional(
+            minimum = 0,
+            maximum = 1,
+            description = "A branch or a slot id to delete, as `aspect worktree list` shows them. Its age is not consulted — naming it is the decision. Leave it out to work by age across every free slot.",
+        ),
         "max_age_days": args.int(
             default = PRUNE_AGE_DAYS,
-            description = "Delete free slots untouched for at least this many days. `0` considers every free slot.",
+            description = "Delete free slots untouched for at least this many days, when no slot is named. `0` considers every free slot.",
         ),
         "dry_run": args.boolean(
             default = False,
@@ -1501,13 +1562,11 @@ prune = task(
     } | _OUTPUT_ARG,
 )
 
-# `list` would shadow the builtin type within this module, so the symbol is
-# named for its command and `kind` carries the command name.
 worktree_list = task(
     kind = "list",
     group = ["worktree"],
     summary = "List this repository's worktree slots, what holds them, and how warm each is.",
-    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree remove <branch>\n        Release the slot and let it keep its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale and what deleting them would reclaim. Without --dry-run it asks before deleting anything.",
+    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, whatever its age. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale and what deleting them all would reclaim. Without --dry-run it asks before deleting anything.",
     implementation = _list_impl,
     traits = [Worktrees],
     args = {
@@ -1522,5 +1581,7 @@ worktree_list = task(
 testonly_held_by = _held_by
 testonly_list_columns = _LIST_COLUMNS
 testonly_list_order = _list_order
+testonly_nothing_to_release = _nothing_to_release_message
 testonly_resolve_slot = _resolve_slot
+testonly_slot_in_use = _slot_in_use_message
 testonly_same_session = _same_session
