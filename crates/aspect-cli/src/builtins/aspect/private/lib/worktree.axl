@@ -31,7 +31,7 @@ match the recorded path again — and `prune` is what collects them.
 **Git is the source of truth; the registry is a cache.** A slot whose worktree
 git no longer knows about is free, whatever the registry says. That recovers
 from a `git worktree remove` run by hand, and from an agent that deleted its
-worktree without releasing the slot. Correctness never depends on `remove`
+worktree without releasing the slot. Correctness never depends on `release`
 being called.
 
 What it does not recover from is an agent that died with its checkout still in
@@ -60,10 +60,11 @@ peak concurrency. `max_slots` is advisory for the same reason: past it `add`
 warns and proceeds, because failing on a bookkeeping budget would send the
 caller back to plain `git worktree add`.
 
-Disk is held down by idle time, but only for **free** slots: `add` drops those nothing
-has touched in `PRUNE_IDLE_DAYS`, and `aspect worktree prune` does the same on
-demand. A leased slot is never taken on idle time alone, however long, because a lease
-is a checkout someone may still want. The one exception is `abandoned_lease`.
+Disk is held down by idle time, but only for **free** slots: `add` drops those
+nothing has touched in `PRUNE_IDLE_DAYS`, and `aspect worktree prune` does the
+same on demand. A leased slot is never taken on idle time alone, however long,
+because a lease is a checkout someone may still want. The one exception is
+`abandoned_lease`.
 
 Nothing here is specific to a developer machine. A CI runner that builds one
 throwaway checkout per job has no use for a pool, but nothing is injected into
@@ -195,6 +196,14 @@ def _rstrip(s: str, ch: str) -> str:
         s = s[:-1]
     return s
 
+def _lstrip(s: str, ch: str) -> str:
+    """`s` with every leading `ch` removed. Bounded like `_rstrip`."""
+    for _ in range(len(s)):
+        if not s.startswith(ch):
+            break
+        s = s[1:]
+    return s
+
 def normalize_remote(url: str) -> str:
     """A remote URL reduced to `host/path`, as a pool key.
 
@@ -260,12 +269,7 @@ def slug(s: str) -> str:
             out += ch.lower()
         else:
             out += "-"
-    out = _rstrip(out, "-")
-    for _ in range(len(out)):
-        if not out.startswith("-"):
-            break
-        out = out[1:]
-    return out or "worktree"
+    return _lstrip(_rstrip(out, "-"), "-") or "worktree"
 
 def pools_root_of(home: str) -> str:
     """Where every pool lives, under an explicit home directory.
@@ -520,12 +524,53 @@ def held_for_ms(entry: dict) -> int:
 def close_lease(registry: dict, slot_id: str) -> None:
     """Close the slot's open history entry, if it has one.
 
-    Tolerates there being none: a registry written before slots kept a history
-    has nothing to close, and neither has a slot freed twice.
+    Tolerates there being none, which is what a slot freed twice looks like.
     """
     history = registry["slots"][slot_id].get("history") or []
     if history and not history[-1].get("released_ms", 0):
         history[-1]["released_ms"] = time.now_ms()
+
+def mark_free(registry: dict, slot_id: str) -> str:
+    """Record that a slot's lease has ended, returning the branch it held.
+    Mutates `registry`.
+
+    The bookkeeping half of a lease ending, shared by every way one can end: a
+    `release` or a take-over drops the worktree first, while `reconcile` finds
+    that git has already lost it. The branch held becomes `last_branch`, so the
+    slot still scores well for that branch's next `add` — the Bazel state it
+    keeps is specific to what was built in it, and that is the whole reason to
+    keep the slot. `reservation` is cleared alongside `lease` so that a slot
+    never carries either one unless its state says it should.
+
+    The commit is not set here: only a caller that still has the worktree can
+    read it, and `release` is the one that does.
+    """
+    close_lease(registry, slot_id)
+    slot = registry["slots"][slot_id]
+    held = (slot.get("lease") or {}).get("name", "")
+    slot["state"] = FREE
+    slot["lease"] = None
+    slot["reservation"] = None
+    if held:
+        slot["last_branch"] = held
+    return held
+
+def mark_leased(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Record that a slot holds a worktree for `name`, taken by `agent`.
+    Mutates `registry`.
+
+    The counterpart to `mark_free`, and the only place a lease is written, so a
+    lease and the state that admits it cannot drift apart. Any reservation goes:
+    one is a promise to produce the worktree that now exists.
+
+    The history entry is the caller's to record first, because only the caller
+    knows which kind of claim this is — a fresh checkout counts as a lease, a
+    handover of the checkout already there does not.
+    """
+    slot = registry["slots"][slot_id]
+    slot["state"] = LEASED
+    slot["reservation"] = None
+    slot["lease"] = {"name": name, "since": time.now_ms(), "agent": agent}
 
 def slot_age_ms(slot: dict) -> int:
     """How long this slot has existed, in milliseconds.
@@ -607,9 +652,7 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         path = slot_path(pool, slot_id)
         if std.fs.exists(path) and (path in live or _is_our_worktree(std, pool, path)):
             continue
-        close_lease(registry, slot_id)
-        slot["state"] = FREE
-        slot["lease"] = None
+        mark_free(registry, slot_id)
 
     # The other direction: a worktree in one of this clone's slots that the
     # registry does not account for. Leased under the branch git has, with no
@@ -629,13 +672,12 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         slot = slots.get(slot_id) or new_slot_record(pool)
         if slot["state"] != FREE or slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
-        slot["state"] = LEASED
-        slot["lease"] = {"name": live[path], "since": time.now_ms(), "agent": {}}
+        slots[slot_id] = slot
+        mark_leased(registry, slot_id, live[path], {})
 
         # At least one worktree has been in here, which is more than the zero a
         # new record would claim. The real count went with the registry.
         slot["lease_count"] = max(slot.get("lease_count", 0), 1)
-        slots[slot_id] = slot
     return registry
 
 # --- slots and their warmth --------------------------------------------------
@@ -952,11 +994,7 @@ def free_slot(std, pool: dict, registry: dict, slot_id: str) -> None:
         catch(run_git, std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
     else:
         catch(run_git, std, ["worktree", "prune"], pool["git_common_dir"])
-    close_lease(registry, slot_id)
-    slot = registry["slots"][slot_id]
-    slot["state"] = FREE
-    slot["lease"] = None
-    slot["reservation"] = None
+    mark_free(registry, slot_id)
 
 def new_slot_id(std, pool: dict, registry: dict) -> str:
     """An id no slot in this pool is using."""

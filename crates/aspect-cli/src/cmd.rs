@@ -394,6 +394,19 @@ fn long_flag(scope: Scope<'_>, name: &str, arg: &Arg) -> String {
 
 // ── Arg → ClapArg ──────────────────────────────────────────────────────────
 
+/// Build the clap argument for one declared [`Arg`].
+///
+/// One subtlety is worth stating up front, because clap's two notions of
+/// "needed" do not line up with AXL's one. For a positional, `num_args` is
+/// cardinality — clap reads `num_args(1..=1)` as "one value if given at all" —
+/// so a `minimum = 1` positional parses as absent unless `required` is set too,
+/// and the task then indexes an empty list. But a declared default already
+/// meets the minimum with nothing typed, and clap checks `required` against
+/// argv rather than against the defaults it is about to apply, so marking a
+/// defaulted positional required refuses the bare command its default exists to
+/// serve. Requiredness is therefore a minimum with no default to meet it, and
+/// [`describe_arg`] derives it the same way so the help and the JSON surface
+/// cannot disagree.
 fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
     let id = clap_id(scope, name, arg);
     let long = long_flag(scope, name, arg);
@@ -487,15 +500,7 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 .value_parser(value_parser!(String))
                 .value_name(id)
                 .help(help_text(description))
-                // `num_args` is cardinality, not requiredness: clap reads
-                // `num_args(1..=1)` as "one value if given at all", so without
-                // this a `minimum = 1` positional parses as absent and the task
-                // indexes an empty list. A declared default already meets the
-                // minimum with nothing typed, and clap checks `required`
-                // against argv rather than against the defaults it is about to
-                // apply, so only a positional without one is required on the
-                // command line. `describe` derives requiredness the same way,
-                // and the two have to agree.
+                // Cardinality is not requiredness; see this function's docs.
                 .required(*minimum >= 1 && default.is_none())
                 .num_args(*minimum as usize..=*maximum as usize);
             if let Some(default) = default {
@@ -2643,11 +2648,7 @@ mod tests {
     }
 
     #[test]
-    fn a_positional_with_a_minimum_reaches_clap_as_required() {
-        // `num_args(1..=1)` is cardinality: clap reads it as "one value if given
-        // at all", so without `required` the task runs with an empty list and
-        // indexes it. `describe` derives requiredness from the same cardinality,
-        // and the two have to agree or the help lies about the surface.
+    fn positional_requiredness_follows_the_minimum_and_the_default() {
         let required = Arg::Positional {
             minimum: 1,
             maximum: 1,
@@ -2741,10 +2742,7 @@ mod tests {
         // default is what keeps it off the caller.
         assert_eq!(by_name("patterns")["required"], false);
         assert_eq!(by_name("patterns")["minimum"], 1);
-        assert_eq!(
-            by_name("patterns")["default"],
-            serde_json::json!(["//..."])
-        );
+        assert_eq!(by_name("patterns")["default"], serde_json::json!(["//..."]));
     }
 
     #[test]

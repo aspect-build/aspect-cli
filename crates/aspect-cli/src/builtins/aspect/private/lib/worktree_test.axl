@@ -38,6 +38,7 @@ load(
     "leased_slot",
     "lock_digest",
     "lock_digest_at",
+    "mark_free",
     "normalize_remote",
     "output_base_of",
     "owned_slots",
@@ -331,7 +332,7 @@ def _test_drop_slot_refuses_while_a_server_holds_it(ctx):
     _eq("base still there", ctx.std.fs.exists(base), True)
 
 def _test_lock_digest_agrees_between_a_file_and_a_ref(ctx):
-    """Allocation digests the lock from a git ref; `remove` digests it from the
+    """Allocation digests the lock from a git ref; `release` digests it from the
     checked-out file. The two must agree on identical content or no slot would
     ever score as a match — `git show` cannot preserve trailing bytes, so both
     sides normalize."""
@@ -902,7 +903,7 @@ def _test_creation_age_is_not_idleness(ctx):
 
 def _test_freeing_a_slot_closes_its_history_entry(ctx):
     """`free_slot` is one of the two ways a lease ends, so it has to close the
-    entry the same way `remove` does — otherwise a slot's history reads as
+    entry the same way `release` does — otherwise a slot's history reads as
     though every branch it ever held is still checked out."""
     env = _repo_with_worktree(ctx, dirty = False)
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
@@ -913,6 +914,44 @@ def _test_freeing_a_slot_closes_its_history_entry(ctx):
     entry = registry["slots"][env.slot_id]["history"][-1]
     if not entry["released_ms"]:
         fail("freeing the slot should have closed its history entry")
+
+def _test_a_lease_ending_leaves_the_branch_as_the_slots_last(ctx):
+    """Every way a lease ends goes through `mark_free`, and what it records is
+    what makes the slot worth keeping: the branch held becomes `last_branch`, so
+    the next `add` for that branch scores this slot — its Bazel state is state
+    for *that* tree. A take-over and a reconcile used to drop it, which quietly
+    sent the next request for the branch to a colder slot.
+
+    `reservation` goes with `lease` so a freed slot carries neither. Every
+    reader gates on `state`, so a left-behind reservation is inert rather than
+    harmful, but a slot that contradicts itself is a trap for the next reader.
+    """
+    registry = {"slots": {"s1": _leased("/owner/.git", "fix/login", _A_SESSION)}}
+    registry["slots"]["s1"]["reservation"] = {"name": "fix/login", "token": "t"}
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+
+    held = mark_free(registry, "s1")
+    slot = registry["slots"]["s1"]
+
+    _eq("reports the branch it ended", held, "fix/login")
+    _eq("which the slot remembers", slot["last_branch"], "fix/login")
+    _eq("and is free", slot["state"], FREE)
+    _eq("with no lease", slot["lease"], None)
+    _eq("and no reservation", slot["reservation"], None)
+    _eq("scores for that branch again", default_score(slot, {"name": "fix/login"}) > 0, True)
+
+def _test_freeing_a_slot_with_no_lease_invents_no_branch(ctx):
+    """`mark_free` is reached twice for one slot — a `release` that raced a
+    `reconcile`, say — and the second call has no lease to read. It must leave
+    the branch the first call recorded rather than clearing it."""
+    registry = {"slots": {"s1": _leased("/owner/.git", "fix/login", {})}}
+
+    first = mark_free(registry, "s1")
+    second = mark_free(registry, "s1")
+
+    _eq("the first call names the branch", first, "fix/login")
+    _eq("the second has none to name", second, "")
+    _eq("but the slot keeps it", registry["slots"]["s1"]["last_branch"], "fix/login")
 
 def _test_the_history_says_who_held_each_lease(ctx):
     """On a machine running several agents, which session had a slot is the
@@ -1209,7 +1248,7 @@ def _test_one_clones_lease_is_not_anothers(ctx):
     """Clones share a pool directory but not the slots in it, and each has its
     own refs — so one clone holding `fix/login` says nothing about another's.
     Searching every slot made `add` refuse the second clone over a session that
-    holds nothing of theirs, and `remove` report a release it did not do."""
+    holds nothing of theirs, and `release` report a release it did not do."""
     registry = {"slots": {
         "theirs": _leased("/other/clone/.git", "fix/login", {}),
         "mine": _slot("/my/clone/.git"),
@@ -1461,6 +1500,8 @@ _UNIT_TESTS = [
     _test_age_and_idleness_answer_in_milliseconds,
     _test_creation_age_is_not_idleness,
     _test_freeing_a_slot_closes_its_history_entry,
+    _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
+    _test_freeing_a_slot_with_no_lease_invents_no_branch,
     _test_the_history_says_who_held_each_lease,
     _test_a_person_leaves_no_session_in_the_history,
     _test_a_handover_records_a_holder_without_counting_a_lease,

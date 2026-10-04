@@ -205,12 +205,12 @@ def _test_scan_lists_youngest_first(ctx):
     ages = [b.last_used for b in fx.scan(ctx, root)]
     _eq("descending last use", ages, sorted(ages, reverse = True))
 
-def _test_fmt_age(ctx):
-    _eq("minutes", output_bases.fmt_age(5 * 60 * 1000000), "5m")
-    _eq("hours", output_bases.fmt_age(3 * fx.HOUR_US), "3h")
-    _eq("hours up to two days", output_bases.fmt_age(47 * fx.HOUR_US), "47h")
-    _eq("days", output_bases.fmt_age(45 * fx.DAY_US), "45d")
-    _eq("clock skew reads as zero", output_bases.fmt_age(-5), "0m")
+def _test_fmt_elapsed(ctx):
+    _eq("minutes", output_bases.fmt_elapsed(5 * 60 * 1000000), "5m")
+    _eq("hours", output_bases.fmt_elapsed(3 * fx.HOUR_US), "3h")
+    _eq("hours up to two days", output_bases.fmt_elapsed(47 * fx.HOUR_US), "47h")
+    _eq("days", output_bases.fmt_elapsed(45 * fx.DAY_US), "45d")
+    _eq("clock skew reads as zero", output_bases.fmt_elapsed(-5), "0m")
 
 def _server(ctx, base, output_base = ""):
     """A stand-in Bazel server for `base`: a live process whose command line
@@ -606,7 +606,7 @@ _UNIT_TESTS = [
     _test_a_just_used_orphan_is_held_back,
     _test_an_idle_base_is_removed_even_with_its_workspace,
     _test_scan_lists_youngest_first,
-    _test_fmt_age,
+    _test_fmt_elapsed,
     _test_a_running_server_vetoes_the_age_rule,
     _test_the_server_veto_survives_another_spelling_of_the_root,
     _test_a_process_that_is_not_a_server_does_not_veto,

@@ -24,6 +24,9 @@ load(
     "label",
     "resume_hint",
     "session_state",
+    "testonly_binaries",
+    "testonly_env_detectors",
+    "testonly_harnesses",
 )
 
 _AGENT_VARS = [
@@ -201,6 +204,22 @@ def _test_resume_is_offered_only_where_the_command_is_known(ctx):
     _eq("unverified harness", resume_hint({"kind": "codex", "id": "abc"}), "")
     _eq("no session id", resume_hint({"kind": "claude-code", "id": ""}), "")
 
+def _test_every_described_harness_is_a_kind_detection_can_report(ctx):
+    """The tables are reached from opposite ends: detection produces a kind,
+    `_HARNESSES` is looked up by one. A kind described in the second that no
+    layer in the first can produce reads as support for a harness while being
+    permanently unreachable — `session_state` would answer `unknown` and
+    `resume_hint` nothing, with the row sitting there looking correct.
+    """
+    detectable = {d.kind: True for d in testonly_env_detectors}
+    for kind in testonly_binaries.values():
+        detectable[kind] = True
+
+    for kind in testonly_harnesses:
+        if kind not in detectable:
+            fail("_HARNESSES describes " + kind + ", which no detection layer reports; " +
+                 "add it to _ENV_DETECTORS or _BINARIES, or correct the spelling")
+
 def _test_a_person_at_a_terminal_is_not_an_agent(ctx):
     """Detection has to come back empty for a human, or every slot would be
     labelled with whatever process happened to be above it."""
@@ -229,6 +248,7 @@ _UNIT_TESTS = [
     _test_a_running_process_outranks_the_session_check,
     _test_label_is_a_glance_not_a_copy_source,
     _test_resume_is_offered_only_where_the_command_is_known,
+    _test_every_described_harness_is_a_kind_detection_can_report,
     _test_a_person_at_a_terminal_is_not_an_agent,
 ]
 

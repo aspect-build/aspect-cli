@@ -383,7 +383,7 @@ def _why(b, now_us: int, home: str = "") -> str:
         return "left by an interrupted gc"
     if b.state == output_bases.ORPHAN:
         return "workspace gone: " + shown
-    return "unused for " + output_bases.fmt_age(now_us - b.last_used) + workspace
+    return "unused for " + output_bases.fmt_elapsed(now_us - b.last_used) + workspace
 
 def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
     """Everything a run will remove, listed before it asks, so the confirmation
@@ -398,7 +398,7 @@ def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
         say(streaming, "  Bazel download cache: %d of %s unused for %s or more, %s" % (
             len(plan.stale),
             pluralize(plan.cache_entries, "entry", "entries"),
-            output_bases.fmt_age(policy.download_cache_max_idle_us),
+            output_bases.fmt_elapsed(policy.download_cache_max_idle_us),
             fmt_kb(_stale_kb(plan)),
         ))
 

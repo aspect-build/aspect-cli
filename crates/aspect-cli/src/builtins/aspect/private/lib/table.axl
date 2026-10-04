@@ -27,12 +27,9 @@ Column = record(
     always = field(bool, default = False),
 )
 
-def shown_columns(rows: list[dict], columns: list) -> list:
-    """The columns a table of `rows` would actually print.
-
-    A column nothing fills is dropped, unless its absence would hide something.
-    The legend asks the same question, so it is answered in one place.
-    """
+def _shown_columns(rows: list[dict], columns: list) -> list:
+    """The columns a table of `rows` would actually print: a column nothing
+    fills is dropped, unless its absence would hide something."""
     return [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
 
 def render(rows: list[dict], columns: list) -> list[str]:
@@ -41,7 +38,7 @@ def render(rows: list[dict], columns: list) -> list[str]:
     Each column is sized to the widest of its header and its cells. The last
     one is not padded, so no row carries trailing spaces.
     """
-    used = shown_columns(rows, columns)
+    used = _shown_columns(rows, columns)
     widths = {c.key: max([len(c.header)] + [len(r.get(c.key, "")) for r in rows]) for c in used}
 
     def line(cells):
