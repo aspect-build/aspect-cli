@@ -70,6 +70,7 @@ load(
     "RESERVED",
     "abandoned_lease",
     "acquire",
+    "close_lease",
     "default_score",
     "drop_slot",
     "free_slot",
@@ -85,12 +86,14 @@ load(
     "prunable_slots",
     "read_registry",
     "reconcile",
+    "record_lease",
     "release",
     "reservation_abandoned",
     "reserve_slot",
     "reserving_slot",
     "run_git",
     "slot_age_days",
+    "slot_created_days",
     "slot_path",
     "slug",
     "warmth_of",
@@ -547,6 +550,7 @@ def _check_out_and_lease(
         warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
         return _pool_busy(ctx)
 
+    record_lease(registry, chosen.id, name)
     slot = registry["slots"][chosen.id]
     slot["state"] = LEASED
     slot["reservation"] = None
@@ -612,6 +616,32 @@ _LIST_COLUMNS = [
     Column(key = "notes", header = "notes"),
 ]
 
+def _age_phrase(days: int) -> str:
+    """How long ago, for a slot's creation date."""
+    if days == 0:
+        return "created today"
+    if days == 1:
+        return "created yesterday"
+    return "created %d days ago" % days
+
+def _history_note(slot: dict) -> str:
+    """How old this slot is and how much use it had before this lease.
+
+    Plain counting, because the pool's whole claim is that a slot gets used
+    again: a slot being reused for the seventh time is that claim holding, and a
+    pool where every slot reads "new" is one that grew instead of turning over.
+
+    `lease_count` already includes the lease being handed over, so prior use is
+    one less — otherwise a slot created a moment ago would report having been
+    leased before.
+    """
+    prior = slot.get("lease_count", 0) - 1
+    if prior <= 0:
+        return "new slot: this is the first worktree it has held"
+
+    times = "once" if prior == 1 else ("twice" if prior == 2 else "%d times" % prior)
+    return "%s, reused %s before this" % (_age_phrase(slot_created_days(slot)), times)
+
 def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
 
@@ -644,6 +674,7 @@ def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, nam
         return 0
     if ctx.args.output == "json":
         lease = registry["slots"][slot_id].get("lease") or {}
+        slot = registry["slots"][slot_id]
         ctx.std.io.stdout.write(json.encode({
             "schema_version": _SCHEMA_VERSION,
             "path": path,
@@ -653,12 +684,16 @@ def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, nam
             "agent": lease.get("agent") or {},
             "server_pid": warmth.server,
             "output_base_present": warmth.base,
+            "lease_count": slot.get("lease_count", 0),
+            "slot_created_days": slot_created_days(slot),
+            "output_base": output_base_of(ctx.std, path, root),
         }, indent = 2) + "\n")
         return 0
 
     info(ctx.std, "worktree ready: " + path)
     print("  branch: " + name)
     print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
+    print("  " + _history_note(registry["slots"][slot_id]))
     print("")
     print("  slot=$(aspect worktree path " + name + ") && cd \"$slot\"")
     return 0
@@ -807,6 +842,7 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     else:
         slot["lock_digest"] = ""
 
+    close_lease(registry, target)
     slot["state"] = FREE
     slot["last_commit"] = head
     slot["last_branch"] = name
@@ -958,6 +994,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "owner": slot.get("owner_git_dir", ""),
             "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
             "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
+            "created_days": slot_created_days(slot),
+            "lease_count": slot.get("lease_count", 0),
+            "history": slot.get("history") or [],
             "output_base": output_base_of(ctx.std, path, root),
             "server_pid": warmth.server,
             "output_base_present": warmth.base,
@@ -1039,10 +1078,14 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     if ctx.args.verbose:
         print("")
         for r in rows:
-            print("  " + (r["branch"] or r["name"] or r["last_branch"] or r["slot"]))
+            print("  " + (r["branch"] or r["name"] or r["reserved_for"] or r["last_branch"] or r["slot"]))
             print("    slot:        " + r["path"])
             print("    output base: " + r["output_base"] +
                   ("" if r["output_base_present"] else "  (missing)"))
+            print("    leases:      %d, %s" % (r["lease_count"], _age_phrase(r["created_days"])))
+            for entry in reversed(r["history"]):
+                print("      " + entry.get("name", "?") +
+                      ("" if entry.get("released_ms", 0) else "  (current)"))
     print("")
     if foreign:
         print("  %d slot(s) belong to another clone of this repository and cannot be leased here." % foreign)

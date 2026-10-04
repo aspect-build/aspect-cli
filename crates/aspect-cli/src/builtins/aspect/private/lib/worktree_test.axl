@@ -18,6 +18,7 @@ load(
     "RESERVED",
     "abandoned_lease",
     "acquire",
+    "close_lease",
     "default_score",
     "drop_slot",
     "free_slot",
@@ -32,12 +33,14 @@ load(
     "prunable_slots",
     "read_registry",
     "reconcile",
+    "record_lease",
     "release",
     "reservation_abandoned",
     "reserve_slot",
     "reserving_slot",
     "run_git",
     "slot_age_days",
+    "slot_created_days",
     "slot_path",
     "slug",
     "warmth_of",
@@ -738,6 +741,77 @@ def _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch(ctx):
     if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
         fail("a worktree whose directory is gone should have been pruned from git")
 
+def _test_a_slot_counts_the_worktrees_it_has_held(ctx):
+    """The count is the pool's claim measured rather than asserted: a slot on
+    its seventh lease has saved six cold starts."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+
+    record_lease(registry, "s1", "fix/login")
+    close_lease(registry, "s1")
+    record_lease(registry, "s1", "spike/perf")
+
+    slot = registry["slots"]["s1"]
+    _eq("two leases", slot["lease_count"], 2)
+    _eq("both remembered", [h["name"] for h in slot["history"]], ["fix/login", "spike/perf"])
+    if not slot["history"][0]["released_ms"]:
+        fail("the first lease ended and should say so")
+    _eq("the current one is open", slot["history"][1]["released_ms"], 0)
+
+def _test_the_history_is_bounded(ctx):
+    """A slot reused for months would otherwise grow its registry entry
+    forever to answer a question only the recent past bears on."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    for i in range(25):
+        record_lease(registry, "s1", "branch-%d" % i)
+        close_lease(registry, "s1")
+
+    slot = registry["slots"]["s1"]
+    _eq("every lease is counted", slot["lease_count"], 25)
+    _eq("only the recent ones are kept", len(slot["history"]), 10)
+    _eq("and they are the recent ones", slot["history"][-1]["name"], "branch-24")
+
+def _test_closing_without_a_history_is_harmless(ctx):
+    """A registry written before slots kept a history has nothing to close, and
+    neither has a slot freed twice."""
+    registry = {"slots": {"s1": {"state": LEASED}}}
+    close_lease(registry, "s1")
+
+    record_lease(registry, "s1", "fix/login")
+    close_lease(registry, "s1")
+    first = registry["slots"]["s1"]["history"][0]["released_ms"]
+    close_lease(registry, "s1")
+    _eq("the closed entry is not touched again", registry["slots"]["s1"]["history"][0]["released_ms"], first)
+
+def _test_creation_age_is_not_idleness(ctx):
+    """`slot_created_days` only grows; `slot_age_days` is what `prune` acts on
+    and resets whenever Bazel touches the output base. Reporting one as the
+    other would tell a reader a slot was new when it had been idle for a month,
+    or ancient when it had just been used."""
+    _eq("nothing recorded", slot_created_days({}), 0)
+    _eq("three days", slot_created_days({"created_ms": time.now_ms() - 3 * _DAY_MS}), 3)
+
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    old = _slot(pool["git_common_dir"], age_days = 30)
+    base = output_base_of(ctx.std, slot_path(pool, "s1"), tmp + "/root")
+    ctx.std.fs.create_dir_all(base)
+    _eq("created a month ago", slot_created_days(old), 30)
+    _eq("but used just now", slot_age_days(ctx.std, pool, "s1", old, tmp + "/root"), 0)
+
+def _test_freeing_a_slot_closes_its_history_entry(ctx):
+    """`free_slot` is one of the two ways a lease ends, so it has to close the
+    entry the same way `remove` does — otherwise a slot's history reads as
+    though every branch it ever held is still checked out."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    record_lease(registry, env.slot_id, "wip")
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    entry = registry["slots"][env.slot_id]["history"][-1]
+    if not entry["released_ms"]:
+        fail("freeing the slot should have closed its history entry")
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -786,6 +860,11 @@ _UNIT_TESTS = [
     _test_reconcile_leaves_a_reservation_alone,
     _test_freeing_a_slot_keeps_its_output_base,
     _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch,
+    _test_a_slot_counts_the_worktrees_it_has_held,
+    _test_the_history_is_bounded,
+    _test_closing_without_a_history_is_harmless,
+    _test_creation_age_is_not_idleness,
+    _test_freeing_a_slot_closes_its_history_entry,
 ]
 
 def _test_impl(ctx):
