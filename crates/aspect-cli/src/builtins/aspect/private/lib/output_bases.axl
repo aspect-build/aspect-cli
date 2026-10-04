@@ -716,11 +716,12 @@ _Column = record(
 )
 
 # The listing's columns, in order. `size` is dropped unless sizes were
-# measured.
+# measured; `bazel server` holds a running server's resident memory, blank when
+# none runs.
 COLUMNS = [
     _Column(header = "last used", cell = lambda b, v: _fmt_age(v.now_us - b.last_used) + " ago", right = True),
     _Column(header = "size", cell = lambda b, v: _fmt_kb(v.sizes.get(b.path, 0)), right = True),
-    _Column(header = "server memory", cell = lambda b, v: _fmt_kb(v.servers[b.path]) if b.path in v.servers else "", right = True, optional = True),
+    _Column(header = "bazel server", cell = lambda b, v: _fmt_kb(v.servers[b.path]) if b.path in v.servers else "", right = True, optional = True),
     _Column(header = "output base", cell = lambda b, v: b.name),
     _Column(header = "repository", cell = lambda b, v: _git(v, b, "repository"), max_width = 32, optional = True),
     _Column(header = "branch", cell = lambda b, v: _git(v, b, "branch"), max_width = 40, optional = True),

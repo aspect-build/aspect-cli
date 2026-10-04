@@ -500,7 +500,7 @@ def _test_a_group_drops_columns_it_has_no_values_for(ctx):
     _eq("dropped when none does", bare, "    last used  output base")
     _eq("size only when measured", "size" in output_bases.group_table([a], output_bases.View(now_us = 0, sizes = {a.path: 4}))[0], True)
     served = output_bases.group_table([a, b], output_bases.View(now_us = 0, servers = {a.path: 2048}))
-    _eq("server memory when one runs", "server memory" in served[0], True)
+    _eq("a running Bazel server's memory under its own column", "bazel server" in served[0], True)
     _eq("its value", "2 MB" in served[1], True)
 
 def _test_resolve_root_refuses_a_missing_root(ctx):
