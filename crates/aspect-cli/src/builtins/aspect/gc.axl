@@ -27,10 +27,12 @@ terminal, so a `gc` wired into CI or a cron has to state that it deletes rather
 than inheriting it from a default.
 
 It never touches a base with a running server whose workspace exists, or anything
-under the output user root not named like an output base. An orphan's server is
-stopped before its base is removed: nothing can use it. A base whose possible
-server `ps` cannot identify, as on an image without procps, is never removed: it
-cannot be confirmed idle or stopped.
+under the output user root not named like an output base, and never treats an
+`aspect worktree` pool slot as orphaned — a free slot has no worktree on purpose
+— though an idle one goes by age like any base. An orphan's server is stopped
+before its base is removed: nothing can use it. A base whose possible server
+`ps` cannot identify, as on an image without procps, is never removed: it cannot
+be confirmed idle or stopped.
 
 `--bazel-output-base` overrides the rules: it removes the named bases outright,
 whatever their state, stopping a running server first, and leaves the download
@@ -374,7 +376,7 @@ def _why(b, now_us: int, home: str = "") -> str:
     are shown with `~`."""
     s = output_bases.STATES[b.state]
     shown = output_bases.tilde(b.workspace, home)
-    workspace = "; workspace " + shown if b.workspace else ""
+    workspace = ("; worktree pool slot " if b.pooled else "; workspace ") + shown if b.workspace else ""
     if not s.removable:
         return "requested; " + s.label + workspace
     if b.state == output_bases.TRASH:
@@ -558,7 +560,7 @@ An output base is removed when its workspace is gone (once it has not been used 
 
 `--bazel-output-base` removes the named bases instead, whatever their state.
 
-Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`). `aspect output-bases` lists every base and its state, read-only.""",
+Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`), and never treats an `aspect worktree` pool slot as orphaned; an idle one still goes by age. `aspect output-bases` lists every base and its state, read-only.""",
     implementation = _gc_impl,
     args = {
         "output_user_root": output_bases.output_user_root_arg(),
