@@ -206,12 +206,18 @@ def normalize_remote(url: str) -> str:
     GitHub and a GitLab URL for the same code become separate pools, because
     guessing that two hosts serve one repository is a worse failure than keeping
     two pools.
+
+    "" for a remote that is not a host and a path at all — a filesystem path, a
+    `file://` URL, or anything with a `..` in it. Those have no host to key on,
+    and a key that began with a separator or climbed out of the pools root would
+    compose into a directory the caller could not then recognize. The caller
+    keys those on a slug instead.
     """
     s = url.strip()
     if not s:
         return ""
     had_scheme = False
-    for prefix in ["ssh://", "https://", "http://", "git://"]:
+    for prefix in ["ssh://", "https://", "http://", "git://", "file://"]:
         if s.startswith(prefix):
             s = s[len(prefix):]
             had_scheme = True
@@ -223,6 +229,9 @@ def normalize_remote(url: str) -> str:
         colon = s.find(":")
         if colon > 0 and (at < 0 or at < colon):
             s = s[:colon] + "/" + s[colon + 1:]
+    if s.startswith("/") or s.startswith(".") or s.startswith("~"):
+        return ""
+
     at = s.find("@")
     slash = s.find("/")
     if at > 0 and (slash < 0 or at < slash):
@@ -233,7 +242,10 @@ def normalize_remote(url: str) -> str:
     s = _rstrip(s, "/")
     if s.endswith(".git"):
         s = s[:-len(".git")]
-    return _rstrip(s, "/").lower()
+    key = _rstrip(s, "/").lower()
+    if ".." in key.split("/"):
+        return ""
+    return key
 
 def slug(s: str) -> str:
     """Arbitrary text as a lowercase, filesystem-safe token.
@@ -283,9 +295,12 @@ def pool_of(std, cwd: str) -> dict:
     origin = git_out(std, ["remote", "get-url", "origin"], cwd)
     pool_id = normalize_remote(origin)
     if not pool_id:
-        # No origin: fall back to the clone's own git dir so the pool is at
-        # least stable for this machine, and say so in `list`.
-        pool_id = "local/" + slug(common)
+        # Either there is no origin, or it is a filesystem path rather than a
+        # host and a path. Keying on a slug keeps every clone of the same local
+        # repository in one pool and keeps the key free of separators; with no
+        # origin at all the clone's own git dir is the most that can be said,
+        # and `list` says so.
+        pool_id = "local/" + slug(origin or common)
     return {
         "id": pool_id,
         "git_common_dir": common,
@@ -570,11 +585,20 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
 
-        # A lease is over when git has dropped the worktree. Git is the only
-        # authority; nothing outside it records that a slot is in use.
-        if slot_path(pool, slot_id) not in live_paths:
-            slot["state"] = FREE
-            slot["lease"] = None
+        # A lease is over when git has dropped the worktree AND the worktree is
+        # really gone. Git alone is not enough: if the two sides spell the same
+        # directory differently, every lease reads as ended, and the next `add`
+        # is handed an occupied slot to force-remove. A worktree that is plainly
+        # sitting there outranks git's silence about it.
+        path = slot_path(pool, slot_id)
+        if path in live_paths:
+            continue
+        if std.fs.exists(path + "/.git"):
+            warn(std, "git does not list a worktree at " + path + " but one is there; " +
+                      "keeping the lease rather than handing the slot to someone else")
+            continue
+        slot["state"] = FREE
+        slot["lease"] = None
     return registry
 
 # --- slots and their warmth --------------------------------------------------

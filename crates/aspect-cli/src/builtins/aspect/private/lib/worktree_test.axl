@@ -32,6 +32,8 @@ load(
     "output_base_of",
     "owned_slots",
     "owner_record",
+    "pool_of",
+    "pools_root_of",
     "prunable_slots",
     "read_registry",
     "reconcile",
@@ -952,6 +954,77 @@ def _test_a_gone_session_with_only_build_output_is_abandoned(ctx):
     _restore_session_store(ctx, previous)
     _eq("build output is not work to protect", verdict, True)
 
+def _test_a_filesystem_remote_is_not_a_pool_key(ctx):
+    """A path has no host to key on, and a key starting with a separator
+    composes into `<pools root>//abs/path` — which git then reports back without
+    the doubled slash, so nothing the pool wrote matches what git says."""
+    for url in [
+        "/srv/repos/thing.git",
+        "file:///srv/repos/thing.git",
+        "./relative/thing",
+        "../sibling/thing.git",
+        "~/repos/thing",
+    ]:
+        _eq("declined: " + url, normalize_remote(url), "")
+
+def _test_a_key_cannot_climb_out_of_the_pools_root(ctx):
+    """`..` in a key would put a pool outside the directory that holds pools,
+    where nothing collects it and another repository's pool may be sitting."""
+    _eq("dot dot", normalize_remote("https://host/a/../../etc"), "")
+    _eq("still fine", normalize_remote("https://host/a/b"), "host/a/b")
+
+def _test_a_filesystem_origin_still_gets_one_pool_per_repository(ctx):
+    """Declining the key must not leave the clone without a pool. Every clone of
+    one local repository shares a slug-keyed pool, and the directory it names
+    has no doubled separator for git to disagree with."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    origin = tmp + "/origin.git"
+    run_git(ctx.std, ["init", "-q", "--bare", origin], tmp)
+
+    pools = []
+    for name in ["one", "two"]:
+        clone = tmp + "/" + name
+        run_git(ctx.std, ["clone", "-q", origin, clone], tmp)
+        pools.append(pool_of(ctx.std, clone))
+
+    if not pools[0]["id"].startswith("local/"):
+        fail("a filesystem origin should be keyed locally: got %r" % pools[0]["id"])
+    _eq("both clones, one pool", pools[0]["id"], pools[1]["id"])
+    _eq("no separator in the key", "/" in pools[0]["id"][len("local/"):], False)
+    if "//" in pools[0]["dir"]:
+        fail("the pool directory must not contain a doubled slash: %r" % pools[0]["dir"])
+    if not pools[0]["dir"].startswith(pools_root_of(ctx.std.env.home_dir())):
+        fail("the pool must sit under the pools root: %r" % pools[0]["dir"])
+
+def _test_a_lease_survives_git_not_naming_its_path(ctx):
+    """The class of bug behind the one above: freeing a lease because git did
+    not mention the path assumes both sides spell it identically. A symlinked
+    home or another mount would differ the same way, and the next `add` would be
+    handed an occupied slot to force-remove. A worktree that is plainly there
+    outranks git's silence."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    # A pool whose directory names the same slots by a path git will not report.
+    confused = {
+        "git_common_dir": env.pool["git_common_dir"],
+        "dir": env.pool["dir"] + "/.",
+    }
+    reconcile(ctx.std, confused, registry)
+    _eq("the lease stands", registry["slots"][env.slot_id]["state"], LEASED)
+
+def _test_a_lease_ends_when_the_worktree_really_is_gone(ctx):
+    """The case `reconcile` exists for has to keep working: somebody ran
+    `git worktree remove` by hand, or an agent deleted its checkout without
+    releasing. The directory is gone, so the lease is over."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    ctx.std.fs.remove_dir_all(env.path)
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("freed", registry["slots"][env.slot_id]["state"], FREE)
+    _eq("and the lease with it", registry["slots"][env.slot_id]["lease"], None)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -1015,6 +1088,11 @@ _UNIT_TESTS = [
     _test_a_tracked_lock_file_that_changed_is_work,
     _test_a_symlink_pointing_elsewhere_is_work,
     _test_a_gone_session_with_only_build_output_is_abandoned,
+    _test_a_filesystem_remote_is_not_a_pool_key,
+    _test_a_key_cannot_climb_out_of_the_pools_root,
+    _test_a_filesystem_origin_still_gets_one_pool_per_repository,
+    _test_a_lease_survives_git_not_naming_its_path,
+    _test_a_lease_ends_when_the_worktree_really_is_gone,
 ]
 
 def _test_impl(ctx):
