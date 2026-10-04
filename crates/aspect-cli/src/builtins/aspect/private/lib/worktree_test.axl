@@ -9,6 +9,7 @@ GitLab mirror of the same code, and a fork. A pool key that collapses the first
 two spellings but not the two hosts is the behaviour these pin down.
 """
 
+load("@aspect//worktree.axl", "testonly_list_columns", "testonly_table")
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
@@ -409,6 +410,53 @@ def _test_an_unverifiable_harness_is_never_abandoned(ctx):
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unknown)}}
     _eq("left alone", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
 
+def _test_the_listing_drops_columns_nothing_fills(ctx):
+    """A pool of two free slots and nothing unusual should read as narrowly as it
+    did before the table had headers, so an empty column is left out rather than
+    printed blank."""
+    rows = [
+        {"branch": "fix/login", "state": "free", "warmth": "cold", "idle": "0d", "slot": "abc123"},
+        {"branch": "spike", "state": "free", "warmth": "cold", "idle": "3d", "slot": "def456"},
+    ]
+    lines = testonly_table(rows, testonly_list_columns)
+    _eq("header first", lines[0], "  branch     state  warmth  idle  slot")
+    _eq("no agent column", "agent" in lines[0], False)
+    _eq("no notes column", "notes" in lines[0], False)
+    _eq("a row", lines[1], "  fix/login  free   cold      0d  abc123")
+
+def _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it(ctx):
+    rows = [
+        {
+            "branch": "fix/login",
+            "state": "in use",
+            "warmth": "cold",
+            "slot": "abc123",
+            "agent": "claude-code b22fe20c",
+            "notes": "",
+        },
+        {
+            "branch": "spike",
+            "state": "free",
+            "warmth": "cold",
+            "idle": "3d",
+            "slot": "def456",
+            "agent": "",
+            "notes": "other clone",
+        },
+    ]
+    lines = testonly_table(rows, testonly_list_columns)
+    _eq("agent appears", "agent" in lines[0], True)
+    _eq("notes appears", "notes" in lines[0], True)
+
+def _test_idle_is_right_aligned_so_the_numbers_line_up(ctx):
+    rows = [
+        {"branch": "a", "state": "free", "warmth": "cold", "idle": "3d", "slot": "s1"},
+        {"branch": "b", "state": "free", "warmth": "cold", "idle": "120d", "slot": "s2"},
+    ]
+    lines = testonly_table(rows, testonly_list_columns)
+    _eq("padded to the widest", "  3d" in lines[1], True)
+    _eq("widest unpadded", "120d" in lines[2], True)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -425,6 +473,9 @@ _UNIT_TESTS = [
     _test_registry_round_trips,
     _test_unreadable_registry_starts_over,
     _test_missing_registry_is_empty,
+    _test_the_listing_drops_columns_nothing_fills,
+    _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it,
+    _test_idle_is_right_aligned_so_the_numbers_line_up,
     _test_age_of_a_record_written_before_timestamps_reads_as_new,
     _test_prune_never_takes_a_leased_slot,
     _test_prune_respects_the_age_threshold,

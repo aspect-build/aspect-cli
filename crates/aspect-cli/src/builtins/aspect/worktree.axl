@@ -53,6 +53,7 @@ load(
 )
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "info", "warn")
+load("./private/lib/text.axl", "pad_left", "pad_right")
 load(
     "./private/lib/worktree.axl",
     "PRUNE_AGE_DAYS",
@@ -350,12 +351,57 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
     else:
         _git(ctx, ["worktree", "add", "-b", name, path, base_ref], pool["git_common_dir"])
 
-def _pad(s: str, width: int) -> str:
-    """`s` padded to `width`. Starlark has no string formatting width flag —
-    `"%-8s"` fails at load time — so columns are padded by hand."""
-    return s + " " * (width - len(s))
-
 # --- reporting ---------------------------------------------------------------
+
+def _checked_out_branches(ctx: TaskContext, pool: dict) -> dict:
+    """The branch git has in each of this clone's worktrees, by path.
+
+    Git is the authority on what a worktree holds, and a lease records only what
+    `add` was asked for. Someone who runs `git switch` inside a slot leaves the
+    two disagreeing, and reporting the registry's answer would be reporting the
+    stale one.
+    """
+    porcelain = _git_try(ctx, ["worktree", "list", "--porcelain"], pool["git_common_dir"])
+    found = {}
+    at = ""
+    for line in porcelain.splitlines():
+        if line.startswith("worktree "):
+            at = line[len("worktree "):].strip()
+        elif line.startswith("branch refs/heads/") and at:
+            found[at] = line[len("branch refs/heads/"):].strip()
+    return found
+
+def _table(rows: list[dict], columns: list) -> list[str]:
+    """`rows` as aligned lines, one header first.
+
+    `columns` is `(key, heading, align_right)`. A column no row has a value for
+    is dropped rather than printed empty, which keeps the common case — a couple
+    of free slots and nothing unusual — as narrow as it was without headers.
+    """
+    used = [c for c in columns if any([r.get(c[0], "") for r in rows])]
+    widths = {}
+    for key, heading, _ in used:
+        widths[key] = max([len(heading)] + [len(r.get(key, "")) for r in rows])
+
+    def line(cells):
+        out = []
+        for i, (key, _, right) in enumerate(used):
+            cell = cells.get(key, "")
+            out.append(pad_left(cell, widths[key]) if right else (cell if i == len(used) - 1 else pad_right(cell, widths[key])))
+        return "  " + "  ".join(out)
+
+    header = {key: heading for key, heading, _ in used}
+    return [line(header).rstrip()] + [line(r).rstrip() for r in rows]
+
+_LIST_COLUMNS = [
+    ("branch", "branch", False),
+    ("state", "state", False),
+    ("warmth", "warmth", False),
+    ("idle", "idle", True),
+    ("slot", "slot", False),
+    ("agent", "agent", False),
+    ("notes", "notes", False),
+]
 
 def _warmth_note(std, path: str, reused_from: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
@@ -636,6 +682,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     # without persisting costs nothing — `add` and `remove` reconcile too.
     pool = _pool(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+    checked_out = _checked_out_branches(ctx, pool)
     rows = []
     for slot_id in registry["slots"]:
         slot = registry["slots"][slot_id]
@@ -647,6 +694,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "slot": slot_id,
             "state": slot["state"],
             "name": lease.get("name", ""),
+            # What git has, which is the authority; `name` is only what `add`
+            # recorded and `path`/`remove` still look up by.
+            "branch": checked_out.get(path, ""),
             "agent": agent,
             "session_state": session_state(ctx.std, agent) if agent else "",
             "path": path,
@@ -673,45 +723,53 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         print("  no slots yet — `aspect worktree add <branch>` creates the first")
         return 0
 
-    # Branch first: it is the only column a reader recognizes. The slot id is
-    # internal and comes last, for anyone cross-referencing `git worktree list`.
-    labels = [r["name"] or r["last_branch"] or "-" for r in rows]
-    warmths = []
-    for r in rows:
-        if r["server_pid"]:
-            warmths.append("warm (server %d)" % r["server_pid"])
-        elif r["output_base_present"]:
-            warmths.append("partly warm")
-        else:
-            warmths.append("cold")
-    label_w = max([len(s) for s in labels])
-    warm_w = max([len(s) for s in warmths])
-
     foreign = 0
     resumable = []
-    for i, r in enumerate(rows):
-        state = "in use" if r["state"] == "leased" else "free  "
+    cells = []
+    for r in rows:
+        if r["server_pid"]:
+            warmth = "warm (server %d)" % r["server_pid"]
+        elif r["output_base_present"]:
+            warmth = "partly warm"
+        else:
+            warmth = "cold"
 
-        # Idle days are what `prune` acts on, so a reader deciding whether to run
-        # it sees the same number the decision uses.
-        tail = "" if r["state"] == "leased" else "  idle %dd" % r["idle_days"]
+        notes = []
         if not r["owned_here"]:
             foreign += 1
-            tail += "  [other clone]"
-        if r["agent"]:
-            tail += "  " + label(r["agent"])
+            notes.append("other clone")
 
-            # Only states a reader can act on are annotated. `unknown` is the
-            # normal answer for a harness whose session layout we cannot check,
-            # so printing it would put noise on most rows and say nothing.
-            if r["session_state"] == RESUMABLE or r["session_state"] == GONE:
-                tail += " (%s)" % r["session_state"]
-            if r["session_state"] == RESUMABLE:
-                hint = resume_hint(r["agent"])
-                if hint:
-                    resumable.append((r["name"], hint))
-        print("  " + _pad(labels[i], label_w) + "  " + state + "  " +
-              _pad(warmths[i], warm_w) + "  " + r["slot"] + tail)
+        # Only session states a reader can act on are noted. `unknown` is the
+        # normal answer for a harness whose session layout cannot be checked, so
+        # printing it would put noise on most rows and say nothing.
+        if r["session_state"] == RESUMABLE or r["session_state"] == GONE:
+            notes.append("session " + r["session_state"])
+        if r["session_state"] == RESUMABLE:
+            hint = resume_hint(r["agent"])
+            if hint:
+                resumable.append((r["name"], hint))
+
+        # The column shows what git has. When that is not what the lease was
+        # taken under, the lease name is still the handle `path` and `remove`
+        # answer to, so it has to be said.
+        if r["branch"] and r["name"] and r["branch"] != r["name"]:
+            notes.append("leased as " + r["name"])
+
+        cells.append({
+            "branch": r["branch"] or r["name"] or r["last_branch"] or "-",
+            "state": "in use" if r["state"] == "leased" else "free",
+            "warmth": warmth,
+            # Idle days are what `prune` acts on, so a reader deciding whether to
+            # run it sees the same number the decision uses. A leased slot has no
+            # meaningful age.
+            "idle": "" if r["state"] == "leased" else "%dd" % r["idle_days"],
+            "slot": r["slot"],
+            "agent": label(r["agent"]),
+            "notes": ", ".join(notes),
+        })
+
+    for line in _table(cells, _LIST_COLUMNS):
+        print(line)
     print("")
     if foreign:
         print("  %d slot(s) belong to another clone of this repository and cannot be leased here." % foreign)
@@ -836,3 +894,7 @@ worktree_list = task(
     traits = [Worktrees],
     args = _OUTPUT_ARG,
 )
+
+# Exposed for worktree_test.axl; not part of any task's surface.
+testonly_table = _table
+testonly_list_columns = _LIST_COLUMNS
