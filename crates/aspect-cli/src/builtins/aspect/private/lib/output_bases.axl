@@ -36,6 +36,7 @@ load("./duration.axl", "compact_us")
 load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
 load("./path_normalize.axl", "normpath")
+load("./table.axl", "tilde")
 load("./text.axl", "pad_left", "pad_right", "pluralize")
 load("./worktree.axl", "SLOT_PREFIX", "pools_root_of")
 
@@ -220,12 +221,6 @@ def _total_kb(sizes: list[int]) -> int:
     for kb in sizes:
         total += kb
     return total
-
-def _tilde(path: str, home: str) -> str:
-    """`path` with the home directory written `~`, for display."""
-    if home and (path == home or path.startswith(home + "/")):
-        return "~" + path[len(home):]
-    return path
 
 def _say(streaming: bool, line: str) -> None:
     """A progress line, suppressed under `--output=json`.
@@ -553,7 +548,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
 def _scan_root(ctx: TaskContext, streaming: bool, root: str, policy) -> tuple:
     """`(bases, now_us)`: `root` announced and scanned under `policy`, against
     one clock reading that the caller's ages also use."""
-    info(ctx.std, "Bazel output user root: " + _tilde(root, ctx.std.env.home_dir()))
+    info(ctx.std, "Bazel output user root: " + tilde(root, ctx.std.env.home_dir()))
     now_us = time.now_ms() * 1000
     _say(streaming, "  scanning %ss…" % BASE)
     return (_scan(ctx, root, now_us, policy), now_us)
@@ -694,7 +689,7 @@ def _workspace_label(b, home: str) -> str:
     """The workspace column: the path, with `~` for home, or what Bazel's own
     naming says when the base records none."""
     if b.workspace:
-        return _tilde(b.workspace, home)
+        return tilde(b.workspace, home)
     if b.name == _NO_WORKSPACE:
         return "(Bazel run outside any workspace)"
     return ""
@@ -915,7 +910,7 @@ output_bases = namespace(
     servers = _servers,
     sort = _sort,
     table = _table,
-    tilde = _tilde,
+    tilde = tilde,
     total_kb = _total_kb,
     workspace_label = _workspace_label,
     workspace_of = _workspace_of,

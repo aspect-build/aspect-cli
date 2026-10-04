@@ -9,7 +9,9 @@ says whether it may be dropped.
 Values mean nothing to a reader who has not read the docs, so a table can carry
 a legend defining the values it actually shows. Keeping those definitions beside
 the data, as `(column, value, definition)`, is what lets the legend shrink the
-same way the table does.
+same way the table does — and what lets it name the column each definition
+belongs to, so a reader is never left working out whether a term is a value or a
+column name.
 
 `lib/text.axl` holds the padding primitives; this is the layer that decides what
 to pad.
@@ -46,15 +48,41 @@ def render(rows: list[dict], columns: list) -> list[str]:
 
     return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
 
-def legend(rows: list[dict], notes: list) -> list[str]:
-    """Definitions for the values `rows` actually contain, in `notes` order.
+def legend(rows: list[dict], notes: list, columns: list) -> list[str]:
+    """Definitions for the values `rows` actually contain, grouped by column.
 
-    `notes` is `(column, value, definition)`. Defining only what is on screen is
-    what keeps a legend short enough to be read: a listing showing two of five
-    possible values gets two lines, not five.
+    `notes` is `(column, value, definition)`. Only what is on screen is defined,
+    which is what keeps a legend short enough to be read, and each group is
+    labelled with its column's own header in a gutter:
+
+        warmth  warm         a live Bazel server still holds the analysis cache
+                partly warm  no server, but external/ is already materialized
+
+    The alternative — a flat list of `value: definition` — leaves the reader to
+    work out which column each term came from, and whether it is a value at all.
     """
+    headers = {c.key: c.header for c in columns}
+    shown = [(k, v, d) for k, v, d in notes if any([r.get(k, "") == v for r in rows])]
+    if not shown:
+        return []
+
+    gutter = max([len(headers.get(k, k)) for k, _, _ in shown])
+    term = max([len(v) for _, v, _ in shown])
+
     lines = []
-    for column, value, definition in notes:
-        if any([r.get(column, "") == value for r in rows]):
-            lines.append("  " + value + ": " + definition)
+    previous = ""
+    for key, value, definition in shown:
+        label = headers.get(key, key) if key != previous else ""
+        previous = key
+        lines.append("  " + pad_right(label, gutter) + "  " + pad_right(value, term) + "  " + definition)
     return lines
+
+def tilde(path: str, home: str) -> str:
+    """`path` with the home directory written `~`, for display.
+
+    Only when the path is really inside it: a path that merely starts with the
+    same characters is left alone.
+    """
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path

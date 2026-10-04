@@ -64,20 +64,48 @@ def _test_a_header_only_table_still_renders(ctx):
 _NOTES = [
     ("state", "busy", "someone is using it."),
     ("state", "free", "nobody is."),
-    ("kind", "warm", "ready to go."),
+    ("owner", "warm", "ready to go."),
 ]
 
 def _test_a_legend_defines_only_what_is_on_screen(ctx):
     """A legend nobody reads is worse than none, so it shrinks with the data."""
-    rows = [{"state": "free", "kind": "warm"}]
-    lines = legend(rows, _NOTES)
+    rows = [{"state": "free", "owner": "warm"}]
+    lines = legend(rows, _NOTES, _COLUMNS)
     _eq("two of three", len(lines), 2)
-    _eq("in notes order, so state first", lines[0].startswith("  free: "), True)
-    _eq("then kind", lines[1].startswith("  warm: "), True)
+
+def _test_a_legend_names_the_column_it_defines(ctx):
+    """A flat list of `value: definition` leaves a reader working out which
+    column each term came from, and whether it is a value at all. The column's
+    own header goes in a gutter, once per group."""
+    rows = [{"state": "free", "owner": "warm"}]
+    lines = legend(rows, _NOTES, _COLUMNS)
+
+    if not lines[0].startswith("  state  free"):
+        fail("the first group leads with its column header: %r" % lines[0])
+    if not lines[1].startswith("  owner  warm"):
+        fail("the next group leads with its own: %r" % lines[1])
+
+def _test_a_repeated_column_is_named_once(ctx):
+    """Two values of one column are one group, so the header is not repeated
+    down the block — the indent is what carries the grouping."""
+    rows = [{"state": "free"}, {"state": "busy"}]
+    lines = legend(rows, _NOTES, _COLUMNS)
+
+    _eq("both values", len(lines), 2)
+    if not lines[0].startswith("  state  busy"):
+        fail("notes order, so busy first: %r" % lines[0])
+    if not lines[1].startswith("         free"):
+        fail("the continuation is indented under the header: %r" % lines[1])
+
+def _test_legend_terms_line_up(ctx):
+    """Definitions start at one column, or the block reads as prose."""
+    rows = [{"state": "free"}, {"state": "busy"}]
+    lines = legend(rows, _NOTES, _COLUMNS)
+    _eq("same offset", lines[0].index("someone"), lines[1].index("nobody"))
 
 def _test_a_legend_for_nothing_is_empty(ctx):
-    _eq("no rows", legend([], _NOTES), [])
-    _eq("no matching values", legend([{"state": "other"}], _NOTES), [])
+    _eq("no rows", legend([], _NOTES, _COLUMNS), [])
+    _eq("no matching values", legend([{"state": "other"}], _NOTES, _COLUMNS), [])
 
 _UNIT_TESTS = [
     _test_a_column_nothing_fills_is_dropped,
@@ -88,6 +116,9 @@ _UNIT_TESTS = [
     _test_no_row_carries_trailing_whitespace,
     _test_a_header_only_table_still_renders,
     _test_a_legend_defines_only_what_is_on_screen,
+    _test_a_legend_names_the_column_it_defines,
+    _test_a_repeated_column_is_named_once,
+    _test_legend_terms_line_up,
     _test_a_legend_for_nothing_is_empty,
 ]
 
