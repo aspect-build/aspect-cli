@@ -65,6 +65,9 @@ load("@std//time.axl", "time")
 load("./agent.axl", "GONE", "session_state")
 load("./bazel_paths.axl", "output_user_root")
 load("./environment.axl", "warn")
+load("./process_info.axl", "alive")
+
+# --- constants ---------------------------------------------------------------
 
 _REGISTRY_VERSION = 1
 
@@ -92,10 +95,14 @@ PRUNE_AGE_DAYS = 30
 
 _DAY_MS = 24 * 60 * 60 * 1000
 
+# --- the environment ---------------------------------------------------------
+
 def enabled(std) -> bool:
     """False on an Aspect Workflows runner, which builds one job in a checkout
     it discards afterwards — nothing to pool and nothing to keep warm."""
     return not std.env.var("ASPECT_WORKFLOWS_RUNNER")
+
+# --- git ---------------------------------------------------------------------
 
 def run_git(std, args: list[str], cwd: str = "") -> struct:
     """Run `git <args>` and report the outcome rather than raising.
@@ -114,6 +121,8 @@ def git_out(std, args: list[str], cwd: str = "") -> str:
     """`git <args>` stdout, trimmed; "" on any failure."""
     r = run_git(std, args, cwd)
     return r.out if r.ok else ""
+
+# --- pool keying -------------------------------------------------------------
 
 def _rstrip(s: str, ch: str) -> str:
     """`s` with every trailing `ch` removed. Starlark has no `while`, so the
@@ -220,6 +229,8 @@ def pool_of(std, cwd: str) -> dict:
         "dir": pools_root(std) + "/" + pool_id,
     }
 
+# --- the pool lock -----------------------------------------------------------
+
 def _digest(s: str) -> str:
     """Hex sha256 of a string. `sha256()` is a streaming hasher, not a one-shot
     function."""
@@ -260,6 +271,8 @@ def acquire(std, pool_dir: str) -> bool:
 def release(std, pool_dir: str) -> None:
     catch(std.fs.remove_dir_all, _lock_dir(pool_dir))
 
+# --- the registry ------------------------------------------------------------
+
 def _registry_path(pool_dir: str) -> str:
     return pool_dir + "/registry.json"
 
@@ -298,31 +311,6 @@ def new_slot_record(pool: dict) -> dict:
         "last_used_ms": time.now_ms(),
     }
 
-def abandoned_lease(std, pool: dict, registry: dict, slot_id: str) -> bool:
-    """Whether a leased slot can be taken back without losing anything.
-
-    Two conditions, both required, because the cost of being wrong is somebody's
-    unfinished work:
-
-    - the session that holds it is positively **gone**, not merely not running.
-      A closed terminal is the usual reason a harness process has exited, and
-      `claude --resume` would put the agent back in this very slot expecting
-      this very branch.
-    - the checkout is clean. Commits survive `git worktree remove` — they are in
-      the branch — so a clean tree has nothing to lose. Uncommitted changes do,
-      and no amount of elapsed time makes deleting them the right default.
-    """
-    lease = registry["slots"][slot_id].get("lease") or {}
-    agent = lease.get("agent") or {}
-    if not agent:
-        return False
-    if session_state(std, agent) != GONE:
-        return False
-    path = slot_path(pool, slot_id)
-    if not std.fs.exists(path):
-        return True
-    return not git_out(std, ["status", "--porcelain"], path)
-
 def reconcile(std, pool: dict, registry: dict) -> dict:
     """Bring `registry` back in line with git and the filesystem, in place.
 
@@ -357,6 +345,8 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
             slot["state"] = "free"
             slot["lease"] = None
     return registry
+
+# --- slots and their warmth --------------------------------------------------
 
 def slot_path(pool: dict, slot_id: str) -> str:
     return pool["dir"] + "/" + SLOT_PREFIX + slot_id
@@ -405,13 +395,9 @@ def warmth_of(std, slot: str, root: str = "") -> struct:
     if not std.fs.exists(base):
         return struct(server = 0, base = False)
     pid = server_pid_of(std, slot, root)
-    return struct(server = pid if pid > 0 and _process_alive(std, pid) else 0, base = True)
+    return struct(server = pid if alive(std, pid) else 0, base = True)
 
-def _process_alive(std, pid: int) -> bool:
-    """Whether `pid` is a live process. `kill -0` asks without signalling."""
-    out = std.process.command("kill").args(["-0", str(pid)]) \
-        .stdout("null").stderr("null").spawn().wait()
-    return out.code == 0
+# --- reuse scoring -----------------------------------------------------------
 
 def lock_digest(std, cwd: str) -> str:
     """A digest of `MODULE.bazel.lock`, the strongest predictor of whether a
@@ -445,6 +431,8 @@ def lock_digest_at(std, git_common_dir: str, ref: str) -> str:
     if not raw:
         return ""
     return _digest(raw)
+
+# --- bounds and pruning ------------------------------------------------------
 
 def owned_slots(pool: dict, registry: dict) -> list[str]:
     """Slot ids this clone owns, in registry order. The only slots it can lease,
@@ -492,6 +480,31 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int) -> list[s
             continue
         victims.append(slot_id)
     return victims
+
+def abandoned_lease(std, pool: dict, registry: dict, slot_id: str) -> bool:
+    """Whether a leased slot can be taken back without losing anything.
+
+    Two conditions, both required, because the cost of being wrong is somebody's
+    unfinished work:
+
+    - the session that holds it is positively **gone**, not merely not running.
+      A closed terminal is the usual reason a harness process has exited, and
+      `claude --resume` would put the agent back in this very slot expecting
+      this very branch.
+    - the checkout is clean. Commits survive `git worktree remove` — they are in
+      the branch — so a clean tree has nothing to lose. Uncommitted changes do,
+      and no amount of elapsed time makes deleting them the right default.
+    """
+    lease = registry["slots"][slot_id].get("lease") or {}
+    agent = lease.get("agent") or {}
+    if not agent:
+        return False
+    if session_state(std, agent) != GONE:
+        return False
+    path = slot_path(pool, slot_id)
+    if not std.fs.exists(path):
+        return True
+    return not git_out(std, ["status", "--porcelain"], path)
 
 def drop_slot(std, pool: dict, registry: dict, slot_id: str, root: str = "") -> struct:
     """Delete a free slot outright: its worktree, its directory, its output base

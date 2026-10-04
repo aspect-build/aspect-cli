@@ -78,6 +78,8 @@ load(
 )
 load("./private/lib/worktrees_trait.axl", "Worktrees")
 
+# --- constants ---------------------------------------------------------------
+
 _ON_RUNNER = ("`aspect worktree` is disabled on Aspect Workflows runners: a runner builds " +
               "one job in a checkout it sets up and discards, so there is no second worktree " +
               "to share a slot with and nothing to keep warm between jobs.")
@@ -91,6 +93,8 @@ _POOL_BUSY = "another `aspect worktree` call is holding this pool's lock; try ag
 _EX_TEMPFAIL = 75
 
 _SCHEMA_VERSION = 1
+
+# --- refusals ----------------------------------------------------------------
 
 def _refuse(ctx: TaskContext, code: str, message: str, exit_code: int = 1, retryable: bool = False) -> TaskConclusion:
     """A refusal in whichever form the caller asked for.
@@ -118,6 +122,8 @@ def _on_runner(ctx: TaskContext) -> TaskConclusion:
     pool."""
     return _refuse(ctx, "disabled_on_runner", _ON_RUNNER)
 
+# --- git ---------------------------------------------------------------------
+
 def _git(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
     """`git <args>` stdout. Fails the task when git does — for calls whose
     failure means the operation cannot proceed."""
@@ -131,6 +137,8 @@ def _git_try(ctx: TaskContext, args: list[str], cwd: str = "") -> str:
     failure is itself the answer, such as asking whether a branch exists."""
     r = run_git(ctx.std, args, cwd)
     return r.out if r.ok else ""
+
+# --- entering the pool -------------------------------------------------------
 
 def _pool(ctx: TaskContext) -> dict:
     """The pool for the working directory."""
@@ -154,6 +162,8 @@ def _enter_pool(ctx: TaskContext) -> dict:
         return {}
     ctx.defer(lambda: release(ctx.std, pool["dir"]))
     return pool
+
+# --- choosing a slot ---------------------------------------------------------
 
 def _score_slot(ctx: TaskContext, slot: dict, want: dict) -> int:
     """The repo's scoring hook if one is registered, else the built-in.
@@ -192,11 +202,6 @@ def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
         elif line.strip() == "branch refs/heads/" + name:
             return at
     return ""
-
-def _pad(s: str, width: int) -> str:
-    """`s` padded to `width`. Starlark has no string formatting width flag —
-    `"%-8s"` fails at load time — so columns are padded by hand."""
-    return s + " " * (width - len(s))
 
 def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
     return _refuse(
@@ -318,6 +323,8 @@ def _best_free_slot(ctx: TaskContext, pool: dict, registry: dict) -> str:
             return slot_id
     return ""
 
+# --- putting a worktree in it ------------------------------------------------
+
 def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: str) -> None:
     """Put a git worktree for `name` at the slot, checked out on that branch.
 
@@ -340,6 +347,13 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
     else:
         _git(ctx, ["worktree", "add", "-b", name, path, base_ref], pool["git_common_dir"])
 
+def _pad(s: str, width: int) -> str:
+    """`s` padded to `width`. Starlark has no string formatting width flag —
+    `"%-8s"` fails at load time — so columns are padded by hand."""
+    return s + " " * (width - len(s))
+
+# --- reporting ---------------------------------------------------------------
+
 def _warmth_note(std, path: str, reused_from: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
 
@@ -354,6 +368,8 @@ def _warmth_note(std, path: str, reused_from: str) -> str:
         last = (", last used for " + reused_from) if reused_from else ""
         return "partly warm: no server, but this slot's `external/` tree is already materialized" + last
     return "cold: this slot has no Bazel state yet, so the first build pays for it"
+
+# --- task implementations ----------------------------------------------------
 
 def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not enabled(ctx.std):
@@ -705,6 +721,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     print("  cd \"$(aspect worktree path <branch>)\" to enter one")
     print("  aspect worktree prune --dry-run  to see what has gone stale")
     return 0
+
+# --- task definitions --------------------------------------------------------
 
 _OUTPUT_ARG = {
     "output": args.string(
