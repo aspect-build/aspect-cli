@@ -1,11 +1,11 @@
 """`aspect output-bases` — list the Bazel output bases on this machine. Read-only.
 
 Every base under the output user root, grouped by its lifecycle state — live,
-idle, orphaned, undetermined (see `lib/output_bases.axl`) —
-with when it was last used, the memory its Bazel server holds if one is running,
-the git repository and branch its workspace is checked out on, and the
-workspace itself. `--measure-sizes` adds each base's size and the shared
-caches'. `--sort` orders the bases within each state.
+idle, orphaned, undetermined (see `lib/output_bases.axl`) — with when it was
+last used, the memory its Bazel server holds if one is running, the git
+repository and branch its workspace is checked out on, and the workspace
+itself. `--measure-sizes` adds each base's size and the shared caches'.
+`--sort` orders the bases within each state.
 
 Sizes are opt-in because they take a `du` of every base: tens of seconds on a
 machine with tens of gigabytes of them. `--sort=size` measures them on its own,
@@ -67,6 +67,7 @@ def _next_steps(bases: list, view, measured: bool, root_flag: str = "") -> list[
     return steps
 
 def _output_bases_impl(ctx: TaskContext) -> int | TaskConclusion:
+    """Scan, attribute, optionally measure, then list or write the document."""
     root, missing = output_bases.resolve_root(ctx, ctx.args.output_user_root)
     if missing:
         return missing

@@ -292,7 +292,7 @@ def _test_removals_carry_their_outcome(ctx):
 
 def _test_a_base_whose_server_cannot_be_identified_is_not_removed(ctx):
     """Without `ps` a live pid can be neither confirmed nor stopped: a rule's
-    pick is skipped, a named base fails, and either way the tree stays."""
+    pick is held, a named base fails, and either way the tree stays."""
     root = fx.fixture(ctx)
     base = root + "/" + fx.DEAD
     ctx.std.fs.create_dir_all(base + "/server")
@@ -303,7 +303,7 @@ def _test_a_base_whose_server_cannot_be_identified_is_not_removed(ctx):
     by_rule = testonly_reap(ctx, b, False)
     named = testonly_reap(ctx, b, True)
     ctx.std.env.set_var("PATH", path)
-    _eq("skipped", by_rule, "skipped")
+    _eq("held", by_rule, "held")
     _eq("named, failed", named, "failed")
     _eq("still there", ctx.std.fs.exists(base), True)
 
@@ -377,6 +377,23 @@ def _test_a_server_running_in_trash_is_stopped(ctx):
     _eq("reaped", result, "reaped")
     _eq("stopped", alive != 0, True)
 
+def _test_a_held_base_counts_as_skipped(ctx):
+    """A base held for an unidentifiable server is a skip, not a failure, and
+    reads as "skipped" in the document."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", "4242")
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = 4242, last_used = output_bases.last_used(ctx, base))
+    plan = testonly_plan(bases = [b], removals = [b], sizes = {}, cache_entries = 0, stale = [])
+    path = ctx.std.env.var("PATH")
+    ctx.std.env.set_var("PATH", "/aspect-no-such-dir")
+    outcome = testonly_collect(ctx, False, plan, False)
+    ctx.std.env.set_var("PATH", path)
+    _eq("skipped", outcome.skipped, 1)
+    _eq("in the document", testonly_document(root, False, {}, plan, outcome)["removals"][0]["outcome"], "skipped")
+    _eq("not a failure", testonly_failure(plan, outcome), None)
+
 def _test_summary(ctx):
     def outcome(skipped):
         return testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = skipped, pruned = 0, pruned_kb = 0)
@@ -412,6 +429,7 @@ _UNIT_TESTS = [
     _test_a_server_that_ignores_sigterm_is_killed,
     _test_an_idle_base_whose_server_came_up_is_skipped,
     _test_a_server_running_in_trash_is_stopped,
+    _test_a_held_base_counts_as_skipped,
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
 ]
