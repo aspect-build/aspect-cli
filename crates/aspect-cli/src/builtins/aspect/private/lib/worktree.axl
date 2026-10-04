@@ -555,16 +555,23 @@ def default_score(slot: dict, want: dict) -> int:
     `last_commit`; `want` describes the worktree about to be created, so its
     commit is keyed `commit`. Every other field is keyed the same on both sides.
 
-    The ordering follows what each mismatch actually costs. A different
+    The ordering follows how much of the previous build survives. A different
     `MODULE.bazel.lock` means the repo fetches miss and `external/` is rebuilt,
-    which is the expensive one, so it nearly disqualifies. Landing on a different
-    commit costs only incremental invalidation, which Bazel handles well — a
-    tiebreak, not a decision. A slot nobody has used yet records neither, and
-    stays fully eligible rather than being punished for being new.
+    which is the expensive one, so it nearly disqualifies. Above that:
+
+      same commit   the tree is identical, so the outputs are exactly right
+      same branch   the outputs are for a near relative of this tree, which is
+                    what an agent returning to a branch it released wants
+      neither       some other work, at some other point
+
+    A slot nobody has used yet records none of it and stays fully eligible,
+    rather than being punished for being new.
     """
     if slot.get("lock_digest", "") and want.get("lock_digest", ""):
         if slot["lock_digest"] != want["lock_digest"]:
             return 1
-    if slot.get("last_commit", "") != want.get("commit", ""):
-        return 90
-    return 100
+    if slot.get("last_commit", "") == want.get("commit", ""):
+        return 100
+    if slot.get("last_branch", "") and slot["last_branch"] == want.get("name", ""):
+        return 95
+    return 90

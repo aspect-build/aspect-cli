@@ -32,6 +32,7 @@ _AGENT_VARS = [
     "CLAUDECODE",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_PID",
+    "CLAUDE_CONFIG_DIR",
     "AI_AGENT",
 ]
 
@@ -137,9 +138,43 @@ def _test_an_unknown_harness_layout_is_never_gone(ctx):
 
 def _test_a_claude_session_absent_from_disk_is_gone(ctx):
     """A session id that is not stored anywhere cannot be resumed, which is what
-    distinguishes a finished lease from a closed terminal."""
+    distinguishes a finished lease from a closed terminal.
+
+    Only meaningful where the sessions directory exists to be searched; where it
+    does not, the next test is the one that applies.
+    """
+    saved = _clear(ctx)
     missing = {"kind": "claude-code", "id": "00000000-dead-dead-dead-000000000000"}
-    _eq("absent", session_state(ctx.std, missing), GONE)
+    root = ctx.std.env.home_dir() + "/.claude/projects"
+    got = session_state(ctx.std, missing)
+    _restore(ctx, saved)
+    _eq("absent", got, GONE if ctx.std.fs.exists(root) else UNKNOWN)
+
+def _test_a_missing_sessions_directory_is_unknown_not_gone(ctx):
+    """The dangerous case. `gone` is what lets `add` take a slot back, so
+    reading "I cannot find the sessions directory" as "the session is deleted"
+    would hand a resumable agent's clean checkout to someone else. A relocated
+    or absent store has to come back `unknown`.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", ctx.std.fs.mkdtemp(prefix = "aspect-no-sessions"))
+    got = session_state(ctx.std, {"kind": "claude-code", "id": "whatever"})
+    _restore(ctx, saved)
+    _eq("no store to search", got, UNKNOWN)
+
+def _test_claude_config_dir_relocates_the_session_store(ctx):
+    """Claude Code honours `CLAUDE_CONFIG_DIR`, so the home directory is a
+    fallback rather than the answer."""
+    saved = _clear(ctx)
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-cfg")
+    ctx.std.fs.create_dir_all(home + "/projects/some-project")
+    ctx.std.fs.write(home + "/projects/some-project/abc-123.jsonl", "{}\n")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+    found = session_state(ctx.std, {"kind": "claude-code", "id": "abc-123"})
+    absent = session_state(ctx.std, {"kind": "claude-code", "id": "not-there"})
+    _restore(ctx, saved)
+    _eq("found under the relocated root", found, RESUMABLE)
+    _eq("and a real miss there is still gone", absent, GONE)
 
 def _test_a_running_process_outranks_the_session_check(ctx):
     """A live harness is in use whatever is on disk, so the cheap, certain
@@ -189,6 +224,8 @@ _UNIT_TESTS = [
     _test_a_live_pid_counts_only_with_a_matching_start_time,
     _test_an_unknown_harness_layout_is_never_gone,
     _test_a_claude_session_absent_from_disk_is_gone,
+    _test_a_missing_sessions_directory_is_unknown_not_gone,
+    _test_claude_config_dir_relocates_the_session_store,
     _test_a_running_process_outranks_the_session_check,
     _test_label_is_a_glance_not_a_copy_source,
     _test_resume_is_offered_only_where_the_command_is_known,

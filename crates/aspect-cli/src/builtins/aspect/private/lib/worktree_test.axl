@@ -502,6 +502,32 @@ def _test_the_listing_defines_only_the_values_it_shows(ctx):
 
     _eq("nothing to define", testonly_legend([]), [])
 
+def _test_the_branchs_own_slot_outranks_an_unrelated_one(ctx):
+    """An agent returning to a branch it released should land back on the slot
+    holding that branch's outputs. Without this the two score the same and it
+    comes down to registry order."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c9"}
+    mine = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "fix/login"}
+    theirs = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "other/work"}
+    if default_score(mine, want) <= default_score(theirs, want):
+        fail("the slot that last held this branch must win")
+
+def _test_an_identical_tree_still_wins_over_the_same_branch(ctx):
+    """A slot sitting on exactly this commit has outputs for exactly this tree,
+    whatever branch produced them — that beats a near relative."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    exact = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "other/work"}
+    near = {"lock_digest": "aaa", "last_commit": "c7", "last_branch": "fix/login"}
+    if default_score(exact, want) <= default_score(near, want):
+        fail("an identical tree must outrank the same branch at another commit")
+
+def _test_a_lock_mismatch_still_beats_everything_down(ctx):
+    """Branch affinity must not rescue a slot whose `external/` would be
+    rebuilt — that is the expensive mismatch."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    wrong_lock = {"lock_digest": "bbb", "last_commit": "c1", "last_branch": "fix/login"}
+    _eq("still nearly disqualified", default_score(wrong_lock, want), 1)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -511,6 +537,9 @@ _UNIT_TESTS = [
     _test_slug_is_a_usable_path_component,
     _test_lock_mismatch_nearly_disqualifies,
     _test_commit_distance_only_breaks_a_tie,
+    _test_the_branchs_own_slot_outranks_an_unrelated_one,
+    _test_an_identical_tree_still_wins_over_the_same_branch,
+    _test_a_lock_mismatch_still_beats_everything_down,
     _test_unknown_lock_does_not_disqualify,
     _test_output_base_matches_bazels_own_derivation,
     _test_a_relocated_output_user_root_is_where_a_slot_looks,
