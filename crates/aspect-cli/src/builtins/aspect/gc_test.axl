@@ -391,6 +391,7 @@ def _test_a_held_base_counts_as_skipped(ctx):
     outcome = testonly_collect(ctx, False, plan, False)
     ctx.std.env.set_var("PATH", path)
     _eq("skipped", outcome.skipped, 1)
+    _eq("held", outcome.held, 1)
     _eq("in the document", testonly_document(root, False, {}, plan, outcome)["removals"][0]["outcome"], "skipped")
     _eq("not a failure", testonly_failure(plan, outcome), None)
 
@@ -401,6 +402,8 @@ def _test_summary(ctx):
     _eq("clean", testonly_summary(outcome(0), False), "reclaimed 2 MB")
     _eq("skipped", testonly_summary(outcome(1), False), "reclaimed 2 MB; left 1 Bazel output base alone, used after the scan")
     _eq("failed", testonly_summary(outcome(0), True), "reclaimed 2 MB; the rest could not be removed")
+    held = testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = 2, held = 1, pruned = 0, pruned_kb = 0)
+    _eq("held apart from used", testonly_summary(held, False), "reclaimed 2 MB; left 1 Bazel output base alone, used after the scan; left 1 Bazel output base alone, its server could not be identified")
 
 _UNIT_TESTS = [
     _test_document_counts_every_state,

@@ -76,10 +76,12 @@ _Plan = record(
 _Outcome = record(
     reaped = field(int),
     reaped_kb = field(int),
-    # Bases left alone because something used them after the scan.
+    # Bases left alone: used after the scan, or held (`_HELD`).
     skipped = field(int),
     pruned = field(int),
     pruned_kb = field(int),
+    # Of `skipped`, those held for a server `ps` could not identify.
+    held = field(int, default = 0),
     # Cache entries left alone because a fetch used them after the scan.
     cache_skipped = field(int, default = 0),
     # `_REAPED`, `_SKIPPED` or `_FAILED` by base path, for the bases attempted.
@@ -303,7 +305,7 @@ def _collect(ctx: TaskContext, streaming: bool, plan, requested: bool):
     A download-cache entry, like a base, is checked again before it goes and
     left alone if a fetch used it after the scan.
     """
-    reaped, reaped_kb, skipped = 0, 0, 0
+    reaped, reaped_kb, skipped, held = 0, 0, 0, 0
     results = {}
     for i, b in enumerate(plan.removals):
         kb = plan.sizes.get(b.path, 0)
@@ -315,6 +317,7 @@ def _collect(ctx: TaskContext, streaming: bool, plan, requested: bool):
             reaped_kb += kb
         elif result in [_SKIPPED, _HELD]:
             skipped += 1
+            held += 1 if result == _HELD else 0
         if result == _SKIPPED:
             output_bases.say(streaming, "        left alone: Bazel used it after the scan")
     if plan.stale:
@@ -330,6 +333,7 @@ def _collect(ctx: TaskContext, streaming: bool, plan, requested: bool):
         reaped = reaped,
         reaped_kb = reaped_kb,
         skipped = skipped,
+        held = held,
         pruned = pruned,
         pruned_kb = pruned_kb,
         cache_skipped = cache_skipped,
@@ -399,8 +403,11 @@ def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
 def _summary(outcome, failed: bool) -> str:
     """The closing line of a run that removed things."""
     line = "reclaimed " + output_bases.fmt_kb(outcome.reaped_kb + outcome.pruned_kb)
-    if outcome.skipped:
-        line += "; left %s alone, used after the scan" % pluralize(outcome.skipped, output_bases.BASE)
+    used = outcome.skipped - outcome.held
+    if used:
+        line += "; left %s alone, used after the scan" % pluralize(used, output_bases.BASE)
+    if outcome.held:
+        line += "; left %s alone, its server could not be identified" % pluralize(outcome.held, output_bases.BASE)
     if outcome.cache_skipped:
         line += "; left %s alone, fetched after the scan" % _entries(outcome.cache_skipped)
     if failed:
