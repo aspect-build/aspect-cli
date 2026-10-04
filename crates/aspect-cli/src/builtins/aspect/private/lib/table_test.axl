@@ -61,77 +61,76 @@ def _test_a_header_only_table_still_renders(ctx):
     _eq("just the header", len(lines), 1)
     _eq("the always columns", lines[0], "  name  owner")
 
+# The legend tests get their own columns: the render fixture has no `state`, and
+# a legend only documents columns the table actually has.
+_LEGEND_COLUMNS = [
+    Column(key = "name", header = "name", always = True),
+    Column(key = "state", header = "state", always = True),
+    Column(key = "size", header = "size", right = True),
+    Column(key = "owner", header = "owner", always = True),
+]
+
 _NOTES = [
+    ("name", "", "what the thing is called."),
+    ("state", "", "what is happening to it."),
     ("state", "busy", "someone is using it."),
     ("state", "free", "nobody is."),
-    ("owner", "warm", "ready to go."),
     ("size", "", "how big it is."),
 ]
 
-def _test_a_legend_defines_only_what_is_on_screen(ctx):
-    """A legend nobody reads is worse than none, so it shrinks with the data.
-    `size` is defined too, because this table prints that column."""
-    rows = [{"size": "1", "state": "free", "owner": "warm"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
-    _eq("two values, a separator, and the column", len(lines), 4)
+def _test_a_legend_documents_every_column_the_table_printed(ctx):
+    """A new table has to teach itself, so each column it printed gets a line in
+    the order it printed them."""
+    rows = [{"name": "a", "state": "free", "owner": "x"}]
+    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
 
-def _test_values_and_columns_are_separate_blocks(ctx):
-    """A value explains a cell and a column explains a header. Listed together
-    they read as one list of similar things, so a blank line divides them —
-    with the definitions still sharing a left edge across both."""
-    rows = [{"size": "1", "state": "free", "owner": "warm"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
+    if not lines[0].startswith("  name  "):
+        fail("the first column of the table leads: %r" % lines[0])
+    if not lines[1].startswith("  state  "):
+        fail("then the next one that has a note: %r" % lines[1])
 
-    _eq("values first", lines[0].startswith("  free (state)"), True)
-    _eq("then a separator", lines[2], "")
-    _eq("then the column", lines[3].startswith("  size  "), True)
-    _eq("one left edge", lines[0].index("nobody"), lines[3].index("how big"))
+def _test_values_are_nested_under_their_column(ctx):
+    """Indentation is what says a term is a value of the column above it, rather
+    than another column — which a flat list cannot express."""
+    rows = [{"name": "a", "state": "free", "owner": "x"}]
+    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
 
-def _test_one_kind_alone_gets_no_separator(ctx):
-    """A blank line between blocks is only a separator when there are two."""
-    values_only = legend([{"state": "free"}], _NOTES, _COLUMNS)
-    for line in values_only:
-        if line == "":
-            fail("nothing to separate: %r" % values_only)
+    nested = [l for l in lines if l.startswith("    busy") or l.startswith("    free")]
+    _eq("both values, indented", len(nested), 2)
+    _eq("in notes order", nested[0].startswith("    busy"), True)
 
-def _test_a_value_carries_the_column_it_came_from(ctx):
-    """A reader looks up the term they saw in a cell, so the term leads and its
-    column follows — the alternative leaves them working out whether a term is a
-    value, a column name or a notation."""
-    rows = [{"size": "1", "state": "free", "owner": "warm"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
+def _test_every_value_is_shown_even_when_absent(ctx):
+    """"What else could this column say" is the question a reader of a new table
+    has, so a value the table does not currently contain is documented too."""
+    rows = [{"name": "a", "state": "free", "owner": "x"}]
+    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
 
-    if not lines[0].startswith("  free (state)"):
-        fail("the value leads, with its column after it: %r" % lines[0])
-    if not lines[1].startswith("  warm (owner)"):
-        fail("and the next: %r" % lines[1])
+    if not any([l.startswith("    busy") for l in lines]):
+        fail("`busy` is not on screen but is still a state: %r" % lines)
 
-def _test_a_column_definition_stands_alone(ctx):
-    """A column needs no qualifier: its own name is the term."""
-    rows = [{"size": "1"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
-    _eq("just the column", len(lines), 1)
-    if not lines[0].startswith("  size  "):
-        fail("a column definition is the bare header: %r" % lines[0])
-
-def _test_a_column_that_was_dropped_is_not_defined(ctx):
-    """Defining a column the table did not print would send a reader looking for
+def _test_a_column_the_table_dropped_is_not_documented(ctx):
+    """Documenting a column that was not printed sends a reader looking for
     something that is not there."""
-    rows = [{"state": "free"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
+    rows = [{"name": "a", "owner": "x"}]
+    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
+
     for line in lines:
         if line.startswith("  size"):
             fail("`size` was dropped from this table: %r" % lines)
 
-def _test_legend_definitions_line_up(ctx):
-    """Definitions start at one column, or the block reads as ragged prose."""
-    rows = [{"size": "1", "state": "free", "owner": "warm"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
-    _eq("same offset", lines[0].index("nobody"), lines[1].index("ready"))
+def _test_definitions_share_one_left_edge(ctx):
+    """However deep the nesting, the definitions line up, or the block reads as
+    ragged prose."""
+    rows = [{"name": "a", "state": "free", "size": "1", "owner": "x"}]
+    lines = legend(rows, _NOTES, _LEGEND_COLUMNS)
+
+    column_line = [l for l in lines if l.startswith("  name")][0]
+    value_line = [l for l in lines if l.startswith("    busy")][0]
+    _eq("same offset", column_line.index("what the thing"), value_line.index("someone"))
 
 def _test_a_legend_for_nothing_is_empty(ctx):
-    _eq("no rows", legend([], _NOTES, _COLUMNS), [])
-    _eq("no matching values", legend([{"state": "other"}], _NOTES, _COLUMNS), [])
+    _eq("no columns documented", legend([{"owner": "x"}], [("size", "", "how big.")], _LEGEND_COLUMNS), [])
+    _eq("no notes at all", legend([{"name": "a"}], [], _LEGEND_COLUMNS), [])
 
 _UNIT_TESTS = [
     _test_a_column_nothing_fills_is_dropped,
@@ -141,13 +140,11 @@ _UNIT_TESTS = [
     _test_right_alignment_lines_numbers_up,
     _test_no_row_carries_trailing_whitespace,
     _test_a_header_only_table_still_renders,
-    _test_a_legend_defines_only_what_is_on_screen,
-    _test_values_and_columns_are_separate_blocks,
-    _test_one_kind_alone_gets_no_separator,
-    _test_a_value_carries_the_column_it_came_from,
-    _test_a_column_definition_stands_alone,
-    _test_a_column_that_was_dropped_is_not_defined,
-    _test_legend_definitions_line_up,
+    _test_a_legend_documents_every_column_the_table_printed,
+    _test_values_are_nested_under_their_column,
+    _test_every_value_is_shown_even_when_absent,
+    _test_a_column_the_table_dropped_is_not_documented,
+    _test_definitions_share_one_left_edge,
     _test_a_legend_for_nothing_is_empty,
 ]
 

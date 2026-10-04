@@ -729,19 +729,26 @@ def _checked_out_branches(ctx: TaskContext, pool: dict) -> dict:
 # `add` reclaims it, if that one was killed.
 _STATE_LABELS = {LEASED: "in use", FREE: "free", RESERVED: "setting up"}
 
-# Values first, then the columns whose headers need a sentence; the legend keeps
-# them in separate blocks. A reader looks up the term they saw in a cell, so that
-# is what leads each line, with its column after it.
+# Every column, with its values nested under it. A pool is a new idea, so the
+# listing documents itself rather than sending a reader to the docs for the
+# vocabulary it invented — and it shows the values this pool does not currently
+# have, since "what else could this column say" is the question a new reader has.
 _COLUMN_NOTES = [
+    ("slot", "", "the directory under the pool that holds the worktree, named above"),
+    ("state", "", "whether a worktree is checked out in the slot right now"),
     ("state", "in use", "a worktree is checked out here, under the branch shown"),
     ("state", "free", "no worktree here; the slot keeps its Bazel state for the next one"),
     ("state", "setting up", "an `aspect worktree add` is checking a worktree out here now"),
+    ("warmth", "", "how much of Bazel's state this slot still has behind it"),
     ("warmth", "warm", "a live Bazel server still holds the analysis cache"),
     ("warmth", "partly warm", "no server, but external/ is already materialized"),
     ("warmth", "cold", "no output base; the first build pays loading and fetches"),
     ("idle", "", "how long since Bazel last built here, which is what prune acts on"),
     ("age", "", "how long the slot has existed"),
     ("leases", "", "worktrees this slot has held, so cold starts it has saved"),
+    ("branch", "", "what is checked out, or what a free slot last held"),
+    ("agent", "", "the agent session holding the slot, where one can be identified"),
+    ("notes", "", "anything exceptional about the row"),
 ]
 
 # The slot's own details first — what it is, what state it is in, how warm,
