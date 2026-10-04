@@ -770,6 +770,16 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     for line in _table(cells, _LIST_COLUMNS):
         print(line)
+
+    # The paths behind each row. Warmth says whether a base is there; only this
+    # says which one, which is what you need when one goes missing.
+    if ctx.args.verbose:
+        print("")
+        for r in rows:
+            print("  " + (r["branch"] or r["name"] or r["last_branch"] or r["slot"]))
+            print("    slot:        " + r["path"])
+            print("    output base: " + r["output_base"] +
+                  ("" if r["output_base_present"] else "  (missing)"))
     print("")
     if foreign:
         print("  %d slot(s) belong to another clone of this repository and cannot be leased here." % foreign)
@@ -892,7 +902,12 @@ worktree_list = task(
     description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.",
     implementation = _list_impl,
     traits = [Worktrees],
-    args = _OUTPUT_ARG,
+    args = {
+        "verbose": args.boolean(
+            default = False,
+            description = "Also print each slot's directory and the Bazel output base its path derives to, marked when that base is missing.",
+        ),
+    } | _OUTPUT_ARG,
 )
 
 # Exposed for worktree_test.axl; not part of any task's surface.
