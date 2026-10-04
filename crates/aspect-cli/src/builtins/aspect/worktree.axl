@@ -9,10 +9,14 @@ cache come back too when the build's flags match, since Bazel discards analysis
 on a configuration change. No flag is injected to arrange any of it.
 
     aspect worktree add fix/login
-    cd "$(aspect worktree path fix/login)"
-    aspect test //...                  ->  the slot's output base, and its
+    slot=$(aspect worktree path fix/login) && cd "$slot"
+    bazel test //...                   ->  the slot's output base, and its
                                            server too if the flags match
     aspect worktree remove fix/login   ->  the slot goes back to the pool
+
+Nothing inside the slot has to be an Aspect command: Bazel derives the base
+from the workspace directory, so anything invoking Bazel there gets the same
+state.
 
 A slot is reached by its own path — nothing is symlinked into place. `git
 worktree list` already reports that path, so a worktree stays legible to git
