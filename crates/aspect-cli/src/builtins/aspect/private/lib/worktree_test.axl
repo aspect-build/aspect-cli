@@ -9,7 +9,12 @@ GitLab mirror of the same code, and a fork. A pool key that collapses the first
 two spellings but not the two hosts is the behaviour these pin down.
 """
 
-load("@aspect//worktree.axl", "testonly_held_by", "testonly_list_columns")
+load(
+    "@aspect//worktree.axl",
+    "testonly_held_by",
+    "testonly_list_columns",
+    "testonly_same_session",
+)
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
@@ -27,6 +32,7 @@ load(
     "git_out",
     "held_for_ms",
     "holds_reservation",
+    "leased_slot",
     "lock_digest",
     "lock_digest_at",
     "normalize_remote",
@@ -375,11 +381,21 @@ def _repo_with_worktree(ctx, dirty):
     run_git(ctx.std, ["add", "-A"], repo)
     run_git(ctx.std, ["commit", "-qm", "init"], repo)
 
-    pool = {"git_common_dir": repo + "/.git", "dir": tmp + "/pool"}
     slot_id = "abc123"
-    path = tmp + "/pool/aspect-worktree-" + slot_id
-    ctx.std.fs.create_dir_all(pool["dir"])
-    run_git(ctx.std, ["worktree", "add", "-q", path, "-b", "wip"], repo + "/.git")
+    asked = tmp + "/pool/" + SLOT_PREFIX + slot_id
+    ctx.std.fs.create_dir_all(tmp + "/pool")
+    run_git(ctx.std, ["worktree", "add", "-q", asked, "-b", "wip"], repo + "/.git")
+
+    # Everything below takes git's spelling of these paths, because that is
+    # where `pool_of` gets them in production. A hand-built path differs from
+    # git's under a symlinked `/var`, and a fixture that mixes the two tests a
+    # configuration the product never has — and hides the one it does.
+    common = git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    path = asked
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX + slot_id in line:
+            path = line[len("worktree "):].strip()
+    pool = {"git_common_dir": common, "dir": path.rsplit("/", 1)[0]}
     if dirty:
         ctx.std.fs.write(path + "/README", "uncommitted\n")
     return struct(pool = pool, slot_id = slot_id, path = path)
@@ -521,15 +537,68 @@ def _test_the_refusal_names_who_holds_the_slot(ctx):
     # No session store, so the state is `unknown`: not resumable, not gone.
     previous = ctx.std.env.var("CLAUDE_CONFIG_DIR") or ""
     ctx.std.env.set_var("CLAUDE_CONFIG_DIR", ctx.std.fs.mkdtemp(prefix = "aspect-nostore"))
-    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login")
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", {})
     if previous:
         ctx.std.env.set_var("CLAUDE_CONFIG_DIR", previous)
     else:
         ctx.std.env.remove_var("CLAUDE_CONFIG_DIR")
 
     _eq("names the branch", "fix/login" in msg, True)
-    _eq("names the holder", "claude-code abcdef12" in msg, True)
+
+    # In full, not truncated as the table does it: two sessions whose ids share
+    # a prefix have to be told apart by whoever reads a refusal.
+    _eq("names the holder", "claude-code session abcdef12-3456" in msg, True)
     _eq("offers the override", "--take-over" in msg, True)
+
+    # The resume line is offered only for a session that can be resumed, so an
+    # alternative phrased as "Or ..." would be an alternative to nothing.
+    _eq("no dangling alternative", " Or " in msg, False)
+
+def _test_a_slot_you_already_hold_says_so(ctx):
+    """Told that a `claude-code` session holds it, in the words used for a
+    stranger, an agent reads the skill's rule — a slot another session holds
+    needs the user's say-so — and stops to ask a question with nobody to ask.
+    Reclaiming your own slot needs nobody's permission, and where it already is
+    is the useful answer."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    me = {"kind": "claude-code", "id": "abcdef12-3456", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", me)}}
+
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", me)
+
+    _eq("says it is yours", "already yours" in msg, True)
+    _eq("points at the slot", "aspect worktree path fix/login" in msg, True)
+    if "check with whoever" in msg:
+        fail("asking the user about your own slot is the inversion being fixed")
+
+def _test_a_different_session_is_still_a_refusal(ctx):
+    """The identity check must not swallow the case it is next to: another
+    session's slot is still not yours, even on the same harness."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    theirs = {"kind": "claude-code", "id": "11111111-1111", "pid": 0, "pid_start": ""}
+    me = {"kind": "claude-code", "id": "22222222-2222", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", theirs)}}
+
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", me)
+    _eq("not called yours", "already yours" in msg, False)
+    _eq("names them", "11111111-1111" in msg, True)
+
+def _test_an_anonymous_lease_is_nobodys(ctx):
+    """A worktree somebody took at a terminal records no session. Matching an
+    empty id against an empty id would make every such slot everybody's."""
+    nobody = {"kind": "", "id": ""}
+    me = {"kind": "claude-code", "id": ""}
+    _eq("no id, no match", testonly_same_session(me, nobody), False)
+    _eq("same id matches", testonly_same_session(
+        {"kind": "claude-code", "id": "x"},
+        {"kind": "claude-code", "id": "x"},
+    ), True)
+    _eq("other harness does not", testonly_same_session(
+        {"kind": "codex", "id": "x"},
+        {"kind": "claude-code", "id": "x"},
+    ), False)
 
 def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
     """A worktree a person took has no session to report, so the message stays
@@ -537,7 +606,7 @@ def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
     pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
     registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", {})}}
-    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login")
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", {})
     _eq("no holder claimed", "held by" in msg, False)
     _eq("still says what to do", "aspect worktree remove" in msg, True)
 
@@ -1067,17 +1136,71 @@ def _test_adoption_does_not_disturb_a_reservation(ctx):
     _eq("still reserved", registry["slots"][slot_id]["state"], RESERVED)
     _eq("still ours", holds_reservation(registry, slot_id, token), True)
 
-def _test_a_lease_ends_when_the_worktree_really_is_gone(ctx):
-    """The case `reconcile` exists for has to keep working: somebody ran
-    `git worktree remove` by hand, or an agent deleted its checkout without
-    releasing. The directory is gone, so the lease is over."""
+def _test_a_lease_ends_when_the_checkout_is_deleted(ctx):
+    """One of the two recoveries the pool model promises: an agent that deleted
+    its worktree without releasing the slot. Git goes on listing that worktree
+    until something prunes it, so the list alone would keep the lease standing
+    forever — and `abandoned_lease` cannot help, because it needs a positively
+    deleted agent session. A directory that is gone holds nobody's work."""
     env = _repo_with_worktree(ctx, dirty = False)
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
     ctx.std.fs.remove_dir_all(env.path)
+    if env.path not in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("the fixture should leave git still listing the deleted worktree")
 
     reconcile(ctx.std, env.pool, registry)
     _eq("freed", registry["slots"][env.slot_id]["state"], FREE)
     _eq("and the lease with it", registry["slots"][env.slot_id]["lease"], None)
+
+def _test_a_lease_ends_when_git_drops_the_worktree(ctx):
+    """The other one: somebody ran `git worktree remove` by hand. No lease
+    protocol, no timeout — git's own registration is the evidence."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    run_git(ctx.std, ["worktree", "remove", "--force", env.path], env.pool["git_common_dir"])
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("freed", registry["slots"][env.slot_id]["state"], FREE)
+
+def _test_a_lease_stands_while_the_checkout_is_there(ctx):
+    """The inverse, which is what makes the two above safe to act on: an
+    ordinary lease over a worktree git lists and the filesystem has must survive
+    every reconcile, or the next `add` is handed an occupied slot."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("untouched", registry["slots"][env.slot_id]["state"], LEASED)
+    _eq("lease intact", registry["slots"][env.slot_id]["lease"]["name"], "wip")
+
+def _test_reconcile_closes_the_history_entry_it_ends(ctx):
+    """Four paths end a lease and all four have to close its entry, or the slot's
+    history says a branch nobody holds is still checked out — and once the slot
+    is leased again, two entries claim to hold it at once."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _A_SESSION)}}
+    record_lease(registry, env.slot_id, "wip", _A_SESSION)
+    ctx.std.fs.remove_dir_all(env.path)
+
+    reconcile(ctx.std, env.pool, registry)
+
+    entry = registry["slots"][env.slot_id]["history"][-1]
+    if not entry["released_ms"]:
+        fail("freeing a lease has to close its history entry")
+
+def _test_one_clones_lease_is_not_anothers(ctx):
+    """Clones share a pool directory but not the slots in it, and each has its
+    own refs — so one clone holding `fix/login` says nothing about another's.
+    Searching every slot made `add` refuse the second clone over a session that
+    holds nothing of theirs, and `remove` report a release it did not do."""
+    registry = {"slots": {
+        "theirs": _leased("/other/clone/.git", "fix/login", {}),
+        "mine": _slot("/my/clone/.git"),
+    }}
+
+    _eq("not mine to find", leased_slot(registry, "fix/login", "/my/clone/.git"), "")
+    _eq("theirs to find", leased_slot(registry, "fix/login", "/other/clone/.git"), "theirs")
+    _eq("unscoped still searches everything", leased_slot(registry, "fix/login"), "theirs")
 
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
@@ -1100,6 +1223,11 @@ _UNIT_TESTS = [
     _test_missing_registry_is_empty,
     _test_the_agent_column_is_never_dropped,
     _test_the_refusal_names_who_holds_the_slot,
+    _test_a_slot_you_already_hold_says_so,
+    _test_a_different_session_is_still_a_refusal,
+    _test_an_anonymous_lease_is_nobodys,
+    _test_reconcile_closes_the_history_entry_it_ends,
+    _test_one_clones_lease_is_not_anothers,
     _test_a_lease_with_no_agent_keeps_the_plain_refusal,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,
     _test_a_recently_used_base_outranks_an_old_creation_floor,
@@ -1148,7 +1276,9 @@ _UNIT_TESTS = [
     _test_a_lease_survives_git_not_naming_its_path,
     _test_a_worktree_the_registry_forgot_is_adopted,
     _test_adoption_does_not_disturb_a_reservation,
-    _test_a_lease_ends_when_the_worktree_really_is_gone,
+    _test_a_lease_ends_when_the_checkout_is_deleted,
+    _test_a_lease_ends_when_git_drops_the_worktree,
+    _test_a_lease_stands_while_the_checkout_is_there,
 ]
 
 def _test_impl(ctx):

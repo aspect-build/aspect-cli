@@ -35,12 +35,14 @@ def started_at(std, pid: int) -> str:
 def is_same_process(std, pid: int, recorded_start: str) -> bool:
     """Whether `pid` is still the process whose start time was `recorded_start`.
 
-    An empty `recorded_start` means nothing was recorded to compare against, so
-    liveness is the best available answer.
+    Falls back to liveness wherever a start time cannot be had — nothing was
+    recorded to compare against, or `ps` cannot answer now. Reading an
+    unanswerable `ps` as "not the same process" would call every live process
+    dead, and callers act on that by taking things away from them.
     """
     if pid <= 0:
         return False
     start = started_at(std, pid)
-    if not start:
-        return False
-    return start == recorded_start if recorded_start else True
+    if not start or not recorded_start:
+        return alive(std, pid)
+    return start == recorded_start

@@ -68,6 +68,7 @@ load(
     "LEASED",
     "PRUNE_AGE_DAYS",
     "RESERVED",
+    "SLOT_PREFIX",
     "abandoned_lease",
     "acquire",
     "close_lease",
@@ -280,7 +281,27 @@ def _dirty_files(ctx: TaskContext, path: str, root: str) -> str:
     work = uncommitted_work(ctx.std, path, output_base_of(ctx.std, path, root))
     return "\n".join(["  " + line for line in work])
 
-def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> str:
+def _holder(agent: dict) -> str:
+    """A lease's holder, named in full.
+
+    `label` truncates the session id to keep a table narrow. A refusal is not a
+    table, and two sessions whose ids share a prefix have to be told apart by
+    whoever reads it.
+    """
+    kind = agent.get("kind", "") or "an unidentified harness"
+    sid = agent.get("id", "")
+    return (kind + " session " + sid) if sid else kind
+
+def _same_session(mine: dict, theirs: dict) -> bool:
+    """Whether two agent records are the same session.
+
+    An empty id never matches: a worktree somebody took at a terminal is not
+    everybody's.
+    """
+    sid = theirs.get("id", "")
+    return sid != "" and sid == mine.get("id", "") and theirs.get("kind", "") == mine.get("kind", "")
+
+def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str, mine: dict) -> str:
     """Why `name` cannot be taken, and what the caller can do instead.
 
     The lease knows which session holds it and whether that session is running,
@@ -295,20 +316,30 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
         return (name + " is already checked out at " + where +
                 ". Use it, or `aspect worktree remove " + name + "` first.")
 
+    # Reclaiming a slot you already hold needs nobody's permission, and a
+    # refusal phrased for a stranger sends the reader to ask a question with no
+    # one to ask.
+    if _same_session(mine, agent):
+        return (name + " is already yours, checked out at " + where +
+                ". `aspect worktree path " + name + "` prints that path again, and " +
+                "`aspect worktree remove " + name + "` releases the slot when you are done.")
+
     state = session_state(ctx.std, agent)
-    who = label(agent)
+    who = _holder(agent)
     if state == RUNNING:
-        held = name + " is checked out at " + where + ", held by a running " + who + " session."
+        held = name + " is checked out at " + where + ", held by a running " + who + "."
     elif state == RESUMABLE:
         held = name + " is checked out at " + where + ", held by " + who + ", which is not running."
     else:
         held = name + " is checked out at " + where + ", held by " + who + "."
 
+    # Each option stands on its own, because which ones apply depends on what
+    # can be established about the session.
     lines = [held]
     hint = resume_hint(agent)
     if hint and state == RESUMABLE:
         lines.append("Resume that session: " + hint)
-    lines.append("Or claim the slot for this session, keeping the checkout as it is: " +
+    lines.append("To claim the slot for this session instead, keeping the checkout as it is: " +
                  "`aspect worktree add " + name + " --take-over`.")
     if state == RUNNING:
         lines.append("That session is still running, so check with whoever is driving it first.")
@@ -431,6 +462,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
         lease = registry["slots"][slot_id].get("lease") or {}
         info(ctx.std, "reclaimed the slot held by " + (lease.get("name", "") or "an earlier worktree") +
                       ": its " + label(lease.get("agent") or {}) + " session no longer exists and the checkout was clean")
+        close_lease(registry, slot_id)
         registry["slots"][slot_id]["state"] = FREE
         registry["slots"][slot_id]["lease"] = None
         return struct(
@@ -493,6 +525,10 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
     """
     if ctx.std.fs.exists(path):
         _git(ctx, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+    else:
+        # Git keeps listing a worktree whose directory went missing, and refuses
+        # to check anything out at a path it still has registered.
+        catch(run_git, ctx.std, ["worktree", "prune"], pool["git_common_dir"])
     ctx.std.fs.create_dir_all(pool["dir"])
     existing = _git_try(ctx, ["rev-parse", "--verify", "--quiet", name], pool["git_common_dir"])
     if existing:
@@ -549,9 +585,12 @@ def _check_out_and_lease(
     if not holds_reservation(registry, chosen.id, token):
         # Only a caller that judged this process dead could have taken the slot,
         # and it is not dead. Leave the registry to whoever owns it now rather
-        # than leasing one slot twice, and take the worktree back out so git and
-        # the registry still agree.
-        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        # than leasing one slot twice, and take back the worktree this call
+        # created — but only while it is still the one this call created. By now
+        # the new holder may have checked their own branch out there, and that
+        # is not ours to force-remove.
+        if _git_try(ctx, ["rev-parse", "--abbrev-ref", "HEAD"], path) == name:
+            catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
         warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
         return _pool_busy(ctx)
 
@@ -613,6 +652,7 @@ _COLUMN_NOTES = [
 
 _LIST_FOOTNOTES = [
     "age: how long the slot has existed. leases: how many worktrees it has held, which is how many cold starts it has saved.",
+    "a branch in (parentheses) is what a free slot last held — history, not something to enter. Allocation prefers the slot that last held the branch you ask for.",
 ]
 
 _LIST_COLUMNS = [
@@ -688,7 +728,7 @@ def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     exits on idle, and `aspect gc` can reclaim the base — so claiming "warm"
     without looking would be a lie often enough to matter.
     """
-    warmth = warmth_of(std, path)
+    warmth = warmth_of(std, path, root)
     if warmth.server:
         return "warm: a Bazel server is still holding this slot's analysis cache (pid %d)" % warmth.server
     if warmth.base:
@@ -791,7 +831,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # been picked and its previous occupant force-removed. Both checks here
     # answer before anything is destroyed; the pool's own leases get the better
     # message, so they are tested first.
-    held = leased_slot(registry, name)
+    held = leased_slot(registry, name, pool["git_common_dir"])
 
     # Asking for a branch whose own lease is abandoned is an agent restarting
     # the task it died in. Hand the slot back instead of refusing: the session
@@ -818,9 +858,25 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         held = ""
 
     if held:
-        return _refuse(ctx, "branch_in_use", _held_by(ctx, pool, registry, held, name))
+        mine = detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id)
+        return _refuse(ctx, "branch_in_use", _held_by(ctx, pool, registry, held, name, mine))
     elsewhere = _worktree_holding_branch(ctx, pool, name)
     if elsewhere:
+        # A pool slot can hold a branch the registry does not know it holds:
+        # somebody ran `git switch` in the slot, or `remove` could not drop the
+        # worktree and freed the slot anyway. Telling the caller the pool does
+        # not manage that directory would be false, and the advice useless.
+        if elsewhere.startswith(pool["dir"] + "/" + SLOT_PREFIX):
+            return _refuse(
+                ctx,
+                "branch_elsewhere",
+                name + " is checked out in the pool slot at " + elsewhere +
+                ", which no lease accounts for — the slot was freed with that " +
+                "branch still in it, or something switched it there. " +
+                "`aspect worktree list` shows the slot; releasing it with " +
+                "`aspect worktree remove` under the branch it is leased as, or " +
+                "`git worktree remove " + elsewhere + "` from this clone, frees the branch.",
+            )
         return _refuse(
             ctx,
             "branch_elsewhere",
@@ -844,7 +900,7 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    target = leased_slot(registry, name)
+    target = leased_slot(registry, name, pool["git_common_dir"])
     if not target:
         return _no_such_worktree(ctx, name)
 
@@ -905,7 +961,7 @@ def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not pool:
         return _not_a_repository(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    found = leased_slot(registry, name)
+    found = leased_slot(registry, name, pool["git_common_dir"])
     if not found:
         return _no_such_worktree(ctx, name)
 
@@ -929,7 +985,22 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    victims = prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days, root)
+
+    # Age and state say which slots are eligible; a live Bazel server is what
+    # spares one. Applied here rather than only at deletion, so `--dry-run`
+    # previews what a real run would do instead of listing slots it would keep.
+    # The deletion loop checks again, for a server that started in between.
+    victims = []
+    spared = []
+    for slot_id in prunable_slots(ctx.std, pool, registry, ctx.args.max_age_days, root):
+        warmth = warmth_of(ctx.std, slot_path(pool, slot_id), root)
+        if warmth.server:
+            spared.append((
+                slot_path(pool, slot_id),
+                "a Bazel server (pid %d) still holds it" % warmth.server,
+            ))
+        else:
+            victims.append(slot_id)
 
     # The whole list goes out before anything is deleted, so the confirmation is
     # answered with the picture rather than a count.
@@ -954,13 +1025,13 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         is_tty = ctx.std.io.stdin.is_tty,
     )
     if verdict == confirm.NEEDS_FORCE:
-        return TaskConclusion(exit_code = 1, message = confirm.needs_force_message(doomed))
+        return _refuse(ctx, "needs_force", confirm.needs_force_message(doomed))
     question = "Delete %d worktree slot(s) and their Bazel output bases?" % len(victims)
     if verdict == confirm.ASK and not confirm.ask(ctx, question):
         return TaskConclusion(exit_code = 0, message = "left alone; nothing was deleted.")
 
     pruned = []
-    kept = []
+    kept = [] + spared
     if verdict != confirm.SKIP:
         for i, slot_id in enumerate(victims):
             path = slot_path(pool, slot_id)
@@ -970,7 +1041,12 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
                 pruned.append(path)
             else:
                 kept.append((path, outcome.reason))
-        write_registry(ctx.std, pool["dir"], registry)
+
+            # Written after each one rather than at the end: an entry whose
+            # output base has been deleted still scores as warm, so an
+            # interrupted prune would send the next caller to the coldest slot
+            # in the pool.
+            write_registry(ctx.std, pool["dir"], registry)
 
     for path, reason in kept:
         warn(ctx.std, "kept " + path + ": " + reason)
@@ -990,8 +1066,11 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         }, indent = 2) + "\n")
         return 0
 
-    if not victims:
+    if not victims and not spared:
         info(ctx.std, "nothing to prune: no free slot has been idle for %d days" % ctx.args.max_age_days)
+    elif not victims:
+        info(ctx.std, "nothing to prune: every slot idle for %d days is still held by a Bazel server" %
+                      ctx.args.max_age_days)
     elif verdict == confirm.SKIP:
         info(ctx.std, "dry run; nothing was deleted")
     else:
@@ -1092,8 +1171,15 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         if r["branch"] and r["name"] and r["branch"] != r["name"]:
             notes.append("leased as " + r["name"])
 
+        # A free slot's branch is the one it last held. Parenthesized, because
+        # it is not a worktree anybody can enter and reads like one otherwise.
+        if r["state"] == FREE:
+            branch = ("(%s)" % r["last_branch"]) if r["last_branch"] else "-"
+        else:
+            branch = r["branch"] or r["name"] or r["reserved_for"] or r["last_branch"] or "-"
+
         cells.append({
-            "branch": r["branch"] or r["name"] or r["reserved_for"] or r["last_branch"] or "-",
+            "branch": branch,
             "state": _STATE_LABELS.get(r["state"], r["state"]),
             "warmth": warmth,
             "warmth_kind": kind,
@@ -1137,7 +1223,14 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     for name, hint in resumable:
         print("  %s is held by a session that is not running. Resume it:" % name)
         print("    " + hint)
-    print("  slot=$(aspect worktree path <branch>) && cd \"$slot\"  to enter one")
+
+    # Only offered when there is something it would work on. `path` answers for
+    # a leased branch; suggesting it over a pool of free slots sends the reader
+    # to a refusal, since the only names on screen would be released ones.
+    if [r for r in rows if r["state"] == LEASED]:
+        print("  slot=$(aspect worktree path <branch>) && cd \"$slot\"  to enter one")
+    else:
+        print("  slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"  to take one")
     print("  aspect worktree prune --dry-run  to see what has gone stale")
     return 0
 
@@ -1224,7 +1317,15 @@ path = task(
             maximum = 1,
             description = "The name the worktree was created with.",
         ),
-    } | _OUTPUT_ARG,
+        # Not the shared `_OUTPUT_ARG`: that one describes text output as a
+        # report on stderr with stdout left empty, and writing the directory to
+        # stdout is the whole point of this command.
+        "output": args.string(
+            default = "text",
+            values = ["text", "json"],
+            description = "`text` (default) writes the slot directory to stdout and nothing else, so a shell can step into it. `json` writes one document to stdout, which is how a refusal arrives as a token rather than prose.",
+        ),
+    },
 )
 
 # `list` would shadow the builtin type within this module, so the symbol is
@@ -1269,3 +1370,4 @@ worktree_list = task(
 # Exposed for worktree_test.axl; not part of any task's surface.
 testonly_held_by = _held_by
 testonly_list_columns = _LIST_COLUMNS
+testonly_same_session = _same_session

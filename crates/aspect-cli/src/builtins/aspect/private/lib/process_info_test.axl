@@ -53,6 +53,24 @@ def _test_nothing_recorded_falls_back_to_liveness(ctx):
     _eq("live, nothing recorded", is_same_process(ctx.std, ctx.std.process.id(), ""), True)
     _eq("dead, nothing recorded", is_same_process(ctx.std, 0, ""), False)
 
+_DEAD_PID = 2147483000
+
+def _test_an_unreadable_start_time_falls_back_to_liveness(ctx):
+    """`ps` failing is not evidence that a process has gone. Reading it that way
+    calls every live process dead, and the callers of this act on that by taking
+    a lock or a reservation away from a process that is still working.
+    """
+    mine = ctx.std.process.id()
+    _eq("alive, with nothing recorded", is_same_process(ctx.std, mine, ""), True)
+    _eq("dead, with nothing recorded", is_same_process(ctx.std, _DEAD_PID, ""), False)
+
+def _test_a_recorded_start_time_still_decides(ctx):
+    """The fallback must not swallow pid reuse: where a start time can be read,
+    it is the answer."""
+    mine = ctx.std.process.id()
+    _eq("the real one matches", is_same_process(ctx.std, mine, started_at(ctx.std, mine)), True)
+    _eq("another process does not", is_same_process(ctx.std, mine, "Mon Jan  1 00:00:00 2001"), False)
+
 _UNIT_TESTS = [
     _test_this_process_is_alive,
     _test_a_nonsense_pid_is_not_alive,
@@ -61,6 +79,8 @@ _UNIT_TESTS = [
     _test_a_matching_start_time_identifies_the_same_process,
     _test_a_different_start_time_means_a_reused_pid,
     _test_nothing_recorded_falls_back_to_liveness,
+    _test_an_unreadable_start_time_falls_back_to_liveness,
+    _test_a_recorded_start_time_still_decides,
 ]
 
 def _test_impl(ctx):

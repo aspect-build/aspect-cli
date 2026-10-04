@@ -592,10 +592,13 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
     reason: an unreadable registry starts over by design, and without this the
     pool would report one of its own slots as a worktree it does not manage.
 
-    A lease is only ended when git says the worktree is gone from inside the
-    directory as well as from the list. The list is matched by path, and two
-    spellings of one directory would otherwise read as every lease having
-    ended — which hands the next caller an occupied slot to force-remove.
+    A lease is kept only while the checkout is still there and git agrees it is
+    a worktree of this clone. A missing directory ends it whatever git's list
+    says, because git keeps listing a worktree until something prunes it and a
+    directory that is gone holds nobody's work. A directory that is there
+    outranks git's silence about it, since the list is matched by path and two
+    spellings of one directory would otherwise read as every lease having ended
+    — which hands the next caller an occupied slot to force-remove.
 
     Only slots this clone owns are judged. A `git worktree list` answers for one
     object store, so another clone's lease is invisible here rather than over.
@@ -613,8 +616,9 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
         path = slot_path(pool, slot_id)
-        if path in live or _is_our_worktree(std, pool, path):
+        if std.fs.exists(path) and (path in live or _is_our_worktree(std, pool, path)):
             continue
+        close_lease(registry, slot_id)
         slot["state"] = FREE
         slot["lease"] = None
 
@@ -624,6 +628,11 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
     prefix = pool["dir"] + "/" + SLOT_PREFIX
     for path in live:
         if not path.startswith(prefix):
+            continue
+
+        # Git lists a worktree whose directory is gone until something prunes
+        # it, and a missing directory holds nothing to adopt.
+        if not std.fs.exists(path):
             continue
         slot_id = path[len(prefix):]
         if not slot_id or "/" in slot_id:
@@ -730,15 +739,24 @@ def lock_digest_at(std, git_common_dir: str, ref: str) -> str:
 
 # --- bounds and pruning ------------------------------------------------------
 
-def leased_slot(registry: dict, name: str) -> str:
-    """The slot id leased under `name`, or "".
+def leased_slot(registry: dict, name: str, owner: str = "") -> str:
+    """The slot id this clone has leased under `name`, or "".
 
     Leases are keyed by the name the caller asked for; the slot id is internal,
     so this is how every command that takes a branch finds its slot.
+
+    `owner` is the clone's git common dir, and leaving it out searches every
+    slot — which is almost never what a caller wants. Clones share a pool
+    directory but not the slots in it, and each has its own refs, so one clone
+    holding `fix/login` says nothing about another's: refusing the second clone
+    would be a false refusal, and releasing the first clone's slot from the
+    second would report a success that did not happen.
     """
     for slot_id in registry["slots"]:
-        lease = registry["slots"][slot_id].get("lease") or {}
-        if lease.get("name", "") == name:
+        slot = registry["slots"][slot_id]
+        if owner and slot.get("owner_git_dir", "") != owner:
+            continue
+        if (slot.get("lease") or {}).get("name", "") == name:
             return slot_id
     return ""
 
