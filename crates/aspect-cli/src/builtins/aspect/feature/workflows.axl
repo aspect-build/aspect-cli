@@ -8,7 +8,7 @@ load(
     "runner_diagnostics_flags",
     "runner_executor_flags",
     "runner_flags",
-    "temp_diagnostics_upload_flags",
+    "temp_exec_log_flags",
 )
 load(
     "../private/lib/environment.axl",
@@ -93,7 +93,7 @@ def _workflows_impl(ctx: FeatureContext):
         # runner's does; only the runner's mounts are missing.
         bazel_trait.extra_flags.extend(env_task_flags(environment))
         if environment.build_events != None:
-            bazel_trait.task_flags.append(temp_diagnostics_upload_flags)
+            bazel_trait.task_flags.append(temp_exec_log_flags)
 
     if environment.build_events != None:
         register_bes_metadata(ctx, bazel_trait)
