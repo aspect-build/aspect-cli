@@ -31,7 +31,7 @@ takes flags to change them.
 load("@std//time.axl", "time")
 load("./agent.axl", agent_label = "label")
 load("./ansi.axl", "ansi")
-load("./bazel_paths.axl", "output_user_root")
+load("./bazel_paths.axl", "last_used", "mtime_us", "output_user_root")
 load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
 load("./path_normalize.axl", "normpath")
@@ -54,11 +54,6 @@ DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
 
 # `md5("")`: the output base Bazel uses when it runs outside any workspace.
 _NO_WORKSPACE = "d41d8cd98f00b204e9800998ecf8427e"
-
-# Rewritten by Bazel as a server starts or runs a command, so statting these few
-# answers "last used" without walking a base's hundred thousand files. The two
-# symlinks are followed to the current profile and log.
-_FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
 
 # --- states ------------------------------------------------------------------
 
@@ -428,22 +423,6 @@ def _workspace_of(ctx: TaskContext, base: str) -> str:
             _workspace_from_execroot(ctx, base) or
             _workspace_from_cmdline(ctx, base))
 
-def _mtime_us(ctx: TaskContext, path: str) -> int:
-    """`path`'s mtime in microseconds, following symlinks; 0 when unreadable."""
-    err, meta = catch(ctx.std.fs.metadata, path)
-    if err != None or meta.modified == None:
-        return 0
-    return meta.modified
-
-def _last_used(ctx: TaskContext, base: str) -> int:
-    """When a Bazel server last started or ran a command in `base`, in
-    microseconds. The base directory's own mtime stands in when no marker can
-    be read."""
-    newest = 0
-    for marker in _FRESHNESS_MARKERS:
-        newest = max(newest, _mtime_us(ctx, base + "/" + marker))
-    return newest or _mtime_us(ctx, base)
-
 # --- servers -----------------------------------------------------------------
 
 def _server_pid(ctx: TaskContext, base: str) -> int:
@@ -552,20 +531,20 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
                 workspace = "",
                 state = TRASH,
                 pid = 0,
-                last_used = _mtime_us(ctx, path),
+                last_used = mtime_us(ctx.std, path),
             ))
             continue
         if not _is_output_base_name(entry.path):
             continue
         workspace = _workspace_of(ctx, path)
         pooled = any([workspace.startswith(p) for p in pools])
-        last_used = _last_used(ctx, path)
+        used_us = last_used(ctx.std, path)
         pid = _server_pid(ctx, path)
         state = _classify(
             workspace,
             bool(workspace) and ctx.std.fs.exists(workspace),
             pooled,
-            now_us - last_used,
+            now_us - used_us,
             policy,
         )
         if state == IDLE and _may_be_this_bases_server(ctx, pid, path):
@@ -576,7 +555,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
             workspace = workspace,
             state = state,
             pid = pid,
-            last_used = last_used,
+            last_used = used_us,
             pooled = pooled,
         ))
     return sorted(bases, key = lambda b: -b.last_used)
@@ -876,6 +855,17 @@ def _base_entry(b, sizes: dict = {}, checkouts: dict = {}, servers: dict = {}) -
         entry["server_rss_kb"] = servers[b.path]
     return entry
 
+# --- freshness, for the namespace -------------------------------------------
+
+def _mtime_us_compat(ctx: TaskContext, path: str) -> int:
+    """`mtime_us` for callers holding a `ctx`, which is how the task and its
+    tests reach it."""
+    return mtime_us(ctx.std, path)
+
+def _last_used_compat(ctx: TaskContext, base: str) -> int:
+    """`last_used` for callers holding a `ctx`."""
+    return last_used(ctx.std, base)
+
 output_bases = namespace(
     BASE = BASE,
     Base = Base,
@@ -911,11 +901,11 @@ output_bases = namespace(
     is_output_base_name = _is_output_base_name,
     is_this_bases_server = _is_this_bases_server,
     kb_by_state = _kb_by_state,
-    last_used = _last_used,
+    last_used = _last_used_compat,
     listing_hint = _listing_hint,
     may_be_this_bases_server = _may_be_this_bases_server,
     measure = _measure,
-    mtime_us = _mtime_us,
+    mtime_us = _mtime_us_compat,
     output_base_name = _output_base_name,
     output_user_root_arg = _output_user_root_arg,
     policy_entry = _policy_entry,

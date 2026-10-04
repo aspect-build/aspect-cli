@@ -226,7 +226,7 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict) -> int:
     dropped = 0
     for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_AGE_DAYS):
         label = registry["slots"][slot_id].get("last_branch", "") or slot_id
-        age = slot_age_days(registry["slots"][slot_id])
+        age = slot_age_days(ctx.std, pool, slot_id, registry["slots"][slot_id])
         if drop_slot(ctx.std, pool, registry, slot_id).dropped:
             info(ctx.std, "pruned slot last used %d days ago (%s)" % (age, label))
             dropped += 1
@@ -504,7 +504,6 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         # than only the branch. Empty for a person at a terminal.
         "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
     }
-    slot["last_used_ms"] = time.now_ms()
     write_registry(ctx.std, pool["dir"], registry)
 
     warmth = warmth_of(ctx.std, path)
@@ -569,7 +568,6 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     slot["last_commit"] = head
     slot["last_branch"] = name
     slot["lease"] = None
-    slot["last_used_ms"] = time.now_ms()
     write_registry(ctx.std, pool["dir"], registry)
 
     if ctx.args.output == "json":
@@ -616,10 +614,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         label = slot.get("last_branch", "") or "never used"
         candidates.append({
             "path": slot_path(pool, slot_id),
-            "idle_days": slot_age_days(slot),
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot),
             "last_branch": slot.get("last_branch", ""),
         })
-        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(slot), label))
+        print("    %s  %d days  %s" % (slot_path(pool, slot_id), slot_age_days(ctx.std, pool, slot_id, slot), label))
 
     doomed = "delete %d worktree slot(s) and their Bazel output bases" % len(victims)
     verdict = confirm.decide(
@@ -703,7 +701,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "last_branch": slot.get("last_branch", ""),
             "owner": slot.get("owner_git_dir", ""),
             "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
-            "idle_days": slot_age_days(slot),
+            "idle_days": slot_age_days(ctx.std, pool, slot_id, slot),
             "output_base": output_base_of(ctx.std, path),
             "server_pid": warmth.server,
             "output_base_present": warmth.base,

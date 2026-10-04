@@ -21,7 +21,7 @@ Worktrees = trait(
     score_slot = attr(
         list[typing.Callable[[TaskContext, dict, dict], int]],
         default = [],
-        description = "Hooks scoring a free slot for reuse: `fn(ctx, slot, want) -> int`, higher wins, 0 refuses the slot outright. `slot` carries what its last occupant left behind (`lock_digest`, `last_commit`, `last_branch`, `last_used_ms`); `want` carries `lock_digest` and `commit` for the worktree being created. The first registered hook decides; with none registered the built-in scoring applies, which weights a matching MODULE.bazel.lock far above everything else because a mismatch is what forces `external/` to be rebuilt.",
+        description = "Hooks scoring a free slot for reuse: `fn(ctx, slot, want) -> int`, higher wins, 0 refuses the slot outright. `slot` carries what its last occupant left behind (`lock_digest`, `last_commit`, `last_branch`, `created_ms`); `want` carries `lock_digest` and `commit` for the worktree being created. The first registered hook decides; with none registered the built-in scoring applies, which weights a matching MODULE.bazel.lock far above everything else because a mismatch is what forces `external/` to be rebuilt.",
     ),
     max_slots = attr(
         int,
