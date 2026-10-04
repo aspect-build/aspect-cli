@@ -66,7 +66,6 @@ _NOTES = [
     ("state", "free", "nobody is."),
     ("owner", "warm", "ready to go."),
     ("size", "", "how big it is."),
-    ("", "-", "not recorded."),
 ]
 
 def _test_a_legend_defines_only_what_is_on_screen(ctx):
@@ -74,7 +73,26 @@ def _test_a_legend_defines_only_what_is_on_screen(ctx):
     `size` is defined too, because this table prints that column."""
     rows = [{"size": "1", "state": "free", "owner": "warm"}]
     lines = legend(rows, _NOTES, _COLUMNS)
-    _eq("two values and the column", len(lines), 3)
+    _eq("two values, a separator, and the column", len(lines), 4)
+
+def _test_values_and_columns_are_separate_blocks(ctx):
+    """A value explains a cell and a column explains a header. Listed together
+    they read as one list of similar things, so a blank line divides them —
+    with the definitions still sharing a left edge across both."""
+    rows = [{"size": "1", "state": "free", "owner": "warm"}]
+    lines = legend(rows, _NOTES, _COLUMNS)
+
+    _eq("values first", lines[0].startswith("  free (state)"), True)
+    _eq("then a separator", lines[2], "")
+    _eq("then the column", lines[3].startswith("  size  "), True)
+    _eq("one left edge", lines[0].index("nobody"), lines[3].index("how big"))
+
+def _test_one_kind_alone_gets_no_separator(ctx):
+    """A blank line between blocks is only a separator when there are two."""
+    values_only = legend([{"state": "free"}], _NOTES, _COLUMNS)
+    for line in values_only:
+        if line == "":
+            fail("nothing to separate: %r" % values_only)
 
 def _test_a_value_carries_the_column_it_came_from(ctx):
     """A reader looks up the term they saw in a cell, so the term leads and its
@@ -105,14 +123,6 @@ def _test_a_column_that_was_dropped_is_not_defined(ctx):
         if line.startswith("  size"):
             fail("`size` was dropped from this table: %r" % lines)
 
-def _test_a_notation_is_found_in_any_column(ctx):
-    """"-" turns up in whichever column has nothing to report, so it cannot be
-    keyed to one of them."""
-    rows = [{"size": "1", "owner": "-"}]
-    lines = legend(rows, _NOTES, _COLUMNS)
-    if not any([l.startswith("  -  ") for l in lines]):
-        fail("the notation should be defined: %r" % lines)
-
 def _test_legend_definitions_line_up(ctx):
     """Definitions start at one column, or the block reads as ragged prose."""
     rows = [{"size": "1", "state": "free", "owner": "warm"}]
@@ -132,10 +142,11 @@ _UNIT_TESTS = [
     _test_no_row_carries_trailing_whitespace,
     _test_a_header_only_table_still_renders,
     _test_a_legend_defines_only_what_is_on_screen,
+    _test_values_and_columns_are_separate_blocks,
+    _test_one_kind_alone_gets_no_separator,
     _test_a_value_carries_the_column_it_came_from,
     _test_a_column_definition_stands_alone,
     _test_a_column_that_was_dropped_is_not_defined,
-    _test_a_notation_is_found_in_any_column,
     _test_legend_definitions_line_up,
     _test_a_legend_for_nothing_is_empty,
 ]

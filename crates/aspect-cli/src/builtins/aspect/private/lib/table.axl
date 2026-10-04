@@ -59,42 +59,48 @@ def render(rows: list[dict], columns: list) -> list[str]:
 def legend(rows: list[dict], notes: list, columns: list) -> list[str]:
     """Definitions for what `rows` show, as a two-column lookup.
 
-    `notes` is `(column, value, definition)` in three shapes:
+    `notes` is `(column, value, definition)` in two shapes:
 
         ("warmth", "cold", …)  a value, shown when a row carries it
         ("idle", "", …)        a column, shown when the column is printed
-        ("", "-", …)           a notation, shown when any cell carries it
 
-    The term a reader saw in the table leads, since that is what they are looking
-    up, and the column it belongs to follows in parentheses:
+    A value explains a cell and a column explains a header, which are different
+    enough that running them together reads as one list of similar things. They
+    come out as two blocks, separated by a blank line, values first — that being
+    what a reader looks up when a cell puzzles them:
 
         free (state)    no worktree here; the slot keeps its Bazel state
         cold (warmth)   no output base; the first build pays loading and fetches
+
         idle            how long since Bazel last built here
 
-    Only what is on screen is defined, so the legend shrinks with the table.
+    The term leads, because it is what they saw, and the width is shared across
+    both blocks so the definitions keep one left edge. Only what is on screen is
+    defined, so the legend shrinks with the table.
     """
     headers = {c.key: c.header for c in columns}
     present = {c.key: True for c in shown_columns(rows, columns)}
 
-    terms = []
+    values = []
+    headings = []
     for key, value, definition in notes:
-        if not key:
-            # A notation, which may turn up in any column.
-            if any([any([cell == value for cell in r.values()]) for r in rows]):
-                terms.append((value, definition))
-        elif not value:
-            # The column itself, for a header that needs a sentence.
+        if not value:
             if key in present:
-                terms.append((headers.get(key, key), definition))
+                headings.append((headers.get(key, key), definition))
         elif any([r.get(key, "") == value for r in rows]):
-            terms.append((value + " (" + headers.get(key, key) + ")", definition))
+            values.append((value + " (" + headers.get(key, key) + ")", definition))
 
-    if not terms:
+    if not values and not headings:
         return []
 
-    width = max([len(term) for term, _ in terms])
-    return ["  " + pad_right(term, width) + "  " + definition for term, definition in terms]
+    width = max([len(term) for term, _ in values + headings])
+
+    def block(terms):
+        return ["  " + pad_right(term, width) + "  " + definition for term, definition in terms]
+
+    if values and headings:
+        return block(values) + [""] + block(headings)
+    return block(values + headings)
 
 def tilde(path: str, home: str) -> str:
     """`path` with the home directory written `~`, for display.

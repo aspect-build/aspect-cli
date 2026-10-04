@@ -14,6 +14,7 @@ load(
     "testonly_held_by",
     "testonly_list_columns",
     "testonly_list_order",
+    "testonly_resolve_slot",
     "testonly_same_session",
 )
 load("@std//time.axl", "time")
@@ -1311,6 +1312,44 @@ def _test_an_unrecorded_count_is_not_zero(ctx):
     _eq("recorded as none", fresh.get("lease_count"), 0)
     _eq("no creation time either", slot_age_ms(old), 0)
 
+def _test_a_slot_answers_to_its_id_and_to_its_branch(ctx):
+    """`aspect worktree list` leads with the slot id, so that is the first thing
+    a reader has to hand; a free slot's row offers nothing else but the branch it
+    last held. Both have to work, or nothing on screen is a valid argument."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "aaaa11112222": _leased("/clone/.git", "fix/login", {}),
+        "bbbb33334444": _slot("/clone/.git"),
+    }}
+    registry["slots"]["bbbb33334444"]["last_branch"] = "dx-two"
+
+    _eq("by lease name", testonly_resolve_slot(ctx, pool, registry, "fix/login"), "aaaa11112222")
+    _eq("by the leased slot's id", testonly_resolve_slot(ctx, pool, registry, "aaaa11112222"), "aaaa11112222")
+    _eq("by the free slot's id", testonly_resolve_slot(ctx, pool, registry, "bbbb33334444"), "bbbb33334444")
+    _eq("by what the free slot last held", testonly_resolve_slot(ctx, pool, registry, "dx-two"), "bbbb33334444")
+    _eq("and nothing else", testonly_resolve_slot(ctx, pool, registry, "no-such-thing"), "")
+
+def _test_a_leased_slots_old_branch_does_not_resolve(ctx):
+    """The bug in the first version of this: `remove dx-two` released
+    `fix/login`, because the slot that had last held `dx-two` had since been
+    leased to something else. A branch resolves a slot only while that slot is
+    free; a leased one answers to its lease name or its id."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {"aaaa11112222": _leased("/clone/.git", "fix/login", {})}}
+    registry["slots"]["aaaa11112222"]["last_branch"] = "dx-two"
+
+    _eq("not by the previous occupant", testonly_resolve_slot(ctx, pool, registry, "dx-two"), "")
+    _eq("still by the lease", testonly_resolve_slot(ctx, pool, registry, "fix/login"), "aaaa11112222")
+
+def _test_another_clones_slot_does_not_resolve(ctx):
+    """Clones share a pool directory but not the slots in it, so an id from
+    another clone's row is not an argument this clone can act on."""
+    pool = {"git_common_dir": "/mine/.git", "dir": "/pool"}
+    registry = {"slots": {"cccc55556666": _leased("/theirs/.git", "their/work", {})}}
+
+    _eq("not by id", testonly_resolve_slot(ctx, pool, registry, "cccc55556666"), "")
+    _eq("not by name", testonly_resolve_slot(ctx, pool, registry, "their/work"), "")
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -1339,6 +1378,9 @@ _UNIT_TESTS = [
     _test_an_anonymous_lease_is_nobodys,
     _test_reconcile_closes_the_history_entry_it_ends,
     _test_one_clones_lease_is_not_anothers,
+    _test_a_slot_answers_to_its_id_and_to_its_branch,
+    _test_a_leased_slots_old_branch_does_not_resolve,
+    _test_another_clones_slot_does_not_resolve,
     _test_a_lease_with_no_agent_keeps_the_plain_refusal,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,
     _test_a_recently_used_base_outranks_an_old_creation_floor,

@@ -266,11 +266,86 @@ def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
             return at
     return ""
 
-def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
+def _resolve_slot(ctx: TaskContext, pool: dict, registry: dict, asked: str) -> str:
+    """The slot `asked` names, whether that is a branch or a slot id.
+
+    `aspect worktree list` leads with the slot id, so it is the first thing a
+    reader has at hand; a free slot's row offers nothing else but the branch it
+    last held. All three resolve here, and the caller decides whether the slot
+    is in a state it can act on.
+    """
+    owner = pool["git_common_dir"]
+    found = leased_slot(registry, asked, owner)
+    if found:
+        return found
+
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot.get("owner_git_dir", "") != owner:
+            continue
+        if slot_id == asked:
+            return slot_id
+
+        # A free slot's last branch is the only label the listing gives it, so
+        # it resolves — but only while the slot is still free. On a leased slot
+        # the lease name is the handle, and matching an earlier occupant's
+        # branch would act on somebody else's worktree.
+        if slot["state"] == FREE and slot.get("last_branch", "") == asked:
+            return slot_id
+    return ""
+
+def _leased_names(pool: dict, registry: dict) -> list[str]:
+    """What this clone currently has out, for an error that would otherwise
+    tell the reader to go and look at a listing they just came from."""
+    names = []
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] == LEASED and slot.get("owner_git_dir", "") == pool["git_common_dir"]:
+            name = (slot.get("lease") or {}).get("name", "")
+            if name:
+                names.append(name)
+    return sorted(names)
+
+def _no_such_worktree(ctx: TaskContext, pool: dict, registry: dict, asked: str) -> TaskConclusion:
+    leased = _leased_names(pool, registry)
+    if leased:
+        detail = "this clone has " + ", ".join(leased) + " out"
+    else:
+        detail = "this clone has nothing out; `aspect worktree add <branch>` takes a worktree"
     return _refuse(
         ctx,
         "no_such_worktree",
-        "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
+        "no worktree or slot called " + asked + " in this pool — " + detail,
+    )
+
+def _free_slot(registry: dict, slot_id: str) -> str:
+    """That a slot is free, and what it last held — the part of the answer both
+    commands share when a reader asks about one."""
+    last = registry["slots"][slot_id].get("last_branch", "")
+    return "slot " + slot_id + " is free" + ((", last holding " + last) if last else "")
+
+def _nothing_to_release(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
+    """A free slot has no lease to end. Named for what the reader was looking at
+    rather than what they typed, since they came from a listing that showed it
+    as free, and the useful answer is which command acts on a free slot."""
+    return _refuse(
+        ctx,
+        "slot_not_leased",
+        _free_slot(registry, slot_id) + ", so there is nothing to release. " +
+        "A free slot keeps its Bazel state for whatever comes next; " +
+        "`aspect worktree prune --dry-run` shows which free slots can be deleted along with it.",
+    )
+
+def _nothing_checked_out(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
+    """A free slot is a directory with no worktree in it, so there is nowhere to
+    go — but taking it back is one command, and it keeps whatever is warm."""
+    last = registry["slots"][slot_id].get("last_branch", "")
+    take = ("`aspect worktree add " + last + "`") if last else "`aspect worktree add <branch>`"
+    return _refuse(
+        ctx,
+        "slot_not_leased",
+        _free_slot(registry, slot_id) + ", so nothing is checked out there to enter. " +
+        take + " takes the slot again, keeping the Bazel state it still has.",
     )
 
 def _dirty_files(ctx: TaskContext, path: str, root: str) -> str:
@@ -654,8 +729,9 @@ def _checked_out_branches(ctx: TaskContext, pool: dict) -> dict:
 # `add` reclaims it, if that one was killed.
 _STATE_LABELS = {LEASED: "in use", FREE: "free", RESERVED: "setting up"}
 
-# Values carry the column they belong to; columns and notations stand alone. A
-# reader looks up the term they saw in a cell, so that is what leads each line.
+# Values first, then the columns whose headers need a sentence; the legend keeps
+# them in separate blocks. A reader looks up the term they saw in a cell, so that
+# is what leads each line, with its column after it.
 _COLUMN_NOTES = [
     ("state", "in use", "a worktree is checked out here, under the branch shown"),
     ("state", "free", "no worktree here; the slot keeps its Bazel state for the next one"),
@@ -666,7 +742,6 @@ _COLUMN_NOTES = [
     ("idle", "", "how long since Bazel last built here, which is what prune acts on"),
     ("age", "", "how long the slot has existed"),
     ("leases", "", "worktrees this slot has held, so cold starts it has saved"),
-    ("", "-", "not recorded; an entry from an older pool has no age or lease count"),
 ]
 
 # The slot's own details first — what it is, what state it is in, how warm,
@@ -927,7 +1002,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     return _check_out_and_lease(ctx, pool, lock, registry, chosen, name, base_ref, token)
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
-    name = ctx.args.name[0]
+    name = ctx.args.branch[0]
     pool = _pool(ctx)
     if not pool:
         return _not_a_repository(ctx)
@@ -936,9 +1011,11 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    target = leased_slot(registry, name, pool["git_common_dir"])
+    target = _resolve_slot(ctx, pool, registry, name)
     if not target:
-        return _no_such_worktree(ctx, name)
+        return _no_such_worktree(ctx, pool, registry, name)
+    if registry["slots"][target]["state"] != LEASED:
+        return _nothing_to_release(ctx, registry, target)
 
     slot = registry["slots"][target]
     path = slot_path(pool, target)
@@ -974,32 +1051,36 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
         slot["lock_digest"] = ""
 
     close_lease(registry, target)
+    released = (slot.get("lease") or {}).get("name", "") or name
     slot["state"] = FREE
     slot["last_commit"] = head
-    slot["last_branch"] = name
+    slot["last_branch"] = released
     slot["lease"] = None
     write_registry(ctx.std, pool["dir"], registry)
 
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
             "schema_version": _SCHEMA_VERSION,
-            "released": name,
+            "released": released,
+            "slot": target,
             "path": path,
         }, indent = 2) + "\n")
         return 0
-    info(ctx.std, "released " + name + "; the slot stays in the pool, " +
-                  _warmth_note(ctx.std, path, name, root).partition(":")[0])
+    info(ctx.std, "released " + released + "; the slot stays in the pool, " +
+                  _warmth_note(ctx.std, path, released, root).partition(":")[0])
     return 0
 
 def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
-    name = ctx.args.name[0]
+    name = ctx.args.branch[0]
     pool = _pool(ctx)
     if not pool:
         return _not_a_repository(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-    found = leased_slot(registry, name, pool["git_common_dir"])
+    found = _resolve_slot(ctx, pool, registry, name)
     if not found:
-        return _no_such_worktree(ctx, name)
+        return _no_such_worktree(ctx, pool, registry, name)
+    if registry["slots"][found]["state"] != LEASED:
+        return _nothing_checked_out(ctx, registry, found)
 
     path = slot_path(pool, found)
     if ctx.args.output == "json":
@@ -1392,10 +1473,10 @@ remove = task(
     implementation = _remove_impl,
     traits = [Worktrees],
     args = {
-        "name": args.positional(
+        "branch": args.positional(
             minimum = 1,
             maximum = 1,
-            description = "The name the worktree was created with.",
+            description = "The branch the worktree was created with, or the slot id `aspect worktree list` shows in its first column.",
         ),
         "force": args.boolean(
             default = False,
@@ -1412,10 +1493,10 @@ path = task(
     implementation = _path_impl,
     traits = [Worktrees],
     args = {
-        "name": args.positional(
+        "branch": args.positional(
             minimum = 1,
             maximum = 1,
-            description = "The name the worktree was created with.",
+            description = "The branch the worktree was created with, or the slot id `aspect worktree list` shows in its first column.",
         ),
         # Not the shared `_OUTPUT_ARG`: that one describes text output as a
         # report on stderr with stdout left empty, and writing the directory to
@@ -1471,4 +1552,5 @@ worktree_list = task(
 testonly_held_by = _held_by
 testonly_list_columns = _LIST_COLUMNS
 testonly_list_order = _list_order
+testonly_resolve_slot = _resolve_slot
 testonly_same_session = _same_session
