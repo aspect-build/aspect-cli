@@ -9,7 +9,7 @@ GitLab mirror of the same code, and a fork. A pool key that collapses the first
 two spellings but not the two hosts is the behaviour these pin down.
 """
 
-load("@aspect//worktree.axl", "testonly_list_columns", "testonly_table")
+load("@aspect//worktree.axl", "testonly_legend", "testonly_list_columns", "testonly_table")
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
@@ -480,6 +480,28 @@ def _test_a_relocated_output_user_root_is_where_a_slot_looks(ctx):
     _eq("found with the root", warmth_of(ctx.std, slot, relocated).base, True)
     _eq("missed without it", warmth_of(ctx.std, slot).base, False)
 
+def _test_the_listing_defines_only_the_values_it_shows(ctx):
+    """The legend is there so a reader never has to leave the terminal to learn
+    what `partly warm` buys them — and short enough that they read it, which
+    means defining the values on screen and no others."""
+    cold_only = [{"state": "free", "warmth_kind": "cold"}]
+    lines = testonly_legend(cold_only)
+    _eq("two definitions", len(lines), 2)
+    _eq("free", lines[0].startswith("  free: "), True)
+    _eq("cold", lines[1].startswith("  cold: "), True)
+
+    everything = [
+        {"state": "in use", "warmth_kind": "warm"},
+        {"state": "free", "warmth_kind": "partly warm"},
+        {"state": "free", "warmth_kind": "cold"},
+    ]
+    all_lines = testonly_legend(everything)
+    _eq("both states and all three warmths", len(all_lines), 5)
+    _eq("table order: states first", all_lines[0].startswith("  in use: "), True)
+    _eq("then warmest first", all_lines[2].startswith("  warm: "), True)
+
+    _eq("nothing to define", testonly_legend([]), [])
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -497,6 +519,7 @@ _UNIT_TESTS = [
     _test_unreadable_registry_starts_over,
     _test_missing_registry_is_empty,
     _test_the_listing_drops_columns_nothing_fills,
+    _test_the_listing_defines_only_the_values_it_shows,
     _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it,
     _test_idle_is_right_aligned_so_the_numbers_line_up,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,

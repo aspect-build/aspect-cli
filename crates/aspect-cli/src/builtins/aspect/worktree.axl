@@ -394,6 +394,27 @@ def _table(rows: list[dict], columns: list) -> list[str]:
     header = {key: heading for key, heading, _ in used}
     return [line(header).rstrip()] + [line(r).rstrip() for r in rows]
 
+# What each value in the `state` and `warmth` columns means, as
+# `(column, value, definition)`. A listing defines only the values it shows, so
+# the common case stays short and a reader never has to leave the terminal to
+# learn what `partly warm` buys them. `warmth_kind` is the warmth without its
+# pid, which is what makes it matchable here.
+_COLUMN_NOTES = [
+    ("state", "in use", "a worktree is checked out here, leased under the branch shown."),
+    ("state", "free", "no worktree here; the slot keeps its Bazel state for whatever comes next."),
+    ("warmth_kind", "warm", "a live Bazel server still holds this slot's analysis cache, so a build with the same flags skips loading and analysis."),
+    ("warmth_kind", "partly warm", "no server, but the output base is there, so `external/` is already materialized."),
+    ("warmth_kind", "cold", "no output base yet, so the first build pays for loading, analysis and fetches."),
+]
+
+def _legend(cells: list[dict]) -> list[str]:
+    """Definitions for the column values this listing shows, in table order."""
+    lines = []
+    for column, value, definition in _COLUMN_NOTES:
+        if any([c.get(column, "") == value for c in cells]):
+            lines.append("  " + value + ": " + definition)
+    return lines
+
 _LIST_COLUMNS = [
     ("branch", "branch", False),
     ("state", "state", False),
@@ -716,11 +737,11 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     cells = []
     for r in rows:
         if r["server_pid"]:
-            warmth = "warm (server %d)" % r["server_pid"]
+            kind, warmth = "warm", "warm (server %d)" % r["server_pid"]
         elif r["output_base_present"]:
-            warmth = "partly warm"
+            kind, warmth = "partly warm", "partly warm"
         else:
-            warmth = "cold"
+            kind, warmth = "cold", "cold"
 
         notes = []
         if not r["owned_here"]:
@@ -747,6 +768,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "branch": r["branch"] or r["name"] or r["last_branch"] or "-",
             "state": "in use" if r["state"] == "leased" else "free",
             "warmth": warmth,
+            "warmth_kind": kind,
             # Idle days are what `prune` acts on, so a reader deciding whether to
             # run it sees the same number the decision uses. A leased slot has no
             # meaningful age.
@@ -757,6 +779,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         })
 
     for line in _table(cells, _LIST_COLUMNS):
+        print(line)
+    print("")
+    for line in _legend(cells):
         print(line)
 
     # The paths behind each row. Warmth says whether a base is there; only this
@@ -900,4 +925,5 @@ worktree_list = task(
 
 # Exposed for worktree_test.axl; not part of any task's surface.
 testonly_table = _table
+testonly_legend = _legend
 testonly_list_columns = _LIST_COLUMNS
