@@ -115,9 +115,7 @@ _LOCK_STALE_MS = 10 * 60 * 1000
 # any plausible branch, so reclaiming at that point surprises nobody.
 PRUNE_AGE_DAYS = 30
 
-_MINUTE_MS = 60 * 1000
-_HOUR_MS = 60 * _MINUTE_MS
-_DAY_MS = 24 * _HOUR_MS
+_DAY_MS = 24 * 60 * 60 * 1000
 
 # How many past leases a slot remembers. Enough to see what a slot has been
 # holding lately, which is the question worth asking of it — a full history
@@ -512,17 +510,6 @@ def record_handover(registry: dict, slot_id: str, name: str, agent: dict) -> Non
     close_lease(registry, slot_id)
     _append_holder(slot, name, agent)
 
-def duration_phrase(ms: int) -> str:
-    """A span of time, coarse: a reader judging whether a slot turns over
-    briskly or sits for days is not timing anything."""
-    if ms < _MINUTE_MS:
-        return "under a minute"
-    if ms < _HOUR_MS:
-        return "%dm" % (ms // _MINUTE_MS)
-    if ms < _DAY_MS:
-        return "%dh %dm" % (ms // _HOUR_MS, (ms % _HOUR_MS) // _MINUTE_MS)
-    return "%dd %dh" % (ms // _DAY_MS, (ms % _DAY_MS) // _HOUR_MS)
-
 def held_for_ms(entry: dict) -> int:
     """How long a history entry's holder had the slot, so far if it still does."""
     started = entry.get("leased_ms", 0)
@@ -540,17 +527,19 @@ def close_lease(registry: dict, slot_id: str) -> None:
     if history and not history[-1].get("released_ms", 0):
         history[-1]["released_ms"] = time.now_ms()
 
-def slot_created_days(slot: dict) -> int:
-    """Whole days since this slot was created.
+def slot_age_ms(slot: dict) -> int:
+    """How long this slot has existed, in milliseconds.
 
-    Distinct from `slot_age_days`, which is idleness — days since Bazel last did
-    anything in the slot's output base, and what `prune` acts on. This one only
-    ever grows, and is what "how long has this slot been around" means.
+    Distinct from `slot_idle_ms`, which is idleness and resets whenever Bazel
+    touches the slot's output base. This one only ever grows, and is what "how
+    long has this slot been around" means.
     """
     created = slot.get("created_ms", 0)
-    if not created:
-        return 0
-    return (time.now_ms() - created) // _DAY_MS
+    return (time.now_ms() - created) if created else 0
+
+def slot_created_days(slot: dict) -> int:
+    """`slot_age_ms` in whole days, rounded down."""
+    return slot_age_ms(slot) // _DAY_MS
 
 def _live_worktrees(std, git_common_dir: str) -> dict:
     """`{path: branch}` for every worktree of this clone, as git spells them.
@@ -822,8 +811,8 @@ def owned_slots(pool: dict, registry: dict) -> list[str]:
         if registry["slots"][slot_id].get("owner_git_dir", "") == pool["git_common_dir"]
     ]
 
-def slot_age_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
-    """Whole days since Bazel last did anything in this slot's output base.
+def slot_idle_ms(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+    """How long since Bazel last did anything in this slot's output base.
 
     Read from the base's own freshness markers, the same evidence `aspect gc`
     ages a base on, so one slot cannot be stale to one of them and fresh to the
@@ -835,9 +824,11 @@ def slot_age_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> 
         last_used(std, output_base_of(std, slot_path(pool, slot_id), root)) // 1000,
         slot.get("created_ms", 0),
     )
-    if not newest:
-        return 0
-    return (time.now_ms() - newest) // _DAY_MS
+    return (time.now_ms() - newest) if newest else 0
+
+def slot_age_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+    """`slot_idle_ms` in whole days, rounded down. What `prune` acts on."""
+    return slot_idle_ms(std, pool, slot_id, slot, root) // _DAY_MS
 
 def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str = "") -> list[str]:
     """Free slots whose Bazel state has gone cold enough to be worth less than

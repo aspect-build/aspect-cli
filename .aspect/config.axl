@@ -29,6 +29,7 @@ load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_te
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
+load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
@@ -455,6 +456,9 @@ def config(ctx: ConfigContext):
 
     # Terminal tables: which columns a listing drops and which it keeps when
     # empty, and the legend that shrinks with the data.
+    # Run with: aspect dev test-duration
+    ctx.tasks.add(duration_tests)
+
     # Run with: aspect dev test-table
     ctx.tasks.add(table_tests)
 

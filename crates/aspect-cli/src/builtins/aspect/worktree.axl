@@ -59,6 +59,7 @@ load(
     "session_state",
 )
 load("./private/lib/confirm.axl", "confirm")
+load("./private/lib/duration.axl", "compact_ms", "phrase_ms")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/table.axl", "Column", "legend", "render")
@@ -74,7 +75,6 @@ load(
     "close_lease",
     "default_score",
     "drop_slot",
-    "duration_phrase",
     "free_slot",
     "held_for_ms",
     "holds_reservation",
@@ -97,7 +97,9 @@ load(
     "reserving_slot",
     "run_git",
     "slot_age_days",
+    "slot_age_ms",
     "slot_created_days",
+    "slot_idle_ms",
     "slot_path",
     "slug",
     "uncommitted_work",
@@ -651,11 +653,15 @@ _COLUMN_NOTES = [
 ]
 
 _LIST_FOOTNOTES = [
-    "age: how long the slot has existed. leases: how many worktrees it has held, which is how many cold starts it has saved.",
-    "a branch in (parentheses) is what a free slot last held — history, not something to enter. Allocation prefers the slot that last held the branch you ask for.",
+    "age: how long the slot has existed.  idle: how long since Bazel last did anything in it, which is what prune acts on.",
+    "leases: how many worktrees the slot has held, which is how many cold starts it has saved.",
+    "a branch in (parentheses) is what a free slot last held — history, not somewhere to go. Allocation prefers the slot that last held the branch you ask for.",
 ]
 
 _LIST_COLUMNS = [
+    # The slot leads: it is the row's identity, the string that shows up in
+    # `git worktree list` and in a path, and it is the same width every time.
+    Column(key = "slot", header = "slot", always = True),
     Column(key = "branch", header = "branch", always = True),
     Column(key = "state", header = "state", always = True),
     Column(key = "warmth", header = "warmth", always = True),
@@ -664,7 +670,6 @@ _LIST_COLUMNS = [
     # holds. A reader should not have to pass a flag to see that.
     Column(key = "age", header = "age", right = True, always = True),
     Column(key = "leases", header = "leases", right = True, always = True),
-    Column(key = "slot", header = "slot", always = True),
     # Always: a pool with no agents running would otherwise never show that it
     # records which session holds a slot.
     Column(key = "agent", header = "agent", always = True),
@@ -690,18 +695,10 @@ def _history_rows(history: list) -> list[dict]:
         rows.append({
             "branch": entry.get("name", "?"),
             "agent": label(entry.get("agent") or {}),
-            "held": duration_phrase(held_for_ms(entry)),
-            "when": "still holding it" if not released else "ended %s ago" % duration_phrase(time.now_ms() - released),
+            "held": phrase_ms(held_for_ms(entry)),
+            "when": "still holding it" if not released else "ended %s ago" % phrase_ms(time.now_ms() - released),
         })
     return rows
-
-def _age_phrase(days: int) -> str:
-    """How long ago, for a slot's creation date."""
-    if days == 0:
-        return "created today"
-    if days == 1:
-        return "created yesterday"
-    return "created %d days ago" % days
 
 def _history_note(slot: dict) -> str:
     """How old this slot is and how much use it had before this lease.
@@ -719,7 +716,7 @@ def _history_note(slot: dict) -> str:
         return "new slot: this is the first worktree it has held"
 
     times = "once" if prior == 1 else ("twice" if prior == 2 else "%d times" % prior)
-    return "%s, reused %s before this" % (_age_phrase(slot_created_days(slot)), times)
+    return "created %s ago, reused %s before this" % (phrase_ms(slot_age_ms(slot)), times)
 
 def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     """One line on what this slot already holds, checked rather than assumed.
@@ -1119,7 +1116,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "owner": slot.get("owner_git_dir", ""),
             "owned_here": slot.get("owner_git_dir", "") == pool["git_common_dir"],
             "idle_days": slot_age_days(ctx.std, pool, slot_id, slot, root),
+            "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root),
             "created_days": slot_created_days(slot),
+            "age_ms": slot_age_ms(slot),
             "lease_count": slot.get("lease_count", 0),
             "history": slot.get("history") or [],
             "output_base": output_base_of(ctx.std, path, root),
@@ -1193,8 +1192,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             # Idle days are what `prune` acts on, so a reader deciding whether to
             # run it sees the same number the decision uses. Only a free slot has
             # a meaningful age, and only a free slot can be pruned.
-            "idle": "%dd" % r["idle_days"] if r["state"] == FREE else "",
-            "age": "%dd" % r["created_days"],
+            "idle": compact_ms(r["idle_ms"]) if r["state"] == FREE else "",
+            "age": compact_ms(r["age_ms"]),
             "leases": str(r["lease_count"]),
             "slot": r["slot"],
             "agent": label(r["agent"]),
@@ -1218,7 +1217,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             print("    slot:        " + r["path"])
             print("    output base: " + r["output_base"] +
                   ("" if r["output_base_present"] else "  (missing)"))
-            print("    leases:      %d, %s" % (r["lease_count"], _age_phrase(r["created_days"])))
+            print("    leases:      %d, over %s" % (r["lease_count"], phrase_ms(r["age_ms"])))
             for line in render(_history_rows(r["history"]), _HISTORY_COLUMNS):
                 print("    " + line)
     print("")

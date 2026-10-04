@@ -27,7 +27,6 @@ load(
     "close_lease",
     "default_score",
     "drop_slot",
-    "duration_phrase",
     "free_slot",
     "git_out",
     "held_for_ms",
@@ -52,6 +51,7 @@ load(
     "reserving_slot",
     "run_git",
     "slot_age_days",
+    "slot_age_ms",
     "slot_created_days",
     "slot_path",
     "slug",
@@ -660,6 +660,8 @@ def _test_the_agent_column_is_never_dropped(ctx):
     _eq("agent survives an empty column", by_key["agent"].always, True)
     _eq("notes does not, since it only ever carries exceptions", by_key["notes"].always, False)
     _eq("idle is right-aligned", by_key["idle"].right, True)
+    _eq("the slot leads", testonly_list_columns[0].key, "slot")
+    _eq("then what it holds", testonly_list_columns[1].key, "branch")
 
 # A pid high enough that nothing is using it, for a record whose process is
 # gone. `kill -0` on it answers ESRCH, which is the whole question.
@@ -860,6 +862,17 @@ def _test_closing_without_a_history_is_harmless(ctx):
     close_lease(registry, "s1")
     _eq("the closed entry is not touched again", registry["slots"]["s1"]["history"][0]["released_ms"], first)
 
+def _test_age_and_idleness_answer_in_milliseconds(ctx):
+    """A column showing `0d` for a slot used ten minutes ago says nothing. The
+    pool reports the elapsed time and the display picks a unit; whole days stay
+    available for `prune`, which acts at that resolution."""
+    minutes_old = {"created_ms": time.now_ms() - 25 * 60 * 1000}
+    age = slot_age_ms(minutes_old)
+    if age < 25 * 60 * 1000 or age > 26 * 60 * 1000:
+        fail("25 minutes should read as about 25 minutes: got %d ms" % age)
+    _eq("and as no whole days", slot_created_days(minutes_old), 0)
+    _eq("nothing recorded", slot_age_ms({}), 0)
+
 def _test_creation_age_is_not_idleness(ctx):
     """`slot_created_days` only grows; `slot_age_days` is what `prune` acts on
     and resets whenever Bazel touches the output base. Reporting one as the
@@ -931,19 +944,12 @@ def _test_how_long_a_holder_had_it(ctx):
     """An open entry is measured to now, which is what makes "still holding it"
     a duration rather than a blank."""
     closed = {"leased_ms": 1000, "released_ms": 1000 + 90 * 60 * 1000}
-    _eq("an hour and a half", duration_phrase(held_for_ms(closed)), "1h 30m")
+    _eq("an hour and a half", held_for_ms(closed), 90 * 60 * 1000)
 
     open_now = {"leased_ms": time.now_ms() - 5 * 60 * 1000}
-    _eq("five minutes so far", duration_phrase(held_for_ms(open_now)), "5m")
+    if held_for_ms(open_now) < 5 * 60 * 1000:
+        fail("an open entry is measured to now: got %d" % held_for_ms(open_now))
     _eq("nothing recorded", held_for_ms({}), 0)
-
-def _test_durations_read_coarsely(ctx):
-    """Judging whether a slot turns over briskly or sits for days needs no
-    precision, and spurious precision would just be noise in a table."""
-    _eq("seconds", duration_phrase(42 * 1000), "under a minute")
-    _eq("minutes", duration_phrase(7 * 60 * 1000), "7m")
-    _eq("hours", duration_phrase(3 * 60 * 60 * 1000 + 20 * 60 * 1000), "3h 20m")
-    _eq("days", duration_phrase(2 * _DAY_MS + 5 * 60 * 60 * 1000), "2d 5h")
 
 def _symlink(ctx, target: str, link: str) -> None:
     """`ln -s`: AXL's `std.fs` can write a file but not create a link."""
@@ -1258,13 +1264,13 @@ _UNIT_TESTS = [
     _test_a_slot_counts_the_worktrees_it_has_held,
     _test_the_history_is_bounded,
     _test_closing_without_a_history_is_harmless,
+    _test_age_and_idleness_answer_in_milliseconds,
     _test_creation_age_is_not_idleness,
     _test_freeing_a_slot_closes_its_history_entry,
     _test_the_history_says_who_held_each_lease,
     _test_a_person_leaves_no_session_in_the_history,
     _test_a_handover_records_a_holder_without_counting_a_lease,
     _test_how_long_a_holder_had_it,
-    _test_durations_read_coarsely,
     _test_a_built_in_slot_is_not_dirty,
     _test_real_work_in_a_built_in_slot_still_counts,
     _test_a_tracked_lock_file_that_changed_is_work,

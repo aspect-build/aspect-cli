@@ -32,6 +32,7 @@ load("@std//time.axl", "time")
 load("./agent.axl", agent_label = "label")
 load("./ansi.axl", "ansi")
 load("./bazel_paths.axl", "last_used", "mtime_us", "output_user_root")
+load("./duration.axl", "compact_us")
 load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
 load("./path_normalize.axl", "normpath")
@@ -185,7 +186,7 @@ def _render(text: str, policy, root_flag: str = "") -> list[str]:
     for this root."""
     for placeholder, p in PERIODS.items():
         us = getattr(policy, p.field)
-        text = text.replace(placeholder, p.on % _fmt_age(us) if us else p.off)
+        text = text.replace(placeholder, p.on % compact_us(us) if us else p.off)
     return text.replace("{gc}", _command("gc", root_flag)).split("\n")
 
 def _command(name: str, root_flag: str) -> str:
@@ -213,17 +214,6 @@ def _fmt_kb(kb: int) -> str:
     if kb >= 1024:
         return str((kb + 512) // 1024) + " MB"
     return str(kb) + " KB"
-
-def _fmt_age(us: int) -> str:
-    """A duration in the coarsest unit that still distinguishes: minutes under
-    an hour, hours under two days, days beyond."""
-    minutes = max(us, 0) // 60000000
-    if minutes < 60:
-        return "%dm" % minutes
-    hours = minutes // 60
-    if hours < 48:
-        return "%dh" % hours
-    return "%dd" % (hours // 24)
 
 def _total_kb(sizes: list[int]) -> int:
     total = 0
@@ -743,7 +733,7 @@ _Column = record(
 # measured; `bazel server` holds a running server's resident memory, blank when
 # none runs.
 COLUMNS = [
-    _Column(header = "last used", cell = lambda b, v: _fmt_age(v.now_us - b.last_used) + " ago", right = True),
+    _Column(header = "last used", cell = lambda b, v: compact_us(v.now_us - b.last_used) + " ago", right = True),
     _Column(header = "size", cell = lambda b, v: _fmt_kb(v.sizes.get(b.path, 0)), right = True),
     _Column(header = "bazel server", cell = lambda b, v: _fmt_kb(v.servers[b.path]) if b.path in v.servers else "", right = True, optional = True),
     _Column(header = "output base", cell = lambda b, v: b.name),
@@ -895,7 +885,7 @@ output_bases = namespace(
     counts = _counts,
     default_policy = _default_policy,
     du_kb = _du_kb,
-    fmt_age = _fmt_age,
+    fmt_age = compact_us,
     fmt_kb = _fmt_kb,
     group_table = _group_table,
     in_state = _in_state,

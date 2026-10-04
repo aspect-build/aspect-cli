@@ -1,0 +1,76 @@
+"""Unit tests for lib/duration.axl.
+
+Run with:
+  aspect dev test-duration
+
+The boundaries are the point: a reader deciding whether something is stale
+should never see a duration rounded to zero, and should never see precision the
+number does not carry.
+"""
+
+load("./duration.axl", "compact_ms", "compact_us", "phrase_ms")
+
+_MINUTE = 60 * 1000
+_HOUR = 60 * _MINUTE
+_DAY = 24 * _HOUR
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_compact_picks_the_unit_that_distinguishes(ctx):
+    """Minutes under an hour, hours under two days, days beyond. Two days
+    rather than one, because `36h` says more than `1d` about something that may
+    be pruned at a day's resolution."""
+    _eq("under a minute", compact_ms(42 * 1000), "0m")
+    _eq("minutes", compact_ms(25 * _MINUTE), "25m")
+    _eq("an hour", compact_ms(_HOUR), "1h")
+    _eq("a day and a half", compact_ms(36 * _HOUR), "36h")
+    _eq("two days", compact_ms(2 * _DAY), "2d")
+    _eq("six weeks", compact_ms(41 * _DAY), "41d")
+
+def _test_compact_never_goes_backwards(ctx):
+    """A clock that moved, or a timestamp from the future, must not print a
+    negative age — the reader would trust it."""
+    _eq("negative", compact_ms(-5 * _HOUR), "0m")
+    _eq("zero", compact_ms(0), "0m")
+
+def _test_microseconds_are_not_milliseconds(ctx):
+    """The filesystem reports microseconds and `time.now_ms` milliseconds, which
+    is why the unit is in the name: passing one to the other is a thousandfold
+    error that still looks plausible."""
+    _eq("an hour, in microseconds", compact_us(_HOUR * 1000), "1h")
+    _eq("the same number read as ms", compact_ms(_HOUR * 1000), "41d")
+
+def _test_a_phrase_never_says_zero(ctx):
+    """"0m" in a sentence reads as a bug. A column has a header to explain it; a
+    sentence does not."""
+    _eq("seconds", phrase_ms(42 * 1000), "under a minute")
+    _eq("minutes", phrase_ms(7 * _MINUTE), "7m")
+    _eq("hours and minutes", phrase_ms(3 * _HOUR + 20 * _MINUTE), "3h 20m")
+    _eq("days and hours", phrase_ms(2 * _DAY + 5 * _HOUR), "2d 5h")
+
+    # A zero remainder is left out: "9d 0h" reads as a template, not an answer.
+    _eq("whole hours", phrase_ms(3 * _HOUR), "3h")
+    _eq("whole days", phrase_ms(9 * _DAY), "9d")
+
+_UNIT_TESTS = [
+    _test_compact_picks_the_unit_that_distinguishes,
+    _test_compact_never_goes_backwards,
+    _test_microseconds_are_not_milliseconds,
+    _test_a_phrase_never_says_zero,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("duration.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+duration_tests = task(
+    summary = "Run the duration formatting AXL unit tests.",
+    kind = "test-duration",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
