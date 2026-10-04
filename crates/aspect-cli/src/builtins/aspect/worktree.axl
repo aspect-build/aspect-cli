@@ -220,6 +220,17 @@ def _no_such_worktree(ctx: TaskContext, name: str) -> TaskConclusion:
         "no worktree named " + name + " in this pool — `aspect worktree list` shows what is leased",
     )
 
+def _dirty_files(ctx: TaskContext, path: str) -> str:
+    """`git status --porcelain` for a slot, or "" when it is clean or gone.
+
+    Reported rather than counted: a caller deciding whether to discard work
+    needs to see which files, not a number.
+    """
+    if not ctx.std.fs.exists(path):
+        return ""
+    out = _git_try(ctx, ["status", "--porcelain"], path)
+    return "\n".join(["  " + line for line in out.splitlines()]) if out else ""
+
 def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> str:
     """Why `name` cannot be taken, and what the caller can do instead.
 
@@ -407,7 +418,11 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
     if existing:
         _git(ctx, ["worktree", "add", path, name], pool["git_common_dir"])
     else:
-        _git(ctx, ["worktree", "add", "-b", name, path, base_ref], pool["git_common_dir"])
+        # `--no-track` is load-bearing. Without it a branch cut from a
+        # remote-tracking ref records that ref as its upstream, and under
+        # `push.default=upstream` a later bare `git push` from this worktree
+        # targets the base branch — `origin/main` for the common case.
+        _git(ctx, ["worktree", "add", "--no-track", "-b", name, path, base_ref], pool["git_common_dir"])
 
 # --- reporting ---------------------------------------------------------------
 
@@ -643,6 +658,18 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     slot = registry["slots"][target]
     path = slot_path(pool, target)
+
+    # Releasing drops the worktree, which takes anything uncommitted in it with
+    # it. That is the last step of an ordinary task, so it must not be the step
+    # that loses work: name the files and let the caller decide.
+    dirty = _dirty_files(ctx, path)
+    if dirty and not ctx.args.force:
+        return _refuse(
+            ctx,
+            "worktree_dirty",
+            name + " has uncommitted changes at " + path + ":\n" + dirty +
+            "\nCommit or stash them, or pass --force to discard them with the worktree.",
+        )
 
     # What the slot is left holding is what the next allocation scores it on, so
     # a slot whose checkout has vanished must record nothing rather than keep an
@@ -949,6 +976,10 @@ remove = task(
             minimum = 1,
             maximum = 1,
             description = "The name the worktree was created with.",
+        ),
+        "force": args.boolean(
+            default = False,
+            description = "Release the slot even when the worktree has uncommitted changes, discarding them. Without this, a dirty worktree is refused and the changed files are listed.",
         ),
     } | _OUTPUT_ARG,
 )

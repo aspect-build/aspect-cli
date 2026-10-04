@@ -587,6 +587,48 @@ def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
     _eq("no holder claimed", "held by" in msg, False)
     _eq("still says what to do", "aspect worktree remove" in msg, True)
 
+def _test_a_new_branch_does_not_adopt_its_bases_upstream(ctx):
+    """Creating a branch from a remote-tracking ref records that ref as the new
+    branch's upstream unless `--no-track` is passed. Under
+    `push.default=upstream` a later bare `git push` from the worktree then
+    targets the base branch, which for `origin/main` is the one outcome this
+    whole feature exists to avoid.
+
+    Git auto-tracks only when the start point is named in its short
+    remote-tracking form, so reproducing the buggy shape needs a configured
+    remote; that half is covered end to end rather than here.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/f", "x\n")
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "init"], repo)
+
+    # A remote-tracking ref without needing a remote.
+    run_git(ctx.std, ["update-ref", "refs/remotes/origin/main", "HEAD"], repo)
+
+    without = tmp + "/without"
+    run_git(ctx.std, ["worktree", "add", "--no-track", "-b", "feat/x", without, "refs/remotes/origin/main"], repo)
+    _eq(
+        "no upstream, so a bare push has no target",
+        run_git(ctx.std, ["rev-parse", "--abbrev-ref", "@{upstream}"], without).ok,
+        False,
+    )
+
+    # The branch still points where it should; only the upstream is withheld.
+    _eq(
+        "branched from the base",
+        run_git(ctx.std, ["rev-parse", "HEAD"], without).out,
+        run_git(ctx.std, ["rev-parse", "refs/remotes/origin/main"], repo).out,
+    )
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -621,6 +663,7 @@ _UNIT_TESTS = [
     _test_drop_slot_removes_the_entry_and_the_base,
     _test_drop_slot_refuses_while_a_server_holds_it,
     _test_lock_digest_agrees_between_a_file_and_a_ref,
+    _test_a_new_branch_does_not_adopt_its_bases_upstream,
     _test_a_lease_with_no_agent_is_never_abandoned,
     _test_a_gone_session_with_a_clean_checkout_is_abandoned,
     _test_uncommitted_changes_are_never_discarded,
