@@ -413,7 +413,8 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 .short(short_char(short))
                 .help(help_text(description))
                 .required(*required)
-                .default_value(default.clone());
+                .default_value(default.clone())
+                .hide_default_value(default.is_empty());
             it = if let Some(values) = values {
                 it.value_parser(PossibleValuesParser::new(values))
             } else {
@@ -597,8 +598,9 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
     }
 }
 
-// Apply a config.axl override to the just-built ClapArg: sets the default and
-// drops `required` (the user has supplied the value, just not on the CLI).
+// Apply a config.axl override to the just-built ClapArg: sets the default
+// (shown in help unless empty) and drops `required` (the user has supplied the
+// value, just not on the CLI).
 fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) -> ClapArg {
     clap_arg = match arg {
         Arg::StringList { .. }
@@ -609,7 +611,9 @@ fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) 
         | Arg::Passthrough { .. } => clap_arg.default_values(override_strings.iter().cloned()),
         _ => {
             if let Some(v) = override_strings.first() {
-                clap_arg.default_value(v.clone())
+                clap_arg
+                    .hide_default_value(v.is_empty())
+                    .default_value(v.clone())
             } else {
                 clap_arg
             }
@@ -2948,6 +2952,33 @@ mod tests {
         assert_eq!(parse(&["aspect", "greet"]).unwrap(), TimingMode::Detailed);
         // Invalid level is rejected by the value parser at parse time.
         assert!(parse(&["aspect", "greet", "--task:timing-summary=verbose"]).is_err());
+    }
+
+    /// An unset string arg defaults to `""`, which help must not print as
+    /// `[default: ]`; a non-empty default, from the schema or a config.axl
+    /// override, is still shown.
+    #[test]
+    fn help_shows_a_string_default_only_when_non_empty() {
+        let unset = arg_string("");
+        let hidden = |arg: &ClapArg| arg.is_hide_default_value_set();
+
+        assert!(hidden(&arg_to_clap(Scope::Task, "name", &unset)));
+        assert!(!hidden(&arg_to_clap(
+            Scope::Task,
+            "name",
+            &arg_string("world")
+        )));
+
+        let overridden = |value: &str| {
+            let base = arg_to_clap(Scope::Task, "name", &unset);
+            with_override(base, &unset, &[value.to_owned()])
+        };
+        assert!(!hidden(&overridden("from-config")));
+        assert!(hidden(&overridden("")));
+
+        let mut cmd = Command::new("t").arg(arg_to_clap(Scope::Task, "name", &unset));
+        let help = cmd.render_help().to_string();
+        assert!(!help.contains("[default"), "{help}");
     }
 
     // ── `--task:*` flags: help visibility and parse positions ──────────────
