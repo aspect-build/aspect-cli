@@ -26,6 +26,7 @@ load(
     "read_registry",
     "run_git",
     "slot_age_days",
+    "slot_path",
     "slug",
     "warmth_of",
     "write_registry",
@@ -191,28 +192,52 @@ def _test_missing_registry_is_empty(ctx):
 _DAY_MS = 24 * 60 * 60 * 1000
 
 def _slot(owner, state = "free", age_days = 0):
-    """A registry entry, aged by construction. `age_days` becomes the absolute
-    `last_used_ms` the library reads, so each test says what it means."""
+    """A registry entry whose creation floor is `age_days` old.
+
+    With no output base on disk the floor is what `slot_age_days` reads, so this
+    is how a test says "this slot has been idle that long"."""
     return {
         "owner_git_dir": owner,
         "state": state,
         "last_commit": "",
         "last_branch": "",
         "lock_digest": "",
-        "last_used_ms": time.now_ms() - age_days * _DAY_MS,
+        "created_ms": time.now_ms() - age_days * _DAY_MS,
     }
 
-def _test_age_of_a_record_written_before_timestamps_reads_as_new(ctx):
-    """Registries predating `last_used_ms` must not look infinitely old, or the
-    first prune after an upgrade would delete every warm slot in the pool."""
-    _eq("missing key", slot_age_days({"state": "free"}), 0)
-    _eq("explicit zero", slot_age_days({"state": "free", "last_used_ms": 0}), 0)
-    _eq("real age", slot_age_days({"last_used_ms": time.now_ms() - 3 * _DAY_MS}), 3)
+def _test_age_comes_from_the_base_and_falls_back_to_the_floor(ctx):
+    """A slot with no output base has no evidence to read, so its creation time
+    stands in. Zero on both counts reads as new rather than ancient: a registry
+    that predates the field must not have every slot pruned out from under it.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    _eq("nothing recorded at all", slot_age_days(ctx.std, pool, "nobase", {"state": "free"}), 0)
+    _eq(
+        "the creation floor, with no base on disk",
+        slot_age_days(ctx.std, pool, "nobase", {"created_ms": time.now_ms() - 3 * _DAY_MS}),
+        3,
+    )
+
+def _test_a_recently_used_base_outranks_an_old_creation_floor(ctx):
+    """The point of reading the base: a slot created long ago but built in
+    yesterday is not stale, and the ledger alone would have said it was."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "fresh1"
+
+    # A base at the derived path, touched now, is the freshest evidence there is.
+    base = output_base_of(ctx.std, slot_path(pool, slot_id))
+    ctx.std.fs.create_dir_all(base)
+    ctx.std.fs.write(base + "/command.profile.gz", "x")
+    old_floor = {"state": "free", "created_ms": time.now_ms() - 900 * _DAY_MS}
+    _eq("fresh despite the floor", slot_age_days(ctx.std, pool, slot_id, old_floor), 0)
+    ctx.std.fs.remove_dir_all(base)
 
 def _test_prune_never_takes_a_leased_slot(ctx):
     """A lease means someone may be working in that checkout right now. Age is
     not grounds for deleting it, however stale the pool thinks it is."""
-    pool = {"git_common_dir": "/clone/.git"}
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
     registry = {"slots": {
         "busy": _slot("/clone/.git", state = "leased", age_days = 900),
         "idle": _slot("/clone/.git", age_days = 900),
@@ -220,7 +245,7 @@ def _test_prune_never_takes_a_leased_slot(ctx):
     _eq("only the free one", prunable_slots(ctx.std, pool, registry, 30), ["idle"])
 
 def _test_prune_respects_the_age_threshold(ctx):
-    pool = {"git_common_dir": "/clone/.git"}
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
     registry = {"slots": {
         "fresh": _slot("/clone/.git", age_days = 3),
         "stale": _slot("/clone/.git", age_days = 31),
@@ -235,7 +260,7 @@ def _test_prune_leaves_a_live_clones_slots_alone(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
     live_owner = tmp + "/live/.git"
     ctx.std.fs.create_dir_all(live_owner)
-    pool = {"git_common_dir": tmp + "/mine/.git"}
+    pool = {"git_common_dir": tmp + "/mine/.git", "dir": "/pool"}
     registry = {"slots": {
         "theirs": _slot(live_owner, age_days = 900),
         "stranded": _slot(tmp + "/moved-away/.git", age_days = 900),
@@ -245,7 +270,7 @@ def _test_prune_leaves_a_live_clones_slots_alone(ctx):
 def _test_owned_slots_counts_only_this_clone(ctx):
     """`max_slots` budgets what this clone can actually lease, so a sibling
     clone's slots must not spend it."""
-    pool = {"git_common_dir": "/clone/.git"}
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
     registry = {"slots": {
         "mine": _slot("/clone/.git"),
         "theirs": _slot("/other/.git"),
@@ -330,7 +355,7 @@ def _leased(owner, name, agent):
         "last_commit": "",
         "last_branch": "",
         "lock_digest": "",
-        "last_used_ms": time.now_ms(),
+        "created_ms": time.now_ms(),
         "lease": {"name": name, "since": str(time.now_ms()), "agent": agent},
     }
 
@@ -476,7 +501,8 @@ _UNIT_TESTS = [
     _test_the_listing_drops_columns_nothing_fills,
     _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it,
     _test_idle_is_right_aligned_so_the_numbers_line_up,
-    _test_age_of_a_record_written_before_timestamps_reads_as_new,
+    _test_age_comes_from_the_base_and_falls_back_to_the_floor,
+    _test_a_recently_used_base_outranks_an_old_creation_floor,
     _test_prune_never_takes_a_leased_slot,
     _test_prune_respects_the_age_threshold,
     _test_prune_leaves_a_live_clones_slots_alone,

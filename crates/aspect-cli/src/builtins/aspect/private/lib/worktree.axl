@@ -63,7 +63,7 @@ share a slot with and nothing to keep warm between jobs.
 load("@std//hash.axl", "md5", "sha256")
 load("@std//time.axl", "time")
 load("./agent.axl", "GONE", "session_state")
-load("./bazel_paths.axl", "output_user_root")
+load("./bazel_paths.axl", "last_used", "output_user_root")
 load("./environment.axl", "warn")
 load("./process_info.axl", "alive")
 
@@ -298,9 +298,10 @@ def write_registry(std, pool_dir: str, registry: dict) -> None:
 def new_slot_record(pool: dict) -> dict:
     """A fresh slot's registry entry: owned by this clone, never used yet.
 
-    `last_used_ms` starts at creation rather than zero, so a slot made moments
-    ago is not immediately the oldest thing in the pool and pruned before its
-    first build finishes.
+    `created_ms` is a floor for `slot_age_days`, not a record of use. A slot
+    nothing has built in yet has no Bazel state to date, and without the floor
+    it would read as infinitely old and be pruned before its first build
+    finished.
     """
     return {
         "owner_git_dir": pool["git_common_dir"],
@@ -308,7 +309,7 @@ def new_slot_record(pool: dict) -> dict:
         "last_commit": "",
         "last_branch": "",
         "lock_digest": "",
-        "last_used_ms": time.now_ms(),
+        "created_ms": time.now_ms(),
     }
 
 def reconcile(std, pool: dict, registry: dict) -> dict:
@@ -443,20 +444,26 @@ def owned_slots(pool: dict, registry: dict) -> list[str]:
         if registry["slots"][slot_id].get("owner_git_dir", "") == pool["git_common_dir"]
     ]
 
-def slot_age_days(slot: dict) -> int:
-    """Whole days since anything leased or released `slot`.
+def slot_age_days(std, pool: dict, slot_id: str, slot: dict) -> int:
+    """Whole days since Bazel last did anything in this slot's output base.
 
-    A record written before `last_used_ms` existed reads as age 0 rather than as
-    ancient: pruning a slot because the registry predates the field would
-    discard warm state on the strength of a missing key.
+    Read from the base's own freshness markers, the same evidence `aspect gc`
+    ages a base on, so one slot cannot be stale to one of them and fresh to the
+    other. The slot's creation time is a floor: a slot nothing has built in has
+    no markers to read, and treating that as ancient would prune it before its
+    first build.
     """
-    last = slot.get("last_used_ms", 0)
-    if not last:
+    newest = max(
+        last_used(std, output_base_of(std, slot_path(pool, slot_id))) // 1000,
+        slot.get("created_ms", 0),
+    )
+    if not newest:
         return 0
-    return (time.now_ms() - last) // _DAY_MS
+    return (time.now_ms() - newest) // _DAY_MS
 
 def prunable_slots(std, pool: dict, registry: dict, max_age_days: int) -> list[str]:
-    """Free slots old enough to be worth less than the disk they hold.
+    """Free slots whose Bazel state has gone cold enough to be worth less than
+    the disk it holds.
 
     Leased slots are never returned, whatever their age: a lease means someone
     may be working in that checkout right now, and a timer is not grounds for
@@ -473,7 +480,7 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int) -> list[s
         slot = registry["slots"][slot_id]
         if slot["state"] == "leased":
             continue
-        if slot_age_days(slot) < max_age_days:
+        if slot_age_days(std, pool, slot_id, slot) < max_age_days:
             continue
         owner = slot.get("owner_git_dir", "")
         if owner != pool["git_common_dir"] and std.fs.exists(owner):
