@@ -152,27 +152,34 @@ def _output_root(ctx: TaskContext) -> str:
     return output_bases.output_user_root(ctx, "")
 
 def _pool(ctx: TaskContext) -> dict:
-    """The pool for the working directory."""
-    pool = pool_of(ctx.std, ctx.std.env.current_dir())
-    if not pool:
-        fail("not inside a git repository — run this from a clone")
-    return pool
+    """The pool for the working directory, or an empty dict outside a clone.
 
-def _enter_pool(ctx: TaskContext) -> dict:
-    """The pool for the working directory, locked for the rest of the task, or
-    an empty dict when another caller holds the lock.
-
-    Only the tasks that write the registry take this. The lock's release is
-    deferred rather than written out at each exit: `ctx.defer` runs even when
-    the task dies on a fatal error, which is the only way to guarantee it is
-    dropped — a `fail()` between acquiring and releasing would otherwise wedge
-    the pool until the stale-lock timeout.
+    Empty rather than fatal: being in the wrong directory is an ordinary
+    mistake for an agent to make, and it deserves the same typed refusal as
+    every other, not a traceback.
     """
-    pool = _pool(ctx)
+    return pool_of(ctx.std, ctx.std.env.current_dir())
+
+def _not_a_repository(ctx: TaskContext) -> TaskConclusion:
+    return _refuse(
+        ctx,
+        "not_a_repository",
+        "not inside a git repository — run this from a clone of the repo you want a worktree of",
+    )
+
+def _lock_pool(ctx: TaskContext, pool: dict) -> bool:
+    """Hold the pool's lock for the rest of the task, or False if another caller
+    has it.
+
+    Only the tasks that write the registry take it. The release is deferred
+    rather than written out at each exit: `ctx.defer` runs even when the task
+    dies on a fatal error, which is the only way to guarantee the lock is
+    dropped rather than left to the stale-lock timeout.
+    """
     if not acquire(ctx.std, pool["dir"]):
-        return {}
+        return False
     ctx.defer(lambda: release(ctx.std, pool["dir"]))
-    return pool
+    return True
 
 # --- choosing a slot ---------------------------------------------------------
 
@@ -519,8 +526,10 @@ def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, nam
 def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.branch[0]
     cwd = ctx.std.env.current_dir()
-    pool = _enter_pool(ctx)
+    pool = _pool(ctx)
     if not pool:
+        return _not_a_repository(ctx)
+    if not _lock_pool(ctx, pool):
         return _pool_busy(ctx)
 
     root = _output_root(ctx)
@@ -616,8 +625,10 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.name[0]
-    pool = _enter_pool(ctx)
+    pool = _pool(ctx)
     if not pool:
+        return _not_a_repository(ctx)
+    if not _lock_pool(ctx, pool):
         return _pool_busy(ctx)
 
     root = _output_root(ctx)
@@ -679,16 +690,29 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
 def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.name[0]
     pool = _pool(ctx)
+    if not pool:
+        return _not_a_repository(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
     found = leased_slot(registry, name)
     if not found:
         return _no_such_worktree(ctx, name)
-    ctx.std.io.stdout.write(slot_path(pool, found) + "\n")
+
+    path = slot_path(pool, found)
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({
+            "schema_version": _SCHEMA_VERSION,
+            "path": path,
+            "pool": pool["id"],
+        }, indent = 2) + "\n")
+        return 0
+    ctx.std.io.stdout.write(path + "\n")
     return 0
 
 def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
-    pool = _enter_pool(ctx)
+    pool = _pool(ctx)
     if not pool:
+        return _not_a_repository(ctx)
+    if not _lock_pool(ctx, pool):
         return _pool_busy(ctx)
 
     root = _output_root(ctx)
@@ -767,6 +791,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     # concurrent `add` can never be observed half-written, and reconciling
     # without persisting costs nothing — `add` and `remove` reconcile too.
     pool = _pool(ctx)
+    if not pool:
+        return _not_a_repository(ctx)
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
     checked_out = _checked_out_branches(ctx, pool)
@@ -967,7 +993,7 @@ path = task(
             maximum = 1,
             description = "The name the worktree was created with.",
         ),
-    },
+    } | _OUTPUT_ARG,
 )
 
 # `list` would shadow the builtin type within this module, so the symbol is
