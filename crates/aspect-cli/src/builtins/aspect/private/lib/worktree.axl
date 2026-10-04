@@ -42,6 +42,15 @@ branch. `abandoned_lease` is the narrow case that *is* safe to take back: the
 session is positively gone rather than merely not running, and the checkout is
 clean, so there is nothing to resume and nothing uncommitted to lose.
 
+**The lock covers deciding, not checking out.** Allocation picks a slot and
+records a *reservation* on it under the pool lock, then drops the lock before
+`git worktree add` — much the slowest thing it does — and retakes it only to
+turn the reservation into a lease. Two agents starting together wait on each
+other's bookkeeping rather than on each other's checkout. Both the lock and a
+reservation record the process behind them, so one abandoned by a crash is
+reclaimed at once instead of waited out, and a release that arrives late cannot
+drop a lock somebody else now holds.
+
 **The pool is bounded by pruning, not by refusing work.** Allocation reuses any
 free slot the clone owns, however badly it scores, because a bad reuse costs at
 worst what a cold slot costs and usually far less — the same refetch, minus a
@@ -67,11 +76,18 @@ load("@std//time.axl", "time")
 load("./agent.axl", "GONE", "session_state")
 load("./bazel_paths.axl", "last_used", "output_user_root")
 load("./environment.axl", "warn")
-load("./process_info.axl", "alive")
+load("./process_info.axl", "alive", "is_same_process", "started_at")
 
 # --- constants ---------------------------------------------------------------
 
 _REGISTRY_VERSION = 1
+
+# What a slot's `state` can be. `RESERVED` is the window where a slot has been
+# claimed for a branch but its worktree is still being checked out, which is the
+# whole reason the pool lock can be released for the slow part of `add`.
+FREE = "free"
+LEASED = "leased"
+RESERVED = "reserved"
 
 # Slot directory names carry this prefix. Public because `aspect gc` recognises
 # a pool's output bases by the workspace they were built for, which is one of
@@ -80,12 +96,16 @@ SLOT_PREFIX = "aspect-worktree-"
 
 # Lock acquisition: `create_dir` is atomic, so a directory that did not exist a
 # moment ago is a lock nobody else holds. Agents allocate concurrently, so this
-# is load-bearing rather than defensive. The wait has to outlast the slowest
-# thing done under the lock, which is a `git worktree add` on a large clone.
+# is load-bearing rather than defensive. Nothing slow happens under the lock —
+# checkouts run outside it — so the wait only has to outlast the registry
+# bookkeeping and, when `add` ages slots out, the deletion of their output
+# bases. A minute is far past either.
 _LOCK_ATTEMPTS = 600
 _LOCK_SLEEP_MS = 100
 
-# A lock directory older than this belonged to a process that died holding it.
+# A lock whose owner cannot be identified is given this long before it is taken
+# to belong to a dead process. Only reached when the owner record is unreadable;
+# an owner that can be read is checked directly, which needs no timeout at all.
 _LOCK_STALE_MS = 10 * 60 * 1000
 
 # A free slot nothing has touched for this long is worth less than the disk it
@@ -236,34 +256,117 @@ def _digest(s: str) -> str:
 def _lock_dir(pool_dir: str) -> str:
     return pool_dir + "/.lock"
 
-def acquire(std, pool_dir: str) -> bool:
-    """Take the pool's lock, or False after waiting.
+def _lock_owner_path(pool_dir: str) -> str:
+    return _lock_dir(pool_dir) + "/owner.json"
+
+def owner_record(std) -> dict:
+    """This process, as the holder of a lock or a reservation.
+
+    A pid on its own is ambiguous — pids are reused, and a recorded one outlives
+    the process that wrote it — so the start time goes in beside it, which is
+    exactly what `is_same_process` settles. `token` is the pair as one string,
+    for the holder to prove it still owns what it took.
+    """
+    pid = std.process.id()
+    start = started_at(std, pid)
+    return {"token": "%d:%s" % (pid, start), "pid": pid, "started_at": start}
+
+def _held_by_a_live_process(std, record: dict) -> bool:
+    """Whether the process in a lock or reservation record is still running.
+
+    A record with no usable pid cannot vouch for anything, so it counts as gone:
+    the alternative is state that nothing is allowed to clean up.
+    """
+    pid = record.get("pid", 0)
+    if type(pid) != "int" or pid <= 0:
+        return False
+    return is_same_process(std, pid, record.get("started_at", ""))
+
+def _lock_owner(std, pool_dir: str) -> dict:
+    """Who holds the pool lock, or an empty dict if that cannot be read."""
+    raw = std.fs.try_read_to_string(_lock_owner_path(pool_dir))
+    if not raw:
+        return {}
+    owner = json.try_decode(raw)
+    return owner if type(owner) == "dict" else {}
+
+def _lock_abandoned(std, pool_dir: str) -> bool:
+    """Whether the lock's holder is gone, so taking it from them loses nothing.
+
+    The owner record answers directly: a holder whose process has exited is
+    never coming back to release it, whatever the clock says. The directory's
+    age is the fallback for a lock whose owner cannot be read — written by an
+    older CLI, or by a process that died between creating the directory and
+    recording itself in it. An age that cannot be established is never called
+    abandoned, because reclaiming a live lock is worse than waiting.
+    """
+    owner = _lock_owner(std, pool_dir)
+    if owner:
+        return not _held_by_a_live_process(std, owner)
+
+    # `modified` is MICROSECONDS since the epoch, and None where the platform
+    # cannot report it.
+    err, meta = catch(std.fs.metadata, _lock_dir(pool_dir))
+    if err != None or meta.modified == None:
+        return False
+    return time.now_ms() - (meta.modified // 1000) > _LOCK_STALE_MS
+
+def _take_lock(std, pool_dir: str) -> str:
+    """Create the lock directory and record this process in it, returning the
+    token that releases it, or "" if somebody else has it.
 
     `create_dir` fails when the directory exists, which is the whole mechanism:
-    two agents racing to allocate cannot both succeed. A lock left behind by a
-    process that died is reclaimed once it is clearly stale, because the
-    alternative is a pool that wedges permanently on a crash.
+    two agents racing to allocate cannot both succeed.
+    """
+    err, _ = catch(std.fs.create_dir, _lock_dir(pool_dir))
+    if err != None:
+        return ""
+    record = owner_record(std)
+    catch(std.fs.write, _lock_owner_path(pool_dir), json.encode(record))
+    return record["token"]
+
+def acquire(std, pool_dir: str, attempts: int = _LOCK_ATTEMPTS) -> str:
+    """Take the pool's lock and return the token that releases it, or "".
+
+    The holder records itself inside the lock, so one left behind by a process
+    that died is reclaimed the moment the next caller looks rather than waited
+    out — the alternative is a pool that wedges on a crash. Reclaiming is
+    progress, not contention, so it is followed by another attempt instead of
+    costing one.
     """
     std.fs.create_dir_all(pool_dir)
-    lock = _lock_dir(pool_dir)
-    for _ in range(_LOCK_ATTEMPTS):
-        err, _ = catch(std.fs.create_dir, lock)
-        if err == None:
-            return True
-        meta_err, meta = catch(std.fs.metadata, lock)
+    for _ in range(attempts):
+        token = _take_lock(std, pool_dir)
+        if token:
+            return token
+        if _lock_abandoned(std, pool_dir):
+            warn(std, "worktree pool lock belonged to a process that is gone; reclaiming it")
+            catch(std.fs.remove_dir_all, _lock_dir(pool_dir))
 
-        # `modified` is MICROSECONDS since the epoch, and None where the
-        # platform cannot report it. An unknown age is never called stale —
-        # reclaiming a live lock is worse than waiting.
-        known_age = meta_err == None and meta.modified != None
-        if known_age and time.now_ms() - (meta.modified // 1000) > _LOCK_STALE_MS:
-            warn(std, "worktree pool lock looked abandoned; reclaiming it")
-            catch(std.fs.remove_dir_all, lock)
+            # A second caller can win the race to retake it, which is ordinary
+            # contention from here on.
+            token = _take_lock(std, pool_dir)
+            if token:
+                return token
             continue
         time.sleep(_LOCK_SLEEP_MS)
-    return False
+    return ""
 
-def release(std, pool_dir: str) -> None:
+def release(std, pool_dir: str, token: str) -> None:
+    """Drop the lock, unless it has since passed to another caller.
+
+    `add` releases the lock before checking a worktree out and takes it again
+    afterwards, so a release can arrive when the lock directory belongs to
+    somebody else — and removing theirs would put two callers in the registry at
+    once. An empty token is a lock already dropped. An owner that cannot be read
+    is assumed to be this caller, because the alternative is a pool nothing can
+    unlock.
+    """
+    if not token:
+        return
+    owner = _lock_owner(std, pool_dir)
+    if owner and owner.get("token", "") != token:
+        return
     catch(std.fs.remove_dir_all, _lock_dir(pool_dir))
 
 # --- the registry ------------------------------------------------------------
@@ -300,7 +403,7 @@ def new_slot_record(pool: dict) -> dict:
     """
     return {
         "owner_git_dir": pool["git_common_dir"],
-        "state": "free",
+        "state": FREE,
         "last_commit": "",
         "last_branch": "",
         "lock_digest": "",
@@ -320,6 +423,11 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
     freeing on that evidence would hand a second caller a slot that is still
     checked out, and the eventual `git worktree add` would fail only after the
     slot's previous occupant had been force-removed.
+
+    Reserved slots are left alone for the same reason read by a different light:
+    a reservation means the worktree does not exist *yet*, so git's silence
+    about it is expected rather than evidence. `reservation_abandoned` is what
+    judges those, and only a caller holding the lock may act on it.
     """
     known = git_out(std, ["worktree", "list", "--porcelain"], pool["git_common_dir"])
     live_paths = {}
@@ -330,7 +438,7 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
     slots = registry["slots"]
     for slot_id in slots:
         slot = slots[slot_id]
-        if slot["state"] != "leased":
+        if slot["state"] != LEASED:
             continue
         if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
@@ -338,7 +446,7 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         # A lease is over when git has dropped the worktree. Git is the only
         # authority; nothing outside it records that a slot is in use.
         if slot_path(pool, slot_id) not in live_paths:
-            slot["state"] = "free"
+            slot["state"] = FREE
             slot["lease"] = None
     return registry
 
@@ -444,6 +552,62 @@ def leased_slot(registry: dict, name: str) -> str:
             return slot_id
     return ""
 
+def reserve_slot(std, registry: dict, slot_id: str, name: str) -> str:
+    """Claim a slot for `name` before its worktree exists, returning the token
+    that proves the claim. Mutates `registry`; the caller writes it.
+
+    This is what lets the pool lock be dropped for the checkout: the slot is off
+    the table for every other caller, and the record says which process owes the
+    pool a worktree, so being slow is distinguishable from being dead.
+    """
+    record = owner_record(std)
+    registry["slots"][slot_id]["state"] = RESERVED
+    registry["slots"][slot_id]["reservation"] = record | {
+        "name": name,
+        "since": time.now_ms(),
+    }
+    return record["token"]
+
+def reserving_slot(registry: dict, name: str) -> str:
+    """The slot an in-flight `add` has claimed for `name`, or "".
+
+    A branch being checked out is already taken, even though no lease exists
+    yet. Without this a second caller asking for the same branch would pick a
+    different slot and then have git refuse the checkout — the same answer,
+    arriving as a failure rather than a refusal, after a slot's previous
+    occupant had been force-removed to make room.
+    """
+    for slot_id in registry["slots"]:
+        if registry["slots"][slot_id]["state"] != RESERVED:
+            continue
+        if (registry["slots"][slot_id].get("reservation") or {}).get("name", "") == name:
+            return slot_id
+    return ""
+
+def reservation_abandoned(std, registry: dict, slot_id: str) -> bool:
+    """Whether a reservation's process is gone, so the slot can be taken back.
+
+    There is no judgement call here, unlike `abandoned_lease`: a reservation
+    means the worktree was still being created, so there is no session to resume
+    and nothing uncommitted to lose. A reservation that records no usable
+    process is treated as abandoned rather than holding a slot forever.
+    """
+    return not _held_by_a_live_process(std, registry["slots"][slot_id].get("reservation") or {})
+
+def holds_reservation(registry: dict, slot_id: str, token: str) -> bool:
+    """Whether `slot_id` is still reserved by the caller holding `token`.
+
+    Checked before a reservation is turned into a lease, because the lock was
+    not held in between and the only honest basis for writing the slot is that
+    it is still ours.
+    """
+    if slot_id not in registry["slots"]:
+        return False
+    slot = registry["slots"][slot_id]
+    if slot["state"] != RESERVED:
+        return False
+    return (slot.get("reservation") or {}).get("token", "") == token
+
 def owned_slots(pool: dict, registry: dict) -> list[str]:
     """Slot ids this clone owns, in registry order. The only slots it can lease,
     and so the only ones its `max_slots` budget counts."""
@@ -474,9 +638,11 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str
     """Free slots whose Bazel state has gone cold enough to be worth less than
     the disk it holds.
 
-    Leased slots are never returned, whatever their age: a lease means someone
-    may be working in that checkout right now, and a timer is not grounds for
-    deleting it.
+    Only free slots are returned, whatever the ages involved. A lease means
+    someone may be working in that checkout right now, and a timer is not
+    grounds for deleting it; a reservation means a checkout is being created in
+    that very directory, and deleting the output base out from under it would
+    break a command that is still running.
 
     A slot owned by *another* clone is returned only once that clone's object
     store is gone from this machine. That is the stranded case — a clone that
@@ -487,7 +653,7 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str
     victims = []
     for slot_id in registry["slots"]:
         slot = registry["slots"][slot_id]
-        if slot["state"] == "leased":
+        if slot["state"] != FREE:
             continue
         if slot_age_days(std, pool, slot_id, slot, root) < max_age_days:
             continue

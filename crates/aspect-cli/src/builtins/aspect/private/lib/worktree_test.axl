@@ -13,16 +13,27 @@ load("@aspect//worktree.axl", "testonly_held_by", "testonly_list_columns")
 load("@std//time.axl", "time")
 load(
     "./worktree.axl",
+    "FREE",
+    "LEASED",
+    "RESERVED",
     "abandoned_lease",
+    "acquire",
     "default_score",
     "drop_slot",
+    "holds_reservation",
     "lock_digest",
     "lock_digest_at",
     "normalize_remote",
     "output_base_of",
     "owned_slots",
+    "owner_record",
     "prunable_slots",
     "read_registry",
+    "reconcile",
+    "release",
+    "reservation_abandoned",
+    "reserve_slot",
+    "reserving_slot",
     "run_git",
     "slot_age_days",
     "slot_path",
@@ -169,7 +180,7 @@ def _test_missing_registry_is_empty(ctx):
 
 _DAY_MS = 24 * 60 * 60 * 1000
 
-def _slot(owner, state = "free", age_days = 0):
+def _slot(owner, state = FREE, age_days = 0):
     """A registry entry whose creation floor is `age_days` old.
 
     With no output base on disk the floor is what `slot_age_days` reads, so this
@@ -329,7 +340,7 @@ def _test_lock_digest_agrees_between_a_file_and_a_ref(ctx):
 def _leased(owner, name, agent):
     return {
         "owner_git_dir": owner,
-        "state": "leased",
+        "state": LEASED,
         "last_commit": "",
         "last_branch": "",
         "lock_digest": "",
@@ -569,6 +580,129 @@ def _test_the_agent_column_is_never_dropped(ctx):
     _eq("notes does not, since it only ever carries exceptions", by_key["notes"].always, False)
     _eq("idle is right-aligned", by_key["idle"].right, True)
 
+# A pid high enough that nothing is using it, for a record whose process is
+# gone. `kill -0` on it answers ESRCH, which is the whole question.
+_DEAD_PID = 2147483000
+
+def _test_the_lock_excludes_a_second_caller(ctx):
+    """The point of the whole mechanism. `attempts = 1` so the refusal is
+    immediate rather than the production minute of patience."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    first = acquire(ctx.std, tmp)
+    if not first:
+        fail("an unlocked pool should hand out its lock")
+    _eq("a second caller is refused", acquire(ctx.std, tmp, attempts = 1), "")
+    release(ctx.std, tmp, first)
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("the lock should be available once released")
+
+def _test_a_stale_release_cannot_drop_someone_elses_lock(ctx):
+    """`add` releases the lock for its checkout and takes it again, so a
+    deferred release can arrive once the lock has passed to another caller.
+    Removing theirs would put two callers in the registry at once.
+
+    The second holder is written by hand because a token identifies a process,
+    and this test only has the one. It carries this process's pid so the lock
+    reads as live rather than abandoned, which is the case being tested.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    mine = acquire(ctx.std, tmp)
+    release(ctx.std, tmp, mine)
+
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode(
+        owner_record(ctx.std) | {"token": "another-caller"},
+    ))
+
+    release(ctx.std, tmp, mine)
+    _eq("their lock survives my late release", acquire(ctx.std, tmp, attempts = 1), "")
+    release(ctx.std, tmp, "another-caller")
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("the holder's own release should still work")
+
+def _test_a_lock_whose_owner_died_is_reclaimed_at_once(ctx):
+    """A crash used to wedge the pool until a ten-minute timeout. The owner
+    record answers directly, so the next caller takes the lock instead of
+    waiting out a clock that says nothing about whether the holder exists."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode({
+        "token": "%d:Mon Jan  1 00:00:00 2001" % _DEAD_PID,
+        "pid": _DEAD_PID,
+        "started_at": "Mon Jan  1 00:00:00 2001",
+    }))
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("a lock held by a dead process should be reclaimed on the first look")
+
+def _test_a_recycled_pid_does_not_pass_for_the_owner(ctx):
+    """Pids are reused, so a live pid is not evidence that the process which
+    took the lock is still there. The recorded start time is what settles it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode({
+        "token": "stale",
+        "pid": ctx.std.process.id(),
+        "started_at": "Mon Jan  1 00:00:00 2001",
+    }))
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("a live pid with a different start time is a different process")
+
+def _test_an_unreadable_owner_still_waits_out_the_clock(ctx):
+    """A process that died between creating the lock directory and recording
+    itself leaves nothing to check. An age that cannot be established is never
+    called abandoned, because reclaiming a live lock is worse than waiting."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    _eq("no owner record, fresh directory", acquire(ctx.std, tmp, attempts = 1), "")
+
+def _test_a_reservation_holds_the_slot_and_the_branch(ctx):
+    """The reservation is what makes releasing the lock for the checkout safe:
+    the slot is no longer free, and the branch is answerable by name before any
+    lease exists."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    token = reserve_slot(ctx.std, registry, "s1", "fix/login")
+
+    _eq("not free any more", registry["slots"]["s1"]["state"], RESERVED)
+    _eq("found by branch", reserving_slot(registry, "fix/login"), "s1")
+    _eq("another branch is not claimed", reserving_slot(registry, "other"), "")
+    _eq("the token proves it is ours", holds_reservation(registry, "s1", token), True)
+    _eq("someone else's token does not", holds_reservation(registry, "s1", "nope"), False)
+    _eq("a live process is not abandoned", reservation_abandoned(ctx.std, registry, "s1"), False)
+
+def _test_a_reservation_whose_process_died_is_reclaimable(ctx):
+    """An `add` killed during its checkout would otherwise hold a slot for
+    good. Unlike a lease there is no judgement call: no worktree existed yet, so
+    there is no session to resume and nothing uncommitted to lose."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    reserve_slot(ctx.std, registry, "s1", "fix/login")
+    registry["slots"]["s1"]["reservation"]["pid"] = _DEAD_PID
+    _eq("dead owner", reservation_abandoned(ctx.std, registry, "s1"), True)
+
+    registry["slots"]["s1"]["reservation"] = {}
+    _eq("nothing recorded is not a hold", reservation_abandoned(ctx.std, registry, "s1"), True)
+
+def _test_prune_never_takes_a_slot_being_set_up(ctx):
+    """A reservation means a checkout is being created in that directory.
+    Deleting its output base would break a command that is still running, and
+    age is no argument: the slot is as old as whatever it held before."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"s1": _slot(pool["git_common_dir"], age_days = 90)}}
+    _eq("free and old", prunable_slots(ctx.std, pool, registry, 30), ["s1"])
+
+    reserve_slot(ctx.std, registry, "s1", "fix/login")
+    _eq("reserved and old", prunable_slots(ctx.std, pool, registry, 30), [])
+
+def _test_reconcile_leaves_a_reservation_alone(ctx):
+    """Git not knowing about a reserved slot's worktree is expected rather than
+    evidence — that is what "not checked out yet" looks like. Freeing on it
+    would hand the slot to a second caller mid-checkout."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {"s2": _slot(env.pool["git_common_dir"])}}
+    reserve_slot(ctx.std, registry, "s2", "fix/login")
+    reconcile(ctx.std, env.pool, registry)
+    _eq("still reserved", registry["slots"]["s2"]["state"], RESERVED)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -606,6 +740,15 @@ _UNIT_TESTS = [
     _test_uncommitted_changes_are_never_discarded,
     _test_a_running_session_is_never_abandoned,
     _test_an_unverifiable_harness_is_never_abandoned,
+    _test_the_lock_excludes_a_second_caller,
+    _test_a_stale_release_cannot_drop_someone_elses_lock,
+    _test_a_lock_whose_owner_died_is_reclaimed_at_once,
+    _test_a_recycled_pid_does_not_pass_for_the_owner,
+    _test_an_unreadable_owner_still_waits_out_the_clock,
+    _test_a_reservation_holds_the_slot_and_the_branch,
+    _test_a_reservation_whose_process_died_is_reclaimable,
+    _test_prune_never_takes_a_slot_being_set_up,
+    _test_reconcile_leaves_a_reservation_alone,
 ]
 
 def _test_impl(ctx):
