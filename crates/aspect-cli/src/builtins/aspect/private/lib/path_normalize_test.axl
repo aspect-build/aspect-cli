@@ -1,10 +1,18 @@
 """Unit tests for lib/path_normalize.axl."""
 
-load("./path_normalize.axl", "normalize_files_for_cwd")
+load("./path_normalize.axl", "normalize_files_for_cwd", "normpath")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_normpath(_ctx):
+    _eq("trailing slash", normpath("/a/b/"), "/a/b")
+    _eq("dot", normpath("/a/./b"), "/a/b")
+    _eq("dot-dot", normpath("/a/x/../b"), "/a/b")
+    _eq("doubled", normpath("/a//b"), "/a/b")
+    _eq("above the root", normpath("/../a"), "/a")
+    _eq("root", normpath("/"), "/")
 
 def _test_at_git_root(_ctx):
     """cwd == git_root → no rebasing needed, return files unchanged."""
@@ -117,6 +125,7 @@ def _test_git_root_under_cwd_empty_files(_ctx):
     )
 
 _UNIT_TESTS = [
+    _test_normpath,
     _test_at_git_root,
     _test_direct_child,
     _test_nested_cwd,

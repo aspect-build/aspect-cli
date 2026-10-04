@@ -1,0 +1,122 @@
+"""The git repository and branch a directory is checked out from, read from `.git`.
+
+No `git` process: a listing that attributes dozens of directories reads a few
+small files for each instead. The layouts covered:
+
+  - **A clone.** `.git` is a directory holding `HEAD` and `config`.
+  - **A linked worktree.** `.git` is a file, `gitdir: <repo>/.git/worktrees/<name>`.
+    That gitdir holds this worktree's `HEAD`, and its `commondir` points back to
+    the shared `.git` that holds `config`.
+
+`.git` is looked for from the directory upwards, so a directory inside a
+checkout — a nested Bazel workspace, say — reports the checkout around it.
+"""
+
+load("./path_normalize.axl", "normpath")
+
+Checkout = record(
+    # The directory holding `.git`.
+    root = field(str),
+    # `owner/name` from the `origin` remote, else the main checkout's directory
+    # name.
+    repository = field(str),
+    # The checked-out branch; another ref HEAD points at, as written; or
+    # `detached@<sha>` for a detached HEAD. "" when it cannot be read.
+    branch = field(str),
+)
+
+_REF = "ref: "
+_BRANCH_REF = "refs/heads/"
+_GITDIR_PREFIX = "gitdir: "
+
+# What a reftable repository writes into `HEAD`; the real branch lives in the
+# reftable, which this does not read.
+_REFTABLE_HEAD = "refs/heads/.invalid"
+
+def _join(base: str, path: str) -> str:
+    """`path` resolved against the directory `base`, as git resolves the
+    relative paths it writes into `.git` files and `commondir`."""
+    return normpath(path if path.startswith("/") else base + "/" + path)
+
+def repository_name(url: str) -> str:
+    """`owner/name` for a remote URL in any of the forms git accepts, or "".
+
+    `git@github.com:aspect-build/aspect-cli.git`,
+    `https://github.com/aspect-build/aspect-cli` and
+    `ssh://git@host/aspect-build/aspect-cli.git` all give `aspect-build/aspect-cli`.
+    """
+    url = url.strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-len(".git")]
+    if "://" in url:
+        url = url[url.index("://") + 3:]
+        url = url[url.find("/") + 1:] if "/" in url else ""
+    elif ":" in url:
+        url = url[url.index(":") + 1:]
+    parts = [p for p in url.split("/") if p]
+    return "/".join(parts[-2:])
+
+def _origin_url(config: str) -> str:
+    """The `url` of `[remote "origin"]` in a git config file's text, or ""."""
+    in_origin = False
+    for raw in config.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_origin = line.replace(" ", "") == "[remote\"origin\"]"
+            continue
+        if in_origin and line.startswith("url") and "=" in line:
+            return line[line.index("=") + 1:].strip()
+    return ""
+
+def _find_dot_git(std, path: str) -> str:
+    """The nearest `.git` at or above `path`, or ""."""
+    path = normpath(path)
+    for _ in range(64):
+        candidate = ("" if path == "/" else path) + "/.git"
+        if std.fs.exists(candidate):
+            return candidate
+        if path == "/":
+            return ""
+        path = path[:path.rfind("/")] or "/"
+    return ""
+
+def _branch(head: str) -> str:
+    """What a `HEAD` file's text names, for display."""
+    if head.startswith(_REF):
+        ref = head[len(_REF):].strip()
+        if ref == _REFTABLE_HEAD:
+            return ""
+        return ref[len(_BRANCH_REF):] if ref.startswith(_BRANCH_REF) else ref
+    return "detached@" + head[:12] if head else ""
+
+def checkout_of(std, path: str):
+    """The `Checkout` that `path` sits in, or None when it is in none."""
+    dot_git = _find_dot_git(std, path)
+    if not dot_git:
+        return None
+    root = dot_git[:-len("/.git")] or "/"
+    if std.fs.is_dir(dot_git):
+        git_dir = dot_git
+        common_dir = dot_git
+    else:
+        text = std.fs.try_read_to_string(dot_git).strip()
+        if not text.startswith(_GITDIR_PREFIX):
+            return None
+        git_dir = _join(root, text[len(_GITDIR_PREFIX):].strip())
+        common = std.fs.try_read_to_string(git_dir + "/commondir").strip()
+        common_dir = _join(git_dir, common) if common else git_dir
+
+    branch = _branch(std.fs.try_read_to_string(git_dir + "/HEAD").strip())
+
+    repository = repository_name(_origin_url(std.fs.try_read_to_string(common_dir + "/config")))
+    if not repository:
+        main = common_dir[:-len("/.git")] if common_dir.endswith("/.git") else common_dir
+        repository = main[main.rfind("/") + 1:]
+    return Checkout(root = root, repository = repository, branch = branch)
+
+git_checkout = namespace(
+    Checkout = Checkout,
+    branch = _branch,
+    checkout_of = checkout_of,
+    repository_name = repository_name,
+)

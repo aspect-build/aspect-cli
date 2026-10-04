@@ -1,0 +1,894 @@
+"""Bazel output bases on this machine: finding, attributing, classifying, measuring.
+
+Each base has a lifecycle state, defined here. `aspect output-bases` lists bases
+by state; `aspect gc` removes them by state, so what one lists as orphaned is
+what the other removes.
+
+Bazel keys one output base per workspace path, named `md5(workspace)`, under the
+output user root. Each base's workspace is read from the `DO_NOT_BUILD_HERE`
+file Bazel writes into it, falling back to the execroot's source symlinks and
+then to the `--workspace_directory` in `server/cmdline`. A base none of them
+resolves is undetermined.
+
+A base's state, first match wins (`classify`):
+
+  - **orphaned** — its workspace is gone; within the grace period after its last
+    use it is held back instead, so a worktree recreated at the same path keeps
+    it.
+  - **idle** — unused for the maximum age, whatever its workspace, unless a
+    Bazel server is running in it.
+  - **live** or **undetermined** otherwise.
+
+`aspect gc` renames a base to `.gc-trash-<name>` before deleting it; the scan
+reports any such leftover as **trash**.
+
+The periods behind idle and orphaned (`PERIODS`) have defaults; `aspect gc`
+takes flags to change them.
+"""
+
+load("@std//time.axl", "time")
+load("./ansi.axl", "ansi")
+load("./environment.axl", "info")
+load("./git_checkout.axl", "git_checkout")
+load("./path_normalize.axl", "normpath")
+load("./text.axl", "pad_left", "pad_right", "pluralize")
+
+# --- constants ---------------------------------------------------------------
+
+HOUR_US = 3600 * 1000000
+
+DAY_US = 24 * HOUR_US
+
+# How the output names a base. aspect-cli may one day manage more than Bazel,
+# so nothing it reports is a bare "output base".
+BASE = "Bazel output base"
+
+TRASH_PREFIX = ".gc-trash-"
+
+DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
+
+# `md5("")`: the output base Bazel uses when it runs outside any workspace.
+_NO_WORKSPACE = "d41d8cd98f00b204e9800998ecf8427e"
+
+# Rewritten by Bazel as a server starts or runs a command, so statting these few
+# answers "last used" without walking a base's hundred thousand files. The two
+# symlinks are followed to the current profile and log.
+_FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
+
+# --- states ------------------------------------------------------------------
+
+LIVE = "live"
+
+IDLE = "idle"
+
+ORPHAN = "orphan"
+
+GRACE = "grace"
+
+UNKNOWN = "unknown"
+
+TRASH = "trash"
+
+_State = record(
+    # Key in a document's counts.
+    key = field(str),
+    # How the census line counts it.
+    label = field(str),
+    removable = field(bool),
+    # Heading over the state's bases in a listing.
+    heading = field(str),
+    # Printed under the census when any base is in the state, once however
+    # many states share it; one line per `\n`, with `PERIODS` placeholders
+    # filled from the run's policy.
+    note = field(str, default = ""),
+)
+
+_ORPHAN_NOTE = ("orphaned: the base's workspace directory no longer exists, e.g. a deleted worktree.\n" +
+                "{grace}.")
+
+# Every state a base can be in, in census and listing order.
+STATES = {
+    LIVE: _State(key = "live", label = "live", removable = False, heading = "live — workspace still exists"),
+    IDLE: _State(key = "idle", label = "idle", removable = True, heading = "idle — unused past the maximum age"),
+    ORPHAN: _State(key = "orphaned", label = "orphaned", removable = True, heading = "orphaned — workspace gone", note = _ORPHAN_NOTE),
+    GRACE: _State(
+        key = "orphaned_within_grace",
+        label = "orphaned within the grace period",
+        removable = False,
+        heading = "orphaned within the grace period",
+        note = _ORPHAN_NOTE,
+    ),
+    UNKNOWN: _State(
+        key = "undetermined",
+        label = "undetermined",
+        removable = False,
+        heading = "undetermined — no workspace recorded in it",
+        note = ("undetermined: nothing in the base names its workspace, so it cannot be orphaned.\n" +
+                "{max_age}, or now with `{gc} --bazel-output-base=<hash>`."),
+    ),
+    TRASH: _State(key = "trash", label = "left from an interrupted gc", removable = True, heading = "left from an interrupted gc"),
+}
+
+# --- periods and policy ------------------------------------------------------
+
+# The periods the rules apply. A period of 0 turns its rule off — for the grace
+# period, that removes orphans without waiting.
+Policy = record(
+    base_max_age_us = field(int),
+    orphan_grace_us = field(int),
+    download_cache_max_age_us = field(int),
+)
+
+_Period = record(
+    # The `Policy` field it sets.
+    field = field(str),
+    # The `aspect gc` argument that sets it, which is also its key in a
+    # document's `policy`.
+    arg = field(str),
+    # Length of one unit of the argument, in microseconds.
+    unit_us = field(int),
+    default = field(int),
+    # Sentences for the period in force (`%s` is its length) and for 0.
+    on = field(str),
+    off = field(str),
+)
+
+# Each period, keyed by the placeholder that states it in notes and reasons, so
+# the output gives the value in force and how to change it.
+PERIODS = {
+    "{grace}": _Period(
+        field = "orphan_grace_us",
+        arg = "orphan_grace_hours",
+        unit_us = HOUR_US,
+        default = 1,
+        on = "`aspect gc` removes one %s after last use (--orphan-grace-hours=N to change, 0 for immediately)",
+        off = "`aspect gc` removes one immediately (--orphan-grace-hours=N waits N hours after last use)",
+    ),
+    "{max_age}": _Period(
+        field = "base_max_age_us",
+        arg = "base_max_age_days",
+        unit_us = DAY_US,
+        default = 30,
+        on = "`aspect gc` removes one %s after last use (--base-max-age-days=N to change, 0 to keep)",
+        off = "`aspect gc` keeps it (--base-max-age-days=N removes one N days after last use)",
+    ),
+    "{cache_age}": _Period(
+        field = "download_cache_max_age_us",
+        arg = "download_cache_max_age_days",
+        unit_us = DAY_US,
+        default = 30,
+        on = "pruned by `aspect gc` after %s unused; --download-cache-max-age-days=N to change, 0 to keep",
+        off = "not pruned; `aspect gc --download-cache-max-age-days=N` prunes after N days unused",
+    ),
+}
+
+def _default_policy():
+    """The `Policy` a `gc` run applies with no period flags."""
+    return Policy(**{p.field: p.default * p.unit_us for p in PERIODS.values()})
+
+def _policy_entry(policy) -> dict:
+    """`policy` for a document, keyed by `aspect gc`'s period flags in their
+    units."""
+    return {p.arg: getattr(policy, p.field) // p.unit_us for p in PERIODS.values()}
+
+def _render(text: str, policy, root_flag: str = "") -> list[str]:
+    """`text` as lines, with each `PERIODS` placeholder replaced by the
+    sentence for the period in force, and `{gc}` by the `aspect gc` command
+    for this root."""
+    for placeholder, p in PERIODS.items():
+        us = getattr(policy, p.field)
+        text = text.replace(placeholder, p.on % _fmt_age(us) if us else p.off)
+    return text.replace("{gc}", _command("gc", root_flag)).split("\n")
+
+def _command(name: str, root_flag: str) -> str:
+    """`aspect <name>` as a reader should run it: against the same root this
+    run looked at, when that was not the default."""
+    return "aspect " + name + root_flag
+
+def _root_flag(explicit: str, root: str) -> str:
+    """The `--output-user-root` to repeat in suggested commands: the root, when
+    one was passed; "" when the default was used."""
+    return " --output-user-root=" + root if explicit else ""
+
+# --- formatting --------------------------------------------------------------
+
+def _fmt_kb(kb: int) -> str:
+    """Kilobytes as a short human string, rounded to nearest.
+
+    Integer math throughout: AXL's `%` formatting rejects width and precision
+    flags, so there is no `%.1f` to reach for. Rounding rather than truncating
+    keeps a report of 7.5996 GB from reading as 7.5.
+    """
+    if kb >= 1048576:
+        tenths = (kb * 10 + 524288) // 1048576
+        return str(tenths // 10) + "." + str(tenths % 10) + " GB"
+    if kb >= 1024:
+        return str((kb + 512) // 1024) + " MB"
+    return str(kb) + " KB"
+
+def _fmt_age(us: int) -> str:
+    """A duration in the coarsest unit that still distinguishes: minutes under
+    an hour, hours under two days, days beyond."""
+    minutes = max(us, 0) // 60000000
+    if minutes < 60:
+        return "%dm" % minutes
+    hours = minutes // 60
+    if hours < 48:
+        return "%dh" % hours
+    return "%dd" % (hours // 24)
+
+def _total_kb(sizes: list[int]) -> int:
+    total = 0
+    for kb in sizes:
+        total += kb
+    return total
+
+def _tilde(path: str, home: str) -> str:
+    """`path` with the home directory written `~`, for display."""
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+def _say(streaming: bool, line: str) -> None:
+    """A progress line, suppressed under `--output=json`.
+
+    The JSON document reports the finished state, so narrating to a script that
+    is waiting to parse one is noise.
+    """
+    if streaming:
+        print(line)
+
+# --- processes ---------------------------------------------------------------
+
+def _run(ctx: TaskContext, cmd: str, args: list[str]):
+    """`(exit code, stdout)` of `cmd args`, stderr discarded; `(-1, "")` when
+    the command cannot be started at all — a slim image without `ps` or
+    `realpath` is a missing answer, not a crash."""
+    err, out = catch(lambda: ctx.std.process.command(cmd).args(args)
+        .stdout("piped").stderr("null").spawn().wait_with_output())
+    if err != None:
+        return (-1, "")
+    return (out.status.code, out.stdout)
+
+# --- the output user root ----------------------------------------------------
+
+def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags: list[str] = []) -> str:
+    """`--output_user_root` as the rc chain resolves it, or "".
+
+    `startup` is a section like any other to the rc parser, so this picks the
+    flag up wherever Bazel itself would read it — the system rc, the workspace
+    `.bazelrc`, the user's `~/.bazelrc` — in that order, last wins. A home rc
+    therefore beats a workspace one, which is Bazel's own precedence and the
+    case that matters most: a root set there relocates every build on the
+    machine.
+
+    `root` defaults to the surrounding workspace. Outside one there is no rc to
+    read and the parse fails, which is "" rather than an error: the platform
+    default is still a usable answer. `startup_flags` is for tests that need to
+    shut the ambient rc files out (`--nosystem_rc --nohome_rc`).
+
+    A value is made absolute as Bazel's `AbsolutePathFromFlag` does: a leading
+    `~` is the home directory, and a relative path is taken against the
+    directory the command runs in. Bazel parses its startup options before it
+    changes into the workspace, so that is the caller's directory, not the
+    workspace root.
+    """
+    err, rc = catch(ctx.bazel.parse_rc, root = root, startup_flags = startup_flags) if root else catch(ctx.bazel.parse_rc, startup_flags = startup_flags)
+    if err != None:
+        return ""
+    value = rc.flag_value("--output_user_root", command = "startup")
+    if not value:
+        return ""
+    if value.startswith("~"):
+        rest = value[1:]
+        return ctx.std.env.home_dir() + (rest if rest.startswith("/") else "/" + rest)
+    if value.startswith("/"):
+        return value
+    return ctx.std.env.current_dir() + "/" + value
+
+def _platform_output_user_root(ctx: TaskContext) -> str:
+    """Bazel's default output user root for this platform."""
+    home = ctx.std.env.home_dir()
+    user = ctx.std.env.var("USER") or ctx.std.env.var("LOGNAME") or ""
+    if not user:
+        # The home directory's last segment is the user name on every platform
+        # whose default root we know how to build.
+        idx = home.rfind("/")
+        user = home[idx + 1:] if idx >= 0 else home
+    if ctx.std.env.os() == "macos":
+        return home + "/Library/Caches/bazel/_bazel_" + user
+    return home + "/.cache/bazel/_bazel_" + user
+
+def _output_user_root(ctx: TaskContext, explicit: str) -> str:
+    """`explicit`, then what the surrounding workspace configures, then the
+    platform default."""
+    return (explicit or
+            _configured_output_user_root(ctx) or
+            _platform_output_user_root(ctx))
+
+def _canonical(ctx: TaskContext, path: str) -> str:
+    """`path` with symlinks, `.` and `..` resolved, via `realpath`. A path
+    `realpath` cannot resolve — missing, or no `realpath` — comes back
+    normalized if absolute, else as given."""
+    code, out = _run(ctx, "realpath", [path])
+    if code == 0 and out.strip():
+        return out.strip()
+    return normpath(path) if path.startswith("/") else path
+
+def _resolve_root(ctx: TaskContext, explicit: str) -> tuple:
+    """`(root, None)` for the output user root to work on, or `(root,
+    conclusion)` when it does not exist.
+
+    The root is canonical, so every path built from it has one spelling: what
+    `--bazel-output-base` is compared against, and what the listing shows.
+    """
+    root = _canonical(ctx, _output_user_root(ctx, explicit))
+    if ctx.std.fs.exists(root):
+        return (root, None)
+    return (root, TaskConclusion(
+        exit_code = 1,
+        message = "no Bazel output user root at " + root + " — pass --output-user-root to point at one",
+    ))
+
+def _output_user_root_arg():
+    return args.string(
+        default = "",
+        description = "The Bazel output user root to work on. Defaults to the `--output_user_root` the surrounding workspace's bazelrc sets, falling back to the platform default (`~/Library/Caches/bazel/_bazel_$USER` on macOS, `~/.cache/bazel/_bazel_$USER` elsewhere).",
+    )
+
+# --- attribution -------------------------------------------------------------
+
+Base = record(
+    name = field(str),
+    path = field(str),
+    # The workspace this base belongs to; "" when it could not be resolved.
+    workspace = field(str),
+    state = field(str),
+    # PID recorded in `server/server.pid.txt`, or 0. Not checked for liveness.
+    pid = field(int),
+    # Newest mtime among the freshness markers, in microseconds since the epoch.
+    last_used = field(int),
+)
+
+def _is_output_base_name(name: str) -> bool:
+    """True for an md5 hex digest, which is how Bazel names every output base
+    under the root. Matching the shape is what keeps `install/`, `cache/` and
+    anything else beside the bases out of the scan."""
+    if len(name) != 32:
+        return False
+    for ch in name.elems():
+        if not (("0" <= ch and ch <= "9") or ("a" <= ch and ch <= "f")):
+            return False
+    return True
+
+_WORKSPACE_FLAG = "--workspace_directory="
+
+def _workspace_from_marker(ctx: TaskContext, base: str) -> str:
+    """The workspace Bazel recorded in `DO_NOT_BUILD_HERE`, or ""."""
+    return ctx.std.fs.try_read_to_string(base + "/DO_NOT_BUILD_HERE").strip()
+
+def _workspace_from_execroot(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the execroot's source symlinks, or "".
+
+    Bazel materializes each top-level source entry as an absolute symlink into
+    `execroot/<name>/`, so any one of them names the workspace. `bazel-out` and
+    `external` are real directories there, not symlinks, so they are skipped by
+    the same test.
+    """
+    execroot = base + "/execroot"
+    if not ctx.std.fs.exists(execroot):
+        return ""
+    for ws in ctx.std.fs.read_dir(execroot):
+        if not ws.is_dir:
+            continue
+        wsdir = execroot + "/" + ws.path
+        for entry in ctx.std.fs.read_dir(wsdir):
+            child = wsdir + "/" + entry.path
+            meta = ctx.std.fs.symlink_metadata(child)
+            if not meta.is_symlink:
+                continue
+            target = ctx.std.fs.read_link(child)
+            if not target.startswith("/"):
+                continue
+            idx = target.rfind("/")
+            if idx > 0:
+                return target[:idx]
+    return ""
+
+def _workspace_from_cmdline(ctx: TaskContext, base: str) -> str:
+    """The workspace named by the base's recorded server command line, or "".
+
+    `server/cmdline` is the NUL-separated argv of the last server started here,
+    carrying an explicit `--workspace_directory=`. An output base is a hash of
+    exactly one workspace, so this names it unambiguously.
+    """
+    raw = ctx.std.fs.try_read_to_string(base + "/server/cmdline")
+    if not raw:
+        return ""
+    for arg in raw.split("\x00"):
+        if arg.startswith(_WORKSPACE_FLAG):
+            return arg[len(_WORKSPACE_FLAG):]
+    return ""
+
+def _workspace_of(ctx: TaskContext, base: str) -> str:
+    """The workspace directory `base` belongs to, or "".
+
+    `DO_NOT_BUILD_HERE` is Bazel's own record of the path the base was hashed
+    from, written on every server start, so it is read first.
+
+    The execroot is the fallback for a base that has lost it, and the execroot
+    is preferred over `server/cmdline` because it records the last build rather
+    than the last server start. `server/cmdline` is what attributes a base that
+    never finished a build: the execroot is created empty on the first server
+    start, so a run that failed in loading leaves nothing to read there.
+    """
+    return (_workspace_from_marker(ctx, base) or
+            _workspace_from_execroot(ctx, base) or
+            _workspace_from_cmdline(ctx, base))
+
+def _mtime_us(ctx: TaskContext, path: str) -> int:
+    """`path`'s mtime in microseconds, following symlinks; 0 when unreadable."""
+    err, meta = catch(ctx.std.fs.metadata, path)
+    if err != None or meta.modified == None:
+        return 0
+    return meta.modified
+
+def _last_used(ctx: TaskContext, base: str) -> int:
+    """When a Bazel server last started or ran a command in `base`, in
+    microseconds. The base directory's own mtime stands in when no marker can
+    be read."""
+    newest = 0
+    for marker in _FRESHNESS_MARKERS:
+        newest = max(newest, _mtime_us(ctx, base + "/" + marker))
+    return newest or _mtime_us(ctx, base)
+
+# --- servers -----------------------------------------------------------------
+
+def _server_pid(ctx: TaskContext, base: str) -> int:
+    """PID recorded in the base's server directory, or 0."""
+    txt = ctx.std.fs.try_read_to_string(base + "/server/server.pid.txt").strip()
+    if not txt:
+        return 0
+    for ch in txt.elems():
+        if ch < "0" or ch > "9":
+            return 0
+    return int(txt)
+
+# `_server_rss_kb` for a live pid whose process `ps` cannot describe.
+_UNSEEN = -1
+
+def _output_base_name(command: str) -> str:
+    """The last path segment of the `--output_base=` in a command line, or "".
+
+    The value runs to the next ` --` flag rather than the next space, so a root
+    with a space in it still yields the base's own name.
+    """
+    flag = "--output_base="
+    i = command.find(flag)
+    if i < 0:
+        return ""
+    value = command[i + len(flag):].split(" --")[0].strip().rstrip("/")
+    return value[value.rfind("/") + 1:]
+
+def _server_rss_kb(ctx: TaskContext, pid: int, base: str):
+    """The resident memory in KB of `base`'s Bazel server; None when `pid` is
+    certainly not it; `_UNSEEN` when `pid` is live but `ps` cannot say what it
+    is — no `ps`, or one without `-p`/`-o`, as on a slim image.
+
+    A recorded PID outlives the process that wrote it, and the OS reuses PIDs,
+    so the process's own `--output_base=` must end in this base's md5 name. The
+    name rather than the whole path: the server records the path as its client
+    spelled it, which need not match this scan's spelling of the root — a
+    trailing slash, `./`, or a symlink such as `/var` for `/private/var`.
+    """
+    if pid <= 0:
+        return None
+    code, out = _run(ctx, "ps", ["-p", str(pid), "-o", "rss=", "-o", "command="])
+    rss, _, command = out.strip().partition(" ")
+    if code == 0 and rss.isdigit():
+        # A server still running in trash was started under the base's own name.
+        name = base[base.rfind("/") + 1:].removeprefix(TRASH_PREFIX)
+        return int(rss) if _output_base_name(command) == name else None
+
+    # `ps` could not say. Only a pid known to be gone is ruled out: with no
+    # `kill` to ask either, as on an image without procps, it might be live.
+    alive, _ = _run(ctx, "kill", ["-0", str(pid)])
+    return None if alive > 0 else _UNSEEN
+
+def _is_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
+    """True only when `pid` is certainly `base`'s Bazel server — what it takes
+    to signal it."""
+    rss = _server_rss_kb(ctx, pid, base)
+    return rss != None and rss != _UNSEEN
+
+def _may_be_this_bases_server(ctx: TaskContext, pid: int, base: str) -> bool:
+    """True unless `pid` is certainly not `base`'s server — what it takes to
+    keep the base."""
+    return _server_rss_kb(ctx, pid, base) != None
+
+def _servers(ctx: TaskContext, bases: list) -> dict:
+    """Resident memory in KB of each base's running Bazel server, by base path."""
+    found = {}
+    for b in bases:
+        rss = _server_rss_kb(ctx, b.pid, b.path)
+        if rss != None and rss != _UNSEEN:
+            found[b.path] = rss
+    return found
+
+# --- scanning ----------------------------------------------------------------
+
+def _classify(workspace: str, workspace_exists: bool, age_us: int, policy) -> str:
+    """The state of a base, from facts already gathered. Pure, so the rule
+    order can be tested without building bases of every age.
+
+    A running server is not decided here: it costs a process lookup, so `_scan`
+    vetoes `IDLE` afterwards, and only for the bases this returns it for.
+    """
+    if workspace and not workspace_exists:
+        return GRACE if age_us < policy.orphan_grace_us else ORPHAN
+    if policy.base_max_age_us > 0 and age_us >= policy.base_max_age_us:
+        return IDLE
+    return LIVE if workspace else UNKNOWN
+
+def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
+    """Classify every output base under `root`, youngest first, including any
+    trash an earlier `gc` failed to finish removing."""
+    bases = []
+    for entry in ctx.std.fs.read_dir(root):
+        if not entry.is_dir:
+            continue
+        path = root + "/" + entry.path
+        if entry.path.startswith(TRASH_PREFIX) and _is_output_base_name(entry.path[len(TRASH_PREFIX):]):
+            bases.append(Base(
+                name = entry.path,
+                path = path,
+                workspace = "",
+                state = TRASH,
+                pid = 0,
+                last_used = _mtime_us(ctx, path),
+            ))
+            continue
+        if not _is_output_base_name(entry.path):
+            continue
+        workspace = _workspace_of(ctx, path)
+        last_used = _last_used(ctx, path)
+        pid = _server_pid(ctx, path)
+        state = _classify(
+            workspace,
+            bool(workspace) and ctx.std.fs.exists(workspace),
+            now_us - last_used,
+            policy,
+        )
+        if state == IDLE and _may_be_this_bases_server(ctx, pid, path):
+            state = LIVE if workspace else UNKNOWN
+        bases.append(Base(
+            name = entry.path,
+            path = path,
+            workspace = workspace,
+            state = state,
+            pid = pid,
+            last_used = last_used,
+        ))
+    return sorted(bases, key = lambda b: -b.last_used)
+
+def _scan_root(ctx: TaskContext, streaming: bool, root: str, policy) -> tuple:
+    """`(bases, now_us)`: `root` announced and scanned under `policy`, against
+    one clock reading that the caller's ages also use."""
+    info(ctx.std, "Bazel output user root: " + _tilde(root, ctx.std.env.home_dir()))
+    now_us = time.now_ms() * 1000
+    _say(streaming, "  scanning %ss…" % BASE)
+    return (_scan(ctx, root, now_us, policy), now_us)
+
+def _in_state(bases: list, state: str) -> list:
+    return [b for b in bases if b.state == state]
+
+def _counts(bases: list) -> dict:
+    return {s.key: len(_in_state(bases, state)) for state, s in STATES.items()}
+
+# --- measuring ---------------------------------------------------------------
+
+def _measure(ctx: TaskContext, streaming: bool, what: str, items: list) -> dict:
+    """`du` sizes in KB for `items`, a list of `(label, path)`, keyed by path.
+
+    One `du` per path, so a run that measures tens of gigabytes can say how far
+    it has got: `[i/N] <label>` is redrawn in place on a terminal. Off one,
+    only the opening line is printed, so a log is not flooded with a line per
+    directory. A launch per path costs nothing against the walk itself.
+    """
+    if not items:
+        return {}
+    _say(streaming, "  measuring sizes of %s…" % what)
+    progress = streaming and ctx.std.io.stderr.is_tty
+    sizes = {}
+    for i, (label, path) in enumerate(items):
+        if progress:
+            ctx.std.io.stderr.write("\r" + ansi.CLEAR_LINE + "    [%d/%d] %s" % (i + 1, len(items), label))
+        kb = _du_kb(ctx, path)
+        if kb != None:
+            sizes[path] = kb
+    if progress:
+        ctx.std.io.stderr.write("\r" + ansi.CLEAR_LINE)
+    return sizes
+
+def _du_kb(ctx: TaskContext, path: str):
+    """Disk usage of `path` in KB via `du -sk`, or None when it reports none.
+
+    The exit status is ignored: `du` exits non-zero over a single unreadable
+    entry yet still prints the total for the rest. None — a path removed since
+    the scan, or no `du` at all — costs the report a number and nothing else.
+    """
+    _code, out = _run(ctx, "du", ["-sk", path])
+    parts = out.strip().split("\t")
+    if len(parts) != 2 or not parts[0].isdigit():
+        return None
+    return int(parts[0])
+
+# The shared caches beside the bases, with what collects each. A reason may
+# hold `PERIODS` placeholders.
+CACHES = [
+    ("download_cache_kb", DOWNLOAD_CACHE, "{cache_age}"),
+    ("repo_contents_cache_kb", "cache/repos/v1/contents", "collected by Bazel while a server sits idle"),
+    ("install_bases_kb", "install", "collected by Bazel's --experimental_install_base_gc_max_age"),
+]
+
+def _cache_report(ctx: TaskContext, streaming: bool, root: str) -> dict:
+    """Sizes of the shared caches, keyed as in `CACHES`. A cache the install
+    has never created reports zero."""
+    present = [(rel, root + "/" + rel) for _key, rel, _reason in CACHES if ctx.std.fs.exists(root + "/" + rel)]
+    sizes = _measure(ctx, streaming, pluralize(len(present), "Bazel shared cache"), present)
+    return {key: sizes.get(root + "/" + rel, 0) for key, rel, _reason in CACHES}
+
+def _kb_by_state(bases: list, sizes: dict) -> dict:
+    return {s.key: _total_kb([sizes.get(b.path, 0) for b in _in_state(bases, state)]) for state, s in STATES.items()}
+
+# --- git ---------------------------------------------------------------------
+
+def _checkouts(ctx: TaskContext, bases: list) -> dict:
+    """The git `Checkout` of each base whose workspace exists, by base path.
+
+    A missing workspace is skipped rather than walked up from: the nearest
+    `.git` above a deleted worktree is usually the main clone, which would
+    report the wrong branch.
+    """
+    found = {}
+    for b in bases:
+        if b.workspace and ctx.std.fs.exists(b.workspace):
+            c = git_checkout.checkout_of(ctx.std, b.workspace)
+            if c:
+                found[b.path] = c
+    return found
+
+# --- listing -----------------------------------------------------------------
+
+# What a listing knows beyond the bases themselves, for cells and sort keys.
+View = record(
+    now_us = field(int),
+    # Shown as `~`; "" to show paths whole.
+    home = field(str, default = ""),
+    # `du` sizes in KB by base path; empty unless measured.
+    sizes = field(dict, default = {}),
+    # git `Checkout` by base path.
+    checkouts = field(dict, default = {}),
+    # Running server's resident memory in KB by base path.
+    servers = field(dict, default = {}),
+)
+
+def _git(v, b, attr: str) -> str:
+    return getattr(v.checkouts[b.path], attr) if b.path in v.checkouts else ""
+
+def _workspace_label(b, home: str) -> str:
+    """The workspace column: the path, with `~` for home, or what Bazel's own
+    naming says when the base records none."""
+    if b.workspace:
+        return _tilde(b.workspace, home)
+    if b.name == _NO_WORKSPACE:
+        return "(Bazel run outside any workspace)"
+    return ""
+
+def _text_key(value: str):
+    """Ascending, with blanks last."""
+    return (value == "", value)
+
+# `--sort` keys: how each orders bases within a state. Ages and sizes go
+# largest-impact first: most recently used, then biggest.
+SORTS = {
+    "last-used": lambda b, v: -b.last_used,
+    "size": lambda b, v: -v.sizes.get(b.path, 0),
+    "workspace": lambda b, v: _text_key(b.workspace),
+    "repository": lambda b, v: _text_key(_git(v, b, "repository")),
+    "branch": lambda b, v: _text_key(_git(v, b, "branch")),
+}
+
+def _sort(bases: list, by: str, view) -> list:
+    """`bases` ordered by the `SORTS` key `by`; ties keep their order."""
+    key = SORTS[by]
+    return sorted(bases, key = lambda b: key(b, view))
+
+_Column = record(
+    header = field(str),
+    # Cell for a base, from (base, view).
+    cell = field(typing.Callable),
+    right = field(bool, default = False),
+    # Cells longer than this are cut to it with a trailing `…`; 0 for no limit.
+    max_width = field(int, default = 0),
+    # Left out of a group in which every cell is empty.
+    optional = field(bool, default = False),
+)
+
+# The listing's columns, in order. `size` is dropped unless sizes were
+# measured; `bazel server` holds a running server's resident memory, blank when
+# none runs.
+COLUMNS = [
+    _Column(header = "last used", cell = lambda b, v: _fmt_age(v.now_us - b.last_used) + " ago", right = True),
+    _Column(header = "size", cell = lambda b, v: _fmt_kb(v.sizes.get(b.path, 0)), right = True),
+    _Column(header = "bazel server", cell = lambda b, v: _fmt_kb(v.servers[b.path]) if b.path in v.servers else "", right = True, optional = True),
+    _Column(header = "output base", cell = lambda b, v: b.name),
+    _Column(header = "repository", cell = lambda b, v: _git(v, b, "repository"), max_width = 32, optional = True),
+    _Column(header = "branch", cell = lambda b, v: _git(v, b, "branch"), max_width = 40, optional = True),
+    _Column(header = "workspace", cell = lambda b, v: _workspace_label(b, v.home), optional = True),
+]
+
+def _clip(cell: str, max_width: int) -> str:
+    if max_width and len(cell) > max_width:
+        return cell[:max_width - 1] + "…"
+    return cell
+
+def _table(columns: list, rows: list[list[str]]) -> list[str]:
+    """`rows` under a header row, each column as wide as its widest cell (up to
+    its `max_width`) and aligned, two spaces apart, with no trailing space."""
+    rows = [[_clip(r[i], c.max_width) for i, c in enumerate(columns)] for r in rows]
+    widths = [max([len(r[i]) for r in rows] + [len(c.header)]) for i, c in enumerate(columns)]
+    lines = []
+    for row in [[c.header for c in columns]] + rows:
+        cells = []
+        for i, c in enumerate(columns):
+            cells.append(pad_left(row[i], widths[i]) if c.right else pad_right(row[i], widths[i]))
+        lines.append(("    " + "  ".join(cells)).rstrip())
+    return lines
+
+def _group_table(group: list, view) -> list[str]:
+    """The table for one state's bases: `size` only when measured, and an
+    optional column only when some base in the group has a value for it."""
+    columns = [c for c in COLUMNS if view.sizes or c.header != "size"]
+    rows = [[c.cell(b, view) for c in columns] for b in group]
+    keep = [i for i, c in enumerate(columns) if not c.optional or any([r[i] for r in rows])]
+    return _table([columns[i] for i in keep], [[r[i] for i in keep] for r in rows])
+
+def _print_listing(bases: list, view, sort: str) -> None:
+    """Every base, grouped by state in `STATES` order and sorted within each
+    group by `sort`, under a heading and a header row."""
+    for state, s in STATES.items():
+        group = _sort(_in_state(bases, state), sort, view)
+        if not group:
+            continue
+        print("")
+        print("  %s (%d):" % (s.heading, len(group)))
+        for line in _group_table(group, view):
+            print(line)
+
+def _print_caches(caches: dict, policy) -> None:
+    """The shared-cache table: path, size, and what collects it."""
+    print("")
+    print("  Bazel shared caches:")
+    width = max([len(rel) for _key, rel, _reason in CACHES])
+    for key, rel, reason in CACHES:
+        print("    " + pad_right(rel, width) + "  " + _fmt_kb(caches[key]) + "   (" + _render(reason, policy)[0] + ")")
+
+def _listing_hint(bases: list, root_flag: str = "") -> str:
+    """The pointer from `aspect gc` to the listing, naming the kept states it
+    would show; "" when nothing is kept."""
+    shown = [s.label for state, s in STATES.items() if not s.removable and _in_state(bases, state)]
+    if not shown:
+        return ""
+    return "Run `" + _command("output-bases", root_flag) + "` to list the kept " + BASE + "s (" + ", ".join(shown) + ")."
+
+def _print_census(streaming: bool, bases: list, sizes: dict, policy, hint: bool, root_flag: str = "") -> None:
+    """How many bases are in each state and, when `sizes` covers them, how much
+    each state holds; what the less obvious states mean; and, with `hint`, the
+    pointer to `aspect output-bases`."""
+
+    def with_size(kb):
+        return " (" + _fmt_kb(kb) + ")" if sizes else ""
+
+    counts = []
+    for state, s in STATES.items():
+        in_state = _in_state(bases, state)
+        if in_state or state == LIVE:
+            counts.append("%d %s%s" % (len(in_state), s.label, with_size(_total_kb([sizes.get(b.path, 0) for b in in_state]))))
+    total = ", " + _fmt_kb(_total_kb(sizes.values())) if sizes else ""
+    _say(streaming, "  %s%s: %s" % (pluralize(len(bases), BASE), total, ", ".join(counts)))
+    notes = []
+    for state, s in STATES.items():
+        if s.note and s.note not in notes and _in_state(bases, state):
+            notes.append(s.note)
+    for note in notes:
+        lines = _render(note, policy, root_flag)
+        _say(streaming, "    " + lines[0])
+        for line in lines[1:]:
+            _say(streaming, "      " + line)
+    if hint and _listing_hint(bases, root_flag):
+        _say(streaming, "    " + _listing_hint(bases, root_flag))
+
+# --- documents ---------------------------------------------------------------
+
+def _base_entry(b, sizes: dict = {}, checkouts: dict = {}, servers: dict = {}) -> dict:
+    """One base, for a document. `kb` only when measured; `repository` and
+    `branch` only when its workspace is a git checkout; `server_rss_kb` only
+    while its server runs."""
+    entry = {
+        "path": b.path,
+        "workspace": b.workspace,
+        "state": b.state,
+        "pid": b.pid,
+        "last_used_ms": b.last_used // 1000,
+    }
+    if b.path in sizes:
+        entry["kb"] = sizes[b.path]
+    if b.path in checkouts:
+        entry["repository"] = checkouts[b.path].repository
+        entry["branch"] = checkouts[b.path].branch
+    if b.path in servers:
+        entry["server_rss_kb"] = servers[b.path]
+    return entry
+
+output_bases = namespace(
+    BASE = BASE,
+    Base = Base,
+    CACHES = CACHES,
+    COLUMNS = COLUMNS,
+    DAY_US = DAY_US,
+    DOWNLOAD_CACHE = DOWNLOAD_CACHE,
+    HOUR_US = HOUR_US,
+    IDLE = IDLE,
+    ORPHAN = ORPHAN,
+    PERIODS = PERIODS,
+    Policy = Policy,
+    SORTS = SORTS,
+    STATES = STATES,
+    TRASH = TRASH,
+    TRASH_PREFIX = TRASH_PREFIX,
+    View = View,
+    base_entry = _base_entry,
+    cache_report = _cache_report,
+    canonical = _canonical,
+    checkouts = _checkouts,
+    classify = _classify,
+    command = _command,
+    configured_output_user_root = _configured_output_user_root,
+    counts = _counts,
+    default_policy = _default_policy,
+    du_kb = _du_kb,
+    fmt_age = _fmt_age,
+    fmt_kb = _fmt_kb,
+    group_table = _group_table,
+    in_state = _in_state,
+    is_output_base_name = _is_output_base_name,
+    is_this_bases_server = _is_this_bases_server,
+    kb_by_state = _kb_by_state,
+    last_used = _last_used,
+    listing_hint = _listing_hint,
+    may_be_this_bases_server = _may_be_this_bases_server,
+    measure = _measure,
+    mtime_us = _mtime_us,
+    output_base_name = _output_base_name,
+    output_user_root_arg = _output_user_root_arg,
+    policy_entry = _policy_entry,
+    print_caches = _print_caches,
+    print_census = _print_census,
+    print_listing = _print_listing,
+    render = _render,
+    resolve_root = _resolve_root,
+    root_flag = _root_flag,
+    run = _run,
+    say = _say,
+    scan = _scan,
+    scan_root = _scan_root,
+    server_pid = _server_pid,
+    servers = _servers,
+    sort = _sort,
+    table = _table,
+    tilde = _tilde,
+    total_kb = _total_kb,
+    workspace_label = _workspace_label,
+    workspace_of = _workspace_of,
+)

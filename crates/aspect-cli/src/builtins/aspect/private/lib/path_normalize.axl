@@ -1,5 +1,19 @@
 """Path normalization utilities."""
 
+def normpath(path: str) -> str:
+    """Absolute `path` with `.`, `..`, repeated and trailing slashes resolved,
+    without touching the disk, so symlinks are left as written."""
+    out = []
+    for seg in path.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    return "/" + "/".join(out)
+
 def normalize_files_for_cwd(cwd, git_root, files):
     """Rebase git-root-relative paths to cwd-relative paths.
 

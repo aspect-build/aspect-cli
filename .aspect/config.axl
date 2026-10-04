@@ -9,6 +9,7 @@ load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//gc_test.axl", "gc_tests")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
+load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
@@ -31,6 +32,7 @@ load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
+load("@aspect//private/lib/git_checkout_test.axl", "git_checkout_tests")
 load("@aspect//private/lib/git_diff_test.axl", "git_diff_tests")
 load("@aspect//private/lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//private/lib/github_features_test.axl", "github_features_tests")
@@ -43,6 +45,7 @@ load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
+load("@aspect//private/lib/path_normalize_test.axl", "path_normalize_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
@@ -51,6 +54,7 @@ load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
+load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
@@ -420,11 +424,27 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-repro-commands
     ctx.tasks.add(repro_commands_tests)
 
-    # gc: output-base classification (live / orphan / unattributable) and the
-    # guard that keeps the shared install+cache directories out of the scan.
+    # gc: the removal plan and its document, --bazel-output-base selection, the
+    # period flags, download-cache pruning, and removal through the trash.
     # Run with: aspect dev test-gc
     ctx.tasks.add(gc_tests)
+
+    # Output bases: scan, attribution, classification, sorting and listing.
+    # Run with: aspect dev test-output-bases
+    ctx.tasks.add(output_bases_tests)
     ctx.tasks.add(confirm_tests)
+
+    # Repository and branch from `.git`, against real clones and worktrees.
+    # Run with: aspect dev test-git-checkout
+    ctx.tasks.add(git_checkout_tests)
+
+    # Path normalization: cwd rebasing and `normpath`.
+    # Run with: aspect dev test-path-normalize
+    ctx.tasks.add(path_normalize_tests)
+
+    # Shared text helpers (padding, pluralize, number formatting).
+    # Run with: aspect dev test-text
+    ctx.tasks.add(text_tests)
 
     # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
     # independence, prefer_app_when_env_critical, watermark badge.

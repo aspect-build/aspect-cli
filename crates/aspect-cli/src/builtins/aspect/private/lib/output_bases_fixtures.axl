@@ -1,0 +1,124 @@
+"""Test fixtures for the output-base suites: a real output-base-shaped tree
+under a temp dir, with every state represented. Test-only.
+
+Symlinks are made with `ln -s` because AXL's `fs` has `hard_link` but no
+symlink creation, and ages are set with `touch -t` for want of a `utimes`.
+"""
+
+load("@std//time.axl", "time")
+load("./output_bases.axl", "output_bases")
+
+# Output bases are md5-named; `_scan` ignores anything else under the root.
+_LIVE = "11111111111111111111111111111111"
+_DEAD = "22222222222222222222222222222222"
+_WEIRD = "33333333333333333333333333333333"
+_CMDLINE = "44444444444444444444444444444444"
+_BOTH = "55555555555555555555555555555555"
+_MARKER = "66666666666666666666666666666666"
+
+_HOUR_US = output_bases.HOUR_US
+_DAY_US = output_bases.DAY_US
+
+# Long enough ago to be past any age the tests configure.
+_LONG_AGO = "202001010000"
+
+def _now_us():
+    return time.now_ms() * 1000
+
+def _backdate(ctx: TaskContext, path: str) -> None:
+    """Set the mtime and atime of `path` and everything under it to
+    `_LONG_AGO`, without following symlinks out of it."""
+    ctx.std.process.command("find").args([path, "-exec", "touch", "-h", "-t", _LONG_AGO, "{}", "+"]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _symlink(ctx: TaskContext, target: str, link: str) -> None:
+    ctx.std.process.command("ln").args(["-s", target, link]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _make_base(ctx: TaskContext, root: str, name: str, workspace: str) -> None:
+    """An output base shaped like Bazel's: an execroot holding an absolute
+    source symlink back into `workspace`."""
+    execroot = root + "/" + name + "/execroot/_main"
+    ctx.std.fs.create_dir_all(execroot)
+    _symlink(ctx, workspace + "/MODULE.bazel", execroot + "/MODULE.bazel")
+
+def _write_cmdline(ctx: TaskContext, base: str, workspace: str) -> None:
+    """A `server/cmdline` shaped like Bazel's: NUL-separated argv."""
+    ctx.std.fs.create_dir_all(base + "/server")
+    argv = [
+        "/usr/local/bin/bazel",
+        "--output_base=" + base,
+        "--workspace_directory=" + workspace,
+        "build",
+    ]
+    ctx.std.fs.write(base + "/server/cmdline", "\x00".join(argv))
+
+def _fixture(ctx: TaskContext) -> str:
+    """A root holding one live base, one orphan, one unattributable base, and
+    the two shared directories that must never be classified.
+
+    Every base is backdated, so the orphans are past the grace period; tests
+    that care about age pass the max age they mean.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-gc-test")
+    root = tmp + "/root"
+    live_ws = tmp + "/live-workspace"
+    ctx.std.fs.create_dir_all(root)
+    ctx.std.fs.create_dir_all(live_ws)
+    ctx.std.fs.write(live_ws + "/MODULE.bazel", "module(name = \"live\")\n")
+
+    _make_base(ctx, root, _LIVE, live_ws)
+    _make_base(ctx, root, _DEAD, tmp + "/workspace-that-was-deleted")
+
+    # A base whose execroot never got a symlink forest and whose server left no
+    # command line behind: nothing can attribute it, and it must not be guessed
+    # at.
+    ctx.std.fs.create_dir_all(root + "/" + _WEIRD + "/execroot")
+    ctx.std.fs.write(root + "/" + _WEIRD + "/execroot/DO_NOT_BUILD_HERE", "")
+
+    # An invocation that died before analysis: Bazel created the execroot on
+    # server start but never populated it, so only `server/cmdline` names the
+    # workspace. A tenth of the bases on a developer machine look like this.
+    _write_cmdline(ctx, root + "/" + _CMDLINE + "", tmp + "/workspace-also-deleted")
+    ctx.std.fs.create_dir_all(root + "/" + _CMDLINE + "/execroot")
+
+    # Both sources present and disagreeing. The execroot reflects the last
+    # build, `server/cmdline` the last server start, so the execroot wins.
+    _make_base(ctx, root, _BOTH, live_ws)
+    _write_cmdline(ctx, root + "/" + _BOTH + "", tmp + "/stale-from-cmdline")
+
+    # Shared infrastructure, not output bases.
+    ctx.std.fs.create_dir_all(root + "/install/abc123")
+    ctx.std.fs.create_dir_all(root + "/cache/repos/v1/contents")
+
+    # Not md5-shaped, so not a base, whatever it holds.
+    _make_base(ctx, root, "not-a-base", tmp + "/workspace-that-was-deleted")
+
+    _backdate(ctx, root)
+    return root
+
+def _policy(max_age_us = 0, grace_us = _HOUR_US, cache_us = 0):
+    return output_bases.Policy(base_max_age_us = max_age_us, orphan_grace_us = grace_us, download_cache_max_age_us = cache_us)
+
+def _scan(ctx, root, max_age_us = 0, grace_us = _HOUR_US):
+    return output_bases.scan(ctx, root, _now_us(), _policy(max_age_us, grace_us))
+
+fixtures = namespace(
+    LIVE = _LIVE,
+    DEAD = _DEAD,
+    WEIRD = _WEIRD,
+    CMDLINE = _CMDLINE,
+    BOTH = _BOTH,
+    MARKER = _MARKER,
+    HOUR_US = _HOUR_US,
+    DAY_US = _DAY_US,
+    LONG_AGO = _LONG_AGO,
+    now_us = _now_us,
+    backdate = _backdate,
+    symlink = _symlink,
+    make_base = _make_base,
+    write_cmdline = _write_cmdline,
+    fixture = _fixture,
+    policy = _policy,
+    scan = _scan,
+)
