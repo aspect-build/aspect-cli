@@ -1,7 +1,7 @@
 """`aspect output-bases` — list the Bazel output bases on this machine. Read-only.
 
 Every base under the output user root, grouped by its lifecycle state — live,
-idle, orphaned, in a worktree pool, undetermined (see `lib/output_bases.axl`) —
+idle, orphaned, undetermined (see `lib/output_bases.axl`) —
 with when it was last used, the memory its Bazel server holds if one is running,
 the git repository and branch its workspace is checked out on, and the
 workspace itself. `--measure-sizes` adds each base's size and the shared
@@ -116,7 +116,7 @@ output_bases_task = task(
     summary = "List the Bazel output bases on this machine: state, server memory, git branch, workspace and size.",
     description = """List every Bazel output base under the output user root, read-only.
 
-Bases are grouped by lifecycle state — live, idle, orphaned, in a worktree pool, undetermined — and show when each was last used, how much memory its Bazel server holds if one is running, the git repository and branch its workspace is checked out on, and the workspace. It ends with what to run next.
+Bases are grouped by lifecycle state — live, idle, orphaned, undetermined — and show when each was last used, how much memory its Bazel server holds if one is running, the git repository and branch its workspace is checked out on, and the workspace. It ends with what to run next.
 
 `--measure-sizes` adds each base's size and the shared caches'. It takes a `du` of every base, so it is off by default. `--sort` orders the bases within each state; `--sort=size` measures sizes on its own.
 

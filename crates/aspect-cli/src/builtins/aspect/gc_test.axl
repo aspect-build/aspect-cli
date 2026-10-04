@@ -41,7 +41,7 @@ def _test_document_counts_every_state(ctx):
     consumer reads a key rather than probing for it."""
     root = fx.fixture(ctx)
     counts = _doc(ctx, root)["counts"]
-    _eq("keys", sorted(counts.keys()), ["idle", "live", "orphaned", "orphaned_within_grace", "pooled", "trash", "undetermined"])
+    _eq("keys", sorted(counts.keys()), ["idle", "live", "orphaned", "orphaned_within_grace", "trash", "undetermined"])
     _eq("live", counts["live"], 2)
     _eq("orphaned", counts["orphaned"], 2)
     _eq("undetermined", counts["undetermined"], 1)
@@ -290,10 +290,6 @@ def _test_removals_carry_their_outcome(ctx):
     dry = testonly_document(root, True, {}, plan, testonly_outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0))
     _eq("a dry run attempts nothing", [r["outcome"] for r in dry["removals"]], ["not attempted", "not attempted"])
 
-def _test_a_pooled_base_says_so_when_removed(ctx):
-    b = output_bases.Base(name = "n", path = "/root/n", workspace = "/home/.aspect/worktrees/x", state = "idle", pid = 0, last_used = 0, pooled = True)
-    _eq("pool slot", testonly_why(b, 45 * fx.DAY_US), "unused for 45d; worktree pool slot /home/.aspect/worktrees/x")
-
 def _test_a_base_whose_server_cannot_be_identified_is_not_removed(ctx):
     """Without `ps` a live pid can be neither confirmed nor stopped: a rule's
     pick is skipped, a named base fails, and either way the tree stays."""
@@ -418,7 +414,6 @@ _UNIT_TESTS = [
     _test_a_server_running_in_trash_is_stopped,
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
-    _test_a_pooled_base_says_so_when_removed,
 ]
 
 def _test_impl(ctx):
