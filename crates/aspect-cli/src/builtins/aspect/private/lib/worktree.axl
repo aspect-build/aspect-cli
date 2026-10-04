@@ -562,10 +562,7 @@ def reserve_slot(std, registry: dict, slot_id: str, name: str) -> str:
     """
     record = owner_record(std)
     registry["slots"][slot_id]["state"] = RESERVED
-    registry["slots"][slot_id]["reservation"] = record | {
-        "name": name,
-        "since": time.now_ms(),
-    }
+    registry["slots"][slot_id]["reservation"] = record | {"name": name, "since": time.now_ms()}
     return record["token"]
 
 def reserving_slot(registry: dict, name: str) -> str:
@@ -719,6 +716,31 @@ def drop_slot(std, pool: dict, registry: dict, slot_id: str, root: str = "") -> 
     catch(std.fs.remove_dir_all, output_base_of(std, path, root))
     registry["slots"].pop(slot_id)
     return struct(dropped = True, reason = "")
+
+def free_slot(std, pool: dict, registry: dict, slot_id: str) -> None:
+    """Give a slot back, keeping it and its output base. Mutates `registry`.
+
+    Only the worktree goes, which is what makes this different from
+    `drop_slot`: the Bazel state is the reason the pool exists, and a claim
+    ending is no reason to throw it away.
+
+    Dropping the worktree here rather than leaving it for the next
+    `git worktree add` keeps the branch out of `git worktree list` — otherwise
+    the next request for that branch would report it as checked out somewhere
+    the pool does not manage, which is both wrong and the opposite of helpful.
+    A slot whose directory has already gone needs `prune` instead: git still
+    lists the worktree, and would refuse to check the branch out again while it
+    does.
+    """
+    path = slot_path(pool, slot_id)
+    if std.fs.exists(path):
+        catch(run_git, std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+    else:
+        catch(run_git, std, ["worktree", "prune"], pool["git_common_dir"])
+    slot = registry["slots"][slot_id]
+    slot["state"] = FREE
+    slot["lease"] = None
+    slot["reservation"] = None
 
 def new_slot_id(std, pool: dict, registry: dict) -> str:
     """An id no slot in this pool is using."""

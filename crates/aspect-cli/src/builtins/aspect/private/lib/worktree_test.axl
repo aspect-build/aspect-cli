@@ -20,6 +20,8 @@ load(
     "acquire",
     "default_score",
     "drop_slot",
+    "free_slot",
+    "git_out",
     "holds_reservation",
     "lock_digest",
     "lock_digest_at",
@@ -621,9 +623,9 @@ def _test_a_stale_release_cannot_drop_someone_elses_lock(ctx):
         fail("the holder's own release should still work")
 
 def _test_a_lock_whose_owner_died_is_reclaimed_at_once(ctx):
-    """A crash used to wedge the pool until a ten-minute timeout. The owner
-    record answers directly, so the next caller takes the lock instead of
-    waiting out a clock that says nothing about whether the holder exists."""
+    """The owner record answers whether the holder still exists, so the next
+    caller takes an abandoned lock rather than waiting out a clock that says
+    nothing about it."""
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
     ctx.std.fs.create_dir_all(tmp + "/.lock")
     ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode({
@@ -703,6 +705,39 @@ def _test_reconcile_leaves_a_reservation_alone(ctx):
     reconcile(ctx.std, env.pool, registry)
     _eq("still reserved", registry["slots"]["s2"]["state"], RESERVED)
 
+def _test_freeing_a_slot_keeps_its_output_base(ctx):
+    """The Bazel state is the reason the pool exists, so a claim ending takes
+    the worktree and nothing else. `drop_slot` is the one that deletes."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    base = output_base_of(ctx.std, env.path, root)
+    ctx.std.fs.create_dir_all(base)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    _eq("free now", registry["slots"][env.slot_id]["state"], FREE)
+    _eq("no lease", registry["slots"][env.slot_id]["lease"], None)
+    _eq("no reservation", registry["slots"][env.slot_id]["reservation"], None)
+    _eq("the worktree is gone", ctx.std.fs.exists(env.path), False)
+    _eq("the output base is not", ctx.std.fs.exists(base), True)
+    if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("git should no longer list a worktree for the branch")
+
+def _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch(ctx):
+    """Git keeps listing a worktree whose directory was removed behind its back,
+    and refuses to check that branch out anywhere else until it is pruned. The
+    branch has to come free even though there is nothing left to remove."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.remove_dir_all(env.path)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    _eq("free now", registry["slots"][env.slot_id]["state"], FREE)
+    if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("a worktree whose directory is gone should have been pruned from git")
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -749,6 +784,8 @@ _UNIT_TESTS = [
     _test_a_reservation_whose_process_died_is_reclaimable,
     _test_prune_never_takes_a_slot_being_set_up,
     _test_reconcile_leaves_a_reservation_alone,
+    _test_freeing_a_slot_keeps_its_output_base,
+    _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch,
 ]
 
 def _test_impl(ctx):

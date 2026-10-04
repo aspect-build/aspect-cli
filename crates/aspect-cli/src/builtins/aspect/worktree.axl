@@ -72,6 +72,7 @@ load(
     "acquire",
     "default_score",
     "drop_slot",
+    "free_slot",
     "holds_reservation",
     "leased_slot",
     "lock_digest",
@@ -321,7 +322,7 @@ def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name:
                   "; the checkout is untouched and anything uncommitted in it is now yours")
     registry["slots"][slot_id]["lease"] = {
         "name": name,
-        "since": str(time.now_ms()),
+        "since": time.now_ms(),
         "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
     }
 
@@ -342,30 +343,6 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
             info(ctx.std, "pruned slot last used %d days ago (%s)" % (age, label))
             dropped += 1
     return dropped
-
-def _release_abandoned(ctx: TaskContext, pool: dict, registry: dict, slot_id: str) -> None:
-    """Free a claim whose owner is gone, keeping the slot and its warm base.
-
-    Serves a lease whose session is gone and a reservation whose process is, and
-    the handling is the same for both: only the worktree goes, and the slot
-    keeps the output base that makes it worth having.
-
-    Dropping the worktree here rather than leaving it for `_materialize` keeps
-    the branch out of `git worktree list` — otherwise the next check would
-    report it as checked out somewhere the pool does not manage, which is both
-    wrong and the opposite of helpful.
-    """
-    path = slot_path(pool, slot_id)
-    if ctx.std.fs.exists(path):
-        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
-    else:
-        # Git still lists a worktree whose directory is gone, and would refuse
-        # to check the branch out again while it does.
-        catch(run_git, ctx.std, ["worktree", "prune"], pool["git_common_dir"])
-    slot = registry["slots"][slot_id]
-    slot["state"] = FREE
-    slot["lease"] = None
-    slot["reservation"] = None
 
 def _reclaim_reservations(ctx: TaskContext, pool: dict, registry: dict) -> int:
     """Free slots an interrupted `add` was setting up. Returns how many went, so
@@ -388,7 +365,7 @@ def _reclaim_reservations(ctx: TaskContext, pool: dict, registry: dict) -> int:
         pending = (slot.get("reservation") or {}).get("name", "")
         info(ctx.std, "reclaimed the slot an interrupted `aspect worktree add` was setting up" +
                       ((" for " + pending) if pending else ""))
-        _release_abandoned(ctx, pool, registry, slot_id)
+        free_slot(ctx.std, pool, registry, slot_id)
         freed += 1
     return freed
 
@@ -518,6 +495,71 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
         # `push.default=upstream` a later bare `git push` from this worktree
         # targets the base branch — `origin/main` for the common case.
         _git(ctx, ["worktree", "add", "--no-track", "-b", name, path, base_ref], pool["git_common_dir"])
+
+def _check_out_and_lease(
+        ctx: TaskContext,
+        pool: dict,
+        lock: dict,
+        registry: dict,
+        chosen,
+        name: str,
+        base_ref: str,
+        token: str) -> int | TaskConclusion:
+    """Check a worktree out into a slot this caller has reserved, then lease it.
+
+    The pool lock is given back for the checkout and taken again to record the
+    result, because the checkout is the whole cost of `add` on a large clone and
+    holding the lock through it puts every other agent behind it. The
+    reservation is what makes the gap safe: the slot and the branch are both
+    claimed for `token`, so no other caller can take either, and a crash in the
+    gap leaves a record the next `add` reclaims instead of a slot nothing frees.
+
+    `registry` is re-read afterwards rather than reused. Another caller may have
+    changed other slots while the lock was theirs, and writing the copy from
+    before would undo that.
+    """
+    path = slot_path(pool, chosen.id)
+    _unlock(ctx, pool, lock)
+    err, _ = catch(_materialize, ctx, pool, path, name, base_ref)
+
+    if not _relock(ctx, pool, lock):
+        # Nothing can be written safely without the lock, so the reservation
+        # stands. This process is about to exit, which is what makes it
+        # reclaimable: the next `add` frees the slot and checks the branch out
+        # again, onto the same output base.
+        if err != None:
+            fail("could not create the worktree: " + str(err))
+        return _pool_busy(ctx)
+
+    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
+
+    if err != None:
+        _drop_reservation(ctx, pool, registry, chosen.id, token)
+        write_registry(ctx.std, pool["dir"], registry)
+        fail("could not create the worktree: " + str(err))
+
+    if not holds_reservation(registry, chosen.id, token):
+        # Only a caller that judged this process dead could have taken the slot,
+        # and it is not dead. Leave the registry to whoever owns it now rather
+        # than leasing one slot twice, and take the worktree back out so git and
+        # the registry still agree.
+        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
+        return _pool_busy(ctx)
+
+    slot = registry["slots"][chosen.id]
+    slot["state"] = LEASED
+    slot["reservation"] = None
+    slot["lease"] = {
+        "name": name,
+        "since": time.now_ms(),
+        # Who took it, so `list` can name the session holding each slot rather
+        # than only the branch. Empty for a person at a terminal.
+        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
+    }
+    write_registry(ctx.std, pool["dir"], registry)
+
+    return _report_slot(ctx, pool, registry, chosen.id, name, chosen)
 
 # --- reporting ---------------------------------------------------------------
 
@@ -683,7 +725,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # and the warm base is exactly what the caller wants.
     if held and abandoned_lease(ctx.std, pool, registry, held):
         info(ctx.std, "taking back " + name + "'s slot: the session that held it no longer exists")
-        _release_abandoned(ctx, pool, registry, held)
+        free_slot(ctx.std, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
         held = ""
 
@@ -697,7 +739,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
             _take_over(ctx, pool, registry, held, name)
             write_registry(ctx.std, pool["dir"], registry)
             return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name))
-        _release_abandoned(ctx, pool, registry, held)
+        free_slot(ctx.std, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
         held = ""
 
@@ -714,58 +756,9 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         )
 
     chosen = _pick_slot(ctx, pool, registry, want)
-    path = slot_path(pool, chosen.id)
     token = reserve_slot(ctx.std, registry, chosen.id, name)
     write_registry(ctx.std, pool["dir"], registry)
-    _unlock(ctx, pool, lock)
-
-    # Unlocked, because this is the whole cost of `add` on a large clone and
-    # holding the lock through it is what made two agents starting together take
-    # turns. The reservation is what makes that safe: the slot and the branch
-    # are both claimed, and a crash in here leaves a record the next caller can
-    # act on rather than a slot nothing will ever free.
-    err, _ = catch(_materialize, ctx, pool, path, name, base_ref)
-
-    if not _relock(ctx, pool, lock):
-        # Nothing can be written safely without the lock, so the reservation
-        # stands. This process is about to exit, which is exactly what makes it
-        # reclaimable: the next `add` frees the slot and checks the branch out
-        # again, onto the same output base.
-        if err != None:
-            fail("could not create the worktree: " + str(err))
-        return _pool_busy(ctx)
-
-    # Re-read: the lock was not held during the checkout, so another caller may
-    # have changed other slots, and writing the copy from before would undo it.
-    registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-
-    if err != None:
-        _drop_reservation(ctx, pool, registry, chosen.id, token)
-        write_registry(ctx.std, pool["dir"], registry)
-        fail("could not create the worktree: " + str(err))
-
-    if not holds_reservation(registry, chosen.id, token):
-        # Defensive: only a caller that judged this process dead could have
-        # taken the slot, and it is not dead. Leave the registry to whoever owns
-        # it now rather than leasing one slot twice, and take the worktree back
-        # out so git and the registry still agree.
-        catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
-        warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
-        return _pool_busy(ctx)
-
-    slot = registry["slots"][chosen.id]
-    slot["state"] = LEASED
-    slot["reservation"] = None
-    slot["lease"] = {
-        "name": name,
-        "since": str(time.now_ms()),
-        # Who took it, so `list` can name the session holding each slot rather
-        # than only the branch. Empty for a person at a terminal.
-        "agent": detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id),
-    }
-    write_registry(ctx.std, pool["dir"], registry)
-
-    return _report_slot(ctx, pool, registry, chosen.id, name, chosen)
+    return _check_out_and_lease(ctx, pool, lock, registry, chosen, name, base_ref, token)
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.name[0]
