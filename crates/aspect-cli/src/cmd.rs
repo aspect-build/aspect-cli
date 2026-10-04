@@ -1848,8 +1848,9 @@ fn help_footer(task: &dyn TaskLike<'_>) -> String {
 /// buckets (in declaration order) and empty when it declares none.
 ///
 /// A passthrough has no flag to list, so `{all-args}` cannot surface it and
-/// the help footer is the only place `--help` can explain the behavior. The text is
-/// the task author's, because only they know what the flags are forwarded to.
+/// the help footer is the only place `--help` can explain the behavior. The
+/// text is the task author's, because only they know what the flags are
+/// forwarded to.
 fn passthrough_notes(task: &dyn TaskLike<'_>) -> Vec<String> {
     task.args()
         .iter()
@@ -3014,6 +3015,39 @@ mod tests {
             );
         }
         assert!(!help.contains("--task-key"), "{help}");
+    }
+
+    /// The passthrough notes do not depend on `show_task_options`; only the
+    /// features paragraph does, and it follows them.
+    #[test]
+    fn help_footer_puts_passthrough_notes_before_the_features_pointer() {
+        let footer = |show_task_options: bool| {
+            let mut args: SmallMap<String, Arg> = SmallMap::new();
+            args.insert(
+                "forwarded".to_owned(),
+                Arg::Passthrough {
+                    position: PassthroughPosition::PostCommand,
+                    value_flags_from: None,
+                    description: Some("Other flags go to the tool.".to_owned()),
+                },
+            );
+            help_footer(&StubTask {
+                show_task_options,
+                ..stub_task("greet", &[], args)
+            })
+        };
+
+        assert_eq!(
+            footer(false),
+            "\n\n\x1b[2mOther flags go to the tool.\x1b[0m"
+        );
+        let shown = footer(true);
+        assert!(shown.starts_with(&footer(false)), "{shown:?}");
+        assert!(shown.ends_with("run `aspect feature` to list them.\x1b[0m"));
+        assert_eq!(shown.matches("\n\n").count(), 2, "{shown:?}");
+
+        let plain = stub_task("greet", &[], SmallMap::new());
+        assert_eq!(help_footer(&plain), "");
     }
 
     #[test]
