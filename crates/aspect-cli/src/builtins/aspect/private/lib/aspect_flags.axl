@@ -187,7 +187,6 @@ _COLOR = "--color"
 _BES_BACKEND = "--bes_backend"
 _BES_RESULTS_URL = "--bes_results_url"
 _PROFILE = "--profile"
-_REMOTE_BUILD_EVENT_UPLOAD = "--remote_build_event_upload"
 _EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
 
 def flag_text(flag) -> str:
@@ -395,26 +394,19 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
         return list(startup_flags)
     return [flag + suffix if flag.startswith(_OUTPUT_BASE_FLAG_PREFIX) else flag for flag in startup_flags]
 
-def diagnostics_upload_flags() -> list:
-    """The switch that carries build diagnostics to the BES backend: every
-    BEP-referenced local file — the JSON profile, and the execution log when
-    `exec_log_flags` writes one — uploaded to the remote cache so the backend
-    can read it. Set wherever a BES backend is wired; the upload needs a remote
-    cache to land in, so with a BES alone it is inert. Version-gated: Bazel 7
-    renamed `--remote_build_event_upload` and flipped its default to `minimal`
-    (Bazel 6 only knows the `experimental_` spelling, whose default is already
-    `all`)."""
-    return [(_REMOTE_BUILD_EVENT_UPLOAD + "=all", ">=7.0.0")]
-
 def exec_log_flags(exec_log_path: str) -> list:
-    """Write the compact execution log at `exec_log_path`, so it rides the
-    diagnostics upload. Per-action cache and timing data in the Web UI comes
-    from this log, which is also why the per-action BEP events behind
-    `--build_event_publish_all_actions` are not requested. Bazel 7.1 added the
-    compact log; an execution option, so scoped to `build` and never reaching a
-    task's `query`. The rc keeps it in its own `aspect-exec-log` group, the
-    upload being slow on a thin link, so a repository can drop just this."""
-    return [(_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.1.0", "build")]
+    """Write the compact execution log at `exec_log_path`. Bazel names it in the
+    BEP as a build tool log and uploads it to the remote cache with the profile
+    and test logs under its default `--remote_build_event_upload=minimal`, which
+    is how the backend reads it; build outputs are uploaded only where the
+    repository asks for `all`. Per-action cache and timing data in the Web UI
+    comes from this log, which is also why the per-action BEP events behind
+    `--build_event_publish_all_actions` are not requested. Gated to Bazel 7.4,
+    the first to know the flag without its `experimental_` prefix. An execution
+    option, so scoped to `build` and never reaching a task's `query`. The rc keeps it in its own
+    `aspect-exec-log` group, the upload being slow on a thin link, so a
+    repository can drop just this."""
+    return [(_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.4.0", "build")]
 
 def temp_exec_log_path(std, run_id: str) -> str:
     """A place for a task's compact execution log off a Workflows runner: under
@@ -425,11 +417,11 @@ def temp_exec_log_path(std, run_id: str) -> str:
     std.fs.create_dir_all(dir)
     return dir + "/exec.log.zstd"
 
-def temp_diagnostics_upload_flags(ctx) -> list:
-    """The diagnostics upload with the execution log at `temp_exec_log_path` for
-    this run — a `BazelTrait.task_flags` hook, since only the task knows its run
-    id. For a BES wired off a runner (`--remote`, or a hand-set env)."""
-    return diagnostics_upload_flags() + exec_log_flags(temp_exec_log_path(ctx.std, ctx.task.id))
+def temp_exec_log_flags(ctx) -> list:
+    """The execution log at `temp_exec_log_path` for this run — a
+    `BazelTrait.task_flags` hook, since only the task knows its run id. For a
+    BES wired off a runner (`--remote`, or a hand-set env)."""
+    return exec_log_flags(temp_exec_log_path(ctx.std, ctx.task.id))
 
 def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
     """`--profile` placed under the runner's job tmpdir, keeping the
@@ -445,9 +437,8 @@ def runner_exec_log_path(environment: WorkflowsEnvironment) -> str:
     return environment.runner.job_tmpdir + "/exec.log.zstd"
 
 def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:
-    """`runner_profile_flags`, the diagnostics upload, and the execution log at
-    `runner_exec_log_path`, for a task on a runner whose env names a BES backend.
+    """`runner_profile_flags` and the execution log at `runner_exec_log_path`, for a task on a runner whose env names a BES backend.
     Empty off a runner or without one."""
     if environment.runner == None or environment.build_events == None:
         return []
-    return runner_profile_flags(environment) + diagnostics_upload_flags() + exec_log_flags(runner_exec_log_path(environment))
+    return runner_profile_flags(environment) + exec_log_flags(runner_exec_log_path(environment))

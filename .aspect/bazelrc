@@ -14,7 +14,7 @@ common:aspect-cache --remote_timeout=3600
 common:aspect-cache --remote_retries=360
 common:aspect-cache --grpc_keepalive_timeout=30s
 
-# The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set), its enrichment, and the build-diagnostics upload the Aspect backend reads.
+# The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set) and its enrichment.
 common:aspect-bes --grpc_keepalive_timeout=30s
 common:aspect-bes --generate_json_trace_profile
 common:aspect-bes --noslim_profile
@@ -22,9 +22,8 @@ common:aspect-bes --experimental_profile_include_target_label
 common:aspect-bes --experimental_profile_include_primary_output
 common:aspect-bes --experimental_profile_include_target_configuration
 common:aspect-bes --legacy_important_outputs
-common:aspect-bes --remote_build_event_upload=all
 
-# The compact execution log, uploaded with the build diagnostics for per-action data in the Web UI. Slow on a thin link: remove this group and the --config lines naming it to skip it.
+# The compact execution log, uploaded to the remote cache for per-action data in the Web UI. Slow on a thin link: remove this group and the --config lines naming it to skip it.
 common:aspect-exec-log --execution_log_compact_file=%workspace%/.aspect/generated/exec.log.zstd
 
 # Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN or `aspect auth login`.
