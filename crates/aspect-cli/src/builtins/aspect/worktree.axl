@@ -3,12 +3,15 @@
 `git worktree add` at a fresh path gives Bazel a workspace it has never seen:
 new server, loading and analysis from zero, `external/` rebuilt. These tasks
 hand out a worktree at a **reused** path instead, so Bazel's own derivation of
-the output base lands on the same directory as last time and the second and
-every later task in that slot starts warm. No flag is injected to arrange that.
+the output base lands on the same directory as last time. The `external/` tree
+and action cache come back unconditionally; the running server and its analysis
+cache come back too when the build's flags match, since Bazel discards analysis
+on a configuration change. No flag is injected to arrange any of it.
 
     aspect worktree add fix/login
     cd "$(aspect worktree path fix/login)"
-    aspect test //...                  ->  warm server, warm analysis
+    aspect test //...                  ->  the slot's output base, and its
+                                           server too if the flags match
     aspect worktree remove fix/login   ->  the slot goes back to the pool
 
 A slot is reached by its own path — nothing is symlinked into place. `git
