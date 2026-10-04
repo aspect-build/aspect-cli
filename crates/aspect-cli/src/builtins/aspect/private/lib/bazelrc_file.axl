@@ -239,7 +239,7 @@ def ensure_import(existing: str | None, line: str) -> ImportResult:
     line apart from whatever the file already holds. At the top so the file's
     own lines come after the imported ones and win where they disagree — Bazel
     takes the last value of a flag — which is how a repository overrides a
-    recommendation, say `--noremote_upload_local_results` for local work.
+    recommendation, say a shorter `--remote_timeout`.
     `None`/empty `existing` is a new file."""
     block = IMPORT_COMMENT + "\n" + line + "\n"
     if not existing:

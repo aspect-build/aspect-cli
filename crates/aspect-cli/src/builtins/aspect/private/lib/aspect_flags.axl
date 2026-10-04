@@ -65,11 +65,6 @@ CATALOG = [
         "Hardlink archives out of the repository cache instead of copying them; saves disk and time on every external fetch.",
     ),
     _entry(
-        "--remote_upload_local_results",
-        "CI populates the cache: outputs built locally are written back so later jobs and developers hit them.",
-        needs = "cache",
-    ),
-    _entry(
         "--remote_accept_cached",
         "Reuse cached action results; stated explicitly so a workspace rc cannot leave the cache write-only.",
         needs = "cache",

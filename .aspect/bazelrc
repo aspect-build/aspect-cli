@@ -9,7 +9,6 @@ common:aspect-common --heap_dump_on_oom
 common:aspect-common --experimental_repository_cache_hardlinks
 
 # The remote cache (ASPECT_WORKFLOWS_REMOTE_CACHE where set) and the tuning a cache justifies.
-common:aspect-cache --remote_upload_local_results
 common:aspect-cache --remote_accept_cached
 common:aspect-cache --remote_timeout=3600
 common:aspect-cache --remote_retries=360

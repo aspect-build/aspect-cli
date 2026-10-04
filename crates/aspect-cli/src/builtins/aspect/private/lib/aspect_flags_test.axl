@@ -55,7 +55,7 @@ def _lacks(label, flags, fragment):
 # `env_flags`, whatever endpoints the environment names.
 _RUNNER_ONLY_FRAGMENTS = ["--repository_cache=", "--output_base=", "--output_user_root=", "--nosystem_rc", "_remote_cache_compression", "--disk_cache="]
 
-_CACHE_TUNING = ["--remote_upload_local_results", "--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
+_CACHE_TUNING = ["--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
 _BES_ENRICHMENT = ["--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--legacy_important_outputs"]
 _INDEPENDENT = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks"]
 _CHANNEL = "--grpc_keepalive_timeout=30s"
