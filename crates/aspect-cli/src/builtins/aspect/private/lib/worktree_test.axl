@@ -361,6 +361,27 @@ def _repo_with_worktree(ctx, dirty):
         ctx.std.fs.write(path + "/README", "uncommitted\n")
     return struct(pool = pool, slot_id = slot_id, path = path)
 
+def _with_empty_session_store(ctx):
+    """Point `CLAUDE_CONFIG_DIR` at a store that exists but holds no sessions,
+    so a claude-code id reads `gone` rather than `unknown`. Returns what was
+    there, for `_restore_session_store`.
+
+    Without this these tests depend on whether the machine happens to have a
+    `~/.claude/projects`: a developer laptop does, a CI runner does not, and a
+    missing store is correctly `unknown`.
+    """
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-sessions")
+    ctx.std.fs.create_dir_all(root + "/projects")
+    previous = ctx.std.env.var("CLAUDE_CONFIG_DIR") or ""
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", root)
+    return previous
+
+def _restore_session_store(ctx, previous):
+    if previous:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", previous)
+    else:
+        ctx.std.env.remove_var("CLAUDE_CONFIG_DIR")
+
 _MISSING_SESSION = {
     "kind": "claude-code",
     "id": "00000000-dead-dead-dead-000000000000",
@@ -380,14 +401,20 @@ def _test_a_gone_session_with_a_clean_checkout_is_abandoned(ctx):
     whose session cannot be resumed has nothing left to lose."""
     env = _repo_with_worktree(ctx, dirty = False)
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
-    _eq("reclaimable", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
+    previous = _with_empty_session_store(ctx)
+    got = abandoned_lease(ctx.std, env.pool, registry, env.slot_id)
+    _restore_session_store(ctx, previous)
+    _eq("reclaimable", got, True)
 
 def _test_uncommitted_changes_are_never_discarded(ctx):
     """The case the whole rule exists to protect: a session that cannot be
     resumed may still have left work nobody has committed."""
     env = _repo_with_worktree(ctx, dirty = True)
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
-    _eq("kept", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+    previous = _with_empty_session_store(ctx)
+    got = abandoned_lease(ctx.std, env.pool, registry, env.slot_id)
+    _restore_session_store(ctx, previous)
+    _eq("kept", got, False)
 
 def _test_a_running_session_is_never_abandoned(ctx):
     """A live harness is in use, whatever else is true — including a clean tree
