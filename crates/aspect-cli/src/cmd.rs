@@ -490,9 +490,13 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 // `num_args` is cardinality, not requiredness: clap reads
                 // `num_args(1..=1)` as "one value if given at all", so without
                 // this a `minimum = 1` positional parses as absent and the task
-                // indexes an empty list. `describe` already derives
-                // requiredness the same way, and the two have to agree.
-                .required(*minimum >= 1)
+                // indexes an empty list. A declared default already meets the
+                // minimum with nothing typed, and clap checks `required`
+                // against argv rather than against the defaults it is about to
+                // apply, so only a positional without one is required on the
+                // command line. `describe` derives requiredness the same way,
+                // and the two have to agree.
+                .required(*minimum >= 1 && default.is_none())
                 .num_args(*minimum as usize..=*maximum as usize);
             if let Some(default) = default {
                 it = it.default_values(default);
@@ -1392,11 +1396,19 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     // instead of a `required` flag — so a `minimum = 1` positional would read as
     // optional. Derive requiredness from the cardinality and report the bounds,
     // or a caller cannot tell `aspect run` (exactly one target) from a task that
-    // takes none.
+    // takes none. A default meets the minimum on its own, so a positional
+    // carrying one is not required of the caller.
     let (required, minimum, maximum) = match arg {
         Arg::Positional {
-            minimum, maximum, ..
-        } => (*minimum >= 1, json!(minimum), json!(maximum)),
+            minimum,
+            maximum,
+            default,
+            ..
+        } => (
+            *minimum >= 1 && default.is_none(),
+            json!(minimum),
+            json!(maximum),
+        ),
         _ => (arg.is_required(), json!(null), json!(null)),
     };
     json!({
@@ -2648,6 +2660,15 @@ mod tests {
             default: None,
             description: None,
         };
+        // `aspect cache diff` is this shape: at least one target pattern, and
+        // `//...` when the caller names none. Marking it required would refuse
+        // the bare command the default exists to serve.
+        let defaulted = Arg::Positional {
+            minimum: 1,
+            maximum: 512,
+            default: Some(vec!["//...".to_owned()]),
+            description: None,
+        };
 
         assert!(
             arg_to_clap(Scope::Task, "branch", &required).is_required_set(),
@@ -2656,6 +2677,10 @@ mod tests {
         assert!(
             !arg_to_clap(Scope::Task, "extras", &optional).is_required_set(),
             "a positional that may be omitted must stay optional"
+        );
+        assert!(
+            !arg_to_clap(Scope::Task, "targets", &defaulted).is_required_set(),
+            "a positional with a default is satisfied without one being typed"
         );
     }
 
@@ -2682,6 +2707,15 @@ mod tests {
                 description: None,
             },
         );
+        args.insert(
+            "patterns".to_owned(),
+            Arg::Positional {
+                minimum: 1,
+                maximum: 512,
+                default: Some(vec!["//...".to_owned()]),
+                description: None,
+            },
+        );
         let task = stub_task("run", &[], args);
         let tasks: Vec<&dyn TaskLike> = vec![&task];
         let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
@@ -2702,6 +2736,15 @@ mod tests {
         assert_eq!(by_name("extras")["required"], false);
         assert_eq!(by_name("extras")["minimum"], 0);
         assert_eq!(by_name("extras")["maximum"], 8);
+
+        // The minimum still describes the cardinality the task relies on; the
+        // default is what keeps it off the caller.
+        assert_eq!(by_name("patterns")["required"], false);
+        assert_eq!(by_name("patterns")["minimum"], 1);
+        assert_eq!(
+            by_name("patterns")["default"],
+            serde_json::json!(["//..."])
+        );
     }
 
     #[test]
