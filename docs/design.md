@@ -111,6 +111,7 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 | `summary` | Task list and `--help` header | One line. Falls back to `"<name> task defined in <file>"`. |
 | `description` | `--help` header only | Extended prose. Replaces `summary` in `--help` when set. |
 | `friendly_kind` | Help section headings | Title Case. Auto-derived from the kind (`axl-add` → `Axl Add`). |
+| `show_task_options` | `--help` | Lists the `--task:*` flags under `Task Options`, plus the features footer. Set it on tasks that report to CI status surfaces; the flags are accepted either way. Default `False`. |
 
 #### CLI arguments
 

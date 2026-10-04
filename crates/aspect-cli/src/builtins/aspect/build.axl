@@ -41,6 +41,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 build = task(
     args = bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args(),
+    show_task_options = True,
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [
         BazelTrait,

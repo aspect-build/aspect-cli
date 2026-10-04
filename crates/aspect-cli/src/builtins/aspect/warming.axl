@@ -260,6 +260,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ph, 0)
 
 warming = task(
+    show_task_options = True,
     group = ["ci"],
     summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
     description = "Cleans prior Bazel state under the runner's storage mount, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",

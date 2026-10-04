@@ -46,6 +46,9 @@ pub trait TaskLike<'v> {
     /// The task kind's display label (Title-Cased kind, or the `friendly_kind=`
     /// kwarg). Distinct from the per-invocation display name set at runtime.
     fn friendly_kind(&self) -> String;
+    /// Whether `--help` lists the `--task:*` flags and the features footer
+    /// (the `show_task_options=` kwarg). The flags parse either way.
+    fn show_task_options(&self) -> bool;
     fn group(&self) -> &Vec<String>;
     /// The task kind — the command being run (e.g. `build`, `test`, `lint`),
     /// derived from the snake_case export variable (or the `kind=` kwarg).
@@ -133,6 +136,7 @@ pub struct Task<'v> {
     pub(super) summary: String,
     pub(super) description: String,
     pub(super) friendly_kind: RefCell<String>,
+    pub(super) show_task_options: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: RefCell<String>,
     pub(super) traits: Vec<values::Value<'v>>,
@@ -200,6 +204,7 @@ impl<'v> Task<'v> {
             summary: frozen.summary.clone(),
             description: frozen.description.clone(),
             friendly_kind: RefCell::new(frozen.friendly_kind.clone()),
+            show_task_options: frozen.show_task_options,
             group: frozen.group.clone(),
             kind: RefCell::new(frozen.kind.clone()),
             traits,
@@ -221,6 +226,9 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
     fn friendly_kind(&self) -> String {
         self.friendly_kind.borrow().clone()
+    }
+    fn show_task_options(&self) -> bool {
+        self.show_task_options
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -305,6 +313,7 @@ impl<'v> values::Freeze for Task<'v> {
             summary: self.summary,
             description: self.description,
             friendly_kind: self.friendly_kind.into_inner(),
+            show_task_options: self.show_task_options,
             group: self.group,
             kind: self.kind.into_inner(),
             traits: frozen_traits?,
@@ -323,6 +332,7 @@ pub struct FrozenTask {
     pub(super) summary: String,
     pub(super) description: String,
     pub(super) friendly_kind: String,
+    pub(super) show_task_options: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: String,
     pub(super) traits: Vec<values::FrozenValue>,
@@ -379,6 +389,9 @@ impl<'v> TaskLike<'v> for FrozenTask {
     }
     fn friendly_kind(&self) -> String {
         self.friendly_kind.clone()
+    }
+    fn show_task_options(&self) -> bool {
+        self.show_task_options
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -457,7 +470,8 @@ fn resolve_task_metadata(
 }
 
 /// Build a fresh `Task<'v>` that aliases `base`. The alias shares the base's
-/// `implementation` callable and `traits` vector and inherits nothing else —
+/// `implementation` callable, `traits` vector and `show_task_options` setting
+/// (all properties of the shared implementation) and inherits nothing else —
 /// `kind`, `group`, `summary`, `description`, and `friendly_kind` come from
 /// the alias's own kwargs. An empty `kind` defers naming to `export_as`.
 ///
@@ -509,6 +523,7 @@ fn build_alias<'v>(
         summary,
         description,
         friendly_kind: RefCell::new(friendly_kind),
+        show_task_options: base.show_task_options(),
         group,
         kind: RefCell::new(kind),
         traits: base.trait_values(),
@@ -522,10 +537,11 @@ fn task_methods(builder: &mut MethodsBuilder) {
     /// Define an alias of this task with overridden arg defaults.
     ///
     /// The alias is a new top-level CLI command that shares this task's
-    /// `implementation` and `traits`, but exposes overridden defaults for one
-    /// or more of its args. The base task is undisturbed — both commands
-    /// coexist, and a CLI flag still wins over the alias's default (so
-    /// `aspect buildifier --formatter-target=X` overrides the alias default).
+    /// `implementation`, `traits` and `show_task_options`, but exposes
+    /// overridden defaults for one or more of its args. The base task is
+    /// undisturbed — both commands coexist, and a CLI flag still wins over the
+    /// alias's default (so `aspect buildifier --formatter-target=X` overrides
+    /// the alias default).
     ///
     /// ## Naming
     ///
@@ -619,6 +635,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// - `summary` — one-liner shown in the task list; falls back to `"<name> task defined in <file>"`.
     /// - `description` — extended prose shown in `--help` (replaces summary in that view).
     /// - `friendly_kind` — Title Case label for help section headings; auto-derived from the kind.
+    /// - `show_task_options` — list the `--task:*` flags (a `Task Options` section) and the
+    ///   features footer in `--help`. Set it on tasks that report to CI status surfaces, where
+    ///   naming the invocation matters. The flags are accepted either way; default `False`.
     ///
     /// ## Aliases
     ///
@@ -657,6 +676,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] kind: String,
         #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
+        #[starlark(require = named, default = false)] show_task_options: bool,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
         let friendly_kind = resolve_task_metadata("task", &kind, &group.items, friendly_kind)?;
@@ -719,6 +739,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             summary,
             description,
             friendly_kind: RefCell::new(friendly_kind),
+            show_task_options,
             group: group.items,
             kind: RefCell::new(kind),
             traits: all_traits,
@@ -764,6 +785,27 @@ aliased = base.alias()
         .run_task(1)
         .expect("run_task");
         assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn show_task_options_defaults_off_and_is_inherited_by_aliases() {
+        let shown = |symbol: &str| {
+            eval_snippet(
+                r#"
+plain = task(implementation = _impl)
+reporting = task(implementation = _impl, show_task_options = True)
+plain_alias = plain.alias()
+reporting_alias = reporting.alias()
+"#,
+            )
+            .with_value(symbol, |v| {
+                super::try_as_task(v).expect("a task").show_task_options()
+            })
+        };
+        assert!(!shown("plain"));
+        assert!(shown("reporting"));
+        assert!(!shown("plain_alias"));
+        assert!(shown("reporting_alias"));
     }
 
     #[test]

@@ -369,6 +369,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     return _conclude("failed", code, "%s exited %d" % (target, code))
 
 run = task(
+    show_task_options = True,
     summary = "Build a target with bazel and run the resulting binary.",
     args = {
         "target": args.positional(

@@ -119,6 +119,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return conclusion
 
 test = task(
+    show_task_options = True,
     summary = "Run Bazel tests. Wraps `bazel test` with retries, remote cache/BES wiring, and CI status reporting.",
     description = "Run Bazel tests. Wraps `bazel test` with retries, remote cache/BES wiring, and CI status reporting.\n\nSee also: `aspect cache diff` lists only the test targets affected by the current working tree, and can run them via its --exec flag.",
     args = {
