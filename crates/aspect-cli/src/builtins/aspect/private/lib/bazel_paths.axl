@@ -1,0 +1,27 @@
+"""Where Bazel keeps its own state on disk.
+
+Locations Bazel derives rather than publishes, for the tasks that have to find
+them without starting a server to ask. `aspect gc` needs them to know what it is
+looking at; `aspect worktree` needs them to pin an output base to a slot.
+"""
+
+def output_user_root(std) -> str:
+    """Bazel's default output user root for this platform.
+
+    What `bazel` uses when nothing sets `--output_user_root`. A workspace that
+    does set it overrides this, so a caller that cares reads the rc first.
+    """
+    home = std.env.home_dir()
+    user = std.env.var("USER") or std.env.var("LOGNAME") or ""
+    if not user:
+        # The home directory's last segment is the user name on every platform
+        # whose default root we know how to build.
+        idx = home.rfind("/")
+        user = home[idx + 1:] if idx >= 0 else home
+    if std.env.os() == "macos":
+        return home + "/Library/Caches/bazel/_bazel_" + user
+    return home + "/.cache/bazel/_bazel_" + user
+
+bazel_paths = namespace(
+    output_user_root = output_user_root,
+)

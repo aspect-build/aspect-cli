@@ -305,11 +305,20 @@ def _test_an_empty_pool_slot_is_attributed_from_its_pool(ctx):
     ctx.std.fs.write(pool + "/registry.json", json.encode({"version": 1, "slots": {
         "aaa": {"state": "free", "last_branch": "fix/login", "lease": None},
         "bbb": {"state": "leased", "lease": {"name": "feat/x"}},
+        "ddd": {"state": "leased", "lease": {
+            "name": "feat/y",
+            "agent": {"kind": "claude-code", "id": "b22fe20c-1f9f-4476"},
+        }},
     }}))
     free = output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa")
     _eq("repository from the pool's path", free.repository, "acme/web")
     _eq("free, with its last branch", free.branch, "free · last fix/login")
     _eq("leased", output_bases.pool_slot(ctx, pool + "/aspect-worktree-bbb").branch, "leased · feat/x")
+    _eq(
+        "leased, naming the agent session holding it",
+        output_bases.pool_slot(ctx, pool + "/aspect-worktree-ddd").branch,
+        "leased · feat/y · claude-code b22fe20c",
+    )
     _eq("unknown to the registry", output_bases.pool_slot(ctx, pool + "/aspect-worktree-ccc").branch, "")
     ctx.std.fs.write(pool + "/registry.json", "not json")
     _eq("a broken registry leaves the branch blank", output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa").branch, "")

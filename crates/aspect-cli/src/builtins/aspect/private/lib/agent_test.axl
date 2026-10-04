@@ -1,0 +1,210 @@
+"""Unit tests for lib/agent.axl — who is running a task, and whether their
+session is still there.
+
+Run with:
+  aspect dev test-agent
+
+The Claude Code variable names are taken from a live session rather than
+invented: `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID=<uuid>`, `CLAUDE_PID=<pid>`,
+and a transcript at `~/.claude/projects/<slug>/<session-id>.jsonl`.
+
+Every test that touches the environment sets both states explicitly and restores
+what was there, because this suite runs inside a Claude Code session often
+enough that neither value can be assumed.
+"""
+
+load(
+    "./agent.axl",
+    "GONE",
+    "RESUMABLE",
+    "RUNNING",
+    "UNKNOWN",
+    "detect",
+    "is_running",
+    "label",
+    "resume_hint",
+    "session_state",
+)
+
+_AGENT_VARS = [
+    "ASPECT_AGENT_KIND",
+    "ASPECT_AGENT_ID",
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+    "AI_AGENT",
+]
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _clear(ctx):
+    """Drop every variable detection reads, returning what was there."""
+    saved = {}
+    for v in _AGENT_VARS:
+        saved[v] = ctx.std.env.var(v) or ""
+        ctx.std.env.remove_var(v)
+    return saved
+
+def _restore(ctx, saved):
+    for v in saved:
+        if saved[v]:
+            ctx.std.env.set_var(v, saved[v])
+        else:
+            ctx.std.env.remove_var(v)
+
+def _test_flags_beat_everything(ctx):
+    """A harness that states what it is must be believed over any inference —
+    it is the only source that cannot be wrong about itself."""
+    saved = _clear(ctx)
+    ctx.std.env.set_var("ASPECT_AGENT_KIND", "from-env")
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    got = detect(ctx.std, "from-flag", "id-123")
+    _restore(ctx, saved)
+    _eq("kind", got["kind"], "from-flag")
+    _eq("id", got["id"], "id-123")
+    _eq("source", got["source"], "flag")
+
+def _test_the_neutral_contract_beats_a_known_harness(ctx):
+    """`ASPECT_AGENT_*` is what a harness we have never heard of sets, so it
+    outranks our own guess about a harness we have."""
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    ctx.std.env.set_var("CLAUDE_CODE_SESSION_ID", "should-be-ignored")
+    ctx.std.env.set_var("ASPECT_AGENT_KIND", "codex")
+    ctx.std.env.set_var("ASPECT_AGENT_ID", "sess-abc")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+    _eq("kind", got["kind"], "codex")
+    _eq("id", got["id"], "sess-abc")
+    _eq("source", got["source"], "env")
+
+def _test_claude_code_is_detected_from_its_own_variables(ctx):
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    ctx.std.env.set_var("CLAUDE_CODE_SESSION_ID", "b22fe20c-1f9f-4476-9097-9f4648158215")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+    _eq("kind", got["kind"], "claude-code")
+    _eq("id", got["id"], "b22fe20c-1f9f-4476-9097-9f4648158215")
+
+def _test_a_generic_ai_agent_variable_gives_a_kind_but_no_session(ctx):
+    """`AI_AGENT` is spelled `<tool>_<version>_<role>`. The tool segment is a
+    kind; nothing in it identifies a session, and claiming otherwise would put
+    a version string in the id column."""
+    saved = _clear(ctx)
+    ctx.std.env.set_var("AI_AGENT", "some-harness_1-2-3_agent")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    # The ancestry walk runs first and wins when this suite is itself under a
+    # recognized harness, so only assert what holds either way.
+    if got.get("source", "") == "env":
+        _eq("kind", got["kind"], "some-harness")
+        _eq("no session id", got["id"], "")
+
+def _test_a_record_with_no_pid_is_not_claimed_to_be_running(ctx):
+    """`is_running` answers only what it can verify. Treating a missing pid as
+    alive would stop `session_state` ever reaching the session check, which is
+    the signal that actually matters."""
+    _eq("no pid", is_running(ctx.std, {"kind": "claude-code", "id": "x"}), False)
+    _eq("zero pid", is_running(ctx.std, {"pid": 0}), False)
+
+def _test_a_live_pid_counts_only_with_a_matching_start_time(ctx):
+    """Pids are reused and a lease outlives the process that took it, so the
+    start time is what makes the pid trustworthy."""
+    me = ctx.std.process.id()
+    _eq("this process is alive", is_running(ctx.std, {"pid": me, "pid_start": _start_of(ctx, me)}), True)
+    _eq(
+        "a mismatched start time is a different process",
+        is_running(ctx.std, {"pid": me, "pid_start": "Thu  1 Jan 00:00:00 1970"}),
+        False,
+    )
+
+def _start_of(ctx, pid):
+    out = ctx.std.process.command("ps").args(["-o", "lstart=", "-p", str(pid)]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip()
+
+def _test_an_unknown_harness_layout_is_never_gone(ctx):
+    """`gone` is the only verdict anything acts on. A harness whose session
+    storage we cannot inspect must come back `unknown`, or a slot would be taken
+    from a session that is sitting there waiting to be resumed."""
+    _eq("unknown harness", session_state(ctx.std, {"kind": "codex", "id": "sess-abc"}), UNKNOWN)
+    _eq("no id at all", session_state(ctx.std, {"kind": "claude-code", "id": ""}), UNKNOWN)
+    _eq("no agent", session_state(ctx.std, {}), UNKNOWN)
+
+def _test_a_claude_session_absent_from_disk_is_gone(ctx):
+    """A session id that is not stored anywhere cannot be resumed, which is what
+    distinguishes a finished lease from a closed terminal."""
+    missing = {"kind": "claude-code", "id": "00000000-dead-dead-dead-000000000000"}
+    _eq("absent", session_state(ctx.std, missing), GONE)
+
+def _test_a_running_process_outranks_the_session_check(ctx):
+    """A live harness is in use whatever is on disk, so the cheap, certain
+    signal is consulted first."""
+    me = ctx.std.process.id()
+    live = {
+        "kind": "claude-code",
+        "id": "00000000-dead-dead-dead-000000000000",
+        "pid": me,
+        "pid_start": _start_of(ctx, me),
+    }
+    _eq("alive beats a missing transcript", session_state(ctx.std, live), RUNNING)
+
+def _test_label_is_a_glance_not_a_copy_source(ctx):
+    _eq("kind and short id", label({"kind": "claude-code", "id": "b22fe20c-1f9f-4476"}), "claude-code b22fe20c")
+    _eq("no id", label({"kind": "codex", "id": ""}), "codex")
+    _eq("no kind", label({"kind": "", "id": ""}), "agent")
+    _eq("no agent", label({}), "")
+
+def _test_resume_is_offered_only_where_the_command_is_known(ctx):
+    """Printing a resume command for a harness whose syntax we have not checked
+    would be worse than printing none."""
+    _eq("claude code", resume_hint({"kind": "claude-code", "id": "abc"}), "claude --resume abc")
+    _eq("unverified harness", resume_hint({"kind": "codex", "id": "abc"}), "")
+    _eq("no session id", resume_hint({"kind": "claude-code", "id": ""}), "")
+
+def _test_a_person_at_a_terminal_is_not_an_agent(ctx):
+    """Detection has to come back empty for a human, or every slot would be
+    labelled with whatever process happened to be above it."""
+    saved = _clear(ctx)
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    # Under a recognized harness the ancestry layer answers, and that is correct
+    # here; what must never happen is a record with no kind at all.
+    if got:
+        if not got.get("kind", ""):
+            fail("a detected agent must always carry a kind")
+        _eq("inferred from the process tree", got["source"], "ancestry")
+
+_UNIT_TESTS = [
+    _test_flags_beat_everything,
+    _test_the_neutral_contract_beats_a_known_harness,
+    _test_claude_code_is_detected_from_its_own_variables,
+    _test_a_generic_ai_agent_variable_gives_a_kind_but_no_session,
+    _test_a_record_with_no_pid_is_not_claimed_to_be_running,
+    _test_a_live_pid_counts_only_with_a_matching_start_time,
+    _test_an_unknown_harness_layout_is_never_gone,
+    _test_a_claude_session_absent_from_disk_is_gone,
+    _test_a_running_process_outranks_the_session_check,
+    _test_label_is_a_glance_not_a_copy_source,
+    _test_resume_is_offered_only_where_the_command_is_known,
+    _test_a_person_at_a_terminal_is_not_an_agent,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("agent.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+agent_tests = task(
+    summary = "Run the agent-detection AXL unit tests.",
+    kind = "test-agent",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

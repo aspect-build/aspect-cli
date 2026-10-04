@@ -29,11 +29,14 @@ takes flags to change them.
 """
 
 load("@std//time.axl", "time")
+load("./agent.axl", agent_label = "label")
 load("./ansi.axl", "ansi")
+load("./bazel_paths.axl", "output_user_root")
 load("./environment.axl", "info")
 load("./git_checkout.axl", "git_checkout")
 load("./path_normalize.axl", "normpath")
 load("./text.axl", "pad_left", "pad_right", "pluralize")
+load("./worktree.axl", "SLOT_PREFIX", "pools_root_of")
 
 # --- constants ---------------------------------------------------------------
 
@@ -48,12 +51,6 @@ BASE = "Bazel output base"
 TRASH_PREFIX = ".gc-trash-"
 
 DOWNLOAD_CACHE = "cache/repos/v1/content_addressable"
-
-# Under the home directory: where `aspect worktree` keeps its pools, one per
-# normalized origin remote (`<host>/<owner>/<name>`), each holding a
-# `registry.json` and its slots, `aspect-worktree-<id>`.
-_POOLS = "/.aspect/worktrees"
-_SLOT_PREFIX = "aspect-worktree-"
 
 # `md5("")`: the output base Bazel uses when it runs outside any workspace.
 _NO_WORKSPACE = "d41d8cd98f00b204e9800998ecf8427e"
@@ -302,25 +299,12 @@ def _configured_output_user_root(ctx: TaskContext, root: str = "", startup_flags
         return value
     return ctx.std.env.current_dir() + "/" + value
 
-def _platform_output_user_root(ctx: TaskContext) -> str:
-    """Bazel's default output user root for this platform."""
-    home = ctx.std.env.home_dir()
-    user = ctx.std.env.var("USER") or ctx.std.env.var("LOGNAME") or ""
-    if not user:
-        # The home directory's last segment is the user name on every platform
-        # whose default root we know how to build.
-        idx = home.rfind("/")
-        user = home[idx + 1:] if idx >= 0 else home
-    if ctx.std.env.os() == "macos":
-        return home + "/Library/Caches/bazel/_bazel_" + user
-    return home + "/.cache/bazel/_bazel_" + user
-
 def _output_user_root(ctx: TaskContext, explicit: str) -> str:
     """`explicit`, then what the surrounding workspace configures, then the
     platform default."""
     return (explicit or
             _configured_output_user_root(ctx) or
-            _platform_output_user_root(ctx))
+            output_user_root(ctx.std))
 
 def _canonical(ctx: TaskContext, path: str) -> str:
     """`path` with symlinks, `.` and `..` resolved, via `realpath`. A path
@@ -555,7 +539,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
     """Classify every output base under `root`, youngest first, including any
     trash an earlier `gc` failed to finish removing."""
     home = ctx.std.env.home_dir()
-    pools = {h + _POOLS + "/": True for h in [home, _canonical(ctx, home)]}.keys()
+    pools = {pools_root_of(h) + "/": True for h in [home, _canonical(ctx, home)]}.keys()
     bases = []
     for entry in ctx.std.fs.read_dir(root):
         if not entry.is_dir:
@@ -672,24 +656,27 @@ def _kb_by_state(bases: list, sizes: dict) -> dict:
 def _pool_slot(ctx: TaskContext, workspace: str):
     """A `Checkout` for an `aspect worktree` slot with no worktree in it, from
     the pool: the repository its path is keyed by, and, from the pool's
-    `registry.json`, the slot's lease or the branch it last held. Read
-    leniently — whatever the registry lacks is left blank — and None when the
-    path is not a slot."""
+    `registry.json`, the slot's lease or the branch it last held — plus the agent
+    session holding it, when the lease names one. Read leniently: whatever the
+    registry lacks is left blank, and None when the path is not a slot."""
     idx = workspace.rfind("/")
     pool, slot = workspace[:idx], workspace[idx + 1:]
-    if not slot.startswith(_SLOT_PREFIX):
+    if not slot.startswith(SLOT_PREFIX):
         return None
     repository = "/".join(pool.split("/")[-2:])
     err, registry = catch(json.decode, ctx.std.fs.try_read_to_string(pool + "/registry.json") or "{}")
     slots = registry.get("slots") if err == None and type(registry) == "dict" else None
-    record = slots.get(slot[len(_SLOT_PREFIX):]) if type(slots) == "dict" else None
+    record = slots.get(slot[len(SLOT_PREFIX):]) if type(slots) == "dict" else None
     if type(record) != "dict":
         return git_checkout.Checkout(root = workspace, repository = repository, branch = "")
-    lease = record.get("lease")
-    name = lease.get("name") if type(lease) == "dict" else None
+    lease = record.get("lease") if type(record.get("lease")) == "dict" else {}
+    name = lease.get("name")
     last = record.get("last_branch")
     if type(name) == "string" and name:
         branch = "leased · " + name
+        holder = agent_label(lease.get("agent") if type(lease.get("agent")) == "dict" else {})
+        if holder:
+            branch += " · " + holder
     elif type(last) == "string" and last:
         branch = "free · last " + last
     else:

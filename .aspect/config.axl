@@ -13,6 +13,7 @@ load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
+load("@aspect//private/lib/agent_test.axl", "agent_tests")
 load("@aspect//private/lib/aspect_cloud_api_test.axl", "aspect_cloud_api_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
@@ -58,6 +59,7 @@ load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
+load("@aspect//private/lib/worktree_test.axl", "worktree_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
@@ -433,6 +435,16 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-output-bases
     ctx.tasks.add(output_bases_tests)
     ctx.tasks.add(confirm_tests)
+
+    # Worktree pool: remote normalization, slot scoring, pruning eligibility and
+    # the one rule that reclaims a lease.
+    # Run with: aspect dev test-worktree
+    ctx.tasks.add(worktree_tests)
+
+    # Agent detection: the ladder that identifies the harness holding a worktree
+    # lease, and whether its session is running, resumable or gone.
+    # Run with: aspect dev test-agent
+    ctx.tasks.add(agent_tests)
 
     # Repository and branch from `.git`, against real clones and worktrees.
     # Run with: aspect dev test-git-checkout
