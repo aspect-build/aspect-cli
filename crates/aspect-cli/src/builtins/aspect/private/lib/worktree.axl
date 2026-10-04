@@ -54,10 +54,10 @@ has touched in `PRUNE_AGE_DAYS`, and `aspect worktree prune` does the same on
 demand. A leased slot is never taken on age alone, however old, because a lease
 is a checkout someone may still want. The one exception is `abandoned_lease`.
 
-**Disabled on Aspect Workflows runners.** A runner builds one job in a
-checkout it set up itself and then discards, so there is no second worktree to
-share a slot with and nothing to keep warm between jobs.
-`ASPECT_WORKFLOWS_RUNNER` turns every entry point here into a no-op.
+Nothing here is specific to a developer machine. A CI runner that builds one
+throwaway checkout per job has no use for a pool, but nothing is injected into
+Bazel to make a slot work — a slot is a `git worktree add` at a stable path — so
+there is nothing to conflict with on a runner that does want one.
 """
 
 load("@std//hash.axl", "md5", "sha256")
@@ -94,13 +94,6 @@ _LOCK_STALE_MS = 10 * 60 * 1000
 PRUNE_AGE_DAYS = 30
 
 _DAY_MS = 24 * 60 * 60 * 1000
-
-# --- the environment ---------------------------------------------------------
-
-def enabled(std) -> bool:
-    """False on an Aspect Workflows runner, which builds one job in a checkout
-    it discards afterwards — nothing to pool and nothing to keep warm."""
-    return not std.env.var("ASPECT_WORKFLOWS_RUNNER")
 
 # --- git ---------------------------------------------------------------------
 
@@ -360,9 +353,11 @@ def output_base_of(std, slot: str, root: str = "") -> str:
     what lets the pool look at a slot's Bazel state without starting a server
     to ask where it is.
 
-    `root` overrides the output user root. Production never passes it; tests do,
-    so that fabricating a base writes under a temp directory rather than
-    littering the developer's real Bazel cache with md5-named stubs.
+    `root` is the output user root to derive under. Callers pass the one the rc
+    chain resolves, because a repo that sets `startup --output_user_root=` keeps
+    its bases somewhere other than the platform default and a slot looked up in
+    the wrong root reads as cold forever. Empty falls back to the platform
+    default, which is right outside a workspace and in tests.
     """
     h = md5()
     h.update(slot)
@@ -444,7 +439,7 @@ def owned_slots(pool: dict, registry: dict) -> list[str]:
         if registry["slots"][slot_id].get("owner_git_dir", "") == pool["git_common_dir"]
     ]
 
-def slot_age_days(std, pool: dict, slot_id: str, slot: dict) -> int:
+def slot_age_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
     """Whole days since Bazel last did anything in this slot's output base.
 
     Read from the base's own freshness markers, the same evidence `aspect gc`
@@ -454,14 +449,14 @@ def slot_age_days(std, pool: dict, slot_id: str, slot: dict) -> int:
     first build.
     """
     newest = max(
-        last_used(std, output_base_of(std, slot_path(pool, slot_id))) // 1000,
+        last_used(std, output_base_of(std, slot_path(pool, slot_id), root)) // 1000,
         slot.get("created_ms", 0),
     )
     if not newest:
         return 0
     return (time.now_ms() - newest) // _DAY_MS
 
-def prunable_slots(std, pool: dict, registry: dict, max_age_days: int) -> list[str]:
+def prunable_slots(std, pool: dict, registry: dict, max_age_days: int, root: str = "") -> list[str]:
     """Free slots whose Bazel state has gone cold enough to be worth less than
     the disk it holds.
 
@@ -480,7 +475,7 @@ def prunable_slots(std, pool: dict, registry: dict, max_age_days: int) -> list[s
         slot = registry["slots"][slot_id]
         if slot["state"] == "leased":
             continue
-        if slot_age_days(std, pool, slot_id, slot) < max_age_days:
+        if slot_age_days(std, pool, slot_id, slot, root) < max_age_days:
             continue
         owner = slot.get("owner_git_dir", "")
         if owner != pool["git_common_dir"] and std.fs.exists(owner):

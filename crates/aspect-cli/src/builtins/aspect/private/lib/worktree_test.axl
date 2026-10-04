@@ -16,7 +16,6 @@ load(
     "abandoned_lease",
     "default_score",
     "drop_slot",
-    "enabled",
     "lock_digest",
     "lock_digest_at",
     "normalize_remote",
@@ -84,27 +83,6 @@ def _test_slug_is_a_usable_path_component(ctx):
     _eq("leading and trailing junk", slug("/wip/"), "wip")
     _eq("nothing usable", slug("///"), "worktree")
     _eq("already clean", slug("main"), "main")
-
-def _test_disabled_on_a_workflows_runner(ctx):
-    """A runner builds one job in a checkout it discards, so there is nothing
-    to pool — every entry point is a no-op there.
-
-    Both states are set up explicitly and the ambient one restored afterwards:
-    this suite's own CI job runs on a Workflows runner, so neither value can be
-    assumed to be the one already in the environment.
-    """
-    env = ctx.std.env
-    ambient = env.var("ASPECT_WORKFLOWS_RUNNER")
-
-    env.remove_var("ASPECT_WORKFLOWS_RUNNER")
-    _eq("enabled off-runner", enabled(ctx.std), True)
-    env.set_var("ASPECT_WORKFLOWS_RUNNER", "runner-1")
-    _eq("disabled on a runner", enabled(ctx.std), False)
-    env.remove_var("ASPECT_WORKFLOWS_RUNNER")
-    _eq("enabled again", enabled(ctx.std), True)
-
-    if ambient:
-        env.set_var("ASPECT_WORKFLOWS_RUNNER", ambient)
 
 def _test_lock_mismatch_nearly_disqualifies(ctx):
     """A different MODULE.bazel.lock means the repo fetches miss and
@@ -482,6 +460,26 @@ def _test_idle_is_right_aligned_so_the_numbers_line_up(ctx):
     _eq("padded to the widest", "  3d" in lines[1], True)
     _eq("widest unpadded", "120d" in lines[2], True)
 
+def _test_a_relocated_output_user_root_is_where_a_slot_looks(ctx):
+    """The root a slot derives under is the caller's to choose, because a repo
+    whose `.bazelrc` sets `startup --output_user_root=` keeps its bases
+    elsewhere. Looking in the platform default there finds nothing: every slot
+    would read cold, and pruning would retire warm slots and leave their real
+    bases behind.
+    """
+    relocated = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    slot = "/pool/aspect-worktree-abc123"
+
+    under_relocated = output_base_of(ctx.std, slot, relocated)
+    under_default = output_base_of(ctx.std, slot)
+    _eq("derived under the root given", under_relocated.startswith(relocated + "/"), True)
+    _eq("same slot, same digest either way", under_relocated.rpartition("/")[2], under_default.rpartition("/")[2])
+
+    # A base in the relocated root is invisible from the default one.
+    ctx.std.fs.create_dir_all(under_relocated)
+    _eq("found with the root", warmth_of(ctx.std, slot, relocated).base, True)
+    _eq("missed without it", warmth_of(ctx.std, slot).base, False)
+
 _UNIT_TESTS = [
     _test_remote_spellings_collapse,
     _test_suffix_behind_a_trailing_slash_is_still_stripped,
@@ -489,11 +487,11 @@ _UNIT_TESTS = [
     _test_fork_is_its_own_pool,
     _test_empty_remote_yields_no_key,
     _test_slug_is_a_usable_path_component,
-    _test_disabled_on_a_workflows_runner,
     _test_lock_mismatch_nearly_disqualifies,
     _test_commit_distance_only_breaks_a_tie,
     _test_unknown_lock_does_not_disqualify,
     _test_output_base_matches_bazels_own_derivation,
+    _test_a_relocated_output_user_root_is_where_a_slot_looks,
     _test_warmth_reads_what_is_really_there,
     _test_registry_round_trips,
     _test_unreadable_registry_starts_over,
