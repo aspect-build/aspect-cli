@@ -413,21 +413,22 @@ def _test_an_unverifiable_harness_is_never_abandoned(ctx):
     registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unknown)}}
     _eq("left alone", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
 
-def _test_the_listing_drops_columns_nothing_fills(ctx):
-    """A pool of two free slots and nothing unusual should read as narrowly as it
-    did before the table had headers, so an empty column is left out rather than
-    printed blank."""
+def _test_the_listing_drops_only_the_columns_it_may(ctx):
+    """An empty column is left out to keep the listing narrow — except `agent`,
+    which stays so a pool with nothing running still shows that the pool records
+    which session holds a slot. `notes` carries only exceptions, so hiding it
+    loses nothing."""
     rows = [
         {"branch": "fix/login", "state": "free", "warmth": "cold", "idle": "0d", "slot": "abc123"},
         {"branch": "spike", "state": "free", "warmth": "cold", "idle": "3d", "slot": "def456"},
     ]
     lines = testonly_table(rows, testonly_list_columns)
-    _eq("header first", lines[0], "  branch     state  warmth  idle  slot")
-    _eq("no agent column", "agent" in lines[0], False)
-    _eq("no notes column", "notes" in lines[0], False)
-    _eq("a row", lines[1], "  fix/login  free   cold      0d  abc123")
+    _eq("header first", lines[0], "  branch     state  warmth  idle  slot    agent")
+    _eq("agent is advertised even with no agents", "agent" in lines[0], True)
+    _eq("notes is not", "notes" in lines[0], False)
+    _eq("a row leaves the agent cell blank", lines[1], "  fix/login  free   cold      0d  abc123")
 
-def _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it(ctx):
+def _test_a_droppable_column_appears_as_soon_as_one_row_fills_it(ctx):
     rows = [
         {
             "branch": "fix/login",
@@ -448,8 +449,7 @@ def _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it(ctx):
         },
     ]
     lines = testonly_table(rows, testonly_list_columns)
-    _eq("agent appears", "agent" in lines[0], True)
-    _eq("notes appears", "notes" in lines[0], True)
+    _eq("notes appears once one row has one", "notes" in lines[0], True)
 
 def _test_idle_is_right_aligned_so_the_numbers_line_up(ctx):
     rows = [
@@ -518,9 +518,9 @@ _UNIT_TESTS = [
     _test_registry_round_trips,
     _test_unreadable_registry_starts_over,
     _test_missing_registry_is_empty,
-    _test_the_listing_drops_columns_nothing_fills,
+    _test_the_listing_drops_only_the_columns_it_may,
     _test_the_listing_defines_only_the_values_it_shows,
-    _test_the_listing_adds_a_column_as_soon_as_one_row_fills_it,
+    _test_a_droppable_column_appears_as_soon_as_one_row_fills_it,
     _test_idle_is_right_aligned_so_the_numbers_line_up,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,
     _test_a_recently_used_base_outranks_an_old_creation_floor,
