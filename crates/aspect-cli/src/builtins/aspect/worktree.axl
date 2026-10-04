@@ -467,6 +467,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     existing = _git_try(ctx, ["rev-parse", "--verify", "--quiet", name], pool["git_common_dir"])
     checkout_ref = name if existing else base_ref
     want = {
+        "name": name,
         "lock_digest": lock_digest_at(ctx.std, pool["git_common_dir"], checkout_ref),
         "commit": _git(ctx, ["rev-parse", checkout_ref], pool["git_common_dir"]),
     }
@@ -497,18 +498,20 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         held = ""
 
     if held:
-        return TaskConclusion(
-            exit_code = 1,
-            message = name + " is already checked out at " + slot_path(pool, held) +
-                      ". Use it, or `aspect worktree remove " + name + "` first.",
+        return _refuse(
+            ctx,
+            "branch_in_use",
+            name + " is already checked out at " + slot_path(pool, held) +
+            ". Use it, or `aspect worktree remove " + name + "` first.",
         )
     elsewhere = _worktree_holding_branch(ctx, pool, name)
     if elsewhere:
-        return TaskConclusion(
-            exit_code = 1,
-            message = name + " is already checked out at " + elsewhere +
-                      ", which this pool does not manage. Work there, or move that " +
-                      "worktree off the branch first.",
+        return _refuse(
+            ctx,
+            "branch_elsewhere",
+            name + " is already checked out at " + elsewhere +
+            ", which this pool does not manage. Work there, or move that " +
+            "worktree off the branch first.",
         )
 
     chosen = _pick_slot(ctx, pool, registry, want)
@@ -553,7 +556,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     print("  branch: " + name)
     print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
     print("")
-    print("  cd \"$(aspect worktree path " + name + ")\"")
+    print("  slot=$(aspect worktree path " + name + ") && cd \"$slot\"")
     return 0
 
 def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -602,7 +605,8 @@ def _remove_impl(ctx: TaskContext) -> int | TaskConclusion:
             "path": path,
         }, indent = 2) + "\n")
         return 0
-    info(ctx.std, "released " + name + "; the slot and its warm Bazel server stay in the pool")
+    info(ctx.std, "released " + name + "; the slot stays in the pool, " +
+                  _warmth_note(ctx.std, path, name, root).partition(":")[0])
     return 0
 
 def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -809,7 +813,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     for name, hint in resumable:
         print("  %s is held by a session that is not running. Resume it:" % name)
         print("    " + hint)
-    print("  cd \"$(aspect worktree path <branch>)\" to enter one")
+    print("  slot=$(aspect worktree path <branch>) && cd \"$slot\"  to enter one")
     print("  aspect worktree prune --dry-run  to see what has gone stale")
     return 0
 
@@ -829,7 +833,7 @@ _ADD_OUTPUT_ARG = {
     "output": args.string(
         default = "text",
         values = ["text", "json", "path"],
-        description = "stdout format. `text` (default) writes a human-readable report to stderr and leaves stdout empty. `json` writes one document to stdout. `path` writes only the worktree directory, for `cd \"$(aspect worktree add <branch> --output=path)\"`.",
+        description = "stdout format. `text` (default) writes a human-readable report to stderr and leaves stdout empty. `json` writes one document to stdout. `path` writes only the worktree directory, so a shell can step into it: `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`. Check the status — `cd \"$(...)\"` returns 0 even when the command fails, because `cd \"\"` is a no-op.",
     ),
 }
 
@@ -879,7 +883,7 @@ path = task(
     kind = "path",
     group = ["worktree"],
     summary = "Print a leased worktree's directory, for `cd`.",
-    description = "Print the slot directory a leased worktree lives in, and nothing else, so a shell can step into it:\n\n    cd \"$(aspect worktree path fix/login)\"\n\nA task cannot change its caller's directory, so this prints rather than moves. Define a shell function if you want one word:\n\n    aspect-cd() { cd \"$(aspect worktree path \"$1\")\"; }",
+    description = "Print the slot directory a leased worktree lives in, and nothing else, so a shell can step into it:\n\n    slot=$(aspect worktree path fix/login) && cd \"$slot\"\n\nThe two steps matter: `cd \"$(...)\"` returns 0 even when this fails, because the substitution is empty and `cd \"\"` is a no-op, so a script would carry on where it already was.\n\nA task cannot change its caller's directory, so this prints rather than moves. Define a shell function if you want one word:\n\n    aspect-cd() { local d; d=$(aspect worktree path \"$1\") && cd \"$d\"; }",
     implementation = _path_impl,
     traits = [Worktrees],
     args = {

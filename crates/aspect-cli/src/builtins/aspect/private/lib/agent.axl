@@ -172,15 +172,23 @@ def is_running(std, agent: dict) -> bool:
     return is_same_process(std, agent.get("pid", 0), agent.get("pid_start", ""))
 
 def _sessions_root(std, kind: str) -> str:
-    """Where a harness keeps its sessions, or "" if that is not known for it.
+    """Where a harness keeps its sessions, or "" when that cannot be answered.
 
-    Only harnesses whose layout has been checked appear here. An unknown layout
-    yields `unknown` rather than `gone`, because `gone` is the one verdict that
-    licenses taking a slot back and it must never rest on a guess.
+    Empty for a harness whose layout has not been checked, and — just as
+    importantly — for one whose layout is known but whose directory is not
+    there. Both yield `unknown` rather than `gone`, because `gone` is the one
+    verdict that licenses taking a slot back and it must never rest on a guess.
+    Reading "the sessions directory is missing" as "the session is deleted"
+    would hand a resumable agent's slot to someone else.
+
+    Claude Code relocates its state with `CLAUDE_CONFIG_DIR`, so the default is
+    a fallback rather than the answer.
     """
-    if kind == "claude-code":
-        return std.env.home_dir() + "/.claude/projects"
-    return ""
+    if kind != "claude-code":
+        return ""
+    configured = std.env.var("CLAUDE_CONFIG_DIR") or ""
+    root = (configured or (std.env.home_dir() + "/.claude")) + "/projects"
+    return root if std.fs.exists(root) else ""
 
 def _session_on_disk(std, kind: str, id: str) -> bool:
     """Whether this session is still stored, searched by id across the harness's
@@ -192,7 +200,7 @@ def _session_on_disk(std, kind: str, id: str) -> bool:
     project directory, which is tens of them.
     """
     root = _sessions_root(std, kind)
-    if not root or not std.fs.exists(root):
+    if not root:
         return False
     for entry in std.fs.read_dir(root):
         if entry.is_dir and std.fs.exists(root + "/" + entry.path + "/" + id + ".jsonl"):
