@@ -1480,7 +1480,7 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
         # linked worktree somebody made by hand is not going to become a pool
         # slot, while the clone itself is where you would take one.
         if linked:
-            info(ctx.std, "this is a git worktree, but not one " + pool["id"] + "'s pool manages")
+            info(ctx.std, "this is a git worktree, but not one managed by aspect worktree")
         else:
             info(ctx.std, "not in a pooled worktree — this is the clone itself")
         print("")
