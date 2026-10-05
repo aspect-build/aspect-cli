@@ -313,12 +313,14 @@ def _test_the_project_is_the_cwd_when_the_store_agrees(ctx):
 
     _eq("the real path, not the slug", got, cwd)
 
-def _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees(ctx):
+def _test_no_project_is_reported_when_the_cwd_disagrees(ctx):
     """An agent that runs `aspect worktree add` from somewhere other than where
-    its harness started records a `cwd` that is not the project. Reporting it
-    would send a reader to a directory whose session list does not have this
-    session in it, so the store's own directory name is reported instead: not a
-    path, but true.
+    its harness started records a `cwd` that is not the project, and the store's
+    layout cannot be decoded to find out what is. So there is no answer.
+
+    Neither candidate may be printed. The `cwd` is wrong, and the store's own
+    directory is where a transcript is filed rather than a directory anyone can
+    enter — and a reader may try to `cd` to whatever this returns.
     """
     saved = _clear(ctx)
     home = ctx.std.fs.mkdtemp(prefix = "aspect-proj-odd")
@@ -334,7 +336,7 @@ def _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees(ctx):
     })
     _restore(ctx, saved)
 
-    _eq("the store's own directory", got, home + "/projects/" + slug)
+    _eq("nothing, rather than either candidate", got, "")
 
 def _test_a_harness_that_states_its_project_is_believed(ctx):
     """A hook invocation is handed the project directory outright, which beats
@@ -451,7 +453,7 @@ _UNIT_TESTS = [
     _test_resume_is_offered_only_where_the_command_is_known,
     _test_every_described_harness_is_a_kind_detection_can_report,
     _test_the_project_is_the_cwd_when_the_store_agrees,
-    _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees,
+    _test_no_project_is_reported_when_the_cwd_disagrees,
     _test_no_project_is_claimed_without_one,
     _test_a_harness_that_states_its_project_is_believed,
     _test_codex_is_detected_from_the_thread_id_it_exports,

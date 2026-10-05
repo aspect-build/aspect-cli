@@ -33,6 +33,7 @@ load(
     "close_lease",
     "default_score",
     "drop_slot",
+    "drop_vanished_leases",
     "free_slot",
     "git_out",
     "held_for_ms",
@@ -977,6 +978,35 @@ def _test_the_sessions_block_speaks_for_the_slots_the_column_names(ctx):
     _eq("no project invented", got[0]["project"], "")
     _eq("and the block declares that column", "project" in [c.key for c in testonly_session_columns], True)
 
+def _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone(ctx):
+    """`--all` lists pools whose clones are not here to ask, so it cannot run
+    `reconcile` — but it must not then report a slot as in use when the
+    directory is gone. A lease is a claim on a checkout, and no record outranks
+    the checkout not being there.
+
+    Ownership is deliberately not consulted: this is a fact about the
+    filesystem, as true of another clone's slot as of this one's. Found by a
+    test agent, which saw `--all` report a deleted slot as in use, on a branch,
+    held by a named live session, while its owning clone reported it free.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-vanished")
+    owner = "/some/other/clone/.git"
+    pool = {"id": "p", "dir": tmp, "git_common_dir": owner, "remote": ""}
+    registry = {"slots": {
+        "gone00000000": _leased(owner, "fix/login", _A_SESSION),
+        "here00000000": _leased(owner, "fix/logout", _A_SESSION),
+    }}
+    ctx.std.fs.create_dir_all(slot_path(pool, "here00000000"))
+
+    drop_vanished_leases(ctx.std, pool, registry)
+
+    _eq("the one with no directory is free", registry["slots"]["gone00000000"]["state"], FREE)
+    _eq("and remembers what it held", registry["slots"]["gone00000000"]["last_branch"], "fix/login")
+
+    # The other is left alone: a directory that is there is where git is the
+    # authority, and this is the half of the judgement that does not need it.
+    _eq("the one still on disk is untouched", registry["slots"]["here00000000"]["state"], LEASED)
+
 def _test_pools_on_disk_finds_a_pool_at_any_depth(ctx):
     """`--all` has to find every pool, and a pool id is not a fixed depth:
     `host/org/repo` is three segments, a nested group is more, and the
@@ -1461,13 +1491,25 @@ def _test_a_leased_slots_old_branch_does_not_resolve(ctx):
     _eq("not by the previous occupant", testonly_resolve_slot(ctx, pool, registry, "dx-two"), "")
     _eq("still by the lease", testonly_resolve_slot(ctx, pool, registry, "fix/login"), "aaaa11112222")
 
-def _test_another_clones_slot_does_not_resolve(ctx):
-    """Clones share a pool directory but not the slots in it, so an id from
-    another clone's row is not an argument this clone can act on."""
+def _test_another_clones_slot_resolves_by_id_but_not_by_branch(ctx):
+    """Clones share a pool directory but not the slots in it — and `list` prints
+    an id for every slot in the pool, so an id it showed has to be usable as an
+    argument. Resolving one is therefore not the same question as being allowed
+    to act on it: the caller refuses another live clone's slot, and collects a
+    stranded one whose clone is gone.
+
+    A branch name stays scoped to the clone asking, because two clones can have
+    the same branch out and the name alone would not say whose.
+    """
     pool = {"git_common_dir": "/mine/.git", "dir": "/pool"}
     registry = {"slots": {"cccc55556666": _leased("/theirs/.git", "their/work", {})}}
 
-    _eq("not by id", testonly_resolve_slot(ctx, pool, registry, "cccc55556666"), "")
+    _eq(
+        "by id, whoever owns it",
+        testonly_resolve_slot(ctx, pool, registry, "cccc55556666"),
+        "cccc55556666",
+    )
+    _eq("but never by their branch", testonly_resolve_slot(ctx, pool, registry, "their/work"), "")
     _eq("not by name", testonly_resolve_slot(ctx, pool, registry, "their/work"), "")
 
 def _test_releasing_a_free_slot_points_at_prune(ctx):
@@ -1485,14 +1527,20 @@ def _test_releasing_a_free_slot_points_at_prune(ctx):
 
 def _test_pruning_a_leased_slot_points_at_release(ctx):
     """The other direction, and the dangerous one: pruning a slot somebody is
-    working in would take the checkout and the warm base with it. Ending the
-    lease is the reversible thing and almost always what was meant."""
+    working in would take the checkout and whatever Bazel state it has with it.
+    Ending the lease is the reversible thing and almost always what was meant.
+
+    What it must not do is call that state warm without having looked: a slot
+    nobody has built in has none, and overstating the stakes in a refusal
+    teaches a reader to discount its wording.
+    """
     registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", {})}}
 
     msg = testonly_slot_in_use(registry, "abc123abc123")
 
     _eq("names what it holds", "fix/login" in msg, True)
-    _eq("says what would be lost", "warm output base" in msg, True)
+    _eq("says what would be lost", "Bazel state" in msg, True)
+    _eq("without claiming it is warm", "warm" in msg, False)
     _eq("and names the reversible command", "aspect worktree release fix/login" in msg, True)
 
 def _test_pruning_a_slot_being_set_up_says_to_wait(ctx):
@@ -1541,7 +1589,7 @@ _UNIT_TESTS = [
     _test_pruning_a_leased_slot_points_at_release,
     _test_pruning_a_slot_being_set_up_says_to_wait,
     _test_a_leased_slots_old_branch_does_not_resolve,
-    _test_another_clones_slot_does_not_resolve,
+    _test_another_clones_slot_resolves_by_id_but_not_by_branch,
     _test_a_lease_with_no_agent_keeps_the_plain_refusal,
     _test_age_comes_from_the_base_and_falls_back_to_the_floor,
     _test_a_recently_used_base_outranks_an_old_creation_floor,
@@ -1581,6 +1629,7 @@ _UNIT_TESTS = [
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
     _test_the_sessions_block_speaks_for_the_slots_the_column_names,
+    _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
     _test_pools_on_disk_finds_a_pool_at_any_depth,
     _test_pools_on_disk_is_empty_before_any_pool_exists,
     _test_freeing_a_slot_with_no_lease_invents_no_branch,

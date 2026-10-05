@@ -64,6 +64,7 @@ load("./private/lib/duration.axl", "compact_ms", "phrase_ms")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/table.axl", "Column", "render", "tilde")
+load("./private/lib/text.axl", "pluralize")
 load(
     "./private/lib/worktree.axl",
     "FREE",
@@ -75,6 +76,7 @@ load(
     "acquire",
     "default_score",
     "drop_slot",
+    "drop_vanished_leases",
     "free_slot",
     "held_for_ms",
     "holds_reservation",
@@ -143,6 +145,30 @@ def _refuse(ctx: TaskContext, code: str, message: str, exit_code: int = 1, retry
         return TaskConclusion(exit_code = exit_code)
     return TaskConclusion(exit_code = exit_code, message = message)
 
+# Refs git would accept as a branch but nobody should own: `HEAD` resolves to
+# whatever is checked out, so a branch by that name makes every later `rev-parse`
+# ambiguous, and git itself warns rather than refusing.
+_RESERVED_BRANCHES = ["HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD"]
+
+def _bad_branch_name(ctx: TaskContext, name: str, why: str) -> TaskConclusion:
+    """A branch git will not create, said before git is asked.
+
+    Reaching `git worktree add` with one of these produced a traceback and no
+    `--output=json` document at all, which is the one shape an agent cannot
+    read.
+    """
+    shown = name if name else '""'
+    return _refuse(ctx, "invalid_branch", shown + " cannot be a branch name: " + why)
+
+def _no_such_ref(ctx: TaskContext, ref: str) -> TaskConclusion:
+    """A `--base-ref` this clone cannot resolve."""
+    return _refuse(
+        ctx,
+        "no_such_ref",
+        "--base-ref=" + ref + " is not a ref in this clone. Pass a branch, tag or commit that " +
+        "exists here — `git fetch` first if it is a remote branch this clone has not seen.",
+    )
+
 def _pool_busy(ctx: TaskContext) -> TaskConclusion:
     """The refusal when another call holds the pool lock."""
     return _refuse(ctx, "pool_busy", _POOL_BUSY, exit_code = _EX_TEMPFAIL, retryable = True)
@@ -201,6 +227,19 @@ def _pool(ctx: TaskContext) -> dict:
     every other, not a traceback.
     """
     return pool_of(ctx.std, ctx.std.env.current_dir())
+
+def _not_a_repository_for_list(ctx: TaskContext) -> TaskConclusion:
+    """`list` outside a clone, which `--all` answers from anywhere.
+
+    The bare refusal is right — a pool is keyed on a repository — but it was
+    withholding the one fact a reader could act on.
+    """
+    return _refuse(
+        ctx,
+        "not_a_repository",
+        "not inside a git repository, so there is no pool to list — " +
+        "`aspect worktree list --all` shows every pool on this machine from anywhere",
+    )
 
 def _not_a_repository(ctx: TaskContext) -> TaskConclusion:
     return _refuse(
@@ -283,17 +322,23 @@ def _resolve_slot(ctx: TaskContext, pool: dict, registry: dict, asked: str) -> s
     if found:
         return found
 
+    # A slot id first, and whichever clone owns it: the listing prints ids for
+    # every slot in the pool, so refusing to resolve one it just showed is a
+    # dead end. Whether the caller may act on it is the caller's question, and
+    # for a slot another live clone owns the answer is no.
+    if asked in registry["slots"]:
+        return asked
+
     for slot_id in registry["slots"]:
         slot = registry["slots"][slot_id]
         if slot.get("owner_git_dir", "") != owner:
             continue
-        if slot_id == asked:
-            return slot_id
 
         # A free slot's last branch is the only label the listing gives it, so
         # it resolves — but only while the slot is still free. On a leased slot
         # the lease name is the handle, and matching an earlier occupant's
-        # branch would act on somebody else's worktree.
+        # branch would act on somebody else's worktree. Branches are per clone,
+        # unlike ids, so this stays scoped to the one asking.
         if slot["state"] == FREE and slot.get("last_branch", "") == asked:
             return slot_id
     return ""
@@ -313,9 +358,11 @@ def _leased_names(pool: dict, registry: dict) -> list[str]:
 def _no_such_worktree(ctx: TaskContext, pool: dict, registry: dict, asked: str) -> TaskConclusion:
     leased = _leased_names(pool, registry)
     if leased:
-        detail = "this clone has " + ", ".join(leased) + " out"
+        detail = ("this clone has " + ", ".join(leased) + " out, and " +
+                  "`aspect worktree list` prints the slot ids")
     else:
-        detail = "this clone has nothing out; `aspect worktree add <branch>` takes a worktree"
+        detail = ("this clone has nothing out; `aspect worktree list` prints the slot ids, and " +
+                  "`aspect worktree add <branch>` takes a worktree")
     return _refuse(
         ctx,
         "no_such_worktree",
@@ -373,8 +420,45 @@ def _slot_in_use_message(registry: dict, slot_id: str) -> str:
     held = name or "a worktree this pool does not have a name for"
     advice = ("  aspect worktree release " + name) if name else "  aspect worktree list --verbose"
     return ("slot " + slot_id + " holds " + held + ", and pruning it would delete that " +
-            "checkout along with the slot's warm output base. To end the lease and keep " +
-            "the slot for the next `add`:\n\n" + advice)
+            "checkout along with whatever Bazel state the slot has built up. To end the " +
+            "lease and keep the slot for the next `add`:\n\n" + advice)
+
+def _owned_elsewhere(ctx: TaskContext, slot_id: str, owner: str) -> TaskConclusion:
+    """A slot another clone that still exists owns.
+
+    Its worktree is that clone's to manage, and deleting the slot would take a
+    checkout somebody may be working in. A slot whose owning clone is *gone* is
+    different — nothing can ever lease it again — and that one is collectable,
+    by name here and by the sweep unprompted.
+    """
+    return _refuse(
+        ctx,
+        "owned_elsewhere",
+        "slot " + slot_id + " belongs to another clone of this repository, at " + owner + ", " +
+        "which still exists — its worktree is that clone's to manage. Run this there, or let " +
+        "`aspect worktree prune` collect the slot once that clone is gone.",
+    )
+
+def _slot_still_warm(ctx: TaskContext, pool: dict, slot_id: str, pid: int, root: str) -> TaskConclusion:
+    """Why a named slot with a live Bazel server is not deleted.
+
+    Unlinking an output base from under a running server leaves it writing into
+    directories that are gone, so this is refused however it was asked for —
+    `--force` covers not having a terminal to confirm at, not overruling that.
+    Both ways out are named, because a refusal a caller cannot act on is only
+    half an answer: wait for Bazel's own idle timeout, or let `aspect gc` stop
+    the server and take the base, which is what it does for one named outright.
+    """
+    base = output_base_of(ctx.std, slot_path(pool, slot_id), root)
+    return _refuse(
+        ctx,
+        "slot_warm",
+        "slot " + slot_id + " still has a Bazel server running in it (pid " + str(pid) + "), and " +
+        "deleting its output base from under a live server would leave that server writing into " +
+        "directories that no longer exist. Wait for Bazel's own idle timeout, or stop it and take " +
+        "the base in one step:\n\n" +
+        "  aspect gc --bazel-output-base=" + base.rpartition("/")[2],
+    )
 
 def _slot_in_use(ctx: TaskContext, registry: dict, slot_id: str) -> TaskConclusion:
     return _refuse(ctx, "slot_in_use", _slot_in_use_message(registry, slot_id))
@@ -457,12 +541,17 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
     # can be established about the session.
     lines = [held]
     hint = resume_hint(agent)
+    tail = ""
     if hint and state == RESUMABLE:
-        lines.append("Resume that session: " + hint)
+        # On its own line: a session id is long, and run into the next sentence
+        # a reader cannot see where it ends — nor can a copy-paste.
+        tail = "\n\n  " + hint + "\n"
     lines.append("To claim the slot for this session instead, keeping the checkout as it is: " +
                  "`aspect worktree add " + name + " --take-over`.")
     if state == RUNNING:
         lines.append("That session is still running, so check with whoever is driving it first.")
+    if tail:
+        return lines[0] + " Resume that session:" + tail + "\n" + " ".join(lines[1:])
     return " ".join(lines)
 
 def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: str) -> None:
@@ -834,7 +923,7 @@ def _history_rows(history: list) -> list[dict]:
         rows.append({
             "branch": entry.get("name", "?"),
             "agent": label(entry.get("agent") or {}),
-            "held": phrase_ms(held_for_ms(entry)),
+            "held": compact_ms(held_for_ms(entry)),
             "when": "still holding it" if not released else "ended %s ago" % phrase_ms(time.now_ms() - released),
         })
     return rows
@@ -893,10 +982,14 @@ def _warmth_note(std, path: str, reused_from: str, root: str) -> str:
     without looking would be a lie often enough to matter.
     """
     warmth = warmth_of(std, path, root)
+
+    # Which branch the state belongs to is the signal for how much of it
+    # applies, so it is said wherever there is state to describe.
+    last = (", last used for " + reused_from) if reused_from else ""
     if warmth.server:
-        return "warm: a Bazel server is still holding this slot's analysis cache (pid %d)" % warmth.server
+        return ("warm: a Bazel server is still holding this slot's analysis cache (pid %d)" %
+                warmth.server) + last
     if warmth.base:
-        last = (", last used for " + reused_from) if reused_from else ""
         return "partly warm: no server, but this slot's `external/` tree is already materialized" + last
     return "cold: this slot has no Bazel state yet, so the first build pays for it"
 
@@ -966,8 +1059,25 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not pool:
         return _not_a_repository(ctx)
 
+    # Before the lock, a slot, or git: these are answerable from the name and a
+    # ref lookup, and reaching `git worktree add` with either wrong produced a
+    # traceback instead of a refusal.
+    if not name.strip():
+        return _bad_branch_name(ctx, name, "it is empty")
+    if name in _RESERVED_BRANCHES:
+        return _bad_branch_name(ctx, name, "git reserves it, and a branch by that name makes " +
+                                           "every later reference to it ambiguous")
+    if not run_git(ctx.std, ["check-ref-format", "--branch", name], pool["git_common_dir"]).ok:
+        return _bad_branch_name(ctx, name, "git rejects it — see `git help check-ref-format`")
+
     root = _output_root(ctx)
     base_ref = ctx.args.base_ref or _git(ctx, ["rev-parse", "HEAD"], cwd)
+    if ctx.args.base_ref and not _git_try(
+        ctx,
+        ["rev-parse", "--verify", "--quiet", base_ref],
+        pool["git_common_dir"],
+    ):
+        return _no_such_ref(ctx, base_ref)
 
     # Score against the tree the slot will hold, not the caller's own: an
     # existing branch is checked out as itself and `--base-ref` ignored, so
@@ -1162,11 +1272,15 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Named a slot, or working by policy. Naming one says which, so age is not
     # consulted — the argument is the decision.
     eligible = []
+    named = len(ctx.args.target) > 0
     if ctx.args.target:
         asked = ctx.args.target[0]
         found = _resolve_slot(ctx, pool, registry, asked)
         if not found:
             return _no_such_worktree(ctx, pool, registry, asked)
+        held_by = registry["slots"][found].get("owner_git_dir", "")
+        if held_by and held_by != pool["git_common_dir"] and ctx.std.fs.exists(held_by):
+            return _owned_elsewhere(ctx, found, held_by)
         if registry["slots"][found]["state"] != FREE:
             return _slot_in_use(ctx, registry, found)
         eligible = [found]
@@ -1182,6 +1296,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     for slot_id in eligible:
         warmth = warmth_of(ctx.std, slot_path(pool, slot_id), root)
         if warmth.server:
+            # Naming a slot is a decision, so it gets a decision back. Sparing
+            # it silently and exiting 0 told a script the work was done.
+            if named:
+                return _slot_still_warm(ctx, pool, slot_id, warmth.server, root)
             spared.append((
                 slot_path(pool, slot_id),
                 "a Bazel server (pid %d) still holds it" % warmth.server,
@@ -1193,7 +1311,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     # answered with the picture rather than a count.
     candidates = []
     if victims:
-        info(ctx.std, "%d slot(s) can be reclaimed:" % len(victims))
+        info(ctx.std, pluralize(len(victims), "slot") + " can be reclaimed:")
     for slot_id in victims:
         slot = registry["slots"][slot_id]
         label = slot.get("last_branch", "") or "never used"
@@ -1207,7 +1325,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         })
         print("    %s  %s  %s" % (slot_path(pool, slot_id), why, label))
 
-    doomed = "delete %d worktree slot(s) and their Bazel output bases" % len(victims)
+    doomed = "delete " + pluralize(len(victims), "worktree slot") + " and their Bazel output bases"
     verdict = confirm.decide(
         has_work = len(victims) > 0,
         dry_run = ctx.args.dry_run,
@@ -1216,7 +1334,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     )
     if verdict == confirm.NEEDS_FORCE:
         return _refuse(ctx, "needs_force", confirm.needs_force_message(doomed))
-    question = "Delete %d worktree slot(s) and their Bazel output bases?" % len(victims)
+    question = "Delete " + pluralize(len(victims), "worktree slot") + " and their Bazel output bases?"
 
     # Declining is an outcome like any other, and reported like one: returning
     # early here left `--output=json` with no document at all.
@@ -1268,14 +1386,14 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             info(ctx.std, "nothing to prune: no free slot has been idle for %d days, and none is empty" %
                           ctx.args.max_idle_days)
     elif not victims:
-        info(ctx.std, "nothing to prune: every slot idle for %d days is still held by a Bazel server" %
-                      ctx.args.max_idle_days)
+        info(ctx.std, "nothing to prune: every free slot that has been idle for %d days still has a " %
+                      ctx.args.max_idle_days + "Bazel server running in it")
     elif declined:
         info(ctx.std, "left alone; nothing was deleted")
     elif verdict == confirm.SKIP:
         info(ctx.std, "dry run; nothing was deleted")
     else:
-        info(ctx.std, "pruned %d slot(s)" % len(pruned))
+        info(ctx.std, "pruned " + pluralize(len(pruned), "slot"))
     return 0
 
 def _pools_on_disk(std) -> list[dict]:
@@ -1298,6 +1416,10 @@ def _pool_rows(ctx: TaskContext, pool: dict, root: str, ask_git: bool) -> list[d
     registry = read_registry(ctx.std, pool["dir"])
     if ask_git:
         registry = reconcile(ctx.std, pool, registry)
+    else:
+        # Git answers for one object store, but a missing directory does not
+        # need asking: a lease on a checkout that is gone is over either way.
+        registry = drop_vanished_leases(ctx.std, pool, registry)
     checked_out = _checked_out_branches(ctx, pool) if ask_git else {}
     rows = []
     for slot_id in registry["slots"]:
@@ -1325,10 +1447,12 @@ def _pool_rows(ctx: TaskContext, pool: dict, root: str, ask_git: bool) -> list[d
             "reservation_abandoned": (
                 slot["state"] == RESERVED and reservation_abandoned(ctx.std, registry, slot_id)
             ),
-            # What git has, which is the authority where it can be asked;
-            # `name` is only what `add` recorded and `path`/`release` look up by.
-            # Without git, the record is all there is.
-            "branch": checked_out.get(path, "") if ask_git else lease.get("name", ""),
+            # What git has where it could be asked, and the record otherwise —
+            # the same value the table shows, so a consumer reading the obvious
+            # field is not told a slot has no branch while a reader can see one.
+            # `name` stays beside it as what `path` and `release` look up by.
+            "branch": checked_out.get(path, "") or lease.get("name", ""),
+            "branch_verified": ask_git and path in checked_out,
             "agent": agent,
             "session_state": session_state(ctx.std, agent) if agent else "",
             # The project directory the harness filed the session under, where
@@ -1455,7 +1579,7 @@ def _render_pool(ctx: TaskContext, pool: dict, rows: list, home: str) -> None:
 
             print("    leases:      %s, slot created %s ago" % (
                 _unit(str, r["lease_count"]),
-                _unit(phrase_ms, r["age_ms"]),
+                _unit(compact_ms, r["age_ms"]),
             ))
             for line in render(_history_rows(r["history"]), _HISTORY_COLUMNS):
                 print("    " + line)
@@ -1507,7 +1631,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     elif here:
         pools = [here]
     else:
-        return _not_a_repository(ctx)
+        return _not_a_repository_for_list(ctx)
 
     mine = here["id"] if here else ""
     listings = []
@@ -1540,7 +1664,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not [rows for _, rows in listings if rows]:
         # The only question an empty pool raises is where its slots would go.
         where = tilde(listings[0][0]["dir"], home) if listings else tilde(pools_root(ctx.std), home)
-        print("no slots yet in " + where)
+        print("no slots in " + where)
         print("")
         print("  aspect worktree add <branch>")
         return 0
@@ -1570,7 +1694,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     if ctx.args.all:
         print("")
         print("  warmth read under " + tilde(root, home))
-        print("  branches for pools this clone does not own come from their records, not from git")
+        if [pool for pool, rows in listings if rows and pool["id"] != mine]:
+            print("  a pool this clone does not own is read from its records: a slot still on " +
+                  "disk reads as its records left it, so a lease there may have ended already")
 
     print("")
     print("  For more details run: aspect worktree list --help")

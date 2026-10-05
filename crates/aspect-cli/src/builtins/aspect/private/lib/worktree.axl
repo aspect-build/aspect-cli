@@ -669,6 +669,25 @@ def _is_our_worktree(std, pool: dict, path: str) -> bool:
     common = git_out(std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], path)
     return common != "" and common == pool["git_common_dir"]
 
+def drop_vanished_leases(std, pool: dict, registry: dict) -> dict:
+    """Free every leased slot whose directory is gone. Mutates `registry`.
+
+    The half of `reconcile` that needs no git, so it can be applied to a pool
+    whose clone is not here to ask. A lease is a claim on a checkout, and a
+    directory that does not exist holds nobody's work — no list, and no record,
+    outranks that.
+
+    Ownership is not consulted for the same reason: this is a fact about the
+    filesystem rather than about an object store, and it is as true of another
+    clone's slot as of this one's. What it cannot judge is a directory that is
+    still there, which is where git is the authority and `reconcile` takes over.
+    """
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] == LEASED and not std.fs.exists(slot_path(pool, slot_id)):
+            mark_free(registry, slot_id)
+    return registry
+
 def reconcile(std, pool: dict, registry: dict) -> dict:
     """Bring `registry` back in line with git, in place, in both directions.
 
@@ -693,6 +712,7 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
     exist *yet*, so git's silence about it is expected rather than evidence, and
     `reservation_abandoned` is what judges those.
     """
+    drop_vanished_leases(std, pool, registry)
     live = _live_worktrees(std, pool["git_common_dir"])
     slots = registry["slots"]
 
@@ -703,7 +723,7 @@ def reconcile(std, pool: dict, registry: dict) -> dict:
         if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
         path = slot_path(pool, slot_id)
-        if std.fs.exists(path) and (path in live or _is_our_worktree(std, pool, path)):
+        if path in live or _is_our_worktree(std, pool, path):
             continue
         mark_free(registry, slot_id)
 

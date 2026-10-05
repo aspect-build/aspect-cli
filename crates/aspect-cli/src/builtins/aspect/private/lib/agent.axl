@@ -367,8 +367,11 @@ def session_project(std, agent: dict) -> str:
     when the session really is filed under the directory that `cwd` flattens to.
 
     Where they disagree — a task run from somewhere other than where the harness
-    started — the store's own directory name is returned instead. It is not a
-    path, but it is true, and it is what the harness's own session list shows.
+    started, which is the ordinary case for an agent handed a worktree — there
+    is no answer, and "" is it. The store's own directory is not a substitute:
+    it is where a transcript is filed, not a directory anyone can enter, and a
+    caller shows this to someone who may try to `cd` into it or hand it to
+    `--resume`. A plausible path that is wrong is worse than no path.
     """
     if not agent:
         return ""
@@ -386,9 +389,8 @@ def session_project(std, agent: dict) -> str:
     if not found:
         return ""
     cwd = agent.get("cwd", "")
-    if cwd and found.rpartition("/")[2] == _flatten(cwd, harness.store.project_flattens):
-        return cwd
-    return found
+    confirmed = cwd and found.rpartition("/")[2] == _flatten(cwd, harness.store.project_flattens)
+    return cwd if confirmed else ""
 
 def session_state(std, agent: dict) -> str:
     """Whether this lease's session is running, resumable, or really gone.
