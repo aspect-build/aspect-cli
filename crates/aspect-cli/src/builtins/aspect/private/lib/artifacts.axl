@@ -44,6 +44,7 @@ load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
 load("./environment.axl", "detect_ci", "info", "warn")
 load("./github.axl", "github")
+load("./report.axl", "REPORT_ARTIFACT_KIND", "REPORT_ARTIFACT_NAME", "build_report")
 load("./tar.axl", "tar_create", "zip_create")
 
 # Public types
@@ -165,6 +166,28 @@ def _upload(ctx, kind, name, content):
     ctx.std.fs.remove_file(tmppath)
     return url
 
+def _upload_report(ctx, data, status, command = "", targets = None, aspect_url = ""):
+    """Encode and upload the structured task report, returning its URL or "".
+
+    Call this before the task's terminal `phases.Update`: the rendered body links
+    the artifact by looking it up in this registry, so a later upload would not
+    appear in the check it describes.
+
+    Pretty-printed — the file is shallow, a person opening it should not have to
+    reformat it first, and the extra bytes are immaterial next to a test log.
+    """
+    return _upload(ctx, REPORT_ARTIFACT_KIND, REPORT_ARTIFACT_NAME, json.encode(
+        build_report(
+            data,
+            status,
+            command = command,
+            targets = targets,
+            aspect_url = aspect_url,
+            task = {"id": ctx.task.id, "name": ctx.task.name, "kind": ctx.task.kind},
+        ),
+        indent = 2,
+    ))
+
 # Public wrapper struct — the only symbol consumers should reach for
 
 artifacts = struct(
@@ -174,6 +197,9 @@ artifacts = struct(
     # on failure / when the CI host has no stable URL).
     upload = _upload,  # (ctx, kind, name, content) -> str
     upload_file = _upload_file,  # (ctx, kind, name, path)    -> str
+
+    # Encode + upload the structured task report. See `_upload_report`.
+    upload_report = _upload_report,  # (ctx, data, status, …)  -> str
 
     # Register a known URL without uploading — only when bypassing the
     # standard CI upload path (e.g. a custom uploader).

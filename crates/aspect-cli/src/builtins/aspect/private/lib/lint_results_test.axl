@@ -22,19 +22,23 @@ Annotation scenarios:
   D. annotations-shape   — exercises severity → annotation_level mapping
 """
 
+load("./check_dispatch.axl", "resolve_templates")
 load(
     "./lint_results.axl",
     "ANNOTATIONS_PER_BATCH",
     "DEFAULT_MAX_ANNOTATIONS",
     "accumulate",
     "chunk_annotations",
+    "clean_linters",
     "compute_annotations",
     "detect_lint_tool",
     "init_data",
     "lint_annotation_plan",
     "linter_rows",
+    "linter_summaries",
     "render_check_output",
 )
+load("./template_presets.axl", "template_presets")
 
 # ─── Fake-data builders ───────────────────────────────────────────────────────
 
@@ -645,7 +649,7 @@ def _annotation_scenarios(ctx):
         fail("expected message fallback to rule_id when message empty, got %r" % anns[2]["message"])
     print("")
 
-def _test_impl(ctx):
+def _render_all(ctx, templates = None):
     """Render each scenario and print TITLE + SUMMARY + first 4000 chars of DETAILS."""
 
     scenarios = [
@@ -667,7 +671,8 @@ def _test_impl(ctx):
     for (label, data, status, targets, with_artifact, ci, metadata_keys) in scenarios:
         rc = _render_ctx(subject = targets)
         lk = _links(with_artifact = with_artifact, ci = ci)
-        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        t = resolve_templates(templates, "lint", renderer_kind = "lint_results") if templates else None
+        out = render_check_output(ctx, data, status, rc, lk, templates = t, metadata_keys = metadata_keys)
         print(sep)
         print("SCENARIO: " + label)
         print(sep)
@@ -780,11 +785,25 @@ def _check_fix_renders_before_reproduce(ctx):
     if fix_at > repro_at:
         fail("Fix block must render before Reproduce (fix@%d, repro@%d)" % (fix_at, repro_at))
 
+def _test_impl(ctx):
+    return _render_all(ctx)
+
+def _default_preset_impl(ctx):
+    return _render_all(ctx, templates = template_presets.templates(template_presets.DEFAULT))
+
 lint_template_snapshot_tests = task(
     summary = "Run the lint template snapshots AXL unit tests.",
     kind = "test-lint-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+lint_default_preset_snapshot_tests = task(
+    summary = "Render the lint template snapshots through the default preset.",
+    kind = "test-lint-default-preset-snapshots",
+    group = ["dev"],
+    implementation = _default_preset_impl,
     args = {},
 )
 
@@ -866,14 +885,58 @@ lint_annotation_plan_tests = task(
 
 # ─── linter_rows (tools_run integration) ──────────────────────────────────────
 
+def _test_linter_summaries_busiest_first_and_plural(ctx):
+    """Order is by volume so the linter a reader should look at is first, and
+    each count carries its own singular/plural."""
+    got = linter_summaries({"lint": {
+        "diagnostics": [
+            {"tool": "eslint", "severity": "error", "file": "a.ts", "line": 1},
+            {"tool": "eslint", "severity": "error", "file": "b.ts", "line": 2},
+            {"tool": "eslint", "severity": "warning", "file": "c.ts", "line": 3},
+            {"tool": "pylint", "severity": "info", "file": "d.py", "line": 4},
+        ],
+        "suggestions": [],
+        "tools_run": [],
+    }})
+    _eq("busiest first", [r["tool"] for r in got], ["eslint", "pylint"])
+    _eq("plural and singular", got[0]["summary"], "2 errors · 1 warning")
+    _eq("single info", got[1]["summary"], "1 info")
+
+def _test_linter_summaries_counts_fixes_alone(ctx):
+    got = linter_summaries({"lint": {
+        "diagnostics": [],
+        "suggestions": [{"tool": "ruff", "file": "a.py", "line": 1}],
+        "tools_run": [],
+    }})
+    _eq("a fix-only linter still appears", got, [{"tool": "ruff", "summary": "1 auto-fix"}])
+
+def _test_linter_summaries_excludes_clean_linters(ctx):
+    """A linter with nothing to report belongs in `clean_linters`, not in the
+    findings list with zero counts."""
+    data = {"lint": {
+        "diagnostics": [{"tool": "eslint", "severity": "error", "file": "a.ts", "line": 1}],
+        "suggestions": [],
+        "tools_run": ["ShellCheck", "stylelint", "eslint"],
+    }}
+    _eq("only linters with findings", [r["tool"] for r in linter_summaries(data)], ["eslint"])
+    _eq("the rest are named as clean", clean_linters(data), ["ShellCheck", "stylelint"])
+
+def _test_clean_linters_empty_when_everything_reported(ctx):
+    data = {"lint": {
+        "diagnostics": [{"tool": "eslint", "severity": "error", "file": "a.ts", "line": 1}],
+        "suggestions": [],
+        "tools_run": ["eslint"],
+    }}
+    _eq("nothing clean", clean_linters(data), [])
+
 def _test_linter_rows(ctx):
-    """Verify the shared row builder consumed by `_linters_chart` and
-    the rendered section header. Covers the three sources of truth
+    """Verify the shared row builder consumed by `linter_summaries`,
+    `clean_linters` and the rendered section header. Covers the three sources of truth
     (diagnostics, suggestions, tools_run) and the case-insensitive
     dedupe between BES file-name markers and SARIF driver names."""
 
-    # 1. tools_run alone — clean linters get zero rows so the chart
-    #    can list every linter that fired, not just the noisy ones.
+    # 1. tools_run alone — clean linters get zero rows so the section can
+    #    name every linter that fired, not just the noisy ones.
     rows = linter_rows({"lint": {
         "diagnostics": [],
         "suggestions": [],
@@ -916,7 +979,7 @@ def _test_linter_rows(ctx):
 
     # 5. Header count matches the rendered chart's row count. Renders
     #    end-to-end and asserts the "🧹 Linters (N)" header agrees
-    #    with the linter_rows snapshot used by `_linters_chart`.
+    #    with the linter_rows snapshot the Linters section renders from.
     data = _make_base()
     accumulate(data, [{"tool": "eslint", "file": "a.ts", "line": 1, "rule_id": "x", "severity": "error", "message": "m"}])
     data["lint"]["tools_run"] = ["ESLint", "ShellCheck", "yamllint"]
@@ -928,7 +991,12 @@ def _test_linter_rows(ctx):
     if header not in out["text"]:
         fail("header / chart disagree: expected %r in rendered details" % header)
 
-    print("lint_results.axl::linter_rows: all cases OK")
+    _test_linter_summaries_busiest_first_and_plural(ctx)
+    _test_linter_summaries_counts_fixes_alone(ctx)
+    _test_linter_summaries_excludes_clean_linters(ctx)
+    _test_clean_linters_empty_when_everything_reported(ctx)
+
+    print("lint_results.axl::linter_rows + Linters section: all cases OK")
     return 0
 
 linter_rows_tests = task(

@@ -1,0 +1,241 @@
+"""Structured task report, uploaded as a CI artifact.
+
+The status surfaces show a developer the verdict, the failures and the commands.
+Everything else this process collects — per-action counts, cache statistics,
+workspace status, build metadata, per-target results — is published here.
+
+The consumer is a coding agent, not a person, so the shape differs from the
+templates on purpose:
+
+  - raw integers and milliseconds, never a pre-formatted "2.2s" or "12%";
+  - uncapped lists, where the surfaces cap to fit a body size limit;
+  - local paths to logs beside their URLs, so an agent on the runner can open a
+    test log without downloading anything;
+  - `snake_case` keys and no emoji;
+  - an explicit `truncation` record, so a consumer can tell a complete picture
+    from a partial one.
+
+Numbers carry their derivation where it is not obvious. `actions.cached` is
+`created - executed` over an analysis-time denominator that collapses on an
+incremental build, so it ships with `cached_derivation` naming that rather than
+as a cache hit rate. `tests.cached_targets` counts test *targets* with at least
+one cached run (BES sets `total_num_cached` per target), not cached test runs.
+
+**The resolved command line is deliberately absent.** `options_parsed`,
+`cmd_line` and `startup_options` carry credentials in flag values, and the
+redaction that makes them safe to render lives in the renderer. The repro
+commands supersede them for every use an agent has, so this file omits them
+rather than duplicating a redaction pass that could drift out of step.
+
+This module loads nothing: it is imported by the results handle, so an import
+back into `bazel_results.axl` would be a cycle.
+
+Nothing here is rendered, so adding a field is always safe; renaming one is not.
+`schema_version` is the contract.
+"""
+
+SCHEMA_VERSION = 1
+
+# The name the artifact is uploaded under, and the registry kind the Download
+# row looks it up by (see `bazel_results.build_details_data`).
+REPORT_ARTIFACT_KIND = "report"
+REPORT_ARTIFACT_NAME = "aspect-report.json"
+
+def _rows(rows):
+    """Copy BES-derived row dicts, dropping render-only alignment helpers."""
+    out = []
+    for r in rows or []:
+        out.append({k: v for k, v in r.items() if not k.startswith("aligned_")})
+    return out
+
+def _commands(cmds):
+    """Flatten `ReproFixCommand` records, keeping `target` — the per-failure
+    correlation key the renderers strip before display."""
+    out = []
+    for c in cmds or []:
+        out.append({
+            "command": c.command,
+            "description": c.description,
+            "slug": c.slug,
+            "target": c.target,
+        })
+    return out
+
+def _attempts(attempts):
+    """Per-attempt snapshots. Only the attempt number, outcome and URL reach a
+    template today."""
+    out = []
+    for a in attempts or []:
+        out.append({
+            "attempt": a.get("attempt", 0),
+            "exit_code": a.get("exit_code", 0),
+            "sink_invocation_id": a.get("sink_invocation_id", ""),
+            "outcome": a.get("outcome", ""),
+        })
+    return out
+
+def build_report(data, status, command = "", targets = None, aspect_url = "", task = None):
+    """Build the JSON-able report dict for a bazel build/test task.
+
+    Args:
+      data:       the accumulated dict from `bazel_results.init_data()`.
+      status:     terminal task status ("passed" | "failed" | "warning" | …).
+      command:    bazel subcommand ("build" | "test").
+      targets:    the task's target patterns.
+      aspect_url: resolved Aspect Build Results URL, or "" when unavailable.
+      task:       optional {id, name, kind} describing the task.
+
+    Returns a dict of plain scalars, lists and dicts — `json.encode`-able as is.
+
+    Every built-in task kind is covered by one shape: the bazel sections are
+    populated for whatever bazel invocation the task ran (empty when it ran
+    none), and the task's own bucket — `lint`, `format`, `gazelle`, `delivery` or
+    `warming` — is carried through as that renderer defines it.
+    """
+    bz = data.get("bazel", {}) or {}
+    task = task or {}
+
+    test_total = ((bz.get("passed_test_total", 0) or 0) +
+                  (bz.get("failed_test_total", 0) or 0) +
+                  (bz.get("flaky_test_total", 0) or 0))
+
+    built = _rows(bz.get("built_targets", []))
+    skipped = _rows(bz.get("skipped_targets", []))
+    failed_actions = _rows(bz.get("failed_actions", []))
+    passed_tests = _rows(bz.get("passed_tests", []))
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task": {
+            "id": task.get("id", ""),
+            "name": task.get("name", ""),
+            "kind": task.get("kind", ""),
+            "command": command,
+            "targets": list(targets or []),
+            "target_pattern": bz.get("target_pattern", ""),
+            "status": status,
+            "aborted": bz.get("aborted", False),
+            "abort_reason": bz.get("abort_reason", ""),
+            "abort_description": bz.get("abort_description", ""),
+        },
+        "invocation": {
+            "sink_invocation_id": data.get("sink_invocation_id", ""),
+            "bazel_invocation_id": bz.get("invocation_id", ""),
+            "bes_streamed_by_bazel": data.get("bes_streamed_by_bazel", False),
+            "aspect_url": aspect_url,
+            "bes_results_url": data.get("bes_results_url", ""),
+            "build_tool_version": bz.get("build_tool_version", ""),
+            "build_command": bz.get("build_command", ""),
+            "cpu_arch": bz.get("cpu_arch", ""),
+            "compilation_mode": bz.get("compilation_mode", ""),
+            "workspace_directory": bz.get("workspace_directory", ""),
+            "working_directory": bz.get("working_directory", ""),
+            "server_pid": bz.get("server_pid", ""),
+        },
+
+        # Uncapped where the surfaces cap. `failed_actions[].stderr_path` and
+        # `test_details[].log_path` / `.xml_path` are collected today and reach
+        # no template — for an agent on the runner they are the highest-value
+        # fields in the file.
+        "failures": {
+            "failed_actions": failed_actions,
+            "failed_actions_total": bz.get("failed_actions_total", 0),
+            "failed_action_labels": list(bz.get("failed_action_labels", []) or []),
+            "failed_targets": _rows(bz.get("failed_targets", [])),
+            "failed_tests": _rows(bz.get("failed_tests", [])),
+            "flaky_tests": _rows(bz.get("flaky_tests", [])),
+        },
+        "targets": {
+            "total": bz.get("targets_total", 0),
+            "configured": bz.get("targets_configured", 0),
+            "configured_counted": bz.get("targets_configured_counted", 0),
+            "configured_not_including_aspects": bz.get("targets_configured_not_including_aspects", 0),
+            "test_targets_configured": bz.get("test_targets_configured", 0),
+            "kinds": bz.get("target_kinds", {}) or {},
+            "built": built,
+            # Collected per skipped target and never rendered; "your test did
+            # not run because of target_compatible_with" is a frequent question.
+            "skipped": skipped,
+            "skipped_total": bz.get("skipped_targets_total", 0),
+        },
+        "tests": {
+            "total": test_total,
+            "passed": bz.get("passed_test_total", 0),
+            "failed": bz.get("failed_test_total", 0),
+            "flaky": bz.get("flaky_test_total", 0),
+            "cached_targets": bz.get("cached_test_total", 0),
+            "cached_targets_derivation": "test targets with TestSummary.total_num_cached > 0",
+            "executed_targets": bz.get("executed_test_total", 0),
+            "executed_duration_ms": bz.get("executed_duration_ms", 0),
+            "cached_duration_ms": bz.get("cached_duration_ms", 0),
+            "passed_targets": passed_tests,
+            "details": bz.get("test_details", {}) or {},
+        },
+        "actions": {
+            "created": bz.get("actions_total", 0),
+            "executed": bz.get("actions_executed", 0),
+            "cached": bz.get("actions_cached", 0),
+            # Named so a consumer does not read this as a remote cache hit rate:
+            # `actions_created` is an analysis-time count that collapses on an
+            # incremental build, which is exactly when the ratio misleads.
+            "cached_derivation": "actions_created - actions_executed",
+            "by_mnemonic": bz.get("action_mnemonics", {}) or {},
+            "by_runner": bz.get("runner_counts", {}) or {},
+            # Local disk action cache only — named so it is not read as the
+            # combined local+remote figure.
+            "local_action_cache": bz.get("action_cache_stats", {}) or {},
+        },
+        "timing": {
+            "start_time_ms": bz.get("start_time_ms", 0),
+            "finish_time_ms": bz.get("finish_time_ms", 0),
+            "wall_time_ms": bz.get("wall_time_ms", 0),
+            "cpu_time_ms": bz.get("cpu_time_ms", 0),
+            # Cumulative across threads, so not comparable with wall time. The
+            # surfaces rendered these as siblings of elapsed and contradicted
+            # themselves; here the arithmetic is the consumer's to do.
+            "analysis_phase_time_ms": bz.get("analysis_phase_time_ms", 0),
+            "execution_phase_time_ms": bz.get("execution_phase_time_ms", 0),
+            "critical_path_ms": bz.get("critical_path_ms", 0),
+        },
+        "graph": {
+            "packages_loaded": bz.get("packages_loaded", 0),
+            # Analysis-cache age: collected today, rendered nowhere, and the
+            # direct answer to "why was this slow on a warm runner".
+            "num_analyses": bz.get("num_analyses", 0),
+            "num_builds": bz.get("num_builds", 0),
+        },
+        "metadata": {
+            "build_metadata": bz.get("metadata", {}) or {},
+            "workspace_status": bz.get("workspace_status", {}) or {},
+        },
+        "commands": {
+            "repro": _commands(data.get("repro_commands")),
+            "fix": _commands(data.get("fix_commands")),
+        },
+        "attempts": _attempts(data.get("bazel_attempts")),
+
+        # Whichever kind bucket this task owns, verbatim. Each non-bazel
+        # renderer layers exactly one onto `bazel_results.init_data()`, so at
+        # most one is present and its shape is that renderer's own contract.
+        "lint": data.get("lint", {}) or {},
+        "format": data.get("format", {}) or {},
+        "gazelle": data.get("gazelle", {}) or {},
+        "delivery": data.get("delivery", {}) or {},
+        "warming": data.get("warming", {}) or {},
+
+        # Which lists a cap shortened. A consumer comparing a list length with
+        # its total would otherwise have to know each cap to tell "none more
+        # exist" from "the rest were dropped".
+        "truncation": {
+            "built_targets_dropped": _dropped(bz.get("targets_total", 0), len(built)),
+            "skipped_targets_dropped": _dropped(bz.get("skipped_targets_total", 0), len(skipped)),
+            "passed_tests_dropped": _dropped(bz.get("passed_test_total", 0), len(passed_tests)),
+            "failed_actions_dropped": _dropped(bz.get("failed_actions_total", 0), len(failed_actions)),
+        },
+    }
+
+def _dropped(total, shown):
+    """Rows a cap removed, floored at 0 — several totals are aggregates that can
+    sit below a sample taken from a different event stream."""
+    n = (total or 0) - shown
+    return n if n > 0 else 0

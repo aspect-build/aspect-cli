@@ -358,7 +358,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             initial_links,
-            resolve_templates(templates, ctx.task.kind, base = preset_templates),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates, renderer_kind = initial_kind),
             metadata_keys,
         )
         (initial_state, initial_desc) = _decide(ctx, "running", False, "pending", initial_output)
@@ -433,7 +433,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             status,
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             links,
-            resolve_templates(templates, ctx.task.kind, base = preset_templates),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates, renderer_kind = update.kind),
             metadata_keys,
         )
 

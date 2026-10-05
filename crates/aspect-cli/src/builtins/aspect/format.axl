@@ -272,6 +272,9 @@ def _emit_final(ph, exit_code):
         },
     )
 
+    # Before the dispatch: the body links this artifact out of the registry.
+    artifacts.upload_report(ctx, data, status)
+
     ph.dispatch(phases.Update(
         kind = "format_results",
         status = status,

@@ -57,6 +57,7 @@ load(
 load("./lifecycle.axl", "Phases", "phases")
 load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet", "has_snippet")
 load("./path_glob.axl", "match_path")
+load("./report.axl", "REPORT_ARTIFACT_KIND")
 load(
     "./repro_commands.axl",
     "ASPECT_CLI_INSTALL_HINT_MARKDOWN",
@@ -1004,6 +1005,11 @@ def resolve_aspect_url(links, data):
         return ""
     return join_url(base, inv_id)
 
+def effective_aspect_url(links, data):
+    """The Aspect UI link for this invocation: the one the feature supplied, else
+    resolved from the invocation ids. "" when neither is available."""
+    return (links.get("aspect_url", "") if links else "") or resolve_aspect_url(links, data)
+
 def aspect_web_ui_url(env: std.Env, data: dict) -> str:
     """Aspect Web UI invocation URL, or "" when unavailable. Joins
     `ASPECT_WORKFLOWS_BES_RESULTS_URL` (`env`=`ctx.std.env`) with
@@ -1230,23 +1236,30 @@ TITLE_TEMPLATE = (
     "{% if state %}{% if icon or task_kind or subject %} · {% endif %}{{ state }}{% endif %}"
 )
 
-def title_vars(status, state, target_pattern = "", task_kind = ""):
+def title_vars(status, state, target_pattern = "", task_kind = "", state_detail = ""):
     """Template variables for a `title` override.
 
     `state` is the per-kind verdict clause the renderer computed (e.g. "Passed",
     "3 errors, 8 warnings", "Running..."); the rest mirror what the built-in
     layout uses. `subject` is pre-truncated to `SUBJECT_TITLE_MAX` so a long
     target pattern can't blow the title cap on its own.
+
+    `state_detail` is the count-complete alternative, set only where `state`
+    names one bucket out of several that applied — in practice just build/test,
+    whose `compute_invocation_state` picks by priority. Every other kind already
+    counts everything it found, so it leaves this empty and a template reading
+    `state_detail or state` gets the right clause for all of them.
     """
     return {
         "icon": emoji_for_status(status),
         "task_kind": task_kind,
         "subject": truncate_for_title(target_pattern, SUBJECT_TITLE_MAX) if target_pattern else "",
         "state": state,
+        "state_detail": state_detail,
         "status": status,
     }
 
-def compose_title(ctx, template, status, state, target_pattern = "", task_kind = ""):
+def compose_title(ctx, template, status, state, target_pattern = "", task_kind = "", state_detail = ""):
     """Render a check-run / annotation title, honoring a `title` override.
 
     Never returns "". A title is the one field every surface needs — GitHub's
@@ -1265,7 +1278,7 @@ def compose_title(ctx, template, status, state, target_pattern = "", task_kind =
     Truncated to `_TITLE_MAX_LEN` after rendering: an override that ignores the
     caps still can't produce a title GitHub would reject.
     """
-    data = title_vars(status, state, target_pattern = target_pattern, task_kind = task_kind)
+    data = title_vars(status, state, target_pattern = target_pattern, task_kind = task_kind, state_detail = state_detail)
     text = render_title_or_fallback(ctx, template or TITLE_TEMPLATE, data).strip()
     if not text:
         if template:
@@ -1671,11 +1684,22 @@ _TT_HDR_DURATION = "Duration"
 # a `...` suffix (the 3 dots included) so <pre> columns stay readable.
 _LABEL_MAX_LEN = 90
 
-def _truncate_label(s):
-    """Cap a target label at _LABEL_MAX_LEN with a `...` suffix when longer."""
+_LABEL_MIN_HEAD_LEN = 20
+
+def truncate_label(s):
+    """Cap a target label at _LABEL_MAX_LEN, eliding the middle.
+
+    The `:target` suffix is what separates one failing rule in a package from
+    the next, so it is kept and the package path loses its middle instead. A
+    suffix with no room left for package context falls back to a plain tail cut.
+    """
     if not s or len(s) <= _LABEL_MAX_LEN:
         return s
-    return s[:_LABEL_MAX_LEN - 3] + "..."
+    colon = s.rfind(":")
+    suffix = s[colon:] if colon > 0 else ""
+    if len(suffix) > _LABEL_MAX_LEN - _LABEL_MIN_HEAD_LEN - 3:
+        return s[:_LABEL_MAX_LEN - 3] + "..."
+    return s[:_LABEL_MAX_LEN - 3 - len(suffix)] + "..." + suffix
 
 def _artifact_anchors(entry):
     """Build a test entry's Artifacts cell. Returns (html, visible_width).
@@ -1694,6 +1718,30 @@ def _artifact_anchors(entry):
     html = " ".join(parts_html)
     visible = " ".join(parts_visible)
     return html, len(visible)
+
+def overflow_note(total, shown, noun = ""):
+    """Markdown note for rows a capped table omitted, or "" when it omitted none.
+
+    `noun` is singular and is agreed with the hidden count; omit it when the
+    surrounding heading already names what is being counted.
+
+    Says "more" only when rows were actually shown. An empty sample with a
+    non-zero total is normal — several counts are aggregates Bazel reports
+    without the matching per-target events — and "N more not shown" would then
+    claim rows the reader never saw.
+
+    Callers place the result *outside* the `<pre>`: markdown emphasis renders
+    literally inside it.
+    """
+    hidden = total - shown
+    if hidden <= 0:
+        return ""
+    tail = ""
+    if noun:
+        tail = " " + (noun if hidden == 1 else noun + "s")
+    if shown > 0:
+        return "_… %s more%s not shown._" % (format_int_comma(hidden), tail)
+    return "_%s%s not shown._" % (format_int_comma(hidden), tail)
 
 def _align_for_pre(entries, has_duration = True, has_mnemonic = False):
     """Build a column-aligned table for <pre> rendering.
@@ -2155,12 +2203,16 @@ def _is_safe_env_value(value):
             return True
     return False
 
-def _strip_url_creds(s):
-    """Redact the user:password prefix in any embedded URL in `s`.
+def strip_url_creds(s):
+    """Redact the secret in the userinfo of any embedded URL in `s`.
 
-    `scheme://user:password@host` → `scheme://user:<REDACTED>@host`. Scheme must
-    start with a letter then scheme-legal chars (alnum, `+-.`). Handles ~10 URLs
-    per string.
+    `scheme://user:password@host` → `scheme://user:<REDACTED>@host`, keeping the
+    user so an operator can still tell which identity a build used.
+    `scheme://token@host` has no user/password split, so the single component is
+    itself the secret and the whole userinfo goes: → `scheme://<REDACTED>@host`.
+
+    Scheme must start with a letter then scheme-legal chars (alnum, `+-.`).
+    Handles ~10 URLs per string.
     """
     if "://" not in s:
         return s
@@ -2193,35 +2245,27 @@ def _strip_url_creds(s):
             cursor = idx + 3
             continue
 
-        # `:` separating user from password (before `@`/whitespace/end).
+        # The `@` closing the userinfo, and the user/password `:` within it.
+        # Scanning for the `@` first matters: a userinfo with no colon is a bare
+        # secret, and searching for the colon first would skip the URL entirely.
+        at = -1
         colon = -1
         for j in range(idx + 3, len(result)):
-            c = result[j]
-            if c == ":":
-                colon = j
-                break
-            if c == "@" or c == " " or c == "\t" or c == "\r" or c == "\n":
-                break
-        if colon < 0:
-            cursor = idx + 3
-            continue
-
-        # Find the `@` that closes the userinfo.
-        at = -1
-        for j in range(colon + 1, len(result)):
             c = result[j]
             if c == "@":
                 at = j
                 break
             if c == " " or c == "\t" or c == "\r" or c == "\n":
                 break
+            if c == ":" and colon < 0:
+                colon = j
         if at < 0:
             cursor = idx + 3
             continue
 
-        # Redact the password slot.
-        result = result[:colon + 1] + _REDACTED + result[at:]
-        cursor = colon + 1 + len(_REDACTED) + 1
+        keep_to = colon + 1 if colon >= 0 else idx + 3
+        result = result[:keep_to] + _REDACTED + result[at:]
+        cursor = keep_to + len(_REDACTED) + 1
     return result
 
 def _split_combined_form(arg):
@@ -2276,11 +2320,11 @@ def _redact_env_value(value, allow_env):
     upper_name = var_name.upper()
     for key in _KNOWN_GIT_REPO_URL_KEYS:
         if upper_name == key:
-            return var_name + "=" + _strip_url_creds(var_value)
+            return var_name + "=" + strip_url_creds(var_value)
 
     # Allowlisted → show value (creds stripped as belt-and-suspenders).
     if _is_allowed_env(var_name, allow_env):
-        return var_name + "=" + _strip_url_creds(var_value)
+        return var_name + "=" + strip_url_creds(var_value)
     return var_name + "=" + _REDACTED
 
 def _redact_header_value(value):
@@ -2308,7 +2352,7 @@ def _redact_arg(arg, allow_env):
     Non-flag tokens pass through (subcommands, target patterns).
     """
     if not arg.startswith("--"):
-        return _strip_url_creds(arg)
+        return strip_url_creds(arg)
     name, value = _split_combined_form(arg)
 
     bare = name[2:] if name.startswith("--") else name
@@ -2319,7 +2363,7 @@ def _redact_arg(arg, allow_env):
 
     # Generic flag — URL credential stripping only.
     if value:
-        return name + "=" + _strip_url_creds(value)
+        return name + "=" + strip_url_creds(value)
     return arg
 
 def _redact_args(args, allow_env):
@@ -2926,7 +2970,7 @@ Reproduce with:
 BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 
 {% if no_targets_info %}
-{%- if not aborted %}
+{%- if targets_pending %}
 :hourglass_flowing_sand: **Build in progress** — target data will appear here as Bazel reports them.
 {% endif %}
 {%- else %}
@@ -2942,8 +2986,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {{ build_failures_table_sep }}
 {%- for t in build_failures %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_mnemonic }}
-{%- endfor %}
-{% if build_failures_overflow %}_{{ build_failures_overflow }} more root failure(s) not shown._{% endif %}</pre>
+{%- endfor %}</pre>
+{% endif %}
+{% if build_failures_overflow_note %}
+{{ build_failures_overflow_note }}
 {% endif %}
 {% if derived_failures %}
 <details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} blocked by a failed dependency</summary>
@@ -2953,8 +2999,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {{ derived_failures_table_sep }}
 {%- for t in derived_failures %}
 {{ t.aligned_label }} | {{ t.aligned_kind }}
-{%- endfor %}
-{% if derived_failures_overflow %}_{{ derived_failures_overflow }} more not shown._{% endif %}</pre>
+{%- endfor %}</pre>
+{% if derived_failures_overflow_note %}
+{{ derived_failures_overflow_note }}
+{% endif %}
 </details>
 {% endif %}
 </details>
@@ -3016,8 +3064,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {{ passed_tests_table_sep }}
 {%- for t in passed_tests %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if passed_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
-{%- endfor %}
-{% if passed_tests_overflow %}_{{ passed_tests_overflow }} more not shown._{% endif %}</pre>
+{%- endfor %}</pre>
+{% if passed_tests_overflow_note %}
+{{ passed_tests_overflow_note }}
+{% endif %}
 </details>
 
 {% endif %}
@@ -3032,6 +3082,9 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if cached_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
 {%- endfor %}
 </pre>
+{% if cached_tests_overflow_note %}
+{{ cached_tests_overflow_note }}
+{% endif %}
 </details>
 
 {% endif %}
@@ -3039,15 +3092,16 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 <details>
 <summary>✅ {{ built_targets_header }}</summary>
 
-<pre>
-{%- if built_targets %}
+{% if built_targets %}<pre>
 {{- built_targets_table_head }}
 {{ built_targets_table_sep }}
 {%- for t in built_targets %}
 {{ t.aligned_label }} | {{ t.aligned_kind }}
-{%- endfor %}
-{%- endif %}
-{% if built_targets_overflow %}_{{ built_targets_overflow }} more not shown._{% endif %}</pre>
+{%- endfor %}</pre>
+{% endif %}
+{% if built_targets_overflow_note %}
+{{ built_targets_overflow_note }}
+{% endif %}
 </details>
 
 {% endif %}
@@ -3055,15 +3109,16 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 <details>
 <summary>{{ skipped_targets_icon }} {{ skipped_targets_header }}</summary>
 
-<pre>
-{%- if skipped_targets %}
+{% if skipped_targets %}<pre>
 {{- skipped_targets_table_head }}
 {{ skipped_targets_table_sep }}
 {%- for t in skipped_targets %}
 {{ t.aligned_label }} | {{ t.aligned_kind }}
-{%- endfor %}
-{%- endif %}
-{% if skipped_targets_overflow %}_{{ skipped_targets_overflow }} more not shown._{% endif %}</pre>
+{%- endfor %}</pre>
+{% endif %}
+{% if skipped_targets_overflow_note %}
+{{ skipped_targets_overflow_note }}
+{% endif %}
 </details>
 
 {% endif %}
@@ -3381,6 +3436,15 @@ def render_title_or_fallback(ctx, template, data):
     _RENDER_LOG.warn(ctx.std, "title failed to render, using the built-in layout: %s" % text)
     return ctx.template.jinja2(TITLE_TEMPLATE, data = data)
 
+def distinct_bes_url(links, data):
+    """The BES results URL when it is a different page from the Aspect UI link,
+    else "". Offering both is useful only when they are not the same viewer."""
+    bes = render_bes_url(data)
+    if not bes:
+        return ""
+    aspect = effective_aspect_url(links, data)
+    return "" if bes == aspect else bes
+
 def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = "", config_items = None, complete_suffix = ""):
     """Build Jinja2 template data for SUMMARY_TEMPLATE.
 
@@ -3443,6 +3507,27 @@ def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_
         "short_sha": sha[:7] if sha else "",
         "commit_msg": html_escape(commit_msg),
         "detail_rows": build_invocation_rows(ctx, data, render_ctx, status, links = links, run_date = run_date, extra_meta = extra_meta),
+
+        # Addressable equivalents of facts `detail_rows` only carries
+        # positionally (its rows drop when empty, so indexes are not stable).
+        # A template that wants one fact rather than the whole row grid reads
+        # these; `full` still renders from `detail_rows`.
+        "aspect_url": effective_aspect_url(links, data),
+        # A BES viewer the build reports to that is not the Aspect UI — only set
+        # when it differs, so a layout can offer it without duplicating the link.
+        "bes_url": distinct_bes_url(links, data),
+        "status_icon": STATUS_ICONS.get(status, "🔄"),
+        "status_label": STATUS_LABELS.get(status, "Running"),
+        "elapsed_text": format_elapsed_with_phases(ctx, status),
+        "state": compute_invocation_state(data, status),
+        "verdict_counts": invocation_state_counts(data, status),
+        "cached_tests_sentence": cached_tests_sentence(data),
+        "is_terminal": "" if status in ("running", "failing") else "1",
+
+        # Operator-configured, not collected: each of these exists because
+        # someone named it, so a layout that drops metadata still shows them.
+        "operator_links": parse_workflows_links(meta),
+        "pinned_metadata": extra_meta,
         "tips": [decorate_tip(t) for t in (render_ctx.get("tips") if render_ctx else None) or []],
     }
 
@@ -3523,6 +3608,70 @@ def _effective_action_cache_counts(data):
         cached = total
     executed = total - cached
     return (executed, cached, total)
+
+def invocation_state_counts(data, status):
+    """Verdict clause naming every populated bucket, or "" when none applies.
+
+    `compute_invocation_state` names a single bucket by priority, so a run with
+    one build failure, two test failures and a timeout reads "Failed to build"
+    and hides the rest. The GitLab commit-status surface carries only the title
+    (`gitlab_commit_statuses.axl` posts `output.title` into a 255-char
+    description), and the GitHub checks list shows nothing else either, so the
+    counts have to be in the title to be seen at all.
+
+    A failure lists only failure buckets; everything else omits them. Returns ""
+    while running or aborted, where partial counts would mislead — callers fall
+    back to `compute_invocation_state`.
+    """
+    bz = data["bazel"]
+    if bz.get("aborted", False) or status in ("running", "failing"):
+        return ""
+    counts = _compute_bucket_counts(data)
+
+    # Ordered worst-first, as (count, noun, verb); an empty noun counts the
+    # subject named by the preceding clauses. `passed_test_total` rather than the
+    # TEST_PASSED bucket: that bucket excludes cached passes, which would read as
+    # though the cached tests had not passed.
+    clauses = [
+        (counts.get(_BUCKET_FAILED_TO_BUILD, 0), "target", "failed to build"),
+        (counts.get(_BUCKET_TEST_FAILED, 0), "test", "failed"),
+        (counts.get(_BUCKET_TEST_TIMEOUT, 0), "", "timed out"),
+        (counts.get(_BUCKET_TEST_FLAKY, 0), "", "flaky"),
+        (bz.get("passed_test_total", 0) or 0, "test", "passed"),
+        (counts.get(_BUCKET_SUCCESSFUL_BUILD, 0), "target", "built"),
+        (counts.get(_BUCKET_SKIPPED, 0), "", "skipped"),
+    ]
+    clauses = clauses[:4] if status == "failed" else clauses[3:]
+
+    parts = []
+    for (n, noun, verb) in clauses:
+        if n > 0:
+            parts.append((pluralize(n, noun) if noun else format_int_comma(n)) + " " + verb)
+    return ", ".join(parts)
+
+def cached_tests_sentence(data):
+    """One sentence for test targets served from cache, or "" when none were.
+
+    Counts with the denominator named in words, never a rate. `cached_test_total`
+    is incremented per target when `TestSummary.total_num_cached > 0`, so it
+    counts test *targets* with at least one cached run — "N tests were cached"
+    would be false for a target whose runs were partly cached.
+    """
+    bz = data["bazel"]
+    total = ((bz.get("passed_test_total", 0) or 0) +
+             (bz.get("failed_test_total", 0) or 0) +
+             (bz.get("flaky_test_total", 0) or 0))
+    cached = bz.get("cached_test_total", 0) or 0
+    if total <= 0 or cached <= 0:
+        return ""
+    plural = "" if total == 1 else "s"
+    if cached >= total:
+        return "All %s test target%s were cached, so none were re-run." % (format_int_comma(total), plural)
+    return "%s of %s test target%s were cached and were not re-run." % (
+        format_int_comma(cached),
+        format_int_comma(total),
+        plural,
+    )
 
 def _cache_actions_line(data):
     """Return 'N of M cached (P%)' for actions, or '' when no actions."""
@@ -3753,7 +3902,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         entry["mnemonics_joined"] = ", ".join(mnemonics)
         original_label = a.get("label", "")
         entry["kind"] = target_kinds_map.get(original_label, "")
-        entry["label"] = _truncate_label(original_label)
+        entry["label"] = truncate_label(original_label)
         return entry
 
     testlogs_label_urls = links.get("testlogs_label_urls", {})
@@ -3765,6 +3914,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     artifact_links = []
     for kind, alabel in [
         ("testlogs", "Test logs"),
+        (REPORT_ARTIFACT_KIND, "Full report (JSON)"),
         ("build_logs", "Build logs"),
         ("profile", "Profile"),
         ("execlog", "Execlog"),
@@ -3801,7 +3951,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
             # Backfill kind from the map (fixtures may omit it).
             if not entry.get("kind"):
                 entry["kind"] = target_kinds_map.get(original_label, "")
-            entry["label"] = _truncate_label(original_label)
+            entry["label"] = truncate_label(original_label)
 
             # Untruncated label, for correlating per-failure repro commands.
             entry["_orig_label"] = original_label
@@ -3845,7 +3995,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
 
     # Sort on the full label before truncating (stable when prefixes collide).
     built_non_test = [
-        {"label": _truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
+        {"label": truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
         for t in sorted(
             [t for t in data["bazel"].get("built_targets", []) if not _is_test_entry(t)],
             key = lambda t: t.get("label", ""),
@@ -3854,7 +4004,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
 
     # Skipped targets — own section (neither built nor failed).
     skipped_for_table = [
-        {"label": _truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
+        {"label": truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
         for t in sorted(
             data["bazel"].get("skipped_targets", []),
             key = lambda t: t.get("label", ""),
@@ -3866,7 +4016,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     failed_action_labels_set = {l: True for l in _failed_action_labels(data)}
 
     derived_failures = [
-        {"label": _truncate_label(t["label"]), "kind": t.get("kind", "")}
+        {"label": truncate_label(t["label"]), "kind": t.get("kind", "")}
         for t in sorted(
             [
                 {"label": t.get("label", ""), "kind": t.get("kind", "")}
@@ -3958,7 +4108,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         original_label = a.get("label", "")
         mnemonics = a.get("mnemonics", []) or []
         row = {
-            "label": _truncate_label(original_label),
+            "label": truncate_label(original_label),
             # Untruncated label, for correlating per-failure repro commands.
             "_orig_label": original_label,
             "kind": target_kinds_map.get(original_label, ""),
@@ -4064,28 +4214,6 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         skipped_count > 0
     )
 
-    actions_total = data["bazel"].get("actions_total", 0)
-    if build_failure_count > 0:
-        build_badge_url = "https://img.shields.io/badge/build-failed-red"
-    elif actions_total > 0:
-        build_badge_url = "https://img.shields.io/badge/build-" + str(actions_total) + "%20actions-blue"
-    else:
-        build_badge_url = "https://img.shields.io/badge/build-passed-brightgreen"
-
-    pass_t_total = data["bazel"].get("passed_test_total", 0)
-    if failed_test_count + timeout_test_count > 0:
-        test_badge_url = ("https://img.shields.io/badge/tests-" +
-                          str(pass_t_total) + "%20passed%2C%20" +
-                          str(failed_test_count + timeout_test_count) + "%20failed-red")
-    elif flaky_test_count > 0:
-        test_badge_url = ("https://img.shields.io/badge/tests-" +
-                          str(pass_t_total) + "%20passed%2C%20" +
-                          str(flaky_test_count) + "%20flaky-yellow")
-    elif pass_t_total > 0:
-        test_badge_url = "https://img.shields.io/badge/tests-" + str(pass_t_total) + "%20passed-brightgreen"
-    else:
-        test_badge_url = ""
-
     return {
         "aborted": data["bazel"].get("aborted", False),
         "abort_reason": data["bazel"].get("abort_reason", ""),
@@ -4093,6 +4221,19 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         # "" (falsy) when any bucket has data; "1" → template shows a
         # "waiting for data" placeholder.
         "no_targets_info": "" if _has_targets_info else "1",
+
+        # Mirror of the addressable keys `build_summary_data` exposes, so one
+        # template can be written against either slot. See the note there.
+        "status_icon": STATUS_ICONS.get(status, "🔄"),
+        "status_label": STATUS_LABELS.get(status, "Running"),
+        "bes_url": distinct_bes_url(links, data),
+        "verdict_counts": invocation_state_counts(data, status),
+        "cached_tests_sentence": cached_tests_sentence(data),
+        "is_terminal": "" if status in ("running", "failing") else "1",
+        # Only a still-running invocation will fill the empty target section
+        # later. A terminal task with no target data never will — lint, format,
+        # gazelle and delivery report none at all — so promising it is false.
+        "targets_pending": "1" if (not _has_targets_info and status in ("running", "failing")) else "",
         # "## Targets (N)" header; aggregate target_completed count (success + failure).
         "total_targets": str(data["bazel"].get("targets_total", 0)),
 
@@ -4105,7 +4246,10 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "build_failures_snippets": _build_failures_snippets,
         "build_failures_count": build_failure_count,
         "build_failures_header": _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
+        # Raw counts, for a config whose own template interpolates them; the
+        # built-in templates read the `*overflow_note` strings instead.
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
+        "build_failures_overflow_note": overflow_note(len(_failed_action_labels(data)), len(data["bazel"].get("failed_actions", [])), "root failure"),
         "build_failures_icon": _BUCKET_ICONS[_BUCKET_FAILED_TO_BUILD],
         # Per-bucket inline-snippet overflow: failures in this bucket past the
         # shared snippet budget (shown as table rows, output not inlined). The
@@ -4130,6 +4274,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "derived_failures_count": str(derived_failures_count),
         "derived_failures_plural": "s" if derived_failures_count != 1 else "",
         "derived_failures_overflow": str(derived_failures_overflow) if derived_failures_overflow > 0 else "",
+        "derived_failures_overflow_note": overflow_note(derived_failures_count, len(derived_failures)),
         "failed_tests": _failed_table["rows"],
         "failed_tests_table_head": _failed_table["header"],
         "failed_tests_table_sep": _failed_table["separator"],
@@ -4164,6 +4309,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "cached_tests_table_sep": _cached_table["separator"],
         "cached_tests_has_artifacts": _cached_table.get("has_artifacts", False),
         "cached_tests_count": cached_test_count,
+        "cached_tests_overflow_note": overflow_note(cached_test_count, len(passed_cached)),
         "cached_tests_header": _bucket_header(_BUCKET_TEST_PASSED_CACHED, cached_test_count),
 
         # Built-targets table: label | kind.
@@ -4176,7 +4322,9 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "built_targets_any": "1" if built_non_test_count > 0 else "",
         "built_targets_header": _bucket_header(_BUCKET_SUCCESSFUL_BUILD, built_non_test_count),
         "built_targets_overflow": str(built_overflow) if built_overflow > 0 else "",
+        "built_targets_overflow_note": overflow_note(built_non_test_count, len(built_non_test)),
         "passed_tests_overflow": str(passed_overflow) if passed_overflow > 0 else "",
+        "passed_tests_overflow_note": overflow_note(data["bazel"].get("passed_test_total", 0), len(raw_passed)),
 
         # Skipped-targets table: label | kind. Header uses the uncapped count;
         # skipped_targets_overflow drives "N more not shown".
@@ -4188,6 +4336,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "skipped_targets_header": _bucket_header(_BUCKET_SKIPPED, skipped_count),
         "skipped_targets_icon": _BUCKET_ICONS[_BUCKET_SKIPPED],
         "skipped_targets_overflow": str(skipped_overflow) if skipped_overflow > 0 else "",
+        "skipped_targets_overflow_note": overflow_note(skipped_count, len(skipped_for_table)),
 
         # Command-line views (options_parsed, redacted). long: multi-line
         # reproducer; short: <details> summary.
@@ -4197,12 +4346,10 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "cmd_line_options": _cmd_line_redacted,
 
         # Badges, links, artifacts.
-        "build_badge_url": build_badge_url,
-        "test_badge_url": test_badge_url,
         "bes_invocation_url": render_bes_url(data),
         "ci_label": links.get("ci_label", ""),
         "ci_url": links.get("ci_url", ""),
-        "aspect_url": links.get("aspect_url", ""),
+        "aspect_url": effective_aspect_url(links, data),
         "artifacts_browse_url": links.get("artifacts_browse_url", ""),
         "artifact_links": artifact_links,
 
@@ -4627,6 +4774,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             summary_title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
+            state_detail = invocation_state_counts(data, status),
         ),
         "summary": summary_text,
         "text": details_text,
@@ -4777,11 +4925,17 @@ def _live_progress(data, command, status):
 def _elapsed_ms(since_monotonic):
     return int((time.monotonic() - since_monotonic) * 1000)
 
-def _results_new(ctx, command):
+def _results_new(ctx, command, report_uploader = None):
     """Shared constructor for `results.build` / `results.test`. Owns
     `phases.new(ctx, init_data())` and a small heartbeat/attempt state cell.
     The handle's own post-task hook closes the surface if the task ends before
-    `conclude()` runs."""
+    `conclude()` runs.
+
+    `report_uploader(data, status, command, targets)` uploads the structured
+    report; the task layer supplies it, because `artifacts.axl` imports this
+    module and calling it from here would be a cycle. `conclude()` invokes it
+    before the terminal dispatch so the rendered body can link the artifact.
+    """
     ph = phases.new(ctx, init_data())
     data = ph.data
 
@@ -4930,6 +5084,9 @@ def _results_new(ctx, command):
             failed_targets = failed_labels(data),
         )
 
+        if report_uploader:
+            report_uploader(data, final_status, command, targets)
+
         bookend = conclusion(final_status, data)
         ph.dispatch(phases.Update(
             kind = "bazel_results",
@@ -4956,7 +5113,7 @@ def _results_new(ctx, command):
     )
 
 results = namespace(
-    build = lambda ctx: _results_new(ctx, "build"),
-    test = lambda ctx: _results_new(ctx, "test"),
+    build = lambda ctx, report_uploader = None: _results_new(ctx, "build", report_uploader),
+    test = lambda ctx, report_uploader = None: _results_new(ctx, "test", report_uploader),
     KINDS = RESULTS_KINDS,
 )

@@ -22,7 +22,9 @@ Two test tasks live in this file:
     surfaces here instead of breaking customer manifests in the wild.
 """
 
+load("./check_dispatch.axl", "resolve_templates")
 load("./delivery_results.axl", "add_result", "build_manifest", "init_data", "render_check_output")
+load("./template_presets.axl", "template_presets")
 load("./text.axl", "SUBJECT_TITLE_MAX")
 
 # A resolved subject far longer than the title's character budget (60),
@@ -307,7 +309,7 @@ def _links(ci = "buildkite", with_manifest = False):
         "testlogs_label_urls": {},
     }
 
-def _test_impl(ctx):
+def _render_all(ctx, templates = None):
     scenarios = [
         # (label,                            data,                     status,     subject,        ci,          metadata_keys, progress, with_manifest)
         ("1. all-delivered · BK", _make_all_delivered(), "passed", "//apps/...", "buildkite", None, "", False),
@@ -345,7 +347,8 @@ def _test_impl(ctx):
     for (label, data, status, subject, ci, metadata_keys, progress, with_manifest) in scenarios:
         rc = _render_ctx(subject = subject, progress = progress)
         lk = _links(ci = ci, with_manifest = with_manifest)
-        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        t = resolve_templates(templates, "delivery", renderer_kind = "delivery_results") if templates else None
+        out = render_check_output(ctx, data, status, rc, lk, templates = t, metadata_keys = metadata_keys)
         print(sep)
         print("SCENARIO: " + label)
         print(sep)
@@ -403,11 +406,25 @@ def _check_long_subject_title_is_capped(ctx):
     if len(title) > SUBJECT_TITLE_MAX + 40:
         fail("title unexpectedly long (%d chars): %r" % (len(title), title))
 
+def _test_impl(ctx):
+    return _render_all(ctx)
+
+def _default_preset_impl(ctx):
+    return _render_all(ctx, templates = template_presets.templates(template_presets.DEFAULT))
+
 delivery_template_snapshot_tests = task(
     summary = "Run the delivery template snapshots AXL unit tests.",
     kind = "test-delivery-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+delivery_default_preset_snapshot_tests = task(
+    summary = "Render the delivery template snapshots through the default preset.",
+    kind = "test-delivery-default-preset-snapshots",
+    group = ["dev"],
+    implementation = _default_preset_impl,
     args = {},
 )
 
