@@ -960,6 +960,12 @@ def prunable_slots(std, pool: dict, registry: dict, max_idle_days: int, root: st
     was moved, renamed or deleted leaves slots no clone can ever match again —
     and it is distinguishable from a second live clone, whose slots are none of
     our business.
+
+    Stranded slots skip the age rule, because that rule weighs Bazel state
+    worth keeping against the disk it costs and a stranded slot has nothing on
+    the first side of it: `git worktree add` is scoped to one object store, so
+    no clone here can lease this slot or reuse its base however warm it is.
+    Waiting thirty days to collect one is all cost and no benefit.
     """
     victims = []
     for slot_id in registry["slots"]:
@@ -969,18 +975,24 @@ def prunable_slots(std, pool: dict, registry: dict, max_idle_days: int, root: st
 
         # Residue: an entry with no recorded age, no output base and no
         # directory has nothing behind it to protect, and nothing to age it out
-        # by either — so without this it would sit in the registry forever. The
-        # usual case is a registry written before `created_ms` existed.
+        # by either — so without this it would sit in the registry forever. A
+        # registry edited by hand is the way to get one.
         if not slot.get("created_ms", 0):
             path = slot_path(pool, slot_id)
             if not std.fs.exists(path) and not std.fs.exists(output_base_of(std, path, root)):
                 victims.append(slot_id)
                 continue
 
-        if slot_idle_days(std, pool, slot_id, slot, root) < max_idle_days:
-            continue
+        # Another clone's slot: none of our business while that clone exists,
+        # and collectable at once when it does not. Asked before the age rule,
+        # which has nothing to weigh for a slot that can never be leased again.
         owner = slot.get("owner_git_dir", "")
-        if owner != pool["git_common_dir"] and std.fs.exists(owner):
+        if owner and owner != pool["git_common_dir"]:
+            if not std.fs.exists(owner):
+                victims.append(slot_id)
+            continue
+
+        if slot_idle_days(std, pool, slot_id, slot, root) < max_idle_days:
             continue
         victims.append(slot_id)
     return victims

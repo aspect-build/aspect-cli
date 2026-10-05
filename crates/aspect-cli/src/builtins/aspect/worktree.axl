@@ -128,12 +128,23 @@ _SCHEMA_VERSION = 1
 
 # --- refusals ----------------------------------------------------------------
 
-def _refuse(ctx: TaskContext, code: str, message: str, exit_code: int = 1, retryable: bool = False) -> TaskConclusion:
+def _refuse(
+        ctx: TaskContext,
+        code: str,
+        message: str,
+        exit_code: int = 1,
+        retryable: bool = False,
+        facts: dict = {}) -> TaskConclusion:
     """A refusal in whichever form the caller asked for.
 
     Every one of these is something an agent has to branch on, and a
     `--output=json` consumer handed prose on stderr and an empty stdout would
     have to parse English to do it. `code` is the stable token to branch on.
+
+    `facts` carries the values the refusal is *about* — a path, a list of files
+    — beside the token, so a consumer does not have to recover them from the
+    sentence that mentions them. The message says the same things in prose: one
+    refusal, rendered for a person and for a program.
     """
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
@@ -141,7 +152,7 @@ def _refuse(ctx: TaskContext, code: str, message: str, exit_code: int = 1, retry
             "error": code,
             "retryable": retryable,
             "message": message,
-        }, indent = 2) + "\n")
+        } | facts, indent = 2) + "\n")
         return TaskConclusion(exit_code = exit_code)
     return TaskConclusion(exit_code = exit_code, message = message)
 
@@ -1026,7 +1037,9 @@ def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, nam
         }, indent = 2) + "\n")
         return 0
 
-    info(ctx.std, "worktree ready: " + path)
+    # Abbreviated as `list` abbreviates, so the two commands do not describe one
+    # directory two ways. The machine-readable outputs above carry it in full.
+    info(ctx.std, "worktree ready: " + tilde(path, ctx.std.env.home_dir()))
     print("  branch: " + name)
     print("  " + _warmth_note(ctx.std, path, chosen.reused_from, root))
     print("  " + _history_note(registry["slots"][slot_id]))
@@ -1139,7 +1152,12 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if held:
         mine = detect(ctx.std, ctx.args.agent_kind, ctx.args.agent_id)
-        return _refuse(ctx, "branch_in_use", _held_by(ctx, pool, registry, held, name, mine))
+        return _refuse(
+            ctx,
+            "branch_in_use",
+            _held_by(ctx, pool, registry, held, name, mine),
+            facts = {"slot": held, "path": slot_path(pool, held)},
+        )
     elsewhere = _worktree_holding_branch(ctx, pool, name)
     if elsewhere:
         # A pool slot can hold a branch the registry does not know it holds:
@@ -1199,6 +1217,13 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             "worktree_dirty",
             name + " has uncommitted changes at " + path + ":\n" + dirty +
             "\nCommit or stash them, or pass --force to discard them with the worktree.",
+            # The porcelain lines themselves, so a caller that branched on the
+            # token does not have to recover them from the sentence.
+            facts = {
+                "slot": target,
+                "path": path,
+                "uncommitted": uncommitted_work(ctx.std, path, output_base_of(ctx.std, path, root)),
+            },
         )
 
     # What the slot is left holding is what the next allocation scores it on, so
@@ -1570,7 +1595,12 @@ def _render_pool(ctx: TaskContext, pool: dict, rows: list, home: str) -> None:
         home = ctx.std.env.home_dir()
         print("")
         for r in rows:
-            print("  " + (r["branch"] or r["name"] or r["reserved_for"] or r["last_branch"] or r["slot"]))
+            # `last <branch>` for a free slot, as the table says it, so the
+            # block does not read as a lease that is still held.
+            if r["state"] == FREE and r["last_branch"]:
+                print("  last " + r["last_branch"])
+            else:
+                print("  " + (r["branch"] or r["name"] or r["reserved_for"] or r["slot"]))
             print("    slot:        " + tilde(r["path"], home))
             print("    output base: " + tilde(r["output_base"], home) +
                   ("" if r["output_base_present"] else "  (missing)"))
@@ -1833,7 +1863,7 @@ worktree_list = task(
     kind = "list",
     group = ["worktree"],
     summary = "List this repository's worktree slots, what holds them, and how warm each is.",
-    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. It also says which Bazel output user root it scanned, which this command does not: a pool whose builds went to a different root has state neither command can see.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified, abbreviated to fit; the table is followed by each session id in full and the project directory the harness filed it under, which is what `claude --resume` needs\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale and what deleting them all would reclaim. Without --dry-run it asks before deleting anything.",
+    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. It also says which Bazel output user root it scanned, which this command does not: a pool whose builds went to a different root has state neither command can see.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified, abbreviated to fit; the table is followed by each session id in full and the project directory the harness filed it under, which is what `claude --resume` needs\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale, and how long each has been idle. Without --dry-run it asks before deleting anything. For what the disk would actually give back, `aspect output-bases --measure-sizes` reports per-base sizes and `aspect gc` acts on them.",
     implementation = _list_impl,
     traits = [Worktrees],
     args = {

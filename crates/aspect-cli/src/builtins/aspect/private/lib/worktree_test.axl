@@ -272,16 +272,37 @@ def _test_prune_respects_the_age_threshold(ctx):
 def _test_prune_leaves_a_live_clones_slots_alone(ctx):
     """Two clones of one repository share a pool directory but not slots. A slot
     owned by a clone that still exists is none of this clone's business; only one
-    stranded by a clone that is gone can be collected."""
+    stranded by a clone that is gone can be collected.
+
+    Age does not enter into the stranded case. The age rule weighs Bazel state
+    worth keeping against the disk it costs, and a stranded slot has nothing on
+    the first side: no clone here can lease it or reuse its base, however warm
+    and however new. A fresh one is as collectable as an ancient one.
+    """
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
     live_owner = tmp + "/live/.git"
     ctx.std.fs.create_dir_all(live_owner)
     pool = {"git_common_dir": tmp + "/mine/.git", "dir": "/pool"}
     registry = {"slots": {
         "theirs": _slot(live_owner, age_days = 900),
+        "theirs-fresh": _slot(live_owner, age_days = 0),
         "stranded": _slot(tmp + "/moved-away/.git", age_days = 900),
+        "stranded-fresh": _slot(tmp + "/also-gone/.git", age_days = 0),
     }}
-    _eq("only the stranded one", prunable_slots(ctx.std, pool, registry, 30), ["stranded"])
+
+    _eq(
+        "both stranded ones, whatever their age",
+        sorted(prunable_slots(ctx.std, pool, registry, 30)),
+        ["stranded", "stranded-fresh"],
+    )
+
+    # And a live clone's slots stay out of reach at any threshold, including the
+    # one that considers everything of this clone's.
+    _eq(
+        "never a live clone's, even at zero",
+        sorted(prunable_slots(ctx.std, pool, registry, 0)),
+        ["stranded", "stranded-fresh"],
+    )
 
 def _test_owned_slots_counts_only_this_clone(ctx):
     """`max_slots` budgets what this clone can actually lease, so a sibling
