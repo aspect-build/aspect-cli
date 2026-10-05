@@ -50,12 +50,14 @@ how the pool is bounded.
 load("@std//time.axl", "time")
 load(
     "./private/lib/agent.axl",
+    "ABSENT",
     "GONE",
     "RESUMABLE",
     "RUNNING",
     "detect",
     "label",
     "resume_hint",
+    "session_filed",
     "session_project",
     "session_state",
 )
@@ -68,6 +70,7 @@ load("./private/lib/table.axl", "Column", "render", "tilde")
 load("./private/lib/text.axl", "pluralize")
 load(
     "./private/lib/worktree.axl",
+    "FORCE_REMOVE",
     "FREE",
     "LEASED",
     "PRUNE_IDLE_DAYS",
@@ -88,6 +91,7 @@ load(
     "mark_leased",
     "new_slot_id",
     "new_slot_record",
+    "observe_base",
     "output_base_of",
     "owned_slots",
     "pool_of",
@@ -703,7 +707,12 @@ def _drop_reservation(ctx: TaskContext, pool: dict, registry: dict, slot_id: str
     """
     if not holds_reservation(registry, slot_id, token):
         return
-    catch(run_git, ctx.std, ["worktree", "remove", "--force", slot_path(pool, slot_id)], pool["git_common_dir"])
+
+    # A killed `add` may have registered the worktree before it died, and
+    # freeing the record while leaving that behind is what produced a slot no
+    # lease accounted for and nothing could clear.
+    catch(run_git, ctx.std, FORCE_REMOVE + [slot_path(pool, slot_id)], pool["git_common_dir"])
+    catch(run_git, ctx.std, ["worktree", "prune"], pool["git_common_dir"])
     registry["slots"][slot_id]["state"] = FREE
     registry["slots"][slot_id]["reservation"] = None
 
@@ -807,7 +816,7 @@ def _materialize(ctx: TaskContext, pool: dict, path: str, name: str, base_ref: s
     better than silently detaching.
     """
     if ctx.std.fs.exists(path):
-        _git(ctx, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        _git(ctx, FORCE_REMOVE + [path], pool["git_common_dir"])
     else:
         # Git keeps listing a worktree whose directory went missing, and refuses
         # to check anything out at a path it still has registered.
@@ -875,7 +884,7 @@ def _check_out_and_lease(
     if not holds_reservation(registry, chosen.id, token):
         # Only while the branch at the path is still the one this call put there.
         if _git_try(ctx, ["rev-parse", "--abbrev-ref", "HEAD"], path) == name:
-            catch(run_git, ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+            catch(run_git, ctx.std, FORCE_REMOVE + [path], pool["git_common_dir"])
         warn(ctx.std, "the slot reserved for " + name + " was taken while its worktree was being created")
         return _pool_busy(ctx)
 
@@ -986,7 +995,16 @@ def _session_rows(std, rows: list, home: str, repo: str = "") -> list[dict]:
         # command would resolve nothing. Anything less certain still gets it —
         # a store nobody has described reports `unknown`, and Codex and Grok
         # sessions resume perfectly well from there.
-        resume = "-" if r.get("session_state", "") == GONE else (resume_hint(agent) or "-")
+        # Withheld only where the harness's own store was read and did not have
+        # this session. Liveness is no guide: a live process can hold an id no
+        # store has heard of, which is how a dead command came to be printed
+        # next to a running one.
+        resume = resume_hint(agent) if session_filed(std, agent) != ABSENT else ""
+
+        # `claude --resume <id>` resolves within the current directory's
+        # project, so the bare command works only where you already are.
+        if resume and project:
+            resume = "cd " + project + " && " + resume
 
         out.append({
             "repo": repo,
@@ -994,7 +1012,7 @@ def _session_rows(std, rows: list, home: str, repo: str = "") -> list[dict]:
             "session": agent.get("id", "") or "-",
             "project": tilde(project, home) if project else "-",
             "slot": r["slot"],
-            "resume": resume,
+            "resume": resume or "-",
         })
     return out
 
@@ -1087,29 +1105,33 @@ def _list_order(row: dict) -> tuple:
     warmth = 0 if row["server_pid"] else (1 if row["output_base_present"] else 2)
     return (state, warmth, row["slot"])
 
-def _warmth_note(std, path: str, reused_from: str, root: str, used_before: bool = False) -> str:
+def _warmth_note(std, path: str, reused_from: str, root: str, had_base: bool = False) -> str:
     """One line on what this slot already holds, checked rather than assumed.
 
     A slot's value is its Bazel state, and that state can be gone — the server
     exits on idle, and `aspect gc` can reclaim the base — so claiming "warm"
     without looking would be a lie often enough to matter.
 
-    `used_before` separates the two ways of being cold. A slot nobody has built
-    in has no state *yet*; a slot that has held worktrees and has no base had
-    its state taken, which is a different thing to tell someone whose next
-    build is about to cost full price.
+    `had_base` separates the two ways of being cold, and is recorded rather
+    than inferred: a slot nobody has built in has no state *yet*, while one
+    whose base was seen and is now gone had its state taken. A lease count
+    cannot tell those apart — a slot leased twice without a build never had a
+    base — and the difference is worth telling someone whose next build is
+    about to cost full price.
     """
     warmth = warmth_of(std, path, root)
 
-    # Which branch the state belongs to is the signal for how much of it
-    # applies, so it is said wherever there is state to describe.
-    last = (", last used for " + reused_from) if reused_from else ""
+    # The branch that held the slot last, which is as much as the pool knows:
+    # nothing records which build populated a cache, and a brief lease that
+    # built nothing is still the last holder. "Leased", not "used", so it is
+    # not read as the source of the warmth.
+    last = (", last leased for " + reused_from) if reused_from else ""
     if warmth.server:
         return ("warm: a Bazel server is still holding this slot's analysis cache (pid %d)" %
                 warmth.server) + last
     if warmth.base:
         return "partly warm: no server, but this slot's `external/` tree is already materialized" + last
-    if used_before:
+    if had_base:
         return ("cold: this slot's Bazel output base is gone, so the first build pays for it " +
                 "again" + last)
     return "cold: this slot has no Bazel state yet, so the first build pays for it"
@@ -1156,7 +1178,7 @@ def _report_slot(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, nam
         path,
         chosen.reused_from,
         root,
-        used_before = (registry["slots"][slot_id].get("lease_count") or 0) > 1,
+        had_base = registry["slots"][slot_id].get("had_base", False),
     ))
     print("  " + _history_note(registry["slots"][slot_id]))
     print("")
@@ -1350,19 +1372,29 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     if ctx.std.fs.exists(path):
         head = _git(ctx, ["rev-parse", "HEAD"], path)
         slot["lock_digest"] = lock_digest(ctx.std, path)
-        dropped = run_git(ctx.std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        dropped = run_git(ctx.std, FORCE_REMOVE + [path], pool["git_common_dir"])
         if not dropped.ok:
             # Freeing the slot anyway is right — the next `add` force-removes
             # whatever is in its way — but a silent failure leaves `list`
             # claiming the slot is empty while git still holds a worktree there.
+            # Not "the next allocation will clear it": the allocator skips a
+            # slot git still has a worktree at, so saying so sent a reader away
+            # from the one thing that recovers it.
             warn(ctx.std, "could not drop the worktree at " + path + ": " + dropped.err +
-                          "; the slot is free and the next allocation will clear it")
+                          "; the slot is free in the pool, but git still has a worktree there. " +
+                          "`git worktree remove -f -f " + path + "` followed by " +
+                          "`git worktree prune` clears it.")
     else:
         slot["lock_digest"] = ""
 
     released = mark_free(registry, target) or name
     slot["last_commit"] = head
     slot["last_branch"] = released
+
+    # Observed rather than inferred: this is the moment the slot's Bazel state
+    # can be looked at, and remembering that it existed is what lets a later
+    # listing tell a reclaimed base from one that was never built.
+    slot["had_base"] = slot.get("had_base", False) or warmth_of(ctx.std, path, root).base
     write_registry(ctx.std, pool["dir"], registry)
 
     if ctx.args.output == "json":
@@ -1414,7 +1446,15 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
     """
     pool = _pool(ctx)
     if not pool:
-        return _not_a_repository_for_list(ctx)
+        # Not the `list` refusal: outside a clone there is no pool to be in a
+        # slot of, which is a different thing from standing in the clone and
+        # holding nothing.
+        return _refuse(
+            ctx,
+            "not_a_repository",
+            "not inside a git repository, so not inside a pooled worktree either — " +
+            "`aspect worktree list --all` shows every pool on this machine from anywhere",
+        )
 
     root = _output_root(ctx)
     registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
@@ -1422,10 +1462,14 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
     home = ctx.std.env.home_dir()
 
     if not here:
+        # One boolean cannot carry three answers, and the text distinguishes
+        # them, so the document says which it is as well.
+        linked = _linked_worktree(ctx)
         if ctx.args.output == "json":
             ctx.std.io.stdout.write(json.encode({
                 "schema_version": _SCHEMA_VERSION,
                 "in_worktree": False,
+                "location": "unmanaged_worktree" if linked else "clone",
                 "pool": pool["id"],
             }, indent = 2) + "\n")
             return 0
@@ -1433,7 +1477,7 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
         # Which of the two "no"s it is, because they lead different places: a
         # linked worktree somebody made by hand is not going to become a pool
         # slot, while the clone itself is where you would take one.
-        if _linked_worktree(ctx):
+        if linked:
             info(ctx.std, "this is a git worktree, but not one " + pool["id"] + "'s pool manages")
         else:
             info(ctx.std, "not in a pooled worktree — this is the clone itself")
@@ -1447,6 +1491,7 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
         ctx.std.io.stdout.write(json.encode({
             "schema_version": _SCHEMA_VERSION,
             "in_worktree": True,
+            "location": "slot",
             "output_user_root": root,
             "pool": pool["id"],
             "remote": pool["remote"],
@@ -1460,6 +1505,15 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
         print("  " + line)
     print("")
     _slot_detail(rows[0], home)
+
+    # "How do I get back to this" is the other half of "who am I", so the
+    # session, its project and the command that returns to it belong here and
+    # not only in `list`.
+    sessions = _session_rows(ctx.std, rows, home)
+    if sessions:
+        print("")
+        for line in render(sessions, _SESSION_COLUMNS):
+            print("  " + line)
     return 0
 
 def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -1583,8 +1637,13 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         return 0
 
     if not victims and not spared:
+        free = len([1 for sid in registry["slots"] if registry["slots"][sid]["state"] == FREE])
         if ctx.args.target:
             info(ctx.std, "nothing to prune")
+        elif not free:
+            # "No free slot has been idle long enough" reads as "they are all
+            # too recent", which is the wrong conclusion when none is free.
+            info(ctx.std, "nothing to prune: every slot in this pool is in use")
         else:
             # Zero considers every free slot, so "idle for 0 days" would
             # contradict the flag: there simply is no free slot.
@@ -1674,6 +1733,11 @@ def _pool_rows(ctx: TaskContext, pool: dict, root: str, ask_git: bool) -> list[d
         # idleness needs that or an output base whose freshness can be read.
         knows_age = slot.get("created_ms", 0) != 0
         knows_idle = knows_age or warmth.base
+
+        # Noticed on the read path, since this is where the base is looked at.
+        # Persisted by whichever command writes the registry next; a listing
+        # does not write, so the fact can lag by one mutation and never lies.
+        observe_base(registry, slot_id, warmth.base)
         rows.append({
             "slot": slot_id,
             "state": slot["state"],
@@ -1699,6 +1763,9 @@ def _pool_rows(ctx: TaskContext, pool: dict, root: str, ask_git: bool) -> list[d
             # The project directory the harness filed the session under, where
             # that can be established. `agent.cwd` is only where the task ran.
             "session_project": session_project(ctx.std, agent) if agent else "",
+            # Withheld on the same rule as the table: a session the harness's
+            # store was read for and did not have cannot be resumed.
+            "resume": (resume_hint(agent) if agent and session_filed(ctx.std, agent) != ABSENT else ""),
             "path": path,
             "last_branch": slot.get("last_branch", ""),
             "owner": slot.get("owner_git_dir", ""),
@@ -1715,6 +1782,7 @@ def _pool_rows(ctx: TaskContext, pool: dict, root: str, ask_git: bool) -> list[d
             "age_ms": slot_age_ms(slot) if knows_age else None,
             "lease_count": slot.get("lease_count"),
             "history": slot.get("history") or [],
+            "had_base": slot.get("had_base", False),
             "output_base": output_base_of(ctx.std, path, root),
             "server_pid": warmth.server,
             "output_base_present": warmth.base,
@@ -1755,7 +1823,9 @@ def _list_cells(rows: list) -> struct:
             foreign += 1
             notes.append("other clone")
         if r["state"] == RESERVED:
-            if r["reserved_for"] and r["reserved_for"] != r["branch"]:
+            # Only when the branch column is showing something else: the cell
+            # falls back to `reserved_for`, so otherwise the note repeats it.
+            if r["reserved_for"] and (r["branch"] or r["name"]):
                 notes.append("claimed for " + r["reserved_for"])
             if r["reservation_abandoned"]:
                 notes.append("add abandoned")
@@ -1774,7 +1844,10 @@ def _list_cells(rows: list) -> struct:
         # A slot with a history and no output base had its state reclaimed from
         # under the pool — by `aspect gc`, or a `bazel clean --expunge`. The
         # row otherwise looks like any healthy one until a build pays for it.
-        if not r["output_base_present"] and (r["lease_count"] or 0) > 0:
+        # Only where a base was once seen. Inferring it from the lease count
+        # flagged every slot leased twice without a build as having had its
+        # state taken, which is a different and false claim.
+        if r["had_base"] and not r["output_base_present"]:
             notes.append("base reclaimed")
 
         # The column shows what git has. When that is not what the lease was
@@ -1857,7 +1930,7 @@ def _render_pool(ctx: TaskContext, pool: dict, rows: list, home: str) -> None:
     # the useful offer is how to get back into it, not how to take it away.
     for name, hint in resumable:
         print("")
-        print("  %s's session is not running; resume it:" % name)
+        print("  the process that took %s is no longer running; resume its session:" % name)
         print("    " + hint)
 
     # One pointer, rather than a handful of suggestions a reader has to tell
@@ -1982,7 +2055,7 @@ _ADD_OUTPUT_ARG = {
 add = task(
     group = ["worktree"],
     summary = "Take a git worktree from a pool of reused paths, so Bazel starts warm.",
-    description = "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nWhich slot you get is chosen for how much of its Bazel state will apply to the branch you asked for: an identical tree first, then the slot that last held this branch — so coming back to a branch lands on the analysis cache built for it — then anything free. The line `add` prints names the branch the warmth came from, so you can tell your own state from a stranger's.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.",
+    description = "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nWhich slot you get is chosen for how much of its Bazel state will apply to the branch you asked for: an identical tree first, then the slot that last held this branch — so coming back to a branch lands on the analysis cache built for it — then anything free. The line `add` prints names the branch that held the slot last, which is as much as the pool knows: what populated an analysis cache is not recorded, and a brief lease that built nothing is still the last holder.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.",
     implementation = _add_impl,
     traits = [Worktrees],
     args = {
@@ -2089,7 +2162,7 @@ whoami = task(
     kind = "whoami",
     group = ["worktree"],
     summary = "Say which pooled worktree this directory is in, and everything about it.",
-    description = "Report the slot the working directory is in: its path, the Bazel output base it keys, whether a server is holding that base, how many worktrees it has held and who has had them. The same detail `aspect worktree list --verbose` prints, for the one slot you are standing in — which otherwise means listing the pool and matching a path by eye.\n\nAnswers from any subdirectory of a slot, since the worktree root comes from git rather than from the working directory.\n\nBeing in no slot is an answer rather than an error, and exits 0: it is the expected result in the clone itself. The two cases are distinguished — a git worktree the pool does not manage, or the clone — because they lead different places, and `--output=json` reports which in `in_worktree`.",
+    description = "Report the slot the working directory is in: its path, the Bazel output base it keys, whether a server is holding that base, how many worktrees it has held and who has had them. The same detail `aspect worktree list --verbose` prints, for the one slot you are standing in — which otherwise means listing the pool and matching a path by eye.\n\nAnswers from any subdirectory of a slot, since the worktree root comes from git rather than from the working directory.\n\nHolding no slot is an answer rather than an error and exits 0, since that is the expected result in the clone itself; the two shapes of it are distinguished — the clone, or a git worktree this pool does not manage — because they lead different places. Being outside a repository altogether is a refusal, because then there is no pool to be in a slot of. `--output=json` reports which of the three in `location`.",
     implementation = _whoami_impl,
     traits = [Worktrees],
     args = {} | _OUTPUT_ARG,

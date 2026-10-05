@@ -95,6 +95,14 @@ RESERVED = "reserved"
 # these, and a second copy of the spelling would be free to drift.
 SLOT_PREFIX = "aspect-worktree-"
 
+# Removing a pool worktree always passes `--force` twice. Once overrides a dirty
+# tree; only twice overrides a *lock*, and `git worktree add` holds one with the
+# reason "initializing" for the duration of a checkout — so an `add` killed
+# mid-flight leaves a worktree that a single force can never remove. That is
+# debris the pool has to be able to clear, and the slot is the pool's to recycle
+# either way.
+FORCE_REMOVE = ["worktree", "remove", "--force", "--force"]
+
 # The registry's filename. Named because `pools_on_disk` recognizes a pool by
 # it, and a second spelling would be free to drift from the one that writes it.
 _REGISTRY_NAME = "registry.json"
@@ -528,6 +536,11 @@ def new_slot_record(pool: dict) -> dict:
         "lock_digest": "",
         "created_ms": time.now_ms(),
         "lease_count": 0,
+        # Whether an output base has ever been seen for this slot, recorded when
+        # a lease ends. A lease count cannot stand in for it: a slot leased
+        # twice without a build never had a base, and reading "the base was
+        # reclaimed" from the count said so about slots that never had one.
+        "had_base": False,
         "history": [],
     }
 
@@ -607,6 +620,20 @@ def mark_free(registry: dict, slot_id: str) -> str:
     if held:
         slot["last_branch"] = held
     return held
+
+def observe_base(registry: dict, slot_id: str, present: bool) -> None:
+    """Remember that this slot has had a Bazel output base. Mutates `registry`.
+
+    Once seen, never unseen: a base that exists now and is gone later is the
+    one thing worth reporting about it, and a slot that never had one must not
+    be told its state was taken. So this only ever sets the flag.
+
+    Called from the read paths, which look at the base anyway — a lease count
+    cannot stand in for the fact, and recording it only when a lease ends would
+    miss every slot whose leases ended some other way.
+    """
+    if present and not registry["slots"][slot_id].get("had_base", False):
+        registry["slots"][slot_id]["had_base"] = True
 
 def mark_leased(registry: dict, slot_id: str, name: str, agent: dict) -> None:
     """Record that a slot holds a worktree for `name`, taken by `agent`.
@@ -864,7 +891,7 @@ def leased_slot(registry: dict, name: str, owner: str = "") -> str:
             return slot_id
     return ""
 
-def reserve_slot(std, registry: dict, slot_id: str, name: str) -> str:
+def reserve_slot(std, registry: dict, slot_id: str, name: str, agent: dict = {}) -> str:
     """Claim a slot for `name` before its worktree exists, returning the token
     that proves the claim. Mutates `registry`; the caller writes it.
 
@@ -874,7 +901,16 @@ def reserve_slot(std, registry: dict, slot_id: str, name: str) -> str:
     """
     record = owner_record(std)
     registry["slots"][slot_id]["state"] = RESERVED
-    registry["slots"][slot_id]["reservation"] = record | {"name": name, "since": time.now_ms()}
+
+    # The agent as well as the process. A reservation is the one window where
+    # two agents can be racing for the same branch, so it is exactly when
+    # saying who is doing it is worth something — and the lease that would
+    # carry it does not exist yet.
+    registry["slots"][slot_id]["reservation"] = record | {
+        "name": name,
+        "since": time.now_ms(),
+        "agent": agent,
+    }
     return record["token"]
 
 def reserving_slot(registry: dict, name: str) -> str:
@@ -1052,7 +1088,7 @@ def drop_slot(std, pool: dict, registry: dict, slot_id: str, root: str = "") -> 
     # either way, so git failing is not fatal.
     owner = registry["slots"][slot_id].get("owner_git_dir", "")
     if owner and std.fs.exists(owner):
-        catch(run_git, std, ["worktree", "remove", "--force", path], owner)
+        catch(run_git, std, FORCE_REMOVE + [path], owner)
 
     catch(std.fs.remove_dir_all, path)
     catch(std.fs.remove_dir_all, output_base_of(std, path, root))
@@ -1076,7 +1112,7 @@ def free_slot(std, pool: dict, registry: dict, slot_id: str) -> None:
     """
     path = slot_path(pool, slot_id)
     if std.fs.exists(path):
-        catch(run_git, std, ["worktree", "remove", "--force", path], pool["git_common_dir"])
+        catch(run_git, std, FORCE_REMOVE + [path], pool["git_common_dir"])
     else:
         catch(run_git, std, ["worktree", "prune"], pool["git_common_dir"])
     mark_free(registry, slot_id)

@@ -978,6 +978,23 @@ def _test_freeing_a_slot_with_no_lease_invents_no_branch(ctx):
     _eq("the second has none to name", second, "")
     _eq("but the slot keeps it", registry["slots"]["s1"]["last_branch"], "fix/login")
 
+def _store_with(ctx, filed: list[str]) -> str:
+    """A session store holding exactly `filed`, and `CLAUDE_CONFIG_DIR` pointed
+    at it. Returns the directory the sessions are filed under.
+
+    Whether a session is filed decides whether a resume command is offered, so a
+    test that does not say which sessions exist is really asking about the
+    machine it runs on.
+    """
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-wt-store")
+    cwd = "/Users/me/src/web"
+    slug = "-Users-me-src-web"
+    ctx.std.fs.create_dir_all(home + "/projects/" + slug)
+    for id in filed:
+        ctx.std.fs.write(home + "/projects/" + slug + "/" + id + ".jsonl", "{}\n")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+    return cwd
+
 def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
     """One row per slot an agent holds, and `-` for anything unanswerable.
 
@@ -991,23 +1008,33 @@ def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
     The slot is spelled as the main table spells it, since matching a row to
     the table above it is the point of having the column.
     """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["full-uuid-here"])
     rows = [
-        {"slot": "aaaaaaaaaaaa", "agent": {"kind": "claude-code", "id": "full-uuid-here", "cwd": "/x"}},
+        {"slot": "aaaaaaaaaaaa", "agent": {"kind": "claude-code", "id": "full-uuid-here", "cwd": cwd}},
         {"slot": "bbbbbbbbbbbb", "agent": {}},
         {"slot": "cccccccccccc", "agent": {"kind": "cursor", "id": ""}},
     ]
 
     got = testonly_session_rows(ctx.std, rows, "/home/me")
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
 
     _eq("a row per agent, none for the person", len(got), 2)
 
     _eq("the slot as the table spells it", got[0]["slot"], "aaaaaaaaaaaa")
     _eq("the harness", got[0]["agent"], "claude-code")
     _eq("the whole id, not the abbreviation", got[0]["session"], "full-uuid-here")
-    _eq("a way back to it", got[0]["resume"], "claude --resume full-uuid-here")
 
-    # The store cannot place this session, and the cwd is not confirmed by it.
-    _eq("no project invented", got[0]["project"], "-")
+    # Filed under the cwd the lease recorded, so the project resolves — and the
+    # command carries a `cd`, since `--resume` looks within the current
+    # directory's project.
+    _eq("the project it is filed under", got[0]["project"], cwd)
+    _eq(
+        "a way back to it, from anywhere",
+        got[0]["resume"],
+        "cd " + cwd + " && claude --resume full-uuid-here",
+    )
 
     # Cursor marks its presence and names no session, so two fields are
     # unanswerable and both say so.
@@ -1015,27 +1042,39 @@ def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
     _eq("the session is not", got[1]["session"], "-")
     _eq("so there is nothing to resume to", got[1]["resume"], "-")
 
-def _test_no_resume_is_offered_for_a_session_known_to_be_gone(ctx):
-    """A resume command whose session its own store says is absent resolves
-    nothing, and a runnable-looking line that cannot run is worse than a dash.
+def _test_no_resume_is_offered_for_a_session_the_store_does_not_have(ctx):
+    """A resume command for a session the store does not hold resolves nothing,
+    and a runnable-looking line that cannot run is worse than a dash.
 
-    Only `gone` withholds it: that is the one verdict meaning "the store was
-    read and the session was not in it". `unknown` is what a harness nobody has
-    described reports, and Codex and Grok sessions resume from there perfectly
-    well, so withholding on uncertainty would withhold from sessions that work.
+    The question is whether the session is *filed*, not whether a process is
+    alive. Gating on liveness made this unreachable — three test agents found
+    the same row, a command for an unfiled id printed because the harness
+    process happened to be running — so both rows here have a live process and
+    differ only in whether the store has them.
     """
-    present = {"kind": "claude-code", "id": "still-there", "cwd": "/x"}
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["filed-one"])
+
+    # Both are held by a *live* process, which is the case that made the old
+    # gate unreachable: liveness said "running" and the store was never asked.
+    filed = {"kind": "claude-code", "id": "filed-one", "cwd": cwd}
+    absent = {"kind": "claude-code", "id": "never-filed", "cwd": cwd}
     rows = [
-        {"slot": "aaaaaaaaaaaa", "agent": present, "session_state": "gone"},
-        {"slot": "bbbbbbbbbbbb", "agent": present, "session_state": "unknown"},
-        {"slot": "cccccccccccc", "agent": present, "session_state": "running"},
+        {"slot": "aaaaaaaaaaaa", "agent": absent, "session_state": "running"},
+        {"slot": "bbbbbbbbbbbb", "agent": filed, "session_state": "running"},
     ]
 
     got = testonly_session_rows(ctx.std, rows, "/home/me")
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
 
-    _eq("not for a session its store says is gone", got[0]["resume"], "-")
-    _eq("but yes where nothing says it cannot", got[1]["resume"], "claude --resume still-there")
-    _eq("and yes while it runs", got[2]["resume"], "claude --resume still-there")
+    _eq("nothing for a session the store does not have", got[0]["resume"], "-")
+    _eq("even though its process is alive", got[0]["session"], "never-filed")
+    _eq(
+        "but a command for the one it does",
+        got[1]["resume"],
+        "cd " + cwd + " && claude --resume filed-one",
+    )
 
     headers = [c.key for c in testonly_session_columns]
     _eq("the columns, in order", headers, ["repo", "agent", "session", "project", "slot", "resume"])
@@ -1725,7 +1764,7 @@ _UNIT_TESTS = [
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
     _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot,
-    _test_no_resume_is_offered_for_a_session_known_to_be_gone,
+    _test_no_resume_is_offered_for_a_session_the_store_does_not_have,
     _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
     _test_pools_on_disk_finds_a_pool_at_any_depth,
     _test_pools_on_disk_is_empty_before_any_pool_exists,

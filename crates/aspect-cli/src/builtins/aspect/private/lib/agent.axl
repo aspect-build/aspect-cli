@@ -112,6 +112,13 @@ _ENV_DETECTORS = [
     ),
 ]
 
+# What `session_filed` can answer. Separate from the lease states below,
+# because a session can be filed while the process that took it is gone, and a
+# live process can hold an id no store has ever heard of.
+FILED = "filed"
+
+ABSENT = "absent"
+
 RUNNING = "running"
 RESUMABLE = "resumable"
 GONE = "gone"
@@ -427,6 +434,27 @@ def session_project(std, agent: dict) -> str:
     confirmed = cwd and found.rpartition("/")[2] == _flatten(cwd, harness.store.project_flattens)
     return cwd if confirmed else ""
 
+def session_filed(std, agent: dict) -> str:
+    """Whether the harness's store holds this session: `yes`, `no` or `unknown`.
+
+    Narrower than `session_state`, and deliberately independent of it. Liveness
+    is about the process that took the lease; this is about whether the session
+    can be *found*, which is the question a resume command turns on — and the
+    two disagree whenever a live process holds a session id the store does not
+    have. Asking the right one of the two is what stops a dead command from
+    being printed next to a running process.
+
+    `unknown` for a harness whose layout is not described, which is most of
+    them: a store that cannot be read says nothing either way.
+    """
+    if not agent:
+        return UNKNOWN
+    id = agent.get("id", "")
+    kind = agent.get("kind", "")
+    if not id or not _sessions_root(std, kind):
+        return UNKNOWN
+    return FILED if _session_on_disk(std, kind, id) else ABSENT
+
 def session_state(std, agent: dict) -> str:
     """Whether this lease's session is running, resumable, or really gone.
 
@@ -434,17 +462,20 @@ def session_state(std, agent: dict) -> str:
     missing one never substitutes for the next: a live process means `running`,
     a session still on disk means `resumable`, and only a *known* layout with
     the session absent from it means `gone`.
+
+    "Running" is a claim about the process recorded with the lease, not about
+    the session id — the two can disagree, and `session_filed` is the one to ask
+    about the id.
     """
     if not agent:
         return UNKNOWN
     if is_running(std, agent):
         return RUNNING
 
-    id = agent.get("id", "")
-    kind = agent.get("kind", "")
-    if not id or not _sessions_root(std, kind):
+    filed = session_filed(std, agent)
+    if filed == UNKNOWN:
         return UNKNOWN
-    return RESUMABLE if _session_on_disk(std, kind, id) else GONE
+    return RESUMABLE if filed == FILED else GONE
 
 def label(agent: dict) -> str:
     """One short column for `list`: the kind, and the session id if there is one.
