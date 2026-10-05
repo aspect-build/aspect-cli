@@ -46,6 +46,7 @@ load(
     "owned_slots",
     "owner_record",
     "pool_of",
+    "pools_on_disk",
     "pools_root_of",
     "prunable_slots",
     "read_registry",
@@ -976,6 +977,61 @@ def _test_the_sessions_block_speaks_for_the_slots_the_column_names(ctx):
     _eq("no project invented", got[0]["project"], "")
     _eq("and the block declares that column", "project" in [c.key for c in testonly_session_columns], True)
 
+def _test_pools_on_disk_finds_a_pool_at_any_depth(ctx):
+    """`--all` has to find every pool, and a pool id is not a fixed depth:
+    `host/org/repo` is three segments, a nested group is more, and the
+    no-usable-remote fallback is two. So the registry is the marker.
+
+    Two things it must not do: descend into a slot directory, which holds an
+    entire checkout and is never a pool, or report a directory that merely sits
+    under the root with nothing in it.
+    """
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-pools")
+    root = pools_root_of(home)
+
+    # Three shapes of real pool, and two things that are not one.
+    for rel in ["github.com/acme/web", "gitlab.com/acme/group/sub/api", "local/some-slug"]:
+        ctx.std.fs.create_dir_all(root + "/" + rel)
+        ctx.std.fs.write(root + "/" + rel + "/registry.json", "{}")
+    ctx.std.fs.create_dir_all(root + "/github.com/acme/nothing-here")
+
+    # A pool whose registry has gone but whose slots have not. Nothing marks
+    # the directory as a pool any more, so the walk would descend — and a slot
+    # holds an entire checkout, which is why slot directories are skipped by
+    # name rather than only by having been recognized as a pool.
+    gone = root + "/github.com/acme/stale/" + SLOT_PREFIX + "bbbbbbbbbbbb"
+    ctx.std.fs.create_dir_all(gone + "/deep")
+    ctx.std.fs.write(gone + "/deep/registry.json", "{}")
+
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+    found = pools_on_disk(ctx.std)
+    if saved != None:
+        ctx.std.env.set_var("HOME", saved)
+
+    ids = [p["id"] for p in found]
+    _eq("every pool, at every depth, sorted", ids, [
+        "github.com/acme/web",
+        "gitlab.com/acme/group/sub/api",
+        "local/some-slug",
+    ])
+    _eq("the directory is the id under the root", found[0]["dir"], root + "/github.com/acme/web")
+
+    # Nothing was asked of a clone, which is what keeps `reconcile` from
+    # judging another repository's slots against this one's object store.
+    _eq("and no clone is claimed", found[0]["git_common_dir"], "")
+
+def _test_pools_on_disk_is_empty_before_any_pool_exists(ctx):
+    """A machine that has never taken a worktree has no pools root at all, and
+    `--all` has to answer that rather than fail."""
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-nopools")
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+    found = pools_on_disk(ctx.std)
+    if saved != None:
+        ctx.std.env.set_var("HOME", saved)
+    _eq("nothing yet", found, [])
+
 def _test_the_history_says_who_held_each_lease(ctx):
     """On a machine running several agents, which session had a slot is the
     question worth asking of it — a cold build or an unexpected branch is
@@ -1525,6 +1581,8 @@ _UNIT_TESTS = [
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
     _test_the_sessions_block_speaks_for_the_slots_the_column_names,
+    _test_pools_on_disk_finds_a_pool_at_any_depth,
+    _test_pools_on_disk_is_empty_before_any_pool_exists,
     _test_freeing_a_slot_with_no_lease_invents_no_branch,
     _test_the_history_says_who_held_each_lease,
     _test_a_person_leaves_no_session_in_the_history,

@@ -95,6 +95,10 @@ RESERVED = "reserved"
 # these, and a second copy of the spelling would be free to drift.
 SLOT_PREFIX = "aspect-worktree-"
 
+# The registry's filename. Named because `pools_on_disk` recognizes a pool by
+# it, and a second spelling would be free to drift from the one that writes it.
+_REGISTRY_NAME = "registry.json"
+
 # Lock acquisition: `create_dir` is atomic, so a directory that did not exist a
 # moment ago is a lock nobody else holds. Agents allocate concurrently, so this
 # is load-bearing rather than defensive. Nothing slow happens under the lock —
@@ -285,6 +289,55 @@ def pools_root(std) -> str:
     """Where every pool lives. One place, so a reaper can see all of them."""
     return pools_root_of(std.env.home_dir())
 
+# How many path segments below the pools root a pool id may have. `host/org/repo`
+# is three; a GitLab subgroup adds one or two. Past this a directory is not
+# treated as a pool, which keeps a stray tree under the root from being walked
+# forever.
+_POOL_ID_DEPTH = 5
+
+def pools_on_disk(std) -> list[dict]:
+    """Every pool on this machine, newest-nothing, ordered by id.
+
+    A pool is a directory under the pools root containing a registry, at
+    whatever depth — the id is the path below the root, and that is three
+    segments for a normal remote and more for a nested group. The registry is
+    the marker rather than the depth.
+
+    `git_common_dir` is empty, because no clone was consulted: that is the whole
+    point of listing pools a clone does not own, and leaving it empty is what
+    stops `reconcile` from judging slots against the wrong object store. The
+    caller supplies its own pool dict for the one it does own.
+    """
+    root = pools_root(std)
+    if not std.fs.exists(root):
+        return []
+
+    found = []
+    frontier = [""]
+    for _ in range(_POOL_ID_DEPTH):
+        deeper = []
+        for rel in frontier:
+            at = root + ("/" + rel if rel else "")
+            err, entries = catch(std.fs.read_dir, at)
+            if err != None:
+                continue
+            for entry in entries:
+                if not entry.is_dir or entry.path.startswith(SLOT_PREFIX) or entry.path.startswith("."):
+                    continue
+                child = (rel + "/" + entry.path) if rel else entry.path
+                if std.fs.exists(at + "/" + entry.path + "/" + _REGISTRY_NAME):
+                    found.append(child)
+                else:
+                    deeper.append(child)
+        frontier = deeper
+        if not frontier:
+            break
+
+    return [
+        {"id": id, "dir": root + "/" + id, "git_common_dir": "", "remote": ""}
+        for id in sorted(found)
+    ]
+
 def pool_of(std, cwd: str) -> dict:
     """The pool this directory belongs to, or an empty dict outside a repo.
 
@@ -438,7 +491,7 @@ def release(std, pool_dir: str, token: str) -> None:
 # --- the registry ------------------------------------------------------------
 
 def _registry_path(pool_dir: str) -> str:
-    return pool_dir + "/registry.json"
+    return pool_dir + "/" + _REGISTRY_NAME
 
 def read_registry(std, pool_dir: str) -> dict:
     """The pool's registry, or an empty one. Never fails: a registry that cannot

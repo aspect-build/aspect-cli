@@ -32,7 +32,14 @@ load(
 
 _AGENT_VARS = [
     "CODEX_THREAD_ID",
+    "CLAUDE_PROJECT_DIR",
+    "CURSOR_AGENT",
+    "CURSOR_PROJECT_DIR",
+    "GEMINI_PROJECT_DIR",
     "GEMINI_CLI",
+    "GEMINI_SESSION_ID",
+    "GROK_HOME",
+    "GROK_SESSION_ID",
     "ASPECT_AGENT_KIND",
     "ASPECT_AGENT_ID",
     "CLAUDECODE",
@@ -125,6 +132,62 @@ def _test_gemini_is_detected_with_a_kind_and_no_session(ctx):
     _eq("the harness", got.get("kind"), "gemini-cli")
     _eq("no session claimed", got.get("id"), "")
     _eq("so nothing to resume", resume_hint(got), "")
+
+def _test_cursor_is_detected_from_a_marker_whose_value_is_unspecified(ctx):
+    """Cursor's terminal docs say to test that `CURSOR_AGENT` is *set*, not that
+    it equals anything, so any non-empty value counts and an empty one does not.
+    No session id reaches a tool — Cursor puts it on a hook's stdin — so the
+    kind is the whole answer.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CURSOR_AGENT", "1")
+    one = detect(ctx.std, "", "")
+    ctx.std.env.set_var("CURSOR_AGENT", "anything")
+    other = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    _eq("the documented value", one.get("kind"), "cursor")
+    _eq("any value, since only presence is promised", other.get("kind"), "cursor")
+    _eq("no session claimed", one.get("id"), "")
+
+def _test_gemini_names_its_session_when_run_as_a_hook(ctx):
+    """`GEMINI_SESSION_ID` is given to hook processes and not to shell tools, and
+    a hook may not carry the marker, so the id alone has to be enough to fire."""
+    saved = _clear(ctx)
+    ctx.std.env.set_var("GEMINI_SESSION_ID", "4e0c1f2a-dead-beef-cafe-000000000000")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    _eq("the harness", got.get("kind"), "gemini-cli")
+    _eq("the session", got.get("id"), "4e0c1f2a-dead-beef-cafe-000000000000")
+    _eq("and a way back to it", resume_hint(got), "gemini --resume 4e0c1f2a-dead-beef-cafe-000000000000")
+
+def _test_grok_is_named_and_its_sessions_can_be_found(ctx):
+    """Grok injects `GROK_SESSION_ID` into tool commands, so a task it runs is
+    named. Its store is also searchable — a directory per session under a
+    directory per working tree — which is what lets `session_state` separate a
+    deleted session from a closed terminal, and so lets an abandoned Grok slot
+    be reclaimed rather than only reported.
+
+    The session being a directory rather than a file is the whole difference
+    from Claude Code's entry, and an existence check does not care which.
+    """
+    saved = _clear(ctx)
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-grok")
+    ctx.std.env.set_var("GROK_HOME", home)
+    ctx.std.env.set_var("GROK_SESSION_ID", "01993b7e-0000-7000-8000-000000000001")
+    ctx.std.fs.create_dir_all(home + "/sessions/-Users-me-src-web/01993b7e-0000-7000-8000-000000000001")
+
+    got = detect(ctx.std, "", "")
+    found = session_state(ctx.std, got | {"pid": 0, "pid_start": ""})
+    absent = session_state(ctx.std, {"kind": "grok", "id": "01993b7e-dead", "pid": 0})
+    _restore(ctx, saved)
+
+    _eq("the harness", got.get("kind"), "grok")
+    _eq("the session it named", got.get("id"), "01993b7e-0000-7000-8000-000000000001")
+    _eq("a way back to it", resume_hint(got), "grok --resume 01993b7e-0000-7000-8000-000000000001")
+    _eq("stored, so resumable", found, RESUMABLE)
+    _eq("and a real miss is gone", absent, GONE)
 
 def _test_an_undescribed_store_is_unknown_for_every_harness(ctx):
     """Codex files sessions by date and Cursor under a hash of the workspace,
@@ -273,6 +336,24 @@ def _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees(ctx):
 
     _eq("the store's own directory", got, home + "/projects/" + slug)
 
+def _test_a_harness_that_states_its_project_is_believed(ctx):
+    """A hook invocation is handed the project directory outright, which beats
+    anything worked out from a path — and is the only way a harness whose store
+    this does not read can report one at all.
+
+    It is captured at detection because the variable exists only while the
+    harness runs, and the lease outlives it.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CURSOR_AGENT", "1")
+    ctx.std.env.set_var("CURSOR_PROJECT_DIR", "/Users/me/src/web")
+    got = detect(ctx.std, "", "")
+    project = session_project(ctx.std, got)
+    _restore(ctx, saved)
+
+    _eq("recorded at detection", got.get("project"), "/Users/me/src/web")
+    _eq("and reported as the project", project, "/Users/me/src/web")
+
 def _test_no_project_is_claimed_without_one(ctx):
     """Every way of not knowing: a harness the store is not described for, a
     record with no session id, and a session that is not filed anywhere."""
@@ -372,8 +453,12 @@ _UNIT_TESTS = [
     _test_the_project_is_the_cwd_when_the_store_agrees,
     _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees,
     _test_no_project_is_claimed_without_one,
+    _test_a_harness_that_states_its_project_is_believed,
     _test_codex_is_detected_from_the_thread_id_it_exports,
     _test_gemini_is_detected_with_a_kind_and_no_session,
+    _test_cursor_is_detected_from_a_marker_whose_value_is_unspecified,
+    _test_gemini_names_its_session_when_run_as_a_hook,
+    _test_grok_is_named_and_its_sessions_can_be_found,
     _test_an_undescribed_store_is_unknown_for_every_harness,
     _test_a_person_at_a_terminal_is_not_an_agent,
 ]

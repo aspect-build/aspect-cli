@@ -10,10 +10,14 @@ always believed over anything inferred:
 1. values passed on the command line
 2. `ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID` — the vendor-neutral contract, for a
    harness or wrapper script that knows what it is
-3. a known harness's own variables, so the common case needs no configuration:
-   Claude Code (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`), Codex
-   (`CODEX_THREAD_ID`, set for the shell and tool executions a task arrives as)
-   and Gemini CLI (`GEMINI_CLI`, a marker with no session id behind it)
+3. a known harness's own variables, so the common case needs no configuration.
+   Three name the session in the environment a task runs in — Claude Code
+   (`CLAUDE_CODE_SESSION_ID`, beside the `CLAUDECODE` marker), Codex
+   (`CODEX_THREAD_ID`) and Grok Build (`GROK_SESSION_ID`, from 1.0.4) — while
+   Gemini CLI and Cursor only mark their presence (`GEMINI_CLI`,
+   `CURSOR_AGENT`, whose value is deliberately unspecified so presence is the
+   test) and name the session to hooks alone (`GEMINI_SESSION_ID`; Cursor puts
+   its on a hook's stdin, which no environment carries)
 4. the process ancestry, which needs nothing from the harness at all: walk up
    from this process until a recognized binary turns up
 5. `AI_AGENT`, last because it names a tool without naming a session: a kind
@@ -47,12 +51,13 @@ from liveness, and only where the answer is knowable:
 `unknown` is the common case and is treated exactly like `resumable`: nothing is
 reclaimed unless we positively know the session is gone.
 
-**Only Claude Code's session store is described**, so only its sessions can ever
-read `gone`, and only its slots are reclaimed automatically. Codex files
-sessions by date and Cursor under a hash of the workspace; until those layouts
-are read here they answer `unknown`, their slots are reported with their holder
-and never taken, and recovering one is `--take-over` or `release --force`. That
-is the side to err on: the alternative is deleting a resumable agent's
+**A store has to be described for a session to read `gone`**, and `gone` is the
+only verdict that reclaims a slot automatically. Claude Code and Grok Build
+both file a session under a directory named for the tree it was started in, so
+both can be searched by id. Codex files by date and Cursor under a hash of the
+workspace; those answer `unknown`, their slots are reported with their holder
+rather than taken, and recovering one is `--take-over` or `release --force`.
+That is the side to err on: the alternative is deleting a resumable agent's
 uncommitted work on a timer.
 """
 
@@ -78,11 +83,30 @@ _ENV_DETECTORS = [
         id_var = "CODEX_THREAD_ID",
         pid_var = "",
     ),
-    # A marker only: Gemini CLI exports no session id, so the kind is known and
-    # the session is not, which `list` shows as a kind with no id beside it.
+    # `GEMINI_CLI` is all a shell tool gets; the session id reaches hook
+    # processes only, where the marker may be absent, so either one firing is
+    # what matters. A task run as a tool reports a kind and no session.
     struct(
         kind = "gemini-cli",
         marker = "GEMINI_CLI",
+        id_var = "GEMINI_SESSION_ID",
+        pid_var = "",
+    ),
+    # Injected into tool commands from 1.0.4, like Codex. No presence marker:
+    # the other `GROK_*` variables are user configuration and can be set
+    # outside a session, so none of them means "inside Grok".
+    struct(
+        kind = "grok",
+        marker = "",
+        id_var = "GROK_SESSION_ID",
+        pid_var = "",
+    ),
+    # A presence marker whose value is deliberately unspecified — the Cursor
+    # terminal docs say to test that it is set — so non-empty is the test.
+    # Cursor exposes no session id to a tool: it arrives on a hook's stdin.
+    struct(
+        kind = "cursor",
+        marker = "CURSOR_AGENT",
         id_var = "",
         pid_var = "",
     ),
@@ -102,6 +126,7 @@ _BINARIES = {
     "cursor-agent": "cursor",
     "aider": "aider",
     "gemini": "gemini-cli",
+    "grok": "grok",
     "goose": "goose",
     "opencode": "opencode",
     "amp": "amp",
@@ -125,6 +150,7 @@ _BINARIES = {
 _HARNESSES = {
     "claude-code": struct(
         resume = "claude --resume %s",
+        project_var = "CLAUDE_PROJECT_DIR",
         store = struct(
             # Relocatable, so the home-relative default is a fallback.
             config_var = "CLAUDE_CONFIG_DIR",
@@ -139,9 +165,35 @@ _HARNESSES = {
             project_flattens = "/.",
         ),
     ),
-    "codex": struct(resume = "codex resume %s", store = None),
-    "gemini-cli": struct(resume = "gemini --resume %s", store = None),
-    "cursor": struct(resume = "cursor-agent --resume %s", store = None),
+    # Codex names no project directory anywhere a task can read: its store is
+    # keyed by date, and the working directory lives inside the rollout file.
+    "codex": struct(resume = "codex resume %s", project_var = "", store = None),
+    "gemini-cli": struct(
+        resume = "gemini --resume %s",
+        project_var = "GEMINI_PROJECT_DIR",
+        store = None,
+    ),
+    "cursor": struct(
+        resume = "cursor-agent --resume %s",
+        project_var = "CURSOR_PROJECT_DIR",
+        store = None,
+    ),
+    "grok": struct(
+        resume = "grok --resume %s",
+        project_var = "",
+        store = struct(
+            config_var = "GROK_HOME",
+            config_default = "/.grok",
+            sessions_dir = "sessions",
+            # A directory named for the session, not a file: an existence check
+            # does not care which, so only the name differs from Claude Code's.
+            session_file = "%s",
+            # The spelling of the `<encoded-cwd>` segment is a guess, and
+            # nothing rests on it — finding the session is a search, and a
+            # mismatch only costs the path, not the answer.
+            project_flattens = "/.",
+        ),
+    ),
 }
 
 # `AI_AGENT` is spelled `<tool>_<version>_<role>`, e.g.
@@ -221,12 +273,23 @@ def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
     return {}
 
 def _record(std, kind: str, id: str, pid: int, source: str) -> dict:
+    """The lease-shaped record for a detected agent.
+
+    `project` is what the harness says its project directory is, which only a
+    hook invocation is told; it is captured here because the variable exists
+    only while the harness is running, and the lease outlives that. `cwd` is
+    where the task ran, which is a candidate for the same thing and not a
+    statement about it.
+    """
+    harness = _HARNESSES.get(kind)
+    project_var = harness.project_var if harness else ""
     return {
         "kind": kind,
         "id": id,
         "pid": pid,
         "pid_start": started_at(std, pid),
         "cwd": std.env.current_dir(),
+        "project": (std.env.var(project_var) or "") if project_var else "",
         "source": source,
         "seen_ms": time.now_ms(),
     }
@@ -292,6 +355,12 @@ def _flatten(path: str, chars: str) -> str:
 def session_project(std, agent: dict) -> str:
     """The directory this session belongs to, as a path, or "".
 
+    Answered from whichever of three sources can back it. The harness's own
+    `*_PROJECT_DIR`, recorded at detection, settles it outright — but only a
+    hook invocation is given one, and a tool execution, which is how a task
+    normally arrives, is not. Failing that, the session store can place the
+    session when it is keyed by the path the harness started in.
+
     The store names a project directory for the path the harness started in with
     the separators flattened, and that cannot be decoded back — so a real path
     is only reported when it can be *checked*: the recorded `cwd` is the answer
@@ -301,8 +370,16 @@ def session_project(std, agent: dict) -> str:
     started — the store's own directory name is returned instead. It is not a
     path, but it is true, and it is what the harness's own session list shows.
     """
-    harness = _HARNESSES.get(agent.get("kind", "")) if agent else None
-    id = agent.get("id", "") if agent else ""
+    if not agent:
+        return ""
+
+    # The harness said so, which beats anything worked out from a path.
+    stated = agent.get("project", "")
+    if stated:
+        return stated
+
+    harness = _HARNESSES.get(agent.get("kind", ""))
+    id = agent.get("id", "")
     if not harness or not harness.store or not id:
         return ""
     found = _session_dir(std, agent.get("kind", ""), id)
