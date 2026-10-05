@@ -978,26 +978,45 @@ def _test_freeing_a_slot_with_no_lease_invents_no_branch(ctx):
     _eq("the second has none to name", second, "")
     _eq("but the slot keeps it", registry["slots"]["s1"]["last_branch"], "fix/login")
 
-def _test_the_sessions_block_speaks_for_the_slots_the_column_names(ctx):
-    """The block repeats the `agent` column in full, so it has to cover exactly
-    the rows that column names — a slot held by a person contributes nothing —
-    and spell the slot the way the table does, or there is no matching the two
-    up. The project is left empty rather than guessed when the harness's store
-    cannot place the session, which is what lets the renderer drop the column.
+def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
+    """One row per slot an agent holds, and `-` for anything unanswerable.
+
+    A slot held by a person contributes nothing — there is no agent to report.
+    But a harness that marks its presence without naming a session does
+    contribute: that is the case where a reader has to be told the session is
+    unknown, which a blank cell would leave them to infer. Same for a project
+    the harness's store cannot place, and for a resume command nobody has
+    confirmed.
+
+    The slot is spelled as the main table spells it, since matching a row to
+    the table above it is the point of having the column.
     """
     rows = [
         {"slot": "aaaaaaaaaaaa", "agent": {"kind": "claude-code", "id": "full-uuid-here", "cwd": "/x"}},
         {"slot": "bbbbbbbbbbbb", "agent": {}},
-        {"slot": "cccccccccccc", "agent": {"kind": "claude-code", "id": ""}},
+        {"slot": "cccccccccccc", "agent": {"kind": "cursor", "id": ""}},
     ]
 
     got = testonly_session_rows(ctx.std, rows, "/home/me")
 
-    _eq("one row, for the one identified session", len(got), 1)
+    _eq("a row per agent, none for the person", len(got), 2)
+
     _eq("the slot as the table spells it", got[0]["slot"], "aaaaaaaaaaaa")
+    _eq("the harness", got[0]["agent"], "claude-code")
     _eq("the whole id, not the abbreviation", got[0]["session"], "full-uuid-here")
-    _eq("no project invented", got[0]["project"], "")
-    _eq("and the block declares that column", "project" in [c.key for c in testonly_session_columns], True)
+    _eq("a way back to it", got[0]["resume"], "claude --resume full-uuid-here")
+
+    # The store cannot place this session, and the cwd is not confirmed by it.
+    _eq("no project invented", got[0]["project"], "-")
+
+    # Cursor marks its presence and names no session, so two fields are
+    # unanswerable and both say so.
+    _eq("the harness is still known", got[1]["agent"], "cursor")
+    _eq("the session is not", got[1]["session"], "-")
+    _eq("so there is nothing to resume to", got[1]["resume"], "-")
+
+    headers = [c.key for c in testonly_session_columns]
+    _eq("the columns, in order", headers, ["repo", "agent", "session", "project", "slot", "resume"])
 
 def _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone(ctx):
     """`--all` lists pools whose clones are not here to ask, so it cannot run
@@ -1540,11 +1559,17 @@ def _test_releasing_a_free_slot_points_at_prune(ctx):
     registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
     registry["slots"]["abc123abc123"]["last_branch"] = "dx-two"
 
-    msg = testonly_nothing_to_release(registry, "abc123abc123")
+    # The caller passes the command already spelled for its own terminal, so a
+    # non-interactive one is not handed a line that needs a prompt.
+    msg = testonly_nothing_to_release(
+        registry,
+        "abc123abc123",
+        "aspect worktree prune abc123abc123 --force",
+    )
 
     _eq("says it is free", "is free" in msg, True)
     _eq("says what it last held", "dx-two" in msg, True)
-    _eq("and names the real command", "aspect worktree prune abc123abc123" in msg, True)
+    _eq("and names the command as given", "aspect worktree prune abc123abc123 --force" in msg, True)
 
 def _test_pruning_a_leased_slot_points_at_release(ctx):
     """The other direction, and the dangerous one: pruning a slot somebody is
@@ -1563,6 +1588,32 @@ def _test_pruning_a_leased_slot_points_at_release(ctx):
     _eq("says what would be lost", "Bazel state" in msg, True)
     _eq("without claiming it is warm", "warm" in msg, False)
     _eq("and names the reversible command", "aspect worktree release fix/login" in msg, True)
+
+def _test_pruning_another_sessions_slot_says_whose_it_is(ctx):
+    """`release` ends somebody's claim on a checkout they may be working in, so
+    offering it for another session's lease without a word about whose it is
+    invites an agent to delete a colleague's work. `add` names the holder for
+    the same reason; this is the one that did not.
+    """
+    theirs = {"kind": "claude-code", "id": "their-session", "pid": 0, "pid_start": ""}
+    mine = {"kind": "claude-code", "id": "my-session", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", theirs)}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123", mine)
+
+    _eq("names the holder", "their-session" in msg, True)
+    _eq("says it is theirs to end", "theirs to run" in msg, True)
+
+def _test_pruning_your_own_slot_just_offers_release(ctx):
+    """The same lease, held by the session asking: no third party to warn
+    about, so the message stays the short one."""
+    mine = {"kind": "claude-code", "id": "my-session", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", mine)}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123", mine)
+
+    _eq("no warning about somebody else", "theirs to run" in msg, False)
+    _eq("still names the reversible command", "aspect worktree release fix/login" in msg, True)
 
 def _test_pruning_a_slot_being_set_up_says_to_wait(ctx):
     """A reserved slot is mid-checkout, so it is not there to delete and no
@@ -1608,6 +1659,8 @@ _UNIT_TESTS = [
     _test_a_slot_answers_to_its_id_and_to_its_branch,
     _test_releasing_a_free_slot_points_at_prune,
     _test_pruning_a_leased_slot_points_at_release,
+    _test_pruning_another_sessions_slot_says_whose_it_is,
+    _test_pruning_your_own_slot_just_offers_release,
     _test_pruning_a_slot_being_set_up_says_to_wait,
     _test_a_leased_slots_old_branch_does_not_resolve,
     _test_another_clones_slot_resolves_by_id_but_not_by_branch,
@@ -1649,7 +1702,7 @@ _UNIT_TESTS = [
     _test_creation_age_is_not_idleness,
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
-    _test_the_sessions_block_speaks_for_the_slots_the_column_names,
+    _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot,
     _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
     _test_pools_on_disk_finds_a_pool_at_any_depth,
     _test_pools_on_disk_is_empty_before_any_pool_exists,

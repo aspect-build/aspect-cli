@@ -68,6 +68,50 @@ def _restore(ctx, saved):
         else:
             ctx.std.env.remove_var(v)
 
+def _test_an_explicit_id_keeps_the_rest_of_the_identity(ctx):
+    """The reason to pass `--agent-id` is to tell sibling agents of one session
+    apart, and that is exactly where the other fields matter most.
+
+    Replacing the whole record instead of the named field left the kind as the
+    literal "unknown", the pid as 0 — so liveness could never be established
+    and the slot could never be reclaimed — and no project, so no resume
+    command was ever offered. The flag names a field; detection answers the
+    others.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    ctx.std.env.set_var("CLAUDE_CODE_SESSION_ID", "parent-session")
+    ctx.std.env.set_var("CLAUDE_PID", str(ctx.std.process.id()))
+    got = detect(ctx.std, "", "worker-a")
+    _restore(ctx, saved)
+
+    _eq("the id the caller gave", got.get("id"), "worker-a")
+    _eq("the kind detection found", got.get("kind"), "claude-code")
+    _eq("and the pid with it, so liveness still works", got.get("pid"), ctx.std.process.id())
+    _eq("reported as caller-supplied", got.get("source"), "flag")
+    _eq(
+        "with a resume command for the harness",
+        resume_hint(got),
+        "claude --resume worker-a",
+    )
+
+def _test_an_explicit_kind_for_another_harness_drops_the_pid(ctx):
+    """A pid identifies the process of the harness that was *detected*. Told
+    this is a different harness, carrying it would answer liveness about the
+    wrong process — and answering that wrongly is what licenses taking a slot
+    away from somebody."""
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    ctx.std.env.set_var("CLAUDE_CODE_SESSION_ID", "parent-session")
+    ctx.std.env.set_var("CLAUDE_PID", str(ctx.std.process.id()))
+    got = detect(ctx.std, "codex", "thread-1")
+    _restore(ctx, saved)
+
+    _eq("the kind the caller gave", got.get("kind"), "codex")
+    _eq("the id the caller gave", got.get("id"), "thread-1")
+    _eq("no pid from the other harness", got.get("pid"), 0)
+    _eq("so liveness is not claimed", is_running(ctx.std, got), False)
+
 def _test_flags_beat_everything(ctx):
     """A harness that states what it is must be believed over any inference —
     it is the only source that cannot be wrong about itself."""
@@ -439,6 +483,8 @@ def _test_a_person_at_a_terminal_is_not_an_agent(ctx):
 
 _UNIT_TESTS = [
     _test_flags_beat_everything,
+    _test_an_explicit_id_keeps_the_rest_of_the_identity,
+    _test_an_explicit_kind_for_another_harness_drops_the_pid,
     _test_the_neutral_contract_beats_a_known_harness,
     _test_claude_code_is_detected_from_its_own_variables,
     _test_a_generic_ai_agent_variable_gives_a_kind_but_no_session,

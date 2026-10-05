@@ -245,10 +245,45 @@ def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
 
     `source` records which layer answered, so a reader can tell a session id the
     harness reported from a kind that was merely inferred from a process name.
+
+    An explicit kind or id *overrides* the field it names and leaves the rest to
+    detection, rather than replacing the record wholesale. The reason to pass
+    `--agent-id` is to tell sibling agents of one session apart, and that is
+    precisely where the other fields are worth keeping: without the pid there is
+    no liveness, and without liveness a slot can never be reclaimed.
     """
     if explicit_kind or explicit_id:
-        return _record(std, explicit_kind or "unknown", explicit_id, 0, "flag")
+        return _overlay(std, _detected(std), explicit_kind, explicit_id)
+    return _detected(std)
 
+def _overlay(std, found: dict, explicit_kind: str, explicit_id: str) -> dict:
+    """`found` with the caller's own kind and id written over it.
+
+    The pid is the one field that cannot just be carried: it identifies the
+    process of the harness that was *detected*, so it is kept only while the
+    resulting kind is still that harness's. Told this is Codex from inside a
+    Claude Code session, a Claude pid would answer liveness about the wrong
+    process — and answering it wrongly is what licenses taking a slot away.
+    """
+    kind = explicit_kind or found.get("kind", "") or "unknown"
+    same_harness = kind == found.get("kind", "")
+    record = _record(
+        std,
+        kind,
+        explicit_id or found.get("id", ""),
+        found.get("pid", 0) if same_harness else 0,
+        "flag",
+    )
+    if same_harness and found.get("pid_start", ""):
+        # Captured when the pid was read, so it is carried with it rather than
+        # looked up again — `ps` may answer differently a moment later.
+        record["pid_start"] = found["pid_start"]
+    if not record["project"] and same_harness:
+        record["project"] = found.get("project", "")
+    return record
+
+def _detected(std) -> dict:
+    """Who is running this, from the environment and the process tree alone."""
     env_kind = std.env.var("ASPECT_AGENT_KIND") or ""
     env_id = std.env.var("ASPECT_AGENT_ID") or ""
     if env_kind or env_id:
