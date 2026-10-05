@@ -97,7 +97,6 @@ load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./aspect_flags.axl", "endpoint_flags", "independent_flags", "temp_exec_log_flags")
-load("./deployment_rc.axl", "credential_helper_flag")
 load("./environment.axl", "detect_ci", "env_names_deployment", "info")
 
 REMOTE_REFUSED_BY_ENV = (
@@ -494,21 +493,18 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
             info(ctx.std, explanation)
 
 def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag: str, what: str) -> list:
-    """Per-invocation auth for an endpoint owned by a configured deployment named
-    by `endpoint_flag`, or `[]`.
+    """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an
+    endpoint owned by a configured deployment named by `endpoint_flag`, or `[]`.
 
     Reads the effective `endpoint_flag` through `rc`. When a configured deployment
     owns its host and the stream will not already carry an `authorization` —
     neither an explicit `<header_flag>=authorization=…` nor a
-    `--credential_helper` registered for the host — returns one flag registering
-    this binary as Bazel's credential helper for that host. Bazel then fetches the
-    token from `aspect get` in memory: as a flag value it would be in the client's
-    argv, in every `java.log`, and in the options the build-event stream publishes.
-    Bazel before 6.0.0 has no helper protocol and gets `<header_flag>` instead.
-    Suppressing on a matching credential helper keeps Bazel from adding a second
-    `authorization` alongside ours, which gRPC would comma-join into a token a
-    JWT-validating proxy rejects. Best-effort: an owned endpoint with no usable
-    credential warns and returns `[]`. `what` describes the endpoint in the warning.
+    `--credential_helper` registered for the host — returns the one auth header
+    flag. Suppressing on a matching credential helper keeps Bazel from adding a
+    second `authorization` alongside the injected one, which gRPC would comma-join
+    into a token a JWT-validating proxy rejects. Best-effort: an owned endpoint
+    with no usable credential warns and returns `[]`. `what` describes the endpoint
+    in the warning.
     """
     endpoint = rc.flag_value(endpoint_flag, command = command)
     if not endpoint:
@@ -530,22 +526,16 @@ def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag:
     bearer = resolve_aspect_bearer(ctx, what, endpoint)
     if not bearer:
         return []
-    helper_flag = credential_helper_flag(ctx.bazel.version())
-    if helper_flag == None:
-        return [header_flag + "=authorization=" + bearer]
-    return [helper_flag + "=" + endpoint_host(endpoint) + "=" + ctx.std.env.current_exe()]
+    return [header_flag + "=authorization=" + bearer]
 
 def deployment_auth_flags(ctx, rc, command: str) -> list:
-    """Per-invocation auth for every Bazel-facing
+    """Per-invocation `--remote_header`/`--bes_header` auth for every Bazel-facing
     endpoint (remote cache + Bazel-streamed BES) a configured deployment owns and
     the resolved `rc` points at. Registered on `BazelTrait.rc_flags`."""
-    flags = (
+    return (
         _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache") +
         _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
     )
-
-    # A deployment serving cache and BES from one host needs its helper once.
-    return {f: None for f in flags}.keys()
 
 def _deployment_impl(ctx):
     """Wire the selected deployment's endpoints into the `BazelTrait`. The auth
