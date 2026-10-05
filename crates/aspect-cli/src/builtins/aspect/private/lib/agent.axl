@@ -92,6 +92,11 @@ _HARNESSES = {
         sessions_dir = "projects",
         # Named for the session id, inside one of the project directories.
         session_file = "%s.jsonl",
+        # A project directory is named for the path the harness started in, with
+        # each of these characters replaced by a dash. The mapping is one-way —
+        # a dash in the result could have been any of them, or a real dash — so
+        # it is used to check a candidate path, never to decode one.
+        project_flattens = "/.",
     ),
 }
 
@@ -208,9 +213,8 @@ def _sessions_root(std, kind: str) -> str:
     root = base + "/" + harness.sessions_dir
     return root if std.fs.exists(root) else ""
 
-def _session_on_disk(std, kind: str, id: str) -> bool:
-    """Whether this session is still stored, searched by id across the harness's
-    project directories.
+def _session_dir(std, kind: str, id: str) -> str:
+    """The project directory in the store that holds this session, or "".
 
     Searched rather than derived: a session's directory is named for the path the
     harness was started in, which is not where a task necessarily runs, so a
@@ -220,12 +224,47 @@ def _session_on_disk(std, kind: str, id: str) -> bool:
     harness = _HARNESSES.get(kind)
     root = _sessions_root(std, kind)
     if not harness or not root:
-        return False
+        return ""
     wanted = harness.session_file % id
     for entry in std.fs.read_dir(root):
         if entry.is_dir and std.fs.exists(root + "/" + entry.path + "/" + wanted):
-            return True
-    return False
+            return root + "/" + entry.path
+    return ""
+
+def _session_on_disk(std, kind: str, id: str) -> bool:
+    """Whether this session is still stored."""
+    return _session_dir(std, kind, id) != ""
+
+def _flatten(path: str, chars: str) -> str:
+    """`path` with each character of `chars` replaced by a dash."""
+    out = ""
+    for ch in path.elems():
+        out += "-" if ch in chars else ch
+    return out
+
+def session_project(std, agent: dict) -> str:
+    """The directory this session belongs to, as a path, or "".
+
+    The store names a project directory for the path the harness started in with
+    the separators flattened, and that cannot be decoded back — so a real path
+    is only reported when it can be *checked*: the recorded `cwd` is the answer
+    when the session really is filed under the directory that `cwd` flattens to.
+
+    Where they disagree — a task run from somewhere other than where the harness
+    started — the store's own directory name is returned instead. It is not a
+    path, but it is true, and it is what the harness's own session list shows.
+    """
+    harness = _HARNESSES.get(agent.get("kind", "")) if agent else None
+    id = agent.get("id", "") if agent else ""
+    if not harness or not id:
+        return ""
+    found = _session_dir(std, agent.get("kind", ""), id)
+    if not found:
+        return ""
+    cwd = agent.get("cwd", "")
+    if cwd and found.rpartition("/")[2] == _flatten(cwd, harness.project_flattens):
+        return cwd
+    return found
 
 def session_state(std, agent: dict) -> str:
     """Whether this lease's session is running, resumable, or really gone.
@@ -273,5 +312,6 @@ def resume_hint(agent: dict) -> str:
 # Exposed for agent_test.axl, so the tables can be checked against each other;
 # not part of this module's interface.
 testonly_binaries = _BINARIES
+testonly_flatten = _flatten
 testonly_env_detectors = _ENV_DETECTORS
 testonly_harnesses = _HARNESSES

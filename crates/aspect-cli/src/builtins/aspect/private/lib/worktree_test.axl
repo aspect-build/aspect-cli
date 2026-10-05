@@ -17,6 +17,8 @@ load(
     "testonly_nothing_to_release",
     "testonly_resolve_slot",
     "testonly_same_session",
+    "testonly_session_columns",
+    "testonly_session_rows",
     "testonly_slot_in_use",
 )
 load("@std//time.axl", "time")
@@ -953,6 +955,27 @@ def _test_freeing_a_slot_with_no_lease_invents_no_branch(ctx):
     _eq("the second has none to name", second, "")
     _eq("but the slot keeps it", registry["slots"]["s1"]["last_branch"], "fix/login")
 
+def _test_the_sessions_block_speaks_for_the_slots_the_column_names(ctx):
+    """The block repeats the `agent` column in full, so it has to cover exactly
+    the rows that column names — a slot held by a person contributes nothing —
+    and spell the slot the way the table does, or there is no matching the two
+    up. The project is left empty rather than guessed when the harness's store
+    cannot place the session, which is what lets the renderer drop the column.
+    """
+    rows = [
+        {"slot": "aaaaaaaaaaaa", "agent": {"kind": "claude-code", "id": "full-uuid-here", "cwd": "/x"}},
+        {"slot": "bbbbbbbbbbbb", "agent": {}},
+        {"slot": "cccccccccccc", "agent": {"kind": "claude-code", "id": ""}},
+    ]
+
+    got = testonly_session_rows(ctx.std, rows, "/home/me")
+
+    _eq("one row, for the one identified session", len(got), 1)
+    _eq("the slot as the table spells it", got[0]["slot"], "aaaaaaaaaaaa")
+    _eq("the whole id, not the abbreviation", got[0]["session"], "full-uuid-here")
+    _eq("no project invented", got[0]["project"], "")
+    _eq("and the block declares that column", "project" in [c.key for c in testonly_session_columns], True)
+
 def _test_the_history_says_who_held_each_lease(ctx):
     """On a machine running several agents, which session had a slot is the
     question worth asking of it — a cold build or an unexpected branch is
@@ -1501,6 +1524,7 @@ _UNIT_TESTS = [
     _test_creation_age_is_not_idleness,
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
+    _test_the_sessions_block_speaks_for_the_slots_the_column_names,
     _test_freeing_a_slot_with_no_lease_invents_no_branch,
     _test_the_history_says_who_held_each_lease,
     _test_a_person_leaves_no_session_in_the_history,

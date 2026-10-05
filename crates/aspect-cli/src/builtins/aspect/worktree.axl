@@ -56,6 +56,7 @@ load(
     "detect",
     "label",
     "resume_hint",
+    "session_project",
     "session_state",
 )
 load("./private/lib/confirm.axl", "confirm")
@@ -786,6 +787,34 @@ _HISTORY_COLUMNS = [
     Column(key = "when", header = "", always = True),
 ]
 
+# What a session needs to be returned to, which no table cell is wide enough
+# for: the whole id, and the directory the harness filed it under.
+_SESSION_COLUMNS = [
+    Column(key = "slot", header = "slot"),
+    Column(key = "session", header = "session"),
+    Column(key = "project", header = "project"),
+]
+
+def _session_rows(std, rows: list, home: str) -> list[dict]:
+    """A row per slot whose holder names a session, or [].
+
+    Only the id is certain to be there. A project is reported when it can be
+    established from the harness's own session store, so an unrecognized harness
+    contributes a row with the id alone and the column drops out.
+    """
+    out = []
+    for r in rows:
+        agent = r["agent"] or {}
+        if not agent.get("id", ""):
+            continue
+        project = session_project(std, agent)
+        out.append({
+            "slot": r["slot"],
+            "session": agent["id"],
+            "project": tilde(project, home) if project else "",
+        })
+    return out
+
 def _history_rows(history: list) -> list[dict]:
     """A slot's holders, newest first, as cells for the table renderer.
 
@@ -1277,6 +1306,9 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
             "branch": checked_out.get(path, ""),
             "agent": agent,
             "session_state": session_state(ctx.std, agent) if agent else "",
+            # The project directory the harness filed the session under, where
+            # that can be established. `agent.cwd` is only where the task ran.
+            "session_project": session_project(ctx.std, agent) if agent else "",
             "path": path,
             "last_branch": slot.get("last_branch", ""),
             "owner": slot.get("owner_git_dir", ""),
@@ -1392,15 +1424,26 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Everything the table gave up, per slot: the paths, the server, the age
     # and every remembered holder.
+    # Under the table rather than in it, and without `--verbose`, because the
+    # abbreviated column is not something `claude --resume` accepts.
+    sessions = _session_rows(ctx.std, rows, ctx.std.env.home_dir())
+    if sessions:
+        print("")
+        print("  the sessions above, in full:")
+        for line in render(sessions, _SESSION_COLUMNS):
+            print("  " + line)
+
     if ctx.args.verbose:
+        home = ctx.std.env.home_dir()
         print("")
         for r in rows:
             print("  " + (r["branch"] or r["name"] or r["reserved_for"] or r["last_branch"] or r["slot"]))
-            print("    slot:        " + r["path"])
-            print("    output base: " + r["output_base"] +
+            print("    slot:        " + tilde(r["path"], home))
+            print("    output base: " + tilde(r["output_base"], home) +
                   ("" if r["output_base_present"] else "  (missing)"))
             if r["server_pid"]:
                 print("    server:      pid %d" % r["server_pid"])
+
             print("    leases:      %s, slot created %s ago" % (
                 _unit(str, r["lease_count"]),
                 _unit(phrase_ms, r["age_ms"]),
@@ -1567,7 +1610,7 @@ worktree_list = task(
     kind = "list",
     group = ["worktree"],
     summary = "List this repository's worktree slots, what holds them, and how warm each is.",
-    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. It also says which Bazel output user root it scanned, which this command does not: a pool whose builds went to a different root has state neither command can see.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale and what deleting them all would reclaim. Without --dry-run it asks before deleting anything.",
+    description = "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held. A free slot's last branch is the signal for how warm it will be for the next thing you put in it.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. It also says which Bazel output user root it scanned, which this command does not: a pool whose builds went to a different root has state neither command can see.\n\nColumns, with every value `state` and `warmth` can take:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          whether a worktree is checked out in the slot right now\n      in use       a worktree is checked out here, under the branch shown\n      free         no worktree here; the slot keeps its Bazel state for the next one\n      setting up   an `aspect worktree add` is checking a worktree out here now\n    warmth         how much of Bazel's state this slot still has behind it\n      warm         a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      partly warm  no server, but the output base is there, so `external/` is already materialized\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    idle           how long since Bazel last did anything in the slot, which is what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held, so cold starts it has saved\n    branch         what is checked out, or what a free slot last held\n    agent          the agent session holding the slot, where one can be identified, abbreviated to fit; the table is followed by each session id in full and the project directory the harness filed it under, which is what `claude --resume` needs\n    notes          anything exceptional about the row\n\nA column no slot fills is left out, except `agent`, which is shown even when empty so that the pool's agent attribution is discoverable. Durations are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days.\n\nRows are ordered by what is happening: in use first, then the slots you could take, warmest down to cold.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take the warmest free slot and check <branch> out in it, creating the branch from --base-ref if it does not exist yet. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree with uncommitted changes, and names the files.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale and what deleting them all would reclaim. Without --dry-run it asks before deleting anything.",
     implementation = _list_impl,
     traits = [Worktrees],
     args = {
@@ -1584,5 +1627,7 @@ testonly_list_columns = _LIST_COLUMNS
 testonly_list_order = _list_order
 testonly_nothing_to_release = _nothing_to_release_message
 testonly_resolve_slot = _resolve_slot
+testonly_session_columns = _SESSION_COLUMNS
+testonly_session_rows = _session_rows
 testonly_slot_in_use = _slot_in_use_message
 testonly_same_session = _same_session

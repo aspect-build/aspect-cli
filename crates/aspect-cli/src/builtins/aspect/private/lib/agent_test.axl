@@ -23,6 +23,7 @@ load(
     "is_running",
     "label",
     "resume_hint",
+    "session_project",
     "session_state",
     "testonly_binaries",
     "testonly_env_detectors",
@@ -179,6 +180,69 @@ def _test_claude_config_dir_relocates_the_session_store(ctx):
     _eq("found under the relocated root", found, RESUMABLE)
     _eq("and a real miss there is still gone", absent, GONE)
 
+def _test_the_project_is_the_cwd_when_the_store_agrees(ctx):
+    """The listing shows a project so you can get back to a session, so it has
+    to be the directory the harness actually ran in — not a guess.
+
+    The store files a session under the started-in path with `/` and `.`
+    flattened to dashes. That is checkable in one direction: flatten the
+    recorded `cwd` and see whether the session really is filed there.
+    """
+    saved = _clear(ctx)
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-proj")
+    cwd = "/Users/me/src/web/.claude/worktrees/fix-login"
+    slug = "-Users-me-src-web--claude-worktrees-fix-login"
+    ctx.std.fs.create_dir_all(home + "/projects/" + slug)
+    ctx.std.fs.write(home + "/projects/" + slug + "/sess-1.jsonl", "{}\n")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+
+    got = session_project(ctx.std, {"kind": "claude-code", "id": "sess-1", "cwd": cwd})
+    _restore(ctx, saved)
+
+    _eq("the real path, not the slug", got, cwd)
+
+def _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees(ctx):
+    """An agent that runs `aspect worktree add` from somewhere other than where
+    its harness started records a `cwd` that is not the project. Reporting it
+    would send a reader to a directory whose session list does not have this
+    session in it, so the store's own directory name is reported instead: not a
+    path, but true.
+    """
+    saved = _clear(ctx)
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-proj-odd")
+    slug = "-Users-me-src-web"
+    ctx.std.fs.create_dir_all(home + "/projects/" + slug)
+    ctx.std.fs.write(home + "/projects/" + slug + "/sess-2.jsonl", "{}\n")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+
+    got = session_project(ctx.std, {
+        "kind": "claude-code",
+        "id": "sess-2",
+        "cwd": "/somewhere/else/entirely",
+    })
+    _restore(ctx, saved)
+
+    _eq("the store's own directory", got, home + "/projects/" + slug)
+
+def _test_no_project_is_claimed_without_one(ctx):
+    """Every way of not knowing: a harness the store is not described for, a
+    record with no session id, and a session that is not filed anywhere."""
+    saved = _clear(ctx)
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-proj-none")
+    ctx.std.fs.create_dir_all(home + "/projects")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+
+    unknown_harness = session_project(ctx.std, {"kind": "codex", "id": "sess-3", "cwd": "/x"})
+    no_id = session_project(ctx.std, {"kind": "claude-code", "id": "", "cwd": "/x"})
+    not_filed = session_project(ctx.std, {"kind": "claude-code", "id": "sess-4", "cwd": "/x"})
+    no_agent = session_project(ctx.std, {})
+    _restore(ctx, saved)
+
+    _eq("harness not described", unknown_harness, "")
+    _eq("no session id", no_id, "")
+    _eq("session not filed", not_filed, "")
+    _eq("no agent at all", no_agent, "")
+
 def _test_a_running_process_outranks_the_session_check(ctx):
     """A live harness is in use whatever is on disk, so the cheap, certain
     signal is consulted first."""
@@ -249,6 +313,9 @@ _UNIT_TESTS = [
     _test_label_is_a_glance_not_a_copy_source,
     _test_resume_is_offered_only_where_the_command_is_known,
     _test_every_described_harness_is_a_kind_detection_can_report,
+    _test_the_project_is_the_cwd_when_the_store_agrees,
+    _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees,
+    _test_no_project_is_claimed_without_one,
     _test_a_person_at_a_terminal_is_not_an_agent,
 ]
 
