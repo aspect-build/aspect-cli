@@ -18,6 +18,55 @@ def _read_bazelignore(fs, root: str) -> list[str]:
     content = fs.try_read_to_string(root + "/.bazelignore")
     return _absolute_ignores(root, content.splitlines())
 
+def _list_start_in_call(content: str, opening: int) -> int:
+    """Find a direct positional or `dirs =` list argument."""
+    depth = 1
+    comment = False
+    prefix = ""
+    for i in range(opening + 1, len(content)):
+        char = content[i]
+        if comment:
+            if char == "\n":
+                comment = False
+            continue
+        if char == "#":
+            comment = True
+        elif char in ["'", '"']:
+            return -1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return -1
+        elif char == "[" and depth == 1:
+            return i if prefix in ["", "dirs="] else -1
+        elif depth == 1 and not char.isspace():
+            prefix += char
+    return -1
+
+def _list_ends_call(content: str, closing: int) -> bool:
+    """Whether only an optional comma follows the list before `)`."""
+    comment = False
+    comma = False
+    for i in range(closing + 1, len(content)):
+        char = content[i]
+        if comment:
+            if char == "\n":
+                comment = False
+            continue
+        if char == "#":
+            comment = True
+        elif char.isspace():
+            continue
+        elif char == "," and not comma:
+            comma = True
+        elif char == ")":
+            return True
+        else:
+            return False
+    return False
+
 def _call_list_strings(content: str, name: str) -> list[str]:
     """Return string literals in the list passed to a top-level call."""
     quote = None
@@ -77,7 +126,7 @@ def _call_list_strings(content: str, name: str) -> list[str]:
     if opening < 0:
         return []
 
-    list_start = content.find("[", opening + 1)
+    list_start = _list_start_in_call(content, opening)
     if list_start < 0:
         return []
 
@@ -86,6 +135,7 @@ def _call_list_strings(content: str, name: str) -> list[str]:
     quote = None
     escaped = False
     comment = False
+    expect_value = True
     for i in range(list_start + 1, len(content)):
         char = content[i]
         if comment:
@@ -109,29 +159,40 @@ def _call_list_strings(content: str, name: str) -> list[str]:
                 result.append(value)
                 value = ""
                 quote = None
+                expect_value = False
             else:
                 value += char
             continue
         if char == "#":
             comment = True
         elif char in ["'", '"']:
+            if not expect_value:
+                return []
             quote = char
+        elif char == ",":
+            if expect_value:
+                return []
+            expect_value = True
         elif char == "]":
-            break
-    return result
+            return result if _list_ends_call(content, i) else []
+        elif not char.isspace():
+            return []
+    return []
 
 def _read_repo_bazel(fs, root: str) -> list[str]:
     """Read `REPO.bazel` and return absolute `ignore_directories` globs."""
     content = fs.try_read_to_string(root + "/REPO.bazel")
     return _absolute_ignores(root, _call_list_strings(content, "ignore_directories"))
 
-def _is_ignored(path: str, prefixes: list[str], patterns: list[str] = []) -> bool:
+def _is_ignored(path: str, prefixes: list[str], patterns: list[str] = [], is_directory: bool = False) -> bool:
     path = path_utils.normalize_separators(path).rstrip("/")
     for prefix in prefixes:
         prefix = path_utils.normalize_separators(prefix).rstrip("/")
         if path == prefix or path.startswith(prefix + "/"):
             return True
-    candidates = [path] + path_utils.parents(path, nearest_first = True)
+    candidates = path_utils.parents(path, nearest_first = True)
+    if is_directory:
+        candidates.insert(0, path)
     for pattern in patterns:
         pattern = path_utils.normalize_separators(pattern).rstrip("/")
         for candidate in candidates:
@@ -139,12 +200,8 @@ def _is_ignored(path: str, prefixes: list[str], patterns: list[str] = []) -> boo
                 return True
     return False
 
-def _literal_patterns(patterns: list[str]) -> list[str]:
-    return [path for path in patterns if "*" not in path and "?" not in path]
-
 bazel_ignores = namespace(
     is_ignored = _is_ignored,
-    literal_patterns = _literal_patterns,
     read_bazelignore = _read_bazelignore,
     read_repo_bazel = _read_repo_bazel,
 )

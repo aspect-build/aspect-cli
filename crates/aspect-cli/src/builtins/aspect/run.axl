@@ -6,7 +6,7 @@ load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
 load("./private/lib/changedetector.axl", "changedetector")
-load("./private/lib/environment.axl", "error")
+load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/incremental_build_protocol_host.axl", "incremental_build_protocol_host")
 load("./private/lib/lifecycle.axl", "phases")
@@ -109,9 +109,29 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
     ws = watch.new(ctx, rc = rc)
     detector = changedetector.new(ctx, r, target, ws.root)
     sources = source_tracker.new(ctx, ws.root, ws.ignored_paths, ws.ignored_patterns)
+    ibp_supported = incremental_build_protocol_host.is_supported(ctx.std)
+    required_ibp_timeout_ms = [None]
+    warned_unsupported_ibp = [False]
 
     def protocol_candidates():
-        candidate = incremental_build_protocol_host.new(ctx, detector.current_runfiles, sources)
+        entrypoint = r.determine_entrypoint(target)
+        tags = entrypoint.tags if entrypoint != None else []
+        expected_ibp = incremental_build_protocol_host.is_expected(tags)
+        if expected_ibp and ibp_supported and required_ibp_timeout_ms[0] == None:
+            required_ibp_timeout_ms[0] = incremental_build_protocol_host.connection_timeout_ms(ctx.std)
+        candidate = incremental_build_protocol_host.new(
+            ctx,
+            detector.current_runfiles,
+            sources,
+            connection_timeout_ms = required_ibp_timeout_ms[0] if expected_ibp else None,
+        )
+        if candidate == None and expected_ibp:
+            if not ibp_supported:
+                if not warned_unsupported_ibp[0]:
+                    warned_unsupported_ibp[0] = True
+                    warn(ctx.std, "target is tagged `%s`, but the incremental build protocol is unavailable on Windows; using process restarts" % incremental_build_protocol_host.SUPPORT_TAG)
+            else:
+                fail("target is tagged `%s`, but the incremental build protocol host is unavailable" % incremental_build_protocol_host.SUPPORT_TAG)
         return [candidate] if candidate != None else []
 
     supervisor = watch_supervisor.new(
@@ -191,6 +211,10 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         # pending events here are the user's own mid-build edits — dropping
         # them would silently miss a rebuild.
 
+        # The child may have exited or a protocol client may have connected
+        # during the synchronous rebuild. Establish a sources baseline before
+        # computing this batch's delta.
+        supervisor.poll()
         source_paths = [event.path for event in batch.events]
         removed_paths = [event.path for event in batch.events if isinstance(event, std.fs.watch.RemovedEvent)]
         source_changes = sources.delta(
@@ -209,10 +233,6 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             )
             continue
 
-        # The target may have exited while the synchronous rebuild was in
-        # progress. Reap it before deciding whether an unchanged build can keep
-        # using the existing child.
-        supervisor.poll()
         detected = detector.changes(
             source_paths,
             removed_paths,
@@ -221,6 +241,8 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         )
         result = supervisor.build_finished(watch_result.result(
             True,
+            # A failed build may update launch outputs or run metadata that a
+            # later successful build reuses without executing another action.
             restart_required = detected.restart_required or detected.changes_unknown,
             outputs_changed = detected.outputs_changed,
             runfiles = detected.runfiles,
@@ -386,7 +408,7 @@ run = task(
         ),
         "watch": args.boolean(
             default = False,
-            description = "Stay running after the first build, watching the workspace and rebuilding the target after each settled batch of changes. Targets that connect to the incremental build protocol receive changes in place; others restart when their runfiles change. A failed rebuild leaves the current process running. Stop with Ctrl-C.",
+            description = "Stay running after the first build, watching the workspace and rebuilding the target after each settled batch of changes. Targets that connect to the incremental build protocol receive changes in place; add the `supports_incremental_build_protocol` target tag to require that connection on supported platforms. Windows does not support IBP and falls back to process restarts. Required connections wait %d milliseconds by default, configurable with `ASPECT_WATCH_CONNECTION_TIMEOUT_MS`. Untagged targets are detected opportunistically, and others restart when their runfiles change. A failed rebuild leaves the current process running. Stop with Ctrl-C." % incremental_build_protocol_host.DEFAULT_CONNECTION_TIMEOUT_MS,
         ),
     } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
     traits = [

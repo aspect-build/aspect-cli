@@ -158,6 +158,29 @@ def _test_empty_listener_poll_returns_not_connected(ctx):
 
     _eq("empty listener", host.try_connect(), (False, None))
 
+def _test_support_tag_selects_required_connection(ctx):
+    _eq("support tag recognized", incremental_build_protocol_host.is_expected(["manual", incremental_build_protocol_host.SUPPORT_TAG]), True)
+    _eq("untagged target remains opportunistic", incremental_build_protocol_host.is_expected(["manual"]), False)
+    if ctx.std.env.os() == "windows":
+        return
+
+    optional = incremental_build_protocol_host.new(ctx)
+    required = incremental_build_protocol_host.new(
+        ctx,
+        connection_timeout_ms = incremental_build_protocol_host.DEFAULT_CONNECTION_TIMEOUT_MS,
+    )
+    ctx.defer(optional.close)
+    ctx.defer(required.close)
+
+    _eq("untagged connection optional", optional.connection_required, False)
+    _eq("tagged connection required", required.connection_required, True)
+    _eq("untagged connection has no deadline", optional.connection_timeout_ms, None)
+    _eq("default connection timeout", incremental_build_protocol_host.DEFAULT_CONNECTION_TIMEOUT_MS, 10000)
+    _eq("tagged connection timeout", required.connection_timeout_ms, incremental_build_protocol_host.DEFAULT_CONNECTION_TIMEOUT_MS)
+
+    std = struct(env = struct(var = lambda name: "25000" if name == incremental_build_protocol_host.CONNECTION_TIMEOUT_ENV else ""))
+    _eq("tagged connection timeout override", incremental_build_protocol_host.connection_timeout_ms(std), 25000)
+
 def _test_close_stops_source_tracking(ctx):
     if ctx.std.env.os() == "windows":
         return
@@ -182,6 +205,7 @@ _UNIT_TESTS = [
     _test_baseline_selects_negotiated_scope,
     _test_server_uses_unique_socket_paths,
     _test_empty_listener_poll_returns_not_connected,
+    _test_support_tag_selects_required_connection,
     _test_close_stops_source_tracking,
 ]
 

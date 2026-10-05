@@ -66,15 +66,15 @@ def _test_source_directory_runfile_change_is_reported(_ctx):
     _eq("source directory child changed", changedetector.changed_runfiles(state, state, ["assets/config.json"], []), ["_main/assets/config.json"])
     _eq("source directory sibling ignored", changedetector.changed_runfiles(state, state, ["assets-old/config.json"], []), [])
 
-def _test_nearest_runfile_directory_wins(_ctx):
+def _test_nested_runfile_directories_all_report_aliases(_ctx):
     state = _manifest({
         "_main/assets": "assets",
         "_main/icons": "assets/icons",
     })
     _eq(
-        "nearest directory mapping",
+        "nested directory mappings",
         changedetector.changed_runfiles(state, state, ["assets/icons/logo.svg"], []),
-        ["_main/icons/logo.svg"],
+        ["_main/assets/icons/logo.svg", "_main/icons/logo.svg"],
     )
 
 def _test_all_runfile_aliases_are_reported(_ctx):
@@ -96,6 +96,16 @@ def _test_all_runfile_aliases_are_reported(_ctx):
         "directory aliases",
         changedetector.changed_runfiles(directories, directories, ["assets/config.json"], []),
         ["_main/assets/config.json", "_main/public/config.json"],
+    )
+
+    nested = _manifest({
+        "_main/assets": "assets",
+        "_main/logo.svg": "assets/icons/logo.svg",
+    })
+    _eq(
+        "exact and directory aliases",
+        changedetector.changed_runfiles(nested, nested, ["assets/icons/logo.svg"], []),
+        ["_main/assets/icons/logo.svg", "_main/logo.svg"],
     )
 
 def _test_generated_runfile_change_is_reported(_ctx):
@@ -336,7 +346,7 @@ def _test_protocol_source_tracker_skips_work_until_baseline(ctx):
             metadata = metadata,
         ),
     )
-    _eq("inactive tracker delta", tracker.delta(["C:\\repo\\app.py"], []), {})
+    _eq("inactive tracker delta", tracker.delta(["C:\\repo\\app.py"], []), None)
     _eq("inactive tracker metadata calls", metadata_paths, [])
 
     tracker.baseline()
@@ -347,9 +357,9 @@ def _test_protocol_source_tracker_skips_work_until_baseline(ctx):
     )
     _eq("active tracker metadata calls", metadata_paths, ["app.py"])
 
-    _eq("tracker rescan", tracker.delta([], [], rescan = True), None)
-    _eq("post-rescan tracker delta", tracker.delta(["C:\\repo\\other.py"], []), {})
-    _eq("post-rescan metadata calls", metadata_paths, ["app.py"])
+    _eq("tracker rescan", tracker.delta([], [], rescan = True), {"app.py": None})
+    _eq("post-rescan tracker delta", tracker.delta(["C:\\repo\\other.py"], []), {"other.py": {"is_source": True}})
+    _eq("post-rescan metadata calls", metadata_paths, ["app.py", "other.py"])
 
 def _test_protocol_source_delta_expands_created_directory(_ctx):
     directory_metadata = struct(is_dir = True, is_file = False, is_symlink = False)
@@ -503,21 +513,25 @@ def _test_protocol_source_delta_resets_on_filesystem_errors(ctx):
         ),
     )
     _eq("baseline error leaves tracker inactive", tracker.baseline(), None)
-    _eq("delta after baseline error stays inactive", tracker.delta(["app.py"], []), {})
+    _eq("delta after baseline error remains unknown", tracker.delta(["app.py"], []), None)
 
 def _test_protocol_source_baseline_scans_workspace(ctx):
     root = ctx.std.fs.mkdtemp(prefix = "aspect-changedetector-sources-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root) if ctx.std.fs.exists(root) else None)
     ctx.std.fs.create_dir_all(root + "/pkg")
     ctx.std.fs.create_dir_all(root + "/pkg/node_modules")
+    ctx.std.fs.create_dir_all(root + "/generated/tree")
     ctx.std.fs.create_dir_all(root + "/ignored")
     ctx.std.fs.write(root + "/README.md", "")
+    ctx.std.fs.write(root + "/generated/client", "")
+    ctx.std.fs.write(root + "/generated/tree/noise", "")
     ctx.std.fs.write(root + "/pkg/app.py", "")
     ctx.std.fs.write(root + "/pkg/node_modules/noise", "")
     ctx.std.fs.write(root + "/ignored/noise", "")
 
     expected = {
         "README.md": {"is_source": True},
+        "generated/client": {"is_source": True},
         "pkg/app.py": {"is_source": True},
     }
     if ctx.std.env.os() != "windows":
@@ -527,7 +541,7 @@ def _test_protocol_source_baseline_scans_workspace(ctx):
 
     _eq(
         "workspace source baseline",
-        source_tracker.workspace_sources(ctx, root, [root + "/ignored"], [root + "/**/node_modules"]),
+        source_tracker.workspace_sources(ctx, root, [root + "/ignored"], [root + "/**/node_modules", root + "/generated/*"]),
         expected,
     )
     _eq(
@@ -606,7 +620,7 @@ _UNIT_TESTS = [
     _test_manifest_decodes_escaped_fields,
     _test_source_runfile_change_is_reported,
     _test_source_directory_runfile_change_is_reported,
-    _test_nearest_runfile_directory_wins,
+    _test_nested_runfile_directories_all_report_aliases,
     _test_all_runfile_aliases_are_reported,
     _test_generated_runfile_change_is_reported,
     _test_default_output_change_restarts_without_manifest_entry,

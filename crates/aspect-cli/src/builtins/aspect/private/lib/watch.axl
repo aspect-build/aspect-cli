@@ -26,8 +26,14 @@ def _ignores(root: str, symlink_prefix: str | None = None) -> list[str]:
         paths.extend([prefix + suffix for suffix in ["bin", "out", "testlogs", workspace]])
     return paths
 
-def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: list[str] = []):
-    events = [event for event in batch.events if not bazel_ignores.is_ignored(root + "/" + event.path, ignored_paths, ignored_patterns)]
+def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: list[str] = [], is_directory = None):
+    is_directory = is_directory or (lambda _path: False)
+    events = []
+    for event in batch.events:
+        path = root + "/" + event.path
+        directory = is_directory(path) if ignored_patterns else False
+        if not bazel_ignores.is_ignored(path, ignored_paths, ignored_patterns, is_directory = directory):
+            events.append(event)
     return struct(events = events, rescan = batch.rescan) if events or batch.rescan else None
 
 def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
@@ -40,7 +46,8 @@ def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
       ignored_patterns — absolute `REPO.bazel` globs excluded from the watch.
 
     Additional ignore paths may be absolute or relative to the invocation
-    directory.
+    directory. Bazel ignore files are read once; restart the watch session
+    after changing them.
     """
     root = ctx.std.env.bazel_root_dir()
     extra_ignores = [_absolute(ctx, path) for path in ignore]
@@ -49,16 +56,19 @@ def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
     ignored_paths = (
         _ignores(root, symlink_prefix) +
         bazel_ignores.read_bazelignore(ctx.std.fs, root) +
-        bazel_ignores.literal_patterns(ignored_patterns) +
         extra_ignores
     )
     w = ctx.std.fs.watch(root, ignore = ignored_paths)
+
+    def is_directory(path):
+        err, metadata = catch(ctx.std.fs.try_metadata, path, types = [std.io.Error])
+        return err == None and metadata != None and metadata.is_dir
 
     def try_pop():
         batch = w.try_pop()
         if batch == None:
             return None
-        return _filter_batch(batch, root, ignored_paths, ignored_patterns)
+        return _filter_batch(batch, root, ignored_paths, ignored_patterns, is_directory = is_directory)
 
     return struct(
         ignored_paths = ignored_paths,

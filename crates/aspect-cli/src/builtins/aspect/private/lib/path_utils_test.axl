@@ -27,6 +27,11 @@ def _test_glob_matches(_ctx):
     _eq("recursive glob nested", path_utils.glob_matches("**/node_modules", "app/node_modules"), True)
     _eq("single segment", path_utils.glob_matches("generated/*", "generated/client"), True)
     _eq("single segment does not recurse", path_utils.glob_matches("generated/*", "generated/client/api"), False)
+    _eq("star backtracks over repeated suffix", path_utils.glob_matches("*.d", "a.d.d.d"), True)
+    _eq("star backtracks to final character", path_utils.glob_matches("*s", "sssss"), True)
+    _eq("star backtracks to repeated pair", path_utils.glob_matches("*ee", "eeeee"), True)
+    _eq("star backtracks to repeated word", path_utils.glob_matches("*abc", "ababababc"), True)
+    _eq("star question consumes final character", path_utils.glob_matches("*?", "name"), True)
 
 def _test_at_git_root(_ctx):
     """cwd == git_root → no rebasing needed, return files unchanged."""

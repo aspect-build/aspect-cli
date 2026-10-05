@@ -42,7 +42,7 @@ def _spawner(spawn_results = None):
 
     return struct(calls = calls, children = children, spawn = spawn)
 
-def _candidate(connect_results, initialize_results = None, build_results = None, socket = "/tmp/fake.sock", build_started_error = None):
+def _candidate(connect_results, initialize_results = None, build_results = None, socket = "/tmp/fake.sock", build_started_error = None, connection_timeout_ms = None, connection_required = False):
     connect_queue = list(connect_results)
     initialize_queue = list(initialize_results or [])
     build_queue = list(build_results or [])
@@ -71,7 +71,7 @@ def _candidate(connect_results, initialize_results = None, build_results = None,
         state["build_results"].append(result)
         return build_queue.pop(0) if build_queue else watch_result.outcome(watch_result.KEEP, status = "updated")
 
-    def close(description = ""):
+    def close(description: str = ""):
         state["close_count"] += 1
         if description:
             state["exit_descriptions"].append(description)
@@ -80,6 +80,8 @@ def _candidate(connect_results, initialize_results = None, build_results = None,
         build_finished = build_finished,
         build_started = build_started,
         close = close,
+        connection_required = connection_required,
+        connection_timeout_ms = connection_timeout_ms,
         environment = {"FAKE_WATCH_SOCKET_FILE": socket},
         initialize = initialize,
         name = "fake-protocol",
@@ -87,7 +89,7 @@ def _candidate(connect_results, initialize_results = None, build_results = None,
         try_connect = try_connect,
     )
 
-def _supervisor(ctx, candidate_groups, spawner = None):
+def _supervisor(ctx, candidate_groups, spawner = None, clock = None, on_fatal = None):
     groups = [list(group) for group in candidate_groups]
     factory_calls = []
 
@@ -96,14 +98,21 @@ def _supervisor(ctx, candidate_groups, spawner = None):
         return groups.pop(0) if groups else []
 
     spawner = spawner or _spawner()
-    supervisor = watch_supervisor.new(ctx, spawner.spawn, candidate_factory = candidate_factory)
+    kwargs = {}
+    if clock != None:
+        kwargs["clock"] = clock
+    if on_fatal != None:
+        kwargs["on_fatal"] = on_fatal
+    supervisor = watch_supervisor.new(ctx, spawner.spawn, candidate_factory = candidate_factory, **kwargs)
     return supervisor, spawner, factory_calls
 
 def _test_late_connection_remains_available(ctx):
+    now = [0.0]
     candidate = _candidate([(False, None), (False, None), (False, None), (True, None)])
-    supervisor, spawner, _ = _supervisor(ctx, [[candidate]])
+    supervisor, spawner, _ = _supervisor(ctx, [[candidate]], clock = lambda: now[0])
 
     supervisor.restart()
+    now[0] = 60.0
     supervisor.poll()
     supervisor.poll()
     _eq("not initialized before connection", candidate.state["initialize_count"], 0)
@@ -113,6 +122,38 @@ def _test_late_connection_remains_available(ctx):
     _eq("protocol environment offered", spawner.calls[0], candidate.environment)
     _eq("connected protocol initialized", candidate.state["initialize_count"], 1)
     _eq("late connection keeps child", spawner.children[0].state["kill_count"], 0)
+
+def _test_required_connection_timeout_fails_watch(ctx):
+    now = [0.0]
+    failures = []
+    candidate = _candidate(
+        [(False, None)],
+        connection_required = True,
+        connection_timeout_ms = 10000,
+    )
+    supervisor, spawner, _ = _supervisor(
+        ctx,
+        [[candidate]],
+        clock = lambda: now[0],
+        on_fatal = lambda message: failures.append(message),
+    )
+    supervisor.restart()
+
+    now[0] = 10.0
+    supervisor.poll()
+
+    _eq("required timeout reported", "timed out after 10000ms" in failures[0], True)
+    _eq("failed watch stops child", spawner.children[0].state["kill_count"], 1)
+
+def _test_required_negotiation_failure_fails_watch(ctx):
+    failures = []
+    candidate = _candidate([(True, "bad negotiation")], connection_required = True)
+    supervisor, spawner, _ = _supervisor(ctx, [[candidate]], on_fatal = lambda message: failures.append(message))
+
+    supervisor.restart()
+
+    _eq("required negotiation reported", "negotiation failed: bad negotiation" in failures[0], True)
+    _eq("failed watch stops child", spawner.children[0].state["kill_count"], 1)
 
 def _test_build_lifecycle_is_delegated(ctx):
     candidate = _candidate([(True, None)])
@@ -154,6 +195,7 @@ def _test_child_exit_closes_pending_listener(ctx):
 
     _eq("child exit returned", status.code, 0)
     _eq("pending listener closed", candidate.state["close_count"], 1)
+    _eq("pending child process group stopped", spawner.children[0].state["kill_count"], 1)
     _eq("exited child reaped", spawner.children[0].state["wait_count"], 1)
 
 def _test_child_exit_closes_active_protocol(ctx):
@@ -167,6 +209,7 @@ def _test_child_exit_closes_active_protocol(ctx):
     _eq("active child exit returned", status.code, 7)
     _eq("active protocol notified", candidate.state["exit_descriptions"], ["watch process exited"])
     _eq("active protocol closed", candidate.state["close_count"], 1)
+    _eq("active child process group stopped", spawner.children[0].state["kill_count"], 1)
 
 def _test_negotiation_failure_disables_protocol(ctx):
     candidate = _candidate([(True, "bad negotiation")])
@@ -176,21 +219,29 @@ def _test_negotiation_failure_disables_protocol(ctx):
     _eq("failed negotiation respawns", spawner.calls, [candidate.environment, {}])
     _eq("protocol child stopped", spawner.children[0].state["kill_count"], 1)
 
-    supervisor.restart()
-    _eq("future spawn stays restart-only", spawner.calls[-1], {})
-    _eq("protocol is not offered again", len(factory_calls), 1)
+    supervisor.build_finished(watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}))
+    _eq("ordinary restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory remains disabled", len(factory_calls), 1)
+
+    supervisor.build_finished(watch_result.result(True, restart_required = True, runfiles = {}, sources = {}))
+    _eq("launch-state restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory stays disabled", len(factory_calls), 1)
 
 def _test_initialization_failure_disables_protocol(ctx):
-    candidate = _candidate([(True, None)], initialize_results = ["initial cycle failed"])
+    candidate = _candidate([(True, None)], initialize_results = [error("initial cycle failed")])
     supervisor, spawner, factory_calls = _supervisor(ctx, [[candidate]])
 
     supervisor.restart()
     _eq("failed initialization respawns", spawner.calls, [candidate.environment, {}])
     _eq("failed protocol exited", candidate.state["exit_descriptions"], ["initial cycle failed"])
 
-    supervisor.restart()
-    _eq("initialization failure is sticky", spawner.calls[-1], {})
-    _eq("candidate factory called once", len(factory_calls), 1)
+    supervisor.build_finished(watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}))
+    _eq("ordinary restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory remains disabled", len(factory_calls), 1)
+
+    supervisor.build_finished(watch_result.result(True, restart_required = True, runfiles = {}, sources = {}))
+    _eq("launch-state restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory stays disabled", len(factory_calls), 1)
 
 def _test_update_failure_retries_protocol(ctx):
     first = _candidate([(True, None)], build_results = [watch_result.outcome(watch_result.RESTART, error = "update failed")], socket = "/tmp/first.sock")
@@ -241,17 +292,36 @@ def _test_failed_build_closes_broken_protocol_while_deferring_restart(ctx):
     _eq("successful build performs deferred restart", spawner.children[0].state["kill_count"], 1)
     _eq("replacement protocol offered", spawner.calls[-1], second.environment)
 
-def _test_candidate_fallback_is_sticky(ctx):
-    candidate = _candidate([(True, None)], build_results = [watch_result.outcome(watch_result.FALLBACK, error = "unsupported")])
+def _test_candidate_fallback_disables_protocol(ctx):
+    candidate = _candidate([(True, None)], build_results = [watch_result.outcome(watch_result.FALLBACK, error = error("unsupported"))])
     supervisor, spawner, factory_calls = _supervisor(ctx, [[candidate]])
     supervisor.restart()
 
     supervisor.build_finished(watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}))
 
     _eq("fallback respawns without protocol", spawner.calls[-1], {})
+    supervisor.build_finished(watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}))
+    _eq("ordinary restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory remains disabled", len(factory_calls), 1)
+
+    supervisor.build_finished(watch_result.result(True, restart_required = True, runfiles = {}, sources = {}))
+    _eq("launch-state restart remains protocol-free", spawner.calls[-1], {})
+    _eq("candidate factory stays disabled", len(factory_calls), 1)
+
+def _test_required_candidate_cannot_fallback(ctx):
+    failures = []
+    candidate = _candidate(
+        [(True, None)],
+        build_results = [watch_result.outcome(watch_result.FALLBACK, error = "unsupported")],
+        connection_required = True,
+    )
+    supervisor, spawner, _ = _supervisor(ctx, [[candidate]], on_fatal = lambda message: failures.append(message))
     supervisor.restart()
-    _eq("fallback remains disabled", spawner.calls[-1], {})
-    _eq("candidate factory called once", len(factory_calls), 1)
+
+    supervisor.build_finished(watch_result.result(True, runfiles = {"_main/app": {}}, sources = {}))
+
+    _eq("required fallback reported", "update failed: unsupported" in failures[0], True)
+    _eq("required fallback stops child", spawner.children[0].state["kill_count"], 1)
 
 def _test_restart_mode_build_results(ctx):
     supervisor, spawner, _ = _supervisor(ctx, [[]])
@@ -314,6 +384,8 @@ def _test_success_after_failed_spawn_starts_child(ctx):
 
 _UNIT_TESTS = [
     _test_late_connection_remains_available,
+    _test_required_connection_timeout_fails_watch,
+    _test_required_negotiation_failure_fails_watch,
     _test_build_lifecycle_is_delegated,
     _test_build_start_failure_retries_protocol,
     _test_child_exit_closes_pending_listener,
@@ -323,7 +395,8 @@ _UNIT_TESTS = [
     _test_update_failure_retries_protocol,
     _test_failed_build_defers_requested_restart,
     _test_failed_build_closes_broken_protocol_while_deferring_restart,
-    _test_candidate_fallback_is_sticky,
+    _test_candidate_fallback_disables_protocol,
+    _test_required_candidate_cannot_fallback,
     _test_restart_mode_build_results,
     _test_restart_mode_honors_non_delta_changes,
     _test_first_connected_candidate_wins,

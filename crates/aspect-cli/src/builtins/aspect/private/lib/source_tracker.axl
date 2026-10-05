@@ -22,7 +22,7 @@ def _workspace_sources(ctx: TaskContext, root: str, ignored_paths: list[str] = [
         for entry in entries:
             relative = entry.path if not relative_dir else relative_dir + "/" + entry.path
             absolute = root + "/" + relative
-            if bazel_ignores.is_ignored(absolute, ignored_paths, ignored_patterns):
+            if bazel_ignores.is_ignored(absolute, ignored_paths, ignored_patterns, is_directory = entry.is_dir):
                 continue
             if entry.is_symlink:
                 sources[path_utils.normalize_separators(relative)] = _SYMLINK
@@ -148,6 +148,13 @@ def _apply_changes(source_state, changes: dict) -> None:
         else:
             source_state.files[path] = info
 
+def _baseline_changes(previous: dict, current: dict) -> dict:
+    changes = {path: None for path in previous if path not in current}
+    for path, info in current.items():
+        if previous.get(path) != info:
+            changes[path] = info
+    return changes
+
 def _new(ctx: TaskContext, root: str, ignored_paths: list[str] = [], ignored_patterns: list[str] = [], source_fs = None) -> struct:
     root = path_utils.normalize_separators(root).rstrip("/")
     state = {"sources": None}
@@ -164,7 +171,15 @@ def _new(ctx: TaskContext, root: str, ignored_paths: list[str] = [], ignored_pat
     def delta(paths: list[str], removed_paths: list[str], rescan: bool = False) -> dict | None:
         source_state = state["sources"]
         if source_state == None:
-            return None if rescan else {}
+            return None
+        if rescan:
+            current = fs.baseline()
+            if isinstance(current, error):
+                state["sources"] = None
+                return None
+            changes = _baseline_changes(source_state.files, current)
+            state["sources"] = _source_state(current)
+            return changes
         changes = _source_changes(paths, removed_paths, root, source_state, fs, rescan = rescan)
         if changes == None:
             state["sources"] = None

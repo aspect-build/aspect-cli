@@ -41,6 +41,36 @@ ignore_directories(
         bazel_ignores.read_repo_bazel(fs, "/repo"),
         ["/repo/**/node_modules", "/repo/generated/*", "/repo/vendor/**"],
     )
+    single_line = _fs({
+        "/repo/REPO.bazel": 'ignore_directories(["src", "vendor"])',
+    })
+    _eq(
+        "single-line REPO.bazel globs",
+        bazel_ignores.read_repo_bazel(single_line, "/repo"),
+        ["/repo/src", "/repo/vendor"],
+    )
+
+def _test_repo_bazel_variable_argument_does_not_capture_later_list(_ctx):
+    fs = _fs({
+        "/repo/REPO.bazel": '''ignored = ["vendor"]
+ignore_directories(ignored)
+other = ["src"]
+''',
+    })
+    _eq("variable argument unsupported", bazel_ignores.read_repo_bazel(fs, "/repo"), [])
+
+def _test_repo_bazel_composite_expressions_are_unsupported(_ctx):
+    conditional = _fs({
+        "/repo/REPO.bazel": '''enabled = False
+ignore_directories(["src"] if enabled else [])
+''',
+    })
+    _eq("conditional unsupported", bazel_ignores.read_repo_bazel(conditional, "/repo"), [])
+
+    concatenated = _fs({
+        "/repo/REPO.bazel": 'ignore_directories(["src"] + ["vendor"])',
+    })
+    _eq("concatenation unsupported", bazel_ignores.read_repo_bazel(concatenated, "/repo"), [])
 
 def _test_missing_files(_ctx):
     fs = _fs({})
@@ -59,22 +89,18 @@ def _test_ignore_matching(_ctx):
     _eq("root glob", bazel_ignores.is_ignored("/repo/node_modules/pkg/index.js", prefixes, patterns), True)
     _eq("nested glob", bazel_ignores.is_ignored("/repo/app/node_modules/pkg/index.js", prefixes, patterns), True)
     _eq("single segment glob", bazel_ignores.is_ignored("/repo/generated/client/api.ts", prefixes, patterns), True)
+    _eq("matching regular file", bazel_ignores.is_ignored("/repo/generated/client", prefixes, patterns), False)
+    _eq("matching directory", bazel_ignores.is_ignored("/repo/generated/client", prefixes, patterns, is_directory = True), True)
     _eq("similar name", bazel_ignores.is_ignored("/repo/node_modules-old/file", prefixes, patterns), False)
     _eq("unmatched", bazel_ignores.is_ignored("/repo/src/app.ts", prefixes, patterns), False)
-
-def _test_literal_patterns(_ctx):
-    _eq(
-        "literal patterns",
-        bazel_ignores.literal_patterns(["/repo/cache", "/repo/**/node_modules", "/repo/generated/?"]),
-        ["/repo/cache"],
-    )
 
 _UNIT_TESTS = [
     _test_read_bazelignore,
     _test_read_repo_bazel,
+    _test_repo_bazel_variable_argument_does_not_capture_later_list,
+    _test_repo_bazel_composite_expressions_are_unsupported,
     _test_missing_files,
     _test_ignore_matching,
-    _test_literal_patterns,
 ]
 
 def _test_impl(ctx):

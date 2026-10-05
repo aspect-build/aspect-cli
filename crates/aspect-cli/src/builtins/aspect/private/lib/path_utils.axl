@@ -21,7 +21,7 @@ def _segment_matches(pattern: str, value: str) -> bool:
     matched = 0
     p = 0
     v = 0
-    for _ in range(len(pattern) + len(value) + 1):
+    for _ in range((len(pattern) + 1) * (len(value) + 1)):
         if v < len(value) and p < len(pattern) and (pattern[p] == value[v] or pattern[p] == "?"):
             p += 1
             v += 1
