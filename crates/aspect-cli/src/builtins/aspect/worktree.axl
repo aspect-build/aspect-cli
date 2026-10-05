@@ -752,14 +752,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
             continue
         if registry["slots"][slot_id].get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
-        if not abandoned_lease(
-            ctx.std,
-            pool,
-            registry,
-            slot_id,
-            root,
-            after_days = ctx.traits[Worktrees].abandoned_lease_days,
-        ):
+        if not abandoned_lease(ctx.std, pool, registry, slot_id, root):
             continue
         lease = registry["slots"][slot_id].get("lease") or {}
         info(ctx.std, "reclaimed the slot held by " + (lease.get("name", "") or "an earlier worktree") +
@@ -1278,15 +1271,9 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # the task it died in. Hand the slot back instead of refusing: the session
     # cannot be resumed and the tree is clean, so there is nothing to protect
     # and the warm base is exactly what the caller wants.
-    if held and abandoned_lease(
-        ctx.std,
-        pool,
-        registry,
-        held,
-        root,
-        after_days = ctx.traits[Worktrees].abandoned_lease_days,
-    ):
-        info(ctx.std, "taking back " + name + "'s slot: the session that held it no longer exists")
+    if held and abandoned_lease(ctx.std, pool, registry, held, root):
+        info(ctx.std, "taking back " + name + "'s slot: the session that held it is not running " +
+                      "and the checkout was clean")
         free_slot(ctx.std, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
         held = ""

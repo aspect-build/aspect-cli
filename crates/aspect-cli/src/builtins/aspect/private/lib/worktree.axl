@@ -34,18 +34,18 @@ from a `git worktree remove` run by hand, and from an agent that deleted its
 worktree without releasing the slot. Correctness never depends on `release`
 being called.
 
-What it does not recover from is an agent that died with its checkout still in
-place: git still knows about that worktree, so the lease stands. Elapsed time is
-the wrong answer there — a harness process exits when someone closes a terminal,
-and `claude --resume` would put the agent back in that slot expecting that
-branch. `abandoned_lease` is what is safe to take back, and a clean checkout is the
-part of it that never bends: there is nothing uncommitted to lose, and the
-branch and its commits are untouched by removing a worktree. Either the session
-is positively gone — its store was read and does not have it — or its process
-is gone and the slot has sat idle past `Worktrees.abandoned_lease_days`. The
-second exists because the first is unreachable for a harness whose session
-storage the CLI cannot read, which without a bound would let a crashed agent
-pin its slot permanently.
+What it does not recover from on its own is an agent that died with its
+checkout still in place: git still knows about that worktree, so the lease
+stands until somebody needs the slot. Elapsed time is the wrong instrument for
+that — a harness process exits whenever someone closes a terminal — so the
+lease is given up at the moment the alternative is growing the pool, and not
+before. `abandoned_lease` is what is safe to take back: the holder's process is gone
+and the checkout is clean. The clean part never bends — there is nothing
+uncommitted to lose, and the branch and its commits survive removing a
+worktree. No timer is involved, because the question is only asked when a slot
+is actually needed and the alternative is another checkout and another output
+base on disk. A session its store reports as *gone* is taken first, having
+nothing to resume at all.
 
 **The lock covers deciding, not checking out.** Allocation picks a slot and
 records a *reservation* on it under the pool lock, then drops the lock before
@@ -1043,8 +1043,7 @@ def abandoned_lease(
         pool: dict,
         registry: dict,
         slot_id: str,
-        root: str = "",
-        after_days: int = 0) -> bool:
+        root: str = "") -> bool:
     """Whether a leased slot can be taken back without losing anything.
 
     **A clean checkout is the condition that never bends.** Commits survive
@@ -1054,24 +1053,18 @@ def abandoned_lease(
     Clean means no *work*: Bazel's own leavings do not count, or a slot that had
     been built in could never be reclaimed, which is every slot the pool is for.
 
-    Given that, there are two ways a lease ends up abandoned.
+Given that, the other condition is simply that the holder is not there: its
+    recorded process is not running. A live holder keeps its slot however long
+    since its last build, because that measures Bazel rather than whether
+    somebody is reading code.
 
-    The session is positively **gone** — its harness's store was read and does
-    not have it. There is nothing left to resume, so the slot is free at once.
-
-    Or the holder's process is gone and the slot has sat idle past
-    `after_days`. This is the bounded version of the same judgement, and it
-    exists because the first one is unreachable for most harnesses: a session
-    can only be proven finished where the CLI knows how to read that harness's
-    storage, so without a bound a crashed Codex or Cursor agent would pin its
-    slot permanently — never reclaimed here, and never pruned either, since
-    `prunable_slots` only ever considers free slots.
-
-    A holder whose process is still *running* is never subject to the timer.
-    Idleness measures when Bazel last did something, not whether somebody is
-    reading code, and a live agent that has not built for a day is working.
-
-    `after_days` of 0 disables the timed path, leaving only the first.
+    No elapsed time enters into it, and deliberately so. This is only ever
+    asked at the point of need — `_pick_slot` looks for an abandoned lease once
+    no free slot has scored and before it grows the pool — so the question is
+    always "or another checkout and another output base on disk?", which has an
+    answer without a clock. A threshold would also have to be guessed, since the
+    right one depends on how many agents a developer runs and how busy the
+    repository is, and it would reclaim slots when nobody wanted one.
 
     `root` is the output user root the rc chain resolves; without it a relocated
     base cannot be recognized and Bazel's leavings would read as work.
@@ -1080,17 +1073,19 @@ def abandoned_lease(
     lease = slot.get("lease") or {}
     agent = lease.get("agent") or {}
 
-    # A live holder keeps its slot, whatever the clock says.
-    if agent and is_running(std, agent):
+    # No agent recorded, no evidence. The rule is that the holder's process is
+    # verifiably gone, and verifying that needs to know what the process was —
+    # so a lease nothing identifies is left alone rather than guessed about. A
+    # person's worktree is theirs until they release it, and unlike a crashed
+    # agent a person can see it in `list` and do so.
+    if not agent:
         return False
 
-    finished = bool(agent) and session_state(std, agent) == GONE
-    stale = after_days > 0 and slot_idle_days(std, pool, slot_id, slot, root) >= after_days
-    if not finished and not stale:
+    # A live holder keeps its slot.
+    if is_running(std, agent):
         return False
 
-    # Below here the holder is gone one way or the other, and only the state of
-    # the checkout decides.
+    # Below here the holder is not there, and only the checkout decides.
     path = slot_path(pool, slot_id)
     if not std.fs.exists(path):
         return True
