@@ -1015,6 +1015,28 @@ def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
     _eq("the session is not", got[1]["session"], "-")
     _eq("so there is nothing to resume to", got[1]["resume"], "-")
 
+def _test_no_resume_is_offered_for_a_session_known_to_be_gone(ctx):
+    """A resume command whose session its own store says is absent resolves
+    nothing, and a runnable-looking line that cannot run is worse than a dash.
+
+    Only `gone` withholds it: that is the one verdict meaning "the store was
+    read and the session was not in it". `unknown` is what a harness nobody has
+    described reports, and Codex and Grok sessions resume from there perfectly
+    well, so withholding on uncertainty would withhold from sessions that work.
+    """
+    present = {"kind": "claude-code", "id": "still-there", "cwd": "/x"}
+    rows = [
+        {"slot": "aaaaaaaaaaaa", "agent": present, "session_state": "gone"},
+        {"slot": "bbbbbbbbbbbb", "agent": present, "session_state": "unknown"},
+        {"slot": "cccccccccccc", "agent": present, "session_state": "running"},
+    ]
+
+    got = testonly_session_rows(ctx.std, rows, "/home/me")
+
+    _eq("not for a session its store says is gone", got[0]["resume"], "-")
+    _eq("but yes where nothing says it cannot", got[1]["resume"], "claude --resume still-there")
+    _eq("and yes while it runs", got[2]["resume"], "claude --resume still-there")
+
     headers = [c.key for c in testonly_session_columns]
     _eq("the columns, in order", headers, ["repo", "agent", "session", "project", "slot", "resume"])
 
@@ -1703,6 +1725,7 @@ _UNIT_TESTS = [
     _test_freeing_a_slot_closes_its_history_entry,
     _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
     _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot,
+    _test_no_resume_is_offered_for_a_session_known_to_be_gone,
     _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
     _test_pools_on_disk_finds_a_pool_at_any_depth,
     _test_pools_on_disk_is_empty_before_any_pool_exists,
