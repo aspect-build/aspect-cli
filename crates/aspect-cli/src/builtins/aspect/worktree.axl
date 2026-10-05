@@ -1083,8 +1083,13 @@ def _slot_detail(r: dict, home: str) -> None:
         _unit(str, r["lease_count"]),
         _unit(compact_ms, r["age_ms"]),
     ))
-    for line in render(_history_rows(r["history"]), _HISTORY_COLUMNS):
-        print("    " + line)
+
+    # A header with no rows under it is not a table, so a slot whose history
+    # the registry does not carry says nothing instead.
+    holders = _history_rows(r["history"])
+    if holders:
+        for line in render(holders, _HISTORY_COLUMNS):
+            print("    " + line)
 
 def _unit(fmt, value) -> str:
     """`value` formatted, or a dash where the registry does not say.
@@ -1504,7 +1509,7 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
     print(tilde(pool["dir"], home) + "/" + SLOT_PREFIX + "<slot>")
     print("")
     for line in render(_list_cells(rows).cells, _LIST_COLUMNS):
-        print("  " + line)
+        print(line)
     print("")
     _slot_detail(rows[0], home)
 
@@ -1582,7 +1587,11 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             "last_branch": slot.get("last_branch", ""),
             "reason": why,
         })
-        print("    %s  %s  %s" % (slot_path(pool, slot_id), why, label))
+        print("    %s  %s  %s" % (
+            tilde(slot_path(pool, slot_id), ctx.std.env.home_dir()),
+            why,
+            label,
+        ))
 
     doomed = "delete " + pluralize(len(victims), "worktree slot") + " and their Bazel output bases"
     verdict = confirm.decide(
