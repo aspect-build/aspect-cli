@@ -1,0 +1,168 @@
+"""Unit tests for lib/resp.axl.
+
+A scripted fake stream serves reply bytes in pre-cut chunks, so a reply split
+across two reads (and the `read_exact` shortfall path) is exercised without a
+server. Writes are recorded so the encoding can be asserted byte for byte.
+"""
+
+load("./resp.axl", "resp", encode = "testonly_encode")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _b(s: str):
+    return bytes(s)
+
+def _fake_stream(chunks: list, writes: list):
+    """`read(n)` hands out `chunks` in order (never more than `n` bytes, never
+    across a chunk boundary) and empty bytes once exhausted; `read_exact` spans
+    chunks. `writes` collects every `write_all` payload."""
+    state = {"chunks": list(chunks), "timeouts": {}, "closed": False}
+
+    def read(n):
+        if not state["chunks"]:
+            return bytes("")
+        c = state["chunks"][0]
+        if len(c) <= n:
+            state["chunks"] = state["chunks"][1:]
+            return c
+        state["chunks"][0] = c[n:]
+        return c[:n]
+
+    def read_exact(n):
+        out = bytes("")
+        for _ in range(1000):
+            if len(out) >= n:
+                break
+            c = read(n - len(out))
+            if len(c) == 0:
+                fail(std.io.Error("early eof", kind = "unexpected_eof"))
+            out = out + c
+        return out
+
+    def set_timeout(which):
+        def set(ms):
+            state["timeouts"][which] = ms
+
+        return set
+
+    def close():
+        state["closed"] = True
+
+    return struct(
+        read = read,
+        read_exact = read_exact,
+        write_all = lambda data: writes.append(data),
+        set_read_timeout = set_timeout("read"),
+        set_write_timeout = set_timeout("write"),
+        close = close,
+        state = state,
+    )
+
+def _conn(chunks, writes = None):
+    return resp.new(_fake_stream([_b(c) for c in chunks], writes if writes != None else []))
+
+def _test_encode(ctx):
+    _eq("one command", encode([["SET", "k", "v"]]), "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n")
+    _eq("two commands back to back", encode([["PING"], ["GET", "k"]]), "*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")
+    _eq("ints are sent as their decimal text", encode([["PEXPIRE", "k", 1000]]), "*3\r\n$7\r\nPEXPIRE\r\n$1\r\nk\r\n$4\r\n1000\r\n")
+
+    # Bulk lengths count UTF-8 bytes: "é" is one character, two bytes.
+    _eq("non-ASCII bulk length", encode([["GET", "é"]]), "*2\r\n$3\r\nGET\r\n$2\r\né\r\n")
+
+def _test_scalar_replies(ctx):
+    writes = []
+    c = _conn(["+PONG\r\n:42\r\n$5\r\nhello\r\n$-1\r\n$0\r\n\r\n"], writes)
+    got = c.pipeline([["PING"], ["INCR", "n"], ["GET", "a"], ["GET", "missing"], ["GET", "empty"]])
+    _eq("scalar replies", got, ["PONG", 42, "hello", None, ""])
+    _eq("one write for the whole batch", len(writes), 1)
+    _eq("the write is the encoded batch", writes[0], encode([["PING"], ["INCR", "n"], ["GET", "a"], ["GET", "missing"], ["GET", "empty"]]))
+
+def _test_reply_split_across_reads(ctx):
+    # The header and two payload bytes land in one read, the rest later: the
+    # shortfall goes through `read_exact`, and the next header needs a fresh fill.
+    c = _conn(["$5\r\nhe", "llo\r\n", ":7\r\n"])
+    _eq("split bulk + trailing int", c.pipeline([["GET", "a"], ["INCR", "n"]]), ["hello", 7])
+
+    # A CRLF split exactly between two reads.
+    c = _conn(["+OK\r", "\n"])
+    _eq("split CRLF", c.command("SET", "k", "v"), "OK")
+
+    # A header split before its digits.
+    c = _conn(["$", "3\r\nabc\r\n"])
+    _eq("split header", c.command("GET", "a"), "abc")
+
+def _test_non_ascii_payload_before_next_header(ctx):
+    # The buffer holds a non-ASCII payload ahead of the next header; the CRLF
+    # scan must still land on the right byte.
+    c = _conn(["$4\r\nçé\r\n:1\r\n"])
+    _eq("non-ASCII bulk then int", c.pipeline([["GET", "a"], ["INCR", "n"]]), ["çé", 1])
+
+def _test_arrays(ctx):
+    c = _conn(["*3\r\n$1\r\na\r\n:1\r\n$-1\r\n*-1\r\n*0\r\n"])
+    _eq("array, null array, empty array", c.pipeline([["HMGET", "k", "a", "b", "c"], ["X"], ["Y"]]), [["a", 1, None], None, []])
+
+def _test_error_reply_raised_after_batch_is_read(ctx):
+    c = _conn(["-ERR boom\r\n+OK\r\n", "+PONG\r\n"])
+    err, got = catch(c.pipeline, [["BAD", "x"], ["SET", "k", "v"]], types = [resp.CommandError])
+    _eq("error reply raises CommandError", err != None, True)
+    _eq("message is the server's", err.message, "ERR boom")
+    _eq("command names the verb", err.command, "BAD")
+    _eq("no value on failure", got, None)
+
+    # Both replies were consumed, so the connection is still in sync.
+    _eq("connection still usable", c.command("PING"), "PONG")
+
+def _test_single_command(ctx):
+    c = _conn(["+PONG\r\n"])
+    _eq("command returns the one reply", c.command("PING"), "PONG")
+    _eq("empty pipeline is a no-op", c.pipeline([]), [])
+
+def _test_protocol_errors(ctx):
+    err, _ = catch(_conn([]).command, "PING", types = [resp.ProtocolError])
+    _eq("eof → ProtocolError", err != None, True)
+    _eq("eof message", err.message, "connection closed by peer")
+
+    err, _ = catch(_conn(["*1\r\n*1\r\n:1\r\n"]).command, "X", types = [resp.ProtocolError])
+    _eq("nested array → ProtocolError", err != None, True)
+
+    err, _ = catch(_conn(["$2\r\nabcd\r\n"]).command, "GET", "a", types = [resp.ProtocolError])
+    _eq("bad bulk terminator → ProtocolError", err != None, True)
+
+    err, _ = catch(_conn(["?what\r\n"]).command, "X", types = [resp.ProtocolError])
+    _eq("unknown type byte → ProtocolError", err != None, True)
+
+def _test_timeouts_and_close(ctx):
+    s = _fake_stream([], [])
+    c = resp.new(s, read_timeout_ms = 1234, write_timeout_ms = 56)
+    _eq("read timeout set on wrap", s.state["timeouts"]["read"], 1234)
+    _eq("write timeout set on wrap", s.state["timeouts"]["write"], 56)
+    c.close()
+    _eq("close closes the stream", s.state["closed"], True)
+
+_UNIT_TESTS = [
+    _test_encode,
+    _test_scalar_replies,
+    _test_reply_split_across_reads,
+    _test_non_ascii_payload_before_next_header,
+    _test_arrays,
+    _test_error_reply_raised_after_batch_is_read,
+    _test_single_command,
+    _test_protocol_errors,
+    _test_timeouts_and_close,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("resp.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+resp_tests = task(
+    summary = "Run the RESP codec AXL unit tests.",
+    kind = "test-resp",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -104,17 +104,27 @@ def _test_parse_endpoint(ctx):
 def _test_negotiates_from_health_header(ctx):
     calls = []
     dd = _client({"GET /health": _health_res("2")}, calls)
-    _eq("version header → v2", dd.version, 2)
+    _eq("version header → v2", dd.status.version, 2)
+    _eq("version header → header suffix", dd.describe, "API v2")
     _eq("negotiation probes /health once", [c.path for c in calls], ["/health"])
     _eq("probe fills .status", dd.status.ok, True)
     _eq("probe reads storage", dd.status.storage.reachable, True)
 
     # A daemon that answers /health without the header predates v2.
     dd = _client({"GET /health": _res(200, {"status": "ok"})}, [])
-    _eq("no version header → v1", dd.version, 1)
+    _eq("no version header → v1", dd.status.version, 1)
 
     # Endpoint defaults to the env var when not passed explicitly.
     _eq("endpoint from env", dd.endpoint, _SOCKET)
+
+def _test_unset_endpoint_reports_status(ctx):
+    # No endpoint anywhere: not a crash, a startup status the task reports.
+    ctx = struct(http = lambda: fail("no request expected"), std = struct(env = struct(var = lambda name: None)))
+    dd = deliveryd.new(ctx, host = "gh", prefix = "deliver")
+    _eq("unset endpoint → not ok", dd.status.ok, False)
+    _eq("unset endpoint → names the variable", deliveryd.ENDPOINT_ENV in dd.status.error, True)
+    _eq("unset endpoint → no endpoint to print", dd.endpoint, "")
+    _eq("unset endpoint → still describes itself", dd.describe, "deliveryd")
 
 def _test_unreachable_reports_status(ctx):
     calls = []
@@ -130,7 +140,7 @@ def _test_probe_retries_a_503_then_succeeds(ctx):
     pauses = []
     dd = _client({"GET /health": [_res(503, "unhealthy: redis connection failed"), _health_res("2")]}, calls, pauses)
     _eq("503 then 200 → ok", dd.status.ok, True)
-    _eq("503 then 200 → v2 from the successful probe", dd.version, 2)
+    _eq("503 then 200 → v2 from the successful probe", dd.status.version, 2)
     _eq("503 then 200 → two probes", len(calls), 2)
     _eq("503 then 200 → one pause", pauses, [1000])
 
@@ -305,6 +315,7 @@ def _test_describe_storage(ctx):
 _UNIT_TESTS = [
     _test_parse_endpoint,
     _test_negotiates_from_health_header,
+    _test_unset_endpoint_reports_status,
     _test_unreachable_reports_status,
     _test_probe_retries_a_503_then_succeeds,
     _test_probe_gives_up_after_persistent_503,

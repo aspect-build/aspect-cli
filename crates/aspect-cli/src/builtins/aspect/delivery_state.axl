@@ -1,0 +1,25 @@
+"""Public facade for the delivery state backend: the trait that selects it and
+the implementations that ship with the CLI.
+
+    load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+
+    def config(ctx: ConfigContext):
+        if DeliveryState in ctx.traits:
+            ctx.traits[DeliveryState].connect = redis_state.connect
+
+`DeliveryState.connect` is `(ctx, delivery_state.Params) -> delivery_state.Backend`.
+Unset, the delivery task uses `deliveryd.connect` (the Workflows daemon over
+its Unix socket). `redis_state.connect` talks to Redis directly and reads
+`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`).
+Any function returning a `delivery_state.Backend` works as a third option.
+Internal modules load from `private/lib/` directly.
+"""
+
+load("./private/lib/delivery_state.axl", _DeliveryState = "DeliveryState", _delivery_state = "delivery_state")
+load("./private/lib/deliveryd.axl", _deliveryd = "deliveryd")
+load("./private/lib/redis_state.axl", _redis_state = "redis_state")
+
+DeliveryState = _DeliveryState
+delivery_state = _delivery_state
+deliveryd = _deliveryd
+redis_state = _redis_state

@@ -1,0 +1,145 @@
+"""A Redis client over `ctx.std.net`: URL parsing, TLS, AUTH, pipelining and one
+transparent reconnect. RESP framing lives in `resp.axl`; this file is the
+connection. Nothing here knows what the keys mean.
+
+    client = redis.connect(ctx, "rediss://cache:6379", ca_pem = pem, auth = "user:pw")
+    client.command("PING")                                   # "PONG"
+    client.pipeline([["HGET", k, "sig"], ["PTTL", k]])       # [sig, pttl]
+    client.info("memory")["used_memory"]                     # "3221225472"
+    client.close()
+
+URL schemes: `rediss://` is TLS, `redis+insecure://` is plaintext, and
+`redis://` or a bare `host[:port]` is TLS as well, the way deliveryd reads it:
+managed Redis requires TLS, so plaintext is the form that has to be spelled out.
+Not supported: credentials or a database index in the URL, Cluster, Sentinel,
+RESP3.
+
+`connect` raises on failure (`std.io.Error` for the dial or handshake, a
+`CommandError` for a rejected AUTH); wrap it in `catch(..., types = redis.ERRORS)`.
+A command raises `CommandError` for a `-ERR` reply. A transport failure during
+a command is retried once on a fresh connection, since callers of this client
+send idempotent commands; the second failure propagates.
+"""
+
+load("./resp.axl", "resp")
+
+DEFAULT_PORT = 6379
+_CONNECT_MS = 2000
+_IO_MS = 3000
+
+Endpoint = record(
+    addr = field(str),
+    tls = field(bool),
+    display = field(str),
+)
+
+# Failures a fresh connection can cure, as opposed to a `-ERR` answer.
+TRANSPORT_ERRORS = [std.io.Error, resp.ProtocolError]
+ERRORS = TRANSPORT_ERRORS + [resp.CommandError]
+
+def _has_port(addr: str) -> bool:
+    # The last colon must come after any IPv6 closing bracket.
+    return addr.rfind(":") > addr.rfind("]")
+
+def parse_endpoint(url: str) -> Endpoint:
+    tls = True
+    scheme = "rediss"
+    addr = url
+    if url.startswith("rediss://"):
+        addr = url[len("rediss://"):]
+    elif url.startswith("redis+insecure://"):
+        tls = False
+        scheme = "redis+insecure"
+        addr = url[len("redis+insecure://"):]
+    elif url.startswith("redis://"):
+        scheme = "redis"
+        addr = url[len("redis://"):]
+    if addr.endswith("/"):
+        addr = addr[:-1]
+    if not _has_port(addr):
+        addr = "{}:{}".format(addr, DEFAULT_PORT)
+    return Endpoint(addr = addr, tls = tls, display = scheme + "://" + addr)
+
+def parse_auth(value: str | None) -> list | None:
+    """The AUTH command for `password` or `user:password`, or None for neither."""
+    if not value:
+        return None
+    if ":" in value:
+        (user, password) = value.split(":", 1)
+        return ["AUTH", user, password]
+    return ["AUTH", value]
+
+def parse_info(text: str) -> dict:
+    """An INFO reply as `{field: value}`; section headers are dropped."""
+    fields = {}
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        if ":" in line and not line.startswith("#"):
+            (k, v) = line.split(":", 1)
+            fields[k] = v
+    return fields
+
+def _dial(ctx, endpoint: Endpoint, ca_pem, auth: list | None, connect_timeout_ms: int, io_timeout_ms: int):
+    net = ctx.std.net
+    if endpoint.tls:
+        stream = net.tls.connect(endpoint.addr, timeout_ms = connect_timeout_ms, ca_pem = ca_pem)
+    else:
+        stream = net.tcp.connect(endpoint.addr, timeout_ms = connect_timeout_ms)
+    conn = resp.new(stream, read_timeout_ms = io_timeout_ms, write_timeout_ms = io_timeout_ms)
+    if auth:
+        conn.command(*auth)
+    return conn
+
+def _redial(st: dict):
+    return st["dial"](st["ctx"], st["endpoint"], st["ca_pem"], st["auth"], st["connect_ms"], st["io_ms"])
+
+def _close(st: dict) -> None:
+    conn = st["conn"]
+    if conn != None:
+        st["conn"] = None
+        catch(conn.close, types = [std.io.Error])
+
+def _pipeline(st: dict, cmds: list) -> list:
+    if st["conn"] == None:
+        fail("redis client is closed")
+    err, replies = catch(st["conn"].pipeline, cmds, types = TRANSPORT_ERRORS)
+    if not err:
+        return replies
+    _close(st)
+    st["conn"] = _redial(st)
+    return st["conn"].pipeline(cmds)
+
+def connect(ctx, url: str, ca_pem = None, auth: str | None = None, connect_timeout_ms: int = _CONNECT_MS, io_timeout_ms: int = _IO_MS, dial = _dial):
+    """Connect and authenticate, once. `ca_pem` replaces the OS trust store for
+    TLS; `auth` is `password` or `user:password`. `dial` is replaceable in tests."""
+    st = {
+        "ctx": ctx,
+        "endpoint": parse_endpoint(url),
+        "ca_pem": ca_pem,
+        "auth": parse_auth(auth),
+        "connect_ms": connect_timeout_ms,
+        "io_ms": io_timeout_ms,
+        "dial": dial,
+        "conn": None,
+    }
+    st["conn"] = _redial(st)
+    return struct(
+        endpoint = st["endpoint"],
+        pipeline = lambda cmds: _pipeline(st, cmds),
+        command = lambda *args: _pipeline(st, [list(args)])[0],
+        info = lambda section: parse_info(_pipeline(st, [["INFO", section]])[0]),
+        close = lambda: _close(st),
+    )
+
+redis = namespace(
+    connect = connect,
+    parse_endpoint = parse_endpoint,
+    parse_auth = parse_auth,
+    parse_info = parse_info,
+    Endpoint = Endpoint,
+    CommandError = resp.CommandError,
+    ProtocolError = resp.ProtocolError,
+    TRANSPORT_ERRORS = TRANSPORT_ERRORS,
+    ERRORS = ERRORS,
+    DEFAULT_PORT = DEFAULT_PORT,
+)

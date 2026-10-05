@@ -1,0 +1,18 @@
+"""Public facade for the Redis client.
+
+    load("@aspect//redis.axl", "redis")
+
+    client = redis.connect(ctx, "rediss://cache:6379", ca_pem = pem, auth = "user:pw")
+    client.command("PING")
+    client.pipeline([["HGET", key, "sig"], ["PTTL", key]])
+    client.close()
+
+See `private/lib/redis.axl` for the URL schemes, error types and reconnect
+behavior, and `private/lib/resp.axl` for the wire codec underneath it.
+"""
+
+load("./private/lib/redis.axl", _redis = "redis")
+load("./private/lib/resp.axl", _resp = "resp")
+
+redis = _redis
+resp = _resp

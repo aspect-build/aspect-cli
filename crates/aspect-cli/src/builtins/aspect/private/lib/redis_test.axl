@@ -1,0 +1,178 @@
+"""Unit tests for lib/redis.axl.
+
+The `dial` seam returns a fake RESP connection that answers from a script and
+records every command, so AUTH on connect, the one-shot reconnect and the
+INFO helper are asserted without a server. RESP framing itself is covered by
+`resp_test.axl`.
+"""
+
+load("./redis.axl", "redis")
+load("./resp.axl", "resp")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_conn(reply = lambda cmd: "OK"):
+    """A RESP-level connection: `pipeline(cmds)` answers each command with
+    `reply(cmd)`, or raises the next queued error from `fail_next`."""
+    state = {"calls": [], "fail_next": [], "closed": 0}
+
+    def pipeline(cmds):
+        if state["fail_next"]:
+            e = state["fail_next"][0]
+            state["fail_next"] = state["fail_next"][1:]
+            fail(e)
+        state["calls"].append(cmds)
+        replies = [reply(c) for c in cmds]
+        for i in range(len(replies)):
+            if type(replies[i]) == "error":
+                fail(resp.CommandError(replies[i].message, command = str(cmds[i][0])))
+        return replies
+
+    def close():
+        state["closed"] += 1
+
+    return struct(
+        pipeline = pipeline,
+        command = lambda *args: pipeline([list(args)])[0],
+        close = close,
+        state = state,
+    )
+
+def _dialer(conns: list, dials: list):
+    """A `dial` that hands out `conns` in order (repeating the last) and records
+    its arguments."""
+
+    def dial(ctx, endpoint, ca_pem, auth, connect_ms, io_ms):
+        dials.append(struct(endpoint = endpoint, ca_pem = ca_pem, auth = auth, connect_ms = connect_ms, io_ms = io_ms))
+        conn = conns[min(len(dials), len(conns)) - 1]
+        if type(conn) == "error":
+            fail(conn)
+        if auth:
+            conn.command(*auth)
+        return conn
+
+    return dial
+
+def _test_parse_endpoint(ctx):
+    e = redis.parse_endpoint("rediss://cache.example:6380")
+    _eq("rediss → tls", (e.addr, e.tls, e.display), ("cache.example:6380", True, "rediss://cache.example:6380"))
+    e = redis.parse_endpoint("redis://cache.example")
+    _eq("redis:// → tls, default port", (e.addr, e.tls, e.display), ("cache.example:6379", True, "redis://cache.example:6379"))
+    e = redis.parse_endpoint("redis+insecure://localhost:6390/")
+    _eq("redis+insecure → plaintext, trailing slash dropped", (e.addr, e.tls), ("localhost:6390", False))
+    e = redis.parse_endpoint("cache.example:7000")
+    _eq("bare host:port → tls", (e.addr, e.tls, e.display), ("cache.example:7000", True, "rediss://cache.example:7000"))
+    _eq("bracketed IPv6 gets the default port", redis.parse_endpoint("redis+insecure://[::1]").addr, "[::1]:6379")
+    _eq("bracketed IPv6 keeps its port", redis.parse_endpoint("redis+insecure://[::1]:6391").addr, "[::1]:6391")
+
+def _test_parse_auth(ctx):
+    _eq("none → none", redis.parse_auth(None), None)
+    _eq("empty → none", redis.parse_auth(""), None)
+    _eq("password only", redis.parse_auth("s3cret"), ["AUTH", "s3cret"])
+    _eq("user:password", redis.parse_auth("app:s3cret"), ["AUTH", "app", "s3cret"])
+    _eq("password may itself contain colons", redis.parse_auth("app:a:b"), ["AUTH", "app", "a:b"])
+
+def _test_parse_info(ctx):
+    fields = redis.parse_info("# Memory\r\nused_memory:3221225472\r\nmaxmemory:0\r\nmaxmemory_policy:noeviction\r\n")
+    _eq("fields parsed", (fields["used_memory"], fields["maxmemory"], fields["maxmemory_policy"]), ("3221225472", "0", "noeviction"))
+    _eq("section headers skipped", len(fields), 3)
+
+def _test_connect_dials_with_options(ctx):
+    conn = _fake_conn()
+    dials = []
+    client = redis.connect(ctx, "rediss://cache:6380", ca_pem = "PEM", auth = "app:s3cret", dial = _dialer([conn], dials), connect_timeout_ms = 1500, io_timeout_ms = 2500)
+    d = dials[0]
+    _eq("endpoint", (d.endpoint.addr, d.endpoint.tls), ("cache:6380", True))
+    _eq("ca pem passed through", d.ca_pem, "PEM")
+    _eq("auth parsed", d.auth, ["AUTH", "app", "s3cret"])
+    _eq("timeouts passed through", (d.connect_ms, d.io_ms), (1500, 2500))
+    _eq("AUTH went over the wire first", conn.state["calls"][0], [["AUTH", "app", "s3cret"]])
+    _eq("client exposes its endpoint", client.endpoint.display, "rediss://cache:6380")
+
+def _test_connect_defaults(ctx):
+    dials = []
+    redis.connect(ctx, "redis+insecure://localhost", dial = _dialer([_fake_conn()], dials))
+    _eq("no auth by default", dials[0].auth, None)
+    _eq("deliveryd's timeouts", (dials[0].connect_ms, dials[0].io_ms), (2000, 3000))
+
+def _test_connect_raises(ctx):
+    err, _ = catch(redis.connect, ctx, "redis+insecure://localhost", dial = _dialer([std.io.Error("connection refused", kind = "connection_refused")], []), types = redis.ERRORS)
+    _eq("dial failure raises", err.kind, "connection_refused")
+
+    bad = _fake_conn(lambda cmd: resp.CommandError("WRONGPASS invalid username-password pair") if cmd[0] == "AUTH" else "OK")
+    err, _ = catch(redis.connect, ctx, "redis+insecure://localhost", auth = "nope", dial = _dialer([bad], []), types = redis.ERRORS)
+    _eq("rejected AUTH raises CommandError", (err.command, err.message.startswith("WRONGPASS")), ("AUTH", True))
+
+def _test_commands(ctx):
+    conn = _fake_conn(lambda cmd: {"PING": "PONG", "GET": "v", "INFO": "redis_version:7.2.4\r\n"}.get(cmd[0], "OK"))
+    client = redis.connect(ctx, "redis+insecure://localhost", dial = _dialer([conn], []))
+    _eq("command", client.command("PING"), "PONG")
+    _eq("pipeline", client.pipeline([["GET", "k"], ["SET", "k", "v"]]), ["v", "OK"])
+    _eq("info parsed", client.info("server"), {"redis_version": "7.2.4"})
+    _eq("info sends INFO section", conn.state["calls"][-1], [["INFO", "server"]])
+
+def _test_reconnects_once_on_transport_error(ctx):
+    conn = _fake_conn()
+    dials = []
+    client = redis.connect(ctx, "redis+insecure://localhost", auth = "pw", dial = _dialer([conn], dials))
+    conn.state["fail_next"] = [std.io.Error("broken pipe", kind = "broken_pipe")]
+    _eq("command succeeds after reconnect", client.command("PING"), "OK")
+    _eq("re-dialed once", len(dials), 2)
+    _eq("dead connection closed", conn.state["closed"], 1)
+    _eq("re-authenticated on the new connection", conn.state["calls"][-2], [["AUTH", "pw"]])
+
+    conn.state["fail_next"] = [resp.ProtocolError("connection closed by peer")]
+    _eq("protocol error also reconnects", client.command("PING"), "OK")
+    _eq("re-dialed again", len(dials), 3)
+
+    conn.state["fail_next"] = [std.io.Error("a", kind = "timed_out"), std.io.Error("b", kind = "timed_out")]
+    err, _ = catch(client.command, "PING", types = [std.io.Error])
+    _eq("second failure propagates", err.message, "b")
+    _eq("exactly one reconnect per call", len(dials), 4)
+
+def _test_command_error_is_not_retried(ctx):
+    conn = _fake_conn()
+    dials = []
+    client = redis.connect(ctx, "redis+insecure://localhost", dial = _dialer([conn], dials))
+    conn.state["fail_next"] = [resp.CommandError("WRONGTYPE", command = "HGET")]
+    err, _ = catch(client.command, "HGET", "k", "f", types = [redis.CommandError])
+    _eq("command error propagates", err.command, "HGET")
+    _eq("no reconnect for an answered command", len(dials), 1)
+
+def _test_close(ctx):
+    conn = _fake_conn()
+    client = redis.connect(ctx, "redis+insecure://localhost", dial = _dialer([conn], []))
+    client.close()
+    client.close()
+    _eq("close is idempotent", conn.state["closed"], 1)
+    err, _ = catch(client.command, "PING")
+    _eq("a closed client refuses commands", "closed" in err.message, True)
+
+_UNIT_TESTS = [
+    _test_parse_endpoint,
+    _test_parse_auth,
+    _test_parse_info,
+    _test_connect_dials_with_options,
+    _test_connect_defaults,
+    _test_connect_raises,
+    _test_commands,
+    _test_reconnects_once_on_transport_error,
+    _test_command_error_is_not_retried,
+    _test_close,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("redis.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+redis_tests = task(
+    summary = "Run the Redis client AXL unit tests.",
+    kind = "test-redis",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

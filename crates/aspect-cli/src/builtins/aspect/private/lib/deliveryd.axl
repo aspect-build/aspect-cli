@@ -3,19 +3,19 @@
 deliveryd tracks which artifacts have already been delivered so a re-run can skip
 them. v2 keys that state by artifact digest and answers one batched
 `QUERY /delivery`; v1 keys it by commit and needs a per-target `record` before
-`POST /query` can answer. `new()` negotiates the dialect once, off the
-`DeliveryD-Version` header on `/health`, and every verb below speaks whichever
-one the daemon advertises — callers write v2-shaped code and never branch on the
-version.
+`POST /query` can answer. `connect()` negotiates the dialect once, off the
+`DeliveryD-Version` header on `/health`, and every verb speaks whichever one the
+daemon advertises — callers write v2-shaped code and never branch on the
+version. It is the default `DeliveryState.connect` (see `delivery_state.axl`).
 
-    dd = deliveryd.new(ctx, host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url)
+    dd = deliveryd.connect(ctx, delivery_state.Params(host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url))
     delivered = dd.query(digests)      # {label: digest} -> {label: signature}
     dd.deliver(label, digest)          # after the run succeeded
     dd.delete(digest)                  # after it failed
 """
 
 load("@std//time.axl", "sleep")
-load("./text.axl", "format_bytes_iec")
+load("./delivery_state.axl", "delivery_state")
 
 # Where an Aspect Workflows runner publishes the daemon's Unix socket.
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT"
@@ -65,44 +65,8 @@ _Client = record(
     signature = field(str),
 )
 
-# The daemon's view of its backing store, as reported by /health. Absent on a
-# v1 daemon, whose /health carries no body.
-Storage = record(
-    reachable = field(bool, default = False),
-    ping_ms = field(int, default = 0),
-    used_bytes = field(int, default = 0),
-    max_bytes = field(int, default = 0),
-    used_pct = field(float, default = 0.0),
-    policy = field(str, default = ""),
-)
-
-Health = record(
-    ok = field(bool),
-    version = field(int),
-    status = field(str, default = ""),
-    storage = field(Storage, default = Storage()),
-    error = field(str, default = ""),
-)
-
-def _format_pct(pct: float) -> str:
-    tenths = int(pct * 10)
-    return "{}.{}%".format(tenths // 10, tenths % 10)
-
-def describe_storage(health: Health) -> str:
-    """The storage half of `/health` as one line, or "" when the daemon reported
-    none (a v1 daemon, or an unreachable one)."""
-    s = health.storage
-    if not s.reachable:
-        return ""
-    parts = []
-    if s.max_bytes:
-        parts.append("{} / {} ({})".format(format_bytes_iec(s.used_bytes), format_bytes_iec(s.max_bytes), _format_pct(s.used_pct)))
-    elif s.used_bytes:
-        parts.append(format_bytes_iec(s.used_bytes) + " used")
-    if s.policy:
-        parts.append(s.policy)
-    parts.append("ping {}ms".format(s.ping_ms))
-    return " · ".join(parts)
+Storage = delivery_state.Storage
+Health = delivery_state.Health
 
 def _parse_endpoint(endpoint: str) -> tuple:
     """`(base_url, socket_path)` for `unix:///path`, `http://host:port` or
@@ -314,7 +278,27 @@ def _do_delete(c: _Client, digest: str) -> None:
         })
     _check(c.conn, "delete", res)
 
-def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep):
+def _unconfigured(version: int) -> delivery_state.Backend:
+    """The backend for a runner without a daemon: every verb is unreachable,
+    and `status` says why, so the task reports it like any other startup error."""
+    message = "{} is not set. The delivery state backend must be running.".format(ENDPOINT_ENV)
+
+    def unavailable(*args, **kwargs):
+        fail("deliveryd is not configured: " + message)
+
+    status = Health(ok = False, version = version, error = message)
+    return delivery_state.Backend(
+        endpoint = "",
+        describe = "deliveryd",
+        status = status,
+        health = lambda: status,
+        record = unavailable,
+        query = unavailable,
+        deliver = unavailable,
+        delete = unavailable,
+    )
+
+def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep) -> delivery_state.Backend:
     """Connect to deliveryd and negotiate the API version, once.
 
     `host` is the CI host label ("gh", "bk", …) and `prefix` the change-detection
@@ -323,14 +307,14 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
     state key on a v1 daemon. `endpoint` defaults to `ENDPOINT_ENV`.
 
     The negotiation probe doubles as a reachability check, reported through
-    `.status` rather than raised — a dead daemon is a startup error the caller
-    concludes its own surface for, not a mid-run write failure. A 503 or a
-    transport error is re-probed up to `probe_attempts` times; `pause` is the
-    sleep between tries, replaceable in tests.
+    `.status` rather than raised — a dead daemon, like an unset endpoint, is a
+    startup error the caller concludes its own surface for, not a mid-run write
+    failure. A 503 or a transport error is re-probed up to `probe_attempts`
+    times; `pause` is the sleep between tries, replaceable in tests.
     """
     endpoint = endpoint or ctx.std.env.var(ENDPOINT_ENV)
     if not endpoint:
-        fail("deliveryd endpoint is not set; expected {} in the environment.".format(ENDPOINT_ENV))
+        return _unconfigured(_V1)
 
     (base_url, socket) = _parse_endpoint(endpoint)
     conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
@@ -344,9 +328,9 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
         commit = commit,
         signature = signature,
     )
-    return struct(
+    return delivery_state.Backend(
         endpoint = endpoint,
-        version = version,
+        describe = "API v{}".format(version),
         status = _to_health(res, version),
         health = lambda: _do_health(c),
         record = lambda label, digest: _do_record(c, label, digest),
@@ -355,9 +339,14 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
         delete = lambda digest: _do_delete(c, digest),
     )
 
+def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
+    """The default `DeliveryState.connect`: deliveryd at `ENDPOINT_ENV`."""
+    return _new(ctx, host = params.host, prefix = params.prefix, commit = params.commit, signature = params.signature)
+
 deliveryd = namespace(
+    connect = _connect,
     new = _new,
-    describe_storage = describe_storage,
+    describe_storage = delivery_state.describe_storage,
     ENDPOINT_ENV = ENDPOINT_ENV,
     Health = Health,
     Storage = Storage,

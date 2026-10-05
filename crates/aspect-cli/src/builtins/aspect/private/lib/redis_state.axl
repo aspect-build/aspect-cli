@@ -1,0 +1,267 @@
+"""Delivery state straight from Redis — a `DeliveryState.connect` that skips deliveryd.
+
+Speaks deliveryd's own key scheme, so the two backends interoperate against one
+database and a fleet can move between them without a migration:
+
+    dd:sig:{host}:{prefix}:{digest}            HASH {sig, label, commit, at, meta?}, 365d TTL
+    delivery-signature:{host}:{digest}:{prefix} STRING, pre-v2 deliveryd; read as a
+                                                fallback and lazily copied into the hash
+    {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
+                                                ever removed here
+
+A query refreshes the TTL of every signature it finds with less than half its
+window left (or none, for an un-migrated legacy key), so a target that keeps
+being built never expires and the TTL only reclaims targets nobody builds.
+
+The connection is `redis.axl`'s client, configured from the runner's environment:
+
+    ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT   rediss://host:port, redis+insecure://host:port,
+                                               or a bare host[:port]; see `redis.axl` for the schemes
+    ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE    PEM bundle to trust instead of the OS store
+    ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH       `password` or `user:password`
+"""
+
+load("@std//time.axl", "sleep", "time")
+load("./delivery_state.axl", "delivery_state")
+load("./redis.axl", "redis")
+
+ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT"
+CA_FILE_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE"
+AUTH_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH"
+
+# deliveryd's startup re-probe policy.
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_MS = 1000
+
+# deliveryd's defaults: signature lifetime, the remaining-TTL threshold below
+# which a query refreshes it, the drain time for a migrated legacy key, and
+# how many digests one pipeline round trip touches.
+SIG_TTL_MS = 365 * 24 * 3600 * 1000
+_REFRESH_BELOW_MS = SIG_TTL_MS // 2
+LEGACY_TTL_MS = 7 * 24 * 3600 * 1000
+CHUNK_SIZE = 500
+
+_Config = record(
+    url = field(str),
+    ca_pem = field(str | None, default = None),
+    auth = field(str | None, default = None),
+)
+
+def _load_config(ctx) -> tuple:
+    """`(config, error)` from the environment; exactly one is set."""
+    url = ctx.std.env.var(ENDPOINT_ENV)
+    if not url:
+        return (None, "{} is not set. The delivery state backend must be reachable.".format(ENDPOINT_ENV))
+    ca_pem = None
+    ca_file = ctx.std.env.var(CA_FILE_ENV)
+    if ca_file:
+        if not ctx.std.fs.exists(ca_file):
+            return (None, "{} points at {}, which does not exist.".format(CA_FILE_ENV, ca_file))
+        ca_pem = ctx.std.fs.read_to_string(ca_file)
+    return (_Config(url = url, ca_pem = ca_pem, auth = ctx.std.env.var(AUTH_ENV) or None), "")
+
+def _describe_error(err) -> str:
+    kind = getattr(err, "kind", "")
+    return "{} ({})".format(err.message, kind) if kind else err.message
+
+def _info_int(fields: dict, key: str) -> int:
+    v = fields.get(key, "")
+    return int(v) if v.isdigit() else 0
+
+def _probe(client) -> tuple:
+    """`(Health, redis_version)` from a live client: PING latency, and memory
+    pressure from INFO where the server allows it."""
+    t0 = time.monotonic()
+    client.command("PING")
+    ping_ms = int((time.monotonic() - t0) * 1000)
+    storage = delivery_state.Storage(reachable = True, ping_ms = ping_ms)
+    version = ""
+    err, infos = catch(client.pipeline, [["INFO", "memory"], ["INFO", "server"]], types = [redis.CommandError])
+    if not err:
+        mem = redis.parse_info(infos[0])
+        used = _info_int(mem, "used_memory")
+        limit = _info_int(mem, "maxmemory")
+        storage = delivery_state.Storage(
+            reachable = True,
+            ping_ms = ping_ms,
+            used_bytes = used,
+            max_bytes = limit,
+            used_pct = used * 100.0 / limit if limit else 0.0,
+            policy = mem.get("maxmemory_policy", ""),
+        )
+        version = redis.parse_info(infos[1]).get("redis_version", "")
+    return (delivery_state.Health(ok = True, version = 2, status = "ok", storage = storage), version)
+
+def _v2_key(p, digest: str) -> str:
+    return "dd:sig:{}:{}:{}".format(p.host, p.prefix, digest)
+
+def _legacy_sig_key(p, digest: str) -> str:
+    # The pre-v2 key put the digest before the prefix (its "workspace" slot).
+    return "delivery-signature:{}:{}:{}".format(p.host, digest, p.prefix)
+
+def _legacy_artifact_key(p, digest: str) -> str:
+    return "{}:{}:{}".format(p.host, digest, p.prefix)
+
+def _should_refresh(pttl: int) -> bool:
+    # -1: exists without expiry (un-migrated legacy); -2: gone, nothing to bump.
+    return pttl == -1 or (pttl >= 0 and pttl < _REFRESH_BELOW_MS)
+
+def _now_s() -> int:
+    return time.now_ms() // 1000
+
+def _query_chunk(client, p, chunk: list, delivered: dict) -> None:
+    """Three pipelines at most: read the v2 hashes, read legacy keys for the
+    misses, then write back TTL refreshes and migrations."""
+    reads = []
+    for d in chunk:
+        k = _v2_key(p, d)
+        reads.append(["HGET", k, "sig"])
+        reads.append(["PTTL", k])
+    replies = client.pipeline(reads)
+
+    refresh = []
+    miss = []
+    for i in range(len(chunk)):
+        d = chunk[i]
+        sig = replies[2 * i]
+        if sig == None:
+            miss.append(d)
+            continue
+        delivered[d] = sig
+        if _should_refresh(replies[2 * i + 1]):
+            refresh.append(_v2_key(p, d))
+
+    migrate = {}
+    if miss:
+        legacy = client.pipeline([["GET", _legacy_sig_key(p, d)] for d in miss])
+        for i in range(len(miss)):
+            if legacy[i] != None:
+                delivered[miss[i]] = legacy[i]
+                migrate[miss[i]] = legacy[i]
+
+    writes = [["PEXPIRE", k, SIG_TTL_MS] for k in refresh]
+    now = _now_s()
+    for d, sig in migrate.items():
+        k = _v2_key(p, d)
+
+        # A legacy signature is a bare string: only sig and at are known; label
+        # and commit stay empty until the target is delivered again.
+        writes.append(["HSET", k, "sig", sig, "at", now])
+        writes.append(["PEXPIRE", k, SIG_TTL_MS])
+        writes.append(["PEXPIRE", _legacy_sig_key(p, d), LEGACY_TTL_MS])
+    if writes:
+        client.pipeline(writes)
+
+def _query(client, p, digests: dict) -> dict:
+    """Which of `{label: digest}` are delivered → `{label: signature}`. Shared
+    digests are looked up once; labels with an empty digest are never asked about."""
+    wanted = {digest: True for digest in digests.values() if digest}
+    if not wanted:
+        return {}
+    uniq = list(wanted.keys())
+    delivered = {}
+    for start in range(0, len(uniq), CHUNK_SIZE):
+        _query_chunk(client, p, uniq[start:start + CHUNK_SIZE], delivered)
+    return {
+        label: delivered[digest]
+        for label, digest in digests.items()
+        if digest and digest in delivered
+    }
+
+def _deliver(client, p, label: str, digest: str, meta: dict = {}) -> None:
+    k = _v2_key(p, digest)
+    hset = ["HSET", k, "sig", p.signature, "label", label, "commit", p.commit, "at", _now_s()]
+    if meta:
+        hset.append("meta")
+        hset.append(json.encode(meta))
+    client.pipeline([hset, ["PEXPIRE", k, SIG_TTL_MS]])
+
+def _delete(client, p, digest: str) -> None:
+    if not digest:
+        return
+    client.pipeline([["UNLINK", _v2_key(p, digest), _legacy_sig_key(p, digest), _legacy_artifact_key(p, digest)]])
+
+def _health(client) -> delivery_state.Health:
+    err, probed = catch(_probe, client, types = redis.ERRORS)
+    if err:
+        return delivery_state.Health(ok = False, version = 2, error = _describe_error(err))
+    return probed[0]
+
+def _describe(tls: bool, version: str = "") -> str:
+    transport = "TLS" if tls else "plaintext"
+    if version:
+        return "redis {} direct, {}".format(version, transport)
+    return "redis direct, " + transport
+
+def _unavailable(endpoint: str, describe: str, message: str) -> delivery_state.Backend:
+    def refuse(*args, **kwargs):
+        fail("redis delivery state is unavailable: " + message)
+
+    status = delivery_state.Health(ok = False, version = 2, error = message)
+    return delivery_state.Backend(
+        endpoint = endpoint,
+        describe = describe,
+        status = status,
+        health = lambda: status,
+        record = refuse,
+        query = refuse,
+        deliver = refuse,
+        delete = refuse,
+    )
+
+def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause = sleep, probe_attempts: int = _PROBE_ATTEMPTS) -> delivery_state.Backend:
+    """Connect to Redis and probe it, once; the result is `.status`, never a
+    raise, so the task reports an unreachable or unconfigured store the same
+    way it reports any startup problem. `connect` (the `redis.connect` client
+    factory) and `pause` are replaceable in tests. The client is closed by
+    `ctx.defer`."""
+    (cfg, problem) = _load_config(ctx)
+    if problem:
+        return _unavailable("", "redis direct", problem)
+    endpoint = redis.parse_endpoint(cfg.url)
+
+    client = None
+    health = None
+    version = ""
+    last_error = ""
+    for attempt in range(probe_attempts):
+        if attempt > 0:
+            pause(_PROBE_RETRY_MS)
+        err, client = catch(connect, ctx, cfg.url, ca_pem = cfg.ca_pem, auth = cfg.auth, types = redis.ERRORS)
+        if err:
+            last_error = _describe_error(err)
+            if isinstance(err, redis.CommandError):
+                break  # the server answered (bad AUTH): asking again changes nothing
+            continue
+        err, probed = catch(_probe, client, types = redis.ERRORS)
+        if err:
+            last_error = _describe_error(err)
+            catch(client.close, types = [std.io.Error])
+            continue
+        (health, version) = probed
+        break
+    if health == None:
+        return _unavailable(endpoint.display, _describe(endpoint.tls), last_error)
+
+    ctx.defer(client.close)
+    p = params
+    return delivery_state.Backend(
+        endpoint = endpoint.display,
+        describe = _describe(endpoint.tls, version),
+        status = health,
+        health = lambda: _health(client),
+        record = lambda label, digest: None,
+        query = lambda digests: _query(client, p, digests),
+        deliver = lambda label, digest, meta = {}: _deliver(client, p, label, digest, meta),
+        delete = lambda digest: _delete(client, p, digest),
+    )
+
+redis_state = namespace(
+    connect = _connect,
+    ENDPOINT_ENV = ENDPOINT_ENV,
+    CA_FILE_ENV = CA_FILE_ENV,
+    AUTH_ENV = AUTH_ENV,
+    SIG_TTL_MS = SIG_TTL_MS,
+    LEGACY_TTL_MS = LEGACY_TTL_MS,
+    CHUNK_SIZE = CHUNK_SIZE,
+)

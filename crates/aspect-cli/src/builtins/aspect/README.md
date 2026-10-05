@@ -161,7 +161,7 @@ Renderer: `gazelle_results`. Renders the gazelle target in the title (so `gazell
 
 ## delivery
 
-[`delivery.axl`](delivery.axl) · multi-phase delivery flow against a `deliveryd` backend.
+[`delivery.axl`](delivery.axl) · multi-phase delivery flow against a pluggable state backend.
 
 ```sh
 aspect delivery //pkg/foo:release //pkg/bar:release
@@ -177,6 +177,16 @@ Phase 1 builds the user's targets with the `hashsum_aspect` to compute action di
 `--dry-run` is tri-state (`false` / `true` / `build`). A preview skips phase 3: it exists to put the pending targets' runfiles on disk for a dispatch that a dry-run never performs, so a preview neither stamps nor materializes release artifacts. `--dry-run=build` opts that build back in for previews that need the manifest's per-target on-disk paths or the `not runnable` check.
 
 Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tables (label / hash / context), failed deliveries open by default, plus the shared bazel detail body from phase 1.
+
+State backend: the task gets its "already delivered" store from the `DeliveryState.connect` hook ([`delivery_state.axl`](delivery_state.axl)). Unset, it is `deliveryd`, the Workflows daemon on `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT` ([`private/lib/deliveryd.axl`](private/lib/deliveryd.axl)). [`private/lib/redis_state.axl`](private/lib/redis_state.axl) talks to Redis directly with the same key scheme, on the generic client in [`redis.axl`](redis.axl) (URL parsing, TLS, AUTH, pipelining, one-shot reconnect; RESP2 codec in [`private/lib/resp.axl`](private/lib/resp.axl)), configured by `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`, `_REDIS_CA_FILE` and `_REDIS_AUTH`:
+
+```python
+load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+
+def config(ctx: ConfigContext):
+    if DeliveryState in ctx.traits:
+        ctx.traits[DeliveryState].connect = redis_state.connect
+```
 
 ---
 

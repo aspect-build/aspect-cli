@@ -8,6 +8,7 @@ files can load the full trait set with a single import:
          "BazelTrait",
          "Phases",
          "DeliveryTrait",
+         "DeliveryState",
          "HealthCheckTrait",
          "REPRO_FIX_ACCEPT",
          "REPRO_FIX_REJECT",
@@ -42,6 +43,7 @@ into the task's trait list).
 load("@aspect//bazel.axl", _BazelTrait = "BazelTrait")
 load("@aspect//delivery.axl", _DeliveryTrait = "DeliveryTrait")
 load("@aspect//lint.axl", _LintTrait = "LintTrait")
+load("@aspect//private/lib/delivery_state.axl", _DeliveryState = "DeliveryState")
 load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
     "./private/lib/lifecycle.axl",
@@ -66,6 +68,7 @@ load(
 )
 
 BazelTrait = _BazelTrait
+DeliveryState = _DeliveryState
 DeliveryTrait = _DeliveryTrait
 HealthCheckTrait = _HealthCheckTrait
 LintTrait = _LintTrait

@@ -1,0 +1,140 @@
+"""A RESP2 client over a `ctx.std.net` stream — the wire half of talking to Redis.
+
+Knows nothing about Redis commands: callers hand it `["HGET", key, field]`
+lists and get Starlark values back. Every command is pipelined, even a single
+one: the whole batch goes out in one write and exactly one reply per command is
+read back before anything is inspected, so an error reply never leaves unread
+replies on the socket.
+
+    conn = resp.new(ctx.std.net.tcp.connect("localhost:6379", timeout_ms = 2000))
+    conn.command("PING")                                  # "PONG"
+    conn.pipeline([["SET", "k", "v"], ["GET", "k"]])     # ["OK", "v"]
+
+Replies: `+` -> str, `:` -> int, `$` -> str (`$-1` -> None), `*` -> list of
+those (`*-1` -> None), `-` -> a `CommandError` raised after the batch is read.
+Bulk payloads are decoded as UTF-8; every value this codebase stores is text.
+Nested arrays are not needed by any command sent here and are rejected.
+"""
+
+_CRLF = bytes("\r\n")
+_READ_CHUNK = 65536
+
+# Upper bound on reads while waiting for one reply header, so a server that
+# streams garbage without a CRLF cannot pin the task forever.
+_MAX_FILLS = 1 << 16
+
+# Malformed or truncated reply: the connection is out of sync and must be
+# dropped. The redis_state backend reconnects on it like on a `std.io.Error`.
+ProtocolError = error.type()
+
+# A `-ERR ...` reply. `command` is the verb that drew it. Not a transport
+# failure: retrying the same command would draw the same answer.
+CommandError = error.type(fields = {"command": field(str, default = "")})
+
+def _encode(cmd: list) -> str:
+    """One command as a RESP array of bulk strings. Bulk lengths count bytes,
+    not characters, hence `len(bytes(s))`."""
+    parts = ["*{}\r\n".format(len(cmd))]
+    for arg in cmd:
+        s = arg if type(arg) == "string" else str(arg)
+        parts.append("${}\r\n{}\r\n".format(len(bytes(s)), s))
+    return "".join(parts)
+
+def _encode_pipeline(cmds: list) -> str:
+    return "".join([_encode(c) for c in cmds])
+
+def _fill(rd: dict) -> None:
+    chunk = rd["stream"].read(_READ_CHUNK)
+    if len(chunk) == 0:
+        fail(ProtocolError("connection closed by peer"))
+    rd["buf"] = rd["buf"] + chunk
+
+def _crlf_index(buf) -> int:
+    for i in range(len(buf) - 1):
+        if buf[i] == 13 and buf[i + 1] == 10:
+            return i
+    return -1
+
+def _read_line(rd: dict):
+    """The next CRLF-terminated line, without the terminator. Scans bytes rather
+    than `str(buf).find`: a char index is not a byte offset once a non-ASCII
+    payload sits in the buffer."""
+    for _ in range(_MAX_FILLS):
+        buf = rd["buf"]
+        if _CRLF in buf:
+            i = _crlf_index(buf)
+            rd["buf"] = buf[i + 2:]
+            return buf[:i]
+        _fill(rd)
+    fail(ProtocolError("no reply header after {} reads".format(_MAX_FILLS)))
+
+def _read_payload(rd: dict, n: int):
+    """`n` payload bytes plus their CRLF. The length is known, so the shortfall
+    is one exact read."""
+    buf = rd["buf"]
+    need = n + 2
+    if len(buf) < need:
+        buf = buf + rd["stream"].read_exact(need - len(buf))
+    if buf[n:need] != _CRLF:
+        fail(ProtocolError("bulk string of {} bytes not terminated by CRLF".format(n)))
+    rd["buf"] = buf[need:]
+    return buf[:n]
+
+def _parse_line(rd: dict, line, nested: bool):
+    kind = str(line[:1])
+    body = str(line[1:])
+    if kind == "+":
+        return body
+    if kind == "-":
+        return CommandError(body)
+    if kind == ":":
+        return int(body)
+    if kind == "$":
+        n = int(body)
+        if n < 0:
+            return None
+        return str(_read_payload(rd, n))
+    if kind == "*":
+        if nested:
+            fail(ProtocolError("nested array reply is not supported"))
+        n = int(body)
+        if n < 0:
+            return None
+        return [_parse_line(rd, _read_line(rd), True) for _ in range(n)]
+    fail(ProtocolError("unexpected reply type byte {}".format(repr(kind))))
+
+def _read_reply(rd: dict):
+    return _parse_line(rd, _read_line(rd), False)
+
+def _pipeline(rd: dict, cmds: list) -> list:
+    """Send every command, read every reply, then raise the first `-ERR`."""
+    if not cmds:
+        return []
+    rd["stream"].write_all(_encode_pipeline(cmds))
+    replies = [_read_reply(rd) for _ in range(len(cmds))]
+    for i in range(len(replies)):
+        r = replies[i]
+        if type(r) == "error":
+            fail(CommandError(r.message, command = str(cmds[i][0])))
+    return replies
+
+def _new(stream, read_timeout_ms: int = 3000, write_timeout_ms: int = 3000):
+    """Wrap a connected stream. The timeouts bound each read and write; a
+    pipeline of hundreds of commands is fine, since its replies stream back
+    continuously, but a stalled server fails fast."""
+    stream.set_read_timeout(read_timeout_ms)
+    stream.set_write_timeout(write_timeout_ms)
+    rd = {"stream": stream, "buf": bytes("")}
+    return struct(
+        pipeline = lambda cmds: _pipeline(rd, cmds),
+        command = lambda *args: _pipeline(rd, [list(args)])[0],
+        close = lambda: rd["stream"].close(),
+    )
+
+resp = namespace(
+    new = _new,
+    ProtocolError = ProtocolError,
+    CommandError = CommandError,
+)
+
+testonly_encode = _encode_pipeline
