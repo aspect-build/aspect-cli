@@ -152,16 +152,16 @@ def _test_classify_rule_order(ctx):
     holds back a just-used orphan, and age applies whether or not the
     workspace exists."""
     month = 30 * fx.DAY_US
-    _eq("orphan past grace", output_bases.classify("/ws", False, 2 * fx.HOUR_US, fx.policy(month)), "orphan")
-    _eq("orphan within grace", output_bases.classify("/ws", False, fx.HOUR_US // 2, fx.policy(month)), "grace")
-    _eq("an old orphan is still an orphan", output_bases.classify("/ws", False, 2 * month, fx.policy(month)), "orphan")
-    _eq("live and recent", output_bases.classify("/ws", True, fx.DAY_US, fx.policy(month)), "live")
-    _eq("live but idle", output_bases.classify("/ws", True, month, fx.policy(month)), "idle")
-    _eq("age 0 turns the age rule off", output_bases.classify("/ws", True, 100 * month, fx.policy(0)), "live")
-    _eq("undetermined and recent", output_bases.classify("", False, fx.DAY_US, fx.policy(month)), "unknown")
-    _eq("undetermined and idle", output_bases.classify("", False, month, fx.policy(month)), "idle")
-    _eq("a longer grace period", output_bases.classify("/ws", False, 2 * fx.HOUR_US, fx.policy(month, 3 * fx.HOUR_US)), "grace")
-    _eq("grace 0 removes at once", output_bases.classify("/ws", False, 0, fx.policy(month, 0)), "orphan")
+    _eq("orphan past grace", output_bases.classify("/ws", False, False, 2 * fx.HOUR_US, fx.policy(month)), "orphan")
+    _eq("orphan within grace", output_bases.classify("/ws", False, False, fx.HOUR_US // 2, fx.policy(month)), "grace")
+    _eq("an old orphan is still an orphan", output_bases.classify("/ws", False, False, 2 * month, fx.policy(month)), "orphan")
+    _eq("live and recent", output_bases.classify("/ws", True, False, fx.DAY_US, fx.policy(month)), "live")
+    _eq("live but idle", output_bases.classify("/ws", True, False, month, fx.policy(month)), "idle")
+    _eq("age 0 turns the age rule off", output_bases.classify("/ws", True, False, 100 * month, fx.policy(0)), "live")
+    _eq("undetermined and recent", output_bases.classify("", False, False, fx.DAY_US, fx.policy(month)), "unknown")
+    _eq("undetermined and idle", output_bases.classify("", False, False, month, fx.policy(month)), "idle")
+    _eq("a longer grace period", output_bases.classify("/ws", False, False, 2 * fx.HOUR_US, fx.policy(month, 3 * fx.HOUR_US)), "grace")
+    _eq("grace 0 removes at once", output_bases.classify("/ws", False, False, 0, fx.policy(month, 0)), "orphan")
 
 def _test_output_base_names_are_md5_shaped(ctx):
     _eq("md5", output_bases.is_output_base_name("d41d8cd98f00b204e9800998ecf8427e"), True)
@@ -205,12 +205,12 @@ def _test_scan_lists_youngest_first(ctx):
     ages = [b.last_used for b in fx.scan(ctx, root)]
     _eq("descending last use", ages, sorted(ages, reverse = True))
 
-def _test_fmt_age(ctx):
-    _eq("minutes", output_bases.fmt_age(5 * 60 * 1000000), "5m")
-    _eq("hours", output_bases.fmt_age(3 * fx.HOUR_US), "3h")
-    _eq("hours up to two days", output_bases.fmt_age(47 * fx.HOUR_US), "47h")
-    _eq("days", output_bases.fmt_age(45 * fx.DAY_US), "45d")
-    _eq("clock skew reads as zero", output_bases.fmt_age(-5), "0m")
+def _test_fmt_elapsed(ctx):
+    _eq("minutes", output_bases.fmt_elapsed(5 * 60 * 1000000), "5m")
+    _eq("hours", output_bases.fmt_elapsed(3 * fx.HOUR_US), "3h")
+    _eq("hours up to two days", output_bases.fmt_elapsed(47 * fx.HOUR_US), "47h")
+    _eq("days", output_bases.fmt_elapsed(45 * fx.DAY_US), "45d")
+    _eq("clock skew reads as zero", output_bases.fmt_elapsed(-5), "0m")
 
 def _server(ctx, base, output_base = ""):
     """A stand-in Bazel server for `base`: a live process whose command line
@@ -257,6 +257,16 @@ def _test_a_process_that_is_not_a_server_does_not_veto(ctx):
     proc.kill()
     _eq("idle", states[fx.LIVE], "idle")
 
+def _test_a_pooled_slot_with_a_server_stays_pooled(ctx):
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.MARKER
+    ctx.std.fs.create_dir_all(base)
+    ctx.std.fs.write(base + "/DO_NOT_BUILD_HERE", ctx.std.env.home_dir() + "/.aspect/worktrees/acme/aspect-worktree-0123\n")
+    server = _server(ctx, base)
+    states = {b.name: b.state for b in fx.scan(ctx, root, 30 * fx.DAY_US)}
+    server.kill()
+    _eq("pooled", states[fx.MARKER], "pooled")
+
 def _test_a_missing_command_is_an_answer_not_a_crash(ctx):
     """A slim image without `ps`, `du` or `realpath` loses the answer, not the run."""
     _eq("missing", output_bases.run(ctx, "aspect-no-such-command", []), (-1, ""))
@@ -285,7 +295,36 @@ def _test_suggested_commands_carry_the_root(ctx):
     _eq("none for the default", output_bases.root_flag("", "/default"), "")
     _eq("listing hint", output_bases.listing_hint(bases, flag).startswith("Run `aspect output-bases --output-user-root=/mnt/bazel`"), True)
     note = output_bases.render(output_bases.STATES["unknown"].note, fx.policy(30 * fx.DAY_US), flag)[1]
-    _eq("note", note.endswith("`aspect gc --output-user-root=/mnt/bazel --bazel-output-base=<hash>`."), True)
+    _eq("note", note.endswith("`aspect gc --output-user-root=/mnt/bazel <hash>`."), True)
+
+def _test_an_empty_pool_slot_is_attributed_from_its_pool(ctx):
+    """A free slot has no `.git`; its pool says whose it is and what it last held."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-pool")
+    pool = tmp + "/github.com/acme/web"
+    ctx.std.fs.create_dir_all(pool)
+    ctx.std.fs.write(pool + "/registry.json", json.encode({"version": 1, "slots": {
+        "aaa": {"state": "free", "last_branch": "fix/login", "lease": None},
+        "bbb": {"state": "leased", "lease": {"name": "feat/x"}},
+        "ddd": {"state": "leased", "lease": {
+            "name": "feat/y",
+            "agent": {"kind": "claude-code", "id": "b22fe20c-1f9f-4476"},
+        }},
+    }}))
+    free = output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa")
+    _eq("repository from the pool's path", free.repository, "acme/web")
+    _eq("free, with its last branch", free.branch, "free · last fix/login")
+    _eq("leased", output_bases.pool_slot(ctx, pool + "/aspect-worktree-bbb").branch, "leased · feat/x")
+    _eq(
+        "leased, naming the agent session holding it",
+        output_bases.pool_slot(ctx, pool + "/aspect-worktree-ddd").branch,
+        # Whole, as everywhere a session is named: an abbreviated id identifies
+        # a session only to someone who already knows which one it is.
+        "leased · feat/y · claude-code b22fe20c-1f9f-4476",
+    )
+    _eq("unknown to the registry", output_bases.pool_slot(ctx, pool + "/aspect-worktree-ccc").branch, "")
+    ctx.std.fs.write(pool + "/registry.json", "not json")
+    _eq("a broken registry leaves the branch blank", output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa").branch, "")
+    _eq("not a slot", output_bases.pool_slot(ctx, pool + "/elsewhere"), None)
 
 def _test_the_no_workspace_base_is_named(ctx):
     """`md5("")` is the base Bazel uses outside any workspace."""
@@ -315,6 +354,20 @@ def _test_a_root_with_a_space_still_matches_its_server(ctx):
     cmd = "java -jar A-server.jar --output_base=/x/my root/" + fx.LIVE + " --workspace_directory=/w"
     _eq("whole value", output_bases.output_base_name(cmd), fx.LIVE)
     _eq("trailing slash", output_bases.output_base_name("j --output_base=/a b/" + fx.LIVE + "/"), fx.LIVE)
+
+def _test_a_malformed_registry_does_not_crash(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-ob-badpool")
+    pool = tmp + "/github.com/acme/web"
+    ctx.std.fs.create_dir_all(pool)
+    for registry in [
+        {"slots": []},
+        {"slots": {"aaa": {"lease": {"name": 7}, "last_branch": 3}}},
+        {"slots": {"aaa": "free"}},
+        [],
+    ]:
+        ctx.std.fs.write(pool + "/registry.json", json.encode(registry))
+        c = output_bases.pool_slot(ctx, pool + "/aspect-worktree-aaa")
+        _eq("still attributed to the pool", c.repository, "acme/web")
 
 def _test_tilde(ctx):
     _eq("under home", output_bases.tilde("/home/u/src/repo", "/home/u"), "~/src/repo")
@@ -371,30 +424,68 @@ def _test_the_orphan_note_states_the_grace_period(ctx):
     _eq("off", output_bases.render(note, fx.policy(0, 0))[1], "`aspect gc` removes one immediately (--orphan-grace-hours=N waits N hours after last use).")
     _eq("shared with the grace state", output_bases.STATES["grace"].note, note)
 
-def _test_the_undetermined_note_states_the_max_age(ctx):
-    """An undetermined base goes only by age, so its note gives the age in force
+def _test_the_undetermined_note_states_the_max_idle(ctx):
+    """An undetermined base goes only by idle time, so its note gives the cutoff
     and the way to remove one now."""
     note = output_bases.STATES["unknown"].note
     _eq("defined", output_bases.render(note, fx.policy(30 * fx.DAY_US))[0], "undetermined: nothing in the base names its workspace, so it cannot be orphaned.")
     _eq(
-        "age in force",
+        "the cutoff in force",
         output_bases.render(note, fx.policy(30 * fx.DAY_US))[1],
-        "`aspect gc` removes one 30d after last use (--base-max-age-days=N to change, 0 to keep), or now with `aspect gc --bazel-output-base=<hash>`.",
+        "`aspect gc` removes one 30d after last use (--base-max-idle-days=N to change, 0 to keep), or now with `aspect gc <hash>`.",
     )
     _eq(
         "age rule off",
         output_bases.render(note, fx.policy(0))[1],
-        "`aspect gc` keeps it (--base-max-age-days=N removes one N days after last use), or now with `aspect gc --bazel-output-base=<hash>`.",
+        "`aspect gc` keeps it (--base-max-idle-days=N removes one N days after last use), or now with `aspect gc <hash>`.",
     )
 
 def _test_the_download_cache_reason_states_the_age(ctx):
     """Pruning is on by default, so the shared-cache table gives the age in
     force rather than naming the flag as if it were needed."""
     reason = [r for key, _rel, r in output_bases.CACHES if key == "download_cache_kb"][0]
-    month = output_bases.Policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 30 * fx.DAY_US)
-    off = output_bases.Policy(base_max_age_us = 0, orphan_grace_us = 0, download_cache_max_age_us = 0)
-    _eq("default", output_bases.render(reason, month), ["pruned by `aspect gc` after 30d unused; --download-cache-max-age-days=N to change, 0 to keep"])
-    _eq("off", output_bases.render(reason, off), ["not pruned; `aspect gc --download-cache-max-age-days=N` prunes after N days unused"])
+    month = output_bases.Policy(base_max_idle_us = 0, orphan_grace_us = 0, download_cache_max_idle_us = 30 * fx.DAY_US)
+    off = output_bases.Policy(base_max_idle_us = 0, orphan_grace_us = 0, download_cache_max_idle_us = 0)
+    _eq("default", output_bases.render(reason, month), ["pruned by `aspect gc` after 30d unused; --download-cache-max-idle-days=N to change, 0 to keep"])
+    _eq("off", output_bases.render(reason, off), ["not pruned; `aspect gc --download-cache-max-idle-days=N` prunes after N days unused"])
+
+def _test_a_pooled_slot_is_never_orphaned(ctx):
+    """A free `aspect worktree` slot has no worktree on purpose; its base is the
+    warm state the pool keeps, so a missing workspace must not orphan it."""
+    month = 30 * fx.DAY_US
+    _eq("pooled, workspace gone", output_bases.classify("/ws", False, True, 2 * fx.HOUR_US, fx.policy(month)), "pooled")
+    _eq("pooled but idle", output_bases.classify("/ws", False, True, 2 * month, fx.policy(month)), "idle")
+    _eq("pooled and the age rule off", output_bases.classify("/ws", False, True, 2 * month, fx.policy(0)), "pooled")
+    _eq("not removable", output_bases.STATES["pooled"].removable, False)
+
+    root = fx.fixture(ctx)
+    slot = ctx.std.env.home_dir() + "/.aspect/worktrees/github.com/acme/repo/aspect-worktree-0123456789ab"
+    ctx.std.fs.create_dir_all(root + "/" + fx.MARKER)
+    ctx.std.fs.write(root + "/" + fx.MARKER + "/DO_NOT_BUILD_HERE", slot + "\n")
+    fx.backdate(ctx, root + "/" + fx.MARKER)
+    states = {b.name: b.state for b in fx.scan(ctx, root)}
+    _eq("scanned as pooled", states[fx.MARKER], "pooled")
+
+def _test_a_slot_nothing_will_lease_again_is_not_pooled(ctx):
+    """A slot whose directory is gone and that its pool no longer records
+    keeps nothing warm for anybody: its base is an orphan. A free slot is
+    pooled whether its clone exists or is gone — the next command in any clone
+    of the repository takes the second over — and so is any slot of a pool
+    whose registry cannot be read, which says nothing."""
+    pool = ctx.std.fs.mkdtemp(prefix = "aspect-ob-pool")
+    clone = ctx.std.fs.mkdtemp(prefix = "aspect-ob-clone")
+    gone = pool + "/aspect-worktree-aaaaaaaaaaaa"
+    kept = pool + "/aspect-worktree-bbbbbbbbbbbb"
+    lost = pool + "/aspect-worktree-cccccccccccc"
+    ctx.std.fs.write(pool + "/registry.json", json.encode({"version": 1, "slots": {
+        "aaaaaaaaaaaa": {"state": "free", "owner_git_dir": clone + "/no-such/.git"},
+        "bbbbbbbbbbbb": {"state": "free", "owner_git_dir": clone},
+    }}))
+    _eq("its clone is gone, for another clone to take", output_bases.unclaimed_slot(ctx, gone, {}), False)
+    _eq("its clone is there", output_bases.unclaimed_slot(ctx, kept, {}), False)
+    _eq("the pool forgot it", output_bases.unclaimed_slot(ctx, lost, {}), True)
+    ctx.std.fs.write(pool + "/registry.json", "{not json")
+    _eq("a damaged registry says nothing", output_bases.unclaimed_slot(ctx, lost, {}), False)
 
 def _base(name, workspace = "", last_used = 0):
     return output_bases.Base(name = name, path = "/root/" + name, workspace = workspace, state = "live", pid = 0, last_used = last_used)
@@ -462,9 +553,9 @@ def _test_listing_hint_names_kept_states(ctx):
 
 def _test_default_policy_is_gcs(ctx):
     p = output_bases.default_policy()
-    _eq("max age", p.base_max_age_us, 30 * fx.DAY_US)
+    _eq("max age", p.base_max_idle_us, 30 * fx.DAY_US)
     _eq("grace", p.orphan_grace_us, fx.HOUR_US)
-    _eq("download cache", p.download_cache_max_age_us, 30 * fx.DAY_US)
+    _eq("download cache", p.download_cache_max_idle_us, 30 * fx.DAY_US)
 
 def _test_output_bases_document(ctx):
     """Bases come grouped by state in `STATES` order and sorted within; sizes
@@ -511,11 +602,22 @@ def _test_resolve_root_refuses_a_missing_root(ctx):
     _eq("a missing root is reported as written", root, tmp + "/nope")
     _eq("refused", missing.exit_code, 1)
 
+def _test_a_bazel_flag_named_in_a_reason_is_spelled_as_bazel_spells_it(ctx):
+    """The install base is collected by a Bazel flag the report names. Ours say
+    "idle" for what they measure, but Bazel's says "age" and has to be quoted
+    exactly — a reader copies it into a bazelrc."""
+    reasons = {key: reason for key, _, reason in output_bases.CACHES}
+    _eq(
+        "Bazel's own flag, verbatim",
+        reasons["install_bases_kb"],
+        "collected by Bazel's --experimental_install_base_gc_max_age",
+    )
+
 def _test_policy_entry_is_in_the_flags_units(ctx):
     _eq("defaults", output_bases.policy_entry(output_bases.default_policy()), {
         "orphan_grace_hours": 1,
-        "base_max_age_days": 30,
-        "download_cache_max_age_days": 30,
+        "base_max_idle_days": 30,
+        "download_cache_max_idle_days": 30,
     })
 
 _UNIT_TESTS = [
@@ -538,14 +640,17 @@ _UNIT_TESTS = [
     _test_a_just_used_orphan_is_held_back,
     _test_an_idle_base_is_removed_even_with_its_workspace,
     _test_scan_lists_youngest_first,
-    _test_fmt_age,
+    _test_fmt_elapsed,
     _test_a_running_server_vetoes_the_age_rule,
     _test_the_server_veto_survives_another_spelling_of_the_root,
     _test_a_process_that_is_not_a_server_does_not_veto,
+    _test_a_pooled_slot_with_a_server_stays_pooled,
     _test_canonical,
     _test_tilde,
     _test_without_ps_or_kill_a_recorded_pid_keeps_its_base,
     _test_a_root_with_a_space_still_matches_its_server,
+    _test_a_malformed_registry_does_not_crash,
+    _test_an_empty_pool_slot_is_attributed_from_its_pool,
     _test_the_no_workspace_base_is_named,
     _test_output_base_name_reads_the_flag_itself,
     _test_trash_must_be_named_like_a_base,
@@ -555,8 +660,9 @@ _UNIT_TESTS = [
     _test_a_missing_command_is_an_answer_not_a_crash,
     _test_du_measures_a_path_and_reports_none_for_a_missing_one,
     _test_the_orphan_note_states_the_grace_period,
-    _test_the_undetermined_note_states_the_max_age,
+    _test_the_undetermined_note_states_the_max_idle,
     _test_the_download_cache_reason_states_the_age,
+    _test_a_pooled_slot_is_never_orphaned,
     _test_sort_orders_within_a_state,
     _test_checkouts_attribute_existing_workspaces_only,
     _test_table_sizes_columns_to_their_widest_cell,
@@ -566,6 +672,8 @@ _UNIT_TESTS = [
     _test_a_group_drops_columns_it_has_no_values_for,
     _test_resolve_root_refuses_a_missing_root,
     _test_policy_entry_is_in_the_flags_units,
+    _test_a_bazel_flag_named_in_a_reason_is_spelled_as_bazel_spells_it,
+    _test_a_slot_nothing_will_lease_again_is_not_pooled,
 ]
 
 def _test_impl(ctx):

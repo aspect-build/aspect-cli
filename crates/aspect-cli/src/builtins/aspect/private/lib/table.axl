@@ -1,0 +1,62 @@
+"""Aligned terminal tables that shrink to their content.
+
+A listing is read at a glance, so it should be as narrow as the rows allow: a
+column nothing fills is dropped rather than printed empty. The exception is a
+column whose absence would hide a capability — a pool with no agents running
+should still show that it records which session holds a slot — so each column
+says whether it may be dropped.
+
+What the columns and their values mean belongs in a command's `--help`, not
+under every listing: a table explaining itself on each invocation spends more of
+the screen on vocabulary than on data.
+
+`lib/text.axl` holds the padding primitives; this is the layer that decides what
+to pad.
+"""
+
+load("./text.axl", "display_width", "pad_left", "pad_right")
+
+Column = record(
+    # Key into each row dict.
+    key = field(str),
+    header = field(str),
+    # Right-align, for numbers that should line up.
+    right = field(bool, default = False),
+    # Shown even when no row fills it, for a column whose absence would hide
+    # something rather than merely save width.
+    always = field(bool, default = False),
+)
+
+def _shown_columns(rows: list[dict], columns: list) -> list:
+    """The columns a table of `rows` would actually print: a column nothing
+    fills is dropped, unless its absence would hide something."""
+    return [c for c in columns if c.always or any([r.get(c.key, "") for r in rows])]
+
+def render(rows: list[dict], columns: list) -> list[str]:
+    """`rows` as aligned lines, the header first.
+
+    Each column is sized to the widest of its header and its cells, as a
+    terminal draws them (`display_width`). The last
+    one is not padded, so no row carries trailing spaces.
+    """
+    used = _shown_columns(rows, columns)
+    widths = {c.key: max([display_width(c.header)] + [display_width(r.get(c.key, "")) for r in rows]) for c in used}
+
+    def line(cells):
+        out = []
+        for i, c in enumerate(used):
+            cell = cells.get(c.key, "")
+            out.append(pad_left(cell, widths[c.key]) if c.right else (cell if i == len(used) - 1 else pad_right(cell, widths[c.key])))
+        return "  " + "  ".join(out)
+
+    return [line({c.key: c.header for c in used}).rstrip()] + [line(r).rstrip() for r in rows]
+
+def tilde(path: str, home: str) -> str:
+    """`path` with the home directory written `~`, for display.
+
+    Only when the path is really inside it: a path that merely starts with the
+    same characters is left alone.
+    """
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path

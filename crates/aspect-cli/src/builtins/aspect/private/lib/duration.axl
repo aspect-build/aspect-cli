@@ -1,0 +1,52 @@
+"""Elapsed time, written for a reader.
+
+Two renderings, because two places ask for one. A table column needs the
+coarsest unit that still distinguishes — `7m`, `3h`, `41d` — and a sentence
+needs something that reads as English — "3h 20m", "under a minute". Both round
+down, and neither invents precision it does not have: a duration shown to the
+minute would be wrong by the time it was read.
+
+**Units are in the names.** The filesystem reports times in microseconds and
+`time.now_ms` in milliseconds, and the two are easy to pass to the wrong
+function and get an answer that is merely implausible rather than obviously
+broken.
+"""
+
+_MINUTE_MS = 60 * 1000
+_HOUR_MS = 60 * _MINUTE_MS
+_DAY_MS = 24 * _HOUR_MS
+
+def compact_ms(ms: int) -> str:
+    """A duration for a narrow column: minutes under an hour, hours under two
+    days, days beyond.
+
+    Two days rather than one, because `36h` says more than `1d` about something
+    that may be pruned at a day's resolution.
+    """
+    minutes = max(ms, 0) // _MINUTE_MS
+    if minutes < 60:
+        return "%dm" % minutes
+    hours = minutes // 60
+    if hours < 48:
+        return "%dh" % hours
+    return "%dd" % (hours // 24)
+
+def compact_us(us: int) -> str:
+    """`compact_ms` for a filesystem timestamp, which is in microseconds."""
+    return compact_ms(max(us, 0) // 1000)
+
+def phrase_ms(ms: int) -> str:
+    """A duration for a sentence, where "0m" would read as a mistake.
+
+    A zero remainder is left out: "9d 0h" reads as a machine filling in a
+    template, and the coarser unit was the whole answer anyway.
+    """
+    if ms < _MINUTE_MS:
+        return "under a minute"
+    if ms < _HOUR_MS:
+        return "%dm" % (ms // _MINUTE_MS)
+    if ms < _DAY_MS:
+        minutes = (ms % _HOUR_MS) // _MINUTE_MS
+        return "%dh %dm" % (ms // _HOUR_MS, minutes) if minutes else "%dh" % (ms // _HOUR_MS)
+    hours = (ms % _DAY_MS) // _HOUR_MS
+    return "%dd %dh" % (ms // _DAY_MS, hours) if hours else "%dd" % (ms // _DAY_MS)

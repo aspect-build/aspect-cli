@@ -15,10 +15,10 @@ without bound:
 
 This task removes output bases by their lifecycle state, as `aspect
 output-bases` lists them (`lib/output_bases.axl`): orphaned past
-`--orphan-grace-hours`, idle past `--base-max-age-days`, and trash an earlier
+`--orphan-grace-hours`, idle past `--base-max-idle-days`, and trash an earlier
 run left. It also prunes download-cache entries unused for
-`--download-cache-max-age-days`. Each period takes 0: the grace period to remove
-orphans at once, the ages to turn their rule off. Everything removed is
+`--download-cache-max-idle-days`. Each period takes 0: the grace period to remove
+orphans at once, the idle cutoffs to turn their rule off. Everything removed is
 re-creatable: a pruned base costs a cold build, a pruned download one re-fetch.
 
 Nothing is deleted without saying so first: what will go is listed in full, then
@@ -27,14 +27,16 @@ terminal, so a `gc` wired into CI or a cron has to state that it deletes rather
 than inheriting it from a default.
 
 It never touches a base with a running server whose workspace exists, or anything
-under the output user root not named like an output base. An orphan's server is
-stopped before its base is removed: nothing can use it. A base whose possible
-server `ps` cannot identify, as on an image without procps, is never removed: it
-cannot be confirmed idle or stopped.
+under the output user root not named like an output base, and never treats an
+`aspect worktree` pool slot as orphaned — a free slot has no worktree on purpose
+— though an idle one goes by idle time like any base. An orphan's server is stopped
+before its base is removed: nothing can use it. A base whose possible server
+`ps` cannot identify, as on an image without procps, is never removed: it cannot
+be confirmed idle or stopped.
 
-`--bazel-output-base` overrides the rules: it removes the named bases outright,
-whatever their state, stopping a running server first, and leaves the download
-cache alone.
+Naming bases — `aspect gc <hash>...` — overrides the rules: it removes those
+bases outright, whatever their state, stopping a running server first, and
+leaves the download cache alone.
 
 Each base not named on the command line is checked again just before it goes,
 and left alone if Bazel has used it since the scan — the confirmation can sit at
@@ -47,14 +49,13 @@ workspace.
 load("@std//time.axl", "time")
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "warn")
+load("./private/lib/fs_tree.axl", "remove_tree")
 load("./private/lib/output_bases.axl", "output_bases")
-load("./private/lib/text.axl", "pluralize")
-
-# --- plan --------------------------------------------------------------------
+load("./private/lib/text.axl", "pluralize", "printable")
 
 # Bumped whenever a key in the `--output=json` document is renamed, removed, or
 # changes meaning. Additive keys do not bump it.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 
 _CacheEntry = record(
     path = field(str),
@@ -101,8 +102,6 @@ _FAILED = "failed"
 
 _NOTHING_DONE = _Outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0)
 
-# --- policy ------------------------------------------------------------------
-
 def _policy_from_args(args):
     """The `Policy` the period flags ask for, or None when one is negative."""
     us = {}
@@ -114,11 +113,8 @@ def _policy_from_args(args):
     return output_bases.Policy(**us)
 
 def _policy_entry(policy, requested: list[str]) -> dict:
-    """The policy for the document: the periods, and the bases named with
-    `--bazel-output-base`."""
+    """The policy for the document: the periods, and any bases the caller named."""
     return output_bases.policy_entry(policy) | {"bazel_output_bases": requested}
-
-# --- download cache ----------------------------------------------------------
 
 def _cache_entry_use(ctx: TaskContext, path: str) -> tuple:
     """`(last use in microseconds, size in KB)` of the download-cache entry at
@@ -157,36 +153,9 @@ def _scan_download_cache(ctx: TaskContext, root: str, cutoff_us: int) -> tuple:
                 stale.append(_CacheEntry(path = path, kb = kb))
     return (seen, stale)
 
-# --- removal -----------------------------------------------------------------
-
 def _remove_tree(ctx: TaskContext, path: str) -> str:
-    """Delete `path` and everything under it; "" on success, else the error.
-
-    A first attempt that fails is retried once the tree is writable. Bazel
-    strips the owner-write bit from the action output directories under
-    `bazel-out/`, and unlinking a child needs write on its parent — the same
-    reason `bazel clean` runs a `chmod`. Trying first skips that `chmod` for the
-    trees that never needed it, such as each of thousands of download-cache
-    entries. A path already gone counts as removed.
-    """
-    err, _ = catch(ctx.std.fs.remove_dir_all, path)
-    if err == None or not ctx.std.fs.exists(path):
-        return ""
-    _make_writable(ctx, path)
-    err, _ = catch(ctx.std.fs.remove_dir_all, path)
-    if err == None or not ctx.std.fs.exists(path):
-        return ""
-    return str(err)
-
-def _make_writable(ctx: TaskContext, path: str) -> None:
-    """Restore the owner-write bit across `path`, so the tree can be unlinked.
-
-    One `chmod -R` rather than an AXL walk: a single output base holds hundreds
-    of read-only directories and tens of thousands of files, and spawning once
-    beats a per-entry round trip. Failure is not reported here — the removal
-    that follows reports it, with the error the caller actually cares about.
-    """
-    output_bases.run(ctx, "chmod", ["-R", "u+w", path])
+    """`remove_tree` for callers holding a `ctx`."""
+    return remove_tree(ctx.std, path)
 
 def _move_to_trash(ctx: TaskContext, path: str) -> str:
     """Rename `path` to `.gc-trash-<name>` beside it and return the new path,
@@ -202,7 +171,7 @@ def _move_to_trash(ctx: TaskContext, path: str) -> str:
         _remove_tree(ctx, trash)
     err, _ = catch(ctx.std.fs.rename, path, trash)
     if err != None:
-        warn(ctx.std, "could not move " + path + " aside to delete it: " + str(err))
+        warn(ctx.std, printable("could not move " + path + " aside to delete it: " + str(err)))
         return ""
     return trash
 
@@ -256,24 +225,22 @@ def _reap(ctx: TaskContext, b, requested: bool) -> str:
         return _SKIPPED
     if output_bases.is_this_bases_server(ctx, pid, b.path):
         if not _stop(ctx, pid):
-            warn(ctx.std, "left " + b.name + " alone: its Bazel server, pid " + str(pid) + ", did not exit")
+            warn(ctx.std, printable("left " + b.name + " alone: its Bazel server, pid " + str(pid) + ", did not exit"))
             return _FAILED
     elif output_bases.may_be_this_bases_server(ctx, pid, b.path):
-        warn(ctx.std, "left " + b.name + " alone: pid " + str(pid) + " may be its Bazel server, and `ps` cannot tell; stop it, then run again")
+        warn(ctx.std, printable("left " + b.name + " alone: pid " + str(pid) + " may be its Bazel server, and `ps` cannot tell; stop it, then run again"))
         return _FAILED if requested else _HELD
     trash = _move_to_trash(ctx, b.path)
     if not trash:
         return _FAILED
     err = _remove_tree(ctx, trash)
     if err:
-        warn(ctx.std, "could not remove " + trash + ": " + err + " (the next `aspect gc` retries it)")
+        warn(ctx.std, printable("could not remove " + trash + ": " + err + " (the next `aspect gc` retries it)"))
         return _FAILED
     return _REAPED
 
-# --- selection ---------------------------------------------------------------
-
 def _select(bases: list, root: str, requested: list[str], canonical = lambda p: p) -> tuple:
-    """`(selected, unmatched)` for the bases `--bazel-output-base` names.
+    """`(selected, unmatched)` for the bases named on the command line.
 
     Each name is a base's directory name (its md5) or its path. A path's
     directory must be `root` once `canonical` resolves it: this deletes what it
@@ -294,8 +261,6 @@ def _select(bases: list, root: str, requested: list[str], canonical = lambda p: 
         elif b not in selected:
             selected.append(b)
     return (selected, unmatched)
-
-# --- collecting --------------------------------------------------------------
 
 def _collect(ctx: TaskContext, streaming: bool, plan, requested: bool):
     """Remove everything in `plan`, narrating each base before its removal: a
@@ -353,8 +318,6 @@ def _failure(plan, outcome):
         return None
     return TaskConclusion(exit_code = 1, message = " and ".join(failed) + " could not be removed")
 
-# --- reporting ---------------------------------------------------------------
-
 def _capitalize(s: str) -> str:
     """First letter upper-cased, so one phrase can serve both a sentence that
     starts with it and one that embeds it."""
@@ -374,14 +337,14 @@ def _why(b, now_us: int, home: str = "") -> str:
     are shown with `~`."""
     s = output_bases.STATES[b.state]
     shown = output_bases.tilde(b.workspace, home)
-    workspace = "; workspace " + shown if b.workspace else ""
+    workspace = ("; worktree pool slot " if b.pooled else "; workspace ") + shown if b.workspace else ""
     if not s.removable:
         return "requested; " + s.label + workspace
     if b.state == output_bases.TRASH:
         return "left by an interrupted gc"
     if b.state == output_bases.ORPHAN:
         return "workspace gone: " + shown
-    return "unused for " + output_bases.fmt_age(now_us - b.last_used) + workspace
+    return "unused for " + output_bases.fmt_elapsed(now_us - b.last_used) + workspace
 
 def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
     """Everything a run will remove, listed before it asks, so the confirmation
@@ -396,7 +359,7 @@ def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
         say(streaming, "  Bazel download cache: %d of %s unused for %s or more, %s" % (
             len(plan.stale),
             pluralize(plan.cache_entries, "entry", "entries"),
-            output_bases.fmt_age(policy.download_cache_max_age_us),
+            output_bases.fmt_elapsed(policy.download_cache_max_idle_us),
             fmt_kb(_stale_kb(plan)),
         ))
 
@@ -447,8 +410,6 @@ def _document(root: str, dry_run: bool, policy: dict, plan, outcome) -> dict:
         "freed_kb": outcome.reaped_kb + outcome.pruned_kb,
     }
 
-# --- task --------------------------------------------------------------------
-
 def _gc_impl(ctx: TaskContext) -> int | TaskConclusion:
     """Scan, list, confirm, collect, report.
 
@@ -472,7 +433,7 @@ def _gc_impl(ctx: TaskContext) -> int | TaskConclusion:
     streaming = ctx.args.output != "json"
     bases, now_us = output_bases.scan_root(ctx, streaming, root, policy)
 
-    requested = ctx.args.bazel_output_bases
+    requested = ctx.args.target
     if requested:
         removals, unmatched = _select(bases, root, requested, lambda p: output_bases.canonical(ctx, p))
         if unmatched:
@@ -486,8 +447,8 @@ def _gc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     sizes = output_bases.measure(ctx, streaming, pluralize(len(removals), output_bases.BASE), [(b.name, b.path) for b in removals])
     cache_entries, stale = 0, []
-    cutoff_us = now_us - policy.download_cache_max_age_us
-    if policy.download_cache_max_age_us and not requested:
+    cutoff_us = now_us - policy.download_cache_max_idle_us
+    if policy.download_cache_max_idle_us and not requested:
         say(streaming, "  scanning the Bazel download cache…")
         cache_entries, stale = _scan_download_cache(ctx, root, cutoff_us)
     plan = _Plan(
@@ -554,30 +515,31 @@ gc = task(
 
 Deleting a git worktree leaves its Bazel output base behind forever — nothing in Bazel collects it — and so does a workspace nobody builds in any more. Nothing collects the download cache (`cache/repos/v1/content_addressable`) either.
 
-An output base is removed when its workspace is gone (once it has not been used in `--orphan-grace-hours`), or when it has not been used in `--base-max-age-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-age-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
+An output base is removed when its workspace is gone (once it has not been used in `--orphan-grace-hours`), or when it has not been used in `--base-max-idle-days`. A download-cache entry is removed when it has not been used in `--download-cache-max-idle-days`. Everything removed is re-creatable: a cold build, or one re-fetch.
 
-`--bazel-output-base` removes the named bases instead, whatever their state.
+Naming output bases — `aspect gc <hash>...` — removes those instead, whatever their state: a running server in one is stopped first, and a process `ps` cannot identify as that server makes the removal fail rather than happen under it. The download cache is not pruned then. Everything named is still listed and confirmed like any other removal.
 
-Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`). `aspect output-bases` lists every base and its state, read-only.""",
+Otherwise never touches a running Bazel server whose workspace still exists, or anything beside the output bases that is not named like one (`install/`, `cache/`), and never treats an `aspect worktree` pool slot as orphaned; an idle one still goes by idle time. `aspect output-bases` lists every base and its state, read-only.""",
     implementation = _gc_impl,
     args = {
         "output_user_root": output_bases.output_user_root_arg(),
-        "base_max_age_days": _period_arg(
-            "{max_age}",
+        "base_max_idle_days": _period_arg(
+            "{max_idle}",
             "Remove an output base no Bazel command has used in this many days, even if its workspace still exists. A base with a running server is kept. 0 turns this off, leaving only bases whose workspace is gone.",
         ),
         "orphan_grace_hours": _period_arg(
             "{grace}",
             "Keep an orphaned output base — one whose workspace no longer exists, such as a deleted worktree — until nothing has used it for this many hours, so a worktree being recreated at the same path keeps its base. 0 removes orphans immediately.",
         ),
-        "download_cache_max_age_days": _period_arg(
-            "{cache_age}",
+        "download_cache_max_idle_days": _period_arg(
+            "{cache_idle}",
             "Remove a download-cache entry no fetch has used in this many days. 0 turns this off.",
         ),
-        "bazel_output_bases": args.string_list(
-            long = "bazel-output-base",
-            default = [],
-            description = "Remove this output base, by hash or by path under the output user root, instead of applying the age and missing-workspace rules. Repeatable. The base is removed whatever its state — a running server in it is stopped first, and a process `ps` cannot identify as its server makes the removal fail rather than happen under it — and the download cache is not pruned. Still listed and confirmed like any other removal.",
+        "target": args.positional(
+            minimum = 0,
+            # 512, as the other variadic positionals in the CLI take.
+            maximum = 512,
+            description = "An output base to remove, by hash or by path under the output user root, as `aspect output-bases` lists them. Naming one is the decision: it is removed whatever its state, and the idle and missing-workspace rules are not applied. Repeatable. Leave it out to sweep by policy.",
         ),
         "dry_run": args.boolean(
             default = False,

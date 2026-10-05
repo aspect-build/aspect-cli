@@ -1,0 +1,50 @@
+"""Where Bazel keeps its own state on disk.
+
+Locations Bazel derives rather than publishes, for the tasks that have to find
+them without starting a server to ask: `aspect gc` and `aspect output-bases` to
+know what they are looking at, `aspect worktree` to find the base a slot's path
+derives to.
+"""
+
+def output_user_root(std) -> str:
+    """Bazel's default output user root for this platform.
+
+    What `bazel` uses when nothing sets `--output_user_root`. A workspace that
+    does set it overrides this, so a caller that cares reads the rc first.
+    """
+    home = std.env.home_dir()
+    user = std.env.var("USER") or std.env.var("LOGNAME") or ""
+    if not user:
+        # The home directory's last segment is the user name on every platform
+        # whose default root we know how to build.
+        idx = home.rfind("/")
+        user = home[idx + 1:] if idx >= 0 else home
+    if std.env.os() == "macos":
+        return home + "/Library/Caches/bazel/_bazel_" + user
+    return home + "/.cache/bazel/_bazel_" + user
+
+# Files Bazel touches as it works, newest wins, for "when was this base last
+# used": `command.profile.gz` is written per command, `java.log`,
+# `action_cache` and `server/` by a running server, `lock` on every invocation.
+_FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
+
+def mtime_us(std, path: str) -> int:
+    """`path`'s mtime in microseconds, following symlinks; 0 when unreadable."""
+    err, meta = catch(std.fs.metadata, path)
+    if err != None or meta.modified == None:
+        return 0
+    return meta.modified
+
+def last_used(std, base: str) -> int:
+    """When a Bazel server last started or ran a command in `base`, in
+    microseconds, or 0 for a base that is not there.
+
+    Evidence rather than bookkeeping, which is why both the collector and the
+    worktree pool read it: a timestamp either side wrote itself would only
+    record what it did, not what Bazel did. The base directory's own mtime
+    stands in when no marker can be read.
+    """
+    newest = 0
+    for marker in _FRESHNESS_MARKERS:
+        newest = max(newest, mtime_us(std, base + "/" + marker))
+    return newest or mtime_us(std, base)

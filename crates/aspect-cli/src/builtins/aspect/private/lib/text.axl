@@ -8,8 +8,13 @@ Currently:
   - `truncate_for_title(text, max_len)` — word-boundary truncation with a
     `…` suffix, for status-surface titles.
   - `join_url(base, segment)` — single-slash URL join.
+  - `display_width(s)` — the columns a terminal draws `s` in.
   - `pad_left(s, width)` / `pad_right(s, width)` — space-padding to a column
-    width, for the table alignment `%` formatting cannot do.
+    width, as drawn, for the table alignment `%` formatting cannot do.
+  - `is_unsafe_char(ch)` / `has_unsafe_chars(s)` / `printable(s, keep)` /
+    `escaped_char(ch)` / `utf8_bytes_escaped(ch)` — the characters that
+    rewrite what a terminal shows, text with them escaped, and the escape a
+    shell reads back.
 
 All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
@@ -101,10 +106,159 @@ def join_url(base: str, segment: str) -> str:
     `base` (an advertised results URL may or may not carry one)."""
     return (base if base.endswith("/") else base + "/") + segment
 
+# Code point ranges a terminal draws two columns wide: Hangul Jamo, the
+# emoji the BMP presents as emoji by default (✅, ⚡, ⭐), CJK and its
+# punctuation, Hangul syllables, compatibility ideographs, fullwidth forms,
+# the emoji and pictograph blocks, and the supplementary ideographic planes.
+_WIDE = [
+    (0x1100, 0x115F),
+    (0x231A, 0x231B),
+    (0x23E9, 0x23EC),
+    (0x23F0, 0x23F0),
+    (0x23F3, 0x23F3),
+    (0x25FD, 0x25FE),
+    (0x2614, 0x2615),
+    (0x2648, 0x2653),
+    (0x267F, 0x267F),
+    (0x2693, 0x2693),
+    (0x26A1, 0x26A1),
+    (0x26AA, 0x26AB),
+    (0x26BD, 0x26BE),
+    (0x26C4, 0x26C5),
+    (0x26CE, 0x26CE),
+    (0x26D4, 0x26D4),
+    (0x26EA, 0x26EA),
+    (0x26F2, 0x26F3),
+    (0x26F5, 0x26F5),
+    (0x26FA, 0x26FA),
+    (0x26FD, 0x26FD),
+    (0x2705, 0x2705),
+    (0x270A, 0x270B),
+    (0x2728, 0x2728),
+    (0x274C, 0x274C),
+    (0x274E, 0x274E),
+    (0x2753, 0x2755),
+    (0x2757, 0x2757),
+    (0x2795, 0x2797),
+    (0x27B0, 0x27B0),
+    (0x27BF, 0x27BF),
+    (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55),
+    (0x2E80, 0x303E),
+    (0x3041, 0x33FF),
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xA000, 0xA4CF),
+    (0xAC00, 0xD7A3),
+    (0xF900, 0xFAFF),
+    (0xFE30, 0xFE4F),
+    (0xFF00, 0xFF60),
+    (0xFFE0, 0xFFE6),
+    (0x1F300, 0x1F64F),
+    (0x1F680, 0x1F6FF),
+    (0x1F900, 0x1F9FF),
+    (0x1FA70, 0x1FAFF),
+    (0x20000, 0x3FFFD),
+]
+
+def display_width(s: str) -> int:
+    """The columns `s` takes on a terminal: two for a wide character, none for
+    a combining mark, one for the rest. An approximation of `wcwidth` that
+    keeps tables of CJK or emoji names in line; text already escaped by
+    `printable` has no control characters left to count."""
+    width = 0
+    for ch in s.elems():
+        code = ord(ch)
+        if code < 0x300:
+            width += 1
+        elif code <= 0x36F:
+            continue
+        elif [r for r in _WIDE if r[0] <= code and code <= r[1]]:
+            width += 2
+        else:
+            width += 1
+    return width
+
 def pad_left(s: str, width: int) -> str:
-    """`s` right-aligned in `width` columns. Longer strings are not truncated."""
-    return " " * (width - len(s)) + s
+    """`s` right-aligned in `width` columns, measured as a terminal draws them
+    (`display_width`). Longer strings are not truncated."""
+    return " " * (width - display_width(s)) + s
 
 def pad_right(s: str, width: int) -> str:
-    """`s` left-aligned in `width` columns. Longer strings are not truncated."""
-    return s + " " * (width - len(s))
+    """`s` left-aligned in `width` columns, measured as a terminal draws them
+    (`display_width`). Longer strings are not truncated."""
+    return s + " " * (width - display_width(s))
+
+# Code points a terminal acts on or a reader cannot see: C0 and C1 controls,
+# DEL, the soft hyphen, the combining grapheme joiner, the Hangul and Khmer
+# fillers, the Arabic and Mongolian format marks, zero-width characters and
+# joiners, the line and paragraph separators, bidirectional overrides and
+# isolates, invisible operators, variation selectors, musical formatting
+# characters, interlinear annotation marks, the byte-order mark, and the tag
+# characters. Printed raw, any of them can reorder, hide or recolour the
+# text around it — a pasted command included.
+_UNSAFE_RANGES = [
+    (0x00, 0x1f),
+    (0x7f, 0x9f),
+    (0xad, 0xad),
+    (0x34f, 0x34f),
+    (0x61c, 0x61c),
+    (0x115f, 0x1160),
+    (0x17b4, 0x17b5),
+    (0x180b, 0x180e),
+    (0x200b, 0x200f),
+    (0x2028, 0x202e),
+    (0x2060, 0x2064),
+    (0x2066, 0x2069),
+    (0x3164, 0x3164),
+    (0xfe00, 0xfe0f),
+    (0xfeff, 0xfeff),
+    (0xffa0, 0xffa0),
+    (0xfff9, 0xfffb),
+    (0x1d173, 0x1d17a),
+    (0xe0000, 0xe007f),
+    (0xe0100, 0xe01ef),
+]
+
+def is_unsafe_char(ch: str) -> bool:
+    """Whether `ch` is one of `_UNSAFE_RANGES`."""
+    code = ord(ch)
+    return len([r for r in _UNSAFE_RANGES if r[0] <= code and code <= r[1]]) > 0
+
+def has_unsafe_chars(s: str) -> bool:
+    """Whether `s` has any character a terminal would act on or hide."""
+    return len([ch for ch in s.elems() if is_unsafe_char(ch)]) > 0
+
+def printable(s: str, keep: str = "") -> str:
+    """`s` with each unsafe character written as its escape (`escaped_char`), so
+    text from outside — a hook's error, an id from the environment — is shown
+    rather than obeyed. Characters in `keep` pass as they are: a message laid
+    out with line breaks keeps them."""
+    if not has_unsafe_chars(s):
+        return s
+    return "".join([escaped_char(ch) if is_unsafe_char(ch) and ch not in keep else ch for ch in s.elems()])
+
+def utf8_bytes_escaped(ch: str) -> str:
+    """`ch` as its UTF-8 bytes, each `\\xHH`: the form every shell's `$'…'`
+    reads back, bash 3.2 — macOS's `/bin/bash` — included, which takes no
+    `\\u`."""
+    code = ord(ch)
+    if code < 0x80:
+        raw = [code]
+    elif code < 0x800:
+        raw = [0xc0 | (code >> 6), 0x80 | (code & 0x3f)]
+    elif code < 0x10000:
+        raw = [0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
+    else:
+        raw = [0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
+    return "".join([("\\x0%x" if b < 16 else "\\x%x") % b for b in raw])
+
+def escaped_char(ch: str) -> str:
+    """`ch` as `\\u` and four hex digits, or `\\U` and eight above U+FFFF,
+    padded by hand: `%` takes no width. For display; a shell command takes
+    `utf8_bytes_escaped`, since bash 3.2's `$'…'` reads no `\\u`."""
+    digits = "%x" % ord(ch)
+    if len(digits) > 4:
+        return "\\U" + "0" * (8 - len(digits)) + digits
+    return "\\u" + "0" * (4 - len(digits)) + digits

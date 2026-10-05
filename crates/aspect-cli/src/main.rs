@@ -130,7 +130,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     )
     .entered();
 
-    let current_work_dir = std::env::current_dir()?;
+    // A directory removed under the shell — a released `aspect worktree` slot,
+    // most often — is otherwise reported as a bare "No such file or directory".
+    let current_work_dir = std::env::current_dir().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::from(err).context(
+                "the current directory no longer exists — if it was a worktree that was released, \
+                 `cd` back into the clone",
+            )
+        } else {
+            anyhow::Error::from(err)
+        }
+    })?;
     // `Env` requires both roots; cwd is the last-resort fallback when no
     // marker file exists anywhere up the tree.
     let aspect_root =
