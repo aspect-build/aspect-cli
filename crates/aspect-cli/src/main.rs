@@ -202,7 +202,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 )
                 .collect();
             mpe.execute_configs(&config_entries)
-                .map_err(anyhow::Error::from)?;
+                .map_err(|err| anyhow::Error::from(err).context(ConfigError))?;
 
             // Build the CLI surface from current eval state.
             let cmd = Cmd {
@@ -338,6 +338,29 @@ fn stdout_protocol_owner(task_kind: &str) -> Option<&'static str> {
     }
 }
 
+/// Marks an error raised while running `config.axl` files. It happens before
+/// any task's arguments are parsed, so no task can report it in the shape its
+/// `--output` asks for; `main` does that instead.
+#[derive(Debug)]
+struct ConfigError;
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a config.axl file failed")
+    }
+}
+
+/// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
+/// `--`. Read from the raw arguments because a config error stops the CLI
+/// before they are parsed.
+fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
+    let args: Vec<String> = args.into_iter().take_while(|a| a != "--").collect();
+    args.iter().enumerate().any(|(i, arg)| {
+        arg == "--output=json"
+            || (arg == "--output" && args.get(i + 1).is_some_and(|v| v == "json"))
+    })
+}
+
 fn main() -> ExitCode {
     // Install first, before any other machinery, so fatal-signal reporting
     // covers everything after it (see the `crash_handler` module docs).
@@ -367,6 +390,24 @@ fn main() -> ExitCode {
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
                 return ExitCode::from(exit.code);
+            }
+            // A config error is reported as the failed config's own error,
+            // and as a document on stdout when one was asked for: a caller
+            // reading `--output=json` otherwise gets nothing to parse.
+            if err.downcast_ref::<ConfigError>().is_some() {
+                let message = format!("{:#}", err.root_cause());
+                errln!("error: {}", message.trim_start_matches("error: "));
+                if wants_json_output(std::env::args().skip(1)) {
+                    outln!(
+                        "{}",
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "error": "config_error",
+                            "message": message.trim_start_matches("error: "),
+                        })
+                    );
+                }
+                return ExitCode::FAILURE;
             }
             errln!("error: {err:?}");
             ExitCode::FAILURE
@@ -579,5 +620,27 @@ mod print_macro_guard {
             "use outln!/errln!/out! from axl_runtime::out instead (see CLAUDE.md):\n  {}",
             found.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod config_error_tests {
+    use super::wants_json_output;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn json_output_is_recognised_in_both_spellings() {
+        assert!(wants_json_output(args(&["gc", "--output=json"])));
+        assert!(wants_json_output(args(&["gc", "--output", "json"])));
+        assert!(!wants_json_output(args(&["gc", "--output=text"])));
+        assert!(!wants_json_output(args(&["gc", "--output"])));
+    }
+
+    #[test]
+    fn arguments_after_a_double_dash_are_not_ours() {
+        assert!(!wants_json_output(args(&["build", "--", "--output=json"])));
     }
 }
