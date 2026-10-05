@@ -1026,10 +1026,9 @@ def _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot(ctx):
     _eq("the harness", got[0]["agent"], "claude-code")
     _eq("the whole id, not the abbreviation", got[0]["session"], "full-uuid-here")
 
-    # Filed under the cwd the lease recorded, so the project resolves — and the
-    # command carries a `cd`, since `--resume` looks within the current
-    # directory's project.
-    _eq("the project it is filed under", got[0]["project"], cwd)
+    # Filed under the cwd the lease recorded, so the project resolves — and it
+    # rides inside the command as a `cd` rather than in a column of its own,
+    # since `--resume` looks within the current directory's project.
     _eq(
         "a way back to it, from anywhere",
         got[0]["resume"],
@@ -1077,7 +1076,7 @@ def _test_no_resume_is_offered_for_a_session_the_store_does_not_have(ctx):
     )
 
     headers = [c.key for c in testonly_session_columns]
-    _eq("the columns, in order", headers, ["repo", "agent", "session", "project", "slot", "resume"])
+    _eq("the columns, in order", headers, ["repo", "agent", "session", "slot", "resume"])
 
 def _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone(ctx):
     """`--all` lists pools whose clones are not here to ask, so it cannot run
@@ -1107,6 +1106,74 @@ def _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone(ctx):
     # The other is left alone: a directory that is there is where git is the
     # authority, and this is the half of the judgement that does not need it.
     _eq("the one still on disk is untouched", registry["slots"]["here00000000"]["state"], LEASED)
+
+def _test_a_dead_holders_clean_slot_is_reclaimable_once_idle(ctx):
+    """Without a bound, a crashed agent pins its slot forever: a leased slot is
+    never pruned, and a session can only be proven finished for a harness whose
+    store the CLI can read — which is two of them. Everything else held its
+    slot permanently and the pool grew past its limit to route around it.
+
+    What makes taking it back safe is the checkout being clean, which is the
+    same thing that made the original rule safe. The branch and its commits are
+    untouched by removing a worktree, so a returning session asks for the
+    branch again and lands on this very slot, still warm, because the last
+    branch a slot held is what the scoring prefers.
+    """
+    env = _repo_with_worktree(ctx, dirty = False)
+
+    # A harness whose session storage is not described, so `session_state` can
+    # only ever answer `unknown` — the case the old rule could not reach.
+    holder = {"kind": "codex", "id": "thread-1", "pid": 0, "pid_start": ""}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", holder)}}
+    registry["slots"][env.slot_id]["created_ms"] = time.now_ms() - 30 * _DAY_MS
+
+    _eq(
+        "held while the bound is off",
+        abandoned_lease(ctx.std, env.pool, registry, env.slot_id, "", 0),
+        False,
+    )
+    _eq(
+        "and while it is younger than the bound",
+        abandoned_lease(ctx.std, env.pool, registry, env.slot_id, "", 90),
+        False,
+    )
+    _eq(
+        "but reclaimable once it is older",
+        abandoned_lease(ctx.std, env.pool, registry, env.slot_id, "", 7),
+        True,
+    )
+
+def _test_a_dirty_slot_is_never_taken_on_a_timer(ctx):
+    """The condition that does not bend. Uncommitted changes are the one thing
+    removing a worktree destroys, and no amount of elapsed time makes that the
+    right default — so the clock cannot reach a dirty checkout at all."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    holder = {"kind": "codex", "id": "thread-1", "pid": 0, "pid_start": ""}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", holder)}}
+    registry["slots"][env.slot_id]["created_ms"] = time.now_ms() - 365 * _DAY_MS
+
+    _eq(
+        "a year idle and still held",
+        abandoned_lease(ctx.std, env.pool, registry, env.slot_id, "", 1),
+        False,
+    )
+
+def _test_a_live_holder_keeps_its_slot_however_idle(ctx):
+    """Idleness measures when Bazel last did something, not whether anybody is
+    working. An agent reading code for a day has not abandoned anything, so a
+    holder whose process is verifiably alive is never subject to the clock."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    alive = {
+        "kind": "claude-code",
+        "id": "live-one",
+        "pid": ctx.std.process.id(),
+        # The real start time, so `is_running` confirms rather than guesses.
+        "pid_start": owner_record(ctx.std)["started_at"],
+    }
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", alive)}}
+    registry["slots"][env.slot_id]["created_ms"] = time.now_ms() - 365 * _DAY_MS
+
+    _eq("still theirs", abandoned_lease(ctx.std, env.pool, registry, env.slot_id, "", 1), False)
 
 def _test_pools_on_disk_finds_a_pool_at_any_depth(ctx):
     """`--all` has to find every pool, and a pool id is not a fixed depth:
@@ -1766,6 +1833,9 @@ _UNIT_TESTS = [
     _test_the_sessions_table_covers_every_agent_and_says_what_it_cannot,
     _test_no_resume_is_offered_for_a_session_the_store_does_not_have,
     _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
+    _test_a_dead_holders_clean_slot_is_reclaimable_once_idle,
+    _test_a_dirty_slot_is_never_taken_on_a_timer,
+    _test_a_live_holder_keeps_its_slot_however_idle,
     _test_pools_on_disk_finds_a_pool_at_any_depth,
     _test_pools_on_disk_is_empty_before_any_pool_exists,
     _test_freeing_a_slot_with_no_lease_invents_no_branch,

@@ -23,9 +23,14 @@ Worktrees = trait(
         default = [],
         description = "Hooks scoring a free slot for reuse: `fn(ctx, slot, want) -> int`, higher wins, 0 refuses the slot outright. `slot` carries what its last occupant left behind (`lock_digest`, `last_commit`, `last_branch`, `created_ms`); `want` carries `name`, `lock_digest` and `commit` for the worktree being created. The first registered hook decides; with none registered the built-in scoring applies, which weights a matching MODULE.bazel.lock far above everything else because a mismatch is what forces `external/` to be rebuilt.",
     ),
+    abandoned_lease_days = attr(
+        int,
+        default = 7,
+        description = "How long a lease whose holder's process is gone may hold its slot before an `aspect worktree add` that needs one may take it. Only ever applied to a clean checkout — a worktree with uncommitted changes is never taken on a timer, whatever its age — and never to a holder whose process is still running, since idleness measures Bazel rather than whether somebody is reading code. Without a bound a crashed agent pins its slot permanently, which is most of them: a session can only be proven finished for a harness whose session storage the CLI knows how to read. Taking one back costs the returning session nothing it cannot recover — its branch and commits are untouched, and asking for that branch again lands on this same slot, still warm, unless somebody else took it first. 0 holds a dead holder's slot forever.",
+    ),
     max_slots = attr(
         int,
         default = 8,
-        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Slots are reclaimed by idle time instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`.",
+        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Free slots are reclaimed by idle time instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`, and a lease whose holder is gone stops holding its slot after `abandoned_lease_days`.",
     ),
 )

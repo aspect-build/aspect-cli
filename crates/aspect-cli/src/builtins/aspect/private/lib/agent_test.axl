@@ -9,7 +9,7 @@ invented: `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID=<uuid>`, `CLAUDE_PID=<pid>`,
 and a transcript at `~/.claude/projects/<slug>/<session-id>.jsonl`.
 
 Every test that touches the environment sets both states explicitly and restores
-what was there, because this suite runs inside a Claude Code session often
+what was there, because this suite runs inside an agent session often
 enough that neither value can be assumed.
 """
 

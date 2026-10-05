@@ -752,7 +752,14 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
             continue
         if registry["slots"][slot_id].get("owner_git_dir", "") != pool["git_common_dir"]:
             continue
-        if not abandoned_lease(ctx.std, pool, registry, slot_id, root):
+        if not abandoned_lease(
+            ctx.std,
+            pool,
+            registry,
+            slot_id,
+            root,
+            after_days = ctx.traits[Worktrees].abandoned_lease_days,
+        ):
             continue
         lease = registry["slots"][slot_id].get("lease") or {}
         info(ctx.std, "reclaimed the slot held by " + (lease.get("name", "") or "an earlier worktree") +
@@ -967,8 +974,10 @@ _SESSION_COLUMNS = [
     Column(key = "repo", header = "repo"),
     Column(key = "agent", header = "agent", always = True),
     Column(key = "session", header = "session", always = True),
-    Column(key = "project", header = "project", always = True),
     Column(key = "slot", header = "slot", always = True),
+    # No `project` column: the resume command carries the directory as a `cd`,
+    # and the two are known together — a session the store cannot place has no
+    # resume command either, so they would always read `-` in step.
     Column(key = "resume", header = "resume", always = True),
 ]
 
@@ -1010,7 +1019,6 @@ def _session_rows(std, rows: list, home: str, repo: str = "") -> list[dict]:
             "repo": repo,
             "agent": agent["kind"],
             "session": agent.get("id", "") or "-",
-            "project": tilde(project, home) if project else "-",
             "slot": r["slot"],
             "resume": resume or "-",
         })
@@ -1270,7 +1278,14 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # the task it died in. Hand the slot back instead of refusing: the session
     # cannot be resumed and the tree is clean, so there is nothing to protect
     # and the warm base is exactly what the caller wants.
-    if held and abandoned_lease(ctx.std, pool, registry, held, root):
+    if held and abandoned_lease(
+        ctx.std,
+        pool,
+        registry,
+        held,
+        root,
+        after_days = ctx.traits[Worktrees].abandoned_lease_days,
+    ):
         info(ctx.std, "taking back " + name + "'s slot: the session that held it no longer exists")
         free_slot(ctx.std, pool, registry, held)
         write_registry(ctx.std, pool["dir"], registry)
@@ -1513,7 +1528,7 @@ def _whoami_impl(ctx: TaskContext) -> int | TaskConclusion:
     if sessions:
         print("")
         for line in render(sessions, _SESSION_COLUMNS):
-            print("  " + line)
+            print(line)
     return 0
 
 def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -2008,7 +2023,7 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
     if sessions:
         print("")
         for line in render(sessions, _SESSION_COLUMNS):
-            print("  " + line)
+            print(line)
 
     # Warmth is read under this workspace's output user root, so a pool built
     # under a different one reads cold. Naming the root is what makes that
