@@ -107,6 +107,19 @@ impl DiskStore {
         self.root().join("cas").join(hex.0.to_string()).join(hex.1)
     }
 
+    /// A path beside `path` that no other process will pick, for staging a
+    /// file, symlink or directory that is then renamed onto `path`.
+    fn staging_path(path: &PathBuf) -> PathBuf {
+        #[allow(deprecated)]
+        let mut rng = rand::thread_rng();
+        let suffix: u64 = rng.r#gen();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        path.with_file_name(format!(".{name}.{suffix:016x}.tmp"))
+    }
+
     fn download_tmp_file(&self) -> PathBuf {
         #[allow(deprecated)]
         let mut rng = rand::thread_rng();
@@ -171,8 +184,7 @@ impl DiskStore {
         }
     }
 
-    async fn expand_dep(&self, dep: &AxlArchiveDep) -> Result<(), io::Error> {
-        let dep_path = self.dep_path(&dep.name);
+    async fn expand_dep(&self, dep: &AxlArchiveDep, dep_path: &PathBuf) -> Result<(), io::Error> {
         let integrity = dep.integrity.as_ref().expect("integrity must be set");
         let cas_path = self.cas_path_for_integrity(integrity);
         let raw = File::open(&cas_path).await?;
@@ -224,17 +236,43 @@ impl DiskStore {
         Ok(())
     }
 
+    /// Point the dep's symlink at `dep.path`. The link is made under a staging
+    /// name and renamed over the old one, which replaces it atomically, so a
+    /// concurrent process loading from it never finds the path missing.
     async fn link_dep(&self, dep: &AxlLocalDep) -> Result<(), io::Error> {
         let dep_path = self.dep_path(&dep.name);
-        // Remove any existing symlink before creating a new one
-        let _ = fs::remove_file(&dep_path).await;
-        fs::symlink(&dep.path, dep_path).await
+        let staged = Self::staging_path(&dep_path);
+        fs::symlink(&dep.path, &staged).await?;
+        if let Err(err) = fs::rename(&staged, &dep_path).await {
+            let _ = fs::remove_file(&staged).await;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Write `contents` to `path` by renaming a staged copy over it, so a
+    /// reader sees the old contents or the new, never a truncated file.
+    async fn write_atomic(path: &PathBuf, contents: &str) -> Result<(), io::Error> {
+        let staged = Self::staging_path(path);
+        fs::write(&staged, contents).await?;
+        if let Err(err) = fs::rename(&staged, path).await {
+            let _ = fs::remove_file(&staged).await;
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn builtins_path(&self) -> PathBuf {
         self.root().join("builtins")
     }
 
+    /// Bring every dep under `deps/` up to date with `store` and `builtins`.
+    ///
+    /// Runs at every CLI start, so concurrent invocations run it side by side
+    /// against the same directory. Each dep's state therefore only ever moves
+    /// by atomic renames — its marker, its symlink, its unpacked tree — and is
+    /// left alone when it is already current, so one process never removes a
+    /// dep that another is loading from.
     pub async fn expand_store(
         &self,
         store: &Mod,
@@ -287,30 +325,31 @@ impl DiskStore {
                 }
             };
 
-            if dep_marker_path.exists() {
-                let prev_hash = fs::read_to_string(&dep_marker_path).await?;
-                if prev_hash != current_hash {
-                    if let Ok(metadata) = fs::symlink_metadata(&dep_path).await {
-                        if metadata.is_symlink() {
-                            fs::remove_file(&dep_path).await?;
-                        } else {
-                            fs::remove_dir_all(&dep_path).await?;
-                        }
-                    }
+            // A missing marker, or one recording another source, means the dep
+            // path cannot be trusted. A local dep's symlink is simply replaced;
+            // anything else there is removed and expanded again.
+            let prev_hash = fs::read_to_string(&dep_marker_path).await.ok();
+            let current =
+                prev_hash.as_deref() == Some(current_hash.as_str()) && !current_hash.is_empty();
+            let metadata = fs::symlink_metadata(&dep_path).await.ok();
+            let linked_here = match (dep, &metadata) {
+                (Dep::Local(local), Some(meta)) if meta.is_symlink() => {
+                    fs::read_link(&dep_path).await.ok().as_ref() == Some(&local.path)
                 }
-            } else {
-                // if we have no marker file and the cas_path exists, the safest thing to do is to delete the
-                // current dep path and start over
-                if let Ok(metadata) = fs::symlink_metadata(&dep_path).await {
-                    if metadata.is_symlink() {
-                        fs::remove_file(&dep_path).await?;
-                    } else {
+                _ => false,
+            };
+            if !current && !linked_here {
+                if let Some(meta) = &metadata {
+                    if meta.is_dir() {
                         fs::remove_dir_all(&dep_path).await?;
+                    } else if !matches!(dep, Dep::Local(_)) {
+                        fs::remove_file(&dep_path).await?;
                     }
                 }
             }
 
-            if fs::symlink_metadata(&dep_path).await.is_err() {
+            let needs_link = matches!(dep, Dep::Local(_)) && !linked_here;
+            if needs_link || fs::symlink_metadata(&dep_path).await.is_err() {
                 match dep {
                     Dep::Local(local) => {
                         self.link_dep(local)
@@ -365,17 +404,33 @@ impl DiskStore {
                             }
                         }
 
-                        fs::create_dir_all(&dep_path).await?;
-                        self.expand_dep(dep)
-                            .await
-                            .map_err(|err| StoreError::UnpackError(err))?;
+                        // Unpacked beside the dep and renamed into place, so the
+                        // dep path holds a whole tree or none. A process that
+                        // loses the race to rename keeps the winner's tree.
+                        let staged = Self::staging_path(&dep_path);
+                        fs::create_dir_all(&staged).await?;
+                        if let Err(err) = self.expand_dep(dep, &staged).await {
+                            let _ = fs::remove_dir_all(&staged).await;
+                            return Err(StoreError::UnpackError(err));
+                        }
+                        if fs::rename(&staged, &dep_path).await.is_err() {
+                            let _ = fs::remove_dir_all(&staged).await;
+                            if fs::symlink_metadata(&dep_path).await.is_err() {
+                                return Err(StoreError::UnpackError(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    format!("could not move {} into place", dep_path.display()),
+                                )));
+                            }
+                        }
                     }
                 }
             }
 
-            // write the marker once the expansion is succesful
-            if !current_hash.is_empty() {
-                fs::write(&dep_marker_path, current_hash).await?;
+            // Written once the dep is in place, and only when it changed: every
+            // CLI start passes through here, and rewriting an unchanged marker
+            // is what let a concurrent reader catch it empty.
+            if !current_hash.is_empty() && prev_hash.as_deref() != Some(current_hash.as_str()) {
+                Self::write_atomic(&dep_marker_path, &current_hash).await?;
             }
         }
 
