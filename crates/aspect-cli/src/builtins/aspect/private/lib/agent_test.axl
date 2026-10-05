@@ -31,6 +31,8 @@ load(
 )
 
 _AGENT_VARS = [
+    "CODEX_THREAD_ID",
+    "GEMINI_CLI",
     "ASPECT_AGENT_KIND",
     "ASPECT_AGENT_ID",
     "CLAUDECODE",
@@ -93,6 +95,53 @@ def _test_claude_code_is_detected_from_its_own_variables(ctx):
     _restore(ctx, saved)
     _eq("kind", got["kind"], "claude-code")
     _eq("id", got["id"], "b22fe20c-1f9f-4476-9097-9f4648158215")
+
+def _test_codex_is_detected_from_the_thread_id_it_exports(ctx):
+    """Codex sets `CODEX_THREAD_ID` for shell and tool executions, which is how
+    a task it runs arrives here. It sets no "you are inside Codex" marker, so
+    the id variable is the whole signal — a detector shape Claude Code's entry
+    does not exercise.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CODEX_THREAD_ID", "019edfd4-fbf0-7100-a982-2ab5bdf125fb")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    _eq("the harness", got.get("kind"), "codex")
+    _eq("the session it named", got.get("id"), "019edfd4-fbf0-7100-a982-2ab5bdf125fb")
+    _eq("reported, not inferred", got.get("source"), "env")
+
+def _test_gemini_is_detected_with_a_kind_and_no_session(ctx):
+    """The mirror shape: Gemini CLI exports `GEMINI_CLI=1` and documents no
+    session id. The kind has to be reported and the id left empty rather than
+    filled with the marker's value, which would print as a session that cannot
+    be resumed.
+    """
+    saved = _clear(ctx)
+    ctx.std.env.set_var("GEMINI_CLI", "1")
+    got = detect(ctx.std, "", "")
+    _restore(ctx, saved)
+
+    _eq("the harness", got.get("kind"), "gemini-cli")
+    _eq("no session claimed", got.get("id"), "")
+    _eq("so nothing to resume", resume_hint(got), "")
+
+def _test_an_undescribed_store_is_unknown_for_every_harness(ctx):
+    """Codex files sessions by date and Cursor under a hash of the workspace,
+    neither of which this reads. They must come back `unknown`: `gone` is the
+    only verdict that lets `add` take a slot back, and it may never rest on a
+    layout nobody has checked.
+    """
+    saved = _clear(ctx)
+    states = [
+        session_state(ctx.std, {"kind": "codex", "id": "abc", "pid": 0}),
+        session_state(ctx.std, {"kind": "cursor", "id": "abc", "pid": 0}),
+        session_state(ctx.std, {"kind": "gemini-cli", "id": "abc", "pid": 0}),
+    ]
+    _restore(ctx, saved)
+
+    for state in states:
+        _eq("no store described", state, UNKNOWN)
 
 def _test_a_generic_ai_agent_variable_gives_a_kind_but_no_session(ctx):
     """`AI_AGENT` is spelled `<tool>_<version>_<role>`. The tool segment is a
@@ -263,9 +312,16 @@ def _test_label_is_a_glance_not_a_copy_source(ctx):
 
 def _test_resume_is_offered_only_where_the_command_is_known(ctx):
     """Printing a resume command for a harness whose syntax we have not checked
-    would be worse than printing none."""
+    would be worse than printing none.
+
+    The spellings come from each vendor's own reference, and a harness only
+    recognized by name — `aider` here — gets nothing until one is confirmed.
+    """
     _eq("claude code", resume_hint({"kind": "claude-code", "id": "abc"}), "claude --resume abc")
-    _eq("unverified harness", resume_hint({"kind": "codex", "id": "abc"}), "")
+    _eq("codex", resume_hint({"kind": "codex", "id": "abc"}), "codex resume abc")
+    _eq("gemini cli", resume_hint({"kind": "gemini-cli", "id": "abc"}), "gemini --resume abc")
+    _eq("cursor", resume_hint({"kind": "cursor", "id": "abc"}), "cursor-agent --resume abc")
+    _eq("recognized but unconfirmed", resume_hint({"kind": "aider", "id": "abc"}), "")
     _eq("no session id", resume_hint({"kind": "claude-code", "id": ""}), "")
 
 def _test_every_described_harness_is_a_kind_detection_can_report(ctx):
@@ -316,6 +372,9 @@ _UNIT_TESTS = [
     _test_the_project_is_the_cwd_when_the_store_agrees,
     _test_the_project_falls_back_to_the_store_when_the_cwd_disagrees,
     _test_no_project_is_claimed_without_one,
+    _test_codex_is_detected_from_the_thread_id_it_exports,
+    _test_gemini_is_detected_with_a_kind_and_no_session,
+    _test_an_undescribed_store_is_unknown_for_every_harness,
     _test_a_person_at_a_terminal_is_not_an_agent,
 ]
 

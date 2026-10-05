@@ -10,11 +10,19 @@ always believed over anything inferred:
 1. values passed on the command line
 2. `ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID` — the vendor-neutral contract, for a
    harness or wrapper script that knows what it is
-3. a known harness's own variables, so the common case needs no configuration
+3. a known harness's own variables, so the common case needs no configuration:
+   Claude Code (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`), Codex
+   (`CODEX_THREAD_ID`, set for the shell and tool executions a task arrives as)
+   and Gemini CLI (`GEMINI_CLI`, a marker with no session id behind it)
 4. the process ancestry, which needs nothing from the harness at all: walk up
    from this process until a recognized binary turns up
 5. `AI_AGENT`, last because it names a tool without naming a session: a kind
    from it is weaker than one the process tree confirms
+
+A kind with no session id is an ordinary outcome, not a failure: several
+harnesses say what they are without saying which conversation. `list` reports
+the kind, and offers no resume command, because there is nothing to resume
+*to*.
 
 **A missing agent means "not detected", never "no agent".** Only (1) and (2) are
 authoritative; the rest are inference, and a harness nobody has taught us about
@@ -38,6 +46,14 @@ from liveness, and only where the answer is knowable:
 
 `unknown` is the common case and is treated exactly like `resumable`: nothing is
 reclaimed unless we positively know the session is gone.
+
+**Only Claude Code's session store is described**, so only its sessions can ever
+read `gone`, and only its slots are reclaimed automatically. Codex files
+sessions by date and Cursor under a hash of the workspace; until those layouts
+are read here they answer `unknown`, their slots are reported with their holder
+and never taken, and recovering one is `--take-over` or `release --force`. That
+is the side to err on: the alternative is deleting a resumable agent's
+uncommitted work on a timer.
 """
 
 load("@std//time.axl", "time")
@@ -46,12 +62,29 @@ load("./process_info.axl", "is_same_process", "started_at")
 # Harnesses whose own environment names a session, so no configuration is
 # needed. Recognition only: what is known about a kind once identified lives in
 # `_HARNESSES`, because a kind can arrive from any of the detection layers.
+# `marker` alone says a harness is running, `id_var` also names the session;
+# either is enough to fire, and a field a harness does not have is "".
 _ENV_DETECTORS = [
     struct(
         kind = "claude-code",
         marker = "CLAUDECODE",
         id_var = "CLAUDE_CODE_SESSION_ID",
         pid_var = "CLAUDE_PID",
+    ),
+    # Set for shell/tool executions, which is how a task run by Codex arrives.
+    struct(
+        kind = "codex",
+        marker = "",
+        id_var = "CODEX_THREAD_ID",
+        pid_var = "",
+    ),
+    # A marker only: Gemini CLI exports no session id, so the kind is known and
+    # the session is not, which `list` shows as a kind with no id beside it.
+    struct(
+        kind = "gemini-cli",
+        marker = "GEMINI_CLI",
+        id_var = "",
+        pid_var = "",
     ),
 ]
 
@@ -83,21 +116,32 @@ _BINARIES = {
 # printing none. The session-store fields say where the harness keeps sessions,
 # so `session_state` can tell a deleted session from a merely closed terminal. A
 # kind absent from here is not an error — it yields `unknown`, never `gone`.
+# `store` is how a session is found on disk, and is None for a harness whose
+# layout does not fit the shape below — one project directory per started-in
+# path, holding a file named for the session. Codex files by date with no
+# project directory at all, and Cursor under a hash of the workspace. Both then
+# report `unknown`, never `gone`, which is the safe side: `gone` is the only
+# verdict that licenses taking a slot back.
 _HARNESSES = {
     "claude-code": struct(
         resume = "claude --resume %s",
-        # Relocatable, so the home-relative default is a fallback.
-        config_var = "CLAUDE_CONFIG_DIR",
-        config_default = "/.claude",
-        sessions_dir = "projects",
-        # Named for the session id, inside one of the project directories.
-        session_file = "%s.jsonl",
-        # A project directory is named for the path the harness started in, with
-        # each of these characters replaced by a dash. The mapping is one-way —
-        # a dash in the result could have been any of them, or a real dash — so
-        # it is used to check a candidate path, never to decode one.
-        project_flattens = "/.",
+        store = struct(
+            # Relocatable, so the home-relative default is a fallback.
+            config_var = "CLAUDE_CONFIG_DIR",
+            config_default = "/.claude",
+            sessions_dir = "projects",
+            # Named for the session id, inside one of the project directories.
+            session_file = "%s.jsonl",
+            # A project directory is named for the path the harness started in,
+            # with each of these characters replaced by a dash. The mapping is
+            # one-way — a dash could have been any of them, or a real dash — so
+            # it checks a candidate path and never decodes one.
+            project_flattens = "/.",
+        ),
     ),
+    "codex": struct(resume = "codex resume %s", store = None),
+    "gemini-cli": struct(resume = "gemini --resume %s", store = None),
+    "cursor": struct(resume = "cursor-agent --resume %s", store = None),
 }
 
 # `AI_AGENT` is spelled `<tool>_<version>_<role>`, e.g.
@@ -159,11 +203,13 @@ def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
         return _record(std, env_kind or "unknown", env_id, 0, "env")
 
     for d in _ENV_DETECTORS:
-        if not std.env.var(d.marker) and not std.env.var(d.id_var):
+        marked = d.marker and std.env.var(d.marker)
+        named = d.id_var and std.env.var(d.id_var)
+        if not marked and not named:
             continue
-        pid_raw = std.env.var(d.pid_var) or ""
+        pid_raw = (std.env.var(d.pid_var) or "") if d.pid_var else ""
         pid = int(pid_raw) if pid_raw.isdigit() else 0
-        return _record(std, d.kind, std.env.var(d.id_var) or "", pid, "env")
+        return _record(std, d.kind, named or "", pid, "env")
 
     found = _ancestry(std)
     if found.kind:
@@ -206,11 +252,12 @@ def _sessions_root(std, kind: str) -> str:
     resumable agent's slot to someone else.
     """
     harness = _HARNESSES.get(kind)
-    if not harness:
+    store = harness.store if harness else None
+    if not store:
         return ""
-    configured = std.env.var(harness.config_var) or ""
-    base = configured or (std.env.home_dir() + harness.config_default)
-    root = base + "/" + harness.sessions_dir
+    configured = std.env.var(store.config_var) or ""
+    base = configured or (std.env.home_dir() + store.config_default)
+    root = base + "/" + store.sessions_dir
     return root if std.fs.exists(root) else ""
 
 def _session_dir(std, kind: str, id: str) -> str:
@@ -223,9 +270,9 @@ def _session_dir(std, kind: str, id: str) -> str:
     """
     harness = _HARNESSES.get(kind)
     root = _sessions_root(std, kind)
-    if not harness or not root:
+    if not harness or not harness.store or not root:
         return ""
-    wanted = harness.session_file % id
+    wanted = harness.store.session_file % id
     for entry in std.fs.read_dir(root):
         if entry.is_dir and std.fs.exists(root + "/" + entry.path + "/" + wanted):
             return root + "/" + entry.path
@@ -256,13 +303,13 @@ def session_project(std, agent: dict) -> str:
     """
     harness = _HARNESSES.get(agent.get("kind", "")) if agent else None
     id = agent.get("id", "") if agent else ""
-    if not harness or not id:
+    if not harness or not harness.store or not id:
         return ""
     found = _session_dir(std, agent.get("kind", ""), id)
     if not found:
         return ""
     cwd = agent.get("cwd", "")
-    if cwd and found.rpartition("/")[2] == _flatten(cwd, harness.project_flattens):
+    if cwd and found.rpartition("/")[2] == _flatten(cwd, harness.store.project_flattens):
         return cwd
     return found
 
