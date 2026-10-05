@@ -37,6 +37,7 @@ whichever host came last, so `config_collisions` reports them for the task to
 refuse.
 """
 
+load("@aspect//bazel/build_metadata.axl", "version_gte")
 load("./aspect_endpoint_auth.axl", "endpoint_host")
 load("./bazelrc_file.axl", "RcConfig")
 load("./environment.axl", "BuildEvents", "RemoteCache", "RemoteExecutor", "WorkflowsEnvironment")
@@ -93,6 +94,16 @@ def deployment_group_auth(deployment, helper: str) -> dict:
         if host:
             auth[group] = credential_helper_flags([host], helper)
     return auth
+
+def credential_helper_flag(bazel_version: str | None) -> str | None:
+    """The credential-helper flag this Bazel spells, or `None` before 6.0.0, which
+    has no helper protocol. `None` for the version (a non-release build) is taken
+    as current."""
+    if bazel_version == None or version_gte(bazel_version, _CREDENTIAL_HELPER_UNPREFIXED_MIN_VERSION):
+        return "--credential_helper"
+    if version_gte(bazel_version, _CREDENTIAL_HELPER_MIN_VERSION):
+        return "--experimental_credential_helper"
+    return None
 
 def credential_helper_flags(hosts: list, helper: str) -> list:
     """`--credential_helper=<host>=<helper>` for each host, scoped so the helper is
