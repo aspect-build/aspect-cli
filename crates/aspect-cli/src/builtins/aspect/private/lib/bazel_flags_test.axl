@@ -398,30 +398,37 @@ def _fake_rc(values = {}):
         flag_values = lambda name, command = None, version = None: values.get(name, []),
     )
 
-def _fake_auth_ctx(access_token = "", owned_hosts = []):
+def _fake_auth_ctx(access_token = "", owned_hosts = [], bazel_version = "8.4.2"):
     """Stand-in `ctx` for the auth path: `deployment_for_host` reports a host as
     owned iff it is in `owned_hosts`, `credentials` returns a fake login (or None
-    when no token), and `std` reports non-TTY so `warn` stays quiet-but-valid."""
+    when no token), Bazel reports `bazel_version`, the CLI runs from `_EXE`, and
+    `std` reports non-TTY so `warn` stays quiet-but-valid."""
     creds = struct(access_token = access_token) if access_token else None
     owned = {h: h for h in owned_hosts}
     return struct(
         std = struct(
             io = struct(stdout = struct(is_tty = False)),
-            env = struct(var = lambda name: None),
+            env = struct(var = lambda name: None, current_exe = lambda: _EXE),
         ),
+        bazel = struct(version = lambda: bazel_version),
         aspect = struct(auth = fake_auth(credentials = creds, owned_hosts = owned)),
     )
 
 _TOK = "fake-access-token"
+_EXE = "/opt/aspect/bin/aspect"
+
+def _helper(host):
+    return "--credential_helper=" + host + "=" + _EXE
 
 _CACHE = "remote.acme.aspect.build"
 _BES = "bes.acme.aspect.build"
 
 def _test_auth_flags(ctx):
-    """`deployment_auth_flags` attaches `--remote_header`/`--bes_header` only for an
-    endpoint owned by a configured deployment, lacking a user authorization
-    header, and only when a credential resolves. Covers the cache path, the BES
-    path, and their combination through the one public entry point."""
+    """`deployment_auth_flags` registers the CLI as Bazel's credential helper only
+    for an endpoint owned by a configured deployment, lacking a user authorization,
+    and only when a credential resolves. The token itself is never a flag value.
+    Covers the cache path, the BES path, and their combination through the one
+    public entry point."""
     both = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
 
     _eq("no endpoints", deployment_auth_flags(both, _fake_rc(), "build"), [])
@@ -433,17 +440,17 @@ def _test_auth_flags(ctx):
     _eq(
         "owned cache only",
         deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
-        ["--remote_header=authorization=Bearer " + _TOK],
+        [_helper(_CACHE)],
     )
     _eq(
         "owned bes only",
         deployment_auth_flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
-        ["--bes_header=authorization=Bearer " + _TOK],
+        [_helper(_BES)],
     )
     _eq(
         "owned cache + bes together",
         deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
-        ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
+        [_helper(_CACHE), _helper(_BES)],
     )
     _eq(
         "user authorization header skips",
@@ -510,8 +517,30 @@ def _test_auth_flags(ctx):
             _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": ["remote.buildbuddy.io=/usr/bin/helper"]}),
             "build",
         ),
-        ["--bes_header=authorization=Bearer " + _TOK],
+        [_helper(_BES)],
     )
+
+    # One host serving both streams needs its helper registered once.
+    shared = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE])
+    _eq(
+        "cache and bes on one host",
+        deployment_auth_flags(shared, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _CACHE}), "build"),
+        [_helper(_CACHE)],
+    )
+
+    # The flag Bazel understands depends on its version; before the helper
+    # protocol existed the token can only travel as a header.
+    def at(version):
+        return deployment_auth_flags(
+            _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE], bazel_version = version),
+            _fake_rc({"--remote_cache": "grpcs://" + _CACHE}),
+            "build",
+        )
+
+    _eq("bazel 6.4.0", at("6.4.0"), [_helper(_CACHE)])
+    _eq("bazel 6.3.2", at("6.3.2"), ["--experimental_credential_helper=" + _CACHE + "=" + _EXE])
+    _eq("bazel 5.4.1", at("5.4.1"), ["--remote_header=authorization=Bearer " + _TOK])
+    _eq("non-release bazel", at(None), [_helper(_CACHE)])
 
 # The helpers fail with a clear message when a calling task omits the required
 # args. Happy-path coverage is implicit in every other subtest — the test task
