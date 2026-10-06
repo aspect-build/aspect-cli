@@ -11,7 +11,8 @@ connection. Nothing here knows what the keys mean.
 URL schemes: `rediss://` is TLS, `redis+insecure://` is plaintext, and
 `redis://` or a bare `host[:port]` is TLS as well, the way deliveryd reads it:
 managed Redis requires TLS, so plaintext is the form that has to be spelled out.
-Not supported: credentials or a database index in the URL, Cluster, Sentinel,
+Not supported: a database index in the URL, credentials in the URL (rejected
+before dialing, without echoing them; pass `auth` instead), Cluster, Sentinel,
 RESP3.
 
 `connect` raises on failure (`std.io.Error` for the dial or handshake, a
@@ -41,7 +42,25 @@ def _has_port(addr: str) -> bool:
     # The last colon must come after any IPv6 closing bracket.
     return addr.rfind(":") > addr.rfind("]")
 
+def _strip_scheme(url: str) -> str:
+    for scheme in ("rediss://", "redis+insecure://", "redis://"):
+        if url.startswith(scheme):
+            return url[len(scheme):]
+    return url
+
+def has_userinfo(url: str) -> bool:
+    """Whether `url` carries `user:password@` credentials, which this client
+    does not accept: they belong in `auth`, where they are never printed."""
+    return "@" in _strip_scheme(url)
+
+USERINFO_ERROR = "redis endpoint URL must not contain credentials (user:password@); pass them as auth instead"
+
 def parse_endpoint(url: str) -> Endpoint:
+    """The dial address, transport and printable form of `url`. Fails, without
+    echoing the URL, if it carries credentials; check `has_userinfo` first to
+    report that gracefully."""
+    if has_userinfo(url):
+        fail(USERINFO_ERROR)
     tls = True
     scheme = "rediss"
     addr = url
@@ -134,6 +153,8 @@ def connect(ctx, url: str, ca_pem = None, auth: str | None = None, connect_timeo
 redis = namespace(
     connect = connect,
     parse_endpoint = parse_endpoint,
+    has_userinfo = has_userinfo,
+    USERINFO_ERROR = USERINFO_ERROR,
     parse_auth = parse_auth,
     parse_info = parse_info,
     Endpoint = Endpoint,

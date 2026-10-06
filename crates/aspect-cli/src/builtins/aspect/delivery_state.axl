@@ -10,7 +10,8 @@ the implementations that ship with the CLI.
 `DeliveryState.connect` is `(ctx, delivery_state.Params) -> delivery_state.Backend`.
 Unset, the delivery task uses `deliveryd.connect` (the Workflows daemon over
 its Unix socket). `redis_state.connect` talks to Redis directly and reads
-`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`).
+`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`,
+`_REDIS_LEGACY_TTL_SECONDS`).
 Any function returning a `delivery_state.Backend` works as a third option.
 Internal modules load from `private/lib/` directly.
 """

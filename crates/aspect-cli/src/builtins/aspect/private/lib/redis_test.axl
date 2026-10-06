@@ -67,6 +67,17 @@ def _test_parse_endpoint(ctx):
     _eq("bracketed IPv6 gets the default port", redis.parse_endpoint("redis+insecure://[::1]").addr, "[::1]:6379")
     _eq("bracketed IPv6 keeps its port", redis.parse_endpoint("redis+insecure://[::1]:6391").addr, "[::1]:6391")
 
+def _test_userinfo_rejected(ctx):
+    _eq("rediss userinfo detected", redis.has_userinfo("rediss://app:s3cret@cache:6379"), True)
+    _eq("bare userinfo detected", redis.has_userinfo("app:s3cret@cache"), True)
+    _eq("plain URL has none", redis.has_userinfo("rediss://cache:6379"), False)
+    err, _ = catch(redis.parse_endpoint, "rediss://app:s3cret@cache:6379")
+    _eq("parse_endpoint refuses it", err.message, redis.USERINFO_ERROR)
+    dials = []
+    err, _ = catch(redis.connect, ctx, "rediss://app:s3cret@cache:6379", dial = _dialer([_fake_conn()], dials))
+    _eq("connect refuses it without echoing the password", "s3cret" in err.message, False)
+    _eq("connect never dials it", len(dials), 0)
+
 def _test_parse_auth(ctx):
     _eq("none → none", redis.parse_auth(None), None)
     _eq("empty → none", redis.parse_auth(""), None)
@@ -152,6 +163,7 @@ def _test_close(ctx):
 
 _UNIT_TESTS = [
     _test_parse_endpoint,
+    _test_userinfo_rejected,
     _test_parse_auth,
     _test_parse_info,
     _test_connect_dials_with_options,

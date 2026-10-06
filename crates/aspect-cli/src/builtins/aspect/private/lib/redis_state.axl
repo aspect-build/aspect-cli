@@ -4,8 +4,9 @@ Speaks deliveryd's own key scheme, so the two backends interoperate against one
 database and a fleet can move between them without a migration:
 
     dd:sig:{host}:{prefix}:{digest}            HASH {sig, label, commit, at, meta?}, 365d TTL
-    delivery-signature:{host}:{digest}:{prefix} STRING, pre-v2 deliveryd; read as a
-                                                fallback and lazily copied into the hash
+    delivery-signature:{host}:{digest}:{prefix} STRING, pre-v2 deliveryd; written alongside
+                                                the hash so v1 readers still see deliveries,
+                                                read as a fallback and lazily copied into the hash
     {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
                                                 ever removed here
 
@@ -18,7 +19,12 @@ The connection is `redis.axl`'s client, configured from the runner's environment
     ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT   rediss://host:port, redis+insecure://host:port,
                                                or a bare host[:port]; see `redis.axl` for the schemes
     ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE    PEM bundle to trust instead of the OS store
-    ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH       `password` or `user:password`
+    ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH       `password` or `user:password`; never in the URL
+    ASPECT_WORKFLOWS_DELIVERY_REDIS_LEGACY_TTL_SECONDS
+                                               lifetime of the legacy signature keys, set on
+                                               every write and on migration (default 7 days);
+                                               0 keeps them forever, for a fleet that still
+                                               has v1 deliveryd readers
 """
 
 load("@std//time.axl", "sleep", "time")
@@ -28,14 +34,15 @@ load("./redis.axl", "redis")
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT"
 CA_FILE_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE"
 AUTH_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH"
+LEGACY_TTL_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_LEGACY_TTL_SECONDS"
 
 # deliveryd's startup re-probe policy.
 _PROBE_ATTEMPTS = 3
 _PROBE_RETRY_MS = 1000
 
 # deliveryd's defaults: signature lifetime, the remaining-TTL threshold below
-# which a query refreshes it, the drain time for a migrated legacy key, and
-# how many digests one pipeline round trip touches.
+# which a query refreshes it, the default lifetime of a legacy key (see
+# LEGACY_TTL_ENV), and how many digests one pipeline round trip touches.
 SIG_TTL_MS = 365 * 24 * 3600 * 1000
 _REFRESH_BELOW_MS = SIG_TTL_MS // 2
 LEGACY_TTL_MS = 7 * 24 * 3600 * 1000
@@ -45,6 +52,7 @@ _Config = record(
     url = field(str),
     ca_pem = field(str | None, default = None),
     auth = field(str | None, default = None),
+    legacy_ttl_ms = field(int, default = LEGACY_TTL_MS),
 )
 
 def _load_config(ctx) -> tuple:
@@ -52,13 +60,21 @@ def _load_config(ctx) -> tuple:
     url = ctx.std.env.var(ENDPOINT_ENV)
     if not url:
         return (None, "{} is not set. The delivery state backend must be reachable.".format(ENDPOINT_ENV))
+    if redis.has_userinfo(url):
+        return (None, "{} must not contain credentials; set {} instead.".format(ENDPOINT_ENV, AUTH_ENV))
     ca_pem = None
     ca_file = ctx.std.env.var(CA_FILE_ENV)
     if ca_file:
         if not ctx.std.fs.exists(ca_file):
             return (None, "{} points at {}, which does not exist.".format(CA_FILE_ENV, ca_file))
         ca_pem = ctx.std.fs.read_to_string(ca_file)
-    return (_Config(url = url, ca_pem = ca_pem, auth = ctx.std.env.var(AUTH_ENV) or None), "")
+    legacy_ttl_ms = LEGACY_TTL_MS
+    legacy_ttl = ctx.std.env.var(LEGACY_TTL_ENV)
+    if legacy_ttl:
+        if not legacy_ttl.isdigit():
+            return (None, "{} must be a whole number of seconds, got {!r}.".format(LEGACY_TTL_ENV, legacy_ttl))
+        legacy_ttl_ms = int(legacy_ttl) * 1000
+    return (_Config(url = url, ca_pem = ca_pem, auth = ctx.std.env.var(AUTH_ENV) or None, legacy_ttl_ms = legacy_ttl_ms), "")
 
 def _describe_error(err) -> str:
     kind = getattr(err, "kind", "")
@@ -109,7 +125,7 @@ def _should_refresh(pttl: int) -> bool:
 def _now_s() -> int:
     return time.now_ms() // 1000
 
-def _query_chunk(client, p, chunk: list, delivered: dict) -> None:
+def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) -> None:
     """Three pipelines at most: read the v2 hashes, read legacy keys for the
     misses, then write back TTL refreshes and migrations."""
     reads = []
@@ -148,11 +164,12 @@ def _query_chunk(client, p, chunk: list, delivered: dict) -> None:
         # and commit stay empty until the target is delivered again.
         writes.append(["HSET", k, "sig", sig, "at", now])
         writes.append(["PEXPIRE", k, SIG_TTL_MS])
-        writes.append(["PEXPIRE", _legacy_sig_key(p, d), LEGACY_TTL_MS])
+        if legacy_ttl_ms:
+            writes.append(["PEXPIRE", _legacy_sig_key(p, d), legacy_ttl_ms])
     if writes:
         client.pipeline(writes)
 
-def _query(client, p, digests: dict) -> dict:
+def _query(client, p, legacy_ttl_ms: int, digests: dict) -> dict:
     """Which of `{label: digest}` are delivered → `{label: signature}`. Shared
     digests are looked up once; labels with an empty digest are never asked about."""
     wanted = {digest: True for digest in digests.values() if digest}
@@ -161,25 +178,37 @@ def _query(client, p, digests: dict) -> dict:
     uniq = list(wanted.keys())
     delivered = {}
     for start in range(0, len(uniq), CHUNK_SIZE):
-        _query_chunk(client, p, uniq[start:start + CHUNK_SIZE], delivered)
+        _query_chunk(client, p, legacy_ttl_ms, uniq[start:start + CHUNK_SIZE], delivered)
     return {
         label: delivered[digest]
         for label, digest in digests.items()
         if digest and digest in delivered
     }
 
-def _deliver(client, p, label: str, digest: str, meta: dict = {}) -> None:
+def _deliver(client, p, legacy_ttl_ms: int, label: str, digest: str, meta: dict = {}) -> None:
     k = _v2_key(p, digest)
     hset = ["HSET", k, "sig", p.signature, "label", label, "commit", p.commit, "at", _now_s()]
     if meta:
         hset.append("meta")
         hset.append(json.encode(meta))
-    client.pipeline([hset, ["PEXPIRE", k, SIG_TTL_MS]])
+
+    # The legacy string too, so a v1 deliveryd on another runner (or after a
+    # rollback) does not deliver the same digest again.
+    legacy = ["SET", _legacy_sig_key(p, digest), p.signature]
+    if legacy_ttl_ms:
+        legacy += ["PX", legacy_ttl_ms]
+    client.pipeline([hset, ["PEXPIRE", k, SIG_TTL_MS], legacy])
 
 def _delete(client, p, digest: str) -> None:
     if not digest:
         return
-    client.pipeline([["UNLINK", _v2_key(p, digest), _legacy_sig_key(p, digest), _legacy_artifact_key(p, digest)]])
+    # One key per UNLINK: the keys share no hash tag, so a multi-key UNLINK is
+    # CROSSSLOT on a cluster-mode server (MemoryDB) even with a single shard.
+    client.pipeline([
+        ["UNLINK", _v2_key(p, digest)],
+        ["UNLINK", _legacy_sig_key(p, digest)],
+        ["UNLINK", _legacy_artifact_key(p, digest)],
+    ])
 
 def _health(client) -> delivery_state.Health:
     err, probed = catch(_probe, client, types = redis.ERRORS)
@@ -245,14 +274,15 @@ def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause 
 
     ctx.defer(client.close)
     p = params
+    legacy_ttl_ms = cfg.legacy_ttl_ms
     return delivery_state.Backend(
         endpoint = endpoint.display,
         describe = _describe(endpoint.tls, version),
         status = health,
         health = lambda: _health(client),
         record = lambda label, digest: None,
-        query = lambda digests: _query(client, p, digests),
-        deliver = lambda label, digest, meta = {}: _deliver(client, p, label, digest, meta),
+        query = lambda digests: _query(client, p, legacy_ttl_ms, digests),
+        deliver = lambda label, digest, meta = {}: _deliver(client, p, legacy_ttl_ms, label, digest, meta),
         delete = lambda digest: _delete(client, p, digest),
     )
 
@@ -261,6 +291,7 @@ redis_state = namespace(
     ENDPOINT_ENV = ENDPOINT_ENV,
     CA_FILE_ENV = CA_FILE_ENV,
     AUTH_ENV = AUTH_ENV,
+    LEGACY_TTL_ENV = LEGACY_TTL_ENV,
     SIG_TTL_MS = SIG_TTL_MS,
     LEGACY_TTL_MS = LEGACY_TTL_MS,
     CHUNK_SIZE = CHUNK_SIZE,

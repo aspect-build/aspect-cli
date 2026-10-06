@@ -1,7 +1,7 @@
 """Unit tests for lib/redis_state.axl.
 
 An in-memory Redis fake implements the handful of commands the backend sends
-(HGET/PTTL/GET/HSET/PEXPIRE/UNLINK/PING/INFO) over dicts and records every
+(HGET/PTTL/GET/SET/HSET/PEXPIRE/UNLINK/PING/INFO) over dicts and records every
 pipeline, so the key scheme, TTL policy and legacy migration can be asserted
 command by command without a server. It stands in for the `redis.axl` client
 through `connect`'s `connect` seam; the client itself (AUTH, reconnect) is
@@ -56,6 +56,12 @@ def _fake_redis(info_disabled = False):
         if verb == "GET":
             v = db["kv"].get(cmd[1])
             return v if type(v) == "string" else None
+        if verb == "SET":
+            db["kv"][cmd[1]] = cmd[2]
+            db["ttl"].pop(cmd[1], None)
+            if len(cmd) == 5 and cmd[3] == "PX":
+                db["ttl"][cmd[1]] = db["now"] + cmd[4]
+            return "OK"
         if verb == "HSET":
             h = db["kv"].get(cmd[1])
             if type(h) != "dict":
@@ -73,6 +79,10 @@ def _fake_redis(info_disabled = False):
             db["ttl"][cmd[1]] = db["now"] + cmd[2]
             return 1
         if verb == "UNLINK":
+            # The backend's keys share no hash tag: on cluster-mode servers
+            # (MemoryDB) more than one in a command is refused.
+            if len(cmd) > 2:
+                return redis.CommandError("CROSSSLOT Keys in request don't hash to the same slot")
             n = 0
             for k in cmd[1:]:
                 if k in db["kv"]:
@@ -167,6 +177,15 @@ def _test_missing_ca_file_reports_status(ctx):
     _eq("missing CA → not ok", dd.status.ok, False)
     _eq("missing CA → names the variable", redis_state.CA_FILE_ENV in dd.status.error, True)
     _eq("missing CA → no connection attempted", len(connects), 0)
+
+def _test_credentials_in_url_rejected(ctx):
+    connects = []
+    dd = _connect(_fake_redis(), env = {redis_state.ENDPOINT_ENV: "rediss://app:s3cret@cache:6379"}, connects = connects)
+    _eq("userinfo → not ok", dd.status.ok, False)
+    _eq("userinfo → no connection attempted", len(connects), 0)
+    _eq("userinfo → points at the auth variable", redis_state.AUTH_ENV in dd.status.error, True)
+    _eq("userinfo → password not echoed", "s3cret" in dd.status.error or "s3cret" in dd.endpoint, False)
+    _eq("userinfo → no endpoint to print", dd.endpoint, "")
 
 def _test_connect_probes_and_describes(ctx):
     fake = _fake_redis()
@@ -303,6 +322,30 @@ def _test_query_migrates_legacy_signatures(ctx):
     dd.query({"//old:t": "old"})
     _eq("second query: v2 hit, no legacy read, no write", fake.verbs()[5:], [["HGET", "PTTL"]])
 
+def _test_legacy_ttl_is_configurable(ctx):
+    fake = _fake_redis()
+    fake.seed_string(_legacy("old"), "https://ci/legacy")
+    dd = _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "60"})
+    dd.query({"//old:t": "old"})
+    _eq("migrated legacy key drains on the configured TTL", fake.pttl(_legacy("old")), 60000)
+    dd.deliver("//new:t", "new")
+    _eq("delivered legacy key gets the configured TTL", fake.pttl(_legacy("new")), 60000)
+
+    fake = _fake_redis()
+    fake.seed_string(_legacy("old"), "https://ci/legacy")
+    dd = _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "0"})
+    dd.query({"//old:t": "old"})
+    _eq("0 → migration leaves the legacy key alone", fake.verbs()[-1], ["HSET", "PEXPIRE"])
+    _eq("0 → legacy key keeps no expiry", fake.pttl(_legacy("old")), -1)
+    dd.deliver("//new:t", "new")
+    _eq("0 → delivered legacy key has no expiry", (fake.db["kv"][_legacy("new")], fake.pttl(_legacy("new"))), ("https://ci/build/7", -1))
+
+    connects = []
+    dd = _connect(_fake_redis(), env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "7d"}, connects = connects)
+    _eq("malformed TTL → not ok", dd.status.ok, False)
+    _eq("malformed TTL → names the variable", redis_state.LEGACY_TTL_ENV in dd.status.error, True)
+    _eq("malformed TTL → no connection attempted", len(connects), 0)
+
 def _test_query_dedupes_and_maps_back(ctx):
     fake = _fake_redis()
     fake.seed_hash(_v2("shared"), {"sig": "s"}, ttl_ms = redis_state.SIG_TTL_MS)
@@ -330,11 +373,13 @@ def _test_deliver_writes_hash_and_ttl(ctx):
     fake = _fake_redis()
     dd = _connect(fake)
     dd.deliver("//a:b", "d1")
-    hset, pexpire = fake.db["calls"][-1]
+    hset, pexpire, legacy = fake.db["calls"][-1]
     _eq("HSET fields", hset[:9], ["HSET", _v2("d1"), "sig", "https://ci/build/7", "label", "//a:b", "commit", "abc123", "at"])
     _eq("at is unix seconds", hset[9] > 1700000000, True)
     _eq("no meta field when empty", len(hset), 10)
     _eq("TTL set in the same pipeline", pexpire, ["PEXPIRE", _v2("d1"), redis_state.SIG_TTL_MS])
+    _eq("legacy signature written for v1 readers", legacy, ["SET", _legacy("d1"), "https://ci/build/7", "PX", redis_state.LEGACY_TTL_MS])
+    _eq("legacy signature readable as v1 reads it", fake.db["kv"][_legacy("d1")], "https://ci/build/7")
 
     dd.deliver("//a:b", "d1", meta = {"image": "sha256:beef"})
     hset = fake.db["calls"][-1][0]
@@ -349,7 +394,7 @@ def _test_delete_unlinks_every_key(ctx):
     fake.seed_string(_legacy("d1"), "x")
     fake.seed_string("gh:d1:deploy", "artifact-metadata")
     dd.delete("d1")
-    _eq("one UNLINK of all three keys", fake.db["calls"][-1], [["UNLINK", _v2("d1"), _legacy("d1"), "gh:d1:deploy"]])
+    _eq("one single-key UNLINK per key, never CROSSSLOT", fake.db["calls"][-1], [["UNLINK", _v2("d1")], ["UNLINK", _legacy("d1")], ["UNLINK", "gh:d1:deploy"]])
     _eq("all gone", fake.db["kv"], {})
     n = len(fake.db["calls"])
     dd.delete("")
@@ -388,6 +433,7 @@ def _test_health_reprobes(ctx):
 _UNIT_TESTS = [
     _test_unset_endpoint_reports_status,
     _test_missing_ca_file_reports_status,
+    _test_credentials_in_url_rejected,
     _test_connect_probes_and_describes,
     _test_connect_passes_env_to_client,
     _test_connect_retries_transport_errors,
@@ -398,6 +444,7 @@ _UNIT_TESTS = [
     _test_query_hit_without_refresh,
     _test_query_refreshes_a_waning_ttl,
     _test_query_migrates_legacy_signatures,
+    _test_legacy_ttl_is_configurable,
     _test_query_dedupes_and_maps_back,
     _test_query_chunks_large_batches,
     _test_deliver_writes_hash_and_ttl,

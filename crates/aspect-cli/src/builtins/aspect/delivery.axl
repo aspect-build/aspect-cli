@@ -65,7 +65,8 @@ The task gets its backend from `DeliveryState.connect` (`lib/delivery_state.axl`
 Unset, that is `deliveryd`: the Unix-socket HTTP daemon Aspect Workflows
 runners start and expose via `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`. A
 config.axl can point it at Redis directly instead, which reads
-`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`):
+`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`,
+`_REDIS_LEGACY_TTL_SECONDS`):
 
     load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
     if DeliveryState in ctx.traits:
