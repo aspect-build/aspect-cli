@@ -435,8 +435,7 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if ctx.args.watch:
         # Watch before the first run so edits made during it aren't missed.
-        # Ctrl+C is the session's normal ending: the task owns it and exits 0.
-        ws = watch.new(ctx, rc = rc, cancellation = ctx.cancellation.notify())
+        ws = watch.new(ctx, rc = rc)
 
         def rerun():
             ph.reset(gaz_init_data())

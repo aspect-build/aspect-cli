@@ -786,7 +786,7 @@ async fn body_kind_to_bytes(body_kind: BodyKind) -> anyhow::Result<Vec<u8>> {
                 let mut buf = Vec::new();
                 match &readable {
                     StdReadable::Stdin(s) => {
-                        s.lock().read_to_end(&mut buf)?;
+                        (&**s).read_to_end(&mut buf)?;
                     }
                     StdReadable::ChildStdout(s) => {
                         s.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;

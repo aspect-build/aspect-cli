@@ -21,7 +21,7 @@
 
 use std::fmt;
 
-use crate::engine::cancellation;
+use crate::engine::cancellation::{Signals, is_cancelled_error};
 use crate::engine::error::RaisedError;
 use crate::errln;
 use crate::eval::EvalError;
@@ -48,21 +48,23 @@ impl TaskExit {
     /// builtin's error arrives; `Other` is how [`EvalError`] re-wraps one,
     /// and how the evaluator reports the bytecode cancel check firing, which
     /// is the same exit a cancelled blocking builtin would have raised.
-    pub fn from_starlark(err: &starlark::Error) -> Option<TaskExit> {
-        if cancellation::is_cancelled_error(err) {
-            return Some(cancellation::Signals::current().exit_for());
+    pub fn from_starlark(err: &starlark::Error, signals: &Signals) -> Option<TaskExit> {
+        if is_cancelled_error(err, signals) {
+            return Some(signals.exit_for());
         }
         match err.kind() {
-            starlark::ErrorKind::Native(e) | starlark::ErrorKind::Other(e) => Self::from_anyhow(e),
+            starlark::ErrorKind::Native(e) | starlark::ErrorKind::Other(e) => {
+                Self::from_anyhow(e, signals)
+            }
             _ => None,
         }
     }
 
     /// The exit carried by `err`, whichever variant a phase wrapped it in.
-    pub fn from_eval_error(err: &EvalError) -> Option<TaskExit> {
+    pub fn from_eval_error(err: &EvalError, signals: &Signals) -> Option<TaskExit> {
         match err {
-            EvalError::StarlarkError(e) => Self::from_starlark(e),
-            EvalError::UnknownError(e) => Self::from_anyhow(e),
+            EvalError::StarlarkError(e) => Self::from_starlark(e, signals),
+            EvalError::UnknownError(e) => Self::from_anyhow(e, signals),
             _ => None,
         }
     }
@@ -71,7 +73,7 @@ impl TaskExit {
     /// however deeply the phases have wrapped one another. A cancelled wait
     /// in a std-shaped helper arrives as an `io::Error` carrying the exit, so
     /// those are opened too.
-    pub fn from_anyhow(err: &anyhow::Error) -> Option<TaskExit> {
+    pub fn from_anyhow(err: &anyhow::Error, signals: &Signals) -> Option<TaskExit> {
         if let Some(exit) = err.downcast_ref::<TaskExit>() {
             return Some(exit.clone());
         }
@@ -85,7 +87,7 @@ impl TaskExit {
                 .cloned();
         }
         err.downcast_ref::<EvalError>()
-            .and_then(Self::from_eval_error)
+            .and_then(|e| Self::from_eval_error(e, signals))
     }
 
     /// Print the message the way the task runner would have, then the
@@ -202,14 +204,23 @@ t = task(implementation = _impl)
     #[test]
     fn native_task_exit_downcasts_but_plain_errors_do_not() {
         let exit = starlark::Error::new_native(anyhow::Error::new(TaskExit::error("x")));
-        assert_eq!(TaskExit::from_starlark(&exit), Some(TaskExit::error("x")));
+        assert_eq!(
+            TaskExit::from_starlark(&exit, &Signals::new()),
+            Some(TaskExit::error("x"))
+        );
         let plain = starlark::Error::new_native(anyhow::anyhow!("x"));
-        assert_eq!(TaskExit::from_starlark(&plain), None);
+        assert_eq!(TaskExit::from_starlark(&plain, &Signals::new()), None);
 
         let wrapped: anyhow::Error = EvalError::from(exit).into();
-        assert_eq!(TaskExit::from_anyhow(&wrapped).map(|e| e.code), Some(1));
+        assert_eq!(
+            TaskExit::from_anyhow(&wrapped, &Signals::new()).map(|e| e.code),
+            Some(1)
+        );
         let context = wrapped.context("outer");
-        assert_eq!(TaskExit::from_anyhow(&context).map(|e| e.code), Some(1));
+        assert_eq!(
+            TaskExit::from_anyhow(&context, &Signals::new()).map(|e| e.code),
+            Some(1)
+        );
     }
 
     /// A feature impl runs before the task runner is involved, so its exit
@@ -231,7 +242,10 @@ t = task(implementation = _impl)
         .with_features(&["Guard"])
         .run_task(0)
         .expect_err("a feature impl exit is an error to the task runner");
-        assert_eq!(TaskExit::from_anyhow(&err).map(|e| e.code), Some(4));
+        assert_eq!(
+            TaskExit::from_anyhow(&err, &Signals::new()).map(|e| e.code),
+            Some(4)
+        );
     }
 
     /// A task body that raises `error_type` from a helper, declared at the top
@@ -274,7 +288,7 @@ t = task(implementation = _impl)
         let msg = format!("{err:#}");
         assert!(msg.contains("Raised: no ack"), "{msg}");
         assert!(msg.contains("Traceback"), "{msg}");
-        assert_eq!(TaskExit::from_anyhow(&err), None);
+        assert_eq!(TaskExit::from_anyhow(&err, &Signals::new()), None);
     }
 
     #[test]
@@ -296,7 +310,7 @@ t = task(implementation = _impl)
         .with_features(&["Guard"])
         .run_task(0)
         .expect_err("a feature impl refusal is an error to the task runner");
-        let exit = TaskExit::from_anyhow(&err).expect("the refusal's exit");
+        let exit = TaskExit::from_anyhow(&err, &Signals::new()).expect("the refusal's exit");
         assert_eq!((exit.code, exit.message.as_deref()), (1, Some("not here")));
     }
 

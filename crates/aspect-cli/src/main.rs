@@ -68,7 +68,7 @@ use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
-use axl_runtime::{SignalKind, Signals};
+use axl_runtime::{SignalKind, SignalOrigin, Signals};
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
@@ -389,7 +389,7 @@ fn main() -> ExitCode {
         Err(err) => {
             // An exit raised from a feature or config impl never reaches the
             // task runner, so it is recognized here instead.
-            if let Some(exit) = TaskExit::from_anyhow(&err) {
+            if let Some(exit) = TaskExit::from_anyhow(&err, Signals::global()) {
                 // `{err:#}` walks the chain to the Starlark error, whose
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
@@ -419,37 +419,45 @@ fn main() -> ExitCode {
     }
 }
 
-/// How long, once the task has ended or the second signal has arrived, the
-/// children still stopping get before the process exits regardless. On CI it
-/// must fit inside the host's own cancel window: the Buildkite agent SIGKILLs
-/// 9s after its SIGTERM and GitHub Actions escalates 7.5s after its SIGINT. Off
-/// CI it covers a terminated child's grace (`CHILD_GRACE`, 3s) plus a beat for
-/// the kernel to settle.
-fn exit_drain() -> Duration {
+/// How long the AXL body gets, after a signal, to return on its own before
+/// it is ended. Long enough for an interrupted bazel to exit and its events
+/// to drain; short enough, with the exit window after it, to fit the CI cancel
+/// windows (the Buildkite agent SIGKILLs 9s after its SIGTERM, GitHub Actions
+/// escalates 7.5s after its SIGINT).
+fn body_grace() -> Duration {
     if on_recognized_ci() {
-        Duration::from_secs(5)
+        Duration::from_secs(3)
     } else {
-        Duration::from_secs(4)
+        Duration::from_secs(5)
     }
+}
+
+/// The body's grace when nothing was bound to the root at the signal: a task
+/// at a prompt or in a pure computation has nothing to wait for.
+const PROMPT_GRACE: Duration = Duration::from_secs(1);
+
+/// How long, once the task has ended or the second signal has arrived, the
+/// children still stopping get before the process exits regardless.
+fn exit_drain() -> Duration {
+    Duration::from_secs(4)
 }
 
 /// Record every Ctrl+C / SIGTERM into the run's cancellation state, and own
 /// the escalation that no AXL code can defeat.
 ///
-/// The first signal only cancels the root token (or the token a task took
-/// with `ctx.cancellation.notify()`); the task unwinds cooperatively and
-/// `run()` waits for the children's stop sequences. This task then waits for
-/// one of two things:
+/// The first signal only cancels the root token: every child bound to it
+/// starts stopping, and the AXL body is left to end on its own, its waits
+/// returning as the children go. This task then gives the body a deadline:
+/// [`body_grace`], or [`PROMPT_GRACE`] when nothing was bound to the root at
+/// the signal (a prompt, a pure computation), since there is nothing to wait
+/// for. Past it the body is ended at its next blocking call with 128 + the
+/// signal, hooks and defers still running. Then, or on a second signal at
+/// any point, the backstop: kill every child still alive and exit at once.
 ///
-///   - **a second signal**, a human hammering Ctrl+C or a host escalating:
-///     kill every child still alive and exit at once with 128 + the signal;
-///   - **the exit window passing after a terminate**: same, so a hung task
-///     cannot keep aspect-cli alive past a CI cancel.
-///
-/// On CI the bazel client is spared the kill either way (the host's own
-/// escalation is the last rung there): a SIGKILL landing during sandbox
-/// cleanup strands `_moved_trash_dir` and poisons the next command on the
-/// runner (bazelbuild/bazel#23880).
+/// On CI the bazel client is spared the kill (the host's own escalation is
+/// the last rung there): a SIGKILL landing during sandbox cleanup strands
+/// `_moved_trash_dir` and poisons the next command on the runner
+/// (bazelbuild/bazel#23880).
 ///
 /// Runs as a detached tokio task for the life of the process. Per tokio's
 /// docs, dropping a `Signal` stream does not uninstall the OS handler, so it
@@ -457,24 +465,30 @@ fn exit_drain() -> Duration {
 /// listener, and aspect-cli unkillable except by SIGKILL.
 fn install_signal_watcher() {
     tokio::spawn(async {
-        let Some(first) = next_signal().await else {
+        let Some((first, origin)) = next_signal().await else {
             return;
         };
         let signals = Signals::global();
-        signals.record(first);
+        signals.record(first, origin);
         errln!("aspect-cli: {}ed, stopping…", first.name());
 
-        let second = async {
-            let kind = next_signal().await.unwrap_or(first);
-            signals.record(kind);
-            kind
+        let grace = if signals.has_live_children() {
+            body_grace()
+        } else {
+            PROMPT_GRACE
         };
-        let kind = match first {
-            SignalKind::Interrupt => second.await,
-            SignalKind::Terminate => tokio::select! {
-                kind = second => kind,
-                _ = tokio::time::sleep(exit_drain()) => first,
-            },
+        let kind = tokio::select! {
+            kind = another_signal(first) => kind,
+            _ = tokio::time::sleep(grace) => {
+                // The body did not return on its own: end it, then give the
+                // exit path (hooks, defers, draining) the exit window before
+                // the backstop.
+                signals.force();
+                tokio::select! {
+                    kind = another_signal(first) => kind,
+                    _ = tokio::time::sleep(exit_drain()) => first,
+                }
+            }
         };
         let killed = signals.kill_all(on_recognized_ci());
         if killed > 0 {
@@ -485,17 +499,65 @@ fn install_signal_watcher() {
     });
 }
 
-/// The next OS request to stop, as the kind the runtime understands.
-/// `None` only if no handler could be installed at all.
+/// A repeat of the request: recorded, and the backstop's cue.
+async fn another_signal(first: SignalKind) -> SignalKind {
+    let (kind, origin) = next_signal()
+        .await
+        .unwrap_or((first, SignalOrigin::Process));
+    Signals::global().record(kind, origin);
+    kind
+}
+
+/// The next OS request to stop, as the kind the runtime understands, and
+/// where it came from. `None` only if no handler could be installed at all.
+///
+/// The origin matters because a terminal delivers Ctrl+C to the whole
+/// foreground process group, children included, while `kill(2)` from a CI
+/// runner reaches this process alone. tokio's streams do not expose the
+/// `siginfo`, so a sigaction hook registered beside them (signal-hook chains
+/// the handlers) records each signal's `si_pid`: a sending process fills it
+/// in, the kernel leaves it zero, which for these two signals means the
+/// terminal. (`si_code` would be the textbook field, but macOS reports 0 for
+/// `kill(2)` too, so it cannot tell the two apart.)
 #[cfg(unix)]
-async fn next_signal() -> Option<SignalKind> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicI32, Ordering};
     use tokio::signal::unix::{Signal, SignalKind as Unix, signal};
     use tokio::sync::Mutex;
+
+    /// The pid of the last signal's sender; 0 when the kernel sent it.
+    static LAST_SENDER: AtomicI32 = AtomicI32::new(0);
+
+    fn sender_of(info: &libc::siginfo_t) -> i32 {
+        // Linux keeps the sender behind an accessor into the siginfo union,
+        // which is zero for a kernel-generated signal; the BSDs expose it as
+        // a field.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: `si_pid` is valid to read for SIGINT and SIGTERM, whose
+        // siginfo carries the kill layout (or is zeroed by the kernel).
+        unsafe {
+            info.si_pid()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        info.si_pid
+    }
 
     // Installed once and kept for the life of the process (see above).
     static STREAMS: OnceLock<Mutex<(Option<Signal>, Option<Signal>)>> = OnceLock::new();
     let streams = STREAMS.get_or_init(|| {
+        for signo in [libc::SIGINT, libc::SIGTERM] {
+            // SAFETY: the action only stores an integer into an atomic, which
+            // is async-signal-safe.
+            let registered = unsafe {
+                signal_hook_registry::register_sigaction(signo, |info: &libc::siginfo_t| {
+                    LAST_SENDER.store(sender_of(info), Ordering::SeqCst);
+                })
+            };
+            if let Err(e) = registered {
+                tracing::warn!("failed to install the signal-origin hook for {signo}: {e}");
+            }
+        }
         let interrupt = signal(Unix::interrupt())
             .map_err(|e| tracing::warn!("failed to install the SIGINT handler: {e}"))
             .ok();
@@ -507,25 +569,33 @@ async fn next_signal() -> Option<SignalKind> {
     });
     let mut guard = streams.lock().await;
     let (interrupt, terminate) = &mut *guard;
-    match (interrupt.as_mut(), terminate.as_mut()) {
-        (Some(int), Some(term)) => Some(tokio::select! {
+    let kind = match (interrupt.as_mut(), terminate.as_mut()) {
+        (Some(int), Some(term)) => tokio::select! {
             _ = int.recv() => SignalKind::Interrupt,
             _ = term.recv() => SignalKind::Terminate,
-        }),
+        },
         (Some(int), None) => {
             int.recv().await;
-            Some(SignalKind::Interrupt)
+            SignalKind::Interrupt
         }
         (None, Some(term)) => {
             term.recv().await;
-            Some(SignalKind::Terminate)
+            SignalKind::Terminate
         }
-        (None, None) => None,
-    }
+        (None, None) => return None,
+    };
+    let origin = if LAST_SENDER.load(Ordering::SeqCst) != 0 {
+        SignalOrigin::Process
+    } else {
+        SignalOrigin::Terminal
+    };
+    Some((kind, origin))
 }
 
+/// Console events never reach a child spawned with `CREATE_NEW_PROCESS_GROUP`,
+/// so on Windows the runtime is always the only one signalling children.
 #[cfg(windows)]
-async fn next_signal() -> Option<SignalKind> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
     use std::sync::OnceLock;
     use tokio::signal::windows::{
         CtrlBreak, CtrlC, CtrlClose, CtrlLogoff, CtrlShutdown, ctrl_break, ctrl_c, ctrl_close,
@@ -555,21 +625,22 @@ async fn next_signal() -> Option<SignalKind> {
     if c.is_none() && brk.is_none() && close.is_none() && logoff.is_none() && shutdown.is_none() {
         return None;
     }
-    Some(tokio::select! {
+    let kind = tokio::select! {
         _ = async { match c.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Interrupt,
         _ = async { match brk.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Interrupt,
         _ = async { match close.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Terminate,
         _ = async { match logoff.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Terminate,
         _ = async { match shutdown.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Terminate,
-    })
+    };
+    Some((kind, SignalOrigin::Process))
 }
 
 #[cfg(not(any(unix, windows)))]
-async fn next_signal() -> Option<SignalKind> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
     tokio::signal::ctrl_c()
         .await
         .ok()
-        .map(|_| SignalKind::Interrupt)
+        .map(|_| (SignalKind::Interrupt, SignalOrigin::Process))
 }
 
 #[cfg(test)]

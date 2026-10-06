@@ -20,6 +20,7 @@ resolution. (The companion case — BES routed through Bazel via
 `bazel/flags.axl` instead.)
 """
 
+load("@std//time.axl", "monotonic")
 load("../private/lib/aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
 load("../private/lib/environment.axl", "info", "warn")
 load("../private/lib/text.axl", "join_url")
@@ -150,13 +151,16 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
 _DRAIN_TIMEOUT_MS = 5000
 
 def drain_bes_sinks(ctx, sinks: list) -> None:
-    """Give every sink a bounded window to finish forwarding. Registered as a
-    `ctx.defer` by `collect_bes_sinks`, so it runs after a Ctrl+C or CI cancel
-    ended the task before its own `sink.wait()`: the interrupted bazel has
-    written `BuildFinished`, and the backend should see it as interrupted
-    rather than time out. A no-op for a sink already waited on."""
+    """Give the sinks one bounded window, shared across all of them, to finish
+    forwarding. Registered as a `ctx.defer` by `collect_bes_sinks`, so it runs
+    after a Ctrl+C or CI cancel ended the task before its own `sink.wait()`:
+    the interrupted bazel has written `BuildFinished`, and the backend should
+    see it as interrupted rather than time out. A no-op for a sink already
+    waited on."""
+    deadline = monotonic() + _DRAIN_TIMEOUT_MS / 1000
     for sink in sinks:
-        if sink.wait(timeout_ms = _DRAIN_TIMEOUT_MS) == False:
+        remaining_ms = int(max(0, (deadline - monotonic()) * 1000))
+        if sink.wait(timeout_ms = remaining_ms) == False:
             warn(ctx.std, "build events to %s were not fully delivered within %ds" % (sink.uri, _DRAIN_TIMEOUT_MS // 1000))
 
 def bes_link_data(bazel_trait, rc, sinks: list, command: str = "build") -> dict:

@@ -10,6 +10,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 use super::{connect_tcp, host_of, remaining, timed};
+use crate::engine::cancellation::Signals;
 
 fn invalid_input(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -55,6 +56,7 @@ fn pem_config(pem: &[u8]) -> io::Result<Arc<ClientConfig>> {
 
 /// Connect to `addr` and finish the TLS handshake, all within `timeout`.
 pub(super) fn connect(
+    signals: &Signals,
     addr: &str,
     timeout: Option<Duration>,
     server_name: Option<&str>,
@@ -69,7 +71,7 @@ pub(super) fn connect(
         .map_err(|e| invalid_input(format!("server name {name:?}: {e}")))?;
 
     let deadline = timeout.map(|t| Instant::now() + t);
-    let mut sock = connect_tcp(addr, timeout)?;
+    let mut sock = connect_tcp(signals, addr, timeout)?;
     let mut conn = ClientConnection::new(config, name).map_err(io::Error::other)?;
     while conn.is_handshaking() {
         if let Some(d) = deadline {

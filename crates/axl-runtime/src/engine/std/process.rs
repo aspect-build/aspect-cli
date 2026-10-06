@@ -35,7 +35,10 @@ use starlark::values::typing::StarlarkNever;
 use super::stream;
 use crate::engine::cancellation::{Signals, Token};
 use crate::engine::children::{self, Bound, Target};
+use crate::engine::store::Env;
 use crate::eval::TaskExit;
+use starlark::eval::Evaluator;
+use std::sync::Arc;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Process>")]
@@ -156,15 +159,20 @@ impl Command {
 
     /// Spawn, bound to `cancellation` (the root unless given): cancelling
     /// that token terminates the child, and kills it after the grace.
-    fn try_spawn(&self, cancellation: NoneOr<&Token>) -> anyhow::Result<Child> {
+    fn try_spawn(
+        &self,
+        signals: &Arc<Signals>,
+        cancellation: NoneOr<&Token>,
+    ) -> anyhow::Result<Child> {
         let parent = match cancellation.into_option() {
             Some(token) => token.inner().clone(),
-            None => Signals::current().root().clone(),
+            None => signals.default_binding(),
         };
         // The spawn's borrow of `inner` ends with this statement, before
         // `describe` borrows it again for the error.
         let spawned = children::spawn(
             &mut self.inner.borrow_mut(),
+            signals,
             &parent,
             self.process_group.get(),
             children::Kind::Process,
@@ -177,8 +185,12 @@ impl Command {
         })
     }
 
-    fn try_status(&self, cancellation: NoneOr<&Token>) -> anyhow::Result<process::ExitStatus> {
-        let child = self.try_spawn(cancellation)?;
+    fn try_status(
+        &self,
+        signals: &Arc<Signals>,
+        cancellation: NoneOr<&Token>,
+    ) -> anyhow::Result<process::ExitStatus> {
+        let child = self.try_spawn(signals, cancellation)?;
         child
             .wait(None)
             .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))?
@@ -352,13 +364,16 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// sent a terminate signal, to its whole process group if it leads one,
     /// and killed three seconds later if it is still running. Bind to
     /// `ctx.cancellation.new()` to keep a child out of that and stop it
-    /// yourself.
+    /// yourself. A child spawned from a post-task hook or `ctx.defer` after
+    /// a cancel is cleanup, not part of what was cancelled: without an
+    /// explicit token it gets one of its own and runs to completion.
     fn spawn<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<&'v Token>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        cmd.try_spawn(cancellation)
+        cmd.try_spawn(&Env::from_eval(eval)?.signals, cancellation)
     }
 
     /// Executes a command as a child process, waiting for it to finish and collecting its status.
@@ -369,9 +384,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     fn status<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<&'v Token>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<ExitStatus> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let status = cmd.try_status(cancellation)?;
+        let status = cmd.try_status(&Env::from_eval(eval)?.signals, cancellation)?;
         Ok(ExitStatus(status))
     }
 }
@@ -394,12 +410,14 @@ impl Child {
         children::wait(&self.inner, &self.bound, timeout)
     }
 
-    /// The child's pid, or the group it leads, for a signal sent now.
-    fn target(&self) -> anyhow::Result<Target> {
+    /// The child's pid, or the group it leads, for a signal sent now. `None`
+    /// once the child was reaped: its pid may be someone else's by then, so a
+    /// signal after `wait()` goes nowhere.
+    fn target(&self) -> anyhow::Result<Option<Target>> {
         if self.inner.borrow().is_none() {
             return Err(anyhow::anyhow!("child is no longer active"));
         }
-        Ok(self.bound.target())
+        Ok((!self.bound.exited()).then(|| self.bound.target()))
     }
 }
 
@@ -493,7 +511,10 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn cancellation<'v>(this: values::Value<'v>) -> anyhow::Result<Token> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        Ok(Token::new(child.bound.token().clone()))
+        Ok(Token::new(
+            child.bound.token().clone(),
+            child.bound.signals().clone(),
+        ))
     }
 
     /// Send the child an interrupt now, what Ctrl+C at a terminal delivers
@@ -501,7 +522,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// it leads one. One signal, no escalation; `wait()` to see the result.
     fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        children::os::interrupt(child.target()?);
+        if let Some(target) = child.target()? {
+            children::os::interrupt(target);
+        }
         Ok(NoneType)
     }
 
@@ -510,7 +533,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// `wait()` to see the result.
     fn terminate<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        children::os::terminate(child.target()?);
+        if let Some(target) = child.target()? {
+            children::os::terminate(target);
+        }
         Ok(NoneType)
     }
 
@@ -519,7 +544,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// exited, it is a no-op.
     fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        children::os::kill(child.target()?);
+        if let Some(target) = child.target()? {
+            children::os::kill(target);
+        }
         Ok(NoneType)
     }
 
@@ -533,7 +560,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// the parent waits for the child to exit.
     ///
     /// The wait ends the task instead if `ctx.cancellation.root` is
-    /// cancelled meanwhile and no `notify()` is in effect; the child is
+    /// cancelled meanwhile and no `intercept()` is in effect; the child is
     /// already stopping by then.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
@@ -727,7 +754,10 @@ mod tests {
             process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
-        let err_msg = cmd.try_spawn(NoneOr::None).unwrap_err().to_string();
+        let err_msg = cmd
+            .try_spawn(&Signals::new(), NoneOr::None)
+            .unwrap_err()
+            .to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
     }
@@ -740,7 +770,10 @@ mod tests {
             process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
-        let err_msg = cmd.try_status(NoneOr::None).unwrap_err().to_string();
+        let err_msg = cmd
+            .try_status(&Signals::new(), NoneOr::None)
+            .unwrap_err()
+            .to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
     }

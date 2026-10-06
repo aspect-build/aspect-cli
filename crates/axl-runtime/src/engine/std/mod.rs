@@ -16,7 +16,12 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
 use crate::engine::error::{IoError, NativeError};
+use starlark::StarlarkResultExt;
+use starlark::values::ValueLike;
 
 mod env;
 mod fs;
@@ -28,7 +33,17 @@ pub(crate) mod watch;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]
-pub struct Std {}
+pub struct Std {
+    /// The run's cancellation state, for the members that block.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
+}
+
+impl Std {
+    pub fn new(signals: Arc<Signals>) -> Self {
+        Self { signals }
+    }
+}
 
 starlark_simple_value!(Std);
 
@@ -49,7 +64,8 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
 
     #[starlark(attribute)]
     fn io<'v>(this: values::Value<'v>) -> anyhow::Result<io::Stdio> {
-        Ok(io::Stdio::new())
+        let this = this.downcast_ref_err::<Std>().into_anyhow_result()?;
+        Ok(io::Stdio::new(this.signals.clone()))
     }
 
     #[starlark(attribute)]

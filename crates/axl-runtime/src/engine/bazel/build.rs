@@ -35,6 +35,7 @@ use starlark::values::starlark_value;
 use axl_proto::build_event_stream::BuildEvent;
 
 use crate::engine::r#async::rt::AsyncRuntime;
+use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Bound, Recv, recv_cancellable};
 use tokio_util::sync::CancellationToken;
 
@@ -408,10 +409,12 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
     fn wait<'v>(
         this: Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<i32>,
+        eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<bool>> {
         let sink = this
             .downcast_ref_err::<BuildEventSink>()
             .into_anyhow_result()?;
+        let signals = crate::engine::store::Env::from_eval(eval)?.signals.clone();
         let timeout = match timeout_ms.into_option() {
             Some(ms) if ms < 0 => anyhow::bail!("timeout_ms must not be negative: {ms}"),
             Some(ms) => Some(Duration::from_millis(ms as u64)),
@@ -428,7 +431,7 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
         };
         let deadline = timeout.map(|t| std::time::Instant::now() + t);
         let finished = |done: &dyn Fn() -> bool| -> Result<bool, crate::eval::TaskExit> {
-            crate::engine::cancellation::Signals::current().block(async {
+            signals.block(async {
                 loop {
                     if done() {
                         return true;
@@ -508,6 +511,8 @@ pub struct BuildEventIter {
     config: IterConfig,
     #[allocative(skip)]
     state: Arc<Mutex<IterState>>,
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 impl std::fmt::Debug for IterConfig {
@@ -529,13 +534,14 @@ impl std::fmt::Debug for IterState {
 }
 
 impl BuildEventIter {
-    pub fn new(kinds: Option<HashSet<i32>>, tick_ms: Option<u64>) -> Self {
+    pub fn new(signals: Arc<Signals>, kinds: Option<HashSet<i32>>, tick_ms: Option<u64>) -> Self {
         Self {
             config: IterConfig {
                 kinds: kinds.map(Arc::new),
                 tick_ms,
             },
             state: Arc::new(Mutex::new(IterState::Pending)),
+            signals,
         }
     }
 
@@ -626,24 +632,28 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
 
         // Heartbeat mode yields a Starlark `None` when the stream goes quiet
         // for `tick_ms`, so the caller's loop keeps ticking; blocking mode
-        // yields events until the stream closes. Both are safe points: once
-        // the root token is cancelled the iterator ends (the client has its
-        // SIGINT by then), and the loop's next call raises the task's exit.
-        match recv_cancellable(&*recv, self.config.tick_ms.map(Duration::from_millis)) {
+        // yields events until the stream closes. Neither ends on a cancel:
+        // the loop decides when to leave. A cancelled root only stops the
+        // heartbeat's wait, so the evaluator's own check ends a loop that is
+        // not watching within a few ticks rather than after that many.
+        let received = match self.config.tick_ms {
+            Some(ms) => recv_cancellable(&self.signals, &*recv, Some(Duration::from_millis(ms))),
+            None => match recv.recv() {
+                Ok(envelope) => Recv::Item(envelope),
+                Err(_) => Recv::Closed,
+            },
+        };
+        match received {
             Recv::Item(envelope) => {
                 *self.state.lock().unwrap() = IterState::Live { recv };
                 Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
             }
-            Recv::Tick => {
+            Recv::Tick | Recv::Cancelled => {
                 *self.state.lock().unwrap() = IterState::Live { recv };
                 Some(Value::new_none())
             }
             Recv::Closed => {
                 *self.state.lock().unwrap() = IterState::Done;
-                None
-            }
-            Recv::Cancelled => {
-                *self.state.lock().unwrap() = IterState::Live { recv };
                 None
             }
         }
@@ -842,6 +852,10 @@ pub struct Build {
     #[allocative(skip)]
     bound: Bound,
 
+    /// The run's cancellation state the client was bound under.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
+
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
@@ -874,10 +888,11 @@ impl Build {
         stderr: Stdio,
         directory: Option<String>,
         announce: AnnounceSpawn,
+        signals: Arc<Signals>,
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info()?;
+        let (pid, version) = super::info::server_info(&signals)?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -981,9 +996,14 @@ impl Build {
 
         // Bound to `cancellation` (the root unless the task said otherwise):
         // cancelling it sends the client one SIGINT.
-        let (child, bound) =
-            children::spawn(&mut cmd, cancellation, None, children::Kind::Bazel)
-                .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+        let (child, bound) = children::spawn(
+            &mut cmd,
+            &signals,
+            cancellation,
+            None,
+            children::Kind::Bazel,
+        )
+        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
@@ -1083,6 +1103,7 @@ impl Build {
             execlog_stream: RefCell::new(execlog_stream),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
+            signals,
             span: RefCell::new(span),
         })
     }
@@ -1157,6 +1178,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         Ok(crate::engine::cancellation::Token::new(
             build.bound.token().clone(),
+            build.signals.clone(),
         ))
     }
 
@@ -1164,8 +1186,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// going through its token.
     fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
-        let pid = build.child.borrow().id();
-        children::os::interrupt(children::Target::Pid(pid));
+        // Nothing after a reap: the pid may be someone else's by then.
+        if !build.bound.exited() {
+            let pid = build.child.borrow().id();
+            children::os::interrupt(children::Target::Pid(pid));
+        }
         Ok(NoneType)
     }
 
@@ -1207,7 +1232,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// events, because the build event stream retains its buffer.
     ///
     /// The wait ends the task instead if `ctx.cancellation.root` is
-    /// cancelled meanwhile and no `notify()` is in effect; the client has
+    /// cancelled meanwhile and no `intercept()` is in effect; the client has
     /// its SIGINT by then.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;

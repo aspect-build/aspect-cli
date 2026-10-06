@@ -74,18 +74,14 @@ impl<'v> values::StarlarkValue<'v> for FutureIterator {
     }
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         let stream: Arc<RwLock<JoinSet<_>>> = Arc::clone(&self.stream);
-        // A safe point: once the root token is cancelled the iterator ends
-        // and the loop's next call raises the task's exit.
-        let out = crate::engine::cancellation::Signals::current()
-            .block(async {
-                tokio::task::spawn(async move {
-                    let mut stream = stream.write().await;
-                    stream.join_next().await
-                })
-                .await
-                .unwrap()
+        let out = self.rt.block_on(async {
+            tokio::task::spawn(async move {
+                let mut stream = stream.write().await;
+                stream.join_next().await
             })
-            .ok()?;
+            .await
+            .unwrap()
+        });
         let value = out?.ok()?;
         // TODO: Should stream stop when any of the futures result in error?
         Some(value.ok()?.alloc_value_fut(heap))

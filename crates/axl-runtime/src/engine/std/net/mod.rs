@@ -122,8 +122,8 @@ pub(super) const NET_SLICE: Duration = Duration::from_millis(100);
 
 /// The `io::Error` a cancelled wait carries: the task's exit, which
 /// [`io_error`] turns back into the exit rather than a `std.io.Error`.
-pub(super) fn cancelled() -> io::Error {
-    io::Error::other(Signals::current().exit_for())
+pub(super) fn cancelled(signals: &Signals) -> io::Error {
+    io::Error::other(signals.exit_for())
 }
 
 /// Turn a failed network call into the error AXL sees: the task's exit when
@@ -145,6 +145,7 @@ pub(super) fn io_error(e: io::Error) -> anyhow::Error {
 /// its own. A safe point: once the root token is cancelled the task's exit
 /// comes back.
 fn within<T: Send + 'static>(
+    signals: &Signals,
     deadline: Option<Instant>,
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
@@ -152,10 +153,9 @@ fn within<T: Send + 'static>(
     thread::spawn(move || {
         let _ = tx.send(f());
     });
-    let signals = Signals::current();
     loop {
         if signals.should_unwind() {
-            return Err(cancelled());
+            return Err(cancelled(signals));
         }
         let slice = match deadline {
             Some(d) => remaining(d)?.min(NET_SLICE),
@@ -176,17 +176,23 @@ fn within<T: Send + 'static>(
 /// Connect to `addr` (`"host:port"`), trying each address it resolves to in
 /// turn within one budget, and returning the last failure. A safe point, via
 /// [`within`].
-fn connect_tcp(addr: &str, timeout: Option<Duration>) -> io::Result<std::net::TcpStream> {
+fn connect_tcp(
+    signals: &Signals,
+    addr: &str,
+    timeout: Option<Duration>,
+) -> io::Result<std::net::TcpStream> {
     let deadline = timeout.map(|t| Instant::now() + t);
     let owned = addr.to_owned();
-    let addrs: Vec<SocketAddr> = within(deadline, move || Ok(owned.to_socket_addrs()?.collect()))?;
+    let addrs: Vec<SocketAddr> = within(signals, deadline, move || {
+        Ok(owned.to_socket_addrs()?.collect())
+    })?;
     let mut last = io::Error::new(
         io::ErrorKind::InvalidInput,
         format!("{addr} resolved to no addresses"),
     );
     for a in &addrs {
         let a = *a;
-        let attempt = within(deadline, move || match deadline {
+        let attempt = within(signals, deadline, move || match deadline {
             None => std::net::TcpStream::connect(a),
             Some(d) => std::net::TcpStream::connect_timeout(&a, remaining(d)?),
         });

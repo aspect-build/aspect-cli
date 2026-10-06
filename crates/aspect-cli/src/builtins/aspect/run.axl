@@ -86,7 +86,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
         status = build_status,
     )
 
-def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_environment: dict = {}, cancellation: cancellation.Token | None = None) -> std.process.Child | None:
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_environment: dict = {}) -> std.process.Child | None:
     """Resolve the entrypoint and spawn the target; None when unresolvable."""
     entrypoint = r.determine_entrypoint(target)
     if entrypoint == None:
@@ -101,18 +101,15 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         ),
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
-    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd, process_group = watching, extra_environment = extra_environment, cancellation = cancellation)
+    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd, process_group = watching, extra_environment = extra_environment)
 
 def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
     """Rebuild on workspace changes, incrementally updating protocol-aware
-    targets and restarting other targets. Runs until Ctrl-C, which is the
-    session's normal ending: the task owns it (`ctx.cancellation.notify()`),
-    stops the watched target gracefully, and returns 0."""
-
-    # The watched target's own token: a child of root, so it is still bound
-    # to the run, but the supervisor can stop it without touching anything else.
-    target_scope = ctx.cancellation.root.child()
-    ws = watch.new(ctx, rc = rc, cancellation = ctx.cancellation.notify())
+    targets and restarting other targets. Runs until Ctrl-C, the session's
+    normal ending: the watched target and any rebuild in flight are bound to
+    the root, so they are already stopping; the loop waits for the target and
+    returns 0."""
+    ws = watch.new(ctx, rc = rc)
     detector = changedetector.new(ctx, r, target, ws.root)
     sources = source_tracker.new(ctx, ws.root, ws.ignored_paths, ws.ignored_patterns)
     ibp_supported = incremental_build_protocol_host.is_supported(ctx.std)
@@ -142,7 +139,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
     supervisor = watch_supervisor.new(
         ctx,
-        lambda environment: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_environment = environment, cancellation = target_scope),
+        lambda environment: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_environment = environment),
         candidate_factory = protocol_candidates,
     )
 

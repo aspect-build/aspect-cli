@@ -234,6 +234,7 @@ fn grpc_server_handle_methods(registry: &mut MethodsBuilder) {
     fn drain_and_quit<'v>(
         this: Value<'v>,
         #[starlark(require = named)] timeout: Option<Value<'v>>,
+        eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let h = this
             .downcast_ref::<GrpcServerHandle>()
@@ -251,16 +252,18 @@ fn grpc_server_handle_methods(registry: &mut MethodsBuilder) {
         let timeout = duration_from_value(timeout)?;
         // A safe point: once the root token is cancelled the task's exit
         // comes back instead.
-        crate::engine::cancellation::Signals::current().block(async move {
-            match timeout {
-                None => {
-                    let _ = done.await;
+        crate::engine::store::Env::from_eval(eval)?
+            .signals
+            .block(async move {
+                match timeout {
+                    None => {
+                        let _ = done.await;
+                    }
+                    Some(d) => {
+                        let _ = tokio::time::timeout(d, done).await;
+                    }
                 }
-                Some(d) => {
-                    let _ = tokio::time::timeout(d, done).await;
-                }
-            }
-        })?;
+            })?;
 
         Ok(NoneType)
     }

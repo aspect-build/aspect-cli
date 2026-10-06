@@ -19,7 +19,7 @@ pub mod trace;
 
 pub use eval::TaskExit;
 
-pub use engine::cancellation::{Kind as SignalKind, Signals};
+pub use engine::cancellation::{Kind as SignalKind, Origin as SignalOrigin, Signals};
 
 #[cfg(test)]
 pub mod test;

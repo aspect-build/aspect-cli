@@ -7,15 +7,20 @@
 //! sequence is what cancellation means for that kind of process, and the
 //! only thing the runtime decides:
 //!
-//! - a plain process: terminate (SIGTERM, to its whole process group when it
-//!   leads one; a console break on Windows), then kill whatever is still alive
-//!   after [`CHILD_GRACE`];
+//! - a plain process: the usual unix escalation, each to its whole process
+//!   group when it leads one: interrupt (SIGINT; a console break on Windows),
+//!   then terminate (SIGTERM) after [`CHILD_GRACE`], then kill (SIGKILL)
+//!   after another;
 //! - a bazel client: one interrupt (SIGINT), bazel's own graceful cancel, and
 //!   nothing more. Draining its build events afterwards is AXL's job.
 //!
 //! The waits here are the safe points for the default ending: each runs under
 //! [`Signals::block`], so a wait on a child ends the task once the root is
 //! cancelled. The children themselves are already stopping by then.
+//!
+//! A child that shares our process group already has a signal the terminal
+//! delivered (`Origin::Terminal`); the sequences skip the signal it already
+//! has rather than send it twice.
 //!
 //! No registry of PIDs exists. [`Signals`] keeps the stop states only so that
 //! process exit can wait for sequences in flight and the backstop can kill
@@ -37,8 +42,24 @@ use crate::eval::TaskExit;
 
 pub use os::Target;
 
-/// How long a terminated process gets to exit before it is killed.
-pub const CHILD_GRACE: Duration = Duration::from_secs(3);
+/// How long a signalled process gets to exit before the next rung: SIGINT,
+/// then SIGTERM, then SIGKILL.
+pub const CHILD_GRACE: Duration = Duration::from_millis(1500);
+
+/// Bazel's own Ctrl+C sequence (https://bazel.build/run/cancellation): the
+/// first SIGINT cancels the command gracefully, the second is still graceful,
+/// the third makes the client kill its server and exit. The runtime replays
+/// it with these timings: a tick between SIGINTs, a grace after the third
+/// before a SIGKILL, and a beat after the kill for the kernel to settle.
+///
+/// On CI the sequence stops after the second SIGINT. Runners do not reap our
+/// process tree, so the only thing that could hard-kill bazel mid-cleanup is
+/// us, and a `KillServerProcess` or SIGKILL landing during sandbox setup
+/// strands a sandbox tree that poisons the next command on the runner
+/// (bazelbuild/bazel#23880). The graceful path lets `afterCommand` finish.
+pub const BAZEL_SIGINT_TICK: Duration = Duration::from_millis(150);
+pub const BAZEL_SIGINT_GRACE: Duration = Duration::from_secs(3);
+pub const BAZEL_POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// How often a wait checks on its child.
 const POLL: Duration = Duration::from_millis(25);
@@ -56,6 +77,7 @@ pub(crate) struct Stop {
     group: Option<i32>,
     kind: Kind,
     token: CancellationToken,
+    signals: Arc<Signals>,
     /// The child was reaped by a wait, so its pid may be reused: never
     /// signal it again.
     exited: AtomicBool,
@@ -84,11 +106,41 @@ impl Stop {
         self.kind == Kind::Bazel
     }
 
-    /// The backstop's rung: kill outright.
+    /// The backstop's rung: kill outright, unless the child is already gone.
     pub(crate) fn kill(&self) {
-        if !self.exited() {
+        if !self.gone() {
             os::kill(self.target());
         }
+    }
+
+    /// The child has gone, as far as we can tell without reaping it. For a
+    /// process group that means every member: a shell exits on SIGINT while
+    /// the jobs it started with `&` ignore it, so the leader going is not
+    /// the group going. (An unreaped leader keeps its group non-empty, so the
+    /// remaining rungs still run; they are harmless on an empty group.)
+    fn gone(&self) -> bool {
+        match self.group {
+            Some(group) => !os::is_running(Target::Group(group)),
+            None => self.exited() || os::has_exited(self.pid),
+        }
+    }
+
+    /// Wait up to `grace` for the child to go, checking every [`POLL`].
+    async fn linger(&self, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if self.gone() {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        self.gone()
+    }
+
+    /// Whether a terminal already delivered the signal to this child: it
+    /// shares our process group, and the signal came from the terminal.
+    fn already_signalled(&self) -> bool {
+        self.group.is_none() && self.signals.group_signalled()
     }
 
     /// What cancellation means for this child. Runs once, on its runtime
@@ -98,27 +150,57 @@ impl Stop {
             return;
         }
         match self.kind {
-            Kind::Bazel => {
-                os::interrupt(Target::Pid(self.pid));
-            }
-            Kind::Process => {
-                let target = self.target();
-                os::terminate(target);
-                let deadline = Instant::now() + CHILD_GRACE;
-                while Instant::now() < deadline {
-                    if self.exited() || os::has_exited(self.pid) {
-                        break;
-                    }
-                    tokio::time::sleep(POLL).await;
-                }
-                // A group is killed even once its leader is gone, for the
-                // descendants; a lone pid only while it is still ours.
-                if self.group.is_some() || !(self.exited() || os::has_exited(self.pid)) {
-                    os::kill(target);
-                }
-            }
+            Kind::Bazel => self.stop_bazel().await,
+            Kind::Process => self.stop_process().await,
         }
         self.finished.store(true, Ordering::SeqCst);
+    }
+
+    /// Interrupt, terminate, kill, with [`CHILD_GRACE`] between each. A child
+    /// the terminal already interrupted starts at the grace.
+    async fn stop_process(&self) {
+        let target = self.target();
+        if !self.already_signalled() {
+            os::interrupt(target);
+        }
+        if self.linger(CHILD_GRACE).await {
+            return;
+        }
+        os::terminate(target);
+        if self.linger(CHILD_GRACE).await {
+            return;
+        }
+        os::kill(target);
+    }
+
+    /// Bazel's Ctrl+C sequence (see [`BAZEL_SIGINT_TICK`]). A terminal's
+    /// SIGINT counts as the first rung.
+    async fn stop_bazel(&self) {
+        let target = Target::Pid(self.pid);
+        let mut sent = if self.already_signalled() { 1 } else { 0 };
+        while sent < 2 {
+            if sent > 0 {
+                tokio::time::sleep(BAZEL_SIGINT_TICK).await;
+            }
+            if self.gone() {
+                return;
+            }
+            os::interrupt(target);
+            sent += 1;
+        }
+        if crate::ci::on_recognized_ci() {
+            return;
+        }
+        tokio::time::sleep(BAZEL_SIGINT_TICK).await;
+        if self.gone() {
+            return;
+        }
+        os::interrupt(target);
+        if self.linger(BAZEL_SIGINT_GRACE).await {
+            return;
+        }
+        os::kill(target);
+        tokio::time::sleep(BAZEL_POST_KILL_GRACE).await;
     }
 }
 
@@ -153,35 +235,54 @@ impl Bound {
         self.stop.target()
     }
 
+    /// The run's cancellation state this child belongs to.
+    pub fn signals(&self) -> &Arc<Signals> {
+        &self.stop.signals
+    }
+
+    /// Whether the child has been reaped. Its pid may belong to someone else
+    /// from then on, so nothing may be sent to it.
+    pub fn exited(&self) -> bool {
+        self.stop.exited()
+    }
+
     /// The child has been reaped. Its pid may be reused from here, so the
     /// stop sequence and the backstop leave it alone.
     pub fn mark_exited(&self) {
         self.stop.exited.store(true, Ordering::SeqCst);
-        Signals::current().forget(&self.stop);
+        self.stop.signals.forget(&self.stop);
     }
 }
 
 /// Bind a just-spawned child to `parent`: a `child()` token of its own and
 /// the runtime task that stops it when that token is cancelled. `group` is
 /// the process group the child leads, when it was spawned into one.
-pub fn bind(parent: &CancellationToken, pid: u32, group: Option<i32>, kind: Kind) -> Bound {
+pub fn bind(
+    signals: &Arc<Signals>,
+    parent: &CancellationToken,
+    pid: u32,
+    group: Option<i32>,
+    kind: Kind,
+) -> Bound {
     let token = parent.child_token();
     let stop = Arc::new(Stop {
         pid,
         group,
         kind,
         token: token.clone(),
+        signals: signals.clone(),
         exited: AtomicBool::new(false),
         finished: AtomicBool::new(false),
     });
-    let signals = Signals::current();
     signals.track(stop.clone());
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         let waiting = stop.clone();
+        // The binding stays tracked after its sequence: a bazel client the
+        // ladder left running on CI, or anything that ignored the kill, must
+        // still be found by the backstop. Only a reap lets go of it.
         handle.spawn(async move {
             waiting.token.cancelled().await;
             waiting.run().await;
-            signals.forget(&waiting);
         });
     }
     Bound { token, stop }
@@ -192,6 +293,7 @@ pub fn bind(parent: &CancellationToken, pid: u32, group: Option<i32>, kind: Kind
 /// to lead, if any.
 pub fn spawn(
     cmd: &mut Command,
+    signals: &Arc<Signals>,
     parent: &CancellationToken,
     group: Option<i32>,
     kind: Kind,
@@ -199,14 +301,13 @@ pub fn spawn(
     os::creation_flags(cmd);
     let child = cmd.spawn()?;
     let group = group.map(|g| if g == 0 { child.id() as i32 } else { g });
-    let bound = bind(parent, child.id(), group, kind);
+    let bound = bind(signals, parent, child.id(), group, kind);
     Ok((child, bound))
 }
 
 /// Spawn a bazel client bound to the root.
-pub fn spawn_bazel(cmd: &mut Command) -> io::Result<Spawned> {
-    let signals = Signals::current();
-    let (child, bound) = spawn(cmd, signals.root(), None, Kind::Bazel)?;
+pub fn spawn_bazel(cmd: &mut Command, signals: &Arc<Signals>) -> io::Result<Spawned> {
+    let (child, bound) = spawn(cmd, signals, signals.root(), None, Kind::Bazel)?;
     Ok(Spawned {
         child: RefCell::new(Some(child)),
         bound,
@@ -283,8 +384,11 @@ impl<T: Send + Clone> RecvSlice<T> for fibre::spmc::Receiver<T> {
 /// Receive from `recv`, checking the root token every [`POLL`], for at most
 /// `tick` when given. For iterators, which cannot raise: on `Cancelled` they
 /// end, and the loop's next call raises the task's exit.
-pub fn recv_cancellable<T>(recv: &impl RecvSlice<T>, tick: Option<Duration>) -> Recv<T> {
-    let signals = Signals::current();
+pub fn recv_cancellable<T>(
+    signals: &Signals,
+    recv: &impl RecvSlice<T>,
+    tick: Option<Duration>,
+) -> Recv<T> {
     let deadline = tick.map(|t| Instant::now() + t);
     loop {
         if signals.should_unwind() {
@@ -322,7 +426,8 @@ pub fn wait_with(
     mut poll: impl FnMut() -> io::Result<Option<ExitStatus>>,
 ) -> io::Result<Option<ExitStatus>> {
     let deadline = timeout.map(|t| Instant::now() + t);
-    let status = Signals::current()
+    let status = bound
+        .signals()
         .block(async {
             loop {
                 if let Some(status) = poll()? {
@@ -413,7 +518,7 @@ fn join_drained(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::engine::cancellation::Kind as SignalKind;
+    use crate::engine::cancellation::{Kind as SignalKind, Origin};
     use std::process::Stdio;
 
     fn sleeper(group: bool) -> Command {
@@ -432,58 +537,62 @@ mod tests {
     fn with_runtime<R>(f: impl FnOnce(Arc<Signals>) -> R) -> R {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _g = rt.enter();
-        let signals = Signals::new();
-        Signals::scoped(signals.clone(), || f(signals))
+        f(Signals::new())
     }
 
     #[test]
-    fn cancelling_the_token_terminates_the_child() {
-        with_runtime(|_signals| {
+    fn cancelling_the_token_interrupts_the_child() {
+        with_runtime(|signals| {
             let token = CancellationToken::new();
-            let (child, bound) = spawn(&mut sleeper(false), &token, None, Kind::Process).unwrap();
+            let (child, bound) =
+                spawn(&mut sleeper(false), &signals, &token, None, Kind::Process).unwrap();
             let cell = RefCell::new(Some(child));
             token.cancel();
             let status = wait(&cell, &bound, Some(Duration::from_secs(5)))
                 .unwrap()
-                .expect("child exits after terminate");
+                .expect("child exits after the interrupt");
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(
                 status.signal(),
-                Some(nix::sys::signal::Signal::SIGTERM as i32)
+                Some(nix::sys::signal::Signal::SIGINT as i32)
             );
             assert!(!bound.stop.stopping());
         });
     }
 
     #[test]
-    fn a_child_ignoring_terminate_is_killed_after_the_grace() {
-        with_runtime(|_signals| {
+    fn a_child_ignoring_interrupt_and_terminate_is_killed_after_the_graces() {
+        with_runtime(|signals| {
             let token = CancellationToken::new();
             let mut cmd = Command::new("sh");
-            cmd.args(["-c", "trap '' TERM; sleep 30"])
+            cmd.args(["-c", "trap '' INT TERM; sleep 30"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &token, None, Kind::Process).unwrap();
+            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Process).unwrap();
             let cell = RefCell::new(Some(child));
             std::thread::sleep(Duration::from_millis(200));
             let started = Instant::now();
             token.cancel();
-            let status = wait(&cell, &bound, Some(CHILD_GRACE + Duration::from_secs(5)))
-                .unwrap()
-                .expect("child is killed after the grace");
+            let status = wait(
+                &cell,
+                &bound,
+                Some(CHILD_GRACE * 2 + Duration::from_secs(5)),
+            )
+            .unwrap()
+            .expect("child is killed after the graces");
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(
                 status.signal(),
                 Some(nix::sys::signal::Signal::SIGKILL as i32)
             );
-            assert!(started.elapsed() >= CHILD_GRACE);
+            assert!(started.elapsed() >= CHILD_GRACE * 2);
         });
     }
 
     #[test]
     fn a_group_leader_takes_its_descendants_with_it() {
-        with_runtime(|_signals| {
+        with_runtime(|signals| {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("descendant.pid");
             let token = CancellationToken::new();
@@ -498,7 +607,7 @@ mod tests {
                 use std::os::unix::process::CommandExt;
                 cmd.process_group(0);
             }
-            let (child, bound) = spawn(&mut cmd, &token, Some(0), Kind::Process).unwrap();
+            let (child, bound) = spawn(&mut cmd, &signals, &token, Some(0), Kind::Process).unwrap();
             let deadline = Instant::now() + Duration::from_secs(2);
             while !pid_file.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -524,43 +633,123 @@ mod tests {
         });
     }
 
+    /// A stand-in for the bazel client: counts the SIGINTs it receives and
+    /// exits on the third, as bazel's `KillServerProcess` rung would.
     #[test]
-    fn a_bazel_child_gets_one_interrupt_and_nothing_more() {
-        with_runtime(|_signals| {
+    fn a_bazel_child_gets_bazels_sigint_ladder() {
+        with_runtime(|signals| {
+            let dir = tempfile::tempdir().unwrap();
+            let count = dir.path().join("count");
             let token = CancellationToken::new();
             let mut cmd = Command::new("sh");
-            cmd.args(["-c", "trap 'echo int' INT; sleep 30 & wait; sleep 30"])
+            cmd.arg("-c")
+                .arg("n=0; trap 'n=$((n+1)); echo $n > \"$COUNT\"; [ $n -ge 3 ] && exit 0' INT; while :; do sleep 0.05; done")
+                .env("COUNT", &count)
                 .stdin(Stdio::null())
-                .stdout(Stdio::piped())
+                .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &token, None, Kind::Bazel).unwrap();
+            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            token.cancel();
+            let cell = RefCell::new(Some(child));
+            let status = wait(&cell, &bound, Some(Duration::from_secs(5))).unwrap();
+            let sent: u32 = std::fs::read_to_string(&count)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            if crate::ci::on_recognized_ci() {
+                // Two graceful SIGINTs, then nothing: the client is left to finish.
+                assert_eq!(sent, 2);
+                assert!(status.is_none());
+                let mut guard = cell.borrow_mut();
+                let child = guard.as_mut().unwrap();
+                child.kill().unwrap();
+                child.wait().unwrap();
+            } else {
+                assert_eq!(sent, 3);
+                assert_eq!(status.expect("exits on the third rung").code(), Some(0));
+            }
+        });
+    }
+
+    /// A binding stays known to the backstop after its sequence ran: a client
+    /// the ladder could not stop must still be found by `kill_all`.
+    #[test]
+    fn a_binding_stays_tracked_until_the_child_is_reaped() {
+        with_runtime(|signals| {
+            let token = CancellationToken::new();
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "trap '' INT TERM; while :; do sleep 0.05; done"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Process).unwrap();
             std::thread::sleep(Duration::from_millis(200));
             token.cancel();
-            std::thread::sleep(CHILD_GRACE + Duration::from_millis(500));
+            // The sequence ends with a kill, which the child cannot ignore.
             let cell = RefCell::new(Some(child));
-            let mut guard = cell.borrow_mut();
-            let child = guard.as_mut().unwrap();
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "bazel child was killed"
-            );
-            child.kill().unwrap();
-            child.wait().unwrap();
-            drop(guard);
-            bound.mark_exited();
+            let deadline = Instant::now() + CHILD_GRACE + Duration::from_secs(5);
+            while !bound.stop.finished.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the sequence never finished");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(signals.alive().len(), 1, "still tracked after the sequence");
+            wait(&cell, &bound, Some(Duration::from_secs(5)))
+                .unwrap()
+                .expect("killed");
+            assert!(signals.alive().is_empty(), "let go once reaped");
+        });
+    }
+
+    /// The terminal already interrupted a child sharing our process group:
+    /// the runtime does not send that interrupt again, only the rungs after
+    /// the grace.
+    #[test]
+    fn a_child_the_terminal_already_signalled_is_not_signalled_again() {
+        with_runtime(|signals| {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("int");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg("trap 'touch \"$MARKER\"' INT; trap 'exit 0' TERM; while :; do sleep 0.05; done")
+                .env("MARKER", &marker)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let (child, bound) =
+                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            signals.record(SignalKind::Interrupt, Origin::Terminal);
+            let cell = RefCell::new(Some(child));
+            let status = wait(
+                &cell,
+                &bound,
+                Some(CHILD_GRACE * 2 + Duration::from_secs(5)),
+            )
+            .unwrap()
+            .expect("the child exits on the terminate rung");
+            assert_eq!(status.code(), Some(0));
+            assert!(!marker.exists(), "the child received a second interrupt");
         });
     }
 
     #[test]
-    fn a_wait_on_the_root_ends_the_task_when_the_root_is_cancelled() {
+    fn a_wait_ends_with_the_exit_once_the_body_is_forced() {
         with_runtime(|signals| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "trap '' INT TERM; sleep 30"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
             let (child, bound) =
-                spawn(&mut sleeper(false), signals.root(), None, Kind::Process).unwrap();
+                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
             let cell = RefCell::new(Some(child));
             let raiser = signals.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(100));
-                raiser.record(SignalKind::Interrupt);
+                raiser.record(SignalKind::Interrupt, Origin::Process);
+                raiser.force();
             });
             let err = wait(&cell, &bound, None).expect_err("the wait ends with the exit");
             let exit = err
@@ -570,9 +759,13 @@ mod tests {
             assert_eq!(exit.code, 130);
             // The child is stopping on its own; wait for it so the test leaves nothing behind.
             signals.enter_unwind();
-            wait(&cell, &bound, Some(Duration::from_secs(5)))
-                .unwrap()
-                .expect("child exits");
+            wait(
+                &cell,
+                &bound,
+                Some(CHILD_GRACE * 2 + Duration::from_secs(5)),
+            )
+            .unwrap()
+            .expect("child exits");
         });
     }
 
@@ -584,7 +777,8 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let (child, bound) = spawn(&mut cmd, signals.root(), None, Kind::Process).unwrap();
+            let (child, bound) =
+                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
             let out = wait_with_output(child, &bound).unwrap();
             assert_eq!(out.status.code(), Some(3));
             assert_eq!(out.stdout, b"out\n");

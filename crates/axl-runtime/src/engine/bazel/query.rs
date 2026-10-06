@@ -26,6 +26,9 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use axl_proto::blaze_query as query;
 use prost::Message;
 
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
 use crate::engine::children;
 
 #[derive(Debug, Clone)]
@@ -152,6 +155,7 @@ fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyh
 /// on a non-zero exit — a failed query is not the same as one that matched
 /// nothing. Used by `ctx.bazel.query(expr, rc=…)`.
 pub fn run(
+    signals: &Arc<Signals>,
     expr: &str,
     startup_flags: &[String],
     flags: &[String],
@@ -186,7 +190,7 @@ pub fn run(
     // extra `bazel info`, so only pay for it when actually announcing.
     if announce.version || announce.command {
         let version = if announce.version {
-            super::info::server_info_with_startup_flags(startup_flags)
+            super::info::server_info_with_startup_flags(signals, startup_flags)
                 .ok()
                 .and_then(|(_pid, version)| version)
         } else {
@@ -197,7 +201,7 @@ pub fn run(
 
     // Bound to the root so a cancel reaches the client: large queries can
     // run for many seconds, and the wait is a safe point.
-    let status = children::spawn_bazel(&mut cmd)
+    let status = children::spawn_bazel(&mut cmd, signals)
         .with_context(|| "failed to spawn bazel")?
         .wait()?;
 

@@ -31,6 +31,15 @@ impl Run {
     /// Start `task` from `source` and wait for its `ready` line. The line may
     /// carry `pid=<n>`, the child the task spawned.
     fn start(source: &str, task: &str) -> Self {
+        Self::launch(source, task, Stdio::null())
+    }
+
+    /// [`Run::start`] with stdin an open pipe nothing ever writes to.
+    fn start_with_stdin(source: &str, task: &str) -> Self {
+        Self::launch(source, task, Stdio::piped())
+    }
+
+    fn launch(source: &str, task: &str, stdin: Stdio) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
         let aspect = dir.path().join(".aspect");
@@ -48,7 +57,7 @@ impl Run {
             .env_remove("CI")
             .env_remove("BUILDKITE")
             .env_remove("GITHUB_ACTIONS")
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -121,7 +130,8 @@ fn wait_gone(pid: i32, timeout: Duration) -> bool {
 }
 
 /// A task waiting on a `sleep 30`, with a post-task hook and a defer that
-/// each leave a line on stderr.
+/// each leave a line on stderr. The signal stops the child, the wait returns,
+/// and the task ends on its own terms: 128 + the signal its child died of.
 const WAITING: &str = r#"
 def _post(ctx, outcome):
     print("post-task hook saw exit code %d" % outcome.exit_code)
@@ -131,8 +141,9 @@ def _impl(ctx):
     ctx.defer(print, "deferred cleanup ran")
     child = ctx.std.process.command("sleep").arg("30").spawn()
     print("ready pid=%d" % child.id)
-    child.wait()
-    return 0
+    status = child.wait()
+    print("child ended with signal %s" % status.signal)
+    return 128 + status.signal if status.signal != None else 0
 
 waiting = task(summary = "Test fixture.", implementation = _impl)
 "#;
@@ -153,7 +164,7 @@ fn assert_default_ending(stderr: &str, code: i32) {
 }
 
 #[test]
-fn ctrl_c_ends_the_task_with_130_and_stops_its_child() {
+fn ctrl_c_stops_the_child_and_the_task_ends_on_its_own() {
     let run = Run::start(WAITING, "waiting");
     let child_pid = run.announced_pid();
     run.signal(libc::SIGINT);
@@ -163,7 +174,11 @@ fn ctrl_c_ends_the_task_with_130_and_stops_its_child() {
         Some(130),
         "exit code\n--- stderr ---\n{stderr}"
     );
-    assert!(stderr.contains("ERROR: interrupted"), "{stderr}");
+    assert!(stderr.contains("child ended with signal 2"), "{stderr}");
+    assert!(
+        !stderr.contains("ERROR: interrupted"),
+        "the body returned on its own:\n{stderr}"
+    );
     assert_default_ending(&stderr, 130);
     assert!(
         wait_gone(child_pid, Duration::from_secs(5)),
@@ -171,10 +186,45 @@ fn ctrl_c_ends_the_task_with_130_and_stops_its_child() {
     );
 }
 
+/// SIGTERM to aspect-cli alone (a CI cancel): the child is still stopped
+/// through its own sequence, SIGINT first.
 #[test]
-fn sigterm_ends_the_task_with_143() {
+fn sigterm_stops_the_child_the_same_way() {
     let run = Run::start(WAITING, "waiting");
     let child_pid = run.announced_pid();
+    run.signal(libc::SIGTERM);
+    let (status, stderr) = run.finish();
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "exit code\n--- stderr ---\n{stderr}"
+    );
+    assert!(stderr.contains("child ended with signal 2"), "{stderr}");
+    assert_default_ending(&stderr, 130);
+    assert!(wait_gone(child_pid, Duration::from_secs(5)));
+}
+
+/// A task that ignores the cancel and has nothing bound is ended a second
+/// after the signal, with the conventional code, its hooks and defers intact.
+#[test]
+fn a_task_that_ignores_the_cancel_is_ended_after_the_grace() {
+    const IGNORES: &str = r#"
+load("@std//time.axl", "sleep_iter")
+
+def _post(ctx, outcome):
+    print("post-task hook saw exit code %d" % outcome.exit_code)
+
+def _impl(ctx):
+    ctx.hooks.post_task(_post)
+    ctx.defer(print, "deferred cleanup ran")
+    print("ready")
+    for _tick in sleep_iter(50):
+        pass
+    return 0
+
+ignores = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start(IGNORES, "ignores");
     run.signal(libc::SIGTERM);
     let (status, stderr) = run.finish();
     assert_eq!(
@@ -184,7 +234,6 @@ fn sigterm_ends_the_task_with_143() {
     );
     assert!(stderr.contains("ERROR: terminated"), "{stderr}");
     assert_default_ending(&stderr, 143);
-    assert!(wait_gone(child_pid, Duration::from_secs(5)));
 }
 
 /// The `run --watch` shape (PR #1540): the child leads its own process group,
@@ -204,7 +253,7 @@ fn a_child_in_its_own_process_group_is_terminated_gracefully() {
 def _impl(ctx):
     child = ctx.std.process.command("sh").args([
         "-c",
-        "trap 'echo cleaned > \"$MARKER\"; exit 0' TERM; touch \"$READY\"; sleep 30 & wait",
+        "trap 'echo cleaned > \"$MARKER\"; exit 0' INT TERM; touch \"$READY\"; sleep 30 & wait",
     ]).env("MARKER", "{marker_path}").env("READY", "{ready_path}").process_group(0).spawn()
     print("ready pid=%d" % child.id)
     child.wait()
@@ -223,7 +272,8 @@ grouped = task(summary = "Test fixture.", implementation = _impl)
     }
     run.signal(libc::SIGINT);
     let (status, stderr) = run.finish();
-    assert_eq!(status.code(), Some(130), "{stderr}");
+    // The child's trap exits 0, so the task's own `return 0` stands.
+    assert_eq!(status.code(), Some(0), "{stderr}");
     assert!(wait_gone(child_pid, Duration::from_secs(5)));
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::path::Path::new(&marker_path).exists() && Instant::now() < deadline {
@@ -235,15 +285,114 @@ grouped = task(summary = "Test fixture.", implementation = _impl)
     );
 }
 
-/// A task that owns its ending and ignores it: the second Ctrl+C is the
-/// backstop, and the process still exits 130.
+/// A child that would otherwise sleep for ten minutes is stopped with the task.
+#[test]
+fn a_long_sleeping_child_is_stopped() {
+    const SLEEPER: &str = r#"
+def _impl(ctx):
+    child = ctx.std.process.command("sleep").arg("600").spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+sleeper = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start(SLEEPER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    // `sleep` died of SIGINT, the wait returned, the task's `return 0` stands.
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(
+        wait_gone(sleep_pid, Duration::from_secs(5)),
+        "`sleep 600` outlived aspect-cli"
+    );
+}
+
+/// A shell whose own child sleeps for ten minutes, in a process group of its
+/// own: both the shell and the sleeper are gone afterwards, not just the shell.
+#[test]
+fn a_shell_and_its_long_sleeping_child_are_both_stopped() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let pid_path = scratch
+        .path()
+        .join("sleep.pid")
+        .to_string_lossy()
+        .into_owned();
+    let source = format!(
+        r#"
+def _impl(ctx):
+    child = ctx.std.process.command("bash").args([
+        "-c",
+        "sleep 600 & echo $! > \"$PIDFILE\"; wait",
+    ]).env("PIDFILE", "{pid_path}").process_group(0).spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+shell = task(summary = "Test fixture.", implementation = _impl)
+"#
+    );
+    let run = Run::start(&source, "shell");
+    let shell_pid = run.announced_pid();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let sleep_pid: i32 = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = text.trim().parse()
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the shell never started its sleeper"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        alive(sleep_pid),
+        "the sleeper should be running before the signal"
+    );
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(
+        wait_gone(shell_pid, Duration::from_secs(5)),
+        "the shell survived"
+    );
+    assert!(
+        wait_gone(sleep_pid, Duration::from_secs(5)),
+        "`sleep 600` survived"
+    );
+}
+
+/// A prompt nobody will answer: a task blocked reading stdin still ends on the
+/// first Ctrl+C.
+#[test]
+fn a_task_blocked_on_stdin_ends_on_the_first_ctrl_c() {
+    const PROMPT: &str = r#"
+def _impl(ctx):
+    print("ready")
+    answer = ctx.std.io.stdin.read_to_string()
+    print("got %r" % answer)
+    return 0
+
+prompt = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start_with_stdin(PROMPT, "prompt");
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    assert_eq!(status.code(), Some(130), "{stderr}");
+    assert!(stderr.contains("ERROR: interrupted"), "{stderr}");
+}
+
+/// A task that ignores the cancel: the second Ctrl+C is the backstop and ends
+/// the process at once, before the grace would have.
 #[test]
 fn a_second_ctrl_c_ends_a_task_that_never_stops() {
     const STUBBORN: &str = r#"
 load("@std//time.axl", "sleep_iter")
 
 def _impl(ctx):
-    ctx.cancellation.notify()
     print("ready")
     for _tick in sleep_iter(50):
         pass
@@ -260,20 +409,18 @@ stubborn = task(summary = "Test fixture.", implementation = _impl)
     assert!(stderr.contains("exiting with code 130"), "{stderr}");
 }
 
-/// `notify()`: Ctrl+C cancels the task's own token, nothing else, and the
-/// task returns the code it wants.
+/// The watch shape: a loop that reads the root on its tick. The child is
+/// already stopping when it notices; it waits for it and returns 0.
 #[test]
-fn a_notified_task_owns_its_ending() {
+fn a_loop_that_watches_the_root_returns_on_its_own_terms() {
     const OWNER: &str = r#"
 load("@std//time.axl", "sleep_iter")
 
 def _impl(ctx):
-    sig = ctx.cancellation.notify()
     child = ctx.std.process.command("sleep").arg("30").spawn()
     print("ready pid=%d" % child.id)
     for _tick in sleep_iter(50):
-        if sig.cancelled:
-            child.cancellation.cancel()
+        if ctx.cancellation.root.cancelled:
             status = child.wait()
             print("child ended with signal %s" % status.signal)
             return 0
@@ -285,5 +432,5 @@ owner = task(summary = "Test fixture.", implementation = _impl)
     run.signal(libc::SIGINT);
     let (status, stderr) = run.finish();
     assert_eq!(status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains("child ended with signal 15"), "{stderr}");
+    assert!(stderr.contains("child ended with signal 2"), "{stderr}");
 }

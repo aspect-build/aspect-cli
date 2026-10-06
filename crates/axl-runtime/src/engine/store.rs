@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
+use super::cancellation::Signals;
 
 static ASPECT_ROOT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -36,6 +37,10 @@ pub struct Env {
     /// not inside a git repository.
     pub git_root_dir: Option<PathBuf>,
     pub rt: AsyncRuntime,
+    /// The run's cancellation state: the root token the OS cancels and the
+    /// children bound to it. The process-wide instance unless a test harness
+    /// gives the run one of its own.
+    pub signals: Arc<Signals>,
 }
 
 impl Env {
@@ -54,6 +59,7 @@ impl Env {
             bazel_root_dir,
             git_root_dir,
             rt: AsyncRuntime::new(),
+            signals: Signals::global().clone(),
         }
     }
 

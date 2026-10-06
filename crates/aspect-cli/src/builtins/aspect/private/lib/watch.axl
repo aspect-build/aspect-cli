@@ -46,10 +46,9 @@ def _new(ctx: TaskContext, rc = None, ignore: list[str] = [], cancellation: canc
       cancellation — the token that ends the session: `loop` returns once it
           is cancelled, and a task's own tick loop checks it the same way.
 
-    `cancellation` defaults to `ctx.cancellation.root`, so Ctrl+C ends the
-    task the default way (exit 130). A task that owns the ending passes the
-    token from `ctx.cancellation.notify()`: Ctrl+C then cancels only that
-    token, the loop returns 0, and the task closes its surfaces itself.
+    `cancellation` defaults to `ctx.cancellation.root`, which Ctrl+C cancels:
+    `loop` then returns 0, the session's normal ending. Pass a token of your
+    own to end the session from AXL instead.
 
     Additional ignore paths may be absolute or relative to the invocation
     directory. Bazel ignore files are read once; restart the watch session

@@ -20,7 +20,9 @@ use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
-use super::cancellation::Cancellation;
+use std::sync::Arc;
+
+use super::cancellation::{Cancellation, Signals};
 use super::http::Http;
 use super::std::Std;
 use super::template;
@@ -40,6 +42,10 @@ pub struct ConfigContext<'v> {
     feature_map: values::Value<'v>,
     telemetry: values::Value<'v>,
     hooks: values::Value<'v>,
+    /// The run's cancellation state, behind `ctx.cancellation`.
+    #[allocative(skip)]
+    #[trace(static)]
+    signals: Arc<Signals>,
 }
 
 impl<'v> ConfigContext<'v> {
@@ -51,6 +57,7 @@ impl<'v> ConfigContext<'v> {
         feature_map: values::Value<'v>,
         telemetry: values::Value<'v>,
         hooks: values::Value<'v>,
+        signals: Arc<Signals>,
     ) -> Self {
         Self {
             tasks,
@@ -58,6 +65,7 @@ impl<'v> ConfigContext<'v> {
             feature_map,
             telemetry,
             hooks,
+            signals,
         }
     }
 
@@ -102,6 +110,7 @@ impl<'v> Freeze for ConfigContext<'v> {
             feature_map: self.feature_map.freeze(freezer)?,
             telemetry: self.telemetry.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
+            signals: self.signals,
         })
     }
 }
@@ -120,6 +129,8 @@ pub struct FrozenConfigContext {
     telemetry: FrozenValue,
     #[allocative(skip)]
     hooks: FrozenValue,
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenConfigContext {
@@ -137,16 +148,28 @@ impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
 pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: values::Value<'v>) -> anyhow::Result<Std> {
+        if let Some(c) = this.downcast_ref::<ConfigContext>() {
+            return Ok(Std::new(c.signals.clone()));
+        }
+        if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
+            return Ok(Std::new(c.signals.clone()));
+        }
+        Err(anyhow::anyhow!("expected ConfigContext"))
     }
 
     /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
     /// and what every spawn is bound to by default; `new()` is a token of
     /// your own; `notify()` makes the task own the ending.
     #[starlark(attribute)]
-    fn cancellation<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Cancellation> {
-        Ok(Cancellation {})
+    fn cancellation<'v>(this: values::Value<'v>) -> anyhow::Result<Cancellation> {
+        if let Some(c) = this.downcast_ref::<ConfigContext>() {
+            return Ok(Cancellation::new(c.signals.clone()));
+        }
+        if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
+            return Ok(Cancellation::new(c.signals.clone()));
+        }
+        Err(anyhow::anyhow!("expected ConfigContext"))
     }
 
     /// Expand template files.

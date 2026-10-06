@@ -310,8 +310,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
 
         // A safe point: once the root token is cancelled the task's exit
         // comes back, and an exit is never caught.
-        let _ = env;
-        let result = match crate::engine::cancellation::Signals::current().block(fut) {
+        let result = match env.signals.block(fut) {
             Ok(result) => result,
             Err(exit) => return Err(exit.into()),
         };

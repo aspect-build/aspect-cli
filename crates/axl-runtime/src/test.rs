@@ -130,6 +130,7 @@ impl EvalBuilder {
         let ast = AstModule::parse("test", self.code, &dialect()).map_err(|e| anyhow!("{}", e))?;
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
+            eval.extra = Some(&loader.env);
             if self.with_loader {
                 eval.set_loader(&loader);
             }
@@ -207,7 +208,6 @@ impl EvalBuilder {
         let _g = rt.enter();
 
         let signals = self.signals.clone().unwrap_or_else(Signals::new);
-        let _scope = Signals::enter(signals.clone());
         let result = ModuleEnv::with(|env| -> anyhow::Result<Option<u8>> {
             let modules: Vec<Mod> = vec![];
             let mut root_mod = Mod::new(
@@ -220,13 +220,14 @@ impl EvalBuilder {
                     .features
                     .push((script_path.clone(), symbol.clone()));
             }
-            let loader = Loader::new(
+            let mut loader = Loader::new(
                 "test".to_string(),
                 tmp.path().to_path_buf(),
                 tmp.path().to_path_buf(),
                 None,
                 &modules,
             );
+            loader.env.signals = signals.clone();
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)

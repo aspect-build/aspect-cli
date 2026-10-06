@@ -4,6 +4,9 @@ use std::sync::OnceLock;
 
 use anyhow::anyhow;
 
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
 use crate::engine::children;
 use starlark::collections::SmallMap;
 
@@ -58,12 +61,13 @@ pub fn parse_output<S: AsRef<str>>(stdout: &str, keys: &[S]) -> SmallMap<String,
 ///
 /// The version is `None` when Bazel reports a non-release build (see
 /// [`parse_release`]); the pid is always required.
-pub fn server_info() -> io::Result<(u32, Option<semver::Version>)> {
-    server_info_with_startup_flags(&[])
+pub fn server_info(signals: &Arc<Signals>) -> io::Result<(u32, Option<semver::Version>)> {
+    server_info_with_startup_flags(signals, &[])
 }
 
 /// Query bazel server info with startup flags prepended before the subcommand.
 pub fn server_info_with_startup_flags(
+    signals: &Arc<Signals>,
     startup_flags: &[String],
 ) -> io::Result<(u32, Option<semver::Version>)> {
     let mut cmd = super::bazel_command();
@@ -77,7 +81,7 @@ pub fn server_info_with_startup_flags(
     // `bazel info` (without --noblock_for_lock) can hang on a busy
     // server. Bound to the root so a cancel reaches it, and so the wait is
     // a safe point.
-    let c = children::spawn_bazel(&mut cmd)
+    let c = children::spawn_bazel(&mut cmd, signals)
         .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
         .wait_with_output()?;
     if !c.status.success() {
@@ -138,9 +142,13 @@ static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 /// The version is stable for the lifetime of an `aspect` invocation, so the
 /// single probe is shared by every caller (flag-gating, rc-section selection,
 /// …) instead of each shelling out to Bazel independently.
-pub fn release_version() -> Option<semver::Version> {
+pub fn release_version(signals: &Arc<Signals>) -> Option<semver::Version> {
     RELEASE_VERSION
-        .get_or_init(|| server_info().ok().and_then(|(_pid, version)| version))
+        .get_or_init(|| {
+            server_info(signals)
+                .ok()
+                .and_then(|(_pid, version)| version)
+        })
         .clone()
 }
 
@@ -149,7 +157,7 @@ pub fn release_version() -> Option<semver::Version> {
 /// When another invocation holds the lock, bazel exits with code 9 and prints:
 ///   "Another command (pid=12345) is running. Exiting immediately."
 /// We parse the PID from that stderr message.
-pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
+pub fn client_pid(signals: &Arc<Signals>, startup_flags: &[String]) -> Option<u32> {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
@@ -158,7 +166,7 @@ pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let output = children::spawn_bazel(&mut cmd)
+    let output = children::spawn_bazel(&mut cmd, signals)
         .ok()?
         .wait_with_output()
         .ok()?;
@@ -175,7 +183,7 @@ pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
 }
 
 /// Check if the bazel server lock is currently held by a client.
-pub fn is_server_busy(startup_flags: &[String]) -> bool {
+pub fn is_server_busy(signals: &Arc<Signals>, startup_flags: &[String]) -> bool {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
@@ -184,7 +192,7 @@ pub fn is_server_busy(startup_flags: &[String]) -> bool {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    let Ok(spawned) = children::spawn_bazel(&mut cmd) else {
+    let Ok(spawned) = children::spawn_bazel(&mut cmd, signals) else {
         return false;
     };
     matches!(spawned.wait_with_output(), Ok(o) if o.status.code() == Some(9))
@@ -197,7 +205,7 @@ pub fn is_server_busy(startup_flags: &[String]) -> bool {
 /// `<output_base>/server/server.pid.txt`.
 ///
 /// Returns `None` only if the server is not running or bazel is not available.
-pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
+pub fn server_pid_nonblocking(signals: &Arc<Signals>, startup_flags: &[String]) -> Option<u32> {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
@@ -206,7 +214,7 @@ pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    let output = children::spawn_bazel(&mut cmd)
+    let output = children::spawn_bazel(&mut cmd, signals)
         .ok()?
         .wait_with_output()
         .ok()?;
