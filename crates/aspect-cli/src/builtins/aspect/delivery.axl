@@ -16,8 +16,8 @@ Up to three Bazel build phases plus a dispatch loop:
      `lib/remote_executor.axl`.
   3. State record/query — record (label, digest) pairs, query per-prefix
      state through the `DeliveryState` backend (`lib/delivery_state.axl`).
-     The default is deliveryd over HTTP (`lib/deliveryd.axl`; a v2 daemon
-     needs no record step); `lib/redis_state.axl` talks to Redis directly.
+     The default is deliveryd over HTTP (`lib/deliveryd.axl`);
+     `lib/redis_state.axl` talks to Redis directly and needs no record step.
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.

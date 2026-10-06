@@ -466,7 +466,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-deployment-flags
     ctx.tasks.add(deployment_flags_tests)
 
-    # deliveryd.axl: v1/v2 negotiation and the wire shape of each verb.
+    # deliveryd.axl: the startup probe and the wire shape of each verb.
     # Run with: aspect dev test-deliveryd
     ctx.tasks.add(deliveryd_tests)
 
