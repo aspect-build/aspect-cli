@@ -22,8 +22,9 @@
 //!      the next invocation on that runner hangs at "Running Bazel
 //!      server needs to be killed" until the orphan exits.
 
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::process;
 
@@ -40,6 +41,12 @@ fn registry() -> &'static Mutex<Vec<u32>> {
 pub fn register(pid: u32) -> LiveBazelGuard {
     if let Ok(mut g) = registry().lock() {
         g.push(pid);
+    }
+    // A task can spawn another bazel while aspect-cli waits out
+    // `wait_for_sinks` after a shutdown signal; it must be cancelled too.
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        tracing::warn!("shutting down — sending SIGINT to newly spawned bazel client PID {pid}");
+        process::sigint(pid);
     }
     LiveBazelGuard { pid }
 }
@@ -80,6 +87,7 @@ pub fn live_pids() -> Vec<u32> {
 ///
 /// [1]: https://bazel.build/run/cancellation
 pub fn signal_all_for_shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
     for pid in live_pids() {
         if process::is_pid_running(pid) {
             tracing::warn!(
@@ -107,6 +115,83 @@ pub fn force_kill_all_remaining() -> usize {
     killed
 }
 
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Count of BES sinks still forwarding events, with a condvar signalled
+/// on every decrement.
+#[derive(Default)]
+struct SinkCounter {
+    live: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl SinkCounter {
+    fn acquire(&'static self) -> LiveSinkGuard {
+        if let Ok(mut n) = self.live.lock() {
+            *n += 1;
+        }
+        LiveSinkGuard { counter: self }
+    }
+
+    fn release(&self) {
+        if let Ok(mut n) = self.live.lock() {
+            *n = n.saturating_sub(1);
+        }
+        self.cv.notify_all();
+    }
+
+    fn wait_until_idle(&self, deadline: Instant) -> bool {
+        let Ok(mut n) = self.live.lock() else {
+            return false;
+        };
+        while *n > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            n = match self.cv.wait_timeout(n, remaining) {
+                Ok((n, _)) => n,
+                Err(_) => return false,
+            };
+        }
+        true
+    }
+}
+
+fn sinks() -> &'static SinkCounter {
+    static SINKS: OnceLock<SinkCounter> = OnceLock::new();
+    SINKS.get_or_init(SinkCounter::default)
+}
+
+/// Register a BES sink as forwarding. Take the guard before spawning the
+/// sink's thread and move it in, so a shutdown signal arriving in between
+/// still sees the sink.
+#[must_use = "hold the guard until the sink has finished forwarding"]
+pub fn register_sink() -> LiveSinkGuard {
+    sinks().acquire()
+}
+
+/// Block until every registered BES sink has finished, or `timeout`
+/// passes. Returns whether they all finished.
+///
+/// A sink finishes once its bazel client exits and closes the event
+/// stream, so after a cancel this is the wait for bazel's final events
+/// (`BuildFinished` with exit code 8) to reach the backend.
+pub fn wait_for_sinks(timeout: Duration) -> bool {
+    sinks().wait_until_idle(Instant::now() + timeout)
+}
+
+/// RAII guard returned by [`register_sink`].
+pub struct LiveSinkGuard {
+    counter: &'static SinkCounter,
+}
+
+impl Drop for LiveSinkGuard {
+    fn drop(&mut self) {
+        self.counter.release();
+    }
+}
+
 /// RAII guard returned by [`register`]. Removes the PID from the
 /// registry on drop. Multiple registrations of the same PID are fine
 /// — drop removes the first matching entry.
@@ -128,6 +213,42 @@ impl Drop for LiveBazelGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn leaked_counter() -> &'static SinkCounter {
+        Box::leak(Box::new(SinkCounter::default()))
+    }
+
+    #[test]
+    fn wait_until_idle_returns_immediately_with_no_sinks() {
+        let c = leaked_counter();
+        assert!(c.wait_until_idle(Instant::now()));
+    }
+
+    #[test]
+    fn wait_until_idle_times_out_while_a_sink_is_live() {
+        let c = leaked_counter();
+        let _g = c.acquire();
+        let start = Instant::now();
+        assert!(!c.wait_until_idle(start + Duration::from_millis(50)));
+        assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn wait_until_idle_wakes_when_the_last_sink_finishes() {
+        let c = leaked_counter();
+        let g1 = c.acquire();
+        let g2 = c.acquire();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(g1);
+            std::thread::sleep(Duration::from_millis(20));
+            drop(g2);
+        });
+        let start = Instant::now();
+        assert!(c.wait_until_idle(start + Duration::from_secs(10)));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        t.join().unwrap();
+    }
 
     #[test]
     fn registers_and_drops() {

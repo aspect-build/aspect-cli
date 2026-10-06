@@ -430,6 +430,12 @@ const SIGINT_TICK: Duration = Duration::from_millis(150);
 /// well inside this window; the SIGKILL is just the backstop for a hung client.
 const SIGINT_GRACE: Duration = Duration::from_secs(3);
 
+/// How long, on CI, we wait after the SIGINTs for BES sinks to forward
+/// bazel's final events (`BuildFinished` with exit code 8) before exiting.
+/// Must fit inside the host's cancel window: Buildkite SIGKILLs 9s after
+/// SIGTERM, and GitHub Actions escalates 7.5s after SIGINT.
+const CI_SINK_DRAIN: Duration = Duration::from_secs(5);
+
 /// Time we wait after SIGKILL for the kernel to deliver the signal
 /// and the process accounting to settle before we exit. SIGKILL
 /// can't be ignored, but on busy systems the actual termination
@@ -442,7 +448,8 @@ const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 ///     recheck the registry after 1 × SIGINT_TICK (≈ 0.15s, to close the
 ///     spawn/register race) and, if still empty, exit — no SIGINT burst, no
 ///     grace window. There's nothing to cancel, so there's nothing to wait for.
-///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs, then exit.
+///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs — then up
+///     to CI_SINK_DRAIN (5s) for the BES sinks to finish, then exit.
 ///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (3s) +
 ///     POST_KILL_GRACE (1s) ≈ 4.3s, and only when a client is actually live.
 /// All well under typical CI cancel grace periods.
@@ -460,8 +467,9 @@ const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 ///
 /// The burst, and what follows it, differ by environment:
 ///
-///   - **On CI** we send only the 1st and 2nd SIGINTs — both graceful — and
-///     then exit. We deliberately skip the 3rd SIGINT (which would trigger
+///   - **On CI** we send only the 1st and 2nd SIGINTs — both graceful — wait
+///     up to `CI_SINK_DRAIN` for the BES sinks to forward bazel's final
+///     events, and then exit. We deliberately skip the 3rd SIGINT (which would trigger
 ///     `KillServerProcess`) and never self-SIGKILL. CI runners don't reap our
 ///     process tree on job cancellation (GHA's `cleanProcessTable` /
 ///     `KILL_PROCESSES` defaults off, and the runner systemd unit is
@@ -587,6 +595,18 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     if on_recognized_ci() {
         // Stop short of KillServerProcess and SIGKILL — let bazel finish its
         // own cleanup so a cancellation can't strand a poisoned sandbox.
+        // Exiting at once would also kill the BES sink threads before bazel
+        // writes `BuildFinished`, leaving the backend showing the build as
+        // still running; give them a bounded window to forward it.
+        let drained = tokio::task::spawn_blocking(|| bazel_live::wait_for_sinks(CI_SINK_DRAIN))
+            .await
+            .unwrap_or(false);
+        if !drained {
+            errln!(
+                "aspect-cli: build events not fully delivered within {}s",
+                CI_SINK_DRAIN.as_secs()
+            );
+        }
         errln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
         std::process::exit(exit_code);
     }

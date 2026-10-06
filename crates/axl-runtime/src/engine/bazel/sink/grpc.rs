@@ -76,7 +76,11 @@ impl Grpc {
         invocation_id: String,
         retry: RetryConfig,
     ) -> JoinHandle<(SinkStats, SinkOutcome)> {
-        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
+        let live = super::super::live::register_sink();
+        thread::spawn(move || {
+            let _live = live;
+            rt.block_on(work(recv, endpoint, headers, invocation_id, retry))
+        })
     }
 }
 
