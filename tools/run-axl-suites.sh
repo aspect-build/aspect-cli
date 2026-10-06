@@ -7,10 +7,23 @@
 # call this; it replaced a pair of hand-maintained allowlists that had drifted
 # to the point where 30 of 44 suites ran nowhere.
 #
-# Run: ./tools/run-axl-suites.sh [path-to-aspect]
+# An optional SHARD/TOTAL (1-based, e.g. `2/3`) runs every TOTAL-th suite of
+# the discovered list, starting at SHARD, so CI can fan the suites out across
+# parallel jobs without keeping a list of which suite runs where. Every suite
+# lands in exactly one shard. Omit it to run them all.
+#
+# Run: ./tools/run-axl-suites.sh [path-to-aspect] [SHARD/TOTAL]
 set -euo pipefail
 
 ASPECT="${1:-aspect}"
+SHARD_SPEC="${2:-1/1}"
+
+if [[ ! "$SHARD_SPEC" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || ((BASH_REMATCH[1] > BASH_REMATCH[2])); then
+    echo "ERROR: shard must be SHARD/TOTAL with 1 <= SHARD <= TOTAL, got '$SHARD_SPEC'." >&2
+    exit 1
+fi
+SHARD="${BASH_REMATCH[1]}"
+TOTAL="${BASH_REMATCH[2]}"
 
 SUITES="$(mktemp)"
 trap 'rm -f "$SUITES"' EXIT
@@ -28,6 +41,14 @@ if [[ "$count" -eq 0 ]]; then
     exit 1
 fi
 echo "Discovered $count AXL test suites."
+
+awk -v shard="$SHARD" -v total="$TOTAL" '(NR - 1) % total == shard - 1' "$SUITES" >"$SUITES.shard"
+mv "$SUITES.shard" "$SUITES"
+if [[ ! -s "$SUITES" ]]; then
+    echo "ERROR: shard $SHARD_SPEC of $count suites is empty — refusing to pass having tested nothing." >&2
+    exit 1
+fi
+echo "Running shard $SHARD_SPEC: $(wc -l <"$SUITES" | tr -d ' ') suites."
 
 while read -r suite; do
     echo "--- $ASPECT dev $suite"

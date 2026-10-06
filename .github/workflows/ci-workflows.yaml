@@ -531,14 +531,14 @@ jobs:
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
   # The AXL suite + the CLI/launcher smoke commands were a single Buildkite
-  # `axl-tests` step. On GitHub Actions they are three jobs that run in
+  # `axl-tests` step. On GitHub Actions they are split into jobs that run in
   # parallel — `axl-tests` (the ~3min `aspect tests axl` suite), `axl-smoke`
-  # (the demo/user/run/dev-snapshot end-to-end checks) and `axl-suites` (every
-  # `aspect dev test-*` suite) — so none is serialized behind another. All
-  # three build the same dev launcher from THIS commit via the
-  # build-dev-launcher composite action;
-  # see that action for why the launcher must be built (rather than reused from
-  # the prebuilt CLI) and how the host-native binary is probed.
+  # (the demo/user/run/flag end-to-end checks) and the sharded `axl-suites`
+  # (every `aspect dev test-*` suite) — so none is serialized behind another.
+  # All of them build the same dev launcher from THIS commit via the
+  # build-dev-launcher composite action; see that action for why the launcher
+  # must be built (rather than reused from the prebuilt CLI) and how the
+  # host-native binary is probed.
   #
   # `aspect tests axl` asserts (under CI) that it was launched by the just-built,
   # UNSTAMPED launcher: ASPECT_LAUNCHER_VERSION == "0.0.0-dev" and the launcher
@@ -564,9 +564,8 @@ jobs:
         run: |
           echo "--- aspect tests axl"
           "$LAUNCHER" tests axl
-  # CLI/launcher end-to-end smoke. Split from `axl-tests` so it runs in parallel
-  # with the AXL suite rather than serialized ahead of it. Builds its own dev
-  # launcher (cheap — a remote-cache hit on the pre-built tree).
+  # CLI/launcher end-to-end smoke. Builds its own dev launcher (cheap — a
+  # remote-cache hit on the pre-built tree).
   axl-smoke:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -656,13 +655,20 @@ jobs:
           assert_rejects_flag "a Bazel-rejected flag" --bazel-flag=--definitely_not_a_flag
           echo "--- flag rejected by Bazel (bare)"
           assert_rejects_flag "a bare Bazel-rejected flag" --definitely_not_a_flag
-  # Every `aspect dev test-*` AXL suite, through the same dev launcher
-  # `axl-smoke` builds. Its own job so neither runs into the other's timeout:
-  # the suites alone take about ten minutes.
+  # Every `aspect dev test-*` suite, split across shards. Each suite pays a few
+  # seconds of CLI startup and there are dozens of them, so run serially they
+  # outgrew everything else in this workflow. run-axl-suites.sh deals the
+  # discovered suites round-robin, so growing the matrix is the only change
+  # needed to add a shard.
   axl-suites:
+    name: axl-suites (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
@@ -671,9 +677,11 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
-          task-name: axl-suites-gha-bootstrap
-      - name: aspect dev test-* (every AXL suite)
-        run: ./tools/run-axl-suites.sh "$LAUNCHER"
+          task-name: axl-suites-${{ matrix.shard }}-gha-bootstrap
+      - name: AXL suites
+        env:
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: ./tools/run-axl-suites.sh "$LAUNCHER" "$SHARD"
   # `aspect worktree` end to end: sessions that stop and resume, subagents,
   # moved and re-cloned clones, and the refusals that protect work — the flows
   # the AXL unit suites cannot reach. Its own job rather than part of
