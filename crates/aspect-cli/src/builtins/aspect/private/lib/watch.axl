@@ -26,8 +26,7 @@ def _ignores(root: str, symlink_prefix: str | None = None) -> list[str]:
         paths.extend([prefix + suffix for suffix in ["bin", "out", "testlogs", workspace]])
     return paths
 
-def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: list[str] = [], is_directory = None):
-    is_directory = is_directory or (lambda _path: False)
+def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: list[str], is_directory):
     events = []
     for event in batch.events:
         path = root + "/" + event.path

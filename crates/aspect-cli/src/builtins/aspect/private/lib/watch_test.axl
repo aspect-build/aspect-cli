@@ -6,6 +6,9 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
+def _not_directory(_path):
+    return False
+
 def _session(values):
     queue = list(values)
 
@@ -52,16 +55,16 @@ def _test_workspace_ignore_files_filter_events(_ctx):
             struct(path = "src/app.js"),
         ],
         rescan = False,
-    ), "/repo", ["/repo/.cache"], ["/repo/**/node_modules"])
+    ), "/repo", ["/repo/.cache"], ["/repo/**/node_modules"], _not_directory)
     _eq("filtered event paths", [event.path for event in batch.events], ["src/app.js"])
     _eq(
         "ignored-only batch",
-        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = False), "/repo", ["/repo/.cache"]),
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = False), "/repo", ["/repo/.cache"], [], _not_directory),
         None,
     )
     _eq(
         "rescan retained",
-        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = True), "/repo", ["/repo/.cache"]).rescan,
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = True), "/repo", ["/repo/.cache"], [], _not_directory).rescan,
         True,
     )
 
