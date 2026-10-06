@@ -5034,7 +5034,17 @@ def _results_new(ctx, command, report_uploader = None):
         )
         _emit(_pick_status(command, data, had_failure = had_failure, terminal = False), priority = m["first"])
 
-    def conclude(w, targets):
+    def reset():
+        """Clear one watch cycle's results while keeping its surface open."""
+        ph.reset(init_data())
+        data["bes_streamed_by_bazel"] = m["bazel_streams_bes"]
+        data["aspect_results_url"] = m["results_url"]
+        m["first"] = True
+        m["last_monotonic"] = 0.0
+        m["attempts"] = 0
+        m["label"] = ""
+
+    def conclude(w, targets, final: bool = True):
         # BuildStatus.code is Option<i32> (None on abnormal exit); key the
         # verdict off the reliable `success` bool and coerce a numeric code.
         code = 0 if w.success else (w.code if w.code != None else 1)
@@ -5091,7 +5101,7 @@ def _results_new(ctx, command, report_uploader = None):
         ph.dispatch(phases.Update(
             kind = "bazel_results",
             status = final_status,
-            final = True,
+            final = final,
             conclusion = bookend,
             data = data,
             progress = _live_progress(data, command, final_status),
@@ -5109,6 +5119,7 @@ def _results_new(ctx, command, report_uploader = None):
         attempt = attempt,
         invocation = invocation,
         process = process,
+        reset = reset,
         conclude = conclude,
     )
 
