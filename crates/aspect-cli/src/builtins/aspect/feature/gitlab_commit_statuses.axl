@@ -292,6 +292,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             target_url = target_url or None,
             description = description or None,
             api_base = api_base,
+            auth_kind = _state["_auth_kind"],
         )
         if not result["success"]:
             _LOG.warn(ctx.std, "commit_status POST failed (state=%s): %s" % (
@@ -305,7 +306,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         if _state.get("_gitlab_token"):
             return True
         auth_reason = {}
-        token = gitlab_token_cache.get_or_mint(
+        token, auth_kind = gitlab_token_cache.resolve_token(
             ctx,
             project_path = project_path,
             project_id = mr.get("project_id"),
@@ -319,11 +320,12 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             ))
             return False
         _state["_gitlab_token"] = token
+        _state["_auth_kind"] = auth_kind
 
-        # Re-resolve CI URL with the token in scope (mirrors GH path —
-        # safe no-op when the CI URL is env-derived rather than
-        # API-derived for the active CI host).
-        _ci_links_base["ci_url"] = resolve_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
+        # Re-resolve the CI URL once auth is in scope. The GitLab token is
+        # never passed through: on GitHub Actions the resolver would send
+        # it to the GitHub jobs API as a GitHub credential.
+        _ci_links_base["ci_url"] = resolve_build_url(ctx) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
         return True
 
