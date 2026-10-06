@@ -254,7 +254,7 @@ impl Signals {
     pub(crate) fn alive(&self) -> Vec<Arc<Stop>> {
         self.stops
             .lock()
-            .map(|stops| stops.iter().filter(|s| !s.exited()).cloned().collect())
+            .map(|stops| stops.iter().filter(|s| s.alive()).cloned().collect())
             .unwrap_or_default()
     }
 

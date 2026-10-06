@@ -99,7 +99,12 @@ impl Stop {
 
     /// Cancelled, still alive as far as we know, and not yet done stopping.
     pub(crate) fn stopping(&self) -> bool {
-        self.token.is_cancelled() && !self.exited() && !self.finished.load(Ordering::SeqCst)
+        self.token.is_cancelled() && !self.finished.load(Ordering::SeqCst) && !self.gone()
+    }
+
+    /// Still alive as far as we know: the whole group for a group leader.
+    pub(crate) fn alive(&self) -> bool {
+        !self.gone()
     }
 
     pub(crate) fn is_bazel(&self) -> bool {
@@ -146,7 +151,8 @@ impl Stop {
     /// What cancellation means for this child. Runs once, on its runtime
     /// task, after the token is cancelled.
     async fn run(&self) {
-        if self.exited() {
+        if self.gone() {
+            self.finished.store(true, Ordering::SeqCst);
             return;
         }
         match self.kind {
@@ -246,11 +252,13 @@ impl Bound {
         self.stop.exited()
     }
 
-    /// The child has been reaped. Its pid may be reused from here, so the
-    /// stop sequence and the backstop leave it alone.
+    /// The child has been reaped. Its pid may be reused from here, so nothing
+    /// is sent to it alone again; a group it led is still stopped as a whole.
     pub fn mark_exited(&self) {
         self.stop.exited.store(true, Ordering::SeqCst);
-        self.stop.signals.forget(&self.stop);
+        if self.stop.group.is_none() {
+            self.stop.signals.forget(&self.stop);
+        }
     }
 }
 
@@ -283,6 +291,9 @@ pub fn bind(
         handle.spawn(async move {
             waiting.token.cancelled().await;
             waiting.run().await;
+            if waiting.gone() {
+                waiting.signals.forget(&waiting);
+            }
         });
     }
     Bound { token, stop }
@@ -673,10 +684,11 @@ mod tests {
         });
     }
 
-    /// A binding stays known to the backstop after its sequence ran: a client
-    /// the ladder could not stop must still be found by `kill_all`.
+    /// A binding stays known to the backstop for as long as its child is
+    /// alive, through the whole sequence, and only drops out once the child
+    /// is gone.
     #[test]
-    fn a_binding_stays_tracked_until_the_child_is_reaped() {
+    fn a_binding_stays_tracked_while_the_child_is_alive() {
         with_runtime(|signals| {
             let token = CancellationToken::new();
             let mut cmd = Command::new("sh");
@@ -687,18 +699,22 @@ mod tests {
             let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Process).unwrap();
             std::thread::sleep(Duration::from_millis(200));
             token.cancel();
-            // The sequence ends with a kill, which the child cannot ignore.
+            // Interrupted and ignoring it: still alive, still tracked.
+            std::thread::sleep(Duration::from_millis(500));
+            assert_eq!(
+                signals.alive().len(),
+                1,
+                "tracked while it ignores the signal"
+            );
             let cell = RefCell::new(Some(child));
-            let deadline = Instant::now() + CHILD_GRACE + Duration::from_secs(5);
-            while !bound.stop.finished.load(Ordering::SeqCst) {
-                assert!(Instant::now() < deadline, "the sequence never finished");
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            assert_eq!(signals.alive().len(), 1, "still tracked after the sequence");
-            wait(&cell, &bound, Some(Duration::from_secs(5)))
-                .unwrap()
-                .expect("killed");
-            assert!(signals.alive().is_empty(), "let go once reaped");
+            wait(
+                &cell,
+                &bound,
+                Some(CHILD_GRACE * 2 + Duration::from_secs(5)),
+            )
+            .unwrap()
+            .expect("killed at the end of the sequence");
+            assert!(signals.alive().is_empty(), "let go once gone");
         });
     }
 
