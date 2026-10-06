@@ -202,6 +202,7 @@ def _deliver(client, p, legacy_ttl_ms: int, label: str, digest: str, meta: dict 
 def _delete(client, p, digest: str) -> None:
     if not digest:
         return
+
     # One key per UNLINK: the keys share no hash tag, so a multi-key UNLINK is
     # CROSSSLOT on a cluster-mode server (MemoryDB) even with a single shard.
     client.pipeline([
