@@ -68,6 +68,10 @@ def _emit_final(ph, exit_code):
         data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
     bookend = warming_conclusion(status, data)
+
+    # Before the update: the body links this artifact out of the registry.
+    artifacts.upload_report(ctx, data, status)
+
     return ph.update(
         status,
         phases.ProgressStyles(body = bookend),

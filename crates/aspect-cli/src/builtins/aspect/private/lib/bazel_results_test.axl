@@ -8,8 +8,11 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "truncate_label")
+load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
+load("./report.axl", "SCHEMA_VERSION", "build_report")
+load("./template_presets.axl", "template_presets")
 
 # Fake data builders
 
@@ -455,7 +458,7 @@ def _make_results_large():
 
 # Shared render context and links
 
-def _render_ctx(subject = "//...", task_kind = "test", progress = ""):
+def _render_ctx(subject = "//...", task_kind = "test", progress = "", tips = None):
     return {
         "triggered_by": "ci-bot (workflow_dispatch)",
         "subject": subject,
@@ -463,6 +466,7 @@ def _render_ctx(subject = "//...", task_kind = "test", progress = ""):
         "ended_ms": 1744630002200,
         "progress": progress,
         "task_kind": task_kind,
+        "tips": tips or [],
     }
 
 def _links(with_artifact = False, ci = "github"):
@@ -508,6 +512,8 @@ def _links(with_artifact = False, ci = "github"):
             d["artifact_urls"] = {
                 "testlogs": "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661414",
                 "profile": "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661415",
+                # The structured report every task now uploads.
+                "report": "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661416",
             }
         elif ci == "gitlab":
             base = "https://gitlab.com/api/v4/projects/1/packages/generic"
@@ -552,10 +558,17 @@ def _links(with_artifact = False, ci = "github"):
 
 # Test task
 
-def _test_impl(ctx):
-    """Render each scenario and print TITLE + SUMMARY + first 3000 chars of DETAILS."""
+def _make_results_custom_bes():
+    """A passing run reporting to a BES viewer that is not the Aspect UI, so the
+    two results links resolve to different pages."""
+    r = _make_results_passed()
+    r["bazel"]["bes_results_url"] = "https://bes.example.com/invocations"
+    r["bazel"]["invocation_id"] = "bazel-inv-9876"
+    return r
 
-    scenarios = [
+def _scenarios():
+    """Scenario table shared by the built-in and preset snapshot suites."""
+    return [
         # (label, data, status, render_targets, use_artifact_link, ci, metadata_keys, progress)
         # metadata_keys exercises GitHubStatusChecksTrait.metadata_keys:
         #   None            → default (no extra_meta surfaced)
@@ -604,14 +617,27 @@ def _test_impl(ctx):
         # MAX_BUILT_TARGETS. Header reports the uncapped count; body
         # renders the overflow line.
         ("18. skipped-over-cap · GH", _make_results_skipped_over_cap(), "passed", "//...", False, "github", None, ""),
+        # A non-Aspect BES viewer: both results links must render, and neither
+        # may be suppressed as a duplicate of the other.
+        ("19. custom-bes-viewer · GH", _make_results_custom_bes(), "passed", "//...", True, "github", None, ""),
     ]
 
+def _render_scenarios(ctx, templates = None):
+    """Render every scenario and print TITLE + SUMMARY + the head of DETAILS.
+
+    `templates` passes through to `render_check_output`, so one table drives the
+    built-in layout and any preset. A template that fails to render falls back
+    to the built-in and logs a WARNING rather than failing the task, so the
+    printed output — and the absence of those warnings — is the assertion.
+    """
+    scenarios = _scenarios()
     sep = "=" * 70
 
     for (label, data, status, targets, with_artifact, ci, metadata_keys, progress) in scenarios:
         rc = _render_ctx(subject = targets, progress = progress)
         lk = _links(with_artifact = with_artifact, ci = ci)
-        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        t = resolve_templates(templates, "test", renderer_kind = "bazel_results") if templates else None
+        out = render_check_output(ctx, data, status, rc, lk, templates = t, metadata_keys = metadata_keys)
         print(sep)
         print("SCENARIO: " + label)
         print(sep)
@@ -628,11 +654,28 @@ def _test_impl(ctx):
     print("All " + str(len(scenarios)) + " scenarios rendered without error.")
     return 0
 
+def _test_impl(ctx):
+    return _render_scenarios(ctx)
+
+def _default_preset_impl(ctx):
+    return _render_scenarios(
+        ctx,
+        templates = template_presets.templates(template_presets.DEFAULT),
+    )
+
 template_snapshot_tests = task(
     summary = "Run the template snapshots AXL unit tests.",
     kind = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+default_preset_snapshot_tests = task(
+    summary = "Render the template snapshots through the default preset.",
+    kind = "test-default-preset-snapshots",
+    group = ["dev"],
+    implementation = _default_preset_impl,
     args = {},
 )
 
@@ -1432,6 +1475,370 @@ def _test_results_kinds_all_processed(ctx):
         if result != True and result != False:
             fail("process_event(%s) returned non-bool: %r" % (kind, result))
 
+def _test_strip_url_creds_keeps_user_when_split(ctx):
+    _eq(
+        "user:password -> user kept, secret gone",
+        strip_url_creds("grpcs://alice:hunter2@bes.example.com:443"),
+        "grpcs://alice:<REDACTED>@bes.example.com:443",
+    )
+
+def _test_strip_url_creds_redacts_bare_userinfo(ctx):
+    """A userinfo with no `:` is a bare token, which is the common shape for
+    `https://<token>@github.com/...`. The whole component is the secret."""
+    _eq(
+        "token-only userinfo -> whole userinfo gone",
+        strip_url_creds("https://ghp_abcdef123456@github.com/acme/repo.git"),
+        "https://<REDACTED>@github.com/acme/repo.git",
+    )
+
+def _test_strip_url_creds_leaves_urls_without_userinfo(ctx):
+    _eq(
+        "no userinfo -> unchanged",
+        strip_url_creds("https://github.com/acme/repo.git"),
+        "https://github.com/acme/repo.git",
+    )
+    _eq("no scheme -> unchanged", strip_url_creds("alice:hunter2@host"), "alice:hunter2@host")
+
+def _test_strip_url_creds_handles_several_urls(ctx):
+    _eq(
+        "both URLs redacted independently",
+        strip_url_creds("a=https://tok@one.example b=grpcs://bob:pw@two.example"),
+        "a=https://<REDACTED>@one.example b=grpcs://bob:<REDACTED>@two.example",
+    )
+
+def _test_strip_url_creds_stops_at_whitespace(ctx):
+    """An `@` in a later word does not belong to this URL's userinfo, so a
+    whitespace-terminated authority must not be treated as one."""
+    _eq(
+        "@ beyond whitespace is not userinfo",
+        strip_url_creds("see https://example.com then mail a@b.com"),
+        "see https://example.com then mail a@b.com",
+    )
+
+def _test_truncate_label_short_label_unchanged(ctx):
+    _eq("under the cap -> unchanged", truncate_label("//pkg:target"), "//pkg:target")
+
+def _test_truncate_label_keeps_target_name(ctx):
+    long_pkg = "//" + "/".join(["deeply_nested_package"] * 6)
+    label = long_pkg + ":the_failing_test"
+    got = truncate_label(label)
+    _eq("length capped", len(got) <= 90, True)
+    _eq("target name survives", got.endswith(":the_failing_test"), True)
+    _eq("package head survives", got.startswith("//deeply_nested_package"), True)
+    _eq("middle elided", "..." in got, True)
+
+def _test_truncate_label_long_target_name_falls_back_to_tail_cut(ctx):
+    """With no room for package context the suffix cannot be preserved, so a
+    plain tail cut is the honest result rather than an all-suffix string."""
+    label = "//pkg:" + "t" * 120
+    got = truncate_label(label)
+    _eq("length capped", len(got) <= 90, True)
+    _eq("ends with ellipsis", got.endswith("..."), True)
+
+def _test_truncate_label_no_colon(ctx):
+    label = "//" + "a" * 120
+    got = truncate_label(label)
+    _eq("length capped", len(got) <= 90, True)
+    _eq("ends with ellipsis", got.endswith("..."), True)
+
+def _make_multi_bucket_failure():
+    """1 build failure + 2 test failures + 1 timeout. `compute_invocation_state`
+    collapses this to the single highest-priority bucket."""
+    r = init_data()
+    r["bazel"]["targets_total"] = 8
+    r["bazel"]["failed_targets"] = [{"label": "//pkg/broken:lib", "kind": "cc_library"}]
+
+    # `_compute_bucket_counts` splits this one list by each entry's `status`;
+    # a timeout is a failed_tests entry, not a separate list.
+    r["bazel"]["failed_tests"] = [
+        {"label": "//pkg/a:test", "kind": "cc_test", "status": "failed"},
+        {"label": "//pkg/b:test", "kind": "py_test", "status": "failed"},
+        {"label": "//pkg/c:test", "kind": "cc_test", "status": "timeout"},
+    ]
+    r["bazel"]["failed_test_total"] = 3
+    return r
+
+def _test_invocation_state_counts_names_every_failure_bucket(ctx):
+    """The whole point of the clause: a run with three kinds of failure must
+    not report only one of them."""
+    data = _make_multi_bucket_failure()
+    _eq(
+        "single-bucket state collapses",
+        compute_invocation_state(data, "failed"),
+        "Failed to build",
+    )
+    _eq(
+        "count-complete clause names all three",
+        invocation_state_counts(data, "failed"),
+        "1 target failed to build, 2 tests failed, 1 timed out",
+    )
+
+def _test_invocation_state_counts_omits_successes_on_failure(ctx):
+    data = _make_multi_bucket_failure()
+    data["bazel"]["passed_test_total"] = 11
+    _eq(
+        "passing counts stay out of a failure clause",
+        invocation_state_counts(data, "failed"),
+        "1 target failed to build, 2 tests failed, 1 timed out",
+    )
+
+def _test_invocation_state_counts_empty_while_running_or_aborted(ctx):
+    data = _make_multi_bucket_failure()
+    _eq("running -> empty", invocation_state_counts(data, "running"), "")
+    _eq("failing -> empty", invocation_state_counts(data, "failing"), "")
+    data["bazel"]["aborted"] = True
+    _eq("aborted -> empty", invocation_state_counts(data, "failed"), "")
+
+def _test_invocation_state_counts_singular(ctx):
+    r = init_data()
+    r["bazel"]["targets_total"] = 1
+    r["bazel"]["failed_targets"] = [{"label": "//a:b", "kind": "cc_library"}]
+    _eq("one target, singular noun", invocation_state_counts(r, "failed"), "1 target failed to build")
+
+def _test_cached_tests_sentence_all_cached(ctx):
+    r = init_data()
+    r["bazel"]["passed_test_total"] = 24
+    r["bazel"]["cached_test_total"] = 24
+    _eq(
+        "all cached -> named denominator, no rate",
+        cached_tests_sentence(r),
+        "All 24 test targets were cached, so none were re-run.",
+    )
+
+def _test_cached_tests_sentence_partial(ctx):
+    r = init_data()
+    r["bazel"]["passed_test_total"] = 18
+    r["bazel"]["failed_test_total"] = 2
+    r["bazel"]["cached_test_total"] = 6
+    _eq(
+        "partial -> counts over the full test-target denominator",
+        cached_tests_sentence(r),
+        "6 of 20 test targets were cached and were not re-run.",
+    )
+
+def _test_cached_tests_sentence_empty_when_nothing_cached(ctx):
+    r = init_data()
+    r["bazel"]["passed_test_total"] = 5
+    _eq("none cached -> no sentence", cached_tests_sentence(r), "")
+    _eq("no tests at all -> no sentence", cached_tests_sentence(init_data()), "")
+
+def _test_report_is_json_encodable(ctx):
+    """The report is encoded at task end on CI. A record or callable left in the
+    dict would fail there, after the build has already run."""
+    data = _make_multi_bucket_failure()
+    data["repro_commands"].append(ReproFixCommand(
+        command = "aspect test -- //pkg/a:test",
+        slug = "test-repro-aspect",
+        target = "//pkg/a:test",
+    ))
+    report = build_report(data, "failed", command = "test", targets = ["//..."])
+    encoded = json.encode(report)
+    _eq("encodes to a non-empty string", len(encoded) > 0, True)
+    _eq("round-trips", json.decode(encoded)["schema_version"], SCHEMA_VERSION)
+
+def _test_report_carries_every_failure_uncapped(ctx):
+    """The surfaces cap their failure lists; the report must not."""
+    data = _make_multi_bucket_failure()
+    report = build_report(data, "failed", command = "test")
+    _eq("all failed tests present", len(report["failures"]["failed_tests"]), 3)
+    _eq("failed target present", len(report["failures"]["failed_targets"]), 1)
+
+def _test_report_keeps_repro_target_correlation(ctx):
+    """`target` is stripped before rendering but is the only key correlating a
+    command with the failure it reproduces."""
+    data = _make_multi_bucket_failure()
+    data["repro_commands"].append(ReproFixCommand(
+        command = "aspect test -- //pkg/a:test",
+        slug = "test-repro-aspect",
+        target = "//pkg/a:test",
+    ))
+    report = build_report(data, "failed", command = "test")
+    _eq("target preserved", report["commands"]["repro"][0]["target"], "//pkg/a:test")
+
+def _test_report_names_its_cache_derivations(ctx):
+    """Both cache numbers ship with their derivation, so a consumer cannot read
+    either as a remote cache hit rate."""
+    data = _make_multi_bucket_failure()
+    data["bazel"]["actions_total"] = 130
+    data["bazel"]["actions_executed"] = 50
+    data["bazel"]["actions_cached"] = 80
+    report = build_report(data, "failed", command = "test")
+    _eq(
+        "action derivation named",
+        report["actions"]["cached_derivation"],
+        "actions_created - actions_executed",
+    )
+    _eq(
+        "test derivation named",
+        report["tests"]["cached_targets_derivation"],
+        "test targets with TestSummary.total_num_cached > 0",
+    )
+
+def _test_report_truncation_floors_at_zero(ctx):
+    """Several totals are aggregates from a different event stream than the
+    sample, so a naive subtraction can go negative."""
+    data = init_data()
+    data["bazel"]["targets_total"] = 0
+    data["bazel"]["built_targets"] = [{"label": "//a:b", "kind": "cc_library"}]
+    report = build_report(data, "passed", command = "build")
+    _eq("no negative drop count", report["truncation"]["built_targets_dropped"], 0)
+
+def _test_report_omits_the_command_line(ctx):
+    """Redaction lives in the renderer, so the report must not carry the
+    resolved flags: a duplicated redaction pass would drift."""
+    data = _make_multi_bucket_failure()
+    encoded = json.encode(build_report(data, "failed", command = "test"))
+    _eq("no options_parsed", "options_parsed" in encoded, False)
+    _eq("no cmd_line", "cmd_line" in encoded, False)
+    _eq("no startup_options", "startup_options" in encoded, False)
+
+def _test_distinct_bes_url_empty_without_a_bes_url(ctx):
+    _eq("no bes_results_url -> empty", distinct_bes_url({}, _make_results_passed()), "")
+
+def _test_distinct_bes_url_returns_a_different_viewer(ctx):
+    data = _make_results_custom_bes()
+    _eq(
+        "a non-Aspect viewer is offered",
+        distinct_bes_url({}, data),
+        "https://bes.example.com/invocations/bazel-inv-9876",
+    )
+
+def _test_distinct_bes_url_suppresses_a_duplicate_of_the_aspect_link(ctx):
+    """Against the Aspect UI both ids resolve to the same page, so offering two
+    links would send the reader to one destination twice."""
+    data = _make_results_custom_bes()
+    same = "https://bes.example.com/invocations/bazel-inv-9876"
+    _eq("identical to the Aspect link -> empty", distinct_bes_url({"aspect_url": same}, data), "")
+
+def _test_default_preset_renders_every_tip_severity(ctx):
+    """A maintainer authored each tip and picked its severity, so the layout
+    shows all of them rather than deciding which severities matter."""
+    tips = [
+        {"id": "t-important", "severity": "important", "title": "Important thing", "body": "b1"},
+        {"id": "t-warning", "severity": "warning", "title": "Warning thing", "body": "b2"},
+        {"id": "t-suggestion", "severity": "suggestion", "title": "Suggested thing", "body": "b3"},
+        {"id": "t-info", "severity": "info", "title": "Informational thing", "body": "b4"},
+    ]
+    out = render_check_output(
+        ctx,
+        _make_results_passed(),
+        "passed",
+        _render_ctx(tips = tips),
+        _links(),
+        templates = resolve_templates(
+            None,
+            "test",
+            base = template_presets.templates("default"),
+            renderer_kind = "bazel_results",
+        ),
+    )
+    for t in tips:
+        _eq("%s renders" % t["id"], t["title"] in out["summary"], True)
+
+def _make_failure_with_logs(ctx):
+    """A build failure and a test failure whose output is on disk, as BES reports
+    it — `extract_snippet` reads the file, so a path is the only way in."""
+    tmp = ctx.std.env.temp_dir()
+    action_log = tmp + "/aspect-test-stderr.log"
+    test_log = tmp + "/aspect-test-testlog.log"
+    ctx.std.fs.write(action_log, "pkg/broken/lib.cc:42:10: error: no member named 'compute' in 'Widget'\n  return w.compute();\n")
+    ctx.std.fs.write(test_log, "[  FAILED  ] ComputeTest.ReturnsSum\npkg/a/test.cc:88: expected 3, got 4\n")
+
+    r = init_data()
+    r["bazel"]["targets_total"] = 4
+    r["bazel"]["failed_actions_total"] = 1
+    r["bazel"]["failed_actions"] = [{
+        "label": "//pkg/broken:lib",
+        "mnemonics": ["CppCompile"],
+        "stderr_path": action_log,
+    }]
+    r["bazel"]["failed_action_labels"] = ["//pkg/broken:lib"]
+    r["bazel"]["failed_targets"] = [{"label": "//pkg/broken:lib", "kind": "cc_library"}]
+    r["bazel"]["failed_tests"] = [{"label": "//pkg/a:test", "kind": "cc_test", "status": "failed"}]
+    r["bazel"]["failed_test_total"] = 1
+    r["bazel"]["test_details"] = {"//pkg/a:test": {"log_path": test_log}}
+
+    # Per-failure repro commands are correlated by `target`.
+    r["repro_commands"].append(ReproFixCommand(
+        command = "aspect build -- //pkg/broken:lib",
+        slug = "build-repro-aspect",
+        target = "//pkg/broken:lib",
+    ))
+    r["repro_commands"].append(ReproFixCommand(
+        command = "aspect test -- //pkg/a:test",
+        slug = "test-repro-aspect",
+        target = "//pkg/a:test",
+    ))
+    return r
+
+def _test_default_preset_renders_failure_snippets_with_repros(ctx):
+    """The failure list, its captured output and the per-failure repro command all
+    reach the body. The Build Results UI does not offer a repro command in this
+    context, so the command being inline is the reason this surface is read."""
+    snippet_options, max_snippets = snippet_budget_for(SURFACE_STATUS_CHECK)
+    _eq("the status-check surface budgets snippets", max_snippets > 0, True)
+
+    out = render_check_output(
+        ctx,
+        _make_failure_with_logs(ctx),
+        "failed",
+        _render_ctx(),
+        _links(),
+        templates = resolve_templates(
+            None,
+            "test",
+            base = template_presets.templates("default"),
+            renderer_kind = "bazel_results",
+        ),
+        snippet_options = snippet_options,
+        max_snippets = max_snippets,
+    )
+    text = out["text"]
+
+    _eq("both failing labels are named", "//pkg/broken:lib" in text and "//pkg/a:test" in text, True)
+    _eq("the compile error is quoted", "no member named 'compute'" in text, True)
+    _eq("the test failure is quoted", "ComputeTest.ReturnsSum" in text, True)
+    _eq("the build repro is inline", "aspect build -- //pkg/broken:lib" in text, True)
+    _eq("the test repro is inline", "aspect test -- //pkg/a:test" in text, True)
+
+def _test_overflow_note_says_more_only_when_rows_were_shown(ctx):
+    """"N more" is a claim about rows the reader can see. Several counts are
+    aggregates Bazel reports without the matching per-target events, so the
+    sample can be empty while the total is not."""
+    _eq("nothing hidden", overflow_note(5, 5), "")
+    _eq("negative floors to empty", overflow_note(3, 5), "")
+    _eq("some shown", overflow_note(24, 5), "_… 19 more not shown._")
+    _eq("none shown", overflow_note(52, 0), "_52 not shown._")
+
+def _test_overflow_note_agrees_its_noun_with_the_hidden_count(ctx):
+    _eq("plural", overflow_note(5, 2, "root failure"), "_… 3 more root failures not shown._")
+    _eq("singular", overflow_note(3, 2, "root failure"), "_… 1 more root failure not shown._")
+
+def _test_overflow_note_formats_large_counts(ctx):
+    _eq("thousands separator", overflow_note(5000, 250), "_… 4,750 more not shown._")
+
+def _test_default_preset_renders_operator_configured_rows(ctx):
+    """`ASPECT_WORKFLOWS_LINKS` and the `metadata_keys` rows are named by an
+    operator, so a layout that drops collected metadata still shows them."""
+    out = render_check_output(
+        ctx,
+        _make_results_passed(),
+        "passed",
+        _render_ctx(),
+        _links(),
+        templates = resolve_templates(
+            None,
+            "test",
+            base = template_presets.templates("default"),
+            renderer_kind = "bazel_results",
+        ),
+        metadata_keys = ["*"],
+    )
+    summary = out["summary"]
+    _eq("operator link rendered", "[Runbook](https://runbooks.example.com/ci)" in summary, True)
+    _eq("pinned key rendered", "**BRANCH:**" in summary, True)
+    _eq("empty pinned value skipped", "`` " not in summary, True)
+
 _UNIT_TESTS = [
     _test_results_kinds_locked,
     _test_results_kinds_all_processed,
@@ -1481,6 +1888,37 @@ _UNIT_TESTS = [
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
     _test_repro_targets_dedups_fallback_input,
+    _test_strip_url_creds_keeps_user_when_split,
+    _test_strip_url_creds_redacts_bare_userinfo,
+    _test_strip_url_creds_leaves_urls_without_userinfo,
+    _test_strip_url_creds_handles_several_urls,
+    _test_strip_url_creds_stops_at_whitespace,
+    _test_truncate_label_short_label_unchanged,
+    _test_truncate_label_keeps_target_name,
+    _test_truncate_label_long_target_name_falls_back_to_tail_cut,
+    _test_truncate_label_no_colon,
+    _test_invocation_state_counts_names_every_failure_bucket,
+    _test_invocation_state_counts_omits_successes_on_failure,
+    _test_invocation_state_counts_empty_while_running_or_aborted,
+    _test_invocation_state_counts_singular,
+    _test_cached_tests_sentence_all_cached,
+    _test_cached_tests_sentence_partial,
+    _test_cached_tests_sentence_empty_when_nothing_cached,
+    _test_report_is_json_encodable,
+    _test_report_carries_every_failure_uncapped,
+    _test_report_keeps_repro_target_correlation,
+    _test_report_names_its_cache_derivations,
+    _test_report_truncation_floors_at_zero,
+    _test_report_omits_the_command_line,
+    _test_distinct_bes_url_empty_without_a_bes_url,
+    _test_distinct_bes_url_returns_a_different_viewer,
+    _test_distinct_bes_url_suppresses_a_duplicate_of_the_aspect_link,
+    _test_default_preset_renders_every_tip_severity,
+    _test_default_preset_renders_failure_snippets_with_repros,
+    _test_overflow_note_says_more_only_when_rows_were_shown,
+    _test_overflow_note_agrees_its_noun_with_the_hidden_count,
+    _test_overflow_note_formats_large_counts,
+    _test_default_preset_renders_operator_configured_rows,
 ]
 
 def _unit_test_impl(ctx):

@@ -1033,6 +1033,9 @@ def _emit_final(ph, exit_code):
     # is registered when the GHSC / BK annotation snapshot their artifact_urls.
     manifest = _publish_manifest(ctx, data)
 
+    # Before the dispatch: the body links this artifact out of the registry.
+    artifacts.upload_report(ctx, data, final_status)
+
     ph.dispatch(phases.Update(
         kind = "delivery_results",
         status = final_status,

@@ -455,7 +455,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_BUILDKITE_ANNOTATIONS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            resolve_templates(templates, ctx.task.kind, base = preset_templates),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates, renderer_kind = update.kind),
             metadata_keys,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,

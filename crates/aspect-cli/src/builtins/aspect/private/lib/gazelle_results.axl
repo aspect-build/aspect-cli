@@ -371,6 +371,9 @@ def _build_details_data(data, status):
             data["gazelle"].get("patch_url", "") or "",
             strip = 0,
         ),
+        # The `-p` level differs per kind, so a template shared across kinds
+        # cannot hard-code it.
+        "patch_apply_cmd": "git apply -p0",
     }
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

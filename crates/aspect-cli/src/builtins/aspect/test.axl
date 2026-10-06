@@ -82,7 +82,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
     bz = bzl.test(ctx)
-    rs = results.test(ctx)
+    rs = results.test(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
+        ctx,
+        data,
+        status,
+        command = command,
+        targets = targets,
+    ))
 
     rs.setup(bz.targets, bz.rc, bz.bazel_streams_bes, bz.results_url)
     bz.start()

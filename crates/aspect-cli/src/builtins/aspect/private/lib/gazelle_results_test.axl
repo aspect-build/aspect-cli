@@ -26,12 +26,14 @@ Scenarios:
                            detected, body must show files list (not placeholder)
  19. failing-with-drift  — status=failing (mid-stream --severity=fail): same
 
-Body-content invariant (asserted in the loop): the "Gazelle task in progress…"
+Body-content invariant (asserted in the loop): `progress_phrase`
 placeholder renders IFF status == "running". A regression where `warning` or
 `failing` short-circuits to the placeholder fails the suite.
 """
 
+load("./check_dispatch.axl", "resolve_templates")
 load("./gazelle_results.axl", "init_data", "render_check_output")
+load("./template_presets.axl", "template_presets")
 
 # ─── Fake-data builders ───────────────────────────────────────────────────────
 
@@ -240,7 +242,7 @@ def _links(ci = "github"):
         "testlogs_label_urls": {},
     }
 
-def _test_impl(ctx):
+def _render_all(ctx, templates = None, progress_phrase = "Gazelle task in progress"):
     scenarios = [
         # (label,                               data,                       status,    ci,          metadata_keys)
         ("1. clean-passed · GH", _make_clean(), "passed", "github", None),
@@ -280,7 +282,8 @@ def _test_impl(ctx):
     for (label, data, status, ci, metadata_keys) in scenarios:
         rc = _render_ctx()
         lk = _links(ci = ci)
-        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        t = resolve_templates(templates, "gazelle", renderer_kind = "gazelle_results") if templates else None
+        out = render_check_output(ctx, data, status, rc, lk, templates = t, metadata_keys = metadata_keys)
         print(sep)
         print("SCENARIO: " + label)
         print(sep)
@@ -293,9 +296,9 @@ def _test_impl(ctx):
         print(out["text"][:4000])
         print("")
 
-        # Invariant: "Gazelle task in progress…" placeholder renders IFF
+        # Invariant: the layout's in-progress placeholder renders IFF
         # status == "running".
-        has_placeholder = "Gazelle task in progress" in out["text"]
+        has_placeholder = progress_phrase in out["text"]
         if status == "running" and not has_placeholder:
             errors.append("%s: status=running but body has no in-progress placeholder" % label)
         if status != "running" and has_placeholder:
@@ -331,10 +334,28 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
     if "//pkg:target" not in out["text"]:
         fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
 
+def _test_impl(ctx):
+    return _render_all(ctx)
+
+def _default_preset_impl(ctx):
+    return _render_all(
+        ctx,
+        templates = template_presets.templates(template_presets.DEFAULT),
+        progress_phrase = "In progress…",
+    )
+
 gazelle_template_snapshot_tests = task(
     summary = "Run the gazelle template snapshots AXL unit tests.",
     kind = "test-gazelle-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+gazelle_default_preset_snapshot_tests = task(
+    summary = "Render the gazelle template snapshots through the default preset.",
+    kind = "test-gazelle-default-preset-snapshots",
+    group = ["dev"],
+    implementation = _default_preset_impl,
     args = {},
 )

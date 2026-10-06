@@ -31,7 +31,7 @@ load(
     bazel_init_data = "init_data",
 )
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "format_int_comma")
+load("./text.axl", "pluralize")
 
 _DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit (~65535).
 
@@ -59,6 +59,12 @@ _SEVERITY_LABELS_SINGULAR = {
     "info": "info",
     "unknown": "unclassified",
 }
+
+def _severity_label(sev, n):
+    """Severity noun agreeing with `n`. Jinja2 cannot compare AXL ints, so
+    every count-dependent label is resolved here."""
+    labels = _SEVERITY_LABELS if n != 1 else _SEVERITY_LABELS_SINGULAR
+    return labels.get(sev, sev)
 
 # Per-group row cap to keep the body under GitHub's size limit on noisy
 # codebases. Full diagnostics are in the raw SARIF `lint-report` artifact.
@@ -240,7 +246,7 @@ _No lint diagnostics reported._{% else %}
 {% endfor -%}
 {% if group.overflow %}
 
-_… {{ group.overflow }} more {{ group.label_singular }} not shown._
+_… {{ group.overflow }} more {{ group.overflow_label }} not shown._
 {% endif %}
 </details>
 {% endfor %}{% endif %}
@@ -251,12 +257,13 @@ _… {{ group.overflow }} more {{ group.label_singular }} not shown._
 - {{ s.icon }} **{{ s.tool }}**{% if s.rule_id %} · `{{ s.rule_id }}`{% endif %} · `{{ s.file }}:{{ s.line_span }}`{% if s.comment_url %} · [💬 fix]({{ s.comment_url }}){% endif %}
 {% endfor %}
 {% endif %}
-{% if linters_chart %}
+{% if linter_summaries or clean_linters %}
 ### 🧹 Linters ({{ linters_count }})
 
-<pre>
-{{ linters_chart }}
-</pre>
+{% for l in linter_summaries %}- **{{ l.tool }}** — {{ l.summary }}
+{% endfor %}{% if clean_linters %}
+No findings from {% for t in clean_linters %}**{{ t }}**{% if not loop.last %}, {% endif %}{% endfor %}.
+{% endif %}
 {% endif %}
 """ + FIX_COMMANDS_BLOCK + REPRO_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
 
@@ -325,13 +332,13 @@ def _group_diagnostics(data, suggestion_links):
             continue
         shown = diags[:_MAX_ROWS_PER_GROUP]
         overflow = len(diags) - len(shown)
-        label = _SEVERITY_LABELS.get(sev, sev)
-        label_singular = _SEVERITY_LABELS_SINGULAR.get(sev, sev)
+        label = _severity_label(sev, len(diags))
+        overflow_label = _severity_label(sev, overflow)
         group = {
             "icon": _SEVERITY_ICONS.get(sev, "❓"),
             "count": len(diags),
             "label": label,
-            "label_singular": label_singular,
+            "overflow_label": overflow_label,
             "severity": sev,
             "rows": _group_rows_for_template(shown, suggestion_links),
             "overflow": overflow if overflow > 0 else 0,
@@ -391,7 +398,8 @@ def linter_rows(data):
     Union of diagnostics (severity-counted), suggestions (fix-counted), and
     tools_run (zero-row for clean linters). tools_run dedupes case-insensitively
     since the BES marker ("ShellCheck") and SARIF driver ("shellcheck") disagree.
-    Shared by `_linters_chart` and `_build_details_data` so they agree.
+    Shared by `linter_summaries`, `clean_linters` and `_build_details_data`
+    so they agree.
     """
     rows = {}
 
@@ -420,14 +428,14 @@ def linter_rows(data):
 
     return rows
 
-def _linters_chart(data):
-    """Render `linter_rows(data)` as a column-aligned <pre> body (no <pre> tags),
-    sorted by finding+fix volume desc then name asc. Empty when nothing surfaced.
+def linter_summaries(data):
+    """Per-linter findings as `[{tool, summary}]`, busiest first.
+
+    Only linters that found something: a linter with nothing to report is named
+    in `clean_linters` instead, which is one fact about the run rather than a row
+    of zeros per tool.
     """
     rows = linter_rows(data)
-    if not rows:
-        return ""
-
     items = sorted(
         [(t, rows[t]) for t in rows],
         key = lambda kv: (
@@ -436,45 +444,46 @@ def _linters_chart(data):
         ),
     )
 
-    h_name = "Linter"
-    h_err = "🚨 Errors"
-    h_warn = "⚠️ Warnings"
-    h_info = "ℹ️ Infos"
-    h_fix = "🔧 Auto Fixes"
-
-    name_w = len(h_name)
-    for (t, _) in items:
-        if len(t) > name_w:
-            name_w = len(t)
-    err_w = len(h_err)
-    warn_w = len(h_warn)
-    info_w = len(h_info)
-    fix_w = len(h_fix)
-
-    lines = []
-    lines.append(
-        _pad_right(h_name, name_w) + " | " +
-        _pad_right(h_err, err_w) + " | " +
-        _pad_right(h_warn, warn_w) + " | " +
-        _pad_right(h_info, info_w) + " | " +
-        _pad_right(h_fix, fix_w),
-    )
-    lines.append(
-        "-" * name_w + "-+-" +
-        "-" * err_w + "-+-" +
-        "-" * warn_w + "-+-" +
-        "-" * info_w + "-+-" +
-        "-" * fix_w,
-    )
+    out = []
     for (tool, r) in items:
-        lines.append(
-            _pad_right(tool, name_w) + " | " +
-            _pad_left(format_int_comma(r["errors"]), err_w) + " | " +
-            _pad_left(format_int_comma(r["warnings"]), warn_w) + " | " +
-            _pad_left(format_int_comma(r["infos"]), info_w) + " | " +
-            _pad_left(format_int_comma(r["fixes"]), fix_w),
-        )
-    return "\n".join(lines)
+        parts = []
+        for (n, noun) in [
+            (r["errors"], "error"),
+            (r["warnings"], "warning"),
+            (r["infos"], "info"),
+            (r["fixes"], "auto-fix"),
+        ]:
+            if n > 0:
+                parts.append(pluralize(n, noun))
+        if parts:
+            out.append({"tool": tool, "summary": " · ".join(parts)})
+    return out
+
+def clean_linters(data):
+    """Names of linters that ran and reported nothing, sorted.
+
+    Worth stating: it is the only evidence in the body that a configured linter
+    executed at all, and a reviewer asking "did eslint even run?" has nowhere
+    else to look.
+    """
+    rows = linter_rows(data)
+    return sorted([
+        t
+        for t in rows
+        if rows[t]["errors"] + rows[t]["warnings"] + rows[t]["infos"] + rows[t]["fixes"] == 0
+    ])
+
+def _nonblocking_summary(groups):
+    """Summary label for the non-error severity groups, or "" when there are
+    none — e.g. "8 warnings, 1 info". A layout that collapses warnings and
+    infos into a single disclosure needs one heading for the lot, and Jinja2
+    cannot build it (it cannot compare AXL ints to pick plurals).
+    """
+    parts = []
+    for g in groups:
+        if g["severity"] != "error" and g["count"] > 0:
+            parts.append(str(g["count"]) + " " + g["label"])
+    return ", ".join(parts)
 
 def _groups_for_template(groups):
     """Stringify integer fields the Jinja2 template interpolates."""
@@ -484,7 +493,7 @@ def _groups_for_template(groups):
             "icon": g["icon"],
             "count": str(g["count"]),
             "label": g["label"],
-            "label_singular": g["label_singular"],
+            "overflow_label": g["overflow_label"],
             "severity": g["severity"],
             "rows": g["rows"],
             "overflow": str(g["overflow"]) if g.get("overflow") else "",
@@ -537,14 +546,17 @@ def _build_details_data(data, render_ctx, status, links = None):
         if file_ and line:
             # Patch-derived — always fix-bearing.
             suggestion_links[(file_, line)] = {"url": url, "is_fix": True}
+    groups = _group_diagnostics(data, suggestion_links)
     return {
         # str() every int: Jinja2 renders Python ints as
         # `{"$serde_json::private::Number": "N"}`, so stringify at the boundary.
         "total": str(total),
-        "linters_chart": _linters_chart(data),
+        "linter_summaries": linter_summaries(data),
+        "clean_linters": clean_linters(data),
         # Same source as the chart so header and row count agree.
         "linters_count": str(len(linter_rows(data))),
-        "groups": _groups_for_template(_group_diagnostics(data, suggestion_links)),
+        "groups": _groups_for_template(groups),
+        "nonblocking_summary": _nonblocking_summary(groups),
         # All auto-fixes (correlated + uncorrelated) in one "Auto fixes" section.
         "suggestions": _suggestions_for_template(raw_suggestions, data),
         "build_failed": bool(data["lint"].get("build_failed")),

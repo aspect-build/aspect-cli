@@ -1,0 +1,262 @@
+"""The `default` status-surface layout.
+
+Selected by `template_preset = "default"`, which is the shipped default. The
+registry that validates and exposes it lives in `template_presets.axl`; this file
+is only the templates.
+
+Authored as new strings rather than assembled from the built-in template
+constants: live configs `.replace()` fragments of those behind load-time `fail()`
+guards, so editing one is a config-load failure for them. Nothing here reads a
+built-in template, and this module loads nothing.
+
+`details` is keyed by renderer rather than task kind — each string is written
+against one renderer's data, and a task kind would miss every alias and custom
+task that renders through the same renderer.
+
+The layout carries the verdict, the results links, the commands, the task's own
+findings and the downloads. What it leaves out is still collected, and reaches the
+reader through the report artifact and the Build Results UI.
+
+Three surface constraints decide its shape:
+
+  - A GitHub check-run `title` is the whole payload in the checks list and the
+    merge box, and a GitLab commit status carries *only* the title, truncated to
+    255 characters — so the counts live in the title.
+  - Buildkite strips every `<details>` on non-terminal updates, so hiding volume
+    behind a disclosure does nothing for a Buildkite reader mid-build. Volume has
+    to be absent, not folded.
+  - A still-running task has no artifact URL yet, so the body must stand on its
+    own and never defer a repro command to the report.
+"""
+
+# Flat per-failure block: label, what happened, the captured output, and the one
+# command that reproduces it. The Aspect UI does not offer a repro command in
+# this context, which is why it is inline here rather than linked.
+_FAILURES_MACRO = """{% macro failures(rows) %}
+{%- for t in rows %}
+**`{{ t.label }}`** — {{ t.snippet_verb }}{% if t.kind %} ({{ t.kind }}){% endif %}
+{%- if t.snippet %}
+{{ t.snippet_fence }}text
+{% if t.snippet_trunc_head %}…
+{% endif %}{{ t.snippet }}
+{% if t.snippet_trunc_tail %}…
+{% endif %}{{ t.snippet_fence }}
+{% endif %}
+{%- if t.repros %}{% for r in t.repros %}
+```
+{{ r.command }}
+```
+{%- endfor %}
+{% endif %}
+{%- endfor %}
+{%- endmacro %}"""
+
+# Fix before Reproduce, and both ahead of any failure list: one line each, and
+# first means a wide build cannot push them past GitHub's 65 000-character body
+# cap.
+_COMMANDS = """{% if fix_commands %}### Fix
+{% for c in fix_commands %}
+```
+{{ c.command }}
+```
+{% endfor %}
+{% endif %}{% if repro_commands %}### Reproduce
+{% for c in repro_commands %}
+```
+{{ c.command }}
+```
+{% endfor %}
+{% endif %}"""
+
+# Links to click, including the report JSON — the machine-readable form of
+# everything this layout leaves out.
+_DOWNLOAD = """{% if artifacts_browse_url or artifact_links %}### Download
+
+{% if artifacts_browse_url %}[All artifacts]({{ artifacts_browse_url }}){% endif %}{% if artifact_links %}{% if artifacts_browse_url %} · {% endif %}{% for a in artifact_links %}[{{ a.label }}]({{ a.url }}){% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+
+{% endif %}"""
+
+# Attribution only; the operator's own links are on the summary.
+_FOOTER = """<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install) · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>"""
+
+_ABORT_NOTICE = """{% if aborted %}> ⚠️ **Task aborted**{% if abort_reason %} — {{ abort_reason }}{% endif %}
+
+{% endif %}"""
+
+# `state_detail` is the count-complete clause, set only for build/test, whose
+# `state` names one bucket out of however many applied. Every other kind already
+# counts everything it found, so `state` is correct there.
+_TITLE = """{% if icon %}{{ icon }}{% endif %}{% if task_kind %}{% if icon %} {% endif %}{{ task_kind }}{% endif %}{% if subject %} {{ subject }}{% endif %}{% if state_detail or state %}{% if icon or task_kind or subject %} · {% endif %}{{ state_detail or state }}{% endif %}"""
+
+# One summary for every kind: all six have the same three things to say, and
+# their differences live in the data (`config_items`, the verdict clause), not
+# the shape. `last_update` appears only while running — on a terminal check whose
+# title already reads "Passed" it restates it. Tips render at every severity: a
+# maintainer authored each one and chose that severity.
+_SUMMARY = """{{ status_icon }} **{{ status_label }}**{% if verdict_counts %} · {{ verdict_counts }}{% endif %}{% if elapsed_text %} · {{ elapsed_text }}{% endif %}{% for c in config_items %} · {{ c.key }} `{{ c.value }}`{% endfor %}
+{% if aspect_url %}
+**[Open in Build Results UI]({{ aspect_url }})**
+{% endif %}{% if bes_url %}
+**[Custom BES Results UI]({{ bes_url }})**
+{% endif %}{% if operator_links %}
+{% for l in operator_links %}[{{ l.text }}]({{ l.url }}){% if not loop.last %} · {% endif %}{% endfor %}
+{% endif %}{% if pinned_metadata %}
+{% for m in pinned_metadata %}{% if m.value %}**{{ m.key }}:** `{{ m.value }}` {% endif %}{% endfor %}
+{% endif %}{% if branch or short_sha %}
+<sub>{% if branch %}{{ branch }}{% endif %}{% if branch and short_sha %} · {% endif %}{% if short_sha %}`{{ short_sha }}`{% endif %}</sub>
+{% endif %}{% if not is_terminal %}{% if last_update %}
+{{ last_update }}
+{% endif %}{% endif %}{% for tip in tips %}
+
+> {{ tip.severity_emoji }} **{{ tip.severity_label|upper }}: {{ tip.title }}**
+>
+{{ tip.body_quoted }}{% if tip.silence_hint %}
+>
+> {{ tip.silence_hint }}{% endif %}
+{% endfor %}"""
+
+# build / test. Failures only — the labels of targets that succeeded are in the
+# report, and nobody reads the names of tests that passed. One cache sentence,
+# counts with the denominator named, and only on a clean run: beside a failure
+# list it reads as an excuse.
+_BAZEL_DETAILS = _FAILURES_MACRO + """
+""" + _ABORT_NOTICE + _COMMANDS + """{% if build_failures_snippets or failed_tests_snippets or timeout_tests_snippets %}### Failures
+{{ failures(build_failures_snippets) }}{{ failures(failed_tests_snippets) }}{{ failures(timeout_tests_snippets) }}
+{% endif %}{% if build_failures and not build_failures_snippets %}### Failed to build
+
+{% for t in build_failures %}- `{{ t.label }}`{% if t.mnemonic %} — {{ t.mnemonic }}{% endif %}
+{% endfor %}
+{% endif %}{% if failed_tests and not failed_tests_snippets %}### Failed tests
+
+{% for t in failed_tests %}- `{{ t.label }}`{% if t.duration %} — {{ t.duration }}{% endif %}
+{% endfor %}
+{% endif %}{% if timeout_tests and not timeout_tests_snippets %}### Timed out
+
+{% for t in timeout_tests %}- `{{ t.label }}`{% if t.duration %} — after {{ t.duration }}{% endif %}
+{% endfor %}
+{% endif %}{% if build_failures_overflow_note %}{{ build_failures_overflow_note }}
+
+{% endif %}{% if flaky_tests %}### Flaky tests
+
+{% for t in flaky_tests %}- `{{ t.label }}`
+{% endfor %}
+{% endif %}{% if derived_failures %}<details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} blocked by a failed dependency</summary>
+
+{% for t in derived_failures %}- `{{ t.label }}`
+{% endfor %}
+</details>
+
+{% endif %}{% if is_terminal %}{% if not build_failures %}{% if not failed_tests %}{% if not timeout_tests %}{% if cached_tests_sentence %}{{ cached_tests_sentence }}
+
+{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}""" + _DOWNLOAD + _FOOTER
+
+# lint. Errors expanded — they are the failures. Warnings and infos share one
+# disclosure: at `hold-the-line` they are not blocking, so the count belongs in
+# the summary and the rows one click away. The auto-fix list and the per-linter
+# breakdown stay inline; the Build Results UI has no view of either.
+_LINT_DETAILS = _ABORT_NOTICE + """{% if build_failed %}> ⚠️ The underlying Bazel invocation failed, so these findings may be incomplete.
+
+{% endif %}""" + _COMMANDS + """{% for group in groups %}{% if group.severity == "error" %}### {{ group.icon }} {{ group.count }} {{ group.label }}
+
+{% for row in group.rows %}- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}{% if row.comment_url %} · [comment]({{ row.comment_url }}){% endif %}
+{% endfor %}{% if group.overflow %}
+_… {{ group.overflow }} more {{ group.overflow_label }} not shown._
+{% endif %}
+{% endif %}{% endfor %}{% if nonblocking_summary %}<details><summary>{{ nonblocking_summary }}</summary>
+
+{% for group in groups %}{% if group.severity != "error" %}{% for row in group.rows %}- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}
+{% endfor %}{% endif %}{% endfor %}
+</details>
+
+{% endif %}{% if suggestions %}### Auto fixes ({{ suggestions|length }})
+
+{% for s in suggestions %}- **{{ s.tool }}**{% if s.rule_id %} · `{{ s.rule_id }}`{% endif %} · `{{ s.file }}:{{ s.line_span }}`{% if s.comment_url %} · [fix]({{ s.comment_url }}){% endif %}
+{% endfor %}
+{% endif %}{% if linter_summaries or clean_linters %}### Linters ({{ linters_count }})
+
+{% for l in linter_summaries %}- **{{ l.tool }}** — {{ l.summary }}
+{% endfor %}{% if clean_linters %}
+No findings from {% for t in clean_linters %}**{{ t }}**{% if not loop.last %}, {% endif %}{% endfor %}.
+{% endif %}
+{% endif %}""" + _DOWNLOAD + _FOOTER
+
+# format / gazelle. One template: they differ only in `noun`, the error keys and
+# the patch flag, all already variables. An undefined variable is falsy here, so
+# each kind's branches simply do not fire for the other.
+_FILES_DETAILS = _ABORT_NOTICE + """{% if formatter_error %}> ⚠️ The formatter failed{% if formatter_error_code %} (exit {{ formatter_error_code }}){% endif %}.
+
+{% endif %}{% if gazelle_error %}> ⚠️ Gazelle failed{% if gazelle_error_code %} (exit {{ gazelle_error_code }}){% endif %}.
+
+{% endif %}{% if apply_error %}> ⚠️ Applying the fix failed{% if apply_error_msg %} — {{ apply_error_msg }}{% endif %}.
+
+{% endif %}{% if no_git %}> ⚠️ No Git repository, so no file set could be determined.
+
+{% endif %}{% if warn_signal %}> ⚠️ `--severity=warn` is set, so this does not fail the build.
+
+{% endif %}{% if is_running %}In progress…
+
+{% endif %}{% if is_clean %}All files in scope are fine.
+
+{% endif %}""" + _COMMANDS + """{% if file_list %}{{ total }} {{ noun }}:
+
+```
+{{ file_list }}
+```
+{% if has_overflow %}
+_… {{ overflow }} more not shown._
+{% endif %}
+{% endif %}{% if has_filtered %}_({{ filtered_count }} file(s) hidden by pattern filters.)_
+
+{% endif %}{% if patch_url %}{% if not applied %}<details><summary>Apply the patch instead</summary>
+
+[Download the patch]({{ patch_url }}), then run `{{ patch_apply_cmd }} <file>` in your workspace.
+{% if patch_download_cmd %}
+```shell
+{{ patch_download_cmd }}
+```
+{% endif %}
+</details>
+
+{% endif %}{% endif %}""" + _DOWNLOAD + _FOOTER
+
+# delivery. The only kind whose *success* carries a payload — what shipped, under
+# which digest — and the Aspect UI has no view of a delivery at all, so the
+# per-target results are the body rather than a summary of it.
+_DELIVERY_DETAILS = _ABORT_NOTICE + """{% for s in summary_rows %}- {{ s.icon }} **{{ s.count }}** {{ s.label }}{% if s.note %} ({{ s.note }}){% endif %}
+{% endfor %}
+{% for group in groups %}{% if group.outcome == "fail" or group.outcome == "warn" %}### {{ group.icon }} {{ group.count }} {{ group.heading }}
+
+{% for r in group.entries %}- `{{ r.label }}`{% if r.message %} — {{ r.message }}{% endif %}
+{% endfor %}
+{% endif %}{% endfor %}{% for group in groups %}{% if group.outcome != "fail" and group.outcome != "warn" %}<details><summary>{{ group.icon }} {{ group.count }} {{ group.heading }}</summary>
+
+{% for r in group.entries %}- `{{ r.label }}`{% if r.key %} · `{{ r.key }}`{% endif %}{% if r.is_forced %} · forced{% endif %}
+{% endfor %}{% if group.overflow %}
+_… {{ group.overflow }} more not shown._
+{% endif %}
+</details>
+
+{% endif %}{% endfor %}""" + _DOWNLOAD + _COMMANDS + _FOOTER
+
+# warming. Only the facts that vary between runs: whether the archive uploaded,
+# was skipped, or failed.
+_WARMING_DETAILS = _ABORT_NOTICE + """{% if is_running %}Warming in progress…
+
+{% endif %}{% if build_failed %}> ⚠️ Populating the caches failed.
+
+{% endif %}{% if archive_skipped_reason %}Caches populated; archive skipped — {{ archive_skipped_reason }}.
+
+{% endif %}{% if archive_error %}> ⚠️ Uploading the warming archive failed — {{ archive_error }}.
+
+{% endif %}""" + _DOWNLOAD + _FOOTER
+
+DEFAULT_TEMPLATES = {
+    "title": _TITLE,
+    "summary": _SUMMARY,
+    "bazel_results": {"details": _BAZEL_DETAILS},
+    "lint_results": {"details": _LINT_DETAILS},
+    "format_results": {"details": _FILES_DETAILS},
+    "gazelle_results": {"details": _FILES_DETAILS},
+    "delivery_results": {"details": _DELIVERY_DETAILS},
+    "warming_results": {"details": _WARMING_DETAILS},
+}

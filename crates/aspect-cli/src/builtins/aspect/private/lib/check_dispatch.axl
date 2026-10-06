@@ -126,9 +126,14 @@ def kind_for_task(task_kind):
     """
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
-# Task-kind keys a `templates` dict may nest an override under, as opposed to
-# the flat slot keys that address every kind at once.
-TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
+# Keys a `templates` dict may nest an override under, as opposed to the flat
+# slot keys that address every kind at once. Both a task kind ("lint") and a
+# renderer kind ("lint_results") are addressable: a `details` template is
+# written against one renderer's data, while a task kind distinguishes `build`
+# from `test` and names an alias or a custom task directly.
+TEMPLATE_SCOPE_KEYS = sorted(
+    list(_TASK_KIND_DEFAULTS.keys()) + list(_TASK_KIND_DEFAULTS.values()),
+)
 
 # Slots the per-kind renderers consume. Valid as a flat key or inside a
 # per-kind block; anything else in a `templates` dict is inert.
@@ -140,41 +145,56 @@ RENDERER_TEMPLATE_SLOTS = ["details", "summary", "title"]
 # aggregates every sibling task, so there is no single kind to scope it to.
 COMMENT_TEMPLATE_SLOT = "body"
 
-def _layer_overrides(layer, task_kind, label):
-    """One layer's flat keys, overlaid with its `task_kind` block."""
+def _scope_block(layer, key, label):
+    """One scope block from a layer, or {} when absent."""
+    block = layer.get(key) or {}
+    if type(block) != "dict":
+        fail("%s[%r] must be a dict of template overrides, got %r" % (label, key, block))
+    return block
+
+def _layer_overrides(layer, task_kind, renderer_kind, label):
+    """One layer's flat keys, overlaid with its renderer-kind block, then its
+    task-kind block — most specific last."""
     resolved = {k: v for k, v in layer.items() if k not in TEMPLATE_SCOPE_KEYS}
-    scoped = layer.get(task_kind) or {}
-    if type(scoped) != "dict":
-        fail("%s[%r] must be a dict of template overrides, got %r" % (label, task_kind, scoped))
-    resolved.update(scoped)
+    if renderer_kind and renderer_kind != task_kind:
+        resolved.update(_scope_block(layer, renderer_kind, label))
+    resolved.update(_scope_block(layer, task_kind, label))
     return resolved
 
-def resolve_templates(templates, task_kind, base = None):
+def resolve_templates(templates, task_kind, base = None, renderer_kind = ""):
     """Narrow template overrides to the flat {"title", "summary", "details"} dict
     the per-kind renderers accept.
 
-    Two shapes are supported within a layer, and they compose:
+    Three shapes are supported within a layer, and they compose:
 
-      {"summary": ...}                     — applies to every task kind
-      {"lint": {"summary": ...}}           — applies to `lint` tasks only
+      {"summary": ...}                      — applies to every task
+      {"format_results": {"details": ...}}  — every task the format renderer draws
+      {"lint": {"summary": ...}}            — `lint` tasks only
 
-    A per-kind block overlays the flat keys, so a config can set a shared
-    default and override one kind without restating the rest. `task_kind` is
-    the task's own kind ("build", "lint", …), not the renderer kind, since
-    that is how tasks are addressed everywhere else in config (`ctx.tasks[…]`);
-    it also keeps `build` and `test` separable even though both render through
-    `bazel_results`.
+    `task_kind` is the task's own kind ("build", "lint", "buildifier", …), which
+    is how tasks are addressed everywhere else in config (`ctx.tasks[…]`), and it
+    keeps `build` and `test` separable even though both render through
+    `bazel_results`. `renderer_kind` is the renderer drawing this update
+    ("bazel_results", "format_results", …).
+
+    Both are offered because the two answer different questions. A `details`
+    template is written against one renderer's data keys, so the renderer is what
+    it is really keyed to; but only the task kind can name one task among several
+    that share a renderer. Keying on the task kind alone silently misses every
+    task whose kind is not one of the built-in seven — a `format.alias` such as
+    `buildifier`, or any custom task — leaving it on the built-in body.
 
     `base` is an optional lower-precedence layer of the same shape — the
     templates contributed by the selected preset — which `templates` overrides.
     Resolving the layers in order rather than merging them first is what keeps
-    four levels of precedence distinct:
+    the levels of precedence distinct:
 
-        base flat  <  base scoped  <  templates flat  <  templates scoped
+        base flat     <  base renderer     <  base task
+          <  templates flat  <  templates renderer  <  templates task
 
-    Merging the two dicts up front would collapse that: a per-kind block in
-    `base` would outrank an explicit flat key in `templates`, letting a preset
-    beat the config that selected it.
+    Merging the two dicts up front would collapse that: a scoped block in `base`
+    would outrank an explicit flat key in `templates`, letting a preset beat the
+    config that selected it.
 
     Returns None when nothing applies, matching what the renderers treat as
     "use the built-ins".
@@ -182,7 +202,7 @@ def resolve_templates(templates, task_kind, base = None):
     resolved = {}
     for (label, layer) in [("template preset", base), ("templates", templates)]:
         if layer:
-            resolved.update(_layer_overrides(layer, task_kind, label))
+            resolved.update(_layer_overrides(layer, task_kind, renderer_kind, label))
     return resolved or None
 
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).

@@ -17,7 +17,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # feature through the trait (see `feature/deployment.axl`). The whole flow is
     # visible below as thin verbs over the handle.
     bz = bzl.build(ctx)
-    rs = results.build(ctx)
+    rs = results.build(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
+        ctx,
+        data,
+        status,
+        command = command,
+        targets = targets,
+    ))
 
     # Surface init + health checks (rc already active); also seeds the resolved
     # BES facts the Aspect Web UI link is keyed on.

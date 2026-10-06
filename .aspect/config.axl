@@ -17,21 +17,21 @@ load("@aspect//private/lib/aspect_cloud_api_test.axl", "aspect_cloud_api_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
-load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
+load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "default_preset_snapshot_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazelrc_file_test.axl", "bazelrc_file_tests")
 load("@aspect//private/lib/cache_selection_test.axl", "cache_selection_tests")
 load("@aspect//private/lib/changedetector_test.axl", "changedetector_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/confirm_test.axl", "confirm_tests")
-load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
+load("@aspect//private/lib/delivery_results_test.axl", "delivery_default_preset_snapshot_tests", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
 load("@aspect//private/lib/environment.axl", "info")
-load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
+load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
-load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
+load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
 load("@aspect//private/lib/git_checkout_test.axl", "git_checkout_tests")
 load("@aspect//private/lib/git_diff_test.axl", "git_diff_tests")
 load("@aspect//private/lib/github_detect_test.axl", "github_detect_tests")
@@ -44,7 +44,7 @@ load("@aspect//private/lib/health_check_ready_test.axl", "health_check_ready_tes
 load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
-load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
+load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/path_normalize_test.axl", "path_normalize_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
@@ -56,7 +56,7 @@ load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
-load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
+load("@aspect//private/lib/warming_results_test.axl", "warming_default_preset_snapshot_tests", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
@@ -306,6 +306,11 @@ def config(ctx: ConfigContext):
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
 
+    # The same scenarios through the shipped default preset, so the preset layer
+    # is exercised and not only validated at load.
+    # Run with: aspect dev test-default-preset-snapshots
+    ctx.tasks.add(default_preset_snapshot_tests)
+
     # Bazel results unit: compute_invocation_state, conclusion, skipped buckets.
     # Run with: aspect dev test-bazel-results
     ctx.tasks.add(bazel_results_unit_tests)
@@ -333,6 +338,7 @@ def config(ctx: ConfigContext):
     # lint_results template snapshots.
     # Run with: aspect dev test-lint-template-snapshots
     ctx.tasks.add(lint_template_snapshot_tests)
+    ctx.tasks.add(lint_default_preset_snapshot_tests)
 
     # Tips primitives: add_tip/collect_tips_sorted, severity, glob filter, silence.
     # Run with: aspect dev test-tips
@@ -497,6 +503,7 @@ def config(ctx: ConfigContext):
     # delivery_results template snapshots.
     # Run with: aspect dev test-delivery-template-snapshots
     ctx.tasks.add(delivery_template_snapshot_tests)
+    ctx.tasks.add(delivery_default_preset_snapshot_tests)
 
     # Delivery results unit: init_data/add_result/build_manifest schema shape.
     # Run with: aspect dev test-delivery-results
@@ -505,6 +512,7 @@ def config(ctx: ConfigContext):
     # format_results template snapshots.
     # Run with: aspect dev test-format-template-snapshots
     ctx.tasks.add(format_template_snapshot_tests)
+    ctx.tasks.add(format_default_preset_snapshot_tests)
 
     # Format spawn-args + tree-walk-hint unit tests.
     # Run with: aspect dev test-format-spawn
@@ -517,10 +525,12 @@ def config(ctx: ConfigContext):
     # gazelle_results template snapshots.
     # Run with: aspect dev test-gazelle-template-snapshots
     ctx.tasks.add(gazelle_template_snapshot_tests)
+    ctx.tasks.add(gazelle_default_preset_snapshot_tests)
 
     # warming_results template snapshots.
     # Run with: aspect dev test-warming-template-snapshots
     ctx.tasks.add(warming_template_snapshot_tests)
+    ctx.tasks.add(warming_default_preset_snapshot_tests)
 
     # Buildkite annotations: snapshots the annotate body per kind × status.
     # Run with: aspect dev test-bk-annotation-snapshots

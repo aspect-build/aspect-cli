@@ -3660,15 +3660,50 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 def test_template_presets(tc: int) -> int:
     """Covers `template_presets` and the `base` layer of `resolve_templates`.
 
-    The shipped `full` preset is empty, so the preset layer is the identity
-    function on every real invocation. These drive the layering with
-    test-local presets instead, which is the only way the four-level
-    precedence lattice gets real coverage while one preset is registered.
+    The layering is driven with test-local presets rather than the registered
+    ones, so the precedence lattice stays covered whatever ships.
     """
 
-    # `full` contributes nothing: that is what keeps output byte-identical.
+    # `full` contributes nothing: that is what makes it the original layout.
     tc = test_case(tc, template_presets.templates("full") == {}, "the full preset contributes no templates")
-    tc = test_case(tc, template_presets.DEFAULT == "full", "full is the default preset")
+    tc = test_case(tc, template_presets.DEFAULT == "default", "default is the default preset")
+    tc = test_case(
+        tc,
+        template_presets.templates("default") != {},
+        "the default preset ships templates",
+    )
+
+    # Every kind a built-in renderer draws must be covered, or that kind silently
+    # renders the full body under the trimmed default.
+    _default_templates = template_presets.templates("default")
+    for _renderer in ["bazel_results", "lint_results", "format_results", "gazelle_results", "delivery_results", "warming_results"]:
+        tc = test_case(
+            tc,
+            "details" in (_default_templates.get(_renderer) or {}),
+            "the default preset defines details for %s" % _renderer,
+        )
+
+    # A task kind outside the built-in seven — `format.alias` names such as
+    # `buildifier`, or any custom task — resolves through its renderer.
+    _alias = resolve_templates(None, "buildifier", base = _default_templates, renderer_kind = "format_results")
+    tc = test_case(
+        tc,
+        _alias != None and _alias.get("details") == _default_templates["format_results"]["details"],
+        "an alias task kind resolves its renderer's details",
+    )
+    tc = test_case(
+        tc,
+        (resolve_templates(None, "buildifier", base = _default_templates) or {}).get("details") == None,
+        "without a renderer kind an alias falls through to the built-in details",
+    )
+
+    # A task-kind block still outranks the renderer block in the same layer.
+    _both = {"format_results": {"details": "R"}, "buildifier": {"details": "T"}}
+    tc = test_case(
+        tc,
+        resolve_templates(_both, "buildifier", renderer_kind = "format_results")["details"] == "T",
+        "a task-kind block outranks its renderer block",
+    )
     tc = test_case(tc, template_presets.DEFAULT in template_presets.NAMES, "the default preset is registered")
     tc = test_case(tc, template_presets.NAMES == sorted(template_presets.NAMES), "preset names are sorted")
 
@@ -3693,6 +3728,11 @@ def test_template_presets(tc: int) -> int:
             tc,
             resolve_templates(templates, kind, base = template_presets.templates("full")) == got,
             "the full preset as base is a no-op for %r" % (templates,),
+        )
+        tc = test_case(
+            tc,
+            resolve_templates(templates, kind, renderer_kind = "") == got,
+            "an empty renderer kind matches the task-kind-only call for %r" % (templates,),
         )
 
     # The four-level lattice: preset flat < preset scoped < user flat < user scoped.

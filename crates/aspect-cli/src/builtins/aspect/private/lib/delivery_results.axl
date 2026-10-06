@@ -392,6 +392,14 @@ def _ctx_column_for(outcome):
         return "Note"
     return "Build URL"
 
+def _entry_for_template(d, prefix):
+    """A delivery entry with its dedup key rendered as `<prefix>:<sha[:12]>` —
+    the identity two runs collide on, which the raw digest is not."""
+    sha = d.get("output_sha", "") or ""
+    e = dict(d)
+    e["key"] = (prefix + ":" + sha[:12]) if sha else ""
+    return e
+
 def _group_deliveries(data):
     prefix = data["delivery"].get("prefix", "") or ""
     by_outcome = {}
@@ -417,6 +425,10 @@ def _group_deliveries(data):
             "heading": _OUTCOME_GROUP_HEADINGS.get(outcome, outcome),
             "label_singular": _OUTCOME_LABELS_SINGULAR.get(outcome, outcome),
             "table": _outcome_table(shown, outcome, prefix),
+            # The raw entries behind `table`, plus the rendered dedup key, for a
+            # layout that lists labels rather than an aligned grid. The key needs
+            # `prefix`, which only exists here.
+            "entries": [_entry_for_template(d, prefix) for d in shown],
             "overflow": str(overflow) if overflow > 0 else "",
             # Open the actionable / informative outcomes (delivered,
             # warned, failed). Skipped / pending stay collapsed.
@@ -428,9 +440,12 @@ def _summary_rows(counts):
     """Render the "Summary" bullet list in the body.
 
     Shows delivered / skipped / warnings / failed counts with brief notes
-    (e.g. "already delivered this hash"). Zero-count rows are included for
-    failed/warned (important to explicitly acknowledge they're zero) but
-    hidden for pending (noisy when unused).
+    (e.g. "already delivered this hash").
+
+    A zero warned/failed row is kept only when some other outcome needs
+    qualifying — once anything warned, failed or is pending, "0 failed"
+    distinguishes "none failed" from "failures not reported". On an
+    all-delivered run it says nothing, so it is omitted.
     """
     ok = counts.get("ok", 0)
     skip = counts.get("skip", 0)
@@ -444,12 +459,16 @@ def _summary_rows(counts):
             return _OUTCOME_LABELS_SINGULAR.get(outcome, _OUTCOME_LABELS.get(outcome, outcome))
         return _OUTCOME_LABELS.get(outcome, outcome)
 
+    needs_qualifying = warn > 0 or fail > 0 or pending > 0
+
     rows = []
     rows.append({"outcome": "ok", "icon": _OUTCOME_ICONS["ok"], "count": str(ok), "label": _label(ok, "ok"), "note": ""})
     if skip > 0:
         rows.append({"outcome": "skip", "icon": _OUTCOME_ICONS["skip"], "count": str(skip), "label": _label(skip, "skip"), "note": "already delivered this hash"})
-    rows.append({"outcome": "warn", "icon": _OUTCOME_ICONS["warn"], "count": str(warn), "label": _label(warn, "warn"), "note": ""})
-    rows.append({"outcome": "fail", "icon": _OUTCOME_ICONS["fail"], "count": str(fail), "label": _label(fail, "fail"), "note": ""})
+    if warn > 0 or needs_qualifying:
+        rows.append({"outcome": "warn", "icon": _OUTCOME_ICONS["warn"], "count": str(warn), "label": _label(warn, "warn"), "note": ""})
+    if fail > 0 or needs_qualifying:
+        rows.append({"outcome": "fail", "icon": _OUTCOME_ICONS["fail"], "count": str(fail), "label": _label(fail, "fail"), "note": ""})
     if pending > 0:
         rows.append({"outcome": "pending", "icon": _OUTCOME_ICONS["pending"], "count": str(pending), "label": _label(pending, "pending"), "note": "dry run / not attempted"})
     return rows
