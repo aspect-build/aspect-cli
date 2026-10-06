@@ -394,6 +394,19 @@ fn long_flag(scope: Scope<'_>, name: &str, arg: &Arg) -> String {
 
 // ── Arg → ClapArg ──────────────────────────────────────────────────────────
 
+/// Build the clap argument for one declared [`Arg`].
+///
+/// One subtlety is worth stating up front, because clap's two notions of
+/// "needed" do not line up with AXL's one. For a positional, `num_args` is
+/// cardinality — clap reads `num_args(1..=1)` as "one value if given at all" —
+/// so a `minimum = 1` positional parses as absent unless `required` is set too,
+/// and the task then indexes an empty list. But a declared default already
+/// meets the minimum with nothing typed, and clap checks `required` against
+/// argv rather than against the defaults it is about to apply, so marking a
+/// defaulted positional required refuses the bare command its default exists to
+/// serve. Requiredness is therefore a minimum with no default to meet it, and
+/// [`describe_arg`] derives it the same way so the help and the JSON surface
+/// cannot disagree.
 fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
     let id = clap_id(scope, name, arg);
     let long = long_flag(scope, name, arg);
@@ -487,6 +500,8 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 .value_parser(value_parser!(String))
                 .value_name(id)
                 .help(help_text(description))
+                // Cardinality is not requiredness; see this function's docs.
+                .required(*minimum >= 1 && default.is_none())
                 .num_args(*minimum as usize..=*maximum as usize);
             if let Some(default) = default {
                 it = it.default_values(default);
@@ -1386,11 +1401,19 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     // instead of a `required` flag — so a `minimum = 1` positional would read as
     // optional. Derive requiredness from the cardinality and report the bounds,
     // or a caller cannot tell `aspect run` (exactly one target) from a task that
-    // takes none.
+    // takes none. A default meets the minimum on its own, so a positional
+    // carrying one is not required of the caller.
     let (required, minimum, maximum) = match arg {
         Arg::Positional {
-            minimum, maximum, ..
-        } => (*minimum >= 1, json!(minimum), json!(maximum)),
+            minimum,
+            maximum,
+            default,
+            ..
+        } => (
+            *minimum >= 1 && default.is_none(),
+            json!(minimum),
+            json!(maximum),
+        ),
         _ => (arg.is_required(), json!(null), json!(null)),
     };
     json!({
@@ -2625,6 +2648,44 @@ mod tests {
     }
 
     #[test]
+    fn positional_requiredness_follows_the_minimum_and_the_default() {
+        let required = Arg::Positional {
+            minimum: 1,
+            maximum: 1,
+            default: None,
+            description: None,
+        };
+        let optional = Arg::Positional {
+            minimum: 0,
+            maximum: 1,
+            default: None,
+            description: None,
+        };
+        // `aspect cache diff` is this shape: at least one target pattern, and
+        // `//...` when the caller names none. Marking it required would refuse
+        // the bare command the default exists to serve.
+        let defaulted = Arg::Positional {
+            minimum: 1,
+            maximum: 512,
+            default: Some(vec!["//...".to_owned()]),
+            description: None,
+        };
+
+        assert!(
+            arg_to_clap(Scope::Task, "branch", &required).is_required_set(),
+            "a positional declared with `minimum = 1` must be required"
+        );
+        assert!(
+            !arg_to_clap(Scope::Task, "extras", &optional).is_required_set(),
+            "a positional that may be omitted must stay optional"
+        );
+        assert!(
+            !arg_to_clap(Scope::Task, "targets", &defaulted).is_required_set(),
+            "a positional with a default is satisfied without one being typed"
+        );
+    }
+
+    #[test]
     fn describe_reports_positional_cardinality_and_derives_requiredness() {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
         // `Arg::is_required` returns false for every positional, so a required
@@ -2644,6 +2705,15 @@ mod tests {
                 minimum: 0,
                 maximum: 8,
                 default: None,
+                description: None,
+            },
+        );
+        args.insert(
+            "patterns".to_owned(),
+            Arg::Positional {
+                minimum: 1,
+                maximum: 512,
+                default: Some(vec!["//...".to_owned()]),
                 description: None,
             },
         );
@@ -2667,6 +2737,12 @@ mod tests {
         assert_eq!(by_name("extras")["required"], false);
         assert_eq!(by_name("extras")["minimum"], 0);
         assert_eq!(by_name("extras")["maximum"], 8);
+
+        // The minimum still describes the cardinality the task relies on; the
+        // default is what keeps it off the caller.
+        assert_eq!(by_name("patterns")["required"], false);
+        assert_eq!(by_name("patterns")["minimum"], 1);
+        assert_eq!(by_name("patterns")["default"], serde_json::json!(["//..."]));
     }
 
     #[test]

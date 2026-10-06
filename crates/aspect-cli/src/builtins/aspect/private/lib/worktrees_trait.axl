@@ -1,0 +1,44 @@
+"""The `Worktrees` trait — how a repo tunes pooled worktree reuse and size.
+
+Picking a slot has no correctness consequence: a worse pick costs a colder
+build and nothing else. That is what makes it safe to hand to `config.axl`
+(either the repo's or a developer's `~/.aspect/config.axl`), where a team that
+knows its own repo can score better than a general heuristic — a monorepo where
+one directory dominates analysis might weight commit distance far above the
+default does, for instance.
+
+The built-in scoring (`default_score` in `private/lib/worktree.axl`) applies when nothing is
+registered.
+
+`max_slots` is the other dial, and the one that costs disk rather than time. It
+is advisory: a pool at its limit with every slot in use still hands out a new
+one, warning instead of failing, because the fallback to a refusal is plain
+`git worktree add` — a cold build and a stranded output base. See the module
+docstring in `private/lib/worktree.axl` for how the pool is actually bounded.
+
+`abandoned_grace_hours` is how long a stopped session's slot is kept for it
+before another `add` may take it back.
+"""
+
+# The `score_slot` hook's limits: how long its calls for one `add` may take in
+# all, and the bound a score is clamped to.
+HOOK_BUDGET_MS = 2000
+HOOK_SCORE_LIMIT = 1000000000
+
+Worktrees = trait(
+    score_slot = attr(
+        list[typing.Callable[[TaskContext, dict, dict], int]],
+        default = [],
+        description = "Hooks scoring a free slot for reuse: `fn(ctx, slot, want) -> int`, higher wins, 0 or less refuses the slot — unless the pool is at `max_slots` and every free slot is refused, when the best fit by the built-in scoring is reused (`score_hook_refused_all`). `slot` carries its `id`, what its last occupant left behind (`lock_digest`, `last_commit`, `last_branch`, `created_ms`) and whether its output base is there now (`base_present`); `want` carries `name`, `lock_digest` and `commit` for the worktree being created. The first registered hook decides; scores are clamped to ±" + str(HOOK_SCORE_LIMIT) + ". One that fails or returns something other than an int is warned about (`score_hook_failed`) and the built-in scoring used for every slot. So does one whose calls for an `add` take more than " + str(HOOK_BUDGET_MS // 1000) + " seconds in all, since every other `add` waits on the pool lock meanwhile: checked between calls, so one long call runs to its end before the rest are scored by the built-in. A hook must not write to stdout, where `add --output=json` and `--output=path` give their answer. With none registered the built-in scoring applies: a warm slot always beats a cold one (no output base), and among warm slots an identical tree beats the same branch, which beats other work, which beats a different MODULE.bazel.lock.",
+    ),
+    abandoned_grace_hours = attr(
+        int,
+        default = 24,
+        description = "How long a lease whose session has stopped is kept for that session to come back to — resumed, or restarted on its branch — counted from the slot's last activity: the lease being taken, Bazel using its output base, or a git operation in its checkout. Only after this, and only with nothing in the checkout to lose, is the slot taken back for another `add`. 0 takes such a slot back at once; a negative value is refused. `--take-over` and `release --force=all` are not bound by it.",
+    ),
+    max_slots = attr(
+        int,
+        default = 8,
+        description = "Advisory ceiling on how many slots one clone keeps in the pool. Each slot costs a checkout plus a Bazel output base — tens of gigabytes on a large repo — so this is a disk budget, not a concurrency limit, and it is a fixed count rather than something derived from core count. Exceeding it warns and proceeds; nothing is refused. Free slots are reclaimed by idle time instead, automatically during `aspect worktree add` and on demand with `aspect worktree prune`, and a lease whose holder has verifiably stopped, past `abandoned_grace_hours` and with a clean checkout, is taken back when a slot is needed rather than the pool growing.",
+    ),
+)

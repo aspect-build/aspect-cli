@@ -531,11 +531,12 @@ jobs:
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
   # The AXL suite + the CLI/launcher smoke commands were a single Buildkite
-  # `axl-tests` step. On GitHub Actions they are split into two jobs that run in
-  # parallel — `axl-tests` (the ~3min `aspect tests axl` suite) and `axl-smoke`
-  # (the demo/user/run/dev-snapshot end-to-end checks) — so the smoke commands
-  # are no longer serialized behind the test suite. Both jobs build the same
-  # dev launcher from THIS commit via the build-dev-launcher composite action;
+  # `axl-tests` step. On GitHub Actions they are three jobs that run in
+  # parallel — `axl-tests` (the ~3min `aspect tests axl` suite), `axl-smoke`
+  # (the demo/user/run/dev-snapshot end-to-end checks) and `axl-suites` (every
+  # `aspect dev test-*` suite) — so none is serialized behind another. All
+  # three build the same dev launcher from THIS commit via the
+  # build-dev-launcher composite action;
   # see that action for why the launcher must be built (rather than reused from
   # the prebuilt CLI) and how the host-native binary is probed.
   #
@@ -655,8 +656,40 @@ jobs:
           assert_rejects_flag "a Bazel-rejected flag" --bazel-flag=--definitely_not_a_flag
           echo "--- flag rejected by Bazel (bare)"
           assert_rejects_flag "a bare Bazel-rejected flag" --definitely_not_a_flag
-          echo "--- aspect dev test-* (every AXL suite)"
-          ./tools/run-axl-suites.sh "$LAUNCHER"
+  # Every `aspect dev test-*` AXL suite, through the same dev launcher
+  # `axl-smoke` builds. Its own job so neither runs into the other's timeout:
+  # the suites alone take about ten minutes.
+  axl-suites:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+      - uses: ./.github/actions/build-dev-launcher
+        with:
+          task-name: axl-suites-gha-bootstrap
+      - name: aspect dev test-* (every AXL suite)
+        run: ./tools/run-axl-suites.sh "$LAUNCHER"
+  # `aspect worktree` end to end: sessions that stop and resume, subagents,
+  # moved and re-cloned clones, and the refusals that protect work — the flows
+  # the AXL unit suites cannot reach. Its own job rather than part of
+  # `axl-smoke`, which is long enough already. Needs only git, jq and the
+  # prebuilt CLI from this run: everything happens in a scratch HOME against a
+  # local bare remote, with no Bazel and no auth.
+  worktree-e2e:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - name: aspect worktree end to end
+        # The action puts the prebuilt CLI on PATH as `aspect`.
+        run: ./tools/worktree-e2e.sh aspect
   # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
   # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
   # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`
@@ -750,6 +783,8 @@ jobs:
       - runner-smoke
       - axl-tests
       - axl-smoke
+      - axl-suites
+      - worktree-e2e
       - test-flags-task
     steps:
       - name: Every CI job succeeded

@@ -1,0 +1,54 @@
+"""Asking the operating system about a process id.
+
+Both tasks that read a recorded pid need this: a worktree slot's warmth depends
+on whether the Bazel server that wrote `server.pid.txt` is still there, and a
+lease's agent carries the pid of the harness that took it.
+
+**A pid alone is ambiguous.** Pids are reused, and a recorded one outlives the
+process that wrote it, so "this pid exists" is not "this is the same process".
+`started_at` is what settles it, and a caller that has somewhere to record the
+start time should compare it. A caller whose recorded pid came from someone
+else's file — Bazel writes a pid and no start time — has only `alive`, and is
+left with the ambiguity rather than a false certainty.
+"""
+
+def alive(std, pid: int) -> bool:
+    """Whether `pid` is a live process. `kill -0` asks without signalling; a
+    process it may not signal, another user's, is alive all the same — told
+    by the C locale's wording of the refusal."""
+    if pid <= 0:
+        return False
+    out = std.process.command("kill").args(["-0", str(pid)]) \
+        .env("LC_ALL", "C") \
+        .stdout("null").stderr("piped").spawn().wait_with_output()
+    return out.status.code == 0 or "not permitted" in out.stderr.lower()
+
+def started_at(std, pid: int) -> str:
+    """When `pid` started, as the platform prints it, or "" if it is not running.
+
+    Opaque: the only thing asked of the value is whether it still matches one
+    recorded earlier, so the format never has to be parsed. Asked in the C
+    locale, since `ps` formats the date by locale and two callers in different
+    ones — a terminal and an IDE, say — would otherwise never agree.
+    """
+    if pid <= 0:
+        return ""
+    out = std.process.command("ps").args(["-o", "lstart=", "-p", str(pid)]) \
+        .env("LC_ALL", "C") \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip() if out.status.code == 0 else ""
+
+def is_same_process(std, pid: int, recorded_start: str) -> bool:
+    """Whether `pid` is still the process whose start time was `recorded_start`.
+
+    Falls back to liveness wherever a start time cannot be had — nothing was
+    recorded to compare against, or `ps` cannot answer now. Reading an
+    unanswerable `ps` as "not the same process" would call every live process
+    dead, and callers act on that by taking things away from them.
+    """
+    if pid <= 0:
+        return False
+    start = started_at(std, pid)
+    if not start or not recorded_start:
+        return alive(std, pid)
+    return start == recorded_start

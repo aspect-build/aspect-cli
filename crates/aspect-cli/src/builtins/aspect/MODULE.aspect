@@ -18,6 +18,8 @@ use_task("wrapper.axl", "tools_bazel_wrapper")
 use_task("init.axl", "init")
 use_task("mcp.axl", "mcp")
 use_task("gc.axl", "gc")
+use_task("worktree.axl", "add", "worktree_release", "worktree_list", "path", "prune",
+         "inspect")
 use_task("output_bases.axl", "output_bases_task")
 use_task("bazelrc.axl", "bazelrc", "ci_bazelrc")
 use_task("workspace_data.axl", "workspace_data")

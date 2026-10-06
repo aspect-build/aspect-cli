@@ -1,0 +1,27 @@
+"""Removing directory trees Bazel has made read-only.
+
+Shared by `aspect gc`, which removes output bases and download-cache entries,
+and the worktree pool, which removes a slot's output base along with the slot.
+"""
+
+def remove_tree(std, path: str) -> str:
+    """Delete `path` and everything under it; "" on success, else the error.
+
+    A first attempt that fails is retried once the tree is writable. Bazel
+    strips the owner-write bit from the action output directories under
+    `bazel-out/`, and unlinking a child needs write on its parent — the same
+    reason `bazel clean` runs a `chmod`. Trying first skips that `chmod` for the
+    trees that never needed it, such as each of thousands of download-cache
+    entries. A path already gone counts as removed.
+    """
+    err, _ = catch(std.fs.remove_dir_all, path)
+    if err == None or not std.fs.exists(path):
+        return ""
+
+    # One `chmod -R` rather than an AXL walk: a base holds hundreds of read-only
+    # directories and tens of thousands of files.
+    catch(lambda: std.process.command("chmod").args(["-R", "u+w", path]).stdout("null").stderr("null").spawn().wait())
+    err, _ = catch(std.fs.remove_dir_all, path)
+    if err == None or not std.fs.exists(path):
+        return ""
+    return str(err)

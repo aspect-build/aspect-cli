@@ -4,7 +4,19 @@ Run with:
   aspect dev test-text
 """
 
-load("./text.axl", "format_bytes_iec", "format_int_comma", "join_url", "pad_left", "pad_right", "pluralize", "truncate_for_title")
+load(
+    "./text.axl",
+    "display_width",
+    "format_bytes_iec",
+    "format_int_comma",
+    "has_unsafe_chars",
+    "join_url",
+    "pad_left",
+    "pad_right",
+    "pluralize",
+    "printable",
+    "truncate_for_title",
+)
 
 def _eq(label, got, want):
     if got != want:
@@ -16,6 +28,14 @@ def _test_pad(ctx):
     _eq("exact width is unchanged", pad_left("abcd", 4), "abcd")
     _eq("pad_left never truncates", pad_left("abcdef", 4), "abcdef")
     _eq("pad_right never truncates", pad_right("abcdef", 4), "abcdef")
+
+    # Columns as a terminal draws them, so a CJK or emoji name keeps its row in line.
+    _eq("ascii is one column a character", display_width("feat/a"), 6)
+    _eq("an ideograph is two", display_width("修正"), 4)
+    _eq("an emoji is two", display_width("🚀x"), 3)
+    _eq("a combining mark is none", display_width("e\u0301"), 1)
+    _eq("pad_right pads to the drawn width", pad_right("修正", 6), "修正  ")
+    _eq("pad_left too", pad_left("修", 3), " 修")
 
 def _test_pluralize(ctx):
     _eq("one", pluralize(1, "base"), "1 base")
@@ -34,7 +54,24 @@ def _test_strings(ctx):
     _eq("join adds a slash", join_url("https://x", "y"), "https://x/y")
     _eq("join keeps one slash", join_url("https://x/", "y"), "https://x/y")
 
+def _test_unsafe_characters(ctx):
+    """What a terminal acts on or hides is caught, and shown escaped."""
+    _eq("plain text is safe", has_unsafe_chars("sess-1 é ﾃｽﾄ"), False)
+    _eq("a newline", has_unsafe_chars("a\nb"), True)
+    _eq("an escape", has_unsafe_chars("a\x1b[31m"), True)
+    _eq("a C1 control", has_unsafe_chars("a\u0085b"), True)
+    _eq("a bidi override", has_unsafe_chars("a\u202eb"), True)
+    _eq("a zero-width space", has_unsafe_chars("a\u200bb"), True)
+    _eq("escaped, padded", printable("a\nb\u202ec"), "a\\u000ab\\u202ec")
+    _eq("safe text unchanged", printable("ok"), "ok")
+    _eq("a tag character", has_unsafe_chars("a\U000e0041b"), True)
+    _eq("a line separator", has_unsafe_chars("a\u2028b"), True)
+    _eq("line breaks kept when asked", printable("a\nb\u202ec", keep = "\n"), "a\nb\\u202ec")
+    _eq("above U+FFFF, eight digits", printable("a\U000e0041b"), "a\\U000e0041b")
+    _eq("a variation selector", has_unsafe_chars("a\ufe0fb"), True)
+
 _UNIT_TESTS = [
+    _test_unsafe_characters,
     _test_pad,
     _test_pluralize,
     _test_format_numbers,

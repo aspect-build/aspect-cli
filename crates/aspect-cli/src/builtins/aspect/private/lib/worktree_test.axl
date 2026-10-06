@@ -1,0 +1,3695 @@
+"""Unit tests for lib/worktree.axl — pool keying, reuse scoring, and warmth.
+
+Run with:
+  aspect dev test-worktree
+
+The URL cases are taken from a real machine rather than invented: one clone
+there carries `ssh://git@github.com/...` with no `.git` suffix, a scp-like
+GitLab mirror of the same code, and a fork. A pool key that collapses the first
+two spellings but not the two hosts is the behaviour these pin down.
+"""
+
+load(
+    "@aspect//worktree.axl",
+    "testonly_base_note",
+    "testonly_being_set_up",
+    "testonly_capped",
+    "testonly_closest",
+    "testonly_free_columns",
+    "testonly_held_by",
+    "testonly_held_elsewhere",
+    "testonly_history_columns",
+    "testonly_history_rows",
+    "testonly_hook_view",
+    "testonly_indented",
+    "testonly_is_branch",
+    "testonly_list_cells",
+    "testonly_list_order",
+    "testonly_materialize",
+    "testonly_nothing_to_prune",
+    "testonly_nothing_to_release",
+    "testonly_own_subagent",
+    "testonly_porcelain_entries",
+    "testonly_protected_from",
+    "testonly_push_command",
+    "testonly_release_grade",
+    "testonly_remote_branches",
+    "testonly_render_sessions",
+    "testonly_reservation_may_clear",
+    "testonly_resolve_slot",
+    "testonly_resume_line",
+    "testonly_same_harness_session",
+    "testonly_same_session",
+    "testonly_score_slot",
+    "testonly_session_groups",
+    "testonly_slot_in_use",
+    "testonly_taken_columns",
+    "testonly_utf8_len",
+)
+load("@std//time.axl", "time")
+load(
+    "./worktree.axl",
+    "FREE",
+    "LEASED",
+    "RESERVED",
+    "SLOT_PREFIX",
+    "UNREADABLE_CHECKOUT",
+    "abandoned_lease",
+    "acquire",
+    "adopt_stranded",
+    "adoptable",
+    "close_lease",
+    "default_score",
+    "drop_slot",
+    "drop_vanished_leases",
+    "free_slot",
+    "git_out",
+    "held_for_ms",
+    "holds_reservation",
+    "is_hex",
+    "lease_last_active_ms",
+    "lock_digest",
+    "lock_digest_at",
+    "lock_reason",
+    "mark_free",
+    "mark_leased",
+    "new_slot_id",
+    "normalize_remote",
+    "observe_base",
+    "output_base_of",
+    "owned_slots",
+    "owner_record",
+    "parse_worktree_list",
+    "pool_of",
+    "pools_on_disk",
+    "pools_root_of",
+    "prunable_slots",
+    "read_registry",
+    "reconcile",
+    "record_handover",
+    "record_lease",
+    "registry_path",
+    "release",
+    "remove_checkout",
+    "reservation_abandoned",
+    "reserve_slot",
+    "reserving_slot",
+    "run_git",
+    "slot_age_ms",
+    "slot_created_days",
+    "slot_idle_days",
+    "slot_idle_ms",
+    "slot_path",
+    "slug",
+    "uncommitted_work",
+    "unreferenced_commits",
+    "unreferenced_tips",
+    "unregister_vanished",
+    "vanished_work",
+    "warmth_of",
+    "work_in",
+    "write_registry",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_remote_spellings_collapse(ctx):
+    """The same repository is written at least three ways; a pool key has to be
+    stable across all of them or a clone silently gets its own pool."""
+    want = "github.com/aspect-build/site"
+    _eq("scp-like", normalize_remote("git@github.com:aspect-build/site.git"), want)
+    _eq("ssh scheme", normalize_remote("ssh://git@github.com/aspect-build/site"), want)
+    _eq("ssh scheme with suffix", normalize_remote("ssh://git@github.com/aspect-build/site.git"), want)
+    _eq("https", normalize_remote("https://github.com/aspect-build/site.git"), want)
+    _eq("https no suffix", normalize_remote("https://github.com/aspect-build/site"), want)
+    _eq("trailing slash", normalize_remote("https://github.com/aspect-build/site/"), want)
+    _eq("uppercase host", normalize_remote("https://GitHub.com/aspect-build/site"), want)
+
+def _test_suffix_behind_a_trailing_slash_is_still_stripped(ctx):
+    """A URL copied out of a browser can carry both; stripping them in the wrong
+    order leaves `.git` in the key and splits the pool."""
+    want = "github.com/aspect-build/site"
+    _eq("suffix then slash", normalize_remote("https://github.com/aspect-build/site.git/"), want)
+    _eq("several slashes", normalize_remote("https://github.com/aspect-build/site.git///"), want)
+
+def _test_mirrors_on_different_hosts_stay_separate(ctx):
+    """Deliberate: guessing that two hosts serve one repository is a worse
+    failure than keeping two pools, so a GitLab mirror is its own pool."""
+    gh = normalize_remote("ssh://git@github.com/aspect-build/aspect-cli")
+    gl = normalize_remote("git@gitlab.com:aspect-build/aspect-cli.git")
+    _eq("github", gh, "github.com/aspect-build/aspect-cli")
+    _eq("gitlab", gl, "gitlab.com/aspect-build/aspect-cli")
+    if gh == gl:
+        fail("mirrors on different hosts must not share a pool key")
+
+def _test_fork_is_its_own_pool(ctx):
+    """A fork is a different repository: same path, different owner."""
+    upstream = normalize_remote("git@github.com:aspect-build/aspect-cli.git")
+    fork = normalize_remote("git@github.com:someone-else/aspect-cli.git")
+    if upstream == fork:
+        fail("a fork must not share the upstream's pool key")
+
+def _test_empty_remote_yields_no_key(ctx):
+    _eq("empty", normalize_remote(""), "")
+    _eq("whitespace", normalize_remote("   "), "")
+
+def _test_slug_is_a_usable_path_component(ctx):
+    """Branch names carry slashes and dots, and the result is appended to a
+    clone path — anything that is not a single path component breaks it."""
+    _eq("slashes", slug("fix/login"), "fix-login")
+    _eq("case and dots", slug("Feature/API.v2"), "feature-api-v2")
+    _eq("leading and trailing junk", slug("/wip/"), "wip")
+    _eq("nothing usable", slug("///"), "worktree")
+    _eq("already clean", slug("main"), "main")
+
+def _test_lock_mismatch_nearly_disqualifies(ctx):
+    """A different MODULE.bazel.lock means the repo fetches miss and
+    `external/` is rebuilt — the one mismatch worth refusing a warm slot over."""
+    want = {"lock_digest": "aaa", "commit": "c1"}
+    same = {"lock_digest": "aaa", "last_commit": "c1", "base_present": True}
+    other = {"lock_digest": "bbb", "last_commit": "c1", "base_present": True}
+    _eq("perfect match", default_score(same, want), 100)
+    _eq("lock mismatch", default_score(other, want), 10)
+
+def _test_commit_distance_only_breaks_a_tie(ctx):
+    """A different commit costs incremental invalidation, which Bazel handles.
+    It must stay far above a lock mismatch or the ordering is inverted."""
+    want = {"lock_digest": "aaa", "commit": "c1"}
+    wrong_commit = {"lock_digest": "aaa", "last_commit": "c2", "base_present": True}
+    wrong_lock = {"lock_digest": "bbb", "last_commit": "c1", "base_present": True}
+    if default_score(wrong_commit, want) <= default_score(wrong_lock, want):
+        fail("a commit difference must cost far less than a lock difference")
+
+def _test_unknown_lock_does_not_disqualify(ctx):
+    """A brand-new slot has no recorded lock digest. Treating that as a mismatch
+    would make a fresh pool refuse its own slots forever."""
+    want = {"lock_digest": "aaa", "commit": ""}
+    fresh = {"lock_digest": "", "last_commit": ""}
+    if default_score(fresh, want) <= 0:
+        fail("a slot with no recorded lock digest must stay eligible")
+
+def _test_output_base_matches_bazels_own_derivation(ctx):
+    """Bazel names a base `md5(workspace_path)` under the output user root. The
+    pool computes that rather than asking Bazel, which is what lets it inspect
+    a slot's state without starting a server — so it has to agree exactly. The
+    vector below was taken from a real Bazel-created base.
+    """
+    base = output_base_of(ctx.std, "/tmp/aspect-worktree-golden")
+    _eq("named by md5 of the path", base.rpartition("/")[2], "5095308adbe80a1457b370244b19f1ee")
+    _eq("under the output user root", base.startswith(ctx.std.env.home_dir()), True)
+
+    other = output_base_of(ctx.std, "/tmp/aspect-worktree-other")
+    if base == other:
+        fail("two slot paths must not share an output base")
+
+def _test_warmth_reads_what_is_really_there(ctx):
+    """`add` and `list` tell a developer how much a slot is worth taking. That
+    claim has to be checked: a server exits on idle and `aspect gc` can reclaim
+    a base, so asserting "warm" without looking would often be wrong.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-warm")
+    slot = tmp + "/aspect-worktree-probe"
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+
+    cold = warmth_of(ctx.std, slot, root = root)
+    _eq("no base yet", cold.base, False)
+    _eq("and so no server", cold.server, 0)
+
+    # Fabricate the base where Bazel would put it, with no server record.
+    base = output_base_of(ctx.std, slot, root = root)
+    _eq("fabricated under the temp root, not the real cache", base.startswith(root + "/"), True)
+    ctx.std.fs.create_dir_all(base + "/server")
+    warm = warmth_of(ctx.std, slot, root = root)
+    _eq("base present", warm.base, True)
+    _eq("but nothing holding it", warm.server, 0)
+
+    # A pid that is recorded but dead must not read as warm.
+    ctx.std.fs.write(base + "/server/server.pid.txt", "999999\n")
+    dead = warmth_of(ctx.std, slot, root = root)
+    _eq("a dead pid is not warmth", dead.server, 0)
+
+def _test_registry_round_trips(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    registry = {"version": 1, "slots": {"abc": {"state": "free", "last_branch": "x"}}}
+    write_registry(ctx.std, tmp, registry)
+    _eq("round trip", read_registry(ctx.std, tmp)["slots"]["abc"]["last_branch"], "x")
+
+def _test_unreadable_registry_starts_over(ctx):
+    """The registry is a cache rebuildable from git, so a corrupt one warns and
+    starts fresh rather than wedging the pool."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.write(tmp + "/registry.json", "{not json")
+    _eq("recovers", read_registry(ctx.std, tmp)["slots"], {})
+
+def _test_missing_registry_is_empty(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    _eq("no file yet", read_registry(ctx.std, tmp)["slots"], {})
+
+_DAY_MS = 24 * 60 * 60 * 1000
+
+def _slot(owner, state = FREE, age_days = 0):
+    """A registry entry whose creation floor is `age_days` old.
+
+    With no output base on disk the floor is what `slot_idle_days` reads, so this
+    is how a test says "this slot has been idle that long"."""
+    return {
+        "owner_git_dir": owner,
+        "state": state,
+        "last_commit": "",
+        "last_branch": "",
+        "lock_digest": "",
+        "created_ms": time.now_ms() - age_days * _DAY_MS,
+    }
+
+def _test_age_comes_from_the_base_and_falls_back_to_the_floor(ctx):
+    """A slot with no output base has no evidence to read, so its creation time
+    stands in. Zero on both counts reads as new rather than ancient: a registry
+    that predates the field must not have every slot pruned out from under it.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    _eq("nothing recorded at all", slot_idle_days(ctx.std, pool, "nobase", {"state": "free"}), 0)
+    _eq(
+        "the creation floor, with no base on disk",
+        slot_idle_days(ctx.std, pool, "nobase", {"created_ms": time.now_ms() - 3 * _DAY_MS}),
+        3,
+    )
+
+def _test_a_recently_used_base_outranks_an_old_creation_floor(ctx):
+    """The point of reading the base: a slot created long ago but built in
+    yesterday is not stale, and the ledger alone would have said it was."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "fresh1"
+
+    # A base at the derived path, touched now, is the freshest evidence there is.
+    base = output_base_of(ctx.std, slot_path(pool, slot_id))
+    ctx.std.fs.create_dir_all(base)
+    ctx.std.fs.write(base + "/command.profile.gz", "x")
+    old_floor = {"state": "free", "created_ms": time.now_ms() - 900 * _DAY_MS}
+    _eq("fresh despite the floor", slot_idle_days(ctx.std, pool, slot_id, old_floor), 0)
+    ctx.std.fs.remove_dir_all(base)
+
+def _test_prune_never_takes_a_leased_slot(ctx):
+    """A lease means someone may be working in that checkout right now. Age is
+    not grounds for deleting it, however stale the pool thinks it is."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "busy": _slot("/clone/.git", state = "leased", age_days = 900),
+        "idle": _slot("/clone/.git", age_days = 900),
+    }}
+    _eq("only the free one", prunable_slots(ctx.std, pool, registry, 30), ["idle"])
+
+def _test_prune_respects_the_age_threshold(ctx):
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "fresh": _slot("/clone/.git", age_days = 3),
+        "stale": _slot("/clone/.git", age_days = 31),
+    }}
+    _eq("over the line", prunable_slots(ctx.std, pool, registry, 30), ["stale"])
+    _eq("everything, at zero", sorted(prunable_slots(ctx.std, pool, registry, 0)), ["fresh", "stale"])
+
+def _test_prune_leaves_a_live_clones_slots_alone(ctx):
+    """Two clones of one repository share a pool directory but not slots. A slot
+    owned by a clone that still exists is none of this clone's business; only one
+    stranded by a clone that is gone can be collected.
+
+    Age does not enter into the stranded case. The age rule weighs Bazel state
+    worth keeping against the disk it costs, and a stranded slot has nothing on
+    the first side: no clone here can lease it or reuse its base, however warm
+    and however new. A fresh one is as collectable as an ancient one.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    live_owner = tmp + "/live/.git"
+    ctx.std.fs.create_dir_all(live_owner)
+    pool = {"git_common_dir": tmp + "/mine/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "theirs": _slot(live_owner, age_days = 900),
+        "theirs-fresh": _slot(live_owner, age_days = 0),
+        "stranded": _slot(tmp + "/moved-away/.git", age_days = 900),
+        "stranded-fresh": _slot(tmp + "/also-gone/.git", age_days = 0),
+    }}
+
+    _eq(
+        "both stranded ones, whatever their age",
+        sorted(prunable_slots(ctx.std, pool, registry, 30)),
+        ["stranded", "stranded-fresh"],
+    )
+
+    # And a live clone's slots stay out of reach at any threshold, including the
+    # one that considers everything of this clone's.
+    _eq(
+        "never a live clone's, even at zero",
+        sorted(prunable_slots(ctx.std, pool, registry, 0)),
+        ["stranded", "stranded-fresh"],
+    )
+
+def _test_owned_slots_counts_only_this_clone(ctx):
+    """`max_slots` budgets what this clone can actually lease, so a sibling
+    clone's slots must not spend it."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "mine": _slot("/clone/.git"),
+        "theirs": _slot("/other/.git"),
+    }}
+    _eq("one", owned_slots(pool, registry), ["mine"])
+
+def _test_drop_slot_removes_the_entry_and_the_base(ctx):
+    """A dropped slot must leave nothing behind in the registry. A caller that
+    persists afterwards would otherwise hand the next allocation a slot whose
+    recorded `lock_digest` describes state that has been deleted."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "cafe01"
+    path = tmp + "/pool/aspect-worktree-" + slot_id
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    base = output_base_of(ctx.std, path, root = root)
+    ctx.std.fs.create_dir_all(base + "/external")
+    ctx.std.fs.create_dir_all(path)
+    registry = {"slots": {slot_id: _slot(pool["git_common_dir"], age_days = 900)}}
+    registry["slots"][slot_id]["lock_digest"] = "stale"
+
+    outcome = drop_slot(ctx.std, pool, registry, slot_id, root = root)
+    _eq("dropped", outcome.dropped, True)
+    _eq("gone from the registry", slot_id in registry["slots"], False)
+    _eq("slot directory gone", ctx.std.fs.exists(path), False)
+    _eq("output base gone", ctx.std.fs.exists(base), False)
+
+def _test_drop_slot_refuses_while_a_server_holds_it(ctx):
+    """Unlinking an output base from under a running Bazel server leaves it
+    writing into directories that no longer exist. A free slot with a live server
+    is also the warmest thing in the pool, so it is kept rather than deleted."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    slot_id = "abc123"
+    path = tmp + "/pool/aspect-worktree-" + slot_id
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    base = output_base_of(ctx.std, path, root = root)
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.create_dir_all(path)
+
+    # A stand-in server: a live process whose own `--output_base=` names this
+    # base, which is what tells a server from a pid the OS reused.
+    server = ctx.std.process.command("sh").args(["-c", "sleep 30; true", "sh", "--output_base=" + base]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()) + "\n")
+    registry = {"slots": {slot_id: _slot(pool["git_common_dir"], age_days = 900)}}
+    outcome = drop_slot(ctx.std, pool, registry, slot_id, root = root)
+    _eq("refused", outcome.dropped, False)
+    _eq("slot kept in the registry", slot_id in registry["slots"], True)
+    _eq("base still there", ctx.std.fs.exists(base), True)
+
+    # A live process whose command line says nothing about an output base may
+    # still be a server whose arguments `ps` shows differently, so it is kept.
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(ctx.std.process.id()) + "\n")
+    _eq("an unnamed process is not ruled out", drop_slot(ctx.std, pool, registry, slot_id, root = root).dropped, False)
+
+    # One that names a different base is certainly not this one's: a reused pid.
+    other = ctx.std.process.command("sh").args(["-c", "sleep 30; true", "sh", "--output_base=/elsewhere/0123456789abcdef"]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(other.id()) + "\n")
+    _eq("a reused pid holds nothing", drop_slot(ctx.std, pool, registry, slot_id, root = root).dropped, True)
+    for p in [server, other]:
+        p.kill()
+        p.wait()
+
+def _test_lock_digest_agrees_between_a_file_and_a_ref(ctx):
+    """Allocation digests the lock from a git ref; `release` digests it from the
+    checked-out file. The two must agree on identical content or no slot would
+    ever score as a match — `git show` cannot preserve trailing bytes, so both
+    sides normalize."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/MODULE.bazel.lock", '{"lockFileVersion": 42}\n')
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "lock"], repo)
+
+    from_file = lock_digest(ctx.std, repo)
+    from_ref = lock_digest_at(ctx.std, repo, "HEAD")
+    if not from_file:
+        fail("the checked-out lock file should digest to something")
+    _eq("same content, same digest", from_ref, from_file)
+    _eq(
+        "a ref with no lock file is unknown, not mismatched",
+        lock_digest_at(ctx.std, repo, "HEAD:nonexistent"),
+        "",
+    )
+
+def _leased(owner, name, agent):
+    return {
+        "owner_git_dir": owner,
+        "state": LEASED,
+        "last_commit": "",
+        "last_branch": "",
+        "lock_digest": "",
+        "created_ms": time.now_ms(),
+        "lease": {"name": name, "since": str(time.now_ms()), "agent": agent},
+    }
+
+def _repo_with_worktree(ctx, dirty):
+    """A clone with one worktree at a pool slot path, optionally dirty."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/README", "x\n")
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "init"], repo)
+
+    slot_id = "abc123"
+    asked = tmp + "/pool/" + SLOT_PREFIX + slot_id
+    ctx.std.fs.create_dir_all(tmp + "/pool")
+    run_git(ctx.std, ["worktree", "add", "-q", asked, "-b", "wip"], repo + "/.git")
+
+    # Everything below takes git's spelling of these paths, because that is
+    # where `pool_of` gets them in production. A hand-built path differs from
+    # git's under a symlinked `/var`, and a fixture that mixes the two tests a
+    # configuration the product never has — and hides the one it does.
+    common = git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    path = asked
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX + slot_id in line:
+            path = line[len("worktree "):].strip()
+    pool = {"git_common_dir": common, "dir": path.rsplit("/", 1)[0]}
+    if dirty:
+        ctx.std.fs.write(path + "/README", "uncommitted\n")
+    return struct(pool = pool, slot_id = slot_id, path = path)
+
+def _with_empty_session_store(ctx):
+    """Point `CLAUDE_CONFIG_DIR` at a store that exists but holds no sessions,
+    so a claude-code id reads `gone` rather than `unknown`. Returns what was
+    there, for `_restore_session_store`.
+
+    Without this these tests depend on whether the machine happens to have a
+    `~/.claude/projects`: a developer laptop does, a CI runner does not, and a
+    missing store is correctly `unknown`.
+    """
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-sessions")
+    ctx.std.fs.create_dir_all(root + "/projects")
+    previous = ctx.std.env.var("CLAUDE_CONFIG_DIR") or ""
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", root)
+    return previous
+
+def _restore_session_store(ctx, previous):
+    if previous:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", previous)
+    else:
+        ctx.std.env.remove_var("CLAUDE_CONFIG_DIR")
+
+# A pid high enough that nothing is using it, for a record whose process is
+# gone. `kill -0` on it answers ESRCH, which is the whole question.
+_DEAD_PID = 2147483000
+
+_MISSING_SESSION = {
+    "kind": "claude-code",
+    "id": "00000000-dead-dead-dead-000000000000",
+    "pid": _DEAD_PID,
+    "pid_start": "Mon Jan  1 00:00:00 2001",
+}
+
+def _test_a_lease_with_no_agent_is_never_abandoned(ctx):
+    """Only a lease that says who took it can be reasoned about. A worktree a
+    person made is not ours to reclaim on any evidence."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    _eq("no agent", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_a_gone_session_with_a_clean_checkout_is_abandoned(ctx):
+    """Commits live in the branch and survive `worktree remove`, so a clean tree
+    whose session cannot be resumed has nothing left to lose."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+    previous = _with_empty_session_store(ctx)
+    got = abandoned_lease(ctx.std, env.pool, registry, env.slot_id)
+    _restore_session_store(ctx, previous)
+    _eq("reclaimable", got, True)
+
+def _test_uncommitted_changes_are_never_discarded(ctx):
+    """The case the whole rule exists to protect: a session that cannot be
+    resumed may still have left work nobody has committed."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+    previous = _with_empty_session_store(ctx)
+    got = abandoned_lease(ctx.std, env.pool, registry, env.slot_id)
+    _restore_session_store(ctx, previous)
+    _eq("kept", got, False)
+
+def _test_a_running_session_is_never_abandoned(ctx):
+    """A live harness is in use, whatever else is true — including a clean tree
+    and a session id with no transcript."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    me = ctx.std.process.id()
+    out = ctx.std.process.command("ps").args(["-o", "lstart=", "-p", str(me)]) \
+        .env("LC_ALL", "C") \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    alive = {
+        "kind": "claude-code",
+        "id": "00000000-dead-dead-dead-000000000000",
+        "pid": me,
+        "pid_start": out.stdout.strip(),
+    }
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", alive)}}
+    _eq("in use", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_a_harness_that_cannot_be_proven_finished_still_gives_up_its_slot(ctx):
+    """A session can only be *proven* finished for a harness whose storage the
+    CLI knows how to read, which is two of them. Requiring that proof would
+    leave every other crashed agent's slot held forever — leased slots are
+    never pruned either — and the pool would grow past its budget to route
+    around slots nobody will use again.
+
+    So the question is not "is this session definitely over" but "is its holder
+    here, and would anybody lose anything". It is only ever asked when a slot is
+    needed and the alternative is another checkout and another output base on
+    disk, which is why no elapsed time is involved: a threshold would have to be
+    guessed, and it would reclaim slots when nobody wanted one.
+    """
+    env = _repo_with_worktree(ctx, dirty = False)
+    unknown = {"kind": "codex", "id": "sess-abc", "pid": _DEAD_PID, "pid_start": "Mon Jan  1 00:00:00 2001"}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unknown)}}
+    _eq("given up", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
+
+def _test_a_holder_whose_process_was_never_captured_keeps_its_slot(ctx):
+    """Reclaiming needs evidence the holder has gone, and a record with no pid
+    has none: an explicit `--agent-kind` drops the detected pid, and a script
+    can name a session with no harness process behind it. Not running cannot
+    be told from not checkable there, so the slot stays theirs — as a person's
+    does — however clean the checkout."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    unchecked = {"kind": "codex", "id": "sess-abc", "pid": 0, "pid_start": ""}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", unchecked)}}
+    _eq("kept", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_a_relocated_output_user_root_is_where_a_slot_looks(ctx):
+    """The root a slot derives under is the caller's to choose, because a repo
+    whose `.bazelrc` sets `startup --output_user_root=` keeps its bases
+    elsewhere. Looking in the platform default there finds nothing: every slot
+    would read cold, and pruning would retire warm slots and leave their real
+    bases behind.
+    """
+    relocated = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    slot = "/pool/aspect-worktree-abc123"
+
+    under_relocated = output_base_of(ctx.std, slot, relocated)
+    under_default = output_base_of(ctx.std, slot)
+    _eq("derived under the root given", under_relocated.startswith(relocated + "/"), True)
+    _eq("same slot, same digest either way", under_relocated.rpartition("/")[2], under_default.rpartition("/")[2])
+
+    # A base in the relocated root is invisible from the default one.
+    ctx.std.fs.create_dir_all(under_relocated)
+    _eq("found with the root", warmth_of(ctx.std, slot, relocated).base, True)
+    _eq("missed without it", warmth_of(ctx.std, slot).base, False)
+
+def _test_the_branchs_own_slot_outranks_an_unrelated_one(ctx):
+    """An agent returning to a branch it released should land back on the slot
+    holding that branch's outputs. Without this the two score the same and it
+    comes down to registry order."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c9"}
+    mine = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "fix/login", "base_present": True}
+    theirs = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "other/work", "base_present": True}
+    if default_score(mine, want) <= default_score(theirs, want):
+        fail("the slot that last held this branch must win")
+
+def _test_an_identical_tree_still_wins_over_the_same_branch(ctx):
+    """A slot sitting on exactly this commit has outputs for exactly this tree,
+    whatever branch produced them — that beats a near relative."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    exact = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "other/work", "base_present": True}
+    near = {"lock_digest": "aaa", "last_commit": "c7", "last_branch": "fix/login", "base_present": True}
+    if default_score(exact, want) <= default_score(near, want):
+        fail("an identical tree must outrank the same branch at another commit")
+
+def _test_a_match_without_bazel_state_counts_for_nothing(ctx):
+    """A slot with no output base matches on commit or branch only on paper:
+    nothing was built there, or it was collected. Every warm slot outranks it —
+    even one that last built unrelated work, or under another lock file — so
+    `add` never picks a cold slot over a warm one. It still beats creating a
+    slot, so it stays eligible."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    never_built = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "fix/login"}
+    warm_unrelated = {"lock_digest": "aaa", "last_commit": "c7", "last_branch": "other", "base_present": True}
+    warm_other_lock = {"lock_digest": "bbb", "last_commit": "c7", "last_branch": "other", "base_present": True}
+    _eq("still eligible", default_score(never_built, want) > 0, True)
+    if default_score(warm_unrelated, want) <= default_score(never_built, want):
+        fail("a warm slot must outrank a cold one, whatever each last held")
+    if default_score(warm_other_lock, want) <= default_score(never_built, want):
+        fail("a warm slot under another lock file must still outrank a cold one")
+
+def _test_a_lock_mismatch_still_beats_everything_down(ctx):
+    """Branch affinity must not rescue a slot whose `external/` would be
+    rebuilt — that is the expensive mismatch."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    wrong_lock = {"lock_digest": "bbb", "last_commit": "c1", "last_branch": "fix/login", "base_present": True}
+    _eq("still nearly disqualified", default_score(wrong_lock, want), 10)
+
+def _test_the_refusal_names_who_holds_the_slot(ctx):
+    """A refusal that reports only the slot path makes the caller go and find
+    out who has it. The lease already knows, so it says: who, whether that
+    session can be resumed, and that `--take-over` is the other way out."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    agent = {"kind": "claude-code", "id": "abcdef12-3456", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", agent)}}
+
+    # No session store, so the state is `unknown`: not resumable, not gone.
+    previous = ctx.std.env.var("CLAUDE_CONFIG_DIR") or ""
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", ctx.std.fs.mkdtemp(prefix = "aspect-nostore"))
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", {})
+    if previous:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", previous)
+    else:
+        ctx.std.env.remove_var("CLAUDE_CONFIG_DIR")
+
+    _eq("names the branch", "fix/login" in msg, True)
+
+    # In full, not truncated as the table does it: two sessions whose ids share
+    # a prefix have to be told apart by whoever reads a refusal.
+    _eq("names the holder", "claude-code session abcdef12-3456" in msg, True)
+    _eq("offers the override", "--take-over" in msg, True)
+
+    # The resume line is offered only for a session that can be resumed, so an
+    # alternative phrased as "Or ..." would be an alternative to nothing.
+    _eq("no dangling alternative", " Or " in msg, False)
+
+def _test_a_slot_you_already_hold_says_so(ctx):
+    """Told that a `claude-code` session holds it, in the words used for a
+    stranger, an agent reads the skill's rule — a slot another session holds
+    needs the user's say-so — and stops to ask a question with nobody to ask.
+    Where the slot already is is the useful answer.
+
+    But not as certainly the caller's: subagents report their parent's session,
+    so a sibling's slot reads the same, and an agent that did not take it has
+    to be told to use another branch rather than move into it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    me = {"kind": "claude-code", "id": "abcdef12-3456", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", me)}}
+
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", me)
+
+    _eq("says this session holds it", "already held by this session" in msg, True)
+    _eq("points at the slot", "aspect worktree path fix/login" in msg, True)
+    _eq("and says what to do if a sibling took it", "use a different branch" in msg, True)
+    if "check with whoever" in msg:
+        fail("your own slot must not be called somebody else's")
+
+def _test_a_different_session_is_still_a_refusal(ctx):
+    """The identity check must not swallow the case it is next to: another
+    session's slot is still not yours, even on the same harness."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    theirs = {"kind": "claude-code", "id": "11111111-1111", "pid": 0, "pid_start": ""}
+    me = {"kind": "claude-code", "id": "22222222-2222", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", theirs)}}
+
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", me)
+    _eq("not called yours", "already yours" in msg, False)
+    _eq("names them", "11111111-1111" in msg, True)
+
+def _test_an_anonymous_lease_is_nobodys(ctx):
+    """A worktree somebody took at a terminal records no session. Matching an
+    empty id against an empty id would make every such slot everybody's."""
+    nobody = {"kind": "", "id": ""}
+    me = {"kind": "claude-code", "id": ""}
+    _eq("no id, no match", testonly_same_session(me, nobody), False)
+    _eq("same id matches", testonly_same_session(
+        {"kind": "claude-code", "id": "x"},
+        {"kind": "claude-code", "id": "x"},
+    ), True)
+    _eq("another harness's chosen id does not", testonly_same_session(
+        {"kind": "codex", "id": "x", "id_source": "caller"},
+        {"kind": "claude-code", "id": "x", "id_source": "caller"},
+    ), False)
+    _eq("a reported session id does, whatever kind it was labelled", testonly_same_session(
+        {"kind": "qa", "id": "0ed5-uuid", "harness_id": "0ed5-uuid"},
+        {"kind": "claude-code", "id": "0ed5-uuid", "harness_id": "0ed5-uuid"},
+    ), True)
+    _eq("two harness sessions are two, whatever their subagents chose", testonly_same_session(
+        {"kind": "claude-code", "id": "worker-1", "parent_id": "A", "harness_id": "A", "id_source": "caller"},
+        {"kind": "claude-code", "id": "worker-1", "parent_id": "B", "harness_id": "B", "id_source": "caller"},
+    ), False)
+    _eq("but a chosen id with no harness session does not", testonly_same_session(
+        {"kind": "other", "id": "same", "source": "flag"},
+        {"kind": "qa", "id": "same", "source": "flag"},
+    ), False)
+
+def _test_a_lease_with_no_agent_keeps_the_plain_refusal(ctx):
+    """A worktree a person took has no session to report, so the message names
+    a person rather than inventing a session, and says what to do."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"s1": _leased(pool["git_common_dir"], "fix/login", {})}}
+    msg = testonly_held_by(ctx, pool, registry, "s1", "fix/login", {})
+    _eq("a person named", "a person at a terminal" in msg, True)
+    _eq("no session invented", " session " in msg, False)
+    _eq("still says what to do", "aspect worktree release" in msg, True)
+
+def _test_a_new_branch_does_not_adopt_its_bases_upstream(ctx):
+    """Creating a branch from a remote-tracking ref records that ref as the new
+    branch's upstream unless `--no-track` is passed. Under
+    `push.default=upstream` a later bare `git push` from the worktree then
+    targets the base branch, which for `origin/main` is the one outcome this
+    whole feature exists to avoid.
+
+    Git auto-tracks only when the start point is named in its short
+    remote-tracking form, so producing the tracking shape needs a configured
+    remote; that half is covered end to end rather than here.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    ctx.std.fs.create_dir_all(repo)
+    for args in [
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+    ]:
+        run_git(ctx.std, args, repo)
+    ctx.std.fs.write(repo + "/f", "x\n")
+    run_git(ctx.std, ["add", "-A"], repo)
+    run_git(ctx.std, ["commit", "-qm", "init"], repo)
+
+    # A remote-tracking ref without needing a remote.
+    run_git(ctx.std, ["update-ref", "refs/remotes/origin/main", "HEAD"], repo)
+
+    without = tmp + "/without"
+    run_git(ctx.std, ["worktree", "add", "--no-track", "-b", "feat/x", without, "refs/remotes/origin/main"], repo)
+    _eq(
+        "no upstream, so a bare push has no target",
+        run_git(ctx.std, ["rev-parse", "--abbrev-ref", "@{upstream}"], without).ok,
+        False,
+    )
+
+    # The branch still points where it should; only the upstream is withheld.
+    _eq(
+        "branched from the base",
+        run_git(ctx.std, ["rev-parse", "HEAD"], without).out,
+        run_git(ctx.std, ["rev-parse", "refs/remotes/origin/main"], repo).out,
+    )
+
+def _test_a_base_that_never_existed_is_not_reported_as_lost(ctx):
+    """Three states, and the two absences do not mean the same thing.
+
+    A slot nobody has built in never had an output base, so calling the path
+    beside it "missing" says something was lost and sends a reader looking for
+    what took it. The case worth reporting is a base once seen and now gone,
+    which is `aspect gc` or a `bazel clean --expunge` having collected it.
+    """
+    _eq("on disk, nothing to say", testonly_base_note(True, True), "")
+    _eq("and still nothing when it was never seen", testonly_base_note(True, False), "")
+    _eq("seen before, gone now", testonly_base_note(False, True).strip(), "(reclaimed)")
+    _eq("never there at all", testonly_base_note(False, False).strip(), "(not created yet)")
+
+def _test_each_table_carries_only_what_its_slots_can_answer(ctx):
+    """Taken slots and free slots are listed separately so that neither carries
+    a column the other kind would leave blank. Which columns those are is the
+    whole point of the split, so they are pinned.
+
+    A pool with nothing running must still show that it records which session
+    holds a slot, so `agent` is the one column kept when empty. The rest of the
+    table's behaviour is lib/table.axl's, and tested there.
+    """
+    taken = [c.key for c in testonly_taken_columns]
+    free = [c.key for c in testonly_free_columns]
+
+    # A free slot has no holder and no checked-out branch; a taken one has not
+    # been idle, and its state is the only thing left for `state` to say.
+    _eq("no holder among free slots", "agent" in free, False)
+    _eq("nor a session", "session" in free, False)
+    _eq("idle belongs to the free slots", "idle" in free, True)
+    _eq("and not to the taken ones", "idle" in taken, False)
+    _eq("headed for what it measures", {c.key: c for c in testonly_free_columns}["idle"].header, "last used")
+
+    # The free table's heading is its state, so the column would repeat it.
+    _eq("no state column among free slots", "state" in free, False)
+    _eq("but one among the taken, for a slot still being set up", "state" in taken, True)
+
+    by_key = {c.key: c for c in testonly_taken_columns}
+    _eq("agent survives an empty column", by_key["agent"].always, True)
+    _eq("notes does not, since it only ever carries exceptions", by_key["notes"].always, False)
+    _eq("idle is right-aligned", {c.key: c for c in testonly_free_columns}["idle"].right, True)
+
+    # The fixed-width columns come first and the ragged ones last, so the
+    # numbers line up in a block and a long branch name cannot push them around.
+    _eq("the slot leads the taken", taken[0], "slot")
+    _eq("and the free", free[0], "slot")
+    for keys in [taken, free]:
+        if keys.index("branch") < keys.index("leases"):
+            fail("branch belongs after the numbers: %r" % keys)
+    if taken.index("branch") > taken.index("agent"):
+        fail("branch belongs before the agent: %r" % taken)
+
+def _test_the_lock_excludes_a_second_caller(ctx):
+    """The point of the whole mechanism. `attempts = 1` so the refusal is
+    immediate rather than the production minute of patience."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    first = acquire(ctx.std, tmp)
+    if not first:
+        fail("an unlocked pool should hand out its lock")
+    _eq("a second caller is refused", acquire(ctx.std, tmp, attempts = 1), "")
+    release(ctx.std, tmp, first)
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("the lock should be available once released")
+
+def _test_a_stale_release_cannot_drop_someone_elses_lock(ctx):
+    """`add` releases the lock for its checkout and takes it again, so a
+    deferred release can arrive once the lock has passed to another caller.
+    Removing theirs would put two callers in the registry at once.
+
+    The second holder is written by hand because a token identifies a process,
+    and this test only has the one. It carries this process's pid so the lock
+    reads as live rather than abandoned, which is the case being tested.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    mine = acquire(ctx.std, tmp)
+    release(ctx.std, tmp, mine)
+
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode(
+        owner_record(ctx.std) | {"token": "another-caller"},
+    ))
+
+    release(ctx.std, tmp, mine)
+    _eq("their lock survives my late release", acquire(ctx.std, tmp, attempts = 1), "")
+    release(ctx.std, tmp, "another-caller")
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("the holder's own release should still work")
+
+def _test_a_lock_whose_owner_died_is_reclaimed_at_once(ctx):
+    """The owner record answers whether the holder still exists, so the next
+    caller takes an abandoned lock rather than waiting out a clock that says
+    nothing about it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode({
+        "token": "%d:Mon Jan  1 00:00:00 2001" % _DEAD_PID,
+        "pid": _DEAD_PID,
+        "started_at": "Mon Jan  1 00:00:00 2001",
+    }))
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("a lock held by a dead process should be reclaimed on the first look")
+
+def _test_a_recycled_pid_does_not_pass_for_the_owner(ctx):
+    """Pids are reused, so a live pid is not evidence that the process which
+    took the lock is still there. The recorded start time is what settles it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    ctx.std.fs.write(tmp + "/.lock/owner.json", json.encode({
+        "token": "stale",
+        "pid": ctx.std.process.id(),
+        "started_at": "Mon Jan  1 00:00:00 2001",
+    }))
+    if not acquire(ctx.std, tmp, attempts = 1):
+        fail("a live pid with a different start time is a different process")
+
+def _test_an_unreadable_owner_still_waits_out_the_clock(ctx):
+    """A process that died between creating the lock directory and recording
+    itself leaves nothing to check. An age that cannot be established is never
+    called abandoned, because reclaiming a live lock is worse than waiting."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.create_dir_all(tmp + "/.lock")
+    _eq("no owner record, fresh directory", acquire(ctx.std, tmp, attempts = 1), "")
+
+def _test_a_reservation_holds_the_slot_and_the_branch(ctx):
+    """The reservation is what makes releasing the lock for the checkout safe:
+    the slot is no longer free, and the branch is answerable by name before any
+    lease exists."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    token = reserve_slot(ctx.std, registry, "s1", "fix/login")
+
+    _eq("not free any more", registry["slots"]["s1"]["state"], RESERVED)
+    _eq("found by branch", reserving_slot(registry, "fix/login", "/owner/.git"), "s1")
+    _eq("another branch is not claimed", reserving_slot(registry, "other", "/owner/.git"), "")
+    _eq("nor the same branch in another clone", reserving_slot(registry, "fix/login", "/other/.git"), "")
+    _eq("the token proves it is ours", holds_reservation(registry, "s1", token), True)
+    _eq("someone else's token does not", holds_reservation(registry, "s1", "nope"), False)
+    _eq("a live process is not abandoned", reservation_abandoned(ctx.std, registry, "s1"), False)
+
+def _test_a_reservation_whose_process_died_is_reclaimable(ctx):
+    """An `add` killed during its checkout would otherwise hold a slot for
+    good. Unlike a lease there is no judgement call: no worktree existed yet, so
+    there is no session to resume and nothing uncommitted to lose."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    reserve_slot(ctx.std, registry, "s1", "fix/login")
+    registry["slots"]["s1"]["reservation"]["pid"] = _DEAD_PID
+    _eq("dead owner", reservation_abandoned(ctx.std, registry, "s1"), True)
+
+    registry["slots"]["s1"]["reservation"] = {}
+    _eq("nothing recorded is not a hold", reservation_abandoned(ctx.std, registry, "s1"), True)
+
+def _test_prune_never_takes_a_slot_being_set_up(ctx):
+    """A reservation means a checkout is being created in that directory.
+    Deleting its output base would break a command that is still running, and
+    age is no argument: the slot is as old as whatever it held before."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"s1": _slot(pool["git_common_dir"], age_days = 90)}}
+    _eq("free and old", prunable_slots(ctx.std, pool, registry, 30), ["s1"])
+
+    reserve_slot(ctx.std, registry, "s1", "fix/login")
+    _eq("reserved and old", prunable_slots(ctx.std, pool, registry, 30), [])
+
+def _test_reconcile_leaves_a_reservation_alone(ctx):
+    """Git not knowing about a reserved slot's worktree is expected rather than
+    evidence — that is what "not checked out yet" looks like. Freeing on it
+    would hand the slot to a second caller mid-checkout."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {"s2": _slot(env.pool["git_common_dir"])}}
+    reserve_slot(ctx.std, registry, "s2", "fix/login")
+    reconcile(ctx.std, env.pool, registry)
+    _eq("still reserved", registry["slots"]["s2"]["state"], RESERVED)
+
+def _test_freeing_a_slot_keeps_its_output_base(ctx):
+    """The Bazel state is the reason the pool exists, so a claim ending takes
+    the worktree and nothing else. `drop_slot` is the one that deletes."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    base = output_base_of(ctx.std, env.path, root)
+    ctx.std.fs.create_dir_all(base)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    _eq("free now", registry["slots"][env.slot_id]["state"], FREE)
+    _eq("no lease", registry["slots"][env.slot_id]["lease"], None)
+    _eq("no reservation", registry["slots"][env.slot_id]["reservation"], None)
+    _eq("the worktree is gone", ctx.std.fs.exists(env.path), False)
+    _eq("the output base is not", ctx.std.fs.exists(base), True)
+    if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("git should no longer list a worktree for the branch")
+
+def _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch(ctx):
+    """Git keeps listing a worktree whose directory was removed behind its back,
+    and refuses to check that branch out anywhere else until it is pruned. The
+    branch has to come free even though there is nothing left to remove."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.remove_dir_all(env.path)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    _eq("free now", registry["slots"][env.slot_id]["state"], FREE)
+    if "wip" in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("a worktree whose directory is gone should have been pruned from git")
+
+_A_SESSION = {"kind": "claude-code", "id": "b22fe20c-aaaa-bbbb-cccc-ddddeeeeffff", "pid": 123, "source": "env"}
+
+def _test_a_slot_counts_the_worktrees_it_has_held(ctx):
+    """The count is the pool's claim measured rather than asserted: a slot on
+    its seventh lease has saved six cold starts."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    close_lease(registry, "s1")
+    record_lease(registry, "s1", "spike/perf", {})
+
+    slot = registry["slots"]["s1"]
+    _eq("two leases", slot["lease_count"], 2)
+    _eq("both remembered", [h["name"] for h in slot["history"]], ["fix/login", "spike/perf"])
+    if not slot["history"][0]["released_ms"]:
+        fail("the first lease ended and should say so")
+    _eq("the current one is open", slot["history"][1]["released_ms"], 0)
+
+def _test_the_history_is_bounded(ctx):
+    """A slot reused for months would otherwise grow its registry entry
+    forever to answer a question only the recent past bears on."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    for i in range(25):
+        record_lease(registry, "s1", "branch-%d" % i, {})
+        close_lease(registry, "s1")
+
+    slot = registry["slots"]["s1"]
+    _eq("every lease is counted", slot["lease_count"], 25)
+    _eq("only the recent ones are kept", len(slot["history"]), 10)
+    _eq("and they are the recent ones", slot["history"][-1]["name"], "branch-24")
+
+def _test_closing_without_a_history_is_harmless(ctx):
+    """A registry written before slots kept a history has nothing to close, and
+    neither has a slot freed twice."""
+    registry = {"slots": {"s1": {"state": LEASED}}}
+    close_lease(registry, "s1")
+
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    close_lease(registry, "s1")
+    first = registry["slots"]["s1"]["history"][0]["released_ms"]
+    close_lease(registry, "s1")
+    _eq("the closed entry is not touched again", registry["slots"]["s1"]["history"][0]["released_ms"], first)
+
+def _test_age_and_idleness_answer_in_milliseconds(ctx):
+    """A column showing `0d` for a slot used ten minutes ago says nothing. The
+    pool reports the elapsed time and the display picks a unit; whole days stay
+    available for `prune`, which acts at that resolution."""
+    minutes_old = {"created_ms": time.now_ms() - 25 * 60 * 1000}
+    age = slot_age_ms(minutes_old)
+    if age < 25 * 60 * 1000 or age > 26 * 60 * 1000:
+        fail("25 minutes should read as about 25 minutes: got %d ms" % age)
+    _eq("and as no whole days", slot_created_days(minutes_old), 0)
+    _eq("nothing recorded", slot_age_ms({}), 0)
+
+def _test_creation_age_is_not_idleness(ctx):
+    """`slot_created_days` only grows; `slot_idle_days` is what `prune` acts on
+    and resets whenever Bazel touches the output base. Reporting one as the
+    other would tell a reader a slot was new when it had been idle for a month,
+    or ancient when it had just been used."""
+    _eq("nothing recorded", slot_created_days({}), 0)
+    _eq("three days", slot_created_days({"created_ms": time.now_ms() - 3 * _DAY_MS}), 3)
+
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    old = _slot(pool["git_common_dir"], age_days = 30)
+    base = output_base_of(ctx.std, slot_path(pool, "s1"), tmp + "/root")
+    ctx.std.fs.create_dir_all(base)
+    _eq("created a month ago", slot_created_days(old), 30)
+    _eq("but used just now", slot_idle_days(ctx.std, pool, "s1", old, tmp + "/root"), 0)
+
+def _test_freeing_a_slot_closes_its_history_entry(ctx):
+    """`free_slot` is one of the two ways a lease ends, so it has to close the
+    entry the same way `release` does — otherwise a slot's history reads as
+    though every branch it ever held is still checked out."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    record_lease(registry, env.slot_id, "wip", _A_SESSION)
+
+    free_slot(ctx.std, env.pool, registry, env.slot_id)
+
+    entry = registry["slots"][env.slot_id]["history"][-1]
+    if not entry["released_ms"]:
+        fail("freeing the slot should have closed its history entry")
+
+def _test_a_lease_ending_leaves_the_branch_as_the_slots_last(ctx):
+    """Every way a lease ends goes through `mark_free`, and what it records is
+    what makes the slot worth keeping: the branch held becomes `last_branch`, so
+    the next `add` for that branch scores this slot — its Bazel state is state
+    for *that* tree. Every path that ends a lease records it, or the next
+    request for the branch is quietly sent to a colder slot.
+
+    `reservation` goes with `lease` so a freed slot carries neither. Every
+    reader gates on `state`, so a left-behind reservation is inert rather than
+    harmful, but a slot that contradicts itself is a trap for the next reader.
+    """
+    registry = {"slots": {"s1": _leased("/owner/.git", "fix/login", _A_SESSION)}}
+    registry["slots"]["s1"]["reservation"] = {"name": "fix/login", "token": "t"}
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+
+    held = mark_free(registry, "s1")
+    slot = registry["slots"]["s1"]
+
+    _eq("reports the branch it ended", held, "fix/login")
+    _eq("which the slot remembers", slot["last_branch"], "fix/login")
+    _eq("and is free", slot["state"], FREE)
+    _eq("with no lease", slot["lease"], None)
+    _eq("and no reservation", slot["reservation"], None)
+    _eq("scores for that branch again", default_score(slot, {"name": "fix/login"}) > 0, True)
+
+def _test_freeing_a_slot_with_no_lease_invents_no_branch(ctx):
+    """`mark_free` is reached twice for one slot — a `release` that raced a
+    `reconcile`, say — and the second call has no lease to read. It must leave
+    the branch the first call recorded rather than clearing it."""
+    registry = {"slots": {"s1": _leased("/owner/.git", "fix/login", {})}}
+
+    first = mark_free(registry, "s1")
+    second = mark_free(registry, "s1")
+
+    _eq("the first call names the branch", first, "fix/login")
+    _eq("the second has none to name", second, "")
+    _eq("but the slot keeps it", registry["slots"]["s1"]["last_branch"], "fix/login")
+
+def _store_with(ctx, filed: list[str]) -> str:
+    """A session store holding exactly `filed`, and `CLAUDE_CONFIG_DIR` pointed
+    at it. Returns the directory the sessions are filed under.
+
+    Whether a session is filed decides whether a resume command is offered, so a
+    test that does not say which sessions exist is really asking about the
+    machine it runs on.
+    """
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-wt-store")
+    cwd = "/Users/me/src/web"
+    slug = "-Users-me-src-web"
+    ctx.std.fs.create_dir_all(home + "/projects/" + slug)
+    for id in filed:
+        ctx.std.fs.write(home + "/projects/" + slug + "/" + id + ".jsonl", "{}\n")
+    ctx.std.env.set_var("CLAUDE_CONFIG_DIR", home)
+    return cwd
+
+def _test_every_holder_is_reported_and_the_unanswerable_says_so(ctx):
+    """One row per holder the slot remembers, and `-` for anything the harness
+    does not say.
+
+    A holder that is a person contributes a row like any other — it is part of
+    the slot's history. A harness that marks its presence without naming a
+    session contributes a known kind and an unknown session, which is the case
+    a reader has to be *told* about rather than left to infer from a blank cell.
+    """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["full-uuid-here"])
+    now = time.now_ms()
+    history = [
+        {
+            "name": "spike/perf",
+            "agent": {"kind": "cursor", "id": ""},
+            "leased_ms": now - 3 * _DAY_MS,
+            "released_ms": now - 2 * _DAY_MS,
+        },
+        {
+            "name": "chore/deps",
+            "agent": {},
+            "leased_ms": now - 2 * _DAY_MS,
+            "released_ms": now - _DAY_MS,
+        },
+        {
+            "name": "fix/login",
+            "agent": {"kind": "claude-code", "id": "full-uuid-here", "cwd": cwd},
+            "leased_ms": now - _DAY_MS,
+        },
+    ]
+
+    got = testonly_history_rows(ctx.std, history, "/Users/me")
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
+
+    _eq("a row per holder, the person included", len(got), 3)
+
+    # Newest first: what bears on a build happening now.
+    _eq("the current holder leads", got[0]["branch"], "fix/login")
+    _eq("the harness", got[0]["agent"], "claude-code")
+    _eq("the whole id, never an abbreviation", got[0]["session"], "full-uuid-here")
+    _eq("still holding it", got[0]["status"], "still holding it")
+
+    _eq("filed under the directory it ran in", got[0]["project"], "~/src/web")
+
+    _eq("a person's lease is named", got[1]["branch"], "chore/deps")
+    _eq("with no harness to report", got[1]["agent"], "-")
+    _eq("and no session either", got[1]["session"], "-")
+    _eq("and says when it let go", got[1]["status"].startswith("ended "), True)
+
+    # Cursor marks its presence and names no session.
+    _eq("the harness is still known", got[2]["agent"], "cursor")
+    _eq("the session is not", got[2]["session"], "-")
+
+    # What the lease was, then who held it. How to get back into a session is
+    # the sessions section's, said once per session.
+    headers = [c.key for c in testonly_history_columns]
+    _eq(
+        "the columns, in order",
+        headers,
+        ["branch", "held", "status", "agent", "session", "project"],
+    )
+
+def _row(agent, history, slot = "aaaaaaaaaaaa"):
+    """A listing row with only what `_session_groups` reads."""
+    return {"agent": agent, "history": history, "slot": slot, "path": "/pool/" + SLOT_PREFIX + slot}
+
+def _test_a_session_is_listed_once_with_every_lease_it_took(ctx):
+    """Most leases come from subagents, which run in their parent's process and
+    report the parent's session id — so one session holding several slots, in
+    more than one repository, is the ordinary case. It is one group, its leases
+    newest first, and the command that returns to it is said once.
+
+    A holder with no session id is a person or a harness that names no
+    conversation, and there is no session to list for it.
+    """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["parent-session", "other-session"])
+    now = time.now_ms()
+    parent = {"kind": "claude-code", "id": "parent-session", "cwd": cwd}
+    other = {"kind": "claude-code", "id": "other-session", "cwd": cwd}
+
+    web = {"id": "github.com/acme/web"}
+    api = {"id": "github.com/acme/api"}
+    listings = [
+        (web, [
+            _row(parent, [
+                {"name": "fix/login", "agent": parent, "leased_ms": now - 3 * _DAY_MS, "released_ms": now - 2 * _DAY_MS},
+                {"name": "fix/logout", "agent": parent, "leased_ms": now - _DAY_MS},
+            ]),
+            _row({}, [
+                {"name": "chore/deps", "agent": {}, "leased_ms": now - 5 * _DAY_MS, "released_ms": now - 4 * _DAY_MS},
+            ]),
+        ]),
+        (api, [
+            _row({}, [
+                {"name": "spike/perf", "agent": parent, "leased_ms": now - 2 * _DAY_MS, "released_ms": now - _DAY_MS},
+                {"name": "old/thing", "agent": other, "leased_ms": now - 9 * _DAY_MS, "released_ms": now - 8 * _DAY_MS},
+            ]),
+        ]),
+    ]
+
+    got = testonly_session_groups(ctx.std, listings, "/Users/me")
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
+
+    _eq("one group per session, none for the person", [g.id for g in got], ["parent-session", "other-session"])
+
+    first = got[0]
+    _eq("the harness", first.kind, "claude-code")
+
+    # Bare: `project` is said on its own line, and the command resolves from
+    # anywhere.
+    _eq("the way back, once", first.resume, "claude --resume parent-session")
+    _eq("its project, written ~ under home", first.project, "~/src/web")
+
+    # Active before released, each newest first: what it holds now and what it
+    # has let go of are different questions.
+    _eq(
+        "every lease it took, across pools, active first",
+        [(lease["repo"], lease["branch"]) for lease in first.leases],
+        [
+            ("github.com/acme/web", "fix/logout"),
+            ("github.com/acme/api", "spike/perf"),
+            ("github.com/acme/web", "fix/login"),
+        ],
+    )
+    _eq("the open one says so", first.leases[0]["status"], "still holding it")
+    _eq("the others say when they ended", first.leases[1]["status"].startswith("ended "), True)
+    _eq("each names its slot", first.leases[0]["slot"], "aaaaaaaaaaaa")
+
+def _test_a_sessions_active_leases_come_before_its_released_ones(ctx):
+    """Ordered by status first, then recency within it — never interleaved. A
+    lease started long ago and still held comes before one started a minute ago
+    and already let go."""
+    now = time.now_ms()
+    agent = {"kind": "claude-code", "id": "s"}
+    listings = [({"id": "github.com/acme/web"}, [
+        _row({}, [
+            {"name": "old-but-held", "agent": agent, "leased_ms": now - 9 * _DAY_MS},
+            {"name": "new-but-done", "agent": agent, "leased_ms": now - 60000, "released_ms": now - 1000},
+            {"name": "done-earlier", "agent": agent, "leased_ms": now - 3 * _DAY_MS, "released_ms": now - 2 * _DAY_MS},
+        ]),
+    ])]
+
+    got = testonly_session_groups(ctx.std, listings)
+
+    _eq(
+        "active, then released by when they ended",
+        [lease["branch"] for lease in got[0].leases],
+        ["old-but-held", "new-but-done", "done-earlier"],
+    )
+
+def _test_a_session_is_placed_from_its_live_lease_when_history_cannot(ctx):
+    """A history entry keeps only what is worth remembering about a finished
+    holder, and one written before the directory was recorded has no `cwd` at
+    all. The slot's live lease is the same holder with everything detection
+    gathered, so a session still holding a slot is placed from that — matched
+    on its id, so a lease that has changed hands lends nothing to another
+    session's group.
+    """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["holding", "stranger"])
+    now = time.now_ms()
+    thin = {"kind": "claude-code", "id": "holding"}
+    live = {"kind": "claude-code", "id": "holding", "cwd": cwd, "pid": 4242}
+    stranger = {"kind": "claude-code", "id": "stranger"}
+
+    listings = [({"id": "github.com/acme/web"}, [
+        _row(live, [
+            {"name": "before", "agent": stranger, "leased_ms": now - 2 * _DAY_MS, "released_ms": now - _DAY_MS},
+            {"name": "fix/login", "agent": thin, "leased_ms": now - _DAY_MS},
+        ]),
+    ])]
+
+    got = testonly_session_groups(ctx.std, listings, "/Users/me")
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
+
+    by_id = {g.id: g for g in got}
+    _eq("placed from the live lease", by_id["holding"].project, "~/src/web")
+    _eq("which lends nothing to another session", by_id["stranger"].project, "")
+
+def _test_the_acted_on_command_names_the_project(ctx):
+    """Where the command is the thing being acted on — the callout under the
+    listing for a holder that has stopped, and `add`'s refusal when that
+    holder's checkout is dirty — it carries a `cd` into the project.
+
+    `claude --resume` resolves within the current directory's project, so the
+    bare command works only where you already are. In the sessions section the
+    project is on its own line and the prefix would repeat it; on a line meant
+    to be pasted there is nowhere else to read it from.
+    """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["filed-one"])
+    agent = {"kind": "claude-code", "id": "filed-one", "cwd": cwd}
+
+    plain = testonly_resume_line(ctx.std, agent)
+    abbreviated = testonly_resume_line(ctx.std, agent, "/Users/me")
+    absent = testonly_resume_line(ctx.std, {"kind": "claude-code", "id": "never-filed", "cwd": cwd})
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
+
+    _eq("the project in front", plain, "cd " + cwd + " && claude --resume filed-one")
+    _eq("written ~ under home", abbreviated, "cd ~/src/web && claude --resume filed-one")
+
+    # The same gate as the short form: a command that resolves nothing is worse
+    # than none, however it is spelled.
+    _eq("and nothing for a session the store lacks", absent, "")
+
+def _test_no_resume_is_offered_for_a_session_the_store_does_not_have(ctx):
+    """A resume command for a session the store does not hold resolves nothing,
+    and a runnable-looking line that cannot run is worse than a dash.
+
+    The question is whether the session is *filed*, not whether a process is
+    alive: a running harness can hold an id its store does not have. So both
+    sessions here differ only in whether the store has them.
+    """
+    saved = ctx.std.env.var("CLAUDE_CONFIG_DIR")
+    cwd = _store_with(ctx, ["filed-one"])
+    now = time.now_ms()
+    filed = {"kind": "claude-code", "id": "filed-one", "cwd": cwd}
+    absent = {"kind": "claude-code", "id": "never-filed", "cwd": cwd}
+    listings = [({"id": "github.com/acme/web"}, [
+        _row({}, [
+            {"name": "fix/login", "agent": filed, "leased_ms": now - _DAY_MS},
+            {"name": "spike/perf", "agent": absent, "leased_ms": now - 2 * _DAY_MS},
+        ]),
+    ])]
+
+    got = testonly_session_groups(ctx.std, listings)
+    if saved != None:
+        ctx.std.env.set_var("CLAUDE_CONFIG_DIR", saved)
+
+    by_id = {g.id: g for g in got}
+    _eq("a command for the one the store has", by_id["filed-one"].resume, "claude --resume filed-one")
+    _eq("nothing for the one it does not", by_id["never-filed"].resume, "")
+    _eq("and no project for it either", by_id["never-filed"].project, "")
+
+def _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone(ctx):
+    """`--all` lists pools whose clones are not here to ask, so it cannot run
+    `reconcile` — but it must not then report a slot as in use when the
+    directory is gone. A lease is a claim on a checkout, and no record outranks
+    the checkout not being there.
+
+    Whichever clone owns it, when that clone's git keeps nothing for it —
+    otherwise `--all` would report a deleted slot as in use while its owning
+    clone reports it free. Here the owner does not exist, so there is nothing
+    to ask.
+    """
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-vanished")
+    owner = "/some/other/clone/.git"
+    pool = {"id": "p", "dir": tmp, "git_common_dir": owner, "remote": ""}
+    registry = {"slots": {
+        "gone00000000": _leased(owner, "fix/login", _A_SESSION),
+        "here00000000": _leased(owner, "fix/logout", _A_SESSION),
+    }}
+    ctx.std.fs.create_dir_all(slot_path(pool, "here00000000"))
+
+    drop_vanished_leases(ctx.std, pool, registry)
+
+    _eq("the one with no directory is free", registry["slots"]["gone00000000"]["state"], FREE)
+    _eq("and remembers what it held", registry["slots"]["gone00000000"]["last_branch"], "fix/login")
+
+    # The other is left alone: a directory that is there is where git is the
+    # authority, and this is the half of the judgement that does not need it.
+    _eq("the one still on disk is untouched", registry["slots"]["here00000000"]["state"], LEASED)
+
+def _test_a_dirty_slot_is_never_taken(ctx):
+    """The condition that does not bend. Uncommitted changes are the one thing
+    removing a worktree destroys, so a dirty checkout is left alone however
+    certainly its holder is gone."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    holder = {"kind": "codex", "id": "thread-1", "pid": 0, "pid_start": ""}
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", holder)}}
+
+    _eq("left alone", abandoned_lease(ctx.std, env.pool, registry, env.slot_id, ""), False)
+
+def _test_a_lease_nothing_identifies_is_left_alone(ctx):
+    """The rule is that the holder's process is *verifiably* gone, and verifying
+    that needs to know which process it was. A lease with no agent recorded —
+    a person's worktree, or one adopted from git — offers no evidence either
+    way, so it is left alone rather than guessed about. A person can see their
+    own slot in `list` and release it; a crashed agent cannot."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    _eq(
+        "no agent, no evidence",
+        abandoned_lease(ctx.std, env.pool, registry, env.slot_id, ""),
+        False,
+    )
+
+def _test_a_base_once_seen_stays_remembered(ctx):
+    """`had_base` is what separates a slot whose Bazel state was reclaimed from
+    one that never had any, and a lease count cannot stand in for it — a slot
+    leased twice without a build never had a base. So it is recorded by
+    observation, and once seen it is never unseen: a base that exists now and is
+    gone later is the whole thing worth reporting about it.
+    """
+    registry = {"slots": {"s1": _slot("/clone/.git")}}
+
+    observe_base(registry, "s1", False)
+    _eq("nothing seen yet", registry["slots"]["s1"].get("had_base", False), False)
+
+    observe_base(registry, "s1", True)
+    _eq("seen", registry["slots"]["s1"]["had_base"], True)
+
+    # The base being gone now is exactly the state the flag exists to describe,
+    # so a later absence must not erase it.
+    observe_base(registry, "s1", False)
+    _eq("still remembered", registry["slots"]["s1"]["had_base"], True)
+
+def _test_marking_a_slot_leased_clears_what_the_state_denies(ctx):
+    """The only place a lease is written, so that a lease and the state which
+    admits it cannot drift apart. A reservation is a promise to produce the
+    worktree that now exists, so it goes with the same stroke."""
+    registry = {"slots": {"s1": _slot("/clone/.git")}}
+    reserve_slot(ctx.std, registry, "s1", "fix/login")
+
+    mark_leased(registry, "s1", "fix/login", _A_SESSION)
+    slot = registry["slots"]["s1"]
+
+    _eq("leased", slot["state"], LEASED)
+    _eq("under the branch", slot["lease"]["name"], "fix/login")
+    _eq("by the agent", slot["lease"]["agent"]["id"], _A_SESSION["id"])
+    _eq("and the promise is discharged", slot["reservation"], None)
+
+def _test_a_new_slot_id_never_collides(ctx):
+    """Ids are the handle `path`, `release` and `prune` take, so a duplicate
+    would point two commands at one directory."""
+    registry = {"slots": {}}
+    pool = {"id": "github.com/acme/web", "dir": "/pool", "git_common_dir": "/clone/.git"}
+
+    seen = {}
+    for _ in range(25):
+        id = new_slot_id(ctx.std, pool, registry)
+        if id in seen:
+            fail("new_slot_id repeated %r" % id)
+        seen[id] = True
+        registry["slots"][id] = _slot(pool["git_common_dir"])
+
+    _eq("all distinct", len(seen), 25)
+
+    # Twelve hex characters, which is what the listing's first column shows.
+    for id in seen:
+        _eq("twelve characters", len(id), 12)
+
+def _test_pools_on_disk_finds_a_pool_at_any_depth(ctx):
+    """`--all` has to find every pool, and a pool id is not a fixed depth:
+    `host/org/repo` is three segments, a nested group is more, and the
+    no-usable-remote fallback is two. So the registry is the marker.
+
+    Two things it must not do: descend into a slot directory, which holds an
+    entire checkout and is never a pool, or report a directory that merely sits
+    under the root with nothing in it.
+    """
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-pools")
+    root = pools_root_of(home)
+
+    # Three shapes of real pool, and two things that are not one.
+    for rel in ["github.com/acme/web", "gitlab.com/acme/group/sub/api", "local/some-slug"]:
+        ctx.std.fs.create_dir_all(root + "/" + rel)
+        ctx.std.fs.write(root + "/" + rel + "/registry.json", "{}")
+    ctx.std.fs.create_dir_all(root + "/github.com/acme/nothing-here")
+
+    # A pool whose registry has gone but whose slots have not. Nothing marks
+    # the directory as a pool any more, so the walk would descend — and a slot
+    # holds an entire checkout, which is why slot directories are skipped by
+    # name rather than only by having been recognized as a pool.
+    gone = root + "/github.com/acme/stale/" + SLOT_PREFIX + "bbbbbbbbbbbb"
+    ctx.std.fs.create_dir_all(gone + "/deep")
+    ctx.std.fs.write(gone + "/deep/registry.json", "{}")
+
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+    found = pools_on_disk(ctx.std)
+    if saved != None:
+        ctx.std.env.set_var("HOME", saved)
+
+    ids = [p["id"] for p in found]
+    _eq("every pool, at every depth, sorted", ids, [
+        "github.com/acme/web",
+        "gitlab.com/acme/group/sub/api",
+        "local/some-slug",
+    ])
+
+    # Spelled with home's symlinks resolved, as git spells worktree paths.
+    _eq("the directory is the id under the root", found[0]["dir"].endswith(root.removeprefix("/private") + "/github.com/acme/web"), True)
+
+    # Nothing was asked of a clone, which is what keeps `reconcile` from
+    # judging another repository's slots against this one's object store.
+    _eq("and no clone is claimed", found[0]["git_common_dir"], "")
+
+def _test_pools_on_disk_is_empty_before_any_pool_exists(ctx):
+    """A machine that has never taken a worktree has no pools root at all, and
+    `--all` has to answer that rather than fail."""
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-nopools")
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+    found = pools_on_disk(ctx.std)
+    if saved != None:
+        ctx.std.env.set_var("HOME", saved)
+    _eq("nothing yet", found, [])
+
+def _test_the_history_says_who_held_each_lease(ctx):
+    """On a machine running several agents, which session had a slot is the
+    question worth asking of it — a cold build or an unexpected branch is
+    usually answered by "that session had it last"."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    entry = registry["slots"]["s1"]["history"][0]
+
+    _eq("the harness", entry["agent"]["kind"], "claude-code")
+    _eq("the session", entry["agent"]["id"], _A_SESSION["id"])
+    if "pid" in entry["agent"]:
+        fail("a finished session's pid is not evidence of anything and should not be kept")
+
+def _test_a_person_leaves_no_session_in_the_history(ctx):
+    """Nothing is invented for a worktree somebody took at a terminal."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    record_lease(registry, "s1", "fix/login", {})
+    _eq("no holder", registry["slots"]["s1"]["history"][0]["agent"], {})
+
+def _test_a_handover_records_a_holder_without_counting_a_lease(ctx):
+    """`--take-over` hands an existing checkout to a second session. Nothing is
+    rebuilt, so the slot has not turned over and the count must not move — but
+    the slot did change hands, which is what the history is for."""
+    registry = {"slots": {"s1": _slot("/owner/.git")}}
+    record_lease(registry, "s1", "fix/login", _A_SESSION)
+    other = {"kind": "claude-code", "id": "7f1e9a02-1111-2222-3333-444455556666"}
+
+    record_handover(registry, "s1", "fix/login", other)
+
+    slot = registry["slots"]["s1"]
+    _eq("still one lease", slot["lease_count"], 1)
+    _eq("two holders", len(slot["history"]), 2)
+    _eq("the new one holds it", slot["history"][1]["agent"]["id"], other["id"])
+    if not slot["history"][0]["released_ms"]:
+        fail("the handed-over entry should be closed")
+
+def _test_how_long_a_holder_had_it(ctx):
+    """An open entry is measured to now, which is what makes "still holding it"
+    a duration rather than a blank."""
+    closed = {"leased_ms": 1000, "released_ms": 1000 + 90 * 60 * 1000}
+    _eq("an hour and a half", held_for_ms(closed), 90 * 60 * 1000)
+
+    open_now = {"leased_ms": time.now_ms() - 5 * 60 * 1000}
+    if held_for_ms(open_now) < 5 * 60 * 1000:
+        fail("an open entry is measured to now: got %d" % held_for_ms(open_now))
+    _eq("nothing recorded", held_for_ms({}), 0)
+
+def _symlink(ctx, target: str, link: str) -> None:
+    """`ln -s`: AXL's `std.fs` can write a file but not create a link."""
+    ctx.std.process.command("ln").args(["-s", target, link]) \
+        .stdout("null").stderr("null").spawn().wait()
+
+def _test_a_built_in_slot_is_not_dirty(ctx):
+    """The documented workflow: take a slot, build in it, release it. Bazel
+    leaves its convenience symlinks and a generated lock file behind, and
+    counting those as work would refuse every release after a slot's first
+    build.
+    """
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    ctx.std.fs.create_dir_all(base + "/execroot/warmth")
+
+    # What a build leaves: symlinks into the output base, plus the lock file.
+    for link in ["bazel-bin", "bazel-out", "bazel-testlogs", "bazel-warmth"]:
+        _symlink(ctx, base + "/execroot/warmth", env.path + "/" + link)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 42}\n')
+
+    _eq("none of it is work", uncommitted_work(ctx.std, env.path, base), [])
+
+def _test_real_work_in_a_built_in_slot_still_counts(ctx):
+    """The filter must not swallow the thing it is next to. A file the caller
+    wrote is work even when Bazel's leavings are in the same listing."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    ctx.std.fs.create_dir_all(base)
+    _symlink(ctx, base, env.path + "/bazel-bin")
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", "{}\n")
+    ctx.std.fs.write(env.path + "/notes.md", "half-finished\n")
+
+    work = uncommitted_work(ctx.std, env.path, base)
+    _eq("just the one file", len(work), 1)
+    if "notes.md" not in work[0]:
+        fail("the caller's own file should be reported: got %r" % work)
+
+def _test_a_tracked_lock_file_that_changed_is_work(ctx):
+    """A lock file git already tracks is a diff somebody may want to commit, so
+    the exemption covers the generated case only."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 1}\n')
+    run_git(ctx.std, ["add", "MODULE.bazel.lock"], env.path)
+    run_git(ctx.std, ["commit", "-qm", "lock"], env.path)
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", '{"lockFileVersion": 2}\n')
+
+    work = uncommitted_work(ctx.std, env.path, "")
+    if len(work) != 1 or "MODULE.bazel.lock" not in work[0]:
+        fail("a tracked lock file that changed is work: got %r" % work)
+
+def _test_a_symlink_pointing_elsewhere_is_work(ctx):
+    """A convenience symlink is recognized by pointing into this slot's output
+    base, not by its name — so a symlink someone else made is still reported,
+    whatever it is called."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    base = ctx.std.fs.mkdtemp(prefix = "aspect-wt-base")
+    elsewhere = ctx.std.fs.mkdtemp(prefix = "aspect-wt-other")
+    _symlink(ctx, elsewhere, env.path + "/bazel-bin")
+
+    work = uncommitted_work(ctx.std, env.path, base)
+    if len(work) != 1 or "bazel-bin" not in work[0]:
+        fail("a symlink out of the pool's reach is not ours to ignore: got %r" % work)
+
+def _test_a_gone_session_with_only_build_output_is_abandoned(ctx):
+    """Reclaiming a crashed agent's slot ran the same check, so a slot that had
+    been built in was unreclaimable as well as unreleasable."""
+    previous = _with_empty_session_store(ctx)
+    env = _repo_with_worktree(ctx, dirty = False)
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    base = output_base_of(ctx.std, env.path, root)
+    ctx.std.fs.create_dir_all(base)
+    _symlink(ctx, base, env.path + "/bazel-out")
+    ctx.std.fs.write(env.path + "/MODULE.bazel.lock", "{}\n")
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _MISSING_SESSION)}}
+
+    verdict = abandoned_lease(ctx.std, env.pool, registry, env.slot_id, root)
+    _restore_session_store(ctx, previous)
+    _eq("build output is not work to protect", verdict, True)
+
+def _test_a_filesystem_remote_is_not_a_pool_key(ctx):
+    """A path has no host to key on, and a key starting with a separator
+    composes into `<pools root>//abs/path` — which git then reports back without
+    the doubled slash, so nothing the pool wrote matches what git says."""
+    for url in [
+        "/srv/repos/thing.git",
+        "file:///srv/repos/thing.git",
+        "./relative/thing",
+        "../sibling/thing.git",
+        "~/repos/thing",
+    ]:
+        _eq("declined: " + url, normalize_remote(url), "")
+
+def _test_a_key_cannot_climb_out_of_the_pools_root(ctx):
+    """`..` in a key would put a pool outside the directory that holds pools,
+    where nothing collects it and another repository's pool may be sitting."""
+    _eq("dot dot", normalize_remote("https://host/a/../../etc"), "")
+    _eq("still fine", normalize_remote("https://host/a/b"), "host/a/b")
+
+def _test_a_filesystem_origin_still_gets_one_pool_per_repository(ctx):
+    """Declining the key must not leave the clone without a pool. Every clone of
+    one local repository shares a slug-keyed pool, and the directory it names
+    has no doubled separator for git to disagree with."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    origin = tmp + "/origin.git"
+    run_git(ctx.std, ["init", "-q", "--bare", origin], tmp)
+
+    pools = []
+    for name in ["one", "two"]:
+        clone = tmp + "/" + name
+        run_git(ctx.std, ["clone", "-q", origin, clone], tmp)
+        pools.append(pool_of(ctx.std, clone))
+
+    if not pools[0]["id"].startswith("local/"):
+        fail("a filesystem origin should be keyed locally: got %r" % pools[0]["id"])
+    _eq("both clones, one pool", pools[0]["id"], pools[1]["id"])
+    _eq("no separator in the key", "/" in pools[0]["id"][len("local/"):], False)
+    if "//" in pools[0]["dir"]:
+        fail("the pool directory must not contain a doubled slash: %r" % pools[0]["dir"])
+    if not pools[0]["dir"].startswith(pools_root_of(ctx.std.env.home_dir())):
+        fail("the pool must sit under the pools root: %r" % pools[0]["dir"])
+
+def _git_common_dir(ctx, cwd: str) -> str:
+    """The common dir as `pool_of` gets it: from git, in git's own spelling.
+
+    A hand-built path is not the same thing. On macOS a `mkdtemp` directory
+    under `/var` comes back from git as `/private/var`, so a test that builds
+    the string itself is testing a configuration the product never has.
+    """
+    return git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
+
+def _test_a_lease_survives_git_not_naming_its_path(ctx):
+    """Freeing a lease because git did not mention the path would assume both
+    sides spell it identically. A symlinked
+    home or another mount would differ the same way, and the next `add` would be
+    handed an occupied slot to force-remove. Git is asked about the directory
+    itself, which settles it without comparing anyone's spelling."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+    registry = {"slots": {env.slot_id: _leased(common, "wip", {})}}
+
+    # A pool that names the same slot by a path git will not report back.
+    confused = {"git_common_dir": common, "dir": env.pool["dir"] + "/."}
+    reconcile(ctx.std, confused, registry)
+    _eq("the lease stands", registry["slots"][env.slot_id]["state"], LEASED)
+
+def _test_a_worktree_the_registry_forgot_is_adopted(ctx):
+    """An unreadable registry starts over by design, so the pool has to be able
+    to find its own worktrees again. Without this, `add` reports one of its own
+    slots as a worktree the pool does not manage and offers no way back."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+
+    # Git's spelling of the slot, so the pool directory is the one git reports.
+    at = ""
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX in line:
+            at = line[len("worktree "):].strip()
+    if not at:
+        fail("the fixture should have left a worktree in a slot")
+    pool = {"git_common_dir": common, "dir": at.rsplit("/", 1)[0]}
+    slot_id = at.rsplit(SLOT_PREFIX, 1)[1]
+
+    registry = reconcile(ctx.std, pool, {"version": 1, "slots": {}})
+
+    if slot_id not in registry["slots"]:
+        fail("the slot should have been adopted: %r" % registry["slots"])
+    adopted = registry["slots"][slot_id]
+    _eq("leased", adopted["state"], LEASED)
+    _eq("under the branch git has", adopted["lease"]["name"], "wip")
+    _eq("by nobody in particular", adopted["lease"]["agent"], {})
+
+def _test_adoption_does_not_disturb_a_reservation(ctx):
+    """A reserved slot is mid-checkout, so git may already list its worktree.
+    Adopting it would replace the reservation that another process is still
+    working through."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = _git_common_dir(ctx, env.pool["git_common_dir"])
+    at = ""
+    for line in git_out(ctx.std, ["worktree", "list", "--porcelain"], common).splitlines():
+        if line.startswith("worktree ") and SLOT_PREFIX in line:
+            at = line[len("worktree "):].strip()
+    pool = {"git_common_dir": common, "dir": at.rsplit("/", 1)[0]}
+    slot_id = at.rsplit(SLOT_PREFIX, 1)[1]
+
+    registry = {"slots": {slot_id: _slot(common)}}
+    token = reserve_slot(ctx.std, registry, slot_id, "being/made")
+    reconcile(ctx.std, pool, registry)
+
+    _eq("still reserved", registry["slots"][slot_id]["state"], RESERVED)
+    _eq("still ours", holds_reservation(registry, slot_id, token), True)
+
+def _test_a_lease_ends_when_the_checkout_is_deleted(ctx):
+    """One of the two recoveries the pool model promises: an agent that deleted
+    its worktree without releasing the slot. Git goes on listing that worktree
+    until something prunes it, so the list alone would keep the lease standing
+    forever — and `abandoned_lease` cannot help, because it needs a positively
+    deleted agent session. A directory that is gone holds nobody's work."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    ctx.std.fs.remove_dir_all(env.path)
+    if env.path not in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]):
+        fail("the fixture should leave git still listing the deleted worktree")
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("freed", registry["slots"][env.slot_id]["state"], FREE)
+    _eq("and the lease with it", registry["slots"][env.slot_id]["lease"], None)
+
+def _test_a_lease_ends_when_git_drops_the_worktree(ctx):
+    """The other one: somebody ran `git worktree remove` by hand. No lease
+    protocol, no timeout — git's own registration is the evidence."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    run_git(ctx.std, ["worktree", "remove", "--force", env.path], env.pool["git_common_dir"])
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("freed", registry["slots"][env.slot_id]["state"], FREE)
+
+def _test_a_lease_stands_while_the_checkout_is_there(ctx):
+    """The inverse, which is what makes the two above safe to act on: an
+    ordinary lease over a worktree git lists and the filesystem has must survive
+    every reconcile, or the next `add` is handed an occupied slot."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("untouched", registry["slots"][env.slot_id]["state"], LEASED)
+    _eq("lease intact", registry["slots"][env.slot_id]["lease"]["name"], "wip")
+
+def _test_reconcile_closes_the_history_entry_it_ends(ctx):
+    """Four paths end a lease and all four have to close its entry, or the slot's
+    history says a branch nobody holds is still checked out — and once the slot
+    is leased again, two entries claim to hold it at once."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", _A_SESSION)}}
+    record_lease(registry, env.slot_id, "wip", _A_SESSION)
+    ctx.std.fs.remove_dir_all(env.path)
+
+    reconcile(ctx.std, env.pool, registry)
+
+    entry = registry["slots"][env.slot_id]["history"][-1]
+    if not entry["released_ms"]:
+        fail("freeing a lease has to close its history entry")
+
+def _test_the_listing_leads_with_what_is_happening(ctx):
+    """Registry order is the order slots were created in, which tells a reader
+    nothing. What is in use belongs at the top, warmest first, and among the
+    slots they could take, the one just given back — however cold — with a
+    slot that has never been leased last."""
+
+    def row(slot, state, server = 0, base = False, used = None):
+        return {"slot": slot, "state": state, "server_pid": server, "output_base_present": base, "idle_ms": used}
+
+    shuffled = [
+        row("f-never-free", FREE, server = 4242, base = True),
+        row("e-old-free", FREE, server = 4242, base = True, used = 900000),
+        row("d-recent-cold-free", FREE, used = 1000),
+        row("c-cold-leased", LEASED),
+        row("b-reserved", RESERVED),
+        row("a-hot-leased", LEASED, server = 4242, base = True),
+    ]
+
+    order = [r["slot"] for r in sorted(shuffled, key = testonly_list_order)]
+    _eq("in use by warmth, being set up, then free by last use", order, [
+        "a-hot-leased",
+        "c-cold-leased",
+        "b-reserved",
+        "d-recent-cold-free",
+        "e-old-free",
+        "f-never-free",
+    ])
+
+def _test_the_listing_order_is_stable(ctx):
+    """Two slots alike in every way that matters still have to come out in the
+    same order every time, or a listing a reader is watching reshuffles itself
+    for no reason."""
+
+    def row(slot):
+        return {"slot": slot, "state": FREE, "server_pid": 0, "output_base_present": False, "idle_ms": 5}
+
+    first = [r["slot"] for r in sorted([row("bbb"), row("aaa")], key = testonly_list_order)]
+    second = [r["slot"] for r in sorted([row("aaa"), row("bbb")], key = testonly_list_order)]
+    _eq("by slot, either way round", first, second)
+
+def _test_an_entry_with_no_age_and_nothing_behind_it_is_collected(ctx):
+    """An entry with no `created_ms` has no age, so a threshold can never be
+    met and nothing would ever collect it. With no output base and
+    no directory either, there is nothing behind it to protect — which is the
+    only reason it is safe to take at any age."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"old": {
+        "owner_git_dir": pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "warm-again",
+        "last_commit": "deadbeef",
+        "lock_digest": "",
+        "lease": None,
+    }}}
+
+    _eq("collectable at the default threshold", prunable_slots(ctx.std, pool, registry, 30), ["old"])
+
+def _test_residue_with_a_base_is_left_alone(ctx):
+    """The exemption is for entries with nothing behind them. An output base is
+    something: it is warm state, and deleting it over a missing field would
+    throw away the thing the pool exists to keep."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-root")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"old": {
+        "owner_git_dir": pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "warm-again",
+        "lease": None,
+    }}}
+    ctx.std.fs.create_dir_all(output_base_of(ctx.std, slot_path(pool, "old"), root))
+
+    _eq("kept", prunable_slots(ctx.std, pool, registry, 30, root), [])
+
+def _test_residue_with_a_checkout_is_left_alone(ctx):
+    """And a directory is something too, whatever the registry forgot: it may
+    hold somebody's work."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: {
+        "owner_git_dir": env.pool["git_common_dir"],
+        "state": FREE,
+        "last_branch": "wip",
+        "lease": None,
+    }}}
+
+    _eq("kept", prunable_slots(ctx.std, env.pool, registry, 30), [])
+
+def _test_an_unrecorded_count_is_not_zero(ctx):
+    """`last_branch` proves the slot held a worktree, so a missing
+    `lease_count` means unknown rather than none — and the listing has to be
+    able to tell the two apart."""
+    old = {"state": FREE, "last_branch": "warm-again"}
+    fresh = {"state": FREE, "lease_count": 0}
+    _eq("not recorded", old.get("lease_count"), None)
+    _eq("recorded as none", fresh.get("lease_count"), 0)
+    _eq("no creation time either", slot_age_ms(old), 0)
+
+def _test_a_slot_answers_to_its_id_and_to_its_branch(ctx):
+    """`aspect worktree list` leads with the slot id, so that is the first thing
+    a reader has to hand; a free slot's row offers nothing else but the branch it
+    last held. Both have to work, or nothing on screen is a valid argument."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "aaaa11112222": _leased("/clone/.git", "fix/login", {}),
+        "bbbb33334444": _slot("/clone/.git"),
+    }}
+    registry["slots"]["bbbb33334444"]["last_branch"] = "dx-two"
+
+    _eq("by lease name", testonly_resolve_slot(ctx, pool, registry, "fix/login"), "aaaa11112222")
+    _eq("by the leased slot's id", testonly_resolve_slot(ctx, pool, registry, "aaaa11112222"), "aaaa11112222")
+    _eq("by the free slot's id", testonly_resolve_slot(ctx, pool, registry, "bbbb33334444"), "bbbb33334444")
+    _eq("by what the free slot last held", testonly_resolve_slot(ctx, pool, registry, "dx-two"), "bbbb33334444")
+    _eq("and nothing else", testonly_resolve_slot(ctx, pool, registry, "no-such-thing"), "")
+
+def _test_a_leased_slots_old_branch_does_not_resolve(ctx):
+    """A free slot answers to the branch it last held, but a leased one does
+    not: once leased to something else, matching its previous occupant would
+    act on somebody else's worktree. A leased slot answers to the branch it
+    holds, or its id."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {"aaaa11112222": _leased("/clone/.git", "fix/login", {})}}
+    registry["slots"]["aaaa11112222"]["last_branch"] = "dx-two"
+
+    _eq("not by the previous occupant", testonly_resolve_slot(ctx, pool, registry, "dx-two"), "")
+    _eq("still by the lease", testonly_resolve_slot(ctx, pool, registry, "fix/login"), "aaaa11112222")
+
+def _test_a_slot_answers_to_its_directory_and_its_detached_ref(ctx):
+    """`add --output=path` hands a script the directory, and git's own commands
+    take one, so the directory resolves — whole or by its last segment. A
+    detached slot has no branch, so the ref it was taken at answers for it, but
+    only while one slot is at that ref: two would make the name ambiguous."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {
+        "aaaa11112222": _leased("/clone/.git", "(detached at v1.2)", {}),
+        "bbbb33334444": _leased("/clone/.git", "(detached at main)", {}),
+        "cccc55556666": _leased("/clone/.git", "(detached at main)", {}),
+    }}
+    registry["slots"]["aaaa11112222"]["lease"]["detached"] = "v1.2"
+    registry["slots"]["bbbb33334444"]["lease"]["detached"] = "main"
+    registry["slots"]["cccc55556666"]["lease"]["detached"] = "main"
+
+    _eq("by path", testonly_resolve_slot(ctx, pool, registry, "/pool/" + SLOT_PREFIX + "aaaa11112222/"), "aaaa11112222")
+    _eq("by directory name", testonly_resolve_slot(ctx, pool, registry, SLOT_PREFIX + "aaaa11112222"), "aaaa11112222")
+    _eq("by its one detached ref", testonly_resolve_slot(ctx, pool, registry, "v1.2"), "aaaa11112222")
+    _eq("not by a ref two are at", testonly_resolve_slot(ctx, pool, registry, "main"), "")
+
+def _test_another_clones_slot_resolves_by_id_but_not_by_branch(ctx):
+    """Clones share a pool directory but not the slots in it — and `list` prints
+    an id for every slot in the pool, so an id it showed has to be usable as an
+    argument. Resolving one is therefore not the same question as being allowed
+    to act on it: the caller refuses another live clone's slot, and collects a
+    stranded one whose clone is gone.
+
+    A branch name stays scoped to the clone asking, because two clones can have
+    the same branch out and the name alone would not say whose.
+    """
+    pool = {"git_common_dir": "/mine/.git", "dir": "/pool"}
+    registry = {"slots": {"cccc55556666": _leased("/theirs/.git", "their/work", {})}}
+
+    _eq(
+        "by id, whoever owns it",
+        testonly_resolve_slot(ctx, pool, registry, "cccc55556666"),
+        "cccc55556666",
+    )
+    _eq("but never by their branch", testonly_resolve_slot(ctx, pool, registry, "their/work"), "")
+
+def _test_an_empty_prune_says_which_of_three_reasons(ctx):
+    """Three ways to collect nothing, and each sends the reader somewhere
+    different: `release` a slot, run the command from the other clone, or wait.
+
+    The middle one is the case that is easy to get wrong. `prunable_slots` skips
+    a free slot belonging to a clone whose object store still exists, so a pool
+    can have nothing to collect *and* several free slots — where both "every
+    slot is in use" and "none has been idle long enough" are false.
+    """
+    mine = "/clone/.git"
+    theirs = "/elsewhere/.git"
+
+    busy = {"slots": {"s1": _leased(mine, "fix/login", {})}}
+    _eq(
+        "every slot leased",
+        testonly_nothing_to_prune(busy, mine, 30),
+        "nothing to prune: every slot in this pool is in use",
+    )
+
+    others = {"slots": {"s1": _slot(theirs), "s2": _leased(mine, "fix/login", {})}}
+    _eq(
+        "free, but not ours to collect",
+        "belong to another clone" in testonly_nothing_to_prune(others, mine, 30),
+        True,
+    )
+
+    # Not the two answers that would be wrong here.
+    _eq("not called in use", "in use" in testonly_nothing_to_prune(others, mine, 30), False)
+    _eq("nor too recent", "idle for" in testonly_nothing_to_prune(others, mine, 30), False)
+
+    recent = {"slots": {"s1": _slot(mine)}}
+    _eq(
+        "ours, and too recent",
+        testonly_nothing_to_prune(recent, mine, 30),
+        "nothing to prune: no free slot has been idle for 30 days",
+    )
+
+    # A slot predating the owner field ages out under this clone like its own,
+    # so it must not be reported as another clone's.
+    legacy = {"slots": {"s1": _slot("")}}
+    _eq(
+        "no owner recorded counts as ours",
+        testonly_nothing_to_prune(legacy, mine, 30),
+        "nothing to prune: no free slot has been idle for 30 days",
+    )
+
+def _test_releasing_a_free_slot_points_at_prune(ctx):
+    """A free slot handed to `release` is nothing to release — a success, so
+    asking twice is safe. The command that deletes a free slot is named for
+    whoever meant that, but never with `--force`: `prune` asks for its own
+    confirmation, and a ready-to-paste destructive line is how an agent ends up
+    running it."""
+    registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
+    registry["slots"]["abc123abc123"]["last_branch"] = "dx-two"
+
+    msg = testonly_nothing_to_release(registry, "abc123abc123")
+
+    _eq("says it is free", "is free" in msg, True)
+    _eq("says what it last held", "dx-two" in msg, True)
+    _eq("names the command that deletes it", "aspect worktree prune abc123abc123" in msg, True)
+    _eq("without forcing it", "--force" in msg, False)
+
+def _test_pruning_a_leased_slot_points_at_release(ctx):
+    """The other direction, and the dangerous one: pruning a slot somebody is
+    working in would take the checkout and whatever Bazel state it has with it.
+    Ending the lease is the reversible thing and almost always what was meant.
+
+    What it must not do is call that state warm without having looked: a slot
+    nobody has built in has none, and overstating the stakes in a refusal
+    teaches a reader to discount its wording.
+    """
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", {})}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123")
+
+    _eq("names what it holds", "fix/login" in msg, True)
+    _eq("says what would be lost", "Bazel state" in msg, True)
+    _eq("without claiming it is warm", "warm" in msg, False)
+    _eq("and names the reversible command", "aspect worktree release fix/login" in msg, True)
+
+def _test_pruning_another_sessions_slot_says_whose_it_is(ctx):
+    """`release` ends somebody's claim on a checkout they may be working in, so
+    offering it for another session's lease without a word about whose it is
+    invites an agent to delete a colleague's work. `add` names the holder for
+    the same reason; this is the one that did not.
+    """
+    theirs = {"kind": "claude-code", "id": "their-session", "pid": 0, "pid_start": ""}
+    mine = {"kind": "claude-code", "id": "my-session", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", theirs)}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123", mine)
+
+    _eq("names the holder", "their-session" in msg, True)
+    _eq("says it is theirs to end", "theirs to run" in msg, True)
+
+def _test_pruning_your_own_slot_just_offers_release(ctx):
+    """The same lease, held by the session asking: no third party to warn
+    about, so the message stays the short one."""
+    mine = {"kind": "claude-code", "id": "my-session", "pid": 0, "pid_start": ""}
+    registry = {"slots": {"abc123abc123": _leased("/clone/.git", "fix/login", mine)}}
+
+    msg = testonly_slot_in_use(registry, "abc123abc123", mine)
+
+    _eq("no warning about somebody else", "theirs to run" in msg, False)
+    _eq("still names the reversible command", "aspect worktree release fix/login" in msg, True)
+
+def _test_pruning_a_slot_being_set_up_says_to_wait(ctx):
+    """A reserved slot is mid-checkout, so it is not there to delete and no
+    lease exists to release either. Neither of the other two messages fits."""
+    registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
+    reserve_slot(ctx.std, registry, "abc123abc123", "being/made")
+
+    msg = testonly_slot_in_use(registry, "abc123abc123")
+
+    _eq("says it is being set up", "being set up" in msg, True)
+    _eq("names the branch", "being/made" in msg, True)
+    if "release" in msg:
+        fail("there is no lease to release yet: %r" % msg)
+
+def _test_a_slot_being_set_up_is_never_called_free(ctx):
+    """`release` and `path` take a slot id in any state. One an `add` is still
+    checking out has no lease to end and no worktree to enter — but it is not
+    free either, and calling it free sends the reader to a `prune` that refuses
+    it. Whatever the command, the answer is to wait."""
+    registry = {"slots": {"abc123abc123": _slot("/clone/.git")}}
+    reserve_slot(ctx.std, registry, "abc123abc123", "being/made")
+
+    for so in ["not leased yet, and there is nothing to release", "not ready to enter"]:
+        msg = testonly_being_set_up(registry, "abc123abc123", so)
+        _eq("says it is being set up", "being set up" in msg, True)
+        _eq("names the branch", "being/made" in msg, True)
+        _eq("and what that means here", so in msg, True)
+        if " free" in msg or "prune" in msg:
+            fail("a slot being set up is not free: %r" % msg)
+
+def _test_the_worktree_list_is_read_in_gits_order_with_detached_heads_blank(ctx):
+    """Every caller that asks git which worktrees exist reads this one parse, so
+    its two edges are pinned: a detached head is listed with no branch rather
+    than dropped, and paths stay in git's order, which is the order a caller
+    finding the first holder of a branch relies on."""
+    porcelain = "\n".join([
+        "worktree /clone",
+        "HEAD 1111111111111111111111111111111111111111",
+        "branch refs/heads/main",
+        "",
+        "worktree /pool/aspect-worktree-aaaaaaaaaaaa",
+        "HEAD 2222222222222222222222222222222222222222",
+        "detached",
+        "",
+        "worktree /pool/aspect-worktree-bbbbbbbbbbbb",
+        "HEAD 3333333333333333333333333333333333333333",
+        "branch refs/heads/fix/login",
+        "",
+    ])
+    got = parse_worktree_list(porcelain)
+    _eq("in git's order", list(got.keys()), [
+        "/clone",
+        "/pool/aspect-worktree-aaaaaaaaaaaa",
+        "/pool/aspect-worktree-bbbbbbbbbbbb",
+    ])
+    _eq("the branch, without refs/heads/", got["/pool/aspect-worktree-bbbbbbbbbbbb"], "fix/login")
+    _eq("a detached head kept, with no branch", got["/pool/aspect-worktree-aaaaaaaaaaaa"], "")
+    _eq("nothing to read is nothing", parse_worktree_list(""), {})
+
+def _test_the_sessions_section_reads_project_then_resume(ctx):
+    """One block per session: its harness, its project, then the command that
+    returns to it, then its leases as a table. What is unknown reads `-` — a
+    reader has to be told the answer is unavailable, not left a blank line."""
+    groups = [
+        struct(
+            kind = "claude-code",
+            id = "s-1",
+            project = "~/src/web",
+            resume = "claude --resume s-1",
+            leases = [{
+                "repo": "github.com/acme/web",
+                "slot": "aaaaaaaaaaaa",
+                "branch": "fix/login",
+                "held": "1h",
+                "status": "still holding it",
+            }],
+        ),
+        struct(
+            kind = "codex",
+            id = "s-2",
+            project = "",
+            resume = "",
+            leases = [{
+                "repo": "github.com/acme/web",
+                "slot": "bbbbbbbbbbbb",
+                "branch": "spike",
+                "held": "2h",
+                "status": "ended 1h ago",
+            }],
+        ),
+    ]
+    lines = testonly_render_sessions(groups)
+
+    _eq("headed by the session", lines[0], "  session s-1")
+    _eq(
+        "agent, project, resume, in that order",
+        [line.split(":")[0].strip() for line in lines[1:5]],
+        ["agent", "project", "resume", "leases"],
+    )
+    _eq("the project", lines[2], "    project: ~/src/web")
+    _eq("the command", lines[3], "    resume:  claude --resume s-1")
+    _eq("then the leases' header", lines[5].split(), ["repo", "slot", "branch", "held", "status"])
+
+    second = lines.index("  session s-2")
+    _eq("an unplaced project says so", lines[second + 2], "    project: -")
+    _eq("and an unknown command too", lines[second + 3], "    resume:  -")
+
+def _test_a_typo_is_answered_with_the_name_it_missed(ctx):
+    """A name nothing answers to is most often a slip of the keyboard, and the
+    useful answer is the name it meant — not a list to read through. Only a near
+    miss is offered: a different name is not a typo of this one."""
+    names = ["fix/login", "fix/logout", "spike/perf"]
+    _eq("one letter dropped", testonly_closest("fix/lgin", names), "fix/login")
+    _eq("two transposed", testonly_closest("spkie/perf", names), "spike/perf")
+    _eq("the nearer of two", testonly_closest("fix/logou", names), "fix/logout")
+    _eq("nothing near", testonly_closest("chore/deps", names), "")
+    _eq("nothing to choose from", testonly_closest("fix/login", []), "")
+
+def _test_a_unique_prefix_of_a_slot_id_resolves(ctx):
+    """The listing prints twelve characters nobody wants to type, and an
+    abbreviation is expected to work. Four characters at least; tried after
+    every name, so a branch that looks like hex still means the branch; and only
+    when one slot matches."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-prefix")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {
+        "5692c6eee13f": _slot(pool["git_common_dir"]),
+        "5692aaaaaaaa": _slot(pool["git_common_dir"]),
+        "ed70d7f4c1c5": _slot(pool["git_common_dir"]),
+    }}
+    registry["slots"]["ed70d7f4c1c5"]["last_branch"] = "ed70"
+
+    _eq("a unique prefix", testonly_resolve_slot(ctx, pool, registry, "5692c6"), "5692c6eee13f")
+    _eq("an ambiguous one does not", testonly_resolve_slot(ctx, pool, registry, "5692"), "")
+    _eq("too short does not", testonly_resolve_slot(ctx, pool, registry, "ed7"), "")
+
+    # A free slot's last branch is a name, and names win over prefixes.
+    _eq("a branch that looks like hex is the branch", testonly_resolve_slot(ctx, pool, registry, "ed70"), "ed70d7f4c1c5")
+
+def _test_a_slot_with_no_base_is_idle_since_its_last_lease(ctx):
+    """With no output base there is no Bazel evidence to read, so the slot's
+    last lease is what idle measures from — not its creation, which made a
+    slot released a minute ago read as idle since the day it was made, to
+    `list` and to `prune` alike."""
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-idle")
+    pool = {"git_common_dir": root + "/.git", "dir": root + "/pool", "id": "github.com/acme/web"}
+    slot = _slot(pool["git_common_dir"], age_days = 40)
+    now = time.now_ms()
+    slot["history"] = [
+        {"name": "old", "agent": {}, "leased_ms": now - 39 * _DAY_MS, "released_ms": now - 38 * _DAY_MS},
+        {"name": "recent", "agent": {}, "leased_ms": now - 2 * _DAY_MS, "released_ms": now - _DAY_MS},
+    ]
+
+    idle = slot_idle_ms(ctx.std, pool, "aaaaaaaaaaaa", slot, root)
+    _eq("since the last lease ended, a day ago", idle // _DAY_MS, 1)
+
+    slot["history"] = []
+    _eq("and the slot's creation without one", slot_idle_ms(ctx.std, pool, "aaaaaaaaaaaa", slot, root) // _DAY_MS, 40)
+
+def _test_an_unstaged_change_keeps_its_status_column(ctx):
+    """`git status --porcelain` marks a change not yet staged with a leading
+    space — ` M README` — and the path starts at column four. Trimming that
+    space from the first line shifted its path by one, and a refusal then
+    named a file that does not exist."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/README", "changed\n")
+
+    got = uncommitted_work(ctx.std, env.path, output_base_of(ctx.std, env.path))
+    _eq("the status keeps its leading space", got, [" M README"])
+
+def _test_a_session_lease_says_whether_it_is_active_without_prose(ctx):
+    """An agent finding what it still holds should not match on "still holding
+    it". Each lease says `active`, its `path`, and how long it was held in
+    milliseconds; and a session says whether it is the one asking, so a caller
+    finds its own without knowing which environment variable names it.
+
+    The caller is passed in rather than read from the machine running the
+    test, whose own harness would otherwise decide the answer."""
+    now = time.now_ms()
+    mine = {"kind": "claude-code", "id": "me-session"}
+    theirs = {"kind": "claude-code", "id": "their-session"}
+    listings = [({"id": "github.com/acme/web"}, [
+        _row({}, [
+            {"name": "held-now", "agent": mine, "leased_ms": now - 60000},
+            {"name": "let-go", "agent": theirs, "leased_ms": now - 120000, "released_ms": now - 30000},
+        ]),
+    ])]
+    got = testonly_session_groups(ctx.std, listings, me = mine)
+    by_id = {g.id: g for g in got}
+    _eq("the caller's own session is marked", by_id["me-session"].current, True)
+    _eq("and nobody else's", by_id["their-session"].current, False)
+
+    held = by_id["me-session"].leases[0]
+    _eq("active, as a boolean", held["active"], True)
+    _eq("with its path", held["path"], "/pool/" + SLOT_PREFIX + "aaaaaaaaaaaa")
+    _eq("held in milliseconds", held["held_ms"] >= 60000, True)
+    _eq("and not ended", held["ended_ms"], 0)
+
+    ended = by_id["their-session"].leases[0]
+    _eq("an ended lease is not active", ended["active"], False)
+    _eq("and says when it ended", ended["ended_ms"], now - 30000)
+
+def _test_release_protects_another_sessions_lease_until_it_has_stopped(ctx):
+    """`release` ends a lease that is the caller's own; another session's only
+    once its process has verifiably stopped. A holder whose process was never
+    captured cannot be shown to have stopped, so it is protected — the gap
+    through which any session could end such a lease. A lease a person took at
+    a terminal is protected from agents, whose plain `--force` would otherwise
+    discard that person's uncommitted work, and not from a person."""
+    me = {"kind": "claude-code", "id": "me"}
+    _eq("a person's, from an agent", testonly_protected_from(ctx.std, me, {}), True)
+    _eq("a person's, from a person", testonly_protected_from(ctx.std, {}, {}), False)
+    _eq("my own", testonly_protected_from(ctx.std, me, {"kind": "claude-code", "id": "me", "pid": 0}), False)
+    _eq(
+        "another's whose process was never captured",
+        testonly_protected_from(ctx.std, me, {"kind": "codex", "id": "them", "pid": 0}),
+        True,
+    )
+    _eq(
+        "another's that has stopped",
+        testonly_protected_from(ctx.std, me, {
+            "kind": "codex",
+            "id": "them",
+            "pid": _DEAD_PID,
+            "pid_start": "Mon Jan  1 00:00:00 2001",
+        }),
+        False,
+    )
+    pid = ctx.std.process.id()
+    out = ctx.std.process.command("ps").args(["-o", "lstart=", "-p", str(pid)]) \
+        .env("LC_ALL", "C") \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    _eq(
+        "another's that is running",
+        testonly_protected_from(ctx.std, me, {"kind": "codex", "id": "them", "pid": pid, "pid_start": out.stdout.strip()}),
+        True,
+    )
+
+def _test_an_empty_pool_has_nothing_to_prune_and_says_so(ctx):
+    """A pool with no slots yet is not one whose slots are all in use."""
+    _eq(
+        "no slots",
+        testonly_nothing_to_prune({"slots": {}}, "/clone/.git", 30),
+        "nothing to prune: this pool has no slots yet",
+    )
+
+def _test_a_new_lease_forgets_the_tree_the_slot_was_freed_with(ctx):
+    """Scoring compares a free slot on the tree it held when it was freed. A
+    lease moves the tree on, so that record is cleared when one starts — a
+    lease ended any way but `release` would otherwise leave the slot scoring as
+    the tree before it."""
+    registry = {"slots": {"s1": _slot("/clone/.git")}}
+    registry["slots"]["s1"]["last_commit"] = "aaaa"
+    registry["slots"]["s1"]["lock_digest"] = "dddd"
+    mark_leased(registry, "s1", "fix/login", {})
+    _eq("the commit forgotten", registry["slots"]["s1"]["last_commit"], "")
+    _eq("and the lock digest", registry["slots"]["s1"]["lock_digest"], "")
+
+def _test_a_checkout_git_does_not_recognise_is_still_removed(ctx):
+    """A slot's directory can hold a checkout no living clone knows — its own
+    clone deleted, or deleted and cloned again at the same path. Git cannot
+    remove it, and leaving it would make the slot unallocatable, so the
+    directory goes regardless."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-orphan")
+    path = tmp + "/" + SLOT_PREFIX + "aaaaaaaaaaaa"
+    ctx.std.fs.create_dir_all(path)
+    ctx.std.fs.write(path + "/.git", "gitdir: " + tmp + "/gone/.git/worktrees/x\n")
+    ctx.std.fs.write(path + "/file", "x\n")
+    _eq("removed", remove_checkout(ctx.std, path, tmp + "/also-gone/.git"), True)
+    _eq("and gone from disk", ctx.std.fs.exists(path), False)
+
+def _test_a_branch_add_creates_has_no_upstream(ctx):
+    """The guard against a bare `git push` landing on the base branch, pinned
+    through the code that creates the branch rather than through git: cut from
+    `origin/main` with tracking, the new branch would record `origin/main` as
+    its upstream, and under `push.default=upstream` a bare push from the slot
+    would go there."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    head = run_git(ctx.std, ["rev-parse", "HEAD"], repo).out
+
+    # A real remote, so that tracking would succeed if it were asked for and
+    # the assertion below — not git refusing — is what catches it.
+    run_git(ctx.std, ["remote", "add", "origin", "https://example.test/acme/web.git"], repo)
+    run_git(ctx.std, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], repo)
+    run_git(ctx.std, ["update-ref", "refs/remotes/origin/main", head], repo)
+
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "bbbbbbbbbbbb"
+    testonly_materialize(ctx, env.pool, path, "feat/no-upstream", "refs/remotes/origin/main")
+
+    _eq("checked out on the new branch", run_git(ctx.std, ["branch", "--show-current"], path).out, "feat/no-upstream")
+    _eq(
+        "with no upstream for a bare push to find",
+        run_git(ctx.std, ["rev-parse", "--abbrev-ref", "@{upstream}"], path).ok,
+        False,
+    )
+
+def _test_a_branch_only_a_remote_has_is_checked_out_from_it(ctx):
+    """Asked for a branch that exists only as `origin/<name>` — a teammate's, a
+    PR's — the slot gets that branch's history, tracking it, so a bare push goes
+    back where the work came from. Created from the caller's HEAD instead it
+    would be unrelated history under their name, aimed at theirs on first push.
+    A remote branch of a *different* name stays untracked, which is what
+    `--no-track` is for."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    head = run_git(ctx.std, ["rev-parse", "HEAD"], repo).out
+    run_git(ctx.std, ["remote", "add", "origin", "https://example.test/acme/web.git"], repo)
+    run_git(ctx.std, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], repo)
+    run_git(ctx.std, ["update-ref", "refs/remotes/origin/teammate/fix", head], repo)
+
+    _eq("found on the remote", testonly_remote_branches(ctx, env.pool, "teammate/fix"), ["origin/teammate/fix"])
+    _eq("and only there", testonly_remote_branches(ctx, env.pool, "nobody/has"), [])
+
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "cccccccccccc"
+    testonly_materialize(ctx, env.pool, path, "teammate/fix", "origin/teammate/fix")
+    _eq(
+        "tracking the branch it came from",
+        run_git(ctx.std, ["rev-parse", "--abbrev-ref", "@{upstream}"], path).out,
+        "origin/teammate/fix",
+    )
+
+def _test_a_leased_slot_carries_gits_lock(ctx):
+    """A slot `add` checks out is locked with git's own lock, so a plain
+    `git worktree remove` — an agent that skipped the skill — refuses it and
+    says whose it is, while the pool's own removal goes past the lock. The
+    reason names the slot, which `git switch` there cannot make stale."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "dddddddddddd"
+    testonly_materialize(ctx, env.pool, path, "feat/locked", "HEAD")
+
+    porcelain = git_out(ctx.std, ["worktree", "list", "--porcelain"], repo)
+    _eq("locked with the pool's reason, by slot", "locked " + lock_reason("dddddddddddd") in porcelain, True)
+    refused = run_git(ctx.std, ["worktree", "remove", path], repo)
+    _eq("a plain remove refuses", refused.ok, False)
+    _eq("and names the slot to release", "aspect worktree release dddddddddddd" in refused.err, True)
+    _eq("the pool removes it anyway", remove_checkout(ctx.std, path, repo), True)
+    _eq("and git forgets it", path in git_out(ctx.std, ["worktree", "list"], repo), False)
+
+def _test_a_lease_on_a_checkout_git_cannot_read_stands(ctx):
+    """A clone deleted and cloned again at the same path leaves its slots'
+    checkouts pointing at an object store that is gone. Git cannot read them,
+    and freeing the lease would hand the slot to `prune` and the age-out to
+    clear — taking whatever was uncommitted with it. The lease stands."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    ctx.std.fs.write(env.path + "/.git", "gitdir: /nonexistent/.git/worktrees/gone\n")
+    ctx.std.fs.write(env.path + "/precious.txt", "x\n")
+    run_git(ctx.std, ["worktree", "prune"], env.pool["git_common_dir"])
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("still leased", registry["slots"][env.slot_id]["state"], LEASED)
+
+def _test_dropping_a_slot_never_takes_its_work_unasked(ctx):
+    """A free slot should hold no checkout, and when it holds one with work in
+    it the bookkeeping is wrong, not the work. `drop_slot` keeps it and says
+    why — unless the caller saw the work and chose to discard it."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    registry = {"slots": {env.slot_id: _slot(env.pool["git_common_dir"], age_days = 900)}}
+
+    outcome = drop_slot(ctx.std, env.pool, registry, env.slot_id)
+    _eq("kept", outcome.dropped, False)
+    _eq("saying why", "would be lost" in outcome.reason, True)
+    _eq("checkout untouched", ctx.std.fs.exists(env.path + "/README"), True)
+    _eq("discarded when asked", drop_slot(ctx.std, env.pool, registry, env.slot_id, discard = True).dropped, True)
+
+def _test_a_checkout_git_cannot_read_is_not_clean(ctx):
+    """Every caller of `uncommitted_work` deletes on an empty answer, so a
+    checkout `git status` fails in — its clone moved, say — must not read as
+    clean: it may hold work. It reads as dirty, and an abandoned lease on it is
+    never taken back."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/.git", "gitdir: /nonexistent/.git/worktrees/gone\n")
+    work = uncommitted_work(ctx.std, env.path)
+    _eq("one entry", len(work), 1)
+    _eq("saying why", work[0].startswith(UNREADABLE_CHECKOUT), True)
+
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {"kind": "x", "id": "y", "pid": 999999})}}
+    _eq("never reclaimed", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+
+def _test_an_unusable_slot_entry_does_not_wedge_the_pool(ctx):
+    """Every command reads the registry, so an entry of the wrong shape would
+    fail all of them until somebody edited the file by hand. One that cannot be
+    a slot is dropped; a lease or a reservation missing its record is mended."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-shapes")
+    ctx.std.fs.write(registry_path(tmp), json.encode({"version": 1, "slots": {
+        "aaaa11112222": {"state": LEASED, "lease": None},
+        "bbbb33334444": {"state": RESERVED},
+        "cccc55556666": "garbage",
+        "dddd77778888": {"state": "haunted"},
+    }}))
+    slots = read_registry(ctx.std, tmp)["slots"]
+    _eq("the unusable ones dropped", sorted(slots.keys()), ["aaaa11112222", "bbbb33334444"])
+    _eq("a lease mended", type(slots["aaaa11112222"]["lease"]), "dict")
+    _eq("a reservation with no record freed", slots["bbbb33334444"]["state"], FREE)
+
+def _test_dropping_a_released_slot_needs_no_checkout(ctx):
+    """A released slot has no directory. Asking git about one would fail to
+    start git at all, and the age-out inside every `add` asks about each free
+    slot it drops — so this is what keeps the pool allocating."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-nodir")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {"cafe02": _slot(pool["git_common_dir"], age_days = 900)}}
+    _eq("no commits where there is no checkout", unreferenced_commits(ctx.std, tmp + "/pool/" + SLOT_PREFIX + "cafe02"), 0)
+    _eq("dropped", drop_slot(ctx.std, pool, registry, "cafe02").dropped, True)
+
+def _test_a_wrong_typed_field_is_reset(ctx):
+    """A field of the wrong type would fail every command that reads it, so it
+    is reset to its default rather than trusted."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-types")
+    ctx.std.fs.write(registry_path(tmp), json.encode({"version": 1, "slots": {
+        "aaaa11112222": {"state": FREE, "created_ms": "x", "history": "nope", "owner_git_dir": 7},
+    }}))
+    slot = read_registry(ctx.std, tmp)["slots"]["aaaa11112222"]
+    _eq("created_ms", slot["created_ms"], 0)
+    _eq("history", slot["history"], [])
+    _eq("owner", slot["owner_git_dir"], "")
+
+def _test_a_read_only_output_base_is_still_removed(ctx):
+    """Bazel strips the write bit from directories under `bazel-out`, so a base
+    that has been built in cannot be removed by deleting it as it is. Dropping
+    the slot has to make it writable first, or the registry entry goes while
+    the gigabytes stay."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-ro")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    path = tmp + "/pool/" + SLOT_PREFIX + "cafe03"
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-wt-ro-root")
+    base = output_base_of(ctx.std, path, root = root)
+    ctx.std.fs.create_dir_all(base + "/execroot/bazel-out/bin")
+    ctx.std.fs.write(base + "/execroot/bazel-out/bin/out.txt", "x\n")
+    ctx.std.fs.set_permissions(base + "/execroot/bazel-out/bin", 365)
+    registry = {"slots": {"cafe03": _slot(pool["git_common_dir"], age_days = 900)}}
+
+    _eq("dropped", drop_slot(ctx.std, pool, registry, "cafe03", root = root).dropped, True)
+    _eq("base gone", ctx.std.fs.exists(base), False)
+
+def _test_nested_registry_values_are_reset(ctx):
+    """A lease, a reservation or a history entry of the wrong shape — or an
+    agent record inside one — would fail every command that reads it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-nested")
+    ctx.std.fs.write(registry_path(tmp), json.encode({"version": 1, "slots": {
+        "aaaa11112222": {
+            "state": LEASED,
+            "lease": {"name": "fix", "agent": "nope"},
+            "history": ["junk", {"name": 3, "agent": {"pid": "12"}}],
+            "reservation": "x",
+        },
+    }}))
+    slot = read_registry(ctx.std, tmp)["slots"]["aaaa11112222"]
+    _eq("agent mended", slot["lease"]["agent"], {})
+    _eq("junk history dropped", len(slot["history"]), 1)
+    _eq("bad name reset", slot["history"][0]["name"], "")
+    _eq("bad pid reset", slot["history"][0]["agent"]["pid"], 0)
+    _eq("stray reservation cleared", slot["reservation"], None)
+
+def _test_files_git_ignores_are_not_work(ctx):
+    """A repository's ignore file says what is disposable, so a slot holding
+    only ignored files — a `.env`, `node_modules/`, a `build/` — is clean, and
+    taken back from a session that has stopped."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/.gitignore", ".env\nnode_modules/\nbuild/\n")
+    run_git(ctx.std, ["add", ".gitignore"], env.path)
+    run_git(ctx.std, ["commit", "-qm", "ignore"], env.path)
+    ctx.std.fs.write(env.path + "/.env", "SECRET=1\n")
+    ctx.std.fs.create_dir_all(env.path + "/build")
+    ctx.std.fs.write(env.path + "/build/notes.txt", "x\n")
+    _eq("nothing to lose", work_in(ctx.std, env.path), [])
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {"kind": "x", "id": "y", "pid": 999999})}}
+    _eq("so it is taken back", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
+
+def _test_an_empty_name_names_no_slot(ctx):
+    """`release "$UNSET"` is an easy mistake to make from a script, and a
+    detached slot has no branch, so an empty name would otherwise match it."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    registry = {"slots": {"aaaa11112222": _leased("/clone/.git", "", {})}}
+    _eq("nothing", testonly_resolve_slot(ctx, pool, registry, ""), "")
+
+def _test_a_slot_id_that_is_not_a_path_component_is_dropped(ctx):
+    """A slot id becomes a directory that `prune` and `release` delete, so one
+    that could reach outside the pool — `..`, a separator — is not trusted,
+    whoever wrote the registry."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-ids")
+    ctx.std.fs.write(registry_path(tmp), json.encode({"version": 1, "slots": {
+        "aaaa11112222": {"state": FREE},
+        "../../escape": {"state": FREE},
+        "a/b": {"state": FREE},
+        "": {"state": FREE},
+    }}))
+    _eq("only the plain id survives", sorted(read_registry(ctx.std, tmp)["slots"].keys()), ["aaaa11112222"])
+
+def _test_a_session_with_no_id_is_matched_by_its_process(ctx):
+    """Cursor and Gemini CLI mark their presence without a session id, and a
+    harness found by walking the process tree has none either. Such a holder
+    is the caller's own when it is the same harness process — pid and start
+    time — or it could never release its own lease without `--force=all`. Two
+    records with nothing to compare stay strangers."""
+    cursor = {"kind": "cursor", "id": "", "pid": 4242, "pid_start": "Mon 5 Oct 09:00:00 2026"}
+    _eq("same process", testonly_same_session(dict(cursor), cursor), True)
+    _eq("another process", testonly_same_session(dict(cursor, pid = 4343), cursor), False)
+    _eq("a reused pid", testonly_same_session(dict(cursor, pid_start = "Tue 6 Oct 09:00:00 2026"), cursor), False)
+    _eq("another harness", testonly_same_session(dict(cursor, kind = "gemini-cli"), cursor), False)
+    _eq("nothing to compare", testonly_same_session({"kind": "", "id": ""}, {"kind": "", "id": ""}), False)
+    _eq("an id against none", testonly_same_session(dict(cursor, id = "abc"), cursor), False)
+    marker = {"kind": "cursor", "id": "", "pid": 0, "pid_start": ""}
+    _eq("a marker alone matches its kind", testonly_same_session(dict(marker), marker), True)
+    _eq("but not a captured process", testonly_same_session(dict(marker), cursor), False)
+
+def _test_a_lease_follows_a_switch_in_its_slot(ctx):
+    """`git switch` inside a slot moves the work to another branch. The lease
+    follows, so the slot answers to the branch now holding the work and the old
+    name is free — and what the lease said about where it started goes, since
+    it described the old branch."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    registry = {"slots": {env.slot_id: _leased(repo, "wip", {})}}
+    registry["slots"][env.slot_id]["lease"]["base"] = "origin/main"
+    registry["slots"][env.slot_id]["lease"]["base_sha"] = "abc"
+    registry["slots"][env.slot_id]["lease"]["detached"] = "v1"
+    run_git(ctx.std, ["switch", "-q", "-c", "moved"], env.path)
+
+    reconcile(ctx.std, env.pool, registry)
+    lease = registry["slots"][env.slot_id]["lease"]
+    _eq("renamed for the branch", lease["name"], "moved")
+    _eq("its start forgotten", [k for k in ["base", "base_sha", "detached"] if k in lease], [])
+    _eq("found by the new branch", testonly_resolve_slot(ctx, env.pool, registry, "moved"), env.slot_id)
+    _eq("not by the old", testonly_resolve_slot(ctx, env.pool, registry, "wip"), "")
+
+def _test_a_name_differing_only_in_case_is_not_the_branch(ctx):
+    """On a case-insensitive filesystem `rev-parse refs/heads/Wip` finds the
+    loose ref `wip`, and checking that out under the other spelling would put
+    one branch in two worktrees. The branch has to match by name."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    _eq("the branch", testonly_is_branch(ctx, env.pool, "wip"), True)
+    _eq("another spelling", testonly_is_branch(ctx, env.pool, "Wip"), False)
+    _eq("a prefix", testonly_is_branch(ctx, env.pool, "wi"), False)
+
+def _test_a_deleted_locked_slot_is_unregistered(ctx):
+    """A lease's lock keeps git listing a slot whose directory was deleted, and
+    `git worktree prune` never drops a locked entry — so its branch would stay
+    checked out somewhere that does not exist. `reconcile` frees the slot
+    without touching git, since `list` runs it unlocked; `unregister_vanished`,
+    run by commands holding the pool lock, removes git's entry — but never a
+    reserved slot's, whose checkout may not be on disk yet."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "eeeeeeeeeeee"
+    testonly_materialize(ctx, env.pool, path, "feat/vanished", "HEAD")
+    registry = {"slots": {"eeeeeeeeeeee": _leased(repo, "feat/vanished", {})}}
+    ctx.std.fs.remove_dir_all(path)
+    run_git(ctx.std, ["worktree", "prune"], repo)
+    if path not in git_out(ctx.std, ["worktree", "list"], repo):
+        fail("the fixture should leave git listing the locked, deleted worktree")
+
+    reconcile(ctx.std, env.pool, registry)
+    _eq("freed", registry["slots"]["eeeeeeeeeeee"]["state"], FREE)
+    _eq("git untouched by reconcile", path in git_out(ctx.std, ["worktree", "list"], repo), True)
+
+    registry["slots"]["eeeeeeeeeeee"]["state"] = RESERVED
+    unregister_vanished(ctx.std, env.pool, registry)
+    _eq("a reserved slot is left alone", path in git_out(ctx.std, ["worktree", "list"], repo), True)
+
+    registry["slots"]["eeeeeeeeeeee"]["state"] = FREE
+    unregister_vanished(ctx.std, env.pool, registry)
+    _eq("and gone from git's list", path in git_out(ctx.std, ["worktree", "list"], repo), False)
+
+def _test_a_detached_slot_and_the_commits_only_it_has(ctx):
+    """`--detach` checks out a commit on no branch, locked under the slot id
+    since there is no branch to name. Commits made there are reachable from no
+    ref, which is what `release` and reclaiming refuse to drop; a branch made
+    from them, or HEAD on a branch at all, counts none."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    head = run_git(ctx.std, ["rev-parse", "HEAD"], repo).out
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "ffffffffffff"
+    testonly_materialize(ctx, env.pool, path, "(detached at main)", head, True)
+
+    _eq("on no branch", run_git(ctx.std, ["symbolic-ref", "--quiet", "HEAD"], path).ok, False)
+    _eq("at the commit", run_git(ctx.std, ["rev-parse", "HEAD"], path).out, head)
+    _eq(
+        "locked under the slot id",
+        "locked " + lock_reason("ffffffffffff") in git_out(ctx.std, ["worktree", "list", "--porcelain"], repo),
+        True,
+    )
+    _eq("nothing of its own yet", unreferenced_commits(ctx.std, path), 0)
+
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached work"], path)
+    _eq("one commit only HEAD has", unreferenced_commits(ctx.std, path), 1)
+    run_git(ctx.std, ["switch", "-q", "-c", "keep/it"], path)
+    _eq("none once a branch has it", unreferenced_commits(ctx.std, path), 0)
+    _eq("and a branch slot never has any", unreferenced_commits(ctx.std, env.path), 0)
+
+def _test_an_interrupted_add_takes_its_own_checkout_with_it(ctx):
+    """A checkout killed part way reads as a tree full of changes. When it was
+    made after the reservation, it is that `add`'s own and goes with it; one
+    made before is work that was there first, which `_materialize` refused to
+    touch, and it stays. A clean checkout goes either way."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    registry = {"slots": {env.slot_id: {
+        "owner_git_dir": env.pool["git_common_dir"],
+        "state": RESERVED,
+        "reservation": {"name": "wip", "since": time.now_ms() - 3600 * 1000},
+    }}}
+    _eq("made after the reservation: the add's own", testonly_reservation_may_clear(ctx, env.pool, registry, env.slot_id), True)
+
+    registry["slots"][env.slot_id]["reservation"]["since"] = time.now_ms() + 3600 * 1000
+    _eq("made before it: work, kept", testonly_reservation_may_clear(ctx, env.pool, registry, env.slot_id), False)
+
+    registry["slots"][env.slot_id]["reservation"]["since"] = 0
+    _eq("no time to compare against: kept", testonly_reservation_may_clear(ctx, env.pool, registry, env.slot_id), False)
+
+    clean = _repo_with_worktree(ctx, dirty = False)
+    registry = {"slots": {clean.slot_id: {
+        "owner_git_dir": clean.pool["git_common_dir"],
+        "state": RESERVED,
+        "reservation": {"name": "wip", "since": time.now_ms() + 3600 * 1000},
+    }}}
+    _eq("nothing in it to keep", testonly_reservation_may_clear(ctx, clean.pool, registry, clean.slot_id), True)
+
+def _broken_hook(ctx, slot, want):
+    fail("hook exploded")
+
+def _test_a_broken_score_hook_falls_back_to_the_built_in(ctx):
+    """A hook that fails, or returns something other than an int, costs at most
+    a colder build, so it is scored by the built-in and said once — not once
+    per slot — rather than failing the `add`. Only the first hook runs."""
+    want = {"name": "fix/login", "lock_digest": "aaa", "commit": "c1"}
+    slot = {"lock_digest": "aaa", "last_commit": "c1", "last_branch": "fix/login", "base_present": True}
+    problems = []
+    _eq("a failing hook", testonly_score_slot(ctx, slot, want, problems, [_broken_hook]), default_score(slot, want))
+    _eq("again", testonly_score_slot(ctx, slot, want, problems, [_broken_hook]), default_score(slot, want))
+    _eq("said once", len(problems), 1)
+    if "hook exploded" not in problems[0]:
+        fail("the hook's own error is named: %r" % problems)
+
+    problems = []
+    _eq("a string", testonly_score_slot(ctx, slot, want, problems, [lambda c, s, w: "high"]), default_score(slot, want))
+    _eq("said as a type", "returned a string" in problems[0], True)
+    problems = []
+    testonly_score_slot(ctx, slot, want, problems, [lambda c, s, w: None])
+    _eq("None by name", "returned None" in problems[0], True)
+
+    problems = []
+    testonly_score_slot(ctx, slot, want, problems, [lambda c, s, w: fail("boom for " + s["last_branch"])])
+    testonly_score_slot(ctx, dict(slot, last_branch = "other"), want, problems, [lambda c, s, w: fail("boom for " + s["last_branch"])])
+    _eq("one warning however the errors differ", len(problems), 1)
+
+    def _meddle(c, s, w):
+        w["name"] = "evil"
+        return 5
+
+    testonly_score_slot(ctx, slot, want, [], [_meddle])
+    _eq("a hook cannot change what is asked for", want["name"], "fix/login")
+
+    view = testonly_hook_view("abcd", {"lease": {"agent": {"id": "x"}}, "last_branch": "b"}, True)
+    _eq("a hook sees the documented fields and the id", sorted(view.keys()), sorted(["base_present", "created_ms", "id", "last_branch", "last_commit", "lock_digest"]))
+
+    problems = []
+    _eq("an int is used", testonly_score_slot(ctx, slot, want, problems, [lambda c, s, w: 7, lambda c, s, w: 99]), 7)
+    _eq("nothing to say", problems, [])
+    _eq("a veto stands", testonly_score_slot(ctx, slot, want, [], [lambda c, s, w: 0]), 0)
+
+def _test_another_clones_slot_is_found_by_its_branch(ctx):
+    """Branches are per clone, so another clone's slot never resolves as the
+    caller's — but it is found, so the answer is whose it is rather than a typo
+    hunt. A lease outranks a free slot's history, and the caller's own slots
+    are not this question."""
+    pool = {"git_common_dir": "/here/.git", "dir": "/pool"}
+    other = _leased("/there/.git", "fix/login", {})
+    old = _slot("/gone/.git")
+    old["last_branch"] = "fix/login"
+    mine = _leased("/here/.git", "mine", {})
+    registry = {"slots": {"aaaa": old, "bbbb": other, "cccc": mine}}
+    _eq("the lease first", testonly_held_elsewhere(pool, registry, "fix/login"), ("bbbb", "/there/.git", True))
+    registry["slots"].pop("bbbb")
+    _eq("then a free slot's last branch", testonly_held_elsewhere(pool, registry, "fix/login"), ("aaaa", "/gone/.git", False))
+    _eq("never the caller's own", testonly_held_elsewhere(pool, registry, "mine"), None)
+    _eq("nor an unknown name", testonly_held_elsewhere(pool, registry, "nope"), None)
+
+def _cell_row(slot, owner, owned_here, known):
+    """A listing row with what `_list_cells` reads."""
+    return {
+        "slot": slot,
+        "owner": owner,
+        "owned_here": owned_here,
+        "ownership_known": known,
+        "state": FREE,
+        "warmth": "cold",
+        "reserved_for": "",
+        "reservation_abandoned": False,
+        "branch": "",
+        "name": "",
+        "last_branch": "x",
+        "session_state": "",
+        "agent": {},
+        "had_base": False,
+        "output_base_present": False,
+        "idle_ms": None,
+        "age_ms": None,
+        "lease_count": None,
+    }
+
+def _test_a_stranded_slot_is_not_counted_as_another_clones(ctx):
+    """A slot whose clone is gone is `stranded` and listed for deletion; one a
+    clone that still exists owns is `other clone`, with that clone named. The
+    two were run together, which named a missing directory as somewhere to go.
+    Stranded is judged from the records alone, so a pool read without its clone
+    shows it too."""
+    here = ctx.std.fs.mkdtemp(prefix = "aspect-wt-owner")
+    shown = testonly_list_cells(ctx.std, [
+        _cell_row("aaaa", here, False, True),
+        _cell_row("bbbb", "/no/such/clone/.git", False, True),
+        _cell_row("cccc", "/no/such/clone/.git", False, False),
+        _cell_row("dddd", here, False, False),
+    ])
+    _eq("the live owner, counted", shown.foreign, {here: 1})
+    _eq("the gone one, listed", shown.stranded, ["bbbb", "cccc"])
+    _eq("tagged", [c["notes"] for c in shown.cells], ["other clone", "stranded", "stranded", ""])
+
+def _test_push_advice_names_a_remote_the_clone_has(ctx):
+    """`origin` where there is one, else the only remote, else a placeholder;
+    and no push at all in a clone with no remote."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    _eq("no remote", testonly_push_command(ctx, env.pool, "fix/login"), "")
+    run_git(ctx.std, ["remote", "add", "upstream", "https://example.test/u.git"], repo)
+    _eq("the only one", testonly_push_command(ctx, env.pool, "fix/login"), "git push -u upstream fix/login")
+    run_git(ctx.std, ["remote", "add", "fork", "https://example.test/f.git"], repo)
+    _eq("several", testonly_push_command(ctx, env.pool, "fix/login"), "git push -u <remote> fix/login")
+    run_git(ctx.std, ["remote", "add", "origin", "https://example.test/o.git"], repo)
+    _eq("origin", testonly_push_command(ctx, env.pool, "fix/login"), "git push -u origin fix/login")
+
+def _test_a_branch_being_set_up_names_its_reserved_slot(ctx):
+    """While an `add` checks a branch out, the branch names the slot reserved
+    for it — never a free slot that held the branch before, which `release`
+    would report as already free and `prune` would delete."""
+    pool = {"git_common_dir": "/clone/.git", "dir": "/pool"}
+    old = _slot("/clone/.git")
+    old["last_branch"] = "b10"
+    pending = _slot("/clone/.git", state = RESERVED)
+    pending["reservation"] = {"name": "b10", "since": time.now_ms()}
+    registry = {"slots": {"aaaa11112222": old, "bbbb33334444": pending}}
+    _eq("the reserved slot", testonly_resolve_slot(ctx, pool, registry, "b10"), "bbbb33334444")
+
+def _test_a_slot_path_that_is_a_file_is_no_checkout(ctx):
+    """A slot directory replaced by a plain file is not a checkout: reading it
+    answers rather than failing on `<file>/.git`, its lease ends, and removing
+    it removes the file."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-file")
+    pool = {"git_common_dir": tmp + "/clone/.git", "dir": tmp}
+    path = tmp + "/" + SLOT_PREFIX + "abc123"
+    ctx.std.fs.write(path, "x\n")
+    _eq("no work in it", uncommitted_work(ctx.std, path), [])
+    registry = {"slots": {"abc123": _leased(pool["git_common_dir"], "y1", {})}}
+    drop_vanished_leases(ctx.std, pool, registry)
+    _eq("the lease ends", registry["slots"]["abc123"]["state"], FREE)
+    _eq("and it can be removed", remove_checkout(ctx.std, path, ""), True)
+
+def _test_a_read_only_checkout_is_still_removed(ctx):
+    """Unlinking a file needs write on its directory, so a checkout holding a
+    read-only tree is made writable rather than left on disk with nothing
+    tracking it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-ro")
+    path = tmp + "/" + SLOT_PREFIX + "abc123"
+    ctx.std.fs.create_dir_all(path + "/ro/sub")
+    ctx.std.fs.write(path + "/ro/sub/f", "d\n")
+    ctx.std.process.command("chmod").args(["-R", "a-w", path + "/ro"]).spawn().wait()
+    _eq("removed", remove_checkout(ctx.std, path, ""), True)
+
+def _test_a_long_refusal_list_is_cut(ctx):
+    """A checkout killed half-deleted reads as thousands of changes: the
+    sentence names the first and counts the rest."""
+    lines = [" D f%d" % i for i in range(25)]
+    got = testonly_capped(lines)
+    _eq("the first twenty and a count", (len(got), got[-1]), (21, "... and 5 more"))
+    _eq("a short one whole", testonly_capped(lines[:3]), lines[:3])
+    _eq("indented under a sentence", testonly_indented([" M a", "?? b"]), "   M a\n  ?? b")
+
+def _test_settings_cannot_hide_work_from_the_check(ctx):
+    """`status.showUntrackedFiles=no`, common on large monorepos, makes plain
+    `git status` report a tree with new files in it as clean — and a clean
+    answer is what licenses deleting it. The check lists them anyway."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    run_git(ctx.std, ["config", "status.showUntrackedFiles", "no"], env.pool["git_common_dir"])
+    ctx.std.fs.write(env.path + "/new-file.txt", "x\n")
+    _eq("an untracked file still counts", uncommitted_work(ctx.std, env.path), ["?? new-file.txt"])
+
+def _test_an_exported_git_dir_does_not_redirect_the_check(ctx):
+    """Inside a git hook `GIT_DIR` points at the clone, and every question
+    asked of a slot would answer for the clone instead."""
+    env = _repo_with_worktree(ctx, dirty = True)
+    saved = ctx.std.env.var("GIT_DIR")
+    ctx.std.env.set_var("GIT_DIR", env.pool["git_common_dir"])
+    got = uncommitted_work(ctx.std, env.path)
+    if saved != None:
+        ctx.std.env.set_var("GIT_DIR", saved)
+    else:
+        ctx.std.env.remove_var("GIT_DIR")
+    _eq("the slot's own change", got, [" M README"])
+
+def _test_work_status_does_not_show_still_counts(ctx):
+    """Edits hidden by `--assume-unchanged`, refs only this worktree has, and an
+    operation in progress are all lost with the checkout, and none of them
+    shows in `git status`."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    _eq("nothing yet", uncommitted_work(ctx.std, env.path), [])
+
+    run_git(ctx.std, ["update-index", "--assume-unchanged", "README"], env.path)
+    ctx.std.fs.write(env.path + "/README", "local edit\n")
+    got = uncommitted_work(ctx.std, env.path)
+    _eq("a hidden edit", [line[:2] for line in got], ["H "])
+
+    run_git(ctx.std, ["update-index", "--no-assume-unchanged", "README"], env.path)
+    run_git(ctx.std, ["checkout", "--", "README"], env.path)
+    run_git(ctx.std, ["update-ref", "refs/worktree/keep", "HEAD"], env.path)
+    _eq("a per-worktree ref", [line[:2] for line in uncommitted_work(ctx.std, env.path)], ["WR"])
+
+def _test_releasing_work_is_graded_by_whose_it_is(ctx):
+    """Plain `--force` discards only the caller's own work; anybody else's —
+    and work under a lease nothing identifies — takes `--force=all`."""
+    me = {"kind": "claude-code", "id": "s1", "pid": 1}
+    _eq("my own", testonly_release_grade(me, dict(me)).needed, "true")
+    _eq("another session's", testonly_release_grade(me, {"kind": "claude-code", "id": "s2", "pid": 2}).needed, "all")
+    _eq("a person's, to an agent", testonly_release_grade(me, {}).needed, "all")
+    _eq("a person's, to a person", testonly_release_grade({}, {}).needed, "true")
+    kind_only = {"kind": "mybot", "id": "", "pid": 0}
+    grade = testonly_release_grade(dict(kind_only), kind_only)
+    _eq("a lease nothing identifies", (grade.anonymous, grade.needed), (True, "all"))
+
+def _test_work_in_counts_every_kind_of_work(ctx):
+    """One answer for every path that discards a checkout unasked: changes,
+    ignored files, and a directory git cannot read because its `.git` went."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    _eq("a clean checkout", work_in(ctx.std, env.path), [])
+    ctx.std.fs.write(env.path + "/new.txt", "x\n")
+    _eq("an untracked file", work_in(ctx.std, env.path), ["?? new.txt"])
+    ctx.std.fs.remove_file(env.path + "/.git")
+    got = work_in(ctx.std, env.path)
+    _eq("files with no .git", len(got) == 1 and got[0].startswith(UNREADABLE_CHECKOUT), True)
+
+def _test_a_hidden_edit_with_an_unusual_name_still_counts(ctx):
+    """`git ls-files` quotes unusual names unless told not to, and a quoted
+    name is no file on disk."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/café.txt", "x\n")
+    run_git(ctx.std, ["add", "café.txt"], env.path)
+    run_git(ctx.std, ["commit", "-qm", "accent"], env.path)
+    run_git(ctx.std, ["update-index", "--assume-unchanged", "café.txt"], env.path)
+    ctx.std.fs.write(env.path + "/café.txt", "edited\n")
+    _eq("found", [line[:2] for line in uncommitted_work(ctx.std, env.path)], ["H "])
+
+def _test_a_skip_worktree_edit_in_a_sparse_checkout_counts(ctx):
+    """With `sparse.expectFilesOutsideOfPatterns`, git keeps the skip-worktree
+    bit on a file that is present and edited, and `git status` says nothing."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    run_git(ctx.std, ["config", "core.sparseCheckout", "true"], env.path)
+    run_git(ctx.std, ["config", "sparse.expectFilesOutsideOfPatterns", "true"], env.path)
+    run_git(ctx.std, ["update-index", "--skip-worktree", "README"], env.path)
+    ctx.std.fs.write(env.path + "/README", "precious\n")
+    _eq("counted", [line[:2] for line in uncommitted_work(ctx.std, env.path)], ["H "])
+
+def _test_an_embedded_repository_gitmodules_does_not_map_counts(ctx):
+    """A gitlink with no `.gitmodules` entry makes `git submodule status` fail,
+    but the repository inside still goes with the worktree."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    nested = env.path + "/nested"
+    ctx.std.fs.create_dir_all(nested)
+    for args in [["init", "-q"], ["config", "user.email", "t@e.test"], ["config", "user.name", "t"]]:
+        run_git(ctx.std, args, nested)
+    ctx.std.fs.write(nested + "/n", "n\n")
+    run_git(ctx.std, ["add", "n"], nested)
+    run_git(ctx.std, ["commit", "-qm", "n"], nested)
+    run_git(ctx.std, ["add", "nested"], env.path)
+    run_git(ctx.std, ["commit", "-qm", "gitlink"], env.path)
+    _eq("counted", [line[:2] for line in uncommitted_work(ctx.std, env.path)], ["SM"])
+
+def _test_a_branch_name_part_is_measured_in_bytes(ctx):
+    """A file name limit counts bytes, and `é` is two of them."""
+    _eq("ascii", testonly_utf8_len("abc"), 3)
+    _eq("two-byte", testonly_utf8_len("é" * 128), 256)
+    _eq("four-byte", testonly_utf8_len("🚀"), 4)
+
+def _test_a_session_and_its_subagents(ctx):
+    """The parent session decides about its subagents' slots; a sibling does
+    not. All of them are one harness session for `same_session`."""
+    parent = {"kind": "claude-code", "id": "S", "pid": 1}
+    child = {"kind": "claude-code", "id": "S-a", "parent_id": "S", "id_source": "caller", "pid": 1}
+    sibling = {"kind": "claude-code", "id": "S-b", "parent_id": "S", "id_source": "caller", "pid": 1}
+    other = {"kind": "claude-code", "id": "T", "pid": 2}
+    _eq("the parent owns its subagent", testonly_own_subagent(parent, child), True)
+    _eq("a sibling does not", testonly_own_subagent(sibling, child), False)
+    _eq("one session: parent and child", testonly_same_harness_session(parent, child), True)
+    _eq("one session: siblings", testonly_same_harness_session(sibling, child), True)
+    _eq("another session", testonly_same_harness_session(parent, other), False)
+    _eq("the parent releases its subagent's work with --force", testonly_release_grade(parent, child).needed, "true")
+    _eq("a sibling needs --force=all", testonly_release_grade(sibling, child).needed, "all")
+    stopped = dict(child, pid = 999999)
+    _eq("a sibling's lease is protected even once its process has gone", testonly_protected_from(ctx.std, sibling, stopped), True)
+    _eq("but not from the session", testonly_protected_from(ctx.std, parent, stopped), False)
+    _eq("and the session's own is protected from a subagent", testonly_protected_from(ctx.std, child, dict(parent, pid = 999999)), True)
+
+def _test_commits_a_detached_head_left_behind_still_count(ctx):
+    """A commit made at a detached HEAD that then moved on is reachable only
+    from the slot's HEAD reflog, which goes with the checkout — so it counts,
+    and its tip is the one named. A commit a branch left behind, an amend, is
+    the branch's business and does not."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    path = env.path
+    start = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "on wip"], path)
+    run_git(ctx.std, ["commit", "-q", "--amend", "--allow-empty", "-m", "on wip, amended"], path)
+    _eq("an amend on a branch is not work", unreferenced_commits(ctx.std, path), 0)
+
+    run_git(ctx.std, ["checkout", "-q", "--detach"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached work"], path)
+    orphan = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    run_git(ctx.std, ["checkout", "-q", "wip"], path)
+    _eq("left behind, it still counts", unreferenced_commits(ctx.std, path), 1)
+    _eq("named by its tip", unreferenced_tips(ctx.std, path), [orphan])
+    _eq("and is work", [w for w in work_in(ctx.std, path) if w.startswith("DH ")] != [], True)
+
+    run_git(ctx.std, ["branch", "keep", orphan], path)
+    _eq("a branch at it ends that", unreferenced_tips(ctx.std, path), [])
+    _eq("the start was never at risk", start != orphan, True)
+
+    run_git(ctx.std, ["checkout", "-q", "--detach"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "one"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "two"], path)
+    run_git(ctx.std, ["reset", "-q", "--hard", "wip"], path)
+    _eq("a reset at a detached HEAD leaves both behind", unreferenced_commits(ctx.std, path), 2)
+    run_git(ctx.std, ["checkout", "-q", "wip"], path)
+    _eq("and back on the branch they still count", unreferenced_commits(ctx.std, path), 2)
+
+    run_git(ctx.std, ["checkout", "-q", "--detach"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "before an orphan"], path)
+    run_git(ctx.std, ["switch", "-q", "--orphan", "fresh"], path)
+    _eq("an unborn branch still has its reflog read", unreferenced_commits(ctx.std, path), 3)
+
+def _test_detached_commits_another_worktree_reaches_are_not_lost(ctx):
+    """A commit another worktree's HEAD is at outlives this one, as does one a
+    ref outside the per-worktree namespaces keeps — a fetched PR head, say."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"].removesuffix("/.git")
+    run_git(ctx.std, ["checkout", "-q", "--detach", "wip"], env.path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "shared"], env.path)
+    shared = run_git(ctx.std, ["rev-parse", "HEAD"], env.path).out
+    _eq("only this worktree has it", unreferenced_commits(ctx.std, env.path), 1)
+    run_git(ctx.std, ["update-ref", "refs/pull/1/head", shared], repo)
+    _eq("a PR ref keeps it", unreferenced_commits(ctx.std, env.path), 0)
+    run_git(ctx.std, ["update-ref", "-d", "refs/pull/1/head"], repo)
+    run_git(ctx.std, ["checkout", "-q", "--detach", shared], repo)
+    _eq("so does the main checkout's HEAD", unreferenced_commits(ctx.std, env.path), 0)
+
+def _test_a_slot_made_with_reflogs_off_still_has_one(ctx):
+    """`core.logAllRefUpdates=false` would leave a new worktree no HEAD reflog
+    and its detached commits invisible; the pool's checkouts get one anyway,
+    and git appends to a reflog that exists."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    repo = env.pool["git_common_dir"]
+    run_git(ctx.std, ["config", "core.logAllRefUpdates", "false"], repo)
+    path = env.pool["dir"] + "/" + SLOT_PREFIX + "eeeeeeeeeeee"
+    testonly_materialize(ctx, env.pool, path, "(detached at wip)", "wip", True)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "unlogged"], path)
+    run_git(ctx.std, ["checkout", "-q", "--detach", "wip"], path)
+    _eq("still counted", unreferenced_commits(ctx.std, path), 1)
+
+def _test_a_chain_of_lost_commits_names_one_tip(ctx):
+    """However many commits a detached HEAD left behind in a line, one branch
+    at the newest keeps them all, so one tip is named."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    run_git(ctx.std, ["checkout", "-q", "--detach", "wip"], env.path)
+    for n in range(5):
+        run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "c%d" % n], env.path)
+    last = run_git(ctx.std, ["rev-parse", "HEAD"], env.path).out
+    run_git(ctx.std, ["checkout", "-q", "wip"], env.path)
+    _eq("five commits", unreferenced_commits(ctx.std, env.path), 5)
+    _eq("one tip, the newest", unreferenced_tips(ctx.std, env.path), [last])
+
+def _test_a_reftable_reflog_is_read(ctx):
+    """A reftable repository has no `logs/HEAD` file; its reflog is read
+    through git. Skipped where git cannot make one."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    if not run_git(ctx.std, ["init", "-q", "--ref-format=reftable", repo], tmp).ok:
+        return
+    for args in [["config", "user.email", "t@example.test"], ["config", "user.name", "t"]]:
+        run_git(ctx.std, args, repo)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "init"], repo)
+    slot = tmp + "/slot"
+    run_git(ctx.std, ["worktree", "add", "-q", "--detach", slot], repo)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "lost"], slot)
+    run_git(ctx.std, ["checkout", "-q", "--detach", "HEAD~1"], slot)
+    _eq("left behind, and found", unreferenced_commits(ctx.std, slot), 1)
+
+def _test_an_unread_reftable_reflog_on_an_unborn_branch_is_work(ctx):
+    """On an unborn branch git will not list a reftable reflog, and there is
+    no file to read: one that exists unread counts as work, not as none.
+    Skipped where git cannot make a reftable repository."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    repo = tmp + "/repo"
+    if not run_git(ctx.std, ["init", "-q", "--ref-format=reftable", repo], tmp).ok:
+        return
+    for args in [["config", "user.email", "t@example.test"], ["config", "user.name", "t"]]:
+        run_git(ctx.std, args, repo)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "init"], repo)
+    slot = tmp + "/slot"
+    run_git(ctx.std, ["worktree", "add", "-q", "--detach", slot], repo)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "lost"], slot)
+    run_git(ctx.std, ["switch", "-q", "--orphan", "fresh"], slot)
+    _eq("unknown, so work", unreferenced_commits(ctx.std, slot), -1)
+    _eq("and said so", [w for w in work_in(ctx.std, slot) if w.startswith("DH ")] != [], True)
+
+def _test_a_gitfile_naming_another_worktree_is_unreadable(ctx):
+    """A `.git` edited to name another worktree's admin directory makes git
+    answer for that one, so this checkout's own state cannot be seen."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    other = env.pool["dir"] + "/" + SLOT_PREFIX + "dddddddddddd"
+    run_git(ctx.std, ["worktree", "add", "-q", "--detach", other], env.pool["git_common_dir"])
+    ctx.std.fs.write(env.path + "/.git", ctx.std.fs.read_to_string(other + "/.git"))
+    got = uncommitted_work(ctx.std, env.path)
+    _eq("unreadable", len(got) == 1 and got[0].startswith(UNREADABLE_CHECKOUT), True)
+    _eq("the other is fine", uncommitted_work(ctx.std, other), [])
+
+def _test_git_that_cannot_start_is_a_failure_not_a_crash(ctx):
+    """A working directory that has gone — a moved clone — makes git fail to
+    start, which is reported as an outcome like any other."""
+    got = run_git(ctx.std, ["status"], "/no/such/directory/anywhere")
+    _eq("not ok", got.ok, False)
+    _eq("code -1", got.code, -1)
+
+def _test_a_repository_at_a_slot_path_is_not_a_slot_checkout(ctx):
+    """A whole clone put where a free slot was has branches and history this
+    pool cannot vouch for: it counts as a checkout that cannot be read, so
+    nothing deletes it unasked."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    path = tmp + "/" + SLOT_PREFIX + "abcabcabcabc"
+    run_git(ctx.std, ["init", "-q", path], tmp)
+    for args in [["config", "user.email", "t@example.test"], ["config", "user.name", "t"]]:
+        run_git(ctx.std, args, path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "precious"], path)
+    got = work_in(ctx.std, path)
+    _eq("unreadable", len(got) >= 1 and got[0].startswith(UNREADABLE_CHECKOUT), True)
+
+def _test_the_lock_is_never_seen_without_its_owner(ctx):
+    """The lock is staged with its owner and renamed into place, so a second
+    taker fails while the first holds it, and its token releases it."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    first = acquire(ctx.std, tmp, attempts = 1)
+    _eq("taken", first != "", True)
+    _eq("owner recorded", ctx.std.fs.exists(tmp + "/.lock/owner.json"), True)
+    _eq("not taken twice", acquire(ctx.std, tmp, attempts = 1), "")
+    release(ctx.std, tmp, first)
+    _eq("released", ctx.std.fs.exists(tmp + "/.lock"), False)
+    _eq("nothing staged left", [e.path for e in ctx.std.fs.read_dir(tmp) if ".lock" in e.path], [])
+
+def _test_a_worktree_nested_in_a_slot_is_work(ctx):
+    """A worktree git lists inside a slot — under an ignored directory, where
+    agents put theirs — goes with the slot, its own changes and reflog too."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    ctx.std.fs.write(env.path + "/.gitignore", ".claude/\n")
+    run_git(ctx.std, ["add", ".gitignore"], env.path)
+    run_git(ctx.std, ["commit", "-q", "-m", "ignore"], env.path)
+    _eq("clean before", work_in(ctx.std, env.path), [])
+    run_git(ctx.std, ["worktree", "add", "-q", "--detach", env.path + "/.claude/worktrees/nested"], env.path)
+    _eq("nested counts", [w for w in work_in(ctx.std, env.path) if w.startswith("NW ")] != [], True)
+
+def _test_lock_leftovers_are_tidied(ctx):
+    """A staged or moved-aside lock whose owner has exited is removed; one a
+    steal moved aside while its owner runs is put back in place."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    dead = {"token": "999999:never", "pid": 999999, "started_at": "never"}
+    ctx.std.fs.create_dir_all(tmp + "/.lock.new-999999-never")
+    ctx.std.fs.write(tmp + "/.lock.new-999999-never/owner.json", json.encode(dead))
+    token = acquire(ctx.std, tmp, attempts = 1)
+    _eq("taken", token != "", True)
+    _eq("the dead one's staging is gone", ctx.std.fs.exists(tmp + "/.lock.new-999999-never"), False)
+
+    # Our own lock, moved aside and let go of: dropped, not restored.
+    ctx.std.fs.rename(tmp + "/.lock", tmp + "/.lock.stale-someone")
+    release(ctx.std, tmp, token)
+    _eq("our own moved-aside lock goes with our release", ctx.std.fs.exists(tmp + "/.lock.stale-someone"), False)
+
+    # Another live holder's lock, moved aside as a racing steal would leave it:
+    # put back before anyone takes the place. A live process with a token of its
+    # own stands in for that holder.
+    me = owner_record(ctx.std)
+    other = dict(me, token = me["token"] + "-other")
+    ctx.std.fs.create_dir_all(tmp + "/.lock.stale-someone")
+    ctx.std.fs.write(tmp + "/.lock.stale-someone/owner.json", json.encode(other))
+    _eq("a second taker does not get it", acquire(ctx.std, tmp, attempts = 1), "")
+    _eq("the live lock is back", ctx.std.fs.exists(tmp + "/.lock/owner.json"), True)
+    release(ctx.std, tmp, other["token"])
+
+def _test_a_vanished_checkouts_git_state_is_work(ctx):
+    """A slot moved away or deleted still has git's admin directory, the last
+    thing reaching its detached commits and per-worktree refs: those count,
+    its registration stays, and its lease is not freed."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    run_git(ctx.std, ["checkout", "-q", "--detach"], env.path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached"], env.path)
+    run_git(ctx.std, ["update-ref", "refs/worktree/keep", "HEAD"], env.path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], env.path)
+    ctx.std.fs.rename(env.path, env.pool["dir"] + "/moved-away")
+    got = vanished_work(ctx.std, env.pool["git_common_dir"], env.path)
+    _eq("said", len(got) >= 2 and got[0].startswith("VG "), True)
+    _eq("the ref", [w for w in got if w.startswith("WR refs/worktree/keep")] != [], True)
+    _eq("the commit", [w for w in got if w.startswith("DH ")] != [], True)
+    registry = {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}
+    unregister_vanished(ctx.std, env.pool, registry)
+    _eq("still registered", env.path in git_out(ctx.std, ["worktree", "list"], env.pool["git_common_dir"]), True)
+    _eq("still leased", reconcile(ctx.std, env.pool, registry)["slots"][env.slot_id]["state"], LEASED)
+
+def _test_a_detached_rebase_result_counts(ctx):
+    """A rebase at a detached HEAD has its result nowhere but the HEAD reflog's
+    rebase entries: reset away from it, it is work all the same. An aborted
+    rebase's steps are the abort's to drop, and do not count."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    path = env.path
+    run_git(ctx.std, ["checkout", "-q", "--detach"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached work"], path)
+    run_git(ctx.std, ["branch", "keep"], path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "wip moves on"], path)
+    run_git(ctx.std, ["checkout", "-q", "--detach", "keep"], path)
+    run_git(ctx.std, ["rebase", "-q", "wip"], path)
+    rebased = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    run_git(ctx.std, ["reset", "-q", "--hard", "wip"], path)
+    _eq("the rebased commit is named", unreferenced_tips(ctx.std, path), [rebased])
+
+def _test_a_finished_rebases_superseded_steps_do_not_count(ctx):
+    """A rebase on a branch that squashed a fixup into its pick left that pick
+    behind: the branch's history, as an amend's is, and not work. Nor are the
+    steps of a rebase that was aborted."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    path = env.path
+    base = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    ctx.std.fs.write(path + "/a.txt", "a\n")
+    run_git(ctx.std, ["add", "a.txt"], path)
+    run_git(ctx.std, ["commit", "-q", "-m", "feat"], path)
+    ctx.std.fs.write(path + "/a.txt", "a, fixed\n")
+    run_git(ctx.std, ["commit", "-q", "-am", "fixup! feat"], path)
+    run_git(ctx.std, ["-c", "sequence.editor=true", "rebase", "-q", "-i", "--autosquash", base], path)
+    _eq("an autosquash leaves nothing", unreferenced_tips(ctx.std, path), [])
+
+    run_git(ctx.std, ["checkout", "-q", "--detach", base], path)
+    ctx.std.fs.write(path + "/a.txt", "clash\n")
+    run_git(ctx.std, ["add", "a.txt"], path)
+    run_git(ctx.std, ["commit", "-q", "-m", "clash"], path)
+    run_git(ctx.std, ["branch", "clash"], path)
+    run_git(ctx.std, ["rebase", "-q", "wip"], path)
+    run_git(ctx.std, ["rebase", "--abort"], path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], path)
+    _eq("nor an aborted rebase", unreferenced_tips(ctx.std, path), [])
+
+def _test_what_a_rebase_span_skips_and_what_it_keeps(ctx):
+    """Inside an aborted rebase only its own steps are skipped: a commit made
+    at a detached HEAD while it was stopped still counts. And a rebase begun
+    under a tool's own reflog name, `mytool (start)`, ends its span there, so
+    detached work older than it is not swallowed."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    path = env.path
+    base = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    ctx.std.fs.write(path + "/a.txt", "wip\n")
+    run_git(ctx.std, ["add", "a.txt"], path)
+    run_git(ctx.std, ["commit", "-q", "-m", "wip side"], path)
+    run_git(ctx.std, ["checkout", "-q", "--detach", base], path)
+    ctx.std.fs.write(path + "/a.txt", "older\n")
+    run_git(ctx.std, ["add", "a.txt"], path)
+    run_git(ctx.std, ["commit", "-q", "-m", "older detached work"], path)
+    older = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+
+    # Conflicts with wip, so the rebase stops; then a commit while stopped.
+    ctx.std.fs.write(path + "/a.txt", "clash\n")
+    run_git(ctx.std, ["commit", "-q", "-am", "clash"], path)
+    clash = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+
+    # The entries a rebase run as `GIT_REFLOG_ACTION=mytool` writes, then
+    # aborted with a plain `git rebase --abort`.
+    wip = run_git(ctx.std, ["rev-parse", "wip"], path).out
+    run_git(ctx.std, ["update-ref", "-m", "mytool (start): checkout wip", "HEAD", wip], path)
+    run_git(ctx.std, ["reset", "-q", "--hard", base], path)
+    ctx.std.fs.write(path + "/b.txt", "made while stopped\n")
+    run_git(ctx.std, ["add", "b.txt"], path)
+    run_git(ctx.std, ["commit", "-q", "-m", "made while stopped"], path)
+    during = run_git(ctx.std, ["rev-parse", "HEAD"], path).out
+    run_git(ctx.std, ["update-ref", "-m", "rebase (abort): returning to " + clash, "HEAD", clash], path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], path)
+
+    tips = unreferenced_tips(ctx.std, path)
+    _eq("a commit made while it was stopped", during in tips, True)
+    _eq("the commit the abort returned to", clash in tips, True)
+    _eq("and the older detached work", older in tips or clash in tips, True)
+
+def _test_an_emptied_slot_directory_still_has_its_admin_dirs_work(ctx):
+    """A slot directory emptied or recreated by hand has no checkout in it, but
+    git's admin directory for it still keeps what a missing one's does: asked
+    with the clone named, it is work. So is an index with changes staged in
+    it, which lives with the registration rather than the checkout."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    common = env.pool["git_common_dir"]
+    run_git(ctx.std, ["checkout", "-q", "--detach"], env.path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached"], env.path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], env.path)
+    ctx.std.fs.write(env.path + "/staged.txt", "x\n")
+    run_git(ctx.std, ["add", "staged.txt"], env.path)
+    ctx.std.fs.rename(env.path, env.pool["dir"] + "/moved-away")
+    ctx.std.fs.create_dir_all(env.path)
+    got = work_in(ctx.std, env.path, "", common)
+    _eq("the commit it kept", [w for w in got if w.startswith("DH ")] != [], True)
+    _eq("and the staged index", [w for w in got if w.startswith("IX ")] != [], True)
+
+def _test_every_deletion_path_sees_a_vanished_slots_work(ctx):
+    """A gone checkout whose git state holds detached commits is not taken
+    back, not dropped by the sweep, and is work to `work_in` when the clone is
+    named."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    run_git(ctx.std, ["checkout", "-q", "--detach"], env.path)
+    run_git(ctx.std, ["commit", "-q", "--allow-empty", "-m", "detached"], env.path)
+    run_git(ctx.std, ["checkout", "-q", "wip"], env.path)
+    ctx.std.fs.rename(env.path, env.pool["dir"] + "/moved-away")
+    common = env.pool["git_common_dir"]
+    _eq("work_in, naming the clone", work_in(ctx.std, env.path, "", common) != [], True)
+    _eq("work_in without one sees nothing it can ask", work_in(ctx.std, env.path), [])
+    lease = _leased(common, "wip", {"kind": "x", "id": "y", "pid": 999999})
+    registry = {"slots": {env.slot_id: lease}}
+    _eq("not taken back", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), False)
+    registry["slots"][env.slot_id]["state"] = FREE
+    _eq("not dropped", drop_slot(ctx.std, env.pool, registry, env.slot_id).dropped, False)
+
+def _test_a_file_or_a_redirected_work_tree_at_a_slot_is_unreadable(ctx):
+    """A plain file where a checkout belongs, and a checkout whose git reads
+    another directory as its work tree, both say nothing git can vouch for."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    ctx.std.fs.write(tmp + "/" + SLOT_PREFIX + "aaaaaaaaaaaa", "precious\n")
+    got = work_in(ctx.std, tmp + "/" + SLOT_PREFIX + "aaaaaaaaaaaa")
+    _eq("a file", len(got) == 1 and got[0].startswith(UNREADABLE_CHECKOUT), True)
+
+    env = _repo_with_worktree(ctx, dirty = False)
+    elsewhere = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    run_git(ctx.std, ["config", "extensions.worktreeConfig", "true"], env.path)
+    run_git(ctx.std, ["config", "--worktree", "core.worktree", elsewhere], env.path)
+    got = uncommitted_work(ctx.std, env.path)
+    _eq("redirected", len(got) == 1 and got[0].startswith(UNREADABLE_CHECKOUT), True)
+
+def _test_a_cherry_pick_sequence_between_picks_is_work(ctx):
+    """Between the picks of a multi-commit cherry-pick there is no
+    CHERRY_PICK_HEAD, but the sequence still waits in `sequencer/`."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    git_dir = git_out(ctx.std, ["rev-parse", "--absolute-git-dir"], env.path)
+    ctx.std.fs.create_dir_all(git_dir + "/sequencer")
+    _eq("in progress", [w for w in work_in(ctx.std, env.path) if w.startswith("IP sequencer")] != [], True)
+
+def _test_hex_and_object_ids(ctx):
+    """Slot ids and commit ids are lowercase hex; a branch that looks like one
+    is not a whole id, and neither is the all-zero id a reflog starts from."""
+    _eq("hex", is_hex("0a1b"), True)
+    _eq("uppercase is not", is_hex("0A1B"), False)
+    _eq("empty is not", is_hex(""), False)
+    _eq("a branch is not", is_hex("feat"), False)
+
+def _test_a_moved_clones_lease_is_not_a_reclone_at_its_old_path(ctx):
+    """A clone moved away and another cloned where it was: the path the slot
+    records exists again, but only the moved clone's git lists the checkout,
+    so the moved clone takes the lease back and the new one is not given it."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    here = env.pool["git_common_dir"]
+    fresh = env.pool["dir"] + "/../fresh"
+    ctx.std.fs.create_dir_all(fresh)
+    run_git(ctx.std, ["init", "-q"], fresh)
+    other = git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], fresh)
+    registry = {"slots": {env.slot_id: _leased(other, "wip", {})}}
+    _eq("the clone whose git lists it", adoptable(ctx.std, env.pool, registry), [env.slot_id])
+    _eq("not the one at the recorded path", adoptable(ctx.std, dict(env.pool, git_common_dir = other), registry), [])
+    registry["slots"][env.slot_id]["owner_git_dir"] = here
+    _eq(
+        "nor, the other way round, a clone whose git does not list it",
+        adoptable(ctx.std, dict(env.pool, git_common_dir = other), registry),
+        [],
+    )
+
+def _test_json_work_entries_keep_path_and_note_apart(ctx):
+    """Every line `work_in` gives becomes `{status, path}`, with a `note` for
+    the lines that say why something counts — and a file named with a
+    parenthesis is still a file."""
+    lines = [
+        " M src/a.go",
+        "?? (draft).txt",
+        "SM third_party/x  (a submodule, whose repository is inside this worktree)",
+        "WR refs/worktree/wip  (a ref only this worktree has)",
+        "H  src/b.go  (hidden from git status by --assume-unchanged or --skip-worktree)",
+        "IP MERGE_HEAD  (a merge in progress)",
+        "UR (git cannot read this checkout): fatal: not a git repository (or any parent)",
+        "DH (2 commits made at a detached HEAD that no branch has)",
+        "IX (changes staged in its index, which lives with the registration)",
+        "?? \"dirty file.txt\"",
+        " M \"tab\\there\"",
+        "?? \"caf\\303\\251.txt\"",
+        "R  \"a b\" -> \"c d\"",
+        "R  old.txt -> new.txt",
+    ]
+    _eq("each shape", testonly_porcelain_entries(lines), [
+        {"status": " M", "path": "src/a.go"},
+        {"status": "??", "path": "(draft).txt"},
+        {"status": "SM", "path": "third_party/x", "note": "a submodule, whose repository is inside this worktree"},
+        {"status": "WR", "path": "refs/worktree/wip", "note": "a ref only this worktree has"},
+        {"status": "H ", "path": "src/b.go", "note": "hidden from git status by --assume-unchanged or --skip-worktree"},
+        {"status": "IP", "path": "MERGE_HEAD", "note": "a merge in progress"},
+        {"status": "UR", "path": "", "note": "git cannot read this checkout: fatal: not a git repository (or any parent)"},
+        {"status": "DH", "path": "", "note": "2 commits made at a detached HEAD that no branch has"},
+        {"status": "IX", "path": "", "note": "changes staged in its index, which lives with the registration"},
+        # Quoted by git for a space or a control character: the name as it is.
+        {"status": "??", "path": "dirty file.txt"},
+        {"status": " M", "path": "tab\there"},
+        # Bytes git wrote in octal cannot be put back together here, so the
+        # quoted form is kept rather than a mangled name.
+        {"status": "??", "path": "\"caf\\303\\251.txt\""},
+        # A rename: where it went, and where it came from beside it.
+        {"status": "R ", "path": "c d", "from": "a b"},
+        {"status": "R ", "path": "new.txt", "from": "old.txt"},
+    ])
+
+def _test_a_gone_clones_slots_are_adopted_where_they_can_be(ctx):
+    """Slots recorded for a clone no longer at its path: a free one goes to
+    any clone; a leased one only to the clone whose git still lists its
+    checkout. Without repair, only the owners are re-recorded."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    here = env.pool["git_common_dir"]
+    gone = env.pool["dir"] + "/no-such-clone/.git"
+    listed = _leased(gone, "wip", {})
+    unlisted = _leased(gone, "elsewhere", {})
+    registry = {"slots": {
+        env.slot_id: listed,
+        "bbbbbbbbbbbb": {"state": FREE, "owner_git_dir": gone, "last_branch": "x"},
+        "cccccccccccc": unlisted,
+        "dddddddddddd": {"state": FREE, "owner_git_dir": here, "last_branch": "y"},
+    }}
+    _eq("the free one and the one git lists", adoptable(ctx.std, env.pool, registry), sorted([env.slot_id, "bbbbbbbbbbbb"]))
+    _eq("none without a clone", adoptable(ctx.std, dict(env.pool, git_common_dir = ""), registry), [])
+    _eq("two change hands", adopt_stranded(ctx.std, env.pool, registry, repair = False), sorted([env.slot_id, "bbbbbbbbbbbb"]))
+    _eq("now this clone's", registry["slots"]["bbbbbbbbbbbb"]["owner_git_dir"], here)
+    _eq("the unlisted lease stays stranded", registry["slots"]["cccccccccccc"]["owner_git_dir"], gone)
+    _eq("nothing left to take", adoptable(ctx.std, env.pool, registry), [])
+
+def _test_a_registry_version_this_cli_does_not_know_is_read_only(ctx):
+    """A higher version is read but never rewritten; one that is not a
+    positive int is damage, rebuilt like any other; the current one, or none,
+    is read as it is. A slot in a state this version does not know is kept in
+    a newer registry and dropped from a current one."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    cases = [
+        ("99", "read_only"),
+        ('"99"', "unreadable"),
+        ("-1", "unreadable"),
+        ("0", "unreadable"),
+        ("1", ""),
+        (None, ""),
+    ]
+    for version, flag in cases:
+        doc = '{"slots": {}' + ((', "version": ' + version) if version != None else "") + "}"
+        ctx.std.fs.write(registry_path(tmp), doc)
+        got = read_registry(ctx.std, tmp)
+        _eq("version %s" % version, [f for f in ["read_only", "unreadable"] if got.get(f, False)], [flag] if flag else [])
+    unknown = '"aaaaaaaaaaaa": {"state": "parked"}, "bbbbbbbbbbbb": {"owner_git_dir": "x"}'
+    ctx.std.fs.write(registry_path(tmp), '{"version": 99, "slots": {' + unknown + "}}")
+    _eq("an unknown state kept where newer", sorted(read_registry(ctx.std, tmp)["slots"].keys()), ["aaaaaaaaaaaa"])
+    ctx.std.fs.write(registry_path(tmp), '{"version": 1, "slots": {' + unknown + "}}")
+    _eq("and dropped where current", read_registry(ctx.std, tmp)["slots"], {})
+
+def _test_a_stopped_session_is_given_time_to_come_back(ctx):
+    """Its process gone and its checkout clean, a session's slot is still
+    kept for it the grace period after the slot's last activity, and taken
+    back only once that has passed."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    lease = _leased(env.pool["git_common_dir"], "wip", {"kind": "x", "id": "y", "pid": 999999})
+    registry = {"slots": {env.slot_id: lease}}
+    day = 24 * 3600 * 1000
+    _eq("within a day of its activity: kept", abandoned_lease(ctx.std, env.pool, registry, env.slot_id, grace_ms = day), False)
+    _eq("with no grace: taken back", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
+    _eq("activity is read", lease_last_active_ms(ctx.std, env.pool, env.slot_id, lease) > 0, True)
+
+_UNIT_TESTS = [
+    _test_files_git_ignores_are_not_work,
+    _test_a_read_only_output_base_is_still_removed,
+    _test_nested_registry_values_are_reset,
+    _test_dropping_a_released_slot_needs_no_checkout,
+    _test_a_wrong_typed_field_is_reset,
+    _test_an_unusable_slot_entry_does_not_wedge_the_pool,
+    _test_an_empty_name_names_no_slot,
+    _test_a_lease_on_a_checkout_git_cannot_read_stands,
+    _test_dropping_a_slot_never_takes_its_work_unasked,
+    _test_a_session_with_no_id_is_matched_by_its_process,
+    _test_a_checkout_git_cannot_read_is_not_clean,
+    _test_a_slot_id_that_is_not_a_path_component_is_dropped,
+    _test_a_lease_follows_a_switch_in_its_slot,
+    _test_a_name_differing_only_in_case_is_not_the_branch,
+    _test_a_slot_answers_to_its_directory_and_its_detached_ref,
+    _test_a_match_without_bazel_state_counts_for_nothing,
+    _test_a_leased_slot_carries_gits_lock,
+    _test_a_deleted_locked_slot_is_unregistered,
+    _test_a_detached_slot_and_the_commits_only_it_has,
+    _test_a_branch_only_a_remote_has_is_checked_out_from_it,
+    _test_a_branch_add_creates_has_no_upstream,
+    _test_release_protects_another_sessions_lease_until_it_has_stopped,
+    _test_an_empty_pool_has_nothing_to_prune_and_says_so,
+    _test_a_new_lease_forgets_the_tree_the_slot_was_freed_with,
+    _test_a_checkout_git_does_not_recognise_is_still_removed,
+    _test_a_session_lease_says_whether_it_is_active_without_prose,
+    _test_an_unstaged_change_keeps_its_status_column,
+    _test_a_slot_with_no_base_is_idle_since_its_last_lease,
+    _test_a_typo_is_answered_with_the_name_it_missed,
+    _test_a_unique_prefix_of_a_slot_id_resolves,
+    _test_a_holder_whose_process_was_never_captured_keeps_its_slot,
+    _test_the_sessions_section_reads_project_then_resume,
+    _test_the_worktree_list_is_read_in_gits_order_with_detached_heads_blank,
+    _test_a_slot_being_set_up_is_never_called_free,
+    _test_remote_spellings_collapse,
+    _test_suffix_behind_a_trailing_slash_is_still_stripped,
+    _test_mirrors_on_different_hosts_stay_separate,
+    _test_fork_is_its_own_pool,
+    _test_empty_remote_yields_no_key,
+    _test_slug_is_a_usable_path_component,
+    _test_lock_mismatch_nearly_disqualifies,
+    _test_commit_distance_only_breaks_a_tie,
+    _test_the_branchs_own_slot_outranks_an_unrelated_one,
+    _test_an_identical_tree_still_wins_over_the_same_branch,
+    _test_a_lock_mismatch_still_beats_everything_down,
+    _test_unknown_lock_does_not_disqualify,
+    _test_output_base_matches_bazels_own_derivation,
+    _test_a_relocated_output_user_root_is_where_a_slot_looks,
+    _test_warmth_reads_what_is_really_there,
+    _test_registry_round_trips,
+    _test_unreadable_registry_starts_over,
+    _test_missing_registry_is_empty,
+    _test_a_base_that_never_existed_is_not_reported_as_lost,
+    _test_each_table_carries_only_what_its_slots_can_answer,
+    _test_the_listing_leads_with_what_is_happening,
+    _test_the_listing_order_is_stable,
+    _test_the_refusal_names_who_holds_the_slot,
+    _test_a_slot_you_already_hold_says_so,
+    _test_a_different_session_is_still_a_refusal,
+    _test_an_anonymous_lease_is_nobodys,
+    _test_reconcile_closes_the_history_entry_it_ends,
+    _test_a_slot_answers_to_its_id_and_to_its_branch,
+    _test_an_empty_prune_says_which_of_three_reasons,
+    _test_releasing_a_free_slot_points_at_prune,
+    _test_pruning_a_leased_slot_points_at_release,
+    _test_pruning_another_sessions_slot_says_whose_it_is,
+    _test_pruning_your_own_slot_just_offers_release,
+    _test_pruning_a_slot_being_set_up_says_to_wait,
+    _test_a_leased_slots_old_branch_does_not_resolve,
+    _test_another_clones_slot_resolves_by_id_but_not_by_branch,
+    _test_a_lease_with_no_agent_keeps_the_plain_refusal,
+    _test_age_comes_from_the_base_and_falls_back_to_the_floor,
+    _test_a_recently_used_base_outranks_an_old_creation_floor,
+    _test_prune_never_takes_a_leased_slot,
+    _test_prune_respects_the_age_threshold,
+    _test_prune_leaves_a_live_clones_slots_alone,
+    _test_owned_slots_counts_only_this_clone,
+    _test_drop_slot_removes_the_entry_and_the_base,
+    _test_drop_slot_refuses_while_a_server_holds_it,
+    _test_lock_digest_agrees_between_a_file_and_a_ref,
+    _test_a_new_branch_does_not_adopt_its_bases_upstream,
+    _test_a_lease_with_no_agent_is_never_abandoned,
+    _test_a_gone_session_with_a_clean_checkout_is_abandoned,
+    _test_uncommitted_changes_are_never_discarded,
+    _test_a_running_session_is_never_abandoned,
+    _test_a_harness_that_cannot_be_proven_finished_still_gives_up_its_slot,
+    _test_the_lock_excludes_a_second_caller,
+    _test_a_stale_release_cannot_drop_someone_elses_lock,
+    _test_a_lock_whose_owner_died_is_reclaimed_at_once,
+    _test_a_recycled_pid_does_not_pass_for_the_owner,
+    _test_an_unreadable_owner_still_waits_out_the_clock,
+    _test_a_reservation_holds_the_slot_and_the_branch,
+    _test_a_reservation_whose_process_died_is_reclaimable,
+    _test_prune_never_takes_a_slot_being_set_up,
+    _test_an_entry_with_no_age_and_nothing_behind_it_is_collected,
+    _test_residue_with_a_base_is_left_alone,
+    _test_residue_with_a_checkout_is_left_alone,
+    _test_an_unrecorded_count_is_not_zero,
+    _test_reconcile_leaves_a_reservation_alone,
+    _test_freeing_a_slot_keeps_its_output_base,
+    _test_freeing_a_slot_whose_directory_is_gone_still_frees_the_branch,
+    _test_a_slot_counts_the_worktrees_it_has_held,
+    _test_the_history_is_bounded,
+    _test_closing_without_a_history_is_harmless,
+    _test_age_and_idleness_answer_in_milliseconds,
+    _test_creation_age_is_not_idleness,
+    _test_freeing_a_slot_closes_its_history_entry,
+    _test_a_lease_ending_leaves_the_branch_as_the_slots_last,
+    _test_every_holder_is_reported_and_the_unanswerable_says_so,
+    _test_a_session_is_listed_once_with_every_lease_it_took,
+    _test_a_session_is_placed_from_its_live_lease_when_history_cannot,
+    _test_a_sessions_active_leases_come_before_its_released_ones,
+    _test_the_acted_on_command_names_the_project,
+    _test_no_resume_is_offered_for_a_session_the_store_does_not_have,
+    _test_a_lease_on_a_directory_that_is_gone_is_over_for_any_clone,
+    _test_a_dirty_slot_is_never_taken,
+    _test_a_lease_nothing_identifies_is_left_alone,
+    _test_a_base_once_seen_stays_remembered,
+    _test_marking_a_slot_leased_clears_what_the_state_denies,
+    _test_a_new_slot_id_never_collides,
+    _test_pools_on_disk_finds_a_pool_at_any_depth,
+    _test_pools_on_disk_is_empty_before_any_pool_exists,
+    _test_freeing_a_slot_with_no_lease_invents_no_branch,
+    _test_the_history_says_who_held_each_lease,
+    _test_a_person_leaves_no_session_in_the_history,
+    _test_a_handover_records_a_holder_without_counting_a_lease,
+    _test_how_long_a_holder_had_it,
+    _test_a_built_in_slot_is_not_dirty,
+    _test_real_work_in_a_built_in_slot_still_counts,
+    _test_a_tracked_lock_file_that_changed_is_work,
+    _test_a_symlink_pointing_elsewhere_is_work,
+    _test_a_gone_session_with_only_build_output_is_abandoned,
+    _test_a_filesystem_remote_is_not_a_pool_key,
+    _test_a_key_cannot_climb_out_of_the_pools_root,
+    _test_a_filesystem_origin_still_gets_one_pool_per_repository,
+    _test_a_lease_survives_git_not_naming_its_path,
+    _test_a_worktree_the_registry_forgot_is_adopted,
+    _test_adoption_does_not_disturb_a_reservation,
+    _test_a_lease_ends_when_the_checkout_is_deleted,
+    _test_a_lease_ends_when_git_drops_the_worktree,
+    _test_a_lease_stands_while_the_checkout_is_there,
+    _test_an_interrupted_add_takes_its_own_checkout_with_it,
+    _test_a_broken_score_hook_falls_back_to_the_built_in,
+    _test_another_clones_slot_is_found_by_its_branch,
+    _test_a_stranded_slot_is_not_counted_as_another_clones,
+    _test_push_advice_names_a_remote_the_clone_has,
+    _test_a_branch_being_set_up_names_its_reserved_slot,
+    _test_a_slot_path_that_is_a_file_is_no_checkout,
+    _test_a_read_only_checkout_is_still_removed,
+    _test_a_long_refusal_list_is_cut,
+    _test_settings_cannot_hide_work_from_the_check,
+    _test_an_exported_git_dir_does_not_redirect_the_check,
+    _test_work_status_does_not_show_still_counts,
+    _test_releasing_work_is_graded_by_whose_it_is,
+    _test_work_in_counts_every_kind_of_work,
+    _test_a_hidden_edit_with_an_unusual_name_still_counts,
+    _test_a_skip_worktree_edit_in_a_sparse_checkout_counts,
+    _test_an_embedded_repository_gitmodules_does_not_map_counts,
+    _test_a_branch_name_part_is_measured_in_bytes,
+    _test_a_session_and_its_subagents,
+    _test_a_stopped_session_is_given_time_to_come_back,
+    _test_commits_a_detached_head_left_behind_still_count,
+    _test_a_gone_clones_slots_are_adopted_where_they_can_be,
+    _test_a_registry_version_this_cli_does_not_know_is_read_only,
+    _test_a_moved_clones_lease_is_not_a_reclone_at_its_old_path,
+    _test_json_work_entries_keep_path_and_note_apart,
+    _test_detached_commits_another_worktree_reaches_are_not_lost,
+    _test_a_slot_made_with_reflogs_off_still_has_one,
+    _test_hex_and_object_ids,
+    _test_a_chain_of_lost_commits_names_one_tip,
+    _test_a_reftable_reflog_is_read,
+    _test_an_unread_reftable_reflog_on_an_unborn_branch_is_work,
+    _test_a_gitfile_naming_another_worktree_is_unreadable,
+    _test_git_that_cannot_start_is_a_failure_not_a_crash,
+    _test_a_repository_at_a_slot_path_is_not_a_slot_checkout,
+    _test_the_lock_is_never_seen_without_its_owner,
+    _test_a_worktree_nested_in_a_slot_is_work,
+    _test_lock_leftovers_are_tidied,
+    _test_a_vanished_checkouts_git_state_is_work,
+    _test_a_cherry_pick_sequence_between_picks_is_work,
+    _test_a_detached_rebase_result_counts,
+    _test_a_finished_rebases_superseded_steps_do_not_count,
+    _test_what_a_rebase_span_skips_and_what_it_keeps,
+    _test_an_emptied_slot_directory_still_has_its_admin_dirs_work,
+    _test_every_deletion_path_sees_a_vanished_slots_work,
+    _test_a_file_or_a_redirected_work_tree_at_a_slot_is_unreadable,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("worktree.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+worktree_tests = task(
+    summary = "Run the worktree pool AXL unit tests.",
+    kind = "test-worktree",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

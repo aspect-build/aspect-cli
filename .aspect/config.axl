@@ -13,6 +13,7 @@ load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
+load("@aspect//private/lib/agent_test.axl", "agent_tests")
 load("@aspect//private/lib/aspect_cloud_api_test.axl", "aspect_cloud_api_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
@@ -29,6 +30,7 @@ load("@aspect//private/lib/delivery_results_test.axl", "delivery_default_preset_
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
+load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
@@ -49,6 +51,7 @@ load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
+load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
@@ -56,12 +59,14 @@ load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
+load("@aspect//private/lib/table_test.axl", "table_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/text_test.axl", "text_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_default_preset_snapshot_tests", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_supervisor_test.axl", "watch_supervisor_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
+load("@aspect//private/lib/worktree_test.axl", "worktree_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
@@ -450,7 +455,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-repro-commands
     ctx.tasks.add(repro_commands_tests)
 
-    # gc: the removal plan and its document, --bazel-output-base selection, the
+    # gc: the removal plan and its document, selection of named bases, the
     # period flags, download-cache pruning, and removal through the trash.
     # Run with: aspect dev test-gc
     ctx.tasks.add(gc_tests)
@@ -459,6 +464,30 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-output-bases
     ctx.tasks.add(output_bases_tests)
     ctx.tasks.add(confirm_tests)
+
+    # Worktree pool: remote normalization, slot scoring, pruning eligibility and
+    # the one rule that reclaims a lease.
+    # Run with: aspect dev test-worktree
+    ctx.tasks.add(worktree_tests)
+
+    # Agent detection: the ladder that identifies the harness holding a worktree
+    # lease, and whether its session is running, resumable or gone.
+    # Run with: aspect dev test-agent
+    ctx.tasks.add(agent_tests)
+
+    # Process introspection: pid liveness, start times, and the pid-reuse case
+    # both the worktree pool and agent leases depend on.
+    # Run with: aspect dev test-process-info
+    ctx.tasks.add(process_info_tests)
+
+    # Durations in the coarsest unit that still distinguishes.
+    # Run with: aspect dev test-duration
+    ctx.tasks.add(duration_tests)
+
+    # Terminal tables: which columns a listing drops and which it keeps when
+    # empty, and how cells align.
+    # Run with: aspect dev test-table
+    ctx.tasks.add(table_tests)
 
     # Repository and branch from `.git`, against real clones and worktrees.
     # Run with: aspect dev test-git-checkout

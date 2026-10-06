@@ -1,0 +1,2205 @@
+"""A pool of git worktrees backed by Bazel output bases that stay warm.
+
+Bazel keys its server on `--workspace_directory`, so a worktree at a fresh path
+gets a cold server: a new JVM, loading and analysis from zero, and a fresh
+`external/` tree. Creating a worktree per task — which is what coding agents do
+— pays that every time and strands the output base afterwards: Bazel has no
+garbage collector for them, so one sits there until `aspect gc` or a person
+removes it.
+
+The fix is to stop letting the path move. A **slot** is a directory at a fixed
+path that holds a git worktree; the worktree inside it is destroyed and
+recreated as tasks come and go, but the path never changes, so the Bazel server
+bound to it survives — and so does its output base, which Bazel keys on that
+same path, with no flag from us.
+
+A slot is where you work, at its own path. `git worktree list` names it,
+`aspect worktree list` maps it to a branch, and `aspect worktree path <branch>`
+prints it for `cd`. Nothing outside git points at the worktree — no symlink, no
+injected flag — so nothing is left dangling if someone falls back to managing
+worktrees by hand; the registry below is bookkeeping git overrides.
+
+    ~/.aspect/worktrees/<pool>/aspect-worktree-a1b2c3
+                                           (the git worktree; path never moves)
+
+**Pools are keyed by the normalized `origin` remote**, not the clone path, so
+every clone of a repository shares one pool directory. The slots inside it are
+not shared: a slot records the git-common-dir of the clone that owns it, because
+`git worktree add` is clone-scoped, and only that clone can lease or reconcile
+it. A clone that moves, or is deleted, leaves its slots recorded for a path
+that no longer has it, and `adopt_stranded` hands them on: a free slot to any
+clone of the repository, a leased one to the clone whose git still lists its
+checkout — the moved clone — whatever is now at the recorded path. What no
+clone can take, a leased slot whose clone was deleted, is stranded: deleted by
+naming it to `prune`, with `--force=all` since its checkout cannot be read —
+from any clone of the repository, or by slot id from outside one.
+
+**Git is the source of truth; the registry is a cache.** A slot whose worktree
+git no longer knows about is free, whatever the registry says. That recovers
+from a `git worktree remove` run by hand, and from an agent that deleted its
+worktree without releasing the slot. Correctness never depends on `release`
+being called.
+
+What it does not recover from on its own is an agent that died with its checkout
+still in place: git still knows about that worktree, so the lease stands until
+somebody needs the slot. A stopped process alone is not enough — a harness
+process exits whenever someone closes a terminal, and the session is resumable
+— so the lease is given up only when a slot is wanted: when the alternative is
+growing the pool, or when `add` asks for the very branch it holds.
+`abandoned_lease` is what is safe to take back: the holder's process has
+verifiably stopped (a holder with no pid recorded never has), the grace period
+(`Worktrees.abandoned_grace_hours`) has passed since the slot's last activity,
+so a session that stopped has time to come back, and the checkout is clean. The
+clean part never bends — there is nothing uncommitted to lose, and the branch
+and its commits survive removing a worktree.
+
+**The lock covers deciding, not checking out.** Allocation picks a slot and
+records a *reservation* on it under the pool lock, then drops the lock before
+`git worktree add` — much the slowest thing it does — and retakes it only to
+turn the reservation into a lease. Two agents starting together wait on each
+other's bookkeeping rather than on each other's checkout. Both the lock and a
+reservation record the process behind them, so one abandoned by a crash is
+reclaimed at once instead of waited out, and a release that arrives late cannot
+drop a lock somebody else now holds.
+
+**The pool is bounded by pruning, not by refusing work.** Allocation reuses any
+free slot the clone owns, however badly it scores — short of one holding work,
+one whose directory will not go, and one a `score_slot` hook vetoes while the
+pool is under `max_slots` — because a bad reuse costs at worst what a cold slot
+costs and usually far less — the same refetch, minus a
+new JVM, from-zero analysis and one more stranded base. New slots therefore
+appear only when every owned slot is busy, and the pool settles at that clone's
+peak concurrency. `max_slots` is advisory for the same reason: past it `add`
+warns and proceeds, because failing on a bookkeeping budget would send the
+caller back to plain `git worktree add`.
+
+Disk is held down by idle time, but only for **free** slots: `add` drops those
+nothing has touched in `PRUNE_IDLE_DAYS`, after adopting what a moved or deleted
+clone left, and `aspect worktree prune` does the same on demand. A leased slot is never taken on idle time alone, however long,
+because a lease is a checkout someone may still want. The one exception is
+`abandoned_lease`.
+
+Nothing here is specific to a developer machine. A CI runner that builds one
+throwaway checkout per job has no use for a pool, but nothing is injected into
+Bazel to make a slot work — a slot is a `git worktree add` at a stable path — so
+there is nothing to conflict with on a runner that does want one.
+"""
+
+load("@std//hash.axl", "md5", "sha256")
+load("@std//time.axl", "time")
+load("./agent.axl", "is_running")
+load("./bazel_paths.axl", "last_used", "output_user_root")
+load("./environment.axl", "warn")
+load("./fs_tree.axl", "remove_tree")
+load("./process_info.axl", "alive", "is_same_process", "started_at")
+
+_REGISTRY_VERSION = 1
+
+# What a slot's `state` can be. `RESERVED` is the window where a slot has been
+# claimed for a branch but its worktree is still being checked out, which is the
+# whole reason the pool lock can be released for the slow part of `add`.
+FREE = "free"
+LEASED = "leased"
+RESERVED = "reserved"
+
+# Slot directory names carry this prefix. Public because `aspect gc` recognises
+# a pool's output bases by the workspace they were built for, which is one of
+# these, and a second copy of the spelling would be free to drift.
+SLOT_PREFIX = "aspect-worktree-"
+
+# Removing a pool worktree always passes `--force` twice. Once overrides a dirty
+# tree; only twice overrides a *lock*, and every leased slot holds one (see
+# `lock_reason`), as does a checkout `git worktree add` was killed in the middle
+# of. Twice also unregisters a locked worktree whose directory is already gone,
+# which `git worktree prune` never does.
+FORCE_REMOVE = ["worktree", "remove", "--force", "--force"]
+
+# The registry's filename. Named because `pools_on_disk` recognizes a pool by
+# it, and a second spelling would be free to drift from the one that writes it.
+_REGISTRY_NAME = "registry.json"
+
+# Lock acquisition: a lock directory is staged with its owner and renamed into
+# place, and a rename onto a lock that exists fails, so one that appears is a
+# lock nobody else holds. Agents allocate concurrently, so this
+# is load-bearing rather than defensive. Checkouts and `prune`'s confirmation
+# run outside the lock; what happens under it is the registry bookkeeping and
+# deleting the output bases of slots being pruned or aged out, which a minute
+# usually outlasts. A caller still waiting after that gets `pool_busy`, which
+# is retryable.
+_LOCK_ATTEMPTS = 600
+_LOCK_SLEEP_MS = 100
+
+# A lock whose owner cannot be identified is given this long before it is taken
+# to belong to a dead process. Only reached when the owner record is unreadable;
+# an owner that can be read is checked directly, which needs no timeout at all.
+# A lock is renamed into place with its owner already in it, so one without is
+# left by an older CLI, made by hand, or caught part way through being removed.
+_LOCK_STALE_MS = 10 * 1000
+
+# A free slot nothing has touched for this long is worth less than the disk it
+# holds: its server is long gone and its `external/` tree has drifted from every
+# branch anyone is still working on. Set long rather than tight because the
+# automatic pass inside `add` does not ask first — a month is past the life of
+# any plausible branch, so reclaiming at that point surprises nobody.
+PRUNE_IDLE_DAYS = 30
+
+_DAY_MS = 24 * 60 * 60 * 1000
+
+# How many past leases a slot remembers. Enough to see what a slot has been
+# holding lately, which is the question worth asking of it — a full history
+# would grow the registry forever to answer nothing extra.
+_HISTORY_LIMIT = 10
+
+# A slot id: hex characters from a digest, as many as `list` shows, and how
+# many times to draw one before deciding something is wrong.
+_SLOT_ID_LENGTH = 12
+_SLOT_ID_ATTEMPTS = 100
+
+# Variables that point git at a repository other than the one `cwd` is in. Set
+# around a git hook, or by a wrapper, they would make every question asked of a
+# slot answer for somewhere else — and a clean answer from the wrong checkout
+# is what licenses deleting the right one.
+_GIT_LOCATION_VARS = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+]
+
+def run_git(std, args: list[str], cwd: str = "") -> struct:
+    """Run `git <args>` and report the outcome rather than raising.
+
+    Callers here treat a non-zero git as data — a directory that is not a
+    repository, a clone with no `origin`, a branch that does not exist yet — so
+    whether a failure is fatal is the caller's decision, not this one's. Git
+    runs in `cwd` with `_GIT_LOCATION_VARS` removed from its environment, so
+    the repository asked about is the one `cwd` is in. `code` is git's exit
+    status, -1 where git could not be started at all — a `cwd` that a moved
+    clone took with it, say.
+    """
+    cmd = std.process.command("git").args(args).stdout("piped").stderr("piped")
+    for var in _GIT_LOCATION_VARS:
+        cmd = cmd.env(var, None)
+    if cwd:
+        cmd = cmd.current_dir(cwd)
+    err, child = catch(cmd.spawn)
+    if err != None:
+        return struct(ok = False, out = "", err = str(err), code = -1)
+    out = child.wait_with_output()
+
+    # Trailing whitespace only: `git status --porcelain` puts a meaningful space
+    # at the start of a line — ` M` is a change not yet staged — and the path
+    # starts at a fixed column after it.
+    return struct(ok = out.status.code == 0, out = out.stdout.rstrip(), err = out.stderr.strip(), code = out.status.code)
+
+def git_out(std, args: list[str], cwd: str = "") -> str:
+    """`git <args>` stdout, trimmed; "" on any failure."""
+    r = run_git(std, args, cwd)
+    return r.out if r.ok else ""
+
+# What `uncommitted_work` reports for a checkout `git status` fails in, shaped
+# as a porcelain line so it lists, refuses and serializes like any other.
+UNREADABLE_CHECKOUT = "UR (git cannot read this checkout)"
+
+# Files a build generates that nobody authored: untracked, one is Bazel's and
+# not work. One git tracks is not untracked — a change to it shows as a
+# modification, a diff somebody may want to commit, and counts.
+_GENERATED_FILES = ["MODULE.bazel.lock"]
+
+def _is_bazel_leaving(std, worktree: str, base: str, entry: str) -> bool:
+    """Whether an untracked path in a worktree is something Bazel put there.
+
+    A convenience symlink is recognized by where it points — into this slot's
+    own output base — rather than by its name, so a repo that sets
+    `--symlink_prefix` is covered without naming its prefix.
+    """
+    if entry in _GENERATED_FILES:
+        return True
+    if not base or "/" in entry:
+        return False
+    err, meta = catch(std.fs.symlink_metadata, worktree + "/" + entry)
+    if err != None or not meta.is_symlink:
+        return False
+    err, target = catch(std.fs.read_link, worktree + "/" + entry)
+    return err == None and str(target).startswith(base)
+
+def is_directory(std, path: str) -> bool:
+    """Whether `path` exists and is a directory. `std.fs.is_dir` fails on a
+    missing path rather than answering no."""
+    return std.fs.exists(path) and std.fs.is_dir(path)
+
+def _is_checkout(std, path: str) -> bool:
+    """Whether `path` is a directory with a `.git` in it. A slot path replaced
+    by a plain file is not, and asking for `<file>/.git` is an error rather
+    than a no."""
+    return is_directory(std, path) and std.fs.exists(path + "/.git")
+
+def is_hex(text: str) -> bool:
+    """Whether `text` is lowercase hex, as git prints object ids and as slot
+    ids are made. False for "", which names nothing."""
+    return text != "" and all([ch in "0123456789abcdef" for ch in text.elems()])
+
+def _is_object_id(text: str) -> bool:
+    """Whether `text` is a whole object id, SHA-1 or SHA-256, other than the
+    null id a reflog's first entry carries."""
+    return len(text) in (40, 64) and is_hex(text) and text.strip("0") != ""
+
+def _head_reflog(std, worktree: str) -> list | None:
+    """This worktree's HEAD reflog as `(commit, message)` pairs, or None when
+    it exists and cannot be read — which a caller must take as work.
+
+    Asked of git, which reads either ref backend, files or reftable. Git
+    refuses on an unborn branch, after `git switch --orphan`, which is exactly
+    where a detached HEAD's commits are easiest to leave behind; there the
+    files backend's `logs/HEAD` is read directly, each line's old and new
+    commit both. Newest first either way. A reftable reflog has no such file, and is then unreadable."""
+    listed = run_git(std, ["log", "-g", "--format=%H %gs", "HEAD", "--"], worktree)
+    if listed.ok:
+        return [(line.partition(" ")[0], line.partition(" ")[2]) for line in listed.out.splitlines() if line]
+    where = git_out(std, ["rev-parse", "--path-format=absolute", "--git-path", "logs/HEAD"], worktree)
+    raw = std.fs.try_read_to_string(where) if where and std.fs.exists(where) else None
+    if raw == None:
+        # Only git saying in so many words that there is no reflog means none;
+        # a reftable one it cannot list here, or a git that cannot run at all,
+        # is a reflog nobody read.
+        return [] if run_git(std, ["reflog", "exists", "HEAD"], worktree).code == 1 else None
+
+    # Newest first, as `git log -g` lists it: the file is oldest first.
+    entries = []
+    for line in reversed(raw.splitlines()):
+        head, _, message = line.partition("\t")
+        fields = head.split(" ")
+        if len(fields) >= 2:
+            entries.append((fields[1], message))
+            entries.append((fields[0], message))
+    return entries
+
+def _reflog_candidates(std, worktree: str) -> list[str] | None:
+    """The current HEAD when detached, whatever the branch reflogs hold — the
+    reflog has it too, unless reflogs are off or were expired — and every
+    other commit this worktree's HEAD reflog records that no branch's reflog
+    does: made at a detached HEAD, or left by `checkout`, `reset` or `rebase`.
+
+    A branch's own reflog keeps what it left behind, an amend or a rebase, so
+    those are the branch owner's choice and not counted. A rebase's steps
+    count like any other entry — a rebase at a detached HEAD has its result
+    nowhere else — except the run of step entries directly under a rebase's
+    finish or abort, which are skipped: a finish put the result on the branch,
+    and an abort is the decision to drop them. The run ends at the first entry
+    that is not a step, so nothing made meanwhile — a commit or an amend at a
+    stop — is ever skipped, and a start that was not recognised costs a false
+    refusal rather than a lost commit. An aborted `git am`'s own entries are
+    skipped down to the commit it returned to. A commit HEAD only
+    moved to, by `checkout`, also counts as kept when a remote-tracking
+    branch's reflog has it: a pull request reviewed at a detached HEAD, then
+    force-pushed over, was never only here. One made here is not excused that
+    way, since a remote's reflog is gone with the next pruning fetch. A branch
+    deleted with `-D` takes its reflog with it, so its commits count here: no
+    ref reaches them either. None when the reflog exists and could not be
+    read."""
+    if not _is_checkout(std, worktree):
+        return []
+    return _candidates_at(std, worktree)
+
+def _candidates_at(std, cwd: str) -> list[str] | None:
+    """`_reflog_candidates`, asked of git in `cwd`: a checkout, or the admin
+    directory git keeps for a worktree, which answers for its HEAD, its reflog
+    and its refs as the checkout would."""
+    worktree = cwd
+    on_branches = {}
+    for line in git_out(std, ["log", "-g", "--format=%H", "--branches", "--"], worktree).splitlines():
+        on_branches[line] = True
+    on_remotes = {}
+    for line in git_out(std, ["log", "-g", "--format=%H", "--remotes", "--"], worktree).splitlines():
+        on_remotes[line] = True
+    found = []
+    seen = {}
+    if not run_git(std, ["symbolic-ref", "--quiet", "HEAD"], worktree).ok:
+        head = git_out(std, ["rev-parse", "--verify", "--quiet", "HEAD"], worktree)
+        if head:
+            found.append(head)
+            seen[head] = True
+    reflog = _head_reflog(std, worktree)
+    if reflog == None:
+        return None
+
+    # Newest first, so a rebase's end is met before the steps it ended. Only
+    # the unbroken run of step entries under it is skipped: whatever is not a
+    # step ends the run, and is counted.
+    in_rebase = False
+    am_back = None
+    for commit, message in reflog:
+        # The action ends at the first ": ". A pull from a path holding ": "
+        # leaves its steps unrecognised, and so counted.
+        action = message.partition(": ")[0]
+        step = _sequencer_step(action)
+        if in_rebase:
+            if step:
+                in_rebase = step != "start"
+                continue
+            in_rebase = False
+        if step == "abort":
+            in_rebase = True
+            continue
+        if step == "finish":
+            in_rebase = True
+
+        # Only the entries of the session that was aborted: they stop at the
+        # commit HEAD was at before it, which is kept. The fallback reader
+        # lists each line twice, so the abort is taken from its first.
+        if action == "am --abort":
+            if am_back == None:
+                am_back = commit
+            continue
+        if am_back != None:
+            if action == "am" and commit != am_back:
+                continue
+            am_back = None
+
+        moved = action == "checkout"
+        ids = [commit]
+        if message.startswith("checkout: moving from "):
+            ids.append(message[len("checkout: moving from "):].split(" ")[0])
+        for one in ids:
+            if not _is_object_id(one) or one in seen or one in on_branches or (moved and one in on_remotes):
+                continue
+            seen[one] = True
+            found.append(one)
+    return found
+
+# The steps a rebase writes to the reflog, whatever action names it.
+_SEQUENCER_STEPS = ["start", "pick", "continue", "finish", "abort", "skip", "reword", "edit", "squash", "fixup", "reset", "label", "merge", "update-ref"]
+
+def _sequencer_step(action: str) -> str:
+    """The rebase step a reflog action records — `rebase (pick)`,
+    `rebase -i (finish)`, `pull --rebase origin main (start)` — or "" for
+    anything else. Only a `rebase` or `pull` action counts, with nothing in
+    parentheses before its step: a merge of a branch named `x(abort)` is a
+    merge. A tool's own `GIT_REFLOG_ACTION` is not recognised, so its entries
+    are counted like any other."""
+    if not action.endswith(")") or not (action.startswith("rebase") or action.startswith("pull")):
+        return ""
+    head, _, step = action.removesuffix(")").rpartition(" (")
+    if "(" in head or ")" in head:
+        return ""
+    return step if step in _SEQUENCER_STEPS else ""
+
+# Refs that keep a commit only for this worktree, and so go with it.
+_PER_WORKTREE_REFS = ["refs/worktree/*", "refs/bisect/*", "refs/rewritten/*"]
+
+def _unreachable(std, worktree: str, tips: list[str], own: str = "") -> list[str] | None:
+    """The commits `tips` reach that nothing outliving this worktree does: no
+    ref outside the per-worktree namespaces, and no other worktree's HEAD.
+    None when git could not answer, which a caller must read as work rather
+    than as none. `own` is the worktree's path where git is asked from
+    elsewhere — its admin directory — so its own HEAD is not taken for
+    another's."""
+    if not tips:
+        return []
+    others = []
+    current = ""
+    here = real_path(std, own or worktree)
+    listed = worktree_porcelain(std, worktree)
+    for line in (listed.split("\0") if "\0" in listed else listed.splitlines()):
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line.startswith("HEAD ") and real_path(std, current) != here and _is_object_id(line[5:]):
+            others.append(line[5:])
+    args = ["rev-list", "--ignore-missing"] + tips + ["--not"]
+    args = args + ["--exclude=" + glob for glob in _PER_WORKTREE_REFS] + ["--glob=refs/*"] + others
+    listed = run_git(std, args, worktree)
+    if not listed.ok:
+        return None
+    return listed.out.splitlines()
+
+def commits_only(std, worktree: str, tips: list[str] | None, own: str = "") -> int:
+    """How many commits `tips` reach that nothing outliving this worktree
+    does (`_unreachable`, with `own`). -1 when git could not say, or `tips`
+    could not be read, which counts as work."""
+    commits = None if tips == None else _unreachable(std, worktree, tips, own)
+    return -1 if commits == None else len(commits)
+
+def unreferenced_tips(std, worktree: str) -> list[str] | None:
+    """The fewest commits whose branches would keep everything removing the
+    worktree, and its HEAD reflog with it, would leave dangling: the
+    `_reflog_candidates` nothing else reaches, less those another of them
+    reaches. `git branch <name> <tip>` on each keeps the lot. Every candidate
+    when git could not say which are lost; None when the reflog itself could
+    not be read. Empty where there is no checkout."""
+    candidates = _reflog_candidates(std, worktree)
+    if candidates == None:
+        return None
+    commits = _unreachable(std, worktree, candidates)
+    if commits == None:
+        return candidates
+    lost = {c: True for c in commits}
+    tips = [tip for tip in candidates if tip in lost]
+    if len(tips) < 2:
+        return tips
+    independent = run_git(std, ["merge-base", "--independent"] + tips, worktree)
+    return independent.out.splitlines() if independent.ok and independent.out else tips
+
+def unreferenced_commits(std, worktree: str) -> int:
+    """How many commits only this worktree's HEAD reflog reaches — which
+    removing the worktree leaves dangling. -1 when git could not say, which
+    counts as work; 0 where there is no checkout."""
+    return commits_only(std, worktree, _reflog_candidates(std, worktree))
+
+# `git status` flags that no setting may weaken: untracked files are listed
+# whatever `status.showUntrackedFiles` says, and a submodule's changes count
+# whatever `submodule.<name>.ignore` says. `core.fsmonitor` is off so a stale
+# monitor cannot report a tree clean. `core.quotePath` is off, so a name
+# outside ASCII comes through as itself rather than as octal bytes, which a
+# JSON consumer could not use; git still quotes one with a control character,
+# a quote or a backslash, and the text report escapes what is left.
+_STATUS = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.quotePath=false",
+    "status",
+    "--porcelain",
+    "--untracked-files=normal",
+    "--ignore-submodules=none",
+]
+
+def uncommitted_work(std, worktree: str, base: str = "") -> list[str]:
+    """`git status --porcelain` lines for a worktree, minus Bazel's own leavings,
+    plus `hidden_work`: what removing the checkout loses, short of commits.
+
+    What a dirty check is for is protecting work, and build output is not work:
+    the convenience symlinks point into the output base and the next build
+    recreates them, and a generated lock file costs a re-resolution. Counting
+    them would make any slot that had been built in impossible to release or to
+    reclaim, which is every slot the pool is for.
+
+    Empty for a worktree that is gone, or an empty directory. A checkout git
+    cannot read — its clone moved, its index damaged, its `.git` deleted, a
+    repository of its own at the path, a `.git` naming another worktree, or a
+    `core.worktree` pointing elsewhere — reports one `UNREADABLE_CHECKOUT`
+    entry rather than none: callers that delete do so on an empty answer, and
+    work nobody could see is still work.
+    """
+    if not is_directory(std, worktree):
+        return []
+    if not std.fs.exists(worktree + "/.git"):
+        err, entries = catch(std.fs.read_dir, worktree)
+        return [UNREADABLE_CHECKOUT + ": it has no .git"] if err != None or entries else []
+
+    # A slot's checkout is a linked worktree, with a `.git` file. A `.git`
+    # directory is a repository of its own put at the slot's path, whose
+    # branches and history nothing here can vouch for.
+    if is_directory(std, worktree + "/.git"):
+        return [UNREADABLE_CHECKOUT + ": it is a repository of its own, not a worktree of this clone"]
+    status = run_git(std, _STATUS, worktree)
+    if not status.ok:
+        return [UNREADABLE_CHECKOUT + (": " + status.err.splitlines()[0] if status.err else "")]
+    elsewhere = _linked_elsewhere(std, worktree)
+    if elsewhere:
+        return [UNREADABLE_CHECKOUT + ": its .git names the worktree at " + elsewhere + ", so git reads that one's state, not this"]
+    top = git_out(std, ["rev-parse", "--show-toplevel"], worktree)
+    if top and real_path(std, top) != real_path(std, worktree):
+        return [UNREADABLE_CHECKOUT + ": git's work tree for it is " + top + " (`core.worktree`), so its state says nothing about this directory"]
+    kept = []
+    for line in status.out.splitlines():
+        if line.startswith("?? ") and _is_bazel_leaving(std, worktree, base, line[3:].strip()):
+            continue
+        if line:
+            kept.append(line)
+    return kept + hidden_work(std, worktree)
+
+def _linked_elsewhere(std, worktree: str) -> str:
+    """The checkout a linked worktree's `.git` actually names, when that is not
+    `worktree`, else "". A `.git` file copied or edited to point at another
+    worktree's admin directory makes git answer every question about that one
+    — its HEAD, its reflog, its index — so nothing seen through it is this
+    checkout's."""
+    admin = git_out(std, ["rev-parse", "--path-format=absolute", "--git-dir"], worktree)
+    common = git_out(std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], worktree)
+    if not admin or admin == common:
+        return ""
+    back = (std.fs.try_read_to_string(admin + "/gitdir") or "").strip()
+    if not back:
+        return ""
+
+    # Relative where `worktree.useRelativePaths` wrote it: to the admin directory.
+    if not back.startswith("/"):
+        back = admin + "/" + back
+    named = back.removesuffix("/.git")
+    return "" if real_path(std, named) == real_path(std, worktree) else named
+
+def _admin_dir(std, git_common_dir: str, path: str) -> str:
+    """The directory git keeps for the worktree at `path` —
+    `<common>/worktrees/<name>`, holding its HEAD, reflog and refs — or "".
+
+    Paths are compared resolved, since git canonicalizes what it records, but
+    only for an entry whose last segment is the same: resolving a path does not
+    rename the directory itself, and resolving every entry for every slot asked
+    about spawns a process per pair."""
+    err, entries = catch(std.fs.read_dir, git_common_dir + "/worktrees")
+    if err != None:
+        return ""
+    path = path.rstrip("/")
+    leaf = path.rpartition("/")[2]
+    want = None
+    for entry in entries:
+        admin = git_common_dir + "/worktrees/" + entry.path.rpartition("/")[2]
+        back = (std.fs.try_read_to_string(admin + "/gitdir") or "").strip()
+        if not back:
+            continue
+
+        # Relative where `worktree.useRelativePaths` wrote it: to the admin directory.
+        if not back.startswith("/"):
+            back = admin + "/" + back
+        named = back.removesuffix("/.git")
+        if named == path:
+            return admin
+        if named.rpartition("/")[2] != leaf:
+            continue
+        if want == None:
+            want = real_path(std, path)
+        if real_path(std, named) == want:
+            return admin
+    return ""
+
+# The first line of `vanished_work`'s answer, which says what the rest is.
+VANISHED_CHECKOUT = "VG (the checkout is gone from its directory; git still keeps this for it)"
+
+def vanished_work(std, git_common_dir: str, path: str) -> list[str]:
+    """What git still keeps for a worktree whose directory is gone or emptied,
+    that removing its registration would lose: commits only its HEAD reflog
+    reaches, refs only it has, its index's staged changes, and an operation
+    in progress. Lines as `work_in` gives them, under a
+    `VANISHED_CHECKOUT` line; empty when there is nothing, or no admin
+    directory to ask.
+
+    A slot moved away with `mv`, or deleted, still has its admin directory in
+    the clone, and git's lock on a leased one keeps it there. That directory is
+    the last thing reaching a detached HEAD's commits; dropping the
+    registration — to free the slot or the branch — deletes it."""
+    if not git_common_dir:
+        return []
+    admin = _admin_dir(std, git_common_dir, path)
+    if not admin:
+        # Listed by git with no admin directory found for it: what it keeps
+        # cannot be read, which is not the same as nothing.
+        if path in _live_worktrees(std, git_common_dir):
+            return [VANISHED_CHECKOUT, "?? (git's admin directory for it could not be found)"]
+        return []
+
+    # Git asked from a directory with no HEAD file does not take it for a git
+    # directory, and answers for the clone around it instead.
+    if not std.fs.exists(admin + "/HEAD"):
+        return [VANISHED_CHECKOUT, "?? (git's admin directory for it has no HEAD, so what it keeps cannot be read)"]
+    found = []
+    for ref in git_out(std, ["for-each-ref", "--format=%(refname)", "refs/worktree", "refs/bisect"], admin).splitlines():
+        if ref:
+            found.append("WR " + ref + "  (a ref only this worktree has)")
+
+    # The index and an operation's state live here too, not in the checkout:
+    # a slot moved mid-merge keeps its files, but its staged resolution and
+    # MERGE_HEAD go with the registration.
+    found += _in_progress(std, admin)
+
+    # No index is nothing staged: a checkout cut short before writing one, which
+    # `diff --cached` would report as everything staged for deletion.
+    staged = run_git(std, ["diff", "--cached", "--quiet"], admin).code if std.fs.exists(admin + "/index") else 0
+    if staged == 1:
+        found.append("IX (changes staged in its index, which lives with the registration)")
+    elif staged != 0:
+        found.append("IX (whether its index holds staged changes, which git could not say)")
+    candidates = _candidates_at(std, admin)
+    lost = _unreachable(std, admin, candidates, own = path) if candidates != None else None
+    if lost == None:
+        found.append("DH (commits only this worktree's HEAD reflog may reach, which git could not count)")
+    elif lost:
+        kept = {c: True for c in lost}
+        tips = [c for c in candidates if c in kept]
+        if len(tips) > 1:
+            independent = run_git(std, ["merge-base", "--independent"] + tips, admin)
+            tips = independent.out.splitlines() if independent.ok and independent.out else tips
+        found.append("DH (%d commit%s only this worktree's HEAD reaches; `git branch <name> <tip>` from the clone, for %s, keeps %s)" % (
+            len(lost),
+            "" if len(lost) == 1 else "s",
+            ("tip " + tips[0]) if len(tips) == 1 else ("each of " + ", ".join(tips[:5]) + (
+                " and %d more" % (len(tips) - 5) if len(tips) > 5 else ""
+            )),
+            "it" if len(lost) == 1 else "them",
+        ))
+    return [VANISHED_CHECKOUT] + found if found else []
+
+def work_in(std, worktree: str, base: str = "", git_common_dir: str = "") -> list[str]:
+    """Everything in a checkout that removing it would lose, as porcelain-shaped
+    lines: `uncommitted_work`, and commits only this worktree's HEAD reaches. Empty
+    means the checkout can go without asking. Files git ignores are not work:
+    whatever a repository ignores is by its own account disposable.
+
+    The one check every path that deletes a checkout unasked goes through, so
+    none of them can forget a kind of work the others count. Where the
+    checkout's directory is gone, it is `vanished_work` — what git keeps for it
+    in `git_common_dir`'s admin directory — which only a caller naming the
+    clone can ask; without one, a missing directory holds nothing it can see.
+    So is one with no `.git` in it, emptied or recreated.
+    A file where the checkout should be is `UNREADABLE_CHECKOUT`: somebody's,
+    not debris.
+    """
+    if std.fs.exists(worktree) and not is_directory(std, worktree):
+        return [UNREADABLE_CHECKOUT + ": a file is at the slot's path, not a checkout"]
+    if not is_directory(std, worktree):
+        return vanished_work(std, git_common_dir, worktree) if git_common_dir else []
+
+    # A directory with no `.git` — emptied, or recreated by hand — is a
+    # checkout gone from it as much as a missing one is, and git's admin
+    # directory for it keeps the same things.
+    if not std.fs.exists(worktree + "/.git"):
+        return uncommitted_work(std, worktree, base) + (vanished_work(std, git_common_dir, worktree) if git_common_dir else [])
+    found = uncommitted_work(std, worktree, base)
+    orphans = unreferenced_commits(std, worktree)
+    if orphans < 0:
+        found = found + ["DH (commits only this worktree's HEAD reflog may reach, which git could not count)"]
+    elif orphans:
+        found = found + ["DH (%d commit%s only this worktree's HEAD reaches)" % (orphans, "" if orphans == 1 else "s")]
+    return found
+
+def hidden_work(std, worktree: str) -> list[str]:
+    """Work in a checkout that `git status` does not report, as porcelain-shaped
+    lines: a populated submodule, whose repository lives inside this worktree's
+    git directory and goes with it; files hidden from status by
+    `--assume-unchanged` or `--skip-worktree` that are on disk; refs
+    only this worktree has (`refs/worktree/`, `refs/bisect/`); a merge,
+    rebase, cherry-pick or bisect in progress; and another worktree git lists
+    inside this one — under an ignored directory, `.claude/worktrees/` say —
+    which removing this one deletes, its own changes and HEAD reflog with it.
+
+    Counted as work, so removing such a checkout takes the same `--force` as
+    uncommitted changes — as `git worktree remove` refuses a worktree with
+    submodules at all.
+    """
+    found = []
+
+    # From the index rather than `git submodule status`, which fails outright
+    # for a gitlink `.gitmodules` does not map — an embedded repository whose
+    # commits would go with the worktree all the same.
+    for entry in git_out(std, ["ls-files", "--stage", "-z"], worktree).split("\0"):
+        meta, _, path = entry.partition("\t")
+        if meta.startswith("160000 ") and std.fs.exists(worktree + "/" + path + "/.git"):
+            found.append("SM " + path + "  (a submodule, whose repository is inside this worktree)")
+
+    # A skip-worktree file on disk is hidden whether or not the checkout is
+    # sparse: git un-skips one it finds present, unless
+    # `sparse.expectFilesOutsideOfPatterns` tells it not to.
+    for line in git_out(std, ["ls-files", "-v", "-z"], worktree).split("\0"):
+        tag, _, path = line.partition(" ")
+        hidden = (tag.islower() and tag != "") or tag == "S"
+        if hidden and std.fs.exists(worktree + "/" + path):
+            found.append("H  " + path + "  (hidden from git status by --assume-unchanged or --skip-worktree)")
+
+    for ref in git_out(std, ["for-each-ref", "--format=%(refname)", "refs/worktree", "refs/bisect"], worktree).splitlines():
+        if ref:
+            found.append("WR " + ref + "  (a ref only this worktree has)")
+
+    git_dir = git_out(std, ["rev-parse", "--absolute-git-dir"], worktree)
+    if git_dir:
+        found += _in_progress(std, git_dir)
+
+    here = real_path(std, worktree)
+    for path in _live_worktrees(std, worktree):
+        for root in [here, worktree]:
+            if path.startswith(root + "/") and is_directory(std, path):
+                found.append("NW " + path[len(root) + 1:] + "  (a worktree nested in this one, which removing it takes too)")
+                break
+    return found
+
+# What a worktree's git directory holds while an operation is half done.
+_IN_PROGRESS = [
+    ("rebase-merge", "a rebase"),
+    ("rebase-apply", "a rebase or am"),
+    ("MERGE_HEAD", "a merge"),
+    ("CHERRY_PICK_HEAD", "a cherry-pick"),
+    ("REVERT_HEAD", "a revert"),
+    ("BISECT_LOG", "a bisect"),
+    ("sequencer", "a cherry-pick or revert sequence"),
+]
+
+def _in_progress(std, git_dir: str) -> list[str]:
+    """`IP` lines for each operation half done in a worktree's git directory."""
+    return [
+        "IP " + marker + "  (" + what + " in progress)"
+        for marker, what in _IN_PROGRESS
+        if std.fs.exists(git_dir + "/" + marker)
+    ]
+
+def normalize_remote(url: str) -> str:
+    """A remote URL reduced to `host/path`, as a pool key.
+
+    The same repository is spelled at least three ways — `git@host:path.git`,
+    `ssh://git@host/path`, `https://host/path` — and a pool key has to be stable
+    across them. Mirrors on different hosts are deliberately NOT unified: a
+    GitHub and a GitLab URL for the same code become separate pools, because
+    guessing that two hosts serve one repository is a worse failure than keeping
+    two pools.
+
+    "" for a remote that is not a host and a path at all — a filesystem path, a
+    `file://` URL, or anything with a `..` in it. Those have no host to key on,
+    and a key that began with a separator or climbed out of the pools root would
+    compose into a directory the caller could not then recognize. The caller
+    keys those on a slug instead.
+    """
+    s = url.strip()
+    if not s:
+        return ""
+    had_scheme = False
+    for prefix in ["ssh://", "https://", "http://", "git://", "file://"]:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            had_scheme = True
+            break
+    if not had_scheme:
+        # scp-like `user@host:path`, the only form with a colon separating the
+        # host from a path that does not start with `/`.
+        at = s.find("@")
+        colon = s.find(":")
+        if colon > 0 and (at < 0 or at < colon):
+            s = s[:colon] + "/" + s[colon + 1:]
+    if s.startswith("/") or s.startswith(".") or s.startswith("~"):
+        return ""
+
+    at = s.find("@")
+    slash = s.find("/")
+    if at > 0 and (slash < 0 or at < slash):
+        s = s[at + 1:]
+
+    # Trailing slashes come off first, so `https://host/path.git/` reduces the
+    # same way `https://host/path.git` does.
+    s = s.rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-len(".git")]
+    key = s.rstrip("/").lower()
+    if ".." in key.split("/"):
+        return ""
+    return key
+
+def slug(s: str) -> str:
+    """Arbitrary text as a lowercase, filesystem-safe token.
+
+    Used for a git dir standing in as a pool key, so it has to be total:
+    anything outside `[a-z0-9-]` becomes a dash, and leading and trailing
+    dashes come off the result.
+    """
+    out = ""
+    for ch in s.elems():
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-":
+            out += ch
+        elif ch >= "A" and ch <= "Z":
+            out += ch.lower()
+        else:
+            out += "-"
+    return out.strip("-") or "worktree"
+
+def pools_root_of(home: str) -> str:
+    """Where every pool lives, under an explicit home directory.
+
+    Separate from `pools_root` because a caller matching a path against the pool
+    root has to try more than one spelling of home: a symlinked `/Users` and
+    `/System/Volumes/Data/Users` name the same directory but do not compare
+    equal.
+    """
+    return home + "/.aspect/worktrees"
+
+def pools_root(std) -> str:
+    """Where every pool lives. One place, so a reaper can see all of them.
+
+    Under home with its symlinks resolved, because git reports worktree paths
+    resolved, and every comparison between a slot path built here and one git
+    lists has to see the same string.
+    """
+    return real_path(std, pools_root_of(std.env.home_dir()))
+
+def real_path(std, path: str) -> str:
+    """`path` with symlinks resolved, or as given where `realpath` cannot say.
+
+    Resolved through its deepest existing directory, so a path not created yet
+    — the pools root before the first slot — is spelled as it will be once it
+    exists.
+    """
+    head = path
+    tail = ""
+    for _ in range(path.count("/")):
+        if std.fs.exists(head):
+            break
+        head, _, last = head.rpartition("/")
+        tail = "/" + last + tail
+    out = std.process.command("realpath").args([head]).stdout("piped").stderr("null").spawn().wait_with_output()
+    resolved = out.stdout.strip() if out.status.code == 0 else ""
+    return (resolved + tail) if resolved else path
+
+# How many path segments below the pools root a pool id may have. `host/org/repo`
+# is three; a GitLab subgroup adds one or two. Past this a directory is not
+# treated as a pool, which keeps a stray tree under the root from being walked
+# forever.
+_POOL_ID_DEPTH = 8
+
+def pools_on_disk(std) -> list[dict]:
+    """Every pool on this machine, ordered by id.
+
+    A pool is a directory under the pools root containing a registry, at
+    whatever depth — the id is the path below the root, and that is three
+    segments for a normal remote and more for a nested group. The registry is
+    the marker rather than the depth.
+
+    `git_common_dir` is empty, because no clone was consulted: that is the whole
+    point of listing pools a clone does not own, and leaving it empty is what
+    stops `reconcile` from judging slots against the wrong object store. The
+    caller supplies its own pool dict for the one it does own.
+    """
+    root = pools_root(std)
+    if not std.fs.exists(root):
+        return []
+
+    found = []
+    frontier = [""]
+    for _ in range(_POOL_ID_DEPTH):
+        deeper = []
+        for rel in frontier:
+            at = root + ("/" + rel if rel else "")
+            err, entries = catch(std.fs.read_dir, at)
+            if err != None:
+                continue
+            for entry in entries:
+                if not entry.is_dir:
+                    continue
+                child = (rel + "/" + entry.path) if rel else entry.path
+                if std.fs.exists(at + "/" + entry.path + "/" + _REGISTRY_NAME):
+                    found.append(child)
+
+                    # Not into what could be a slot or a lock: a pool that lost its
+                    # registry still holds checkouts, whose contents are not pools.
+
+                elif not entry.path.startswith(SLOT_PREFIX) and not entry.path.startswith(".lock"):
+                    deeper.append(child)
+        frontier = deeper
+        if not frontier:
+            break
+
+    return [
+        {"id": id, "dir": root + "/" + id, "git_common_dir": "", "remote": ""}
+        for id in sorted(found)
+    ]
+
+def pool_of(std, cwd: str) -> dict:
+    """The pool this directory belongs to, or an empty dict outside a repo.
+
+    `git_common_dir` collapses every worktree of a clone onto one value, which
+    is exactly the set of slots that clone can own.
+    """
+    common = git_out(std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
+    if not common:
+        return {}
+    origin = git_out(std, ["remote", "get-url", "origin"], cwd)
+    pool_id = normalize_remote(origin)
+    if not pool_id:
+        # Either there is no origin, or it is a filesystem path rather than a
+        # host and a path. Keying on a slug keeps every clone of the same local
+        # repository in one pool and keeps the key free of separators; with no
+        # origin at all the clone's own git dir is the most that can be said,
+        # and `list` says so.
+        pool_id = "local/" + slug(origin or common)
+    return {
+        "id": pool_id,
+        "git_common_dir": common,
+        "remote": origin,
+        "dir": pools_root(std) + "/" + pool_id,
+    }
+
+def _digest(s: str) -> str:
+    """Hex sha256 of a string. `sha256()` is a streaming hasher, not a one-shot
+    function."""
+    h = sha256()
+    h.update(s)
+    return h.hexdigest()
+
+def _lock_dir(pool_dir: str) -> str:
+    return pool_dir + "/.lock"
+
+def _lock_owner_path(pool_dir: str) -> str:
+    return _lock_dir(pool_dir) + "/owner.json"
+
+def owner_record(std) -> dict:
+    """This process, as the holder of a lock or a reservation.
+
+    A pid on its own is ambiguous — pids are reused, and a recorded one outlives
+    the process that wrote it — so the start time goes in beside it, which is
+    exactly what `is_same_process` settles. `token` is the pair as one string,
+    for the holder to prove it still owns what it took.
+    """
+    pid = std.process.id()
+    start = started_at(std, pid)
+    return {"token": "%d:%s" % (pid, start), "pid": pid, "started_at": start}
+
+def _held_by_a_live_process(std, record: dict) -> bool:
+    """Whether the process in a lock or reservation record is still running.
+
+    A record with no usable pid cannot vouch for anything, so it counts as gone:
+    the alternative is state that nothing is allowed to clean up.
+    """
+    pid = record.get("pid", 0)
+    if type(pid) != "int" or pid <= 0:
+        return False
+    return is_same_process(std, pid, record.get("started_at", ""))
+
+def _lock_owner(std, pool_dir: str) -> dict:
+    """Who holds the pool lock, or an empty dict if that cannot be read."""
+    raw = std.fs.try_read_to_string(_lock_owner_path(pool_dir))
+    if not raw:
+        return {}
+    owner = json.try_decode(raw)
+    return owner if type(owner) == "dict" else {}
+
+def _lock_abandoned(std, pool_dir: str, owner: dict) -> bool:
+    """Whether the lock's holder is gone, so taking it from them loses nothing.
+
+    `owner` is the record as the caller read it, so the lock judged is the lock
+    a steal then compares against. The owner record answers directly: a holder
+    whose process has exited is never coming back to release it, whatever the
+    clock says. The directory's age is the fallback for a lock whose owner
+    cannot be read — a process that died between creating the directory and
+    recording itself in it. An age that cannot be established is never called
+    abandoned, because reclaiming a live lock is worse than waiting.
+    """
+    if owner:
+        return not _held_by_a_live_process(std, owner)
+
+    # `modified` is MICROSECONDS since the epoch, and None where the platform
+    # cannot report it.
+    err, meta = catch(std.fs.metadata, _lock_dir(pool_dir))
+    if err != None or meta.modified == None:
+        return False
+    return time.now_ms() - (meta.modified // 1000) > _LOCK_STALE_MS
+
+def _take_lock(std, pool_dir: str) -> str:
+    """Create the lock directory and record this process in it, returning the
+    token that releases it, or "" if somebody else has it.
+
+    The lock is a directory, made aside and renamed into place: renaming onto
+    a lock that exists, owner and all, fails, which is the whole mechanism —
+    two agents racing to allocate cannot both succeed.
+    """
+
+    # Built aside with its owner recorded, then renamed into place: a lock is
+    # never seen without an owner, however long the write takes or whether it
+    # fails. `rename` onto an existing lock fails, since it holds its owner.
+    record = owner_record(std)
+    staged = _lock_dir(pool_dir) + ".new-" + record["token"].replace(":", "-").replace(" ", "-")
+    catch(std.fs.remove_dir_all, staged)
+    if catch(std.fs.create_dir, staged)[0] != None:
+        return ""
+    if catch(std.fs.write, staged + "/owner.json", json.encode(record))[0] != None:
+        catch(std.fs.remove_dir_all, staged)
+        return ""
+    if std.fs.exists(_lock_dir(pool_dir)) or catch(std.fs.rename, staged, _lock_dir(pool_dir))[0] != None:
+        catch(std.fs.remove_dir_all, staged)
+        return ""
+    return record["token"]
+
+def _steal_lock(std, pool_dir: str, judged: str) -> bool:
+    """Remove an abandoned lock, returning whether this caller did. `judged` is
+    the owner token the caller found dead, "" for a lock judged by age.
+
+    Removing in place races: two callers that both judged the old holder dead
+    can each remove the lock, and the second removes the one the first has
+    just taken. Renaming is atomic, so only one caller moves the lock aside;
+    and unless what it moved is the very lock it judged — same owner token, or
+    no owner for a lock judged by age — it is put back rather than removed: a
+    live holder may have taken it in between, before or after recording itself.
+    """
+    aside = _lock_dir(pool_dir) + ".stale-" + owner_record(std)["token"].replace(":", "-").replace(" ", "-")
+    if catch(std.fs.rename, _lock_dir(pool_dir), aside)[0] != None:
+        return False
+    moved = std.fs.try_read_to_string(aside + "/owner.json")
+    record = json.try_decode(moved) if moved else None
+    same = (record.get("token", "") == judged) if type(record) == "dict" else judged == ""
+    if not same:
+        if catch(std.fs.rename, aside, _lock_dir(pool_dir))[0] != None:
+            warn(std, "moved a live worktree pool lock aside and could not put it back, at " + aside)
+        return False
+    catch(std.fs.remove_dir_all, aside)
+    return True
+
+def _tidy_lock_leftovers(std, pool_dir: str) -> None:
+    """Put back a live lock that a steal moved aside, and remove what dead
+    processes left beside the lock.
+
+    A steal that finds it moved a live holder's lock puts it back; one killed
+    in between, or beaten to the empty place, leaves it aside, with its holder
+    still at work. Restoring it before anyone takes the place keeps that holder
+    the only one. Staged and moved-aside directories whose owner has exited are
+    nobody's, and go.
+    """
+    err, entries = catch(std.fs.read_dir, pool_dir)
+    if err != None:
+        return
+    mine = owner_record(std)["token"]
+    for entry in entries:
+        name = entry.path.rpartition("/")[2]
+        if not (name.startswith(".lock.new-") or name.startswith(".lock.stale-")):
+            continue
+        path = pool_dir + "/" + name
+        raw = std.fs.try_read_to_string(path + "/owner.json")
+        owner = json.try_decode(raw) if raw else None
+        live = type(owner) == "dict" and _held_by_a_live_process(std, owner)
+        ours = type(owner) == "dict" and owner.get("token", "") == mine
+
+        # This process's own lock, moved aside, it has already let go of.
+        if ours and name.startswith(".lock.stale-"):
+            catch(std.fs.remove_dir_all, path)
+        elif live and name.startswith(".lock.stale-") and not std.fs.exists(_lock_dir(pool_dir)):
+            catch(std.fs.rename, path, _lock_dir(pool_dir))
+        elif not live:
+            catch(std.fs.remove_dir_all, path)
+
+def acquire(std, pool_dir: str, attempts: int = _LOCK_ATTEMPTS) -> str:
+    """Take the pool's lock and return the token that releases it, or "".
+
+    The holder records itself inside the lock, so one left behind by a process
+    that died is reclaimed the moment the next caller looks rather than waited
+    out — the alternative is a pool that wedges on a crash. Reclaiming is
+    progress, not contention, so it is followed by another attempt instead of
+    costing one.
+    """
+    std.fs.create_dir_all(pool_dir)
+    _tidy_lock_leftovers(std, pool_dir)
+    for _ in range(attempts):
+        token = _take_lock(std, pool_dir)
+        if token:
+            return token
+        owner = _lock_owner(std, pool_dir)
+        if _lock_abandoned(std, pool_dir, owner) and _steal_lock(std, pool_dir, owner.get("token", "")):
+            warn(std, "worktree pool lock belonged to a process that is gone; reclaiming it")
+
+            # A second caller can win the race to retake it, which is ordinary
+            # contention from here on.
+            token = _take_lock(std, pool_dir)
+            if token:
+                return token
+            continue
+        time.sleep(_LOCK_SLEEP_MS)
+    return ""
+
+def release(std, pool_dir: str, token: str) -> None:
+    """Drop the lock, unless it has since passed to another caller.
+
+    `add` releases the lock before checking a worktree out and takes it again
+    afterwards, so a release can arrive when the lock directory belongs to
+    somebody else — and removing theirs would put two callers in the registry at
+    once. An empty token is a lock already dropped. An owner that cannot be read
+    is assumed to be this caller, because the alternative is a pool nothing can
+    unlock.
+    """
+    if not token:
+        return
+    owner = _lock_owner(std, pool_dir)
+    if not owner or owner.get("token", "") == token:
+        catch(std.fs.remove_dir_all, _lock_dir(pool_dir))
+
+    # A steal that moved this lock aside and did not put it back leaves it
+    # there; it is this caller's to drop, not anybody's to restore.
+    err, entries = catch(std.fs.read_dir, pool_dir)
+    for entry in (entries if err == None else []):
+        name = entry.path.rpartition("/")[2]
+        if name.startswith(".lock.stale-"):
+            raw = std.fs.try_read_to_string(pool_dir + "/" + name + "/owner.json")
+            aside = json.try_decode(raw) if raw else None
+            if type(aside) == "dict" and aside.get("token", "") == token:
+                catch(std.fs.remove_dir_all, pool_dir + "/" + name)
+
+def registry_path(pool_dir: str) -> str:
+    """Where a pool keeps its registry. The one place the file is named, for
+    this library and for anything else that reads a pool."""
+    return pool_dir + "/" + _REGISTRY_NAME
+
+def _warn_once(std, about: str, message: str) -> None:
+    """`warn`, once per process for `about`. The registry is read more than
+    once per command, and the process environment is the one place a "said
+    already" can live — which every child process inherits, so a nested
+    `aspect` run says it no more than once either."""
+    said = "ASPECT_WORKTREE_WARNED_" + _digest(about)[:16]
+    if not std.env.var(said):
+        std.env.set_var(said, "1")
+        warn(std, message)
+
+def read_registry(std, pool_dir: str) -> dict:
+    """The pool's registry, or an empty one. Never fails: a registry that cannot
+    be parsed is a cache we can rebuild, not state worth stopping for.
+
+    One a newer CLI wrote — a higher `version` — is read as far as this version
+    understands it and marked `read_only`, so `write_registry` never drops what
+    this version does not know; a `version` that is not a positive int, which
+    no CLI writes, is damage like any other. In a newer registry, entries in a state it does
+    not know are kept for the same reason, and skipped by everything that acts
+    on slots. In a current one they are dropped, with a warning.
+
+    An empty answer says why: `absent` for a pool with no registry yet, and
+    `unreadable` for a damaged one. A reader that would act on a slot's *absence*
+    — `aspect gc` deciding nothing claims a base — must not on either.
+    """
+    if not std.fs.exists(registry_path(pool_dir)):
+        return {"version": _REGISTRY_VERSION, "slots": {}, "absent": True}
+    raw = std.fs.try_read_to_string(registry_path(pool_dir)) or ""
+
+    # Written by rename, so an empty file is damage as much as garbage is.
+    parsed = json.try_decode(raw) if raw.strip() else None
+    if parsed == None or type(parsed) != "dict" or type(parsed.get("slots")) != "dict":
+        _warn_once(std, pool_dir, "worktree registry at " + pool_dir + " is unreadable, so its slots are not listed; " +
+                                  "the next command that changes this pool rebuilds it from git, keeping every slot " +
+                                  "git still lists and forgetting the free ones")
+        return {"version": _REGISTRY_VERSION, "slots": {}, "unreadable": True}
+
+    version = parsed.get("version", _REGISTRY_VERSION)
+    if type(version) != "int" or version < 1:
+        _warn_once(std, pool_dir, "worktree registry at " + pool_dir + " records a version no aspect CLI writes, so " +
+                                  "it is read as unreadable; the next command that changes this pool rebuilds it from git")
+        return {"version": _REGISTRY_VERSION, "slots": {}, "unreadable": True}
+    newer = version > _REGISTRY_VERSION
+    if newer:
+        parsed["read_only"] = True
+
+    # A slot id becomes a path that is deleted, so one that could name anything
+    # outside the pool — `..`, a separator — is dropped rather than trusted. An
+    # entry of the wrong shape is dropped too, or every command would fail on it.
+    for slot_id in list(parsed["slots"].keys()):
+        slot = parsed["slots"][slot_id]
+        shaped = _safe_slot_id(slot_id) and type(slot) == "dict" and type(slot.get("state")) == "string"
+        known = shaped and slot["state"] in [FREE, LEASED, RESERVED]
+        if newer and shaped and not known:
+            continue
+        if not known:
+            _warn_once(
+                std,
+                pool_dir + "\0" + str(slot_id),
+                "worktree registry at " + pool_dir + " has an unusable slot entry %r; ignoring it" % slot_id,
+            )
+            parsed["slots"].pop(slot_id)
+            continue
+        for key, kind, default in _SLOT_FIELDS:
+            if key in slot and type(slot[key]) != kind:
+                slot[key] = default
+        slot["history"] = [_clean_entry(e) for e in slot.get("history", []) if type(e) == "dict"]
+        if type(slot.get("lease")) == "dict":
+            slot["lease"] = _clean_entry(slot["lease"])
+        elif slot["state"] == LEASED:
+            slot["lease"] = {"name": "", "since": 0, "agent": {}}
+        else:
+            slot["lease"] = None
+        if type(slot.get("reservation")) == "dict":
+            slot["reservation"] = _clean_entry(slot["reservation"])
+        elif slot["state"] == RESERVED:
+            slot["state"] = FREE
+            slot["reservation"] = None
+        else:
+            slot["reservation"] = None
+    return parsed
+
+# The fields of a lease, a reservation or a history entry, and of the agent
+# record inside one, with the type each is read as and its reset value.
+_ENTRY_FIELDS = [
+    ("name", "string", ""),
+    ("token", "string", ""),
+    ("pid", "int", 0),
+    ("started_at", "string", ""),
+    ("since", "int", 0),
+    ("leased_ms", "int", 0),
+    ("released_ms", "int", 0),
+    ("detached", "string", ""),
+    ("base", "string", ""),
+    ("base_sha", "string", ""),
+]
+_AGENT_FIELDS = [
+    ("kind", "string", ""),
+    ("id", "string", ""),
+    ("parent_id", "string", ""),
+    ("id_source", "string", ""),
+    ("harness_id", "string", ""),
+    ("pid", "int", 0),
+    ("pid_start", "string", ""),
+    ("cwd", "string", ""),
+    ("project", "string", ""),
+    ("source", "string", ""),
+    ("seen_ms", "int", 0),
+]
+
+def _clean_entry(entry: dict) -> dict:
+    """`entry` with every field of the wrong type reset, its agent included."""
+    for key, kind, default in _ENTRY_FIELDS:
+        if key in entry and type(entry[key]) != kind:
+            entry[key] = default
+    agent = entry.get("agent")
+    agent = agent if type(agent) == "dict" else {}
+    for key, kind, default in _AGENT_FIELDS:
+        if key in agent and type(agent[key]) != kind:
+            agent[key] = default
+    entry["agent"] = agent
+    return entry
+
+# The fields a slot entry is read as, with the type each must have and what a
+# wrong-typed one is reset to.
+_SLOT_FIELDS = [
+    ("owner_git_dir", "string", ""),
+    ("last_branch", "string", ""),
+    ("last_commit", "string", ""),
+    ("lock_digest", "string", ""),
+    ("created_ms", "int", 0),
+    ("lease_count", "int", 0),
+    ("had_base", "bool", False),
+    ("history", "list", []),
+]
+
+def _safe_slot_id(slot_id) -> bool:
+    """Whether `slot_id` is a single, plain path component."""
+    if type(slot_id) != "string" or not slot_id:
+        return False
+    for ch in slot_id.elems():
+        if not (ch.isalnum() or ch in "-_"):
+            return False
+    return True
+
+def write_registry(std, pool_dir: str, registry: dict) -> None:
+    """Replace the registry atomically, so a crash mid-write cannot leave a
+    half-written file where the pool's state should be. Refused for a registry
+    a newer CLI wrote, which this one would rewrite without what it does not
+    understand."""
+    if registry.get("read_only", False):
+        fail("the worktree registry at " + pool_dir + " was written by a newer aspect CLI; run this " +
+             "command with that version, or upgrade, rather than let this one rewrite it")
+    tmp = registry_path(pool_dir) + ".tmp"
+    kept = {k: v for k, v in registry.items() if k not in ["absent", "unreadable", "read_only"]}
+    std.fs.write(tmp, json.encode(kept, indent = 2) + "\n")
+    std.fs.rename(tmp, registry_path(pool_dir))
+
+def new_slot_record(pool: dict) -> dict:
+    """A fresh slot's registry entry: owned by this clone, never used yet.
+
+    `created_ms` is a floor for `slot_idle_days`, not a record of use. A slot
+    nothing has built in yet has no Bazel state to date, and without the floor
+    it would read as infinitely old and be pruned before its first build
+    finished.
+    """
+    return {
+        "owner_git_dir": pool["git_common_dir"],
+        "state": FREE,
+        "last_commit": "",
+        "last_branch": "",
+        "lock_digest": "",
+        "created_ms": time.now_ms(),
+        "lease_count": 0,
+        # Whether an output base has ever been seen for this slot, recorded by
+        # `add` and `release`. A lease count cannot stand in for it: a slot
+        # leased twice without a build never had a base.
+        "had_base": False,
+        "history": [],
+    }
+
+def _append_holder(slot: dict, name: str, agent: dict) -> None:
+    """Add an open history entry naming who is taking the slot.
+
+    The holder keeps its kind, its session id — and, for a subagent, the session
+    it ran in — and the directory it ran in, and nothing else. A finished
+    session's pid is not evidence of anything and keeping it would invite
+    reading it as though it were; the directory is a different kind of fact —
+    harnesses file a session under the project it was opened in, so it is what
+    lets a past holder's session be named again.
+    """
+    history = (slot.get("history") or []) + [{
+        "name": name,
+        "agent": {
+            "kind": agent.get("kind", ""),
+            "id": agent.get("id", ""),
+            "parent_id": agent.get("parent_id", ""),
+            "id_source": agent.get("id_source", ""),
+            "harness_id": agent.get("harness_id", ""),
+            "cwd": agent.get("cwd", ""),
+        } if agent else {},
+        "leased_ms": time.now_ms(),
+        "released_ms": 0,
+    }]
+    slot["history"] = history[-_HISTORY_LIMIT:]
+
+def record_lease(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Count a worktree created in this slot, and record who took it.
+
+    Counted per checkout rather than per holder, which is what makes the count
+    a measure of reuse: it is how many cold starts this slot has saved.
+    """
+    slot = registry["slots"][slot_id]
+    slot["lease_count"] = slot.get("lease_count", 0) + 1
+    _append_holder(slot, name, agent)
+
+def record_handover(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Record a second holder taking over the checkout already in this slot.
+
+    No lease is counted — the slot did not turn over, and nothing was rebuilt —
+    but a different session is now responsible for it, which is the question the
+    history exists to answer.
+    """
+    slot = registry["slots"][slot_id]
+    close_lease(registry, slot_id)
+    _append_holder(slot, name, agent)
+
+def held_for_ms(entry: dict) -> int:
+    """How long a history entry's holder had the slot, so far if it still does."""
+    started = entry.get("leased_ms", 0)
+    if not started:
+        return 0
+    return (entry.get("released_ms", 0) or time.now_ms()) - started
+
+def close_lease(registry: dict, slot_id: str) -> None:
+    """Close the slot's open history entry, if it has one.
+
+    Tolerates there being none, which is what a slot freed twice looks like.
+    """
+    history = registry["slots"][slot_id].get("history") or []
+    if history and not history[-1].get("released_ms", 0):
+        history[-1]["released_ms"] = time.now_ms()
+
+def mark_free(registry: dict, slot_id: str) -> str:
+    """Record that a slot's lease has ended, returning the branch it held.
+    Mutates `registry`.
+
+    The bookkeeping half of a lease ending, shared by every way one can end: a
+    `release` drops the worktree first, reclaiming an abandoned lease or freeing
+    a slot drops it alongside, and `reconcile` finds that git has already lost
+    it. The branch held becomes `last_branch`, so the
+    slot still scores well for that branch's next `add` — the Bazel state it
+    keeps is specific to what was built in it, and that is the whole reason to
+    keep the slot. `reservation` is cleared alongside `lease` so that a slot
+    never carries either one unless its state says it should.
+
+    The commit is not set here: only a caller that still has the worktree can
+    read it, and `release` is the one that does.
+    """
+    close_lease(registry, slot_id)
+    slot = registry["slots"][slot_id]
+    held = (slot.get("lease") or {}).get("name", "")
+    slot["state"] = FREE
+    slot["lease"] = None
+    slot["reservation"] = None
+    if held:
+        slot["last_branch"] = held
+    return held
+
+def observe_base(registry: dict, slot_id: str, present: bool) -> None:
+    """Remember that this slot has had a Bazel output base. Mutates `registry`.
+
+    Once seen, never unseen: a base that exists now and is gone later is the
+    one thing worth reporting about it, and a slot that never had one must not
+    be told its state was taken. So this only ever sets the flag.
+
+    Called wherever a base is looked at: `add` and `release` persist it, and a
+    listing uses it for its own output. A lease count cannot stand in for the
+    fact, and recording it only when a lease ends would miss every slot whose
+    leases ended some other way.
+    """
+    if present and not registry["slots"][slot_id].get("had_base", False):
+        registry["slots"][slot_id]["had_base"] = True
+
+def mark_leased(registry: dict, slot_id: str, name: str, agent: dict) -> None:
+    """Record that a slot holds a worktree for `name`, taken by `agent`.
+    Mutates `registry`.
+
+    The counterpart to `mark_free`, and the only place a lease is written, so a
+    lease and the state that admits it cannot drift apart. Any reservation goes:
+    one is a promise to produce the worktree that now exists.
+
+    The history entry is the caller's to record first, because only the caller
+    knows which kind of claim this is — a fresh checkout counts as a lease, a
+    handover of the checkout already there does not.
+
+    `last_commit` and `lock_digest` describe the tree the slot held when it was
+    last freed, which is what scoring compares a free slot on. A lease moves the
+    tree on, so they are cleared here and recorded again by whatever frees the
+    slot with the worktree in hand; a lease that ends without one leaves them
+    empty rather than describing a tree the slot no longer has.
+    """
+    slot = registry["slots"][slot_id]
+    slot["last_commit"] = ""
+    slot["lock_digest"] = ""
+    slot["state"] = LEASED
+    slot["reservation"] = None
+    slot["lease"] = {"name": name, "since": time.now_ms(), "agent": agent}
+
+def slot_age_ms(slot: dict) -> int:
+    """How long this slot has existed, in milliseconds.
+
+    Distinct from `slot_idle_ms`, which is idleness and resets whenever Bazel
+    touches the slot's output base. This one only ever grows, and is what "how
+    long has this slot been around" means.
+    """
+    created = slot.get("created_ms", 0)
+    return (time.now_ms() - created) if created else 0
+
+def slot_created_days(slot: dict) -> int:
+    """`slot_age_ms` in whole days, rounded down."""
+    return slot_age_ms(slot) // _DAY_MS
+
+def parse_worktree_list(porcelain: str) -> dict:
+    """`{path: branch}` from `git worktree list --porcelain`, in git's order and
+    spelled as git spells the paths.
+
+    Read as `-z` writes it, each field ended by a NUL, wherever there is one:
+    a path may hold a newline, which the line form would split into a second,
+    made-up record. The line form is still read, for a git that has no `-z`.
+
+    The branch is "" for a detached head: a slot taken with `--detach`, or one
+    somebody detached by hand.
+    """
+    found = {}
+    at = ""
+    for line in (porcelain.split("\0") if "\0" in porcelain else porcelain.splitlines()):
+        if line.startswith("worktree "):
+            at = line[len("worktree "):]
+            found[at] = ""
+        elif line.startswith("branch refs/heads/") and at:
+            found[at] = line[len("branch refs/heads/"):].strip()
+    return found
+
+def worktree_porcelain(std, cwd: str) -> str:
+    """`git worktree list --porcelain`, NUL-separated where git can (2.36 on),
+    and as lines where it cannot, for `parse_worktree_list`."""
+    listed = run_git(std, ["worktree", "list", "--porcelain", "-z"], cwd)
+    return listed.out if listed.ok else git_out(std, ["worktree", "list", "--porcelain"], cwd)
+
+def _live_worktrees(std, git_common_dir: str) -> dict:
+    """`parse_worktree_list` for every worktree of this clone."""
+    return parse_worktree_list(worktree_porcelain(std, git_common_dir))
+
+def _is_our_worktree(std, pool: dict, path: str) -> bool:
+    """Whether git says a worktree of *this* clone is at `path`.
+
+    Asked only when `git worktree list` named nothing matching a slot, which
+    means either the worktree is gone or the two sides spell the same directory
+    differently. Asking git from inside the directory settles it without
+    comparing paths at all: this answer and `pool["git_common_dir"]` are both
+    git's own, so they agree on spelling by construction.
+    """
+    if not is_directory(std, path):
+        return False
+    common = git_out(std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], path)
+    return common != "" and common == pool["git_common_dir"]
+
+def _unreadable_checkout(std, path: str) -> bool:
+    """Whether `path` holds a checkout git cannot read — its `.git` pointing
+    at an object store that moved or was re-cloned. Such a checkout may hold
+    work nobody can inspect, so a lease on it stands rather than freeing a slot
+    that would then be cleared."""
+    return _is_checkout(std, path) and not run_git(std, ["rev-parse", "--git-dir"], path).ok
+
+def drop_vanished_leases(std, pool: dict, registry: dict) -> dict:
+    """Free every leased slot whose directory is gone — unless git still keeps
+    work for it (`vanished_work`), asked of the clone that owns the slot while
+    that clone exists. Mutates `registry`.
+
+    The half of `reconcile` that needs no clone of its own, so it can be
+    applied to a pool read from anywhere. A lease is a claim on a checkout, and
+    a directory that does not exist holds no files — but its owner's git can
+    still hold commits only it reached, which are asked of that clone, and kept
+    while it says so. A slot whose owning clone is gone has nothing left to ask.
+    What it cannot judge is a directory that is still there, which is where git
+    is the authority and `reconcile` takes over.
+    """
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] == LEASED and not is_directory(std, slot_path(pool, slot_id)):
+            owner = slot.get("owner_git_dir", "") or pool["git_common_dir"]
+            if owner and std.fs.exists(owner) and vanished_work(std, owner, slot_path(pool, slot_id)):
+                continue
+            mark_free(registry, slot_id)
+    return registry
+
+def reconcile(std, pool: dict, registry: dict) -> dict:
+    """Bring `registry` back in line with git, in place, in both directions.
+
+    Git is the authority on whether a worktree exists, so a slot git has
+    forgotten is free regardless of what the registry claims — which is what
+    recovers from a hand-run `git worktree remove`, with no lease protocol and
+    no timeouts. A worktree the *registry* has forgotten is adopted for the same
+    reason: an unreadable registry starts over by design, and without this the
+    pool would report one of its own slots as a worktree it does not manage.
+
+    A lease is kept only while the checkout is still there and git agrees it is
+    a worktree of this clone — or git cannot read it at all, which is no
+    evidence the work in it is gone — and it follows the branch git has there: after a
+    `git switch` in the slot, the lease is named for the branch now holding the
+    work, which is the name every command looks it up and reports it by.
+
+    A missing directory ends a lease whatever git's list says — git keeps
+    listing a worktree until something removes it — unless git still keeps
+    work for it, which `drop_vanished_leases` asks the owning clone. A directory that is there outranks git's silence about
+    it, since the list is matched by path and two
+    spellings of one directory would otherwise read as every lease having ended
+    — which hands the next caller an occupied slot to force-remove.
+
+    Only slots this clone owns are judged. A `git worktree list` answers for one
+    object store, so another clone's lease is invisible here rather than over.
+    Reserved slots are left alone: a reservation means the worktree does not
+    exist *yet*, so git's silence about it is expected rather than evidence, and
+    `reservation_abandoned` is what judges those.
+
+    A pool read with no clone to ask — `git_common_dir` empty — gets only
+    `drop_vanished_leases`, the half that needs no clone of its own.
+    """
+    drop_vanished_leases(std, pool, registry)
+    if not pool["git_common_dir"]:
+        return registry
+    live = _live_worktrees(std, pool["git_common_dir"])
+    slots = registry["slots"]
+
+    for slot_id in slots:
+        slot = slots[slot_id]
+        if slot["state"] != LEASED:
+            continue
+        if slot.get("owner_git_dir", "") != pool["git_common_dir"]:
+            continue
+        path = slot_path(pool, slot_id)
+        if path in live:
+            _follow_switch(slot["lease"], live[path])
+            continue
+        if _is_our_worktree(std, pool, path) or _unreadable_checkout(std, path):
+            continue
+        mark_free(registry, slot_id)
+
+    # The other direction: a worktree in one of this clone's slots that the
+    # registry does not account for. Leased under the branch git has, with no
+    # agent, because who took it is not known.
+    prefix = pool["dir"] + "/" + SLOT_PREFIX
+    for path in live:
+        if not path.startswith(prefix):
+            continue
+
+        # Git lists a worktree whose directory is gone until something removes
+        # it, and a missing directory holds nothing to adopt.
+        if not is_directory(std, path):
+            continue
+        slot_id = path[len(prefix):]
+        if not _safe_slot_id(slot_id):
+            continue
+        slot = slots.get(slot_id) or new_slot_record(pool)
+        if slot["state"] != FREE or slot.get("owner_git_dir", "") != pool["git_common_dir"]:
+            continue
+        slots[slot_id] = slot
+        mark_leased(registry, slot_id, live[path], {})
+
+        # At least one worktree has been in here, which is more than the zero a
+        # new record would claim. The real count went with the registry.
+        slot["lease_count"] = max(slot.get("lease_count", 0), 1)
+    return registry
+
+def adoptable(std, pool: dict, registry: dict) -> list[str]:
+    """The slots `adopt_stranded` would take over for this clone, without
+    taking them.
+
+    A free slot recorded for a clone that no longer exists at its path: it has
+    no checkout to belong to anybody, so any clone of the repository can have
+    it, warm base and all — a deleted clone's as much as a moved one's.
+
+    A leased slot whose checkout this clone's git lists and the recorded
+    clone's does not: the moved clone's own. Asked of git rather than of the
+    path, because a clone moved away and another cloned at its old path leaves
+    the path existing and the slots still the moved clone's — and the new
+    clone, whose git has never heard of them, must not act on them as its own.
+
+    Empty for a pool read without a clone.
+    """
+    here = pool["git_common_dir"]
+    if not here:
+        return []
+    lists = {}
+    found = []
+    for slot_id in sorted(registry["slots"].keys()):
+        slot = registry["slots"][slot_id]
+        owner = slot.get("owner_git_dir", "")
+        if not owner or owner == here:
+            continue
+        if slot["state"] == FREE:
+            if not std.fs.exists(owner):
+                found.append(slot_id)
+            continue
+        if slot["state"] != LEASED:
+            continue
+        path = slot_path(pool, slot_id)
+        if here not in lists:
+            lists[here] = _live_worktrees(std, here)
+        if path not in lists[here]:
+            continue
+        if std.fs.exists(owner):
+            if owner not in lists:
+                lists[owner] = _live_worktrees(std, owner)
+            if path in lists[owner]:
+                continue
+        found.append(slot_id)
+    return found
+
+def adopt_stranded(std, pool: dict, registry: dict, repair: bool = True) -> list[str]:
+    """Take over, for this clone, the `adoptable` slots — usually this very
+    clone's, moved or renamed. Returns the ids that changed hands, for the
+    caller to write and report. Mutates `registry`.
+
+    `git worktree repair` points each leased checkout back at this clone, so
+    the lease and its work carry on here; one whose repair fails stays where it
+    was, since a lease on a checkout this clone cannot read is not this
+    clone's. Repairing changes git, so it is for commands holding the pool
+    lock. `repair = False` only re-records the owners, for a preview of what
+    such a command would do.
+    """
+    taken = []
+    for slot_id in adoptable(std, pool, registry):
+        if repair and registry["slots"][slot_id]["state"] == LEASED:
+            if not run_git(std, ["worktree", "repair", slot_path(pool, slot_id)], pool["git_common_dir"]).ok:
+                continue
+        registry["slots"][slot_id]["owner_git_dir"] = pool["git_common_dir"]
+        taken.append(slot_id)
+    return taken
+
+def unregister_vanished(std, pool: dict, registry: dict) -> None:
+    """Remove from git's list every slot of this pool whose directory is gone.
+
+    A lease's lock keeps git listing such a worktree through any
+    `git worktree prune`, so its branch would stay checked out somewhere that
+    does not exist and no worktree could take it. This changes git, so it is
+    for commands that hold the pool lock, not for `list`, which only reads. A
+    slot being set up is left alone: its checkout may not have reached the
+    disk yet. So is one git still keeps work for (`vanished_work`), whose
+    registration is the last thing holding it.
+    """
+    prefix = pool["dir"] + "/" + SLOT_PREFIX
+    for path in _live_worktrees(std, pool["git_common_dir"]):
+        if not path.startswith(prefix) or is_directory(std, path):
+            continue
+        slot = registry["slots"].get(path[len(prefix):]) or {}
+        if slot.get("state", FREE) == RESERVED or vanished_work(std, pool["git_common_dir"], path):
+            continue
+        catch(run_git, std, FORCE_REMOVE + [path], pool["git_common_dir"])
+
+def _follow_switch(lease: dict, branch: str) -> None:
+    """Rename `lease` for `branch`, the branch git has checked out in its slot,
+    when the two differ. Mutates `lease`.
+
+    What the lease said about its own start goes with the old name: `detached`
+    no longer holds once HEAD is on a branch, and `base` describes where the
+    old branch began, not the new one. A detached HEAD (`branch` "") leaves
+    the lease as it is.
+    """
+    if not branch or branch == lease.get("name", ""):
+        return
+    lease["name"] = branch
+    for key in ["detached", "base", "base_sha"]:
+        lease.pop(key, None)
+
+def slot_path(pool: dict, slot_id: str) -> str:
+    return pool["dir"] + "/" + SLOT_PREFIX + slot_id
+
+def output_base_of(std, slot: str, root: str = "") -> str:
+    """The output base Bazel will use for the worktree at `slot`.
+
+    Bazel derives it as `<output_user_root>/md5(workspace_path)` and nothing
+    overrides it here, so this is a calculation rather than a choice — which is
+    what lets the pool look at a slot's Bazel state without starting a server
+    to ask where it is.
+
+    `root` is the output user root to derive under. Callers pass the one the rc
+    chain resolves, because a repo that sets `startup --output_user_root=` keeps
+    its bases somewhere other than the platform default and a slot looked up in
+    the wrong root reads as cold forever. Empty falls back to the platform
+    default, which is right outside a workspace and in tests.
+    """
+    h = md5()
+    h.update(slot)
+    return (root or output_user_root(std)) + "/" + h.hexdigest()
+
+def server_pid_of(std, slot: str, root: str = "") -> int:
+    """PID of the Bazel server holding `slot`'s output base, or 0.
+
+    A recorded pid outlives its process, so a caller that acts on this has to
+    check the process too; `warmth_of` does.
+    """
+    txt = std.fs.try_read_to_string(output_base_of(std, slot, root) + "/server/server.pid.txt").strip()
+    if not txt:
+        return 0
+    for ch in txt.elems():
+        if ch < "0" or ch > "9":
+            return 0
+    return int(txt)
+
+def warmth_of(std, slot: str, root: str = "") -> struct:
+    """What a caller would actually gain by taking this slot.
+
+    `server` is a live Bazel server still holding the analysis cache — the
+    expensive thing, and the difference between a warm build and a cold one.
+    `base` is whether the output base exists at all, which is what makes
+    `external/` already materialized. Reported rather than asserted: a slot
+    whose server has since exited is still useful, but less so, and saying
+    "warm" of it would be a lie.
+    """
+    base = output_base_of(std, slot, root)
+    if not std.fs.exists(base):
+        return struct(server = 0, base = False)
+    pid = server_pid_of(std, slot, root)
+    return struct(server = pid if _is_bases_server(std, pid, base) else 0, base = True)
+
+def _is_bases_server(std, pid: int, base: str) -> bool:
+    """Whether `pid` may be `base`'s Bazel server — stricter than `aspect gc`
+    about keeping a base, since this one also guards a slot's checkout.
+
+    A recorded pid outlives its process and the OS reuses it, so a live pid is
+    not enough. It is ruled out only when its command line names a different
+    `--output_base=`; one that names this base, names none, or that `ps`
+    cannot read, counts, since keeping a base is the safe answer. The value is
+    read up to the next ` --`, so a root with a space in it compares whole.
+    """
+    if pid <= 0 or not alive(std, pid):
+        return False
+    out = std.process.command("ps").args(["-p", str(pid), "-o", "command="]).stdout("piped").stderr("null").spawn().wait_with_output()
+    flag = " --output_base="
+    command = " " + out.stdout.strip()
+    if out.status.code != 0 or flag not in command:
+        return True
+    named = command.partition(flag)[2].partition(" --")[0].strip().rstrip("/")
+    return named.rpartition("/")[2] == base.rpartition("/")[2]
+
+def lock_digest(std, cwd: str) -> str:
+    """A digest of `MODULE.bazel.lock`, the strongest predictor of whether a
+    slot's `external/` tree is reusable.
+
+    An identical lock means identical `generatedRepoSpecs`, so every bzlmod repo
+    hashes to the same entry in Bazel's shared repo-contents cache. It does not
+    promise a hit — a repo rule that read an env var can still miss on its
+    recorded inputs — which is why this scores rather than decides.
+
+    Trailing whitespace is normalized away so that this and `lock_digest_at`,
+    which reads through git and cannot preserve it, agree on identical content.
+    """
+    raw = std.fs.try_read_to_string(cwd + "/MODULE.bazel.lock")
+    if not raw:
+        return ""
+    return _digest(raw.strip())
+
+def lock_digest_at(std, git_common_dir: str, ref: str) -> str:
+    """`lock_digest` for the tree at `ref` rather than a checked-out one.
+
+    Allocation has to score against what the slot will hold, which is `ref`, not
+    whatever the caller's own working tree happens to be on. Reading the
+    checkout instead mislabels every `--create=<ref>` that leaves the current
+    branch, and a dirty lock file mislabels even the simple case.
+
+    "" when the ref has no lock file, which `default_score` reads as "unknown"
+    rather than "mismatched".
+    """
+    raw = git_out(std, ["show", ref + ":MODULE.bazel.lock"], git_common_dir)
+    if not raw:
+        return ""
+    return _digest(raw)
+
+def reserve_slot(std, registry: dict, slot_id: str, name: str, agent: dict = {}) -> str:
+    """Claim a slot for `name` before its worktree exists, returning the token
+    that proves the claim. Mutates `registry`; the caller writes it.
+
+    This is what lets the pool lock be dropped for the checkout: the slot is off
+    the table for every other caller, and the record says which process owes the
+    pool a worktree, so being slow is distinguishable from being dead.
+    """
+    record = owner_record(std)
+    registry["slots"][slot_id]["state"] = RESERVED
+
+    # The agent as well as the process. A reservation is the one window where
+    # two agents can be racing for the same branch, so it is exactly when
+    # saying who is doing it is worth something — and the lease that would
+    # carry it does not exist yet.
+    registry["slots"][slot_id]["reservation"] = record | {
+        "name": name,
+        "since": time.now_ms(),
+        "agent": agent,
+    }
+    return record["token"]
+
+def reserving_slot(registry: dict, name: str, owner: str) -> str:
+    """The slot an in-flight `add` in the clone whose git dir is `owner` has
+    claimed for `name`, or "". Branches are per clone, so another clone's
+    reservation of the same name is no claim on this one's.
+
+    A branch being checked out is already taken, even though no lease exists
+    yet. Without this a second caller asking for the same branch would pick a
+    different slot and then have git refuse the checkout — the same answer,
+    arriving as a failure rather than a refusal, after a slot's previous
+    occupant had been force-removed to make room.
+    """
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] != RESERVED or slot.get("owner_git_dir", "") != owner:
+            continue
+        if (slot.get("reservation") or {}).get("name", "") == name:
+            return slot_id
+    return ""
+
+def reservation_abandoned(std, registry: dict, slot_id: str) -> bool:
+    """Whether a reservation's process is gone, so the slot can be taken back.
+
+    There is no judgement call here, unlike `abandoned_lease`: a reservation
+    means the worktree was still being created, so there is no session to resume
+    and nothing uncommitted to lose. A reservation that records no usable
+    process is treated as abandoned rather than holding a slot forever.
+    """
+    return not _held_by_a_live_process(std, registry["slots"][slot_id].get("reservation") or {})
+
+def holds_reservation(registry: dict, slot_id: str, token: str) -> bool:
+    """Whether `slot_id` is still reserved by the caller holding `token`.
+
+    Checked before a reservation is turned into a lease, because the lock was
+    not held in between and the only honest basis for writing the slot is that
+    it is still ours.
+    """
+    if slot_id not in registry["slots"]:
+        return False
+    slot = registry["slots"][slot_id]
+    if slot["state"] != RESERVED:
+        return False
+    return (slot.get("reservation") or {}).get("token", "") == token
+
+def owned_slots(pool: dict, registry: dict) -> list[str]:
+    """Slot ids this clone owns, in registry order. The only slots it can lease,
+    and so the only ones its `max_slots` budget counts."""
+    return [
+        slot_id
+        for slot_id in registry["slots"]
+        if registry["slots"][slot_id].get("owner_git_dir", "") == pool["git_common_dir"]
+    ]
+
+def slot_idle_ms(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+    """How long since the slot was last used: the newer of Bazel's last activity
+    in its output base and its last lease, taken or ended. `list` shows it as
+    `last used`, and `prune` acts on it.
+
+    Bazel's side is read from the base's own freshness markers, the evidence
+    `aspect gc` ages a base on. A lease counts too, since the slot just given
+    back is the one most likely wanted again whether or not it built anything;
+    `gc` may still collect such a base, which leaves the slot cold rather than
+    gone. The slot's creation is the floor beneath both, and the only evidence
+    for a slot that has held nothing.
+    """
+    newest = max(last_used(std, output_base_of(std, slot_path(pool, slot_id), root)) // 1000, slot.get("created_ms", 0))
+    for entry in slot.get("history") or []:
+        newest = max(newest, entry.get("leased_ms", 0), entry.get("released_ms", 0))
+    return (time.now_ms() - newest) if newest else 0
+
+def slot_idle_days(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+    """`slot_idle_ms` in whole days, rounded down. What `prune` acts on."""
+    return slot_idle_ms(std, pool, slot_id, slot, root) // _DAY_MS
+
+def prunable_slots(std, pool: dict, registry: dict, max_idle_days: int, root: str = "", stranded_at_once: bool = True) -> list[str]:
+    """Free slots whose Bazel state has gone cold enough to be worth less than
+    the disk it holds.
+
+    Only free slots are returned, whatever the ages involved. A lease means
+    someone may be working in that checkout right now, and a timer is not
+    grounds for deleting it; a reservation means a checkout is being created in
+    that very directory, and deleting the output base out from under it would
+    break a command that is still running.
+
+    A slot owned by *another* clone is returned only once that clone's object
+    store is gone from this machine, and so only where `adopt_stranded` has not
+    run first — outside any clone, where nothing is adopted. Inside one, such a
+    free slot has been taken over and ages as this clone's own. A second live
+    clone's slots are none of our business.
+
+    Stranded slots skip the age rule, because that rule weighs Bazel state
+    worth keeping against the disk it costs and a stranded slot read from
+    outside every clone has nothing on the first side of it. Waiting
+    `PRUNE_IDLE_DAYS` to collect one is all cost and no benefit — when
+    somebody asked. `stranded_at_once = False` makes a stranded slot wait out
+    the idle period like any other, for the sweep nobody asked for: an owner
+    that does not exist *here* may be on a volume that is not mounted, or a
+    container sharing this home, and is not shown to be gone.
+    """
+    victims = []
+    for slot_id in registry["slots"]:
+        slot = registry["slots"][slot_id]
+        if slot["state"] != FREE:
+            continue
+
+        # Residue: an entry with no recorded age, no output base and no
+        # directory has nothing behind it to protect, and nothing to age it out
+        # by either — so without this it would sit in the registry forever. A
+        # registry edited by hand is the way to get one.
+        if not slot.get("created_ms", 0):
+            path = slot_path(pool, slot_id)
+            if not std.fs.exists(path) and not std.fs.exists(output_base_of(std, path, root)):
+                victims.append(slot_id)
+                continue
+
+        # Another clone's slot: none of our business while that clone exists,
+        # and collectable at once when it does not. Asked before the age rule,
+        # which has nothing to weigh for a slot that can never be leased again.
+        owner = slot.get("owner_git_dir", "")
+        if owner and owner != pool["git_common_dir"]:
+            if not std.fs.exists(owner) and (stranded_at_once or slot_idle_days(std, pool, slot_id, slot, root) >= max_idle_days):
+                victims.append(slot_id)
+            continue
+
+        if slot_idle_days(std, pool, slot_id, slot, root) < max_idle_days:
+            continue
+        victims.append(slot_id)
+    return victims
+
+def lease_last_active_ms(std, pool: dict, slot_id: str, slot: dict, root: str = "") -> int:
+    """When anything last happened in a leased slot, in ms: the lease being
+    taken, Bazel using the slot's output base, or git writing the checkout's
+    index or HEAD. 0 when none of it can be read.
+
+    The pool records no moment a session stopped — only that its process is
+    gone — so this is the clock a stopped session's grace period runs on.
+    """
+    lease = slot.get("lease") or {}
+    since = lease.get("since", 0)
+    newest = since if type(since) == "int" else (int(since) if type(since) == "string" and since.isdigit() else 0)
+    path = slot_path(pool, slot_id)
+    base_used = last_used(std, output_base_of(std, path, root)) // 1000
+    newest = max(newest, base_used)
+    git_dir = git_out(std, ["rev-parse", "--absolute-git-dir"], path) if _is_checkout(std, path) else ""
+    for marker in ["index", "HEAD", "logs/HEAD"]:
+        err, meta = catch(std.fs.metadata, git_dir + "/" + marker) if git_dir else ("", None)
+        if err == None and meta != None and meta.modified:
+            newest = max(newest, meta.modified // 1000)
+    return newest
+
+def abandoned_lease(
+        std,
+        pool: dict,
+        registry: dict,
+        slot_id: str,
+        root: str = "",
+        grace_ms: int = 0) -> bool:
+    """Whether a leased slot can be taken back without losing anything.
+
+    **A clean checkout is the condition that never bends.** Commits survive
+    `git worktree remove` — they are in the branch — so a checkout with nothing
+    in `work_in` has nothing to lose: no uncommitted changes, no commits only a
+    detached HEAD reached. Files git ignores are disposable. No amount of elapsed
+    time makes deleting work the right default, so a slot holding any is never
+    taken however old. Bazel's own leavings are not work, or a slot that had
+    been built in could never be reclaimed, which is every slot the pool is for.
+
+    Given that, the other conditions are that the holder is verifiably not
+    there — a recorded process that is not running — and has been given
+    `grace_ms` since the slot's last activity to come back. A live holder keeps
+    its slot however long since its last build, because that measures Bazel rather than
+    whether somebody is reading code. So does a holder whose process cannot be
+    checked at all — no pid recorded — since that is no evidence it has gone.
+
+    The grace runs from the slot's last activity rather than from the process
+    stopping, which nothing records: a session closed mid-task and resumed the
+    next morning finds its slot. And it is only asked at the point of need — by
+    `_pick_slot` once no free slot has scored and before it grows the pool, and
+    by `add` when the branch asked for is the one the abandoned lease holds —
+    so nothing is reclaimed when nobody wants a slot.
+
+    `root` is the output user root the rc chain resolves; without it a relocated
+    base cannot be recognized and Bazel's leavings would read as work.
+    """
+    slot = registry["slots"][slot_id]
+    lease = slot.get("lease") or {}
+    agent = lease.get("agent") or {}
+
+    # No agent recorded, no evidence. The rule is that the holder's process is
+    # verifiably gone, and verifying that needs to know what the process was —
+    # so a lease nothing identifies is left alone rather than guessed about. A
+    # person's worktree is theirs until they release it, and unlike a crashed
+    # agent a person can see it in `list` and do so.
+    if not agent:
+        return False
+
+    # Nor does a holder whose process was never captured: an explicit kind
+    # drops the detected pid, and a script can name a session with no harness
+    # behind it. Not running cannot be told from not checkable there.
+    if not agent.get("pid", 0):
+        return False
+
+    # A live holder keeps its slot.
+    if is_running(std, agent):
+        return False
+
+    # A session that stopped is given `grace_ms` from the slot's last activity
+    # to come back to it — resumed, or restarted on its branch — before the
+    # slot is anybody else's.
+    if grace_ms > 0 and time.now_ms() - lease_last_active_ms(std, pool, slot_id, slot, root) < grace_ms:
+        return False
+
+    # Below here the holder is not there, and only the checkout decides — or,
+    # with it gone, what git still keeps for it.
+    path = slot_path(pool, slot_id)
+    owner = slot.get("owner_git_dir", "") or pool["git_common_dir"]
+    return not work_in(std, path, output_base_of(std, path, root), owner)
+
+def lock_reason(slot_id: str) -> str:
+    """The reason a leased slot's git lock gives, which is what a plain
+    `git worktree remove` of it prints when refusing. Named by slot, since
+    `git switch` in the slot changes its branch and the lock is not rewritten."""
+    return "leased from the aspect worktree pool; `aspect worktree release " + slot_id + "` ends it"
+
+def remove_checkout(std, path: str, owner: str) -> bool:
+    """Remove the checkout at `path`, returning whether it is gone.
+
+    The owning clone's git is asked to unregister the worktree when that clone
+    still exists, and the directory is deleted whatever git says. A checkout git
+    does not recognise — left by a clone that was deleted, or one deleted and
+    cloned again at the same path — has nobody to ask, and leaving it would
+    make its slot unallocatable. Safe on a path whose directory is already gone:
+    git still lists a locked worktree there until it is removed by name. A
+    read-only tree is made writable first, as `remove_tree` does, and a plain
+    file where the directory should be is removed too — before git is asked,
+    since git will not unregister a worktree whose path is a file, and keeps
+    it locked.
+
+    No work check is made here: a caller decides that first, with `work_in`
+    naming the clone, as every one does.
+    """
+    err, meta = catch(std.fs.symlink_metadata, path)
+    if err == None and (meta.is_symlink or not is_directory(std, path)):
+        catch(std.fs.remove_file, path)
+    if owner and std.fs.exists(owner):
+        catch(run_git, std, FORCE_REMOVE + [path], owner)
+    if is_directory(std, path):
+        remove_tree(std, path)
+
+        # Git would not let go while the directory was there; with it gone, it
+        # does. By name, never `git worktree prune`, which would also drop the
+        # admin directory of every other worktree of the clone whose directory
+        # is missing — a moved one's commits included.
+        if owner and std.fs.exists(owner):
+            catch(run_git, std, FORCE_REMOVE + [path], owner)
+    gone, _ = catch(std.fs.symlink_metadata, path)
+    return gone != None
+
+def drop_slot(std, pool: dict, registry: dict, slot_id: str, root: str = "", discard: bool = False) -> struct:
+    """Delete a slot outright — a free one, or a stranded one named to `prune`:
+    its worktree, its directory, its output base and its registry entry. Mutates
+    `registry`; the caller writes it.
+
+    A slot still held by a live Bazel server is refused rather than deleted.
+    Unlinking an output base from under a running server is how you get a
+    process writing into directories that no longer exist, and a free slot with
+    a live server is the warmest thing in the pool anyway — exactly what the
+    pool is for. `aspect worktree list` reports it, and it becomes prunable on
+    its own once Bazel's idle timeout fires.
+
+    So is a slot whose checkout holds work (`work_in`), unless `discard` says
+    the caller saw it and chose to: a free slot should hold none, and when it
+    does the bookkeeping is what is wrong, not the work.
+
+    Removing the base here rather than leaving it for `aspect gc` is deliberate:
+    a prune that reclaimed no disk and told the user to go run something else
+    would not be a prune.
+    """
+    path = slot_path(pool, slot_id)
+    base = output_base_of(std, path, root)
+    warmth = warmth_of(std, path, root)
+    if warmth.server:
+        return struct(dropped = False, reason = "a Bazel server (pid %d) still holds it" % warmth.server)
+    owner = registry["slots"][slot_id].get("owner_git_dir", "") or pool["git_common_dir"]
+    work = [] if discard else work_in(std, path, base, owner if std.fs.exists(owner) else "")
+    if work:
+        more = (" and %d more" % (len(work) - 1)) if len(work) > 1 else ""
+        return struct(dropped = False, reason = "its checkout holds work that would be lost: " + work[0] + more)
+
+    base_err = remove_tree(std, base)
+    if base_err:
+        return struct(dropped = False, reason = "its output base could not be removed: " + base_err)
+
+    # Kept on the books while its directory is still on disk, or nothing would
+    # ever look at that directory again.
+    if not remove_checkout(std, path, owner):
+        return struct(dropped = False, reason = "its directory could not be removed: " + path)
+    registry["slots"].pop(slot_id)
+    return struct(dropped = True, reason = "")
+
+def free_slot(std, pool: dict, registry: dict, slot_id: str) -> None:
+    """Give a slot back, keeping it and its output base. Mutates `registry`.
+
+    Only the worktree goes, which is what makes this different from
+    `drop_slot`: the Bazel state is the reason the pool exists, and a claim
+    ending is no reason to throw it away.
+
+    Dropping the worktree here rather than leaving it for the next
+    `git worktree add` keeps the branch out of `git worktree list` — otherwise
+    the next request for that branch would report it as checked out somewhere
+    the pool does not manage, which is both wrong and the opposite of helpful.
+    A slot whose directory has already gone is unregistered from git here
+    too: git would otherwise refuse to check the branch out again while it
+    still lists the worktree, which it does for as long as the lease's lock
+    stands.
+    """
+    remove_checkout(std, slot_path(pool, slot_id), pool["git_common_dir"])
+    mark_free(registry, slot_id)
+
+def new_slot_id(std, pool: dict, registry: dict) -> str:
+    """An id no slot in this pool is using.
+
+    Each attempt digests something different: the clock alone does not move
+    between attempts in one millisecond, so a collision would otherwise repeat
+    on every try.
+    """
+    for attempt in range(_SLOT_ID_ATTEMPTS):
+        seed = "%s/%d/%d/%d" % (pool["id"], time.now_ms(), len(registry["slots"]), attempt)
+        candidate = _digest(seed)[:_SLOT_ID_LENGTH]
+        if candidate not in registry["slots"]:
+            return candidate
+    fail("could not allocate a worktree slot id")
+
+def default_score(slot: dict, want: dict) -> int:
+    """How good a reuse `slot` is for `want`. Higher wins; 0 refuses.
+
+    `slot` is what its last occupant left behind, so its commit is keyed
+    `last_commit`; `want` describes the worktree about to be created, so its
+    commit is keyed `commit`, and its branch `last_branch` against `want`'s
+    `name`. The lock digest is keyed the same on both sides.
+
+    The ordering follows how much of the previous build survives, highest first:
+
+      same commit    warm, and the tree is identical, so the outputs are
+                     exactly right
+      same branch    warm, with outputs for a near relative of this tree, which
+                     is what an agent returning to a branch it released wants
+      neither        warm, from some other work at some other point
+      lock differs   warm, but a different `MODULE.bazel.lock` means the repo
+                     fetches miss and `external/` is rebuilt — the expensive
+                     part, though the action cache still counts for something
+      cold           no output base now (`base_present`, which the caller fills
+                     in), so nothing survives whatever the slot last held
+
+    Every free slot stays eligible — a cold one, a new one included, still
+    beats creating a slot — so nothing here returns 0, which refuses.
+    """
+    if not slot.get("base_present", False):
+        return _SCORE_COLD
+    if slot.get("lock_digest", "") and want.get("lock_digest", ""):
+        if slot["lock_digest"] != want["lock_digest"]:
+            return _SCORE_LOCK_DIFFERS
+    if slot.get("last_commit", "") and slot["last_commit"] == want.get("commit", ""):
+        return _SCORE_SAME_COMMIT
+    if slot.get("last_branch", "") and slot["last_branch"] == want.get("name", ""):
+        return _SCORE_SAME_BRANCH
+    return _SCORE_WARM
+
+# `default_score`'s ladder, highest first.
+_SCORE_SAME_COMMIT = 100
+_SCORE_SAME_BRANCH = 95
+_SCORE_WARM = 90
+_SCORE_LOCK_DIFFERS = 10
+_SCORE_COLD = 1

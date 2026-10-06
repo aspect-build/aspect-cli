@@ -25,6 +25,7 @@ files can load the full trait set with a single import:
          "surface_replace",
          "surface_restyle",
          "TaskUpdate",
+         "Worktrees",
          "repro_fix_replace")
 
 Internal modules should load directly from the owning module — this
@@ -64,6 +65,7 @@ load(
     _surface_replace = "surface_replace",
     _surface_restyle = "surface_restyle",
 )
+load("./private/lib/worktrees_trait.axl", _Worktrees = "Worktrees")
 
 BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait
@@ -84,6 +86,7 @@ StatusSurfaceAction = _StatusSurfaceAction
 StatusSurfaceDecision = _StatusSurfaceDecision
 StatusSurfaceUpdate = _StatusSurfaceUpdate
 TaskUpdate = _TaskUpdate
+Worktrees = _Worktrees
 repro_fix_replace = _repro_fix_replace
 surface_replace = _surface_replace
 surface_restyle = _surface_restyle

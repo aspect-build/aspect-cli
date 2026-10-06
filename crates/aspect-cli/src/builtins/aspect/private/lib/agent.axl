@@ -1,0 +1,584 @@
+"""Who is running this task — a coding agent, or a person at a terminal.
+
+Worktree leases record it so `aspect worktree list` can say which agent session
+holds which slot. On a machine running several agents at once that is the
+difference between a list of hashes and a list you can act on.
+
+Detection is layered, most explicit first, so a harness that reports itself is
+always believed over anything inferred:
+
+1. values passed on the command line
+2. `ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID` — the vendor-neutral contract, for a
+   harness or wrapper script that knows what it is
+3. a known harness's own variables, so the common case needs no configuration.
+   Three name the session in the environment a task runs in — Claude Code
+   (`CLAUDE_CODE_SESSION_ID`, beside the `CLAUDECODE` marker), Codex
+   (`CODEX_THREAD_ID`) and Grok Build (`GROK_SESSION_ID`, from 1.0.4) — while
+   Gemini CLI and Cursor only mark their presence (`GEMINI_CLI`,
+   `CURSOR_AGENT`, whose value is deliberately unspecified so presence is the
+   test) and name the session to hooks alone (`GEMINI_SESSION_ID`; Cursor puts
+   its on a hook's stdin, which no environment carries)
+4. the process ancestry, which needs nothing from the harness at all: walk up
+   from this process until a recognized binary turns up
+5. `AI_AGENT`, last because it names a tool without naming a session: a kind
+   from it is weaker than one the process tree confirms
+
+A kind with no session id is an ordinary outcome, not a failure: several
+harnesses say what they are without saying which conversation. `list` reports
+the kind, and offers no resume command, because there is nothing to resume
+*to*.
+
+**A missing agent means "not detected", never "no agent".** Only (1) and (2) are
+authoritative; the rest are inference, and a harness nobody has taught us about
+simply reports nothing. Most of what is detected is descriptive. The one
+exception is the holder's pid: whether that process is still running is what
+the pool's reclaiming and `release`'s protection turn on, which is why a
+holder with no pid is never treated as having stopped.
+
+**What a slot's holder is doing decides nothing on its own.** The pool takes a
+slot back when its holder's process has verifiably stopped *and* its checkout is
+clean — a holder with no pid recorded cannot be shown to have stopped, and keeps
+its slot: commits survive in the branch, so a clean tree loses nothing, and the
+session stays resumable whether or not the slot is reclaimed. A dirty checkout
+is never taken automatically. That rule lives in the pool library; this file
+only says who the holder is and whether its process is alive.
+
+Whether the *session* can be returned to is a separate question, reported so a
+reader knows a resume command will work:
+
+    running      the harness process is alive
+    resumable    the process is gone, but the session is still on disk
+    gone         the session itself has been deleted — unresumable
+    unknown      no way to tell, for this harness or this record
+
+**A store has to be described for a session to read `gone`.** Claude Code and
+Grok Build both file a session under a directory named for the tree it was
+started in, so both can be searched by id. Codex files by date and Cursor under
+a hash of the workspace; those answer `unknown`, which is the common case and
+offers the resume command all the same.
+"""
+
+load("@std//time.axl", "time")
+load("./process_info.axl", "is_same_process", "started_at")
+load("./text.axl", "has_unsafe_chars", "is_unsafe_char", "utf8_bytes_escaped")
+
+# Harnesses whose own environment names a session, so no configuration is
+# needed. Recognition only: what is known about a kind once identified lives in
+# `_HARNESSES`, because a kind can arrive from any of the detection layers.
+# `marker` alone says a harness is running, `id_var` also names the session;
+# either is enough to fire, and a field a harness does not have is "".
+_ENV_DETECTORS = [
+    struct(
+        kind = "claude-code",
+        marker = "CLAUDECODE",
+        id_var = "CLAUDE_CODE_SESSION_ID",
+        pid_var = "CLAUDE_PID",
+    ),
+    # Set for shell/tool executions, which is how a task run by Codex arrives.
+    struct(
+        kind = "codex",
+        marker = "",
+        id_var = "CODEX_THREAD_ID",
+        pid_var = "",
+    ),
+    # `GEMINI_CLI` is all a shell tool gets; the session id reaches hook
+    # processes only, where the marker may be absent, so either one firing is
+    # what matters. A task run as a tool reports a kind and no session.
+    struct(
+        kind = "gemini-cli",
+        marker = "GEMINI_CLI",
+        id_var = "GEMINI_SESSION_ID",
+        pid_var = "",
+    ),
+    # Injected into tool commands from 1.0.4, like Codex. No presence marker:
+    # the other `GROK_*` variables are user configuration and can be set
+    # outside a session, so none of them means "inside Grok".
+    struct(
+        kind = "grok",
+        marker = "",
+        id_var = "GROK_SESSION_ID",
+        pid_var = "",
+    ),
+    # A presence marker whose value is deliberately unspecified — the Cursor
+    # terminal docs say to test that it is set — so non-empty is the test.
+    # Cursor exposes no session id to a tool: it arrives on a hook's stdin.
+    struct(
+        kind = "cursor",
+        marker = "CURSOR_AGENT",
+        id_var = "",
+        pid_var = "",
+    ),
+]
+
+# What `session_filed` can answer. Separate from the lease states below,
+# because a session can be filed while the process that took it is gone, and a
+# live process can hold an id no store has ever heard of.
+FILED = "filed"
+
+ABSENT = "absent"
+
+RUNNING = "running"
+RESUMABLE = "resumable"
+GONE = "gone"
+UNKNOWN = "unknown"
+
+# Harness binary names, for the ancestry walk. This is the layer that
+# generalizes: it asks nothing of the harness beyond being recognizable, so a
+# new one costs an entry here rather than a protocol. Matched against the
+# process name, so a harness that runs as `node` is not found this way.
+_BINARIES = {
+    "claude": "claude-code",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+    "aider": "aider",
+    "gemini": "gemini-cli",
+    "grok": "grok",
+    "goose": "goose",
+    "opencode": "opencode",
+    "amp": "amp",
+}
+
+# What is known about a harness once its kind is settled, keyed by that kind
+# rather than by whichever layer reported it — a kind found by walking the
+# process tree deserves the same answers as one that announced itself.
+#
+# `resume` is a format string for the command that returns to a session, left
+# out where it has not been confirmed: printing a wrong one is worse than
+# printing none. The session-store fields say where the harness keeps sessions,
+# so `session_state` can tell a deleted session from a merely closed terminal. A
+# kind absent from here is not an error — it yields `unknown`, never `gone`.
+# `store` is how a session is found on disk, and is None for a harness whose
+# layout does not fit the shape below — one project directory per started-in
+# path, holding a file named for the session. Codex files by date with no
+# project directory at all, and Cursor under a hash of the workspace. Both then
+# report `unknown`, never `gone`, which is the safe side: `gone` withholds the
+# resume command, and must not rest on a guess.
+_HARNESSES = {
+    "claude-code": struct(
+        resume = "claude --resume %s",
+        project_var = "CLAUDE_PROJECT_DIR",
+        store = struct(
+            # Relocatable, so the home-relative default is a fallback.
+            config_var = "CLAUDE_CONFIG_DIR",
+            config_default = "/.claude",
+            sessions_dir = "projects",
+            # Named for the session id, inside one of the project directories.
+            session_file = "%s.jsonl",
+            # A project directory is named for the path the harness started in,
+            # with each of these characters replaced by a dash. The mapping is
+            # one-way — a dash could have been any of them, or a real dash — so
+            # it checks a candidate path and never decodes one.
+            project_flattens = "/.",
+        ),
+    ),
+    # Codex names no project directory anywhere a task can read: its store is
+    # keyed by date, and the working directory lives inside the rollout file.
+    "codex": struct(resume = "codex resume %s", project_var = "", store = None),
+    "gemini-cli": struct(
+        resume = "gemini --resume %s",
+        project_var = "GEMINI_PROJECT_DIR",
+        store = None,
+    ),
+    "cursor": struct(
+        resume = "cursor-agent --resume %s",
+        project_var = "CURSOR_PROJECT_DIR",
+        store = None,
+    ),
+    "grok": struct(
+        resume = "grok --resume %s",
+        project_var = "",
+        store = struct(
+            config_var = "GROK_HOME",
+            config_default = "/.grok",
+            sessions_dir = "sessions",
+            # A directory named for the session, not a file: an existence check
+            # does not care which, so only the name differs from Claude Code's.
+            session_file = "%s",
+            # The spelling of the `<encoded-cwd>` segment is a guess, and
+            # nothing rests on it — finding the session is a search, and a
+            # mismatch only costs the path, not the answer.
+            project_flattens = "/.",
+        ),
+    ),
+}
+
+# `AI_AGENT` is spelled `<tool>_<version>_<role>`, e.g.
+# `claude-code_2-1-278_agent`. Read as a fallback for a harness that sets it
+# without anything else we recognize; only the tool segment is used, since the
+# rest is not a session identifier.
+_GENERIC_KIND_VAR = "AI_AGENT"
+
+# How far up the process tree to look. An agent shells out through a wrapper or
+# two, not twenty, and the walk stops at pid 1 regardless.
+_ANCESTRY_DEPTH = 12
+
+def _out(std, args: list[str]) -> str:
+    out = std.process.command(args[0]).args(args[1:]) \
+        .stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip() if out.status.code == 0 else ""
+
+def _ancestry(std) -> struct:
+    """The nearest recognized harness above this process, or an empty kind.
+
+    Needs no cooperation: `ps` reports each process's parent and command, so
+    walking up from here finds the harness whatever it chose to export.
+
+    A harness's long-lived `daemon` process serves many sessions at once, so it
+    names the kind but not a session: its pid is not returned, or every session
+    under it would read as one, and as running for as long as the daemon is.
+    """
+    pid = std.process.id()
+    for _ in range(_ANCESTRY_DEPTH):
+        row = _out(std, ["ps", "-o", "ppid=,comm=", "-p", str(pid)])
+        if not row:
+            break
+        parts = row.split(None, 1)
+        if len(parts) < 2:
+            break
+        parent = int(parts[0]) if parts[0].isdigit() else 0
+        name = parts[1].strip().rpartition("/")[2]
+        if name in _BINARIES:
+            argv = _out(std, ["ps", "-o", "args=", "-p", str(pid)]).split()
+            return struct(kind = _BINARIES[name], pid = 0 if len(argv) > 1 and argv[1] == "daemon" else pid)
+        if parent <= 1:
+            break
+        pid = parent
+    return struct(kind = "", pid = 0)
+
+def _generic_kind(std) -> str:
+    """The tool segment of `AI_AGENT`, or ""."""
+    raw = std.env.var(_GENERIC_KIND_VAR) or ""
+    return raw.partition("_")[0] if raw else ""
+
+def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
+    """Who is running this, as a lease-shaped record. Empty dict when nothing
+    identifies an agent, which is the ordinary case for a person at a terminal.
+
+    `source` records which layer answered, so a reader can tell a session id the
+    harness reported from a kind that was merely inferred from a process name.
+
+    An explicit kind or id — each from its flag, or else from `ASPECT_AGENT_KIND`
+    / `ASPECT_AGENT_ID` — *overrides* the field it names and leaves the rest to
+    detection, rather than replacing the record wholesale. The reason to pass
+    `--agent-id` is to tell sibling agents of one session apart, and that is
+    precisely where the other fields are worth keeping: without the pid there is
+    no liveness, and a holder whose liveness cannot be read is never taken to
+    have stopped.
+    """
+    kind = explicit_kind or std.env.var("ASPECT_AGENT_KIND") or ""
+    id = explicit_id or std.env.var("ASPECT_AGENT_ID") or ""
+    if kind or id:
+        return _overlay(std, _detected(std), kind, id, "flag" if explicit_kind or explicit_id else "env")
+    return _detected(std)
+
+def _overlay(std, found: dict, explicit_kind: str, explicit_id: str, source: str) -> dict:
+    """`found` with the caller's own kind and id written over it.
+
+    The pid is the one field that cannot just be carried: it identifies the
+    process of the harness that was *detected*, so it is kept only while the
+    resulting kind is still that harness's. Told this is Codex from inside a
+    Claude Code session, a Claude pid would answer liveness about the wrong
+    process — and answering it wrongly is what licenses taking a slot away.
+    """
+    kind = explicit_kind or found.get("kind", "") or "unknown"
+    same_harness = kind == found.get("kind", "")
+    record = _record(
+        std,
+        kind,
+        explicit_id or found.get("id", ""),
+        found.get("pid", 0) if same_harness else 0,
+        source,
+    )
+    if same_harness and found.get("pid_start", ""):
+        # Captured when the pid was read, so it is carried with it rather than
+        # looked up again — `ps` may answer differently a moment later.
+        record["pid_start"] = found["pid_start"]
+    if not record["project"] and same_harness:
+        record["project"] = found.get("project", "")
+
+    # The session id the harness itself reported, kept through any relabelling:
+    # it, unlike a kind or an id the caller chose, says which session this is.
+    if found.get("harness_id", ""):
+        record["harness_id"] = found["harness_id"]
+
+    # An id given under a harness that reports a session of its own names a
+    # subagent of that session: the harness's id is kept beside it as
+    # `parent_id`, for the store and the resume command, which know only that
+    # one. Where detection found no session — a wrapper exporting its harness's
+    # real id through `ASPECT_AGENT_ID` — the given id is the session.
+    if explicit_id and same_harness and found.get("id", "") and explicit_id != found["id"]:
+        record["id_source"] = "caller"
+        record["parent_id"] = found["id"]
+    return record
+
+def _detected(std) -> dict:
+    """Who is running this, from the environment and the process tree alone."""
+    for d in _ENV_DETECTORS:
+        marked = d.marker and std.env.var(d.marker)
+        named = d.id_var and std.env.var(d.id_var)
+        if not marked and not named:
+            continue
+        pid_raw = (std.env.var(d.pid_var) or "") if d.pid_var else ""
+        pid = int(pid_raw) if pid_raw.isdigit() else 0
+        if not pid:
+            # Most harnesses export no pid. Their process is still above this
+            # one, and without it a lease could never be shown to have ended.
+            found = _ancestry(std)
+            pid = found.pid if found.kind == d.kind else 0
+
+        # An id that would rewrite the terminal is no id this can print, paste
+        # into a resume command, or match on.
+        if named and has_unsafe_chars(named):
+            named = ""
+        record = _record(std, d.kind, named or "", pid, "env")
+        if named:
+            record["harness_id"] = named
+        return record
+
+    found = _ancestry(std)
+    if found.kind:
+        return _record(std, found.kind, "", found.pid, "ancestry")
+
+    generic = _generic_kind(std)
+    if generic:
+        return _record(std, generic, "", 0, "env")
+    return {}
+
+def _record(std, kind: str, id: str, pid: int, source: str) -> dict:
+    """The lease-shaped record for a detected agent.
+
+    `project` is what the harness says its project directory is, which only a
+    hook invocation is told; it is captured here because the variable exists
+    only while the harness is running, and the lease outlives that. `cwd` is
+    where the task ran, which is a candidate for the same thing and not a
+    statement about it.
+    """
+    harness = _HARNESSES.get(kind)
+    project_var = harness.project_var if harness else ""
+    return {
+        "kind": kind,
+        "id": id,
+        "pid": pid,
+        "pid_start": started_at(std, pid),
+        "cwd": std.env.current_dir(),
+        "project": (std.env.var(project_var) or "") if project_var else "",
+        "source": source,
+        "seen_ms": time.now_ms(),
+    }
+
+def is_running(std, agent: dict) -> bool:
+    """Whether the recorded harness process is alive: its pid, and its start
+    time where both the recorded and the current one can be read — otherwise
+    liveness alone, which a reused pid can fool. A record with no pid is "not
+    known to be running", a question for `session_state` rather than an answer.
+    """
+    return is_same_process(std, agent.get("pid", 0), agent.get("pid_start", ""))
+
+def _sessions_root(std, kind: str) -> str:
+    """Where a harness keeps its sessions, or "" when that cannot be answered.
+
+    Empty for a harness `_HARNESSES` does not describe, and — just as
+    importantly — for one it does describe whose directory is not there. Both
+    yield `unknown` rather than `gone`, because `gone` withholds the resume
+    command and must never rest on a guess: reading "the sessions directory is
+    missing" as "the session is deleted" would hide the way back into a session
+    that is still there.
+    """
+    harness = _HARNESSES.get(kind)
+    store = harness.store if harness else None
+    if not store:
+        return ""
+    configured = std.env.var(store.config_var) or ""
+    base = configured or (std.env.home_dir() + store.config_default)
+    root = base + "/" + store.sessions_dir
+    return root if std.fs.exists(root) else ""
+
+def _session_dir(std, kind: str, id: str) -> str:
+    """The project directory in the store that holds this session, or "".
+
+    Searched rather than derived: a session's directory is named for the path the
+    harness was started in, which is not where a task necessarily runs, so a
+    path computed at lease time would usually be wrong. The search is a stat per
+    project directory, which is tens of them.
+    """
+    harness = _HARNESSES.get(kind)
+    root = _sessions_root(std, kind)
+    if not harness or not harness.store or not root:
+        return ""
+    wanted = harness.store.session_file % id
+    for entry in std.fs.read_dir(root):
+        if entry.is_dir and std.fs.exists(root + "/" + entry.path + "/" + wanted):
+            return root + "/" + entry.path
+    return ""
+
+def _session_on_disk(std, kind: str, id: str) -> bool:
+    """Whether this session is still stored."""
+    return _session_dir(std, kind, id) != ""
+
+def _flatten(path: str, chars: str) -> str:
+    """`path` with each character of `chars` replaced by a dash."""
+    out = ""
+    for ch in path.elems():
+        out += "-" if ch in chars else ch
+    return out
+
+def session_project(std, agent: dict) -> str:
+    """The directory this session belongs to, as a path, or "".
+
+    Answered from whichever of three sources can back it. The harness's own
+    `*_PROJECT_DIR`, recorded at detection, settles it outright — but only a
+    hook invocation is given one, and a tool execution, which is how a task
+    normally arrives, is not. Failing that, the session store can place the
+    session when it is keyed by the path the harness started in.
+
+    The store names a project directory for the path the harness started in with
+    the separators flattened, and that cannot be decoded back — so a real path
+    is only reported when it can be *checked*: the recorded `cwd` is the answer
+    when the session really is filed under the directory that `cwd` flattens to.
+
+    Where they disagree — a task run from somewhere other than where the harness
+    started, which is the ordinary case for an agent handed a worktree — there
+    is no answer, and "" is it. The store's own directory is not a substitute:
+    it is where a transcript is filed, not a directory anyone can enter, and a
+    caller shows this to someone who may try to `cd` into it or hand it to
+    `--resume`. A plausible path that is wrong is worse than no path.
+    """
+    if not agent:
+        return ""
+
+    # The harness said so, which beats anything worked out from a path.
+    stated = agent.get("project", "")
+    if stated:
+        return stated
+
+    harness = _HARNESSES.get(agent.get("kind", ""))
+    id = _harness_session(agent)
+    if not harness or not harness.store or not id:
+        return ""
+    found = _session_dir(std, agent.get("kind", ""), id)
+    if not found:
+        return ""
+    cwd = agent.get("cwd", "")
+    confirmed = cwd and found.rpartition("/")[2] == _flatten(cwd, harness.store.project_flattens)
+    return cwd if confirmed else ""
+
+def session_filed(std, agent: dict) -> str:
+    """Whether the harness's store holds this session: `FILED`, `ABSENT` or
+    `UNKNOWN`.
+
+    Narrower than `session_state`, and deliberately independent of it. Liveness
+    is about the process that took the lease; this is about whether the session
+    can be *found*, which is the question a resume command turns on — and the
+    two disagree whenever a live process holds a session id the store does not
+    have.
+
+    `unknown` for a harness whose layout is not described, which is most of
+    them: a store that cannot be read says nothing either way.
+    """
+    if not agent:
+        return UNKNOWN
+    id = _harness_session(agent)
+    kind = agent.get("kind", "")
+    if not id or not _sessions_root(std, kind):
+        return UNKNOWN
+    return FILED if _session_on_disk(std, kind, id) else ABSENT
+
+def session_state(std, agent: dict) -> str:
+    """Whether this lease's session is running, resumable, or really gone.
+
+    The three signals are consulted in order of how much they prove, and a
+    missing one never substitutes for the next: a live process means `running`,
+    a session still on disk means `resumable`, and only a *known* layout with
+    the session absent from it means `gone`.
+
+    "Running" is a claim about the process recorded with the lease, not about
+    the session id — the two can disagree, and `session_filed` is the one to ask
+    about the id.
+    """
+    if not agent:
+        return UNKNOWN
+    if is_running(std, agent):
+        return RUNNING
+
+    filed = session_filed(std, agent)
+    if filed == UNKNOWN:
+        return UNKNOWN
+    return RESUMABLE if filed == FILED else GONE
+
+def session_id(agent: dict) -> str:
+    """The harness session an agent record belongs to: the session it runs in
+    when the id is one the caller chose (`parent_id`), else its own id."""
+    return agent.get("parent_id", "") or agent.get("id", "")
+
+def _harness_session(agent: dict) -> str:
+    """The id the harness's own store and resume command know this session by,
+    or "" — for an id the caller chose with no harness session behind it, and
+    for one that could be read as an option or a path, or carries a character
+    a terminal would act on or hide, since it is pasted into a command and
+    joined into a file name."""
+    if agent.get("id_source", "") == "caller" and not agent.get("parent_id", ""):
+        return ""
+    id = session_id(agent)
+    if not id or id.startswith("-") or id.startswith(".") or "/" in id or "\\" in id or has_unsafe_chars(id):
+        return ""
+    return id
+
+def label(agent: dict) -> str:
+    """An agent named in a sentence: the kind, and the session id if there is one.
+
+    The id is whole. An abbreviated one identifies a session to a reader who
+    already knows which it is and is no use to anyone else, since `--resume`
+    will not take it; tables get the two as separate columns so the ids align.
+    """
+    if not agent:
+        return ""
+    kind = agent.get("kind", "") or "agent"
+    id = agent.get("id", "")
+    if agent.get("parent_id", ""):
+        return kind + " agent " + id + " in session " + agent["parent_id"]
+    return (kind + " " + id) if id else kind
+
+def shell_quote(s: str) -> str:
+    """`s` as one shell word: as it is when it holds nothing a shell would
+    reinterpret, else single-quoted. A leading `~/` stays outside the quotes,
+    so the shell still expands it.
+
+    A word with characters a terminal would act on or hide is written as
+    `$'…'` with each of them as its UTF-8 bytes (`\\xHH`): shown safely, and
+    read back by any shell as the word it is — where plain quotes around an
+    escape would name something else. A quote and `!` are bytes too, so
+    interactive history expansion has nothing to act on."""
+    if not s:
+        return "''"
+    if s == "~":
+        return s
+    home = "~/" if s.startswith("~/") else ""
+    rest = s[len(home):]
+    if has_unsafe_chars(rest):
+        return home + "$'" + "".join([
+            "\\\\" if ch == "\\" else utf8_bytes_escaped(ch) if is_unsafe_char(ch) or ch in "'!" else ch
+            for ch in rest.elems()
+        ]) + "'"
+    if not rest or (not rest.startswith("=") and all([ch.isalnum() or ch in "-_./:@%+=," for ch in rest.elems()])):
+        return s
+    return home + "'" + rest.replace("'", "'\\''") + "'"
+
+def resume_hint(agent: dict) -> str:
+    """How to return to this session, or "" when that is not known.
+
+    A harness that is no longer running is usually a closed terminal, and the
+    work in it is waiting to be picked up rather than finished with. The id is
+    quoted: it comes from the environment, and the line is printed to be pasted.
+    """
+    id = _harness_session(agent) if agent else ""
+    if not id:
+        return ""
+    harness = _HARNESSES.get(agent.get("kind", ""))
+    return (harness.resume % shell_quote(id)) if harness and harness.resume else ""
+
+# Exposed for agent_test.axl, so the tables can be checked against each other;
+# not part of this module's interface.
+testonly_binaries = _BINARIES
+testonly_flatten = _flatten
+testonly_env_detectors = _ENV_DETECTORS
+testonly_harnesses = _HARNESSES
