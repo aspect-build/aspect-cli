@@ -51,7 +51,7 @@ load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/environment.axl", "warn")
 load("./private/lib/fs_tree.axl", "remove_tree")
 load("./private/lib/output_bases.axl", "output_bases")
-load("./private/lib/text.axl", "pluralize", "printable")
+load("./private/lib/text.axl", "pad_left", "pluralize", "printable")
 
 # Bumped whenever a key in the `--output=json` document is renamed, removed, or
 # changes meaning. Additive keys do not bump it.
@@ -353,8 +353,12 @@ def _print_plan(streaming: bool, plan, policy, now_us: int, home: str) -> None:
     fmt_kb = output_bases.fmt_kb
     if plan.removals:
         say(streaming, "  %s to remove, %s:" % (pluralize(len(plan.removals), output_bases.BASE), fmt_kb(_removal_kb(plan))))
-    for b in plan.removals:
-        say(streaming, "    " + fmt_kb(plan.sizes.get(b.path, 0)) + "  " + b.name + "  (" + _why(b, now_us, home) + ")")
+
+    # Sizes right-aligned, so the names start in one column.
+    sizes = [fmt_kb(plan.sizes.get(b.path, 0)) for b in plan.removals]
+    width = max([len(size) for size in sizes]) if sizes else 0
+    for b, size in zip(plan.removals, sizes):
+        say(streaming, "    " + pad_left(size, width) + "  " + b.name + "  (" + _why(b, now_us, home) + ")")
     if plan.stale:
         say(streaming, "  Bazel download cache: %d of %s unused for %s or more, %s" % (
             len(plan.stale),

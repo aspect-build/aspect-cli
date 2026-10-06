@@ -236,6 +236,38 @@ check "prune refuses a file there" "$(outcome "$A" "$A_PID" prune "$nslot" --for
 check "and it is still there" "$(cat "$npath")" "precious"
 rm -f "$npath"
 
+section "another repository's slot, named from elsewhere"
+g init -q --bare -b main "$ROOT/other.git"
+g clone -q "$ROOT/other.git" "$ROOT/other" 2>/dev/null
+cd "$ROOT/other"
+echo other >README
+g add -A
+g commit -qm init
+g push -q origin HEAD:main 2>/dev/null
+oslot="$(json "$A" "$A_PID" add o1 --create=origin/main | jq -r .slot)"
+oslot2="$(json "$A" "$A_PID" add o2 --create=origin/main | jq -r .slot)"
+cd "$ROOT/repo"
+check "release it from this repository's clone" "$(json "$A" "$A_PID" release "$oslot" | jq -r .released)" "o1"
+check "prune it from here too" "$(outcome "$A" "$A_PID" prune "$oslot" --force)" "ok"
+check "and it is gone" "$(json "$A" "$A_PID" list --all | jq --arg s "$oslot" '[.pools[].slots[] | select(.slot == $s)] | length')" "0"
+cd "$ROOT"
+check "release one from outside any clone" "$(json "$A" "$A_PID" release "$oslot2" | jq -r .released)" "o2"
+cd "$ROOT/repo"
+
+# A branch of this clone that looks like the start of another repository's
+# slot id is still this clone's branch.
+hexname="${oslot2:0:6}"
+mine="$(json "$A" "$A_PID" add "$hexname" --create=origin/main | jq -r .slot)"
+json "$A" "$A_PID" release "$hexname" >/dev/null
+check "a hex-looking branch name means this clone's slot" "$(json "$A" "$A_PID" prune "$hexname" --dry-run | jq -r '.candidates[0].slot')" "$mine"
+
+# Another clone of the same repository.
+g clone -q "$ROOT/remote.git" "$ROOT/repo2" 2>/dev/null
+cd "$ROOT/repo2"
+cslot="$(json "$A" "$A_PID" add c1 --create=origin/main | jq -r .slot)"
+cd "$ROOT/repo"
+check "release a sibling clone's slot by id" "$(json "$A" "$A_PID" release "$cslot" | jq -r .released)" "c1"
+
 section "machine output"
 bidi="$(printf 'bi\xe2\x80\xaedi')"
 out="$(as "$A" "$A_PID" add "$bidi" --create=origin/main --output=path 2>"$ROOT/stderr")"
