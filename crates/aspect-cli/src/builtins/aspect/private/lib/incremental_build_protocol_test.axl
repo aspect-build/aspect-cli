@@ -1,0 +1,77 @@
+"""Unit tests for the transport-neutral Incremental Build Protocol."""
+
+load("./incremental_build_protocol.axl", "incremental_build_protocol")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_ndjson_framing(_ctx):
+    line, remainder = incremental_build_protocol.take_line("{\"kind\":\"EXIT\"}\nnext")
+    _eq("line", line, "{\"kind\":\"EXIT\"}")
+    _eq("remainder", remainder, "next")
+    line, remainder = incremental_build_protocol.take_line("partial")
+    _eq("partial line", line, None)
+    _eq("partial remainder", remainder, "partial")
+
+    line, remainder = incremental_build_protocol.take_line("first\nsecond\npartial")
+    _eq("first buffered line", line, "first")
+    line, remainder = incremental_build_protocol.take_line(remainder)
+    _eq("second buffered line", line, "second")
+    _eq("buffered partial remainder", remainder, "partial")
+
+def _test_message_validation(_ctx):
+    err, message = incremental_build_protocol.parse_message("{\"kind\":\"CYCLE_COMPLETED\",\"cycle_id\":1}")
+    _eq("valid message error", err, None)
+    _eq("valid message", message["cycle_id"], 1)
+    err, _ = incremental_build_protocol.parse_message("{\"kind\":\"NOPE\"}")
+    _eq("unknown kind rejected", err != None, True)
+    _eq("unknown kind error type", isinstance(err, incremental_build_protocol.Error), True)
+    err, _ = incremental_build_protocol.parse_message("not json")
+    _eq("invalid JSON rejected", err != None, True)
+    for label, raw in [
+        ("null", "null"),
+        ("array", "[]"),
+        ("string", "\"EXIT\""),
+    ]:
+        err, _ = incremental_build_protocol.parse_message(raw)
+        _eq("%s message rejected" % label, err != None, True)
+    err, _ = incremental_build_protocol.parse_message("{}")
+    _eq("missing kind rejected", err != None, True)
+
+def _test_message_builder(_ctx):
+    _eq(
+        "message fields",
+        incremental_build_protocol.message("EXIT", description = "done"),
+        {"kind": "EXIT", "description": "done"},
+    )
+
+def _test_socket_environment_names(_ctx):
+    _eq("socket environment", incremental_build_protocol.PROTOCOL_SOCKET_ENV, "IBP_WATCH_SOCKET_FILE")
+    _eq("legacy socket environment", incremental_build_protocol.LEGACY_PROTOCOL_SOCKET_ENV, "ABAZEL_WATCH_SOCKET_FILE")
+
+def _test_exported_enums(_ctx):
+    _eq("cycle kind", "CYCLE" in incremental_build_protocol.KIND.values(), True)
+    _eq("sources watch scope", "sources" in incremental_build_protocol.WATCH_SCOPE.values(), True)
+
+_UNIT_TESTS = [
+    _test_ndjson_framing,
+    _test_message_validation,
+    _test_message_builder,
+    _test_socket_environment_names,
+    _test_exported_enums,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("incremental_build_protocol.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+incremental_build_protocol_tests = task(
+    summary = "Run the Incremental Build Protocol core AXL unit tests.",
+    kind = "test-incremental-build-protocol",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

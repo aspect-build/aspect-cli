@@ -6,6 +6,9 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
+def _not_directory(_path):
+    return False
+
 def _session(values):
     queue = list(values)
 
@@ -44,12 +47,53 @@ def _test_disabled_or_absolute_symlink_prefix(_ctx):
     _eq("disabled symlinks", watch.ignores("/repo/ws", "/"), base)
     _eq("absolute bin symlink", "/repo/ws/links/bazel-bin" in watch.ignores("/repo/ws", "/repo/ws/links/bazel-"), True)
 
+def _test_workspace_ignore_files_filter_events(_ctx):
+    batch = watch.filter_batch(struct(
+        events = [
+            struct(path = ".cache/data"),
+            struct(path = "app/node_modules/pkg/index.js"),
+            struct(path = "src/app.js"),
+        ],
+        rescan = False,
+    ), "/repo", ["/repo/.cache"], ["/repo/**/node_modules"], _not_directory)
+    _eq("filtered event paths", [event.path for event in batch.events], ["src/app.js"])
+    _eq(
+        "ignored-only batch",
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = False), "/repo", ["/repo/.cache"], [], _not_directory),
+        None,
+    )
+    _eq(
+        "rescan retained",
+        watch.filter_batch(struct(events = [struct(path = ".cache/data")], rescan = True), "/repo", ["/repo/.cache"], [], _not_directory).rescan,
+        True,
+    )
+
+def _test_repo_patterns_only_match_directories(_ctx):
+    directories = {"/repo/generated/tree": True}
+    batch = watch.filter_batch(
+        struct(
+            events = [
+                struct(path = "generated/client"),
+                struct(path = "generated/tree"),
+                struct(path = "generated/tree/child.js"),
+            ],
+            rescan = False,
+        ),
+        "/repo",
+        [],
+        ["/repo/generated/*"],
+        is_directory = lambda path: path in directories,
+    )
+    _eq("regular file retained", [event.path for event in batch.events], ["generated/client"])
+
 _UNIT_TESTS = [
     _test_no_batch_does_not_run,
     _test_batch_runs_once,
     _test_queued_batches_are_coalesced,
     _test_bazel_symlink_ignores_follow_resolved_prefix,
     _test_disabled_or_absolute_symlink_prefix,
+    _test_workspace_ignore_files_filter_events,
+    _test_repo_patterns_only_match_directories,
 ]
 
 def _test_impl(ctx):

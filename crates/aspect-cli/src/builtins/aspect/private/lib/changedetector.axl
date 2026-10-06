@@ -1,4 +1,6 @@
-"""Runfiles-aware restart decisions for `run --watch`."""
+"""Runfile restart decisions for `run --watch`."""
+
+load("./path_utils.axl", "path_utils")
 
 _MANIFEST_OUTPUT_GROUP = "aspect_watch_manifest"
 
@@ -73,9 +75,6 @@ def _take_execution_outputs(ctx: TaskContext, path: str, successful: bool) -> li
     ctx.std.fs.remove_file(path)
     return outputs
 
-def _normalize_path(path: str) -> str:
-    return path.replace("\\", "/")
-
 def _manifest_unescape(value: str) -> str:
     """Decode Bazel's escaped runfiles-manifest field representation."""
     out = ""
@@ -119,10 +118,9 @@ def _origin_keys(origin: str, root: str) -> list[str]:
     """Forms by which watcher events or execution-log outputs name origin."""
     if not origin:
         return []
-    origin = _normalize_path(origin)
-    root = _normalize_path(root).rstrip("/")
-    absolute = origin.startswith("/") or (len(origin) >= 3 and origin[1] == ":" and origin[2] == "/")
-    if not absolute:
+    origin = path_utils.normalize_separators(origin)
+    root = path_utils.normalize_separators(root).rstrip("/")
+    if not path_utils.is_absolute(origin):
         # Relative manifest origins are runfiles symlink targets, not paths
         # reported by the workspace watcher or execution log.
         return []
@@ -157,8 +155,50 @@ def _parse_manifest(content: str, root: str) -> struct:
         logical, origin = fields
         entries[logical] = origin
         for key in _origin_keys(origin, root):
-            origins[key] = logical
+            origins.setdefault(key, []).append(logical)
     return struct(entries = entries, origins = origins)
+
+def _source_info(origin: str, root: str) -> dict:
+    """Incremental Build Protocol metadata for one manifest entry."""
+    origin = path_utils.normalize_separators(origin)
+    root = path_utils.normalize_separators(root).rstrip("/")
+    info = {}
+    if origin and not path_utils.is_absolute(origin):
+        info["is_symlink"] = True
+    elif origin == root or origin.startswith(root + "/"):
+        info["is_source"] = True
+    return info
+
+def _runfiles(manifest, root: str) -> dict | None:
+    if manifest == None:
+        return None
+    return {logical: _source_info(origin, root) for logical, origin in manifest.entries.items()}
+
+def _runfile_info(manifest, logical: str, root: str):
+    if manifest == None:
+        return None
+    origin = manifest.entries.get(logical)
+    if origin != None:
+        return _source_info(origin, root)
+
+    # Directory runfiles are represented by their root in the manifest, while
+    # a change names the child below it. The child has the same source/symlink
+    # classification as that root.
+    for parent in path_utils.parents(logical, nearest_first = True):
+        origin = manifest.entries.get(parent)
+        if origin != None:
+            return _source_info(origin, root)
+    return None
+
+def _runfile_delta(current, logical_paths: list[str], removed_paths: list[str], root: str) -> dict:
+    removed = {path_utils.normalize_separators(path): True for path in _runfiles_for_paths(removed_paths, current.origins)} if current != None else {}
+    return {logical: None if logical in removed else _runfile_info(current, logical, root) for logical in logical_paths}
+
+def _runfile_changes(previous, current, source_paths: list[str], removed_paths: list[str], output_paths: list[str] | None, root: str, rescan: bool = False) -> dict | None:
+    changed = _changed_runfiles(previous, current, source_paths, output_paths, rescan = rescan)
+    if changed == None:
+        return None
+    return _runfile_delta(current, changed, removed_paths, root)
 
 def _manifest_path(paths: list[str]) -> str | None:
     for path in paths:
@@ -176,15 +216,14 @@ def _read_manifest(ctx: TaskContext, path: str | None, root: str):
 def _paths_changed(paths: list[str], origins: dict) -> bool:
     """Whether any changed path equals or descends from a tracked origin."""
     for path in paths:
-        path = _normalize_path(path)
+        path = path_utils.normalize_separators(path)
         if path in origins:
             return True
 
         # An origin may itself be a directory. Events name the changed child,
         # while manifests and execution logs name its root.
-        parts = path.split("/")
-        for i in range(len(parts) - 1, 0, -1):
-            if "/".join(parts[:i]) in origins:
+        for parent in path_utils.parents(path, nearest_first = True):
+            if parent in origins:
                 return True
     return False
 
@@ -192,20 +231,19 @@ def _runfiles_for_paths(paths: list[str], origins: dict) -> list[str]:
     """Logical runfile paths backed by the changed physical paths."""
     changed = {}
     for path in paths:
-        path = _normalize_path(path)
-        logical = origins.get(path)
-        if logical != None:
-            changed[logical] = True
-            continue
+        path = path_utils.normalize_separators(path)
+        logicals = origins.get(path)
+        if logicals != None:
+            for logical in logicals:
+                changed[logical] = True
 
         # A runfile origin may itself be a directory. Preserve the changed
         # child's suffix so future consumers can receive a precise delta.
-        parts = path.split("/")
-        for i in range(len(parts) - 1, 0, -1):
-            logical = origins.get("/".join(parts[:i]))
-            if logical != None:
-                changed[logical.rstrip("/") + "/" + "/".join(parts[i:])] = True
-                break
+        for parent in path_utils.parents(path, nearest_first = True):
+            logicals = origins.get(parent)
+            if logicals != None:
+                for logical in logicals:
+                    changed[logical.rstrip("/") + "/" + path[len(parent) + 1:]] = True
     return sorted(changed.keys())
 
 def _changed_runfiles(previous, current, source_paths: list[str], output_paths: list[str] | None, rescan: bool = False) -> list[str] | None:
@@ -278,38 +316,51 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
         state["manifest"] = read_current_manifest()
         state["restart_pending"] = False
 
+    def current_runfiles():
+        return _runfiles(state["manifest"], root)
+
     def record_build_failure():
         state["restart_pending"] = True
 
-    def changed_runfiles(source_paths: list[str], execution_outputs: list[str] | None, rescan: bool = False) -> list[str] | None:
-        """Return precise changed logical runfiles, or None when the caller
-        must conservatively restart because the change cannot be represented."""
+    def changes(source_paths: list[str], removed_paths: list[str], execution_outputs: list[str] | None, rescan: bool = False) -> struct:
+        """Return changes relevant to each watch-update strategy."""
         after = _entrypoint_state(r.determine_entrypoint(target))
+        previous_manifest = state["manifest"]
         next_manifest = read_current_manifest()
-        changed = _changed_runfiles(
-            state["manifest"],
-            next_manifest,
-            source_paths,
-            execution_outputs,
-            rescan = rescan,
-        )
+        changes_unknown = state["restart_pending"]
+        changed_runfiles = None
+        if not changes_unknown:
+            changed_runfiles = _runfile_changes(
+                previous_manifest,
+                next_manifest,
+                source_paths,
+                removed_paths,
+                execution_outputs,
+                root,
+                rescan = rescan,
+            )
         default_outputs_changed = _outputs_changed(
             execution_outputs,
             r.get_default_outputs(target),
             root,
         )
         state["manifest"] = next_manifest
-        can_report_precisely = not state["restart_pending"] and changed != None and not default_outputs_changed and state["entrypoint_before_build"] == after
         state["restart_pending"] = False
-        return changed if can_report_precisely else None
+        return struct(
+            changes_unknown = changes_unknown,
+            outputs_changed = default_outputs_changed,
+            restart_required = state["entrypoint_before_build"] != after,
+            runfiles = changed_runfiles,
+        )
 
     return struct(
         aspects = [_aspect(ctx)],
+        changes = changes,
         execution_log_path = execution_log_dir + "/execution.binpb",
         begin_build = begin_build,
         capture_baseline = capture_baseline,
+        current_runfiles = current_runfiles,
         record_build_failure = record_build_failure,
-        changed_runfiles = changed_runfiles,
     )
 
 changedetector = namespace(
@@ -319,5 +370,7 @@ changedetector = namespace(
     new = _new,
     outputs_changed = _outputs_changed,
     parse_manifest = _parse_manifest,
+    runfile_changes = _runfile_changes,
+    runfiles = _runfiles,
     take_execution_outputs = _take_execution_outputs,
 )

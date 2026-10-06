@@ -12,7 +12,7 @@ small files for each instead. The layouts covered:
 checkout — a nested Bazel workspace, say — reports the checkout around it.
 """
 
-load("./path_normalize.axl", "normpath")
+load("./path_utils.axl", "normpath")
 
 Checkout = record(
     # The directory holding `.git`.

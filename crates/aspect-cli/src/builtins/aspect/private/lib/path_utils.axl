@@ -1,0 +1,129 @@
+"""Path utilities."""
+
+def _normalize_separators(path: str) -> str:
+    return path.replace("\\", "/")
+
+def _is_absolute(path: str) -> bool:
+    return path.startswith("/") or (len(path) >= 3 and path[1] == ":" and path[2] == "/")
+
+def _parents(path: str, nearest_first: bool = False) -> list[str]:
+    parts = path.split("/")
+    parents = ["/".join(parts[:i]) for i in range(1, len(parts))]
+    return parents[::-1] if nearest_first else parents
+
+def _segment_matches(pattern: str, value: str) -> bool:
+    if pattern == "*" or pattern == value:
+        return True
+    if "*" not in pattern and "?" not in pattern:
+        return False
+
+    star = -1
+    matched = 0
+    p = 0
+    v = 0
+    for _ in range((len(pattern) + 1) * (len(value) + 1)):
+        if v < len(value) and p < len(pattern) and (pattern[p] == value[v] or pattern[p] == "?"):
+            p += 1
+            v += 1
+        elif p < len(pattern) and pattern[p] == "*":
+            star = p
+            matched = v
+            p += 1
+        elif star >= 0:
+            p = star + 1
+            matched += 1
+            v = matched
+        else:
+            return False
+        if v >= len(value):
+            break
+    for _ in range(len(pattern)):
+        if p < len(pattern) and pattern[p] == "*":
+            p += 1
+        else:
+            break
+    return p == len(pattern) and v == len(value)
+
+def _glob_matches(pattern: str, path: str) -> bool:
+    """Match a `/`-separated path against `*`, `?`, and `**`."""
+    pattern_parts = pattern.split("/")
+    path_parts = path.split("/")
+    reachable = [False] * (len(path_parts) + 1)
+    reachable[0] = True
+    for pattern_part in pattern_parts:
+        next_reachable = [False] * (len(path_parts) + 1)
+        if pattern_part == "**":
+            carry = False
+            for i in range(len(path_parts) + 1):
+                if reachable[i]:
+                    carry = True
+                next_reachable[i] = carry
+        else:
+            for i in range(1, len(path_parts) + 1):
+                if reachable[i - 1] and _segment_matches(pattern_part, path_parts[i - 1]):
+                    next_reachable[i] = True
+        reachable = next_reachable
+    return reachable[len(path_parts)]
+
+def normpath(path: str) -> str:
+    """Absolute `path` with `.`, `..`, repeated and trailing slashes resolved,
+    without touching the disk, so symlinks are left as written."""
+    out = []
+    for seg in path.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    return "/" + "/".join(out)
+
+def normalize_files_for_cwd(cwd, git_root, files):
+    """Rebase git-root-relative paths to cwd-relative paths.
+
+    Three cases based on the relationship between cwd and git_root:
+
+    1. cwd == git_root: no rebasing needed, return files unchanged.
+
+    2. cwd is under git_root: files outside the cwd subtree are dropped;
+       the cwd prefix is stripped from the rest.
+
+         git_root /repo, cwd /repo/pkg:
+           "pkg/foo.go"   → "foo.go"   (kept, prefix stripped)
+           "other/bar.go" → dropped
+
+    3. git_root is under cwd: a prefix is added so paths reach the git
+       repository from cwd. This happens when aspect is invoked from an
+       ancestor directory that contains the git repo as a subdirectory
+       (e.g. aspect_root = /workspace, git_root = /workspace/project).
+
+         git_root /workspace/project, cwd /workspace:
+           "src/foo.go"  → "project/src/foo.go"
+
+    When cwd and git_root are unrelated (neither is an ancestor of the
+    other), or when git_root is None, returns files unchanged.
+    """
+    if not files or not git_root:
+        return files
+    if cwd == git_root:
+        return files
+    git_root_slash = git_root + "/"
+    cwd_slash = cwd + "/"
+    if cwd.startswith(git_root_slash):
+        # Case 2: cwd is under git_root — strip the cwd prefix.
+        rel_cwd = cwd[len(git_root_slash):]
+        cwd_prefix = rel_cwd + "/"
+        return [f[len(cwd_prefix):] for f in files if f.startswith(cwd_prefix)]
+    if git_root.startswith(cwd_slash):
+        # Case 3: git_root is under cwd — add the relative path to git_root.
+        rel_git = git_root[len(cwd_slash):]
+        return [rel_git + "/" + f for f in files]
+    return files
+
+path_utils = namespace(
+    glob_matches = _glob_matches,
+    is_absolute = _is_absolute,
+    normalize_separators = _normalize_separators,
+    parents = _parents,
+)

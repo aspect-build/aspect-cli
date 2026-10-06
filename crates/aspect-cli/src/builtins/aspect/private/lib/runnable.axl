@@ -36,7 +36,8 @@ _DOWNLOAD_OUTPUTS_ALIASES = {
 # `<name>.aspect_runinfo.json` per runnable target carrying everything
 # `bazel run` reconstructs but no provider exposes: the executable
 # (runfiles-relative short_path), the expanded+tokenized `args` attribute, and
-# the `RunEnvironmentInfo` env. `determine_entrypoint` reads it back.
+# the `RunEnvironmentInfo` env, plus tags used to select watch integrations.
+# `determine_entrypoint` reads it back.
 _RUNINFO_OUTPUT_GROUP = "aspect_runinfo"
 _RUNINFO_JSON_SUFFIX = ".aspect_runinfo.json"
 
@@ -143,6 +144,7 @@ def _runinfo_aspect_impl(target, ctx):
         args = _expand_and_tokenize_args(ctx, target),
         environment = env,
         inherited_environment = inherited,
+        tags = getattr(ctx.rule.attr, "tags", []),
     )
 
     out = ctx.actions.declare_file(target.label.name + ".aspect_runinfo.json")
@@ -443,7 +445,7 @@ def _clear_output_group_outputs(state: struct, target: str, group: str) -> None:
 def _read_runinfo(state: struct, target_key: str) -> struct | None:
     """Parse the `aspect_runinfo` JSON the injected aspect wrote for `target_key`.
 
-    Returns `struct(executable, args, environment, inherited_environment)` —
+    Returns `struct(executable, args, environment, inherited_environment, tags)` —
     `executable` the runfiles-relative short_path of the binary, `args` the
     expanded+tokenized `args` attribute, and the `RunEnvironmentInfo` env split.
     `None` when the aspect didn't run for this target (no injection, or a
@@ -462,6 +464,7 @@ def _read_runinfo(state: struct, target_key: str) -> struct | None:
             args = parsed.get("args", []),
             environment = parsed.get("environment", {}),
             inherited_environment = parsed.get("inherited_environment", []),
+            tags = parsed.get("tags", []),
         )
     return None
 
@@ -469,11 +472,11 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Resolve `target` to an executable path and runfiles directory.
 
     Returns `struct(path, runfiles_dir, runfiles_workspace_dir, args,
-    environment, inherited_environment)` or `None` when the target produced no
+    environment, inherited_environment, tags)` or `None` when the target produced no
     BES `target_completed` event or its default output group has no selectable
     executable.
 
-    `args` / `environment` / `inherited_environment` come from the injected
+    `args` / `environment` / `inherited_environment` / `tags` come from the injected
     `runinfo` aspect (see `runinfo_aspect_flags`): the expanded+tokenized `args`
     attribute and the target's `RunEnvironmentInfo` env, for `_spawn` to replay
     the way `bazel run` does. They are empty when the aspect didn't run — e.g.
@@ -563,6 +566,7 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         args = runinfo.args if runinfo != None else [],
         environment = runinfo.environment if runinfo != None else {},
         inherited_environment = runinfo.inherited_environment if runinfo != None else [],
+        tags = runinfo.tags if runinfo != None else [],
     )
 
 def _entrypoint_ready(state: struct, target: str) -> bool:
@@ -584,7 +588,7 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False, extra_environment: dict = {}) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
@@ -634,6 +638,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
         .args(getattr(ep, "args", []) + list(args))
     for k, v in runfiles_env(ep).items():
+        cmd = cmd.env(k, v)
+    for k, v in extra_environment.items():
         cmd = cmd.env(k, v)
     if stdout_path:
         cmd = cmd.stdout(ctx.std.fs.create(stdout_path))
@@ -724,7 +730,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           aspect completion; targets still not-ready at build end are resolved
           via `determine_entrypoint` (non-runnable ones never turn ready).
 
-      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment) | None
+      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment, tags) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
@@ -732,7 +738,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
           cwd `bazel run` uses; usually `…/format.runfiles/_main`), or `None`
           when `runfiles_dir` is `None`. `args` / `environment` /
-          `inherited_environment` carry the `runinfo` aspect's capture (empty
+          `inherited_environment` / `tags` carry the `runinfo` aspect's capture (empty
           when the caller didn't inject it — i.e. constructed `runnable` without
           `rc`, or built without `r.flags`).
 
@@ -748,7 +754,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           Forget the prior build's default output group before starting the
           next build, preventing an incomplete build from leaving stale paths.
 
-      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False) → Child
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None, process_group=False, extra_environment={}) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -761,6 +767,8 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
           `process_group=True` starts the child in a separate process group so
           the caller can terminate the child and its descendants together.
+          `extra_environment` is applied last for caller-owned protocols and
+          other per-spawn integration variables.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -797,5 +805,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         clear_default_outputs = lambda target: _clear_default_outputs(state, target),
         get_output_group_outputs = lambda target, group: _get_output_group_outputs(state, target, group),
         clear_output_group_outputs = lambda target, group: _clear_output_group_outputs(state, target, group),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False, extra_environment = {}: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group, extra_environment),
     )

@@ -1,6 +1,7 @@
 """Workspace file-watch session for `--watch` tasks."""
 
 load("@std//time.axl", "sleep_iter")
+load("./bazel_ignores.axl", "bazel_ignores")
 
 # Workspace entries never worth a rebuild: VCS internals and bazel's
 # convenience symlinks (bazel-bin, bazel-out,
@@ -25,22 +26,53 @@ def _ignores(root: str, symlink_prefix: str | None = None) -> list[str]:
         paths.extend([prefix + suffix for suffix in ["bin", "out", "testlogs", workspace]])
     return paths
 
+def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: list[str], is_directory):
+    events = []
+    for event in batch.events:
+        path = root + "/" + event.path
+        directory = is_directory(path) if ignored_patterns else False
+        if not bazel_ignores.is_ignored(path, ignored_paths, ignored_patterns, is_directory = directory):
+            events.append(event)
+    return struct(events = events, rescan = batch.rescan) if events or batch.rescan else None
+
 def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
     """Start watching the bazel workspace. Returns a session:
 
       try_pop() → None | fs.WatchBatch — non-blocking; a settled batch of
           workspace changes.
       root — the watched workspace root.
+      ignored_paths — absolute path prefixes excluded from the watch.
+      ignored_patterns — absolute `REPO.bazel` globs excluded from the watch.
 
     Additional ignore paths may be absolute or relative to the invocation
-    directory.
+    directory. Bazel ignore files are read once; restart the watch session
+    after changing them.
     """
     root = ctx.std.env.bazel_root_dir()
     extra_ignores = [_absolute(ctx, path) for path in ignore]
     symlink_prefix = rc.flag_value("--symlink_prefix", command = "build") if rc != None else None
-    w = ctx.std.fs.watch(root, ignore = _ignores(root, symlink_prefix) + extra_ignores)
+    ignored_patterns = bazel_ignores.read_repo_bazel(ctx.std.fs, root)
+    ignored_paths = (
+        _ignores(root, symlink_prefix) +
+        bazel_ignores.read_bazelignore(ctx.std.fs, root) +
+        extra_ignores
+    )
+    w = ctx.std.fs.watch(root, ignore = ignored_paths)
+
+    def is_directory(path):
+        err, metadata = catch(ctx.std.fs.try_metadata, path, types = [std.io.Error])
+        return err == None and metadata != None and metadata.is_dir
+
+    def try_pop():
+        batch = w.try_pop()
+        if batch == None:
+            return None
+        return _filter_batch(batch, root, ignored_paths, ignored_patterns, is_directory = is_directory)
+
     return struct(
-        try_pop = w.try_pop,
+        ignored_paths = ignored_paths,
+        ignored_patterns = ignored_patterns,
+        try_pop = try_pop,
         root = root,
     )
 
@@ -67,6 +99,7 @@ def _loop(ws: struct, run_cycle) -> None:
         _run_pending(ws, run_cycle)
 
 watch = namespace(
+    filter_batch = _filter_batch,
     ignores = _ignores,
     new = _new,
     loop = _loop,
