@@ -25,7 +25,7 @@ use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
 use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
-use crate::engine::r#trait::extract_trait_type_id;
+use crate::engine::r#trait::{TraitInstance, extract_trait_type_id};
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
@@ -387,7 +387,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             let function_name = "config";
             let def = frozen
                 .get(function_name)
-                .map_err(|_| EvalError::MissingSymbol(function_name.to_string()))?;
+                .map_err(|_| EvalError::MissingConfig(config_path.to_path_buf()))?;
             let func = heap.access_owned_frozen_value(&def);
 
             let mut eval = Evaluator::new(&self.env.0);
@@ -395,6 +395,23 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
             eval.eval_function(func, &[context_value], &[])?;
+        }
+
+        // Assignment to a trait field is type-checked as it happens, but a list
+        // field mutated in place (`score_slot.append(5)`) is not, so every
+        // instance a config touched is checked once they have all run.
+        let trait_map = self
+            .trait_map_value
+            .and_then(|v| v.downcast_ref::<TraitMap>())
+            .expect("trait map was just allocated");
+        let mismatches: Vec<String> = trait_map
+            .entries()
+            .into_iter()
+            .filter_map(|(_, _, instance)| instance.downcast_ref::<TraitInstance>())
+            .flat_map(|instance| instance.type_mismatches())
+            .collect();
+        if !mismatches.is_empty() {
+            return Err(EvalError::TraitTypeMismatch(mismatches));
         }
 
         Ok(())

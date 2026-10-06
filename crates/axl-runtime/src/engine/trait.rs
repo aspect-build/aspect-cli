@@ -584,6 +584,25 @@ impl<'v> AllocValue<'v> for TraitInstance<'v> {
 }
 
 impl<'v> TraitInstance<'v> {
+    /// Each field whose value no longer matches its declared type, described
+    /// for a message. Empty for an instance every field of which still fits.
+    pub(crate) fn type_mismatches(&self) -> Vec<String> {
+        self.get_field_names()
+            .into_iter()
+            .zip(self.values.iter().zip(self.type_checkers.iter()))
+            .filter(|(_, (value, tc))| !tc.matches(value.get()))
+            .map(|(name, (value, tc))| {
+                format!(
+                    "{}.{} expected type `{}`, got `{}`",
+                    self.typ,
+                    name,
+                    tc,
+                    value.get().to_repr()
+                )
+            })
+            .collect()
+    }
+
     fn get_field_names(&self) -> Vec<&str> {
         if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
             trait_type.fields.keys().map(|s| s.as_str()).collect()
