@@ -22,15 +22,20 @@
 //!      the next invocation on that runner hangs at "Running Bazel
 //!      server needs to be killed" until the orphan exits.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::process;
 
-fn registry() -> &'static Mutex<Vec<u32>> {
-    static REG: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct Registry {
+    pids: Vec<u32>,
+    shutting_down: bool,
+}
+
+fn registry() -> &'static Mutex<Registry> {
+    static REG: OnceLock<Mutex<Registry>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(Registry::default()))
 }
 
 /// Register a bazel client PID as live. The returned guard removes
@@ -39,12 +44,16 @@ fn registry() -> &'static Mutex<Vec<u32>> {
 #[must_use = "drop the guard at the end of the bazel invocation; \
               if you never bind it, the registry won't track the PID"]
 pub fn register(pid: u32) -> LiveBazelGuard {
-    if let Ok(mut g) = registry().lock() {
-        g.push(pid);
-    }
-    // A task can spawn another bazel while aspect-cli waits out
-    // `wait_for_sinks` after a shutdown signal; it must be cancelled too.
-    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+    // Register and check shutdown together so the first broadcast cannot
+    // overlap with the immediate SIGINT for a late client.
+    let shutting_down = registry()
+        .lock()
+        .map(|mut g| {
+            g.pids.push(pid);
+            g.shutting_down
+        })
+        .unwrap_or(false);
+    if shutting_down {
         tracing::warn!("shutting down — sending SIGINT to newly spawned bazel client PID {pid}");
         process::sigint(pid);
     }
@@ -72,7 +81,10 @@ pub fn spawn_registered(
 /// Snapshot of currently-live bazel client PIDs. Used by the OS
 /// signal handler in `aspect-cli/src/main.rs` to forward cancellation.
 pub fn live_pids() -> Vec<u32> {
-    registry().lock().map(|g| g.clone()).unwrap_or_default()
+    registry()
+        .lock()
+        .map(|g| g.pids.clone())
+        .unwrap_or_default()
 }
 
 /// Best-effort SIGINT to every registered bazel client. Non-blocking
@@ -87,8 +99,14 @@ pub fn live_pids() -> Vec<u32> {
 ///
 /// [1]: https://bazel.build/run/cancellation
 pub fn signal_all_for_shutdown() {
-    SHUTTING_DOWN.store(true, Ordering::SeqCst);
-    for pid in live_pids() {
+    let pids = registry()
+        .lock()
+        .map(|mut g| {
+            g.shutting_down = true;
+            g.pids.clone()
+        })
+        .unwrap_or_default();
+    for pid in pids {
         if process::is_pid_running(pid) {
             tracing::warn!(
                 "received OS shutdown signal — sending SIGINT to live bazel client PID {pid}"
@@ -114,8 +132,6 @@ pub fn force_kill_all_remaining() -> usize {
     }
     killed
 }
-
-static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Count of BES sinks still forwarding events, with a condvar signalled
 /// on every decrement.
@@ -203,8 +219,8 @@ pub struct LiveBazelGuard {
 impl Drop for LiveBazelGuard {
     fn drop(&mut self) {
         if let Ok(mut g) = registry().lock() {
-            if let Some(idx) = g.iter().position(|p| *p == self.pid) {
-                g.swap_remove(idx);
+            if let Some(idx) = g.pids.iter().position(|p| *p == self.pid) {
+                g.pids.swap_remove(idx);
             }
         }
     }
