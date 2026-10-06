@@ -13,6 +13,7 @@ use crate::ci::on_recognized_ci;
 use crate::diag;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::{Bazel, ClaimCheck};
+use crate::engine::cancellation::Signals;
 use crate::engine::config_context::ConfigContext;
 use crate::engine::feature::{Feature, FeatureLike, FrozenFeature};
 use crate::engine::feature_context::FeatureContext;
@@ -379,6 +380,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.features,
             self.telemetry_value,
             self.hooks_value,
+            self.loader.env.signals.clone(),
         ));
 
         for (config_path, scope) in configs {
@@ -394,6 +396,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
+            arm_cancel_check(&mut eval, &self.loader.env.signals);
             eval.eval_function(func, &[context_value], &[])?;
         }
 
@@ -493,11 +496,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 trait_map_value,
                 self.telemetry_value,
                 self.hooks_value,
+                self.loader.env.signals.clone(),
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
+            arm_cancel_check(&mut eval, &self.loader.env.signals);
             eval.eval_function(feature.implementation(), &[fctx], &[])
                 .map_err(|e| {
                     EvalError::UnknownError(
@@ -627,12 +632,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_info_val,
             bazel,
             self.hooks_value,
+            self.loader.env.signals.clone(),
         ));
 
         let mut eval = Evaluator::new(&self.env.0);
         eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
+        arm_cancel_check(&mut eval, &self.loader.env.signals);
 
         let hooks = self
             .hooks_value
@@ -643,7 +650,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             Ok(()) => eval.eval_function(task.implementation(), &[context], &[]),
             Err(e) => Err(e),
         };
-        let (mut outcome, ending) = Outcome::resolve(body_result);
+        let (mut outcome, ending) = Outcome::resolve(body_result, &self.loader.env.signals);
+        // The body has ended: from here the post-task hooks, defers and
+        // bookend run to completion whatever the root token says. Starlark
+        // runs the cancel check after every `eval_function`, so an armed
+        // check would fail each hook as it returned; and blocking builtins
+        // must block normally so cleanup can wait on things.
+        eval.set_check_cancelled(Box::new(|| false));
+        self.loader.env.signals.enter_unwind();
         // A hard error prints itself, traceback and all, once it propagates
         // below; an exit or return is reported here like a conclusion.
         if !matches!(ending, Ending::Failed(_)) {
@@ -789,6 +803,13 @@ fn apply_unclaimed_flags<'v>(
     } else {
         Some(passthrough::EXIT_UNCLAIMED)
     }
+}
+
+/// Make the evaluator end at the next loop iteration once the root token is
+/// cancelled, as `ctx.std.process.exit(130, "interrupted")` would: the safe
+/// point for pure Starlark loops. Blocking builtins have their own.
+fn arm_cancel_check<'a>(eval: &mut Evaluator<'_, 'a, '_>, signals: &'a Signals) {
+    eval.set_check_cancelled(Box::new(|| signals.should_unwind()));
 }
 
 fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {

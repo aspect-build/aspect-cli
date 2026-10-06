@@ -9,6 +9,9 @@ use starlark::values::{
 };
 
 use super::aspect::Aspect;
+use std::sync::Arc;
+
+use super::cancellation::{Cancellation, Signals};
 use super::http::Http;
 use super::std::Std;
 
@@ -32,6 +35,9 @@ pub struct FeatureContext<'v> {
     pub(crate) telemetry: Value<'v>,
     /// The run's `TaskHooks`, shared with the task body's context.
     pub(crate) hooks: Value<'v>,
+    /// The run's cancellation state, behind `ctx.cancellation`.
+    #[allocative(skip)]
+    pub(crate) signals: Arc<Signals>,
 }
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
@@ -49,12 +55,14 @@ impl<'v> FeatureContext<'v> {
         fragments: Value<'v>,
         telemetry: Value<'v>,
         hooks: Value<'v>,
+        signals: Arc<Signals>,
     ) -> Self {
         Self {
             args,
             fragments,
             telemetry,
             hooks,
+            signals,
         }
     }
 }
@@ -74,6 +82,7 @@ impl<'v> Freeze for FeatureContext<'v> {
             fragments: self.fragments.freeze(freezer)?,
             telemetry: self.telemetry.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
+            signals: self.signals,
         })
     }
 }
@@ -98,6 +107,8 @@ pub struct FrozenFeatureContext {
     telemetry: FrozenValue,
     #[allocative(skip)]
     hooks: FrozenValue,
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
@@ -138,8 +149,28 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
 
     /// Standard library — same as `ctx.std` in config and task functions.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: Value<'v>) -> anyhow::Result<Std> {
+        if let Some(c) = this.downcast_ref::<FeatureContext>() {
+            return Ok(Std::new(c.signals.clone()));
+        }
+        if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
+            return Ok(Std::new(c.signals.clone()));
+        }
+        Err(anyhow::anyhow!("expected FeatureContext"))
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(this: Value<'v>) -> anyhow::Result<Cancellation> {
+        if let Some(c) = this.downcast_ref::<FeatureContext>() {
+            return Ok(Cancellation::new(c.signals.clone()));
+        }
+        if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
+            return Ok(Cancellation::new(c.signals.clone()));
+        }
+        Err(anyhow::anyhow!("expected FeatureContext"))
     }
 
     /// Aspect platform APIs (auth, etc.).

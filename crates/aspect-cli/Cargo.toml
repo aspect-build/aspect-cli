@@ -52,6 +52,7 @@ libmimalloc-sys = { version = "0.1", default-features = false, features = ["exte
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook-registry = "1"
 backtrace = "0.3"
 
 [dev-dependencies]

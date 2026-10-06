@@ -196,6 +196,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde_json",
  "sha256",
+ "signal-hook-registry",
  "starlark",
  "tempfile",
  "thiserror 2.0.18",
@@ -408,6 +409,7 @@ dependencies = [
  "uuid",
  "wasmi",
  "wasmi_wasi",
+ "windows-sys 0.59.0",
  "zstd",
 ]
 
@@ -419,6 +421,7 @@ dependencies = [
  "anyhow",
  "derive_more 2.0.1",
  "dupe",
+ "libc",
  "starlark",
 ]
 

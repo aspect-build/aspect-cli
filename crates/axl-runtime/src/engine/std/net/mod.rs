@@ -20,6 +20,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::engine::cancellation::Signals;
+use crate::engine::error::IoError;
+use crate::eval::TaskExit;
+
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
@@ -113,41 +117,88 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "timed out"))
 }
 
+/// How often a blocking network wait checks the root cancellation token.
+pub(super) const NET_SLICE: Duration = Duration::from_millis(100);
+
+/// The `io::Error` a cancelled wait carries: the task's exit, which
+/// [`io_error`] turns back into the exit rather than a `std.io.Error`.
+pub(super) fn cancelled(signals: &Signals) -> io::Error {
+    io::Error::other(signals.exit_for())
+}
+
+/// Turn a failed network call into the error AXL sees: the task's exit when
+/// the call was a safe point that saw the root cancelled, else a
+/// `std.io.Error` with the right `kind`.
+pub(super) fn io_error(e: io::Error) -> anyhow::Error {
+    if let Some(exit) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<TaskExit>())
+    {
+        return anyhow::Error::new(exit.clone());
+    }
+    anyhow::Error::from(IoError::from(timed(e)))
+}
+
 /// Run `f`, giving up with `timed_out` at `deadline`. For the blocking calls
 /// Rust offers no timeout for (name resolution, a Unix connect): `f` runs on
-/// its own thread, which a timeout abandons to finish on its own.
+/// its own thread, which a timeout, or a cancelled run, abandons to finish on
+/// its own. A safe point: once the root token is cancelled the task's exit
+/// comes back.
 fn within<T: Send + 'static>(
+    signals: &Signals,
     deadline: Option<Instant>,
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    let Some(deadline) = deadline else {
-        return f();
-    };
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = tx.send(f());
     });
-    rx.recv_timeout(remaining(deadline)?)
-        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "timed out")))
+    loop {
+        if signals.should_unwind() {
+            return Err(cancelled(signals));
+        }
+        let slice = match deadline {
+            Some(d) => remaining(d)?.min(NET_SLICE),
+            None => NET_SLICE,
+        };
+        match rx.recv_timeout(slice) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other(
+                    "the connect thread ended without a result",
+                ));
+            }
+        }
+    }
 }
 
 /// Connect to `addr` (`"host:port"`), trying each address it resolves to in
-/// turn within one budget, and returning the last failure.
-fn connect_tcp(addr: &str, timeout: Option<Duration>) -> io::Result<std::net::TcpStream> {
+/// turn within one budget, and returning the last failure. A safe point, via
+/// [`within`].
+fn connect_tcp(
+    signals: &Signals,
+    addr: &str,
+    timeout: Option<Duration>,
+) -> io::Result<std::net::TcpStream> {
     let deadline = timeout.map(|t| Instant::now() + t);
     let owned = addr.to_owned();
-    let addrs: Vec<SocketAddr> = within(deadline, move || Ok(owned.to_socket_addrs()?.collect()))?;
+    let addrs: Vec<SocketAddr> = within(signals, deadline, move || {
+        Ok(owned.to_socket_addrs()?.collect())
+    })?;
     let mut last = io::Error::new(
         io::ErrorKind::InvalidInput,
         format!("{addr} resolved to no addresses"),
     );
     for a in &addrs {
-        let attempt = match deadline {
+        let a = *a;
+        let attempt = within(signals, deadline, move || match deadline {
             None => std::net::TcpStream::connect(a),
-            Some(d) => std::net::TcpStream::connect_timeout(a, remaining(d)?),
-        };
+            Some(d) => std::net::TcpStream::connect_timeout(&a, remaining(d)?),
+        });
         match attempt {
             Ok(s) => return Ok(s),
+            Err(e) if e.get_ref().is_some_and(|i| i.is::<TaskExit>()) => return Err(e),
             Err(e) => last = e,
         }
     }

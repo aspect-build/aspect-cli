@@ -588,8 +588,12 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False, extra_environment: dict = {}) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None, process_group: bool = False, extra_environment: dict = {}, cancellation: cancellation.Token | None = None) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
+
+    The child is bound to `cancellation`, `ctx.cancellation.root` when None:
+    cancelling that token terminates it (its whole process group with
+    `process_group`), then kills it after a grace.
 
     Output disposition: pass `stdout_path` / `stderr_path` to redirect the
     child's streams straight to those files (created via `fs.create`), letting
@@ -649,7 +653,7 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         cmd = cmd.stdout("piped").stderr("piped")
     if process_group:
         cmd = cmd.process_group(0)
-    return cmd.spawn()
+    return cmd.spawn(cancellation = cancellation)
 
 def runfiles_env(ep: struct) -> dict:
     """The RUNFILES_* environment `_spawn` exports for entrypoint `ep`.
@@ -805,5 +809,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         clear_default_outputs = lambda target: _clear_default_outputs(state, target),
         get_output_group_outputs = lambda target, group: _get_output_group_outputs(state, target, group),
         clear_output_group_outputs = lambda target, group: _clear_output_group_outputs(state, target, group),
-        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False, extra_environment = {}: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group, extra_environment),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None, process_group = False, extra_environment = {}, cancellation = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path, process_group, extra_environment, cancellation),
     )

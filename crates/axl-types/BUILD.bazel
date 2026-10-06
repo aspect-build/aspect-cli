@@ -13,6 +13,7 @@ rust_library(
         "@crates//:anyhow",
         "@crates//:derive_more",
         "@crates//:dupe",
+        "@crates//:libc",
         "@crates//:starlark",
     ],
 )

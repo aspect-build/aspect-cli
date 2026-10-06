@@ -34,9 +34,93 @@ use starlark::values::starlark_value;
 use crate::stream_iter;
 use starlark::values::bytes::StarlarkBytes as Bytes;
 
+/// Asked before every blocking read of stdin: `Some(err)` ends the read with
+/// that error instead of waiting for input. The runtime installs one that
+/// carries the task's exit once the run is cancelled.
+pub type Interrupt = Arc<dyn Fn() -> Option<std::io::Error> + Send + Sync>;
+
+/// The process's stdin, read only once input is actually available so a
+/// cancelled run is not stuck behind a prompt nobody will answer.
+pub struct StdinSource {
+    inner: Stdin,
+    interrupt: Mutex<Option<Interrupt>>,
+}
+
+impl Debug for StdinSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StdinSource")
+    }
+}
+
+impl StdinSource {
+    pub fn new(inner: Stdin) -> Self {
+        Self {
+            inner,
+            interrupt: Mutex::new(None),
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.inner.is_terminal()
+    }
+
+    pub fn set_interrupt(&self, interrupt: Interrupt) {
+        if let Ok(mut slot) = self.interrupt.lock() {
+            *slot = Some(interrupt);
+        }
+    }
+
+    /// Wait until stdin has input (or hit EOF), checking the interrupt every
+    /// slice. On a platform without `poll` the read simply blocks.
+    fn wait_readable(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let mut pfd = libc::pollfd {
+                fd: self.inner.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                let interrupted = self
+                    .interrupt
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().and_then(|check| check()));
+                if let Some(err) = interrupted {
+                    return Err(err);
+                }
+                // SAFETY: `pfd` is a valid, initialized pollfd for the call's duration.
+                let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
+                if ready > 0 {
+                    return Ok(());
+                }
+                if ready < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    // A descriptor `poll` cannot watch: fall back to a
+                    // blocking read.
+                    return Ok(());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        Ok(())
+    }
+}
+
+impl Read for &StdinSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.wait_readable()?;
+        self.inner.lock().read(buf)
+    }
+}
+
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Readable {
-    Stdin(#[allocative(skip)] Arc<Stdin>),
+    Stdin(#[allocative(skip)] Arc<StdinSource>),
     ChildStderr(#[allocative(skip)] Arc<Mutex<RefCell<ChildStderr>>>),
     ChildStdout(#[allocative(skip)] Arc<Mutex<RefCell<ChildStdout>>>),
     File(#[allocative(skip)] Arc<Mutex<std::fs::File>>),
@@ -74,7 +158,17 @@ impl Display for Writable {
 
 impl From<Stdin> for Readable {
     fn from(stdin: Stdin) -> Self {
-        Self::Stdin(Arc::new(stdin))
+        Self::Stdin(Arc::new(StdinSource::new(stdin)))
+    }
+}
+
+impl Readable {
+    /// Install the check every blocking stdin read makes first. A no-op for
+    /// any other source.
+    pub fn set_stdin_interrupt(&self, interrupt: Interrupt) {
+        if let Readable::Stdin(stdin) = self {
+            stdin.set_interrupt(interrupt);
+        }
     }
 }
 
@@ -133,11 +227,11 @@ impl<'v> UnpackValue<'v> for Readable {
 
 // --- Reader wrappers for to_boxed_read ---
 
-struct StdinReader(Arc<Stdin>);
+struct StdinReader(Arc<StdinSource>);
 
 impl Read for StdinReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.lock().read(buf)
+        (&*self.0).read(buf)
     }
 }
 
@@ -223,7 +317,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             let mut buf = Vec::new();
             match &*io {
                 Readable::Stdin(stdin) => {
-                    stdin.lock().read_to_end(&mut buf)?;
+                    (&**stdin).read_to_end(&mut buf)?;
                 }
                 Readable::ChildStderr(stderr) => {
                     stderr.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
@@ -240,7 +334,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             // Read up to size bytes
             let mut buf = vec![0u8; size as usize];
             let bytes_read = match &*io {
-                Readable::Stdin(stdin) => stdin.lock().read(&mut buf)?,
+                Readable::Stdin(stdin) => (&**stdin).read(&mut buf)?,
                 Readable::ChildStderr(stderr) => {
                     stderr.lock().unwrap().borrow_mut().read(&mut buf)?
                 }
@@ -261,7 +355,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
         let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
         let mut buf = String::new();
         let _size = match &*io {
-            Readable::Stdin(stdin) => stdin.lock().read_to_string(&mut buf)?,
+            Readable::Stdin(stdin) => (&**stdin).read_to_string(&mut buf)?,
             Readable::ChildStderr(stderr) => stderr
                 .lock()
                 .unwrap()

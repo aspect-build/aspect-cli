@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -32,7 +33,12 @@ use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkNever;
 
 use super::stream;
+use crate::engine::cancellation::{Signals, Token};
+use crate::engine::children::{self, Bound, Target};
+use crate::engine::store::Env;
 use crate::eval::TaskExit;
+use starlark::eval::Evaluator;
+use std::sync::Arc;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Process>")]
@@ -151,14 +157,44 @@ impl Command {
         )
     }
 
-    fn try_spawn(&self) -> anyhow::Result<process::Child> {
-        let result = self.inner.borrow_mut().spawn();
-        result.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))
+    /// Spawn, bound to `cancellation` (the root unless given): cancelling
+    /// that token terminates the child, and kills it after the grace.
+    fn try_spawn(
+        &self,
+        signals: &Arc<Signals>,
+        cancellation: NoneOr<&Token>,
+    ) -> anyhow::Result<Child> {
+        let parent = match cancellation.into_option() {
+            Some(token) => token.inner().clone(),
+            None => signals.default_binding(),
+        };
+        // The spawn's borrow of `inner` ends with this statement, before
+        // `describe` borrows it again for the error.
+        let spawned = children::spawn(
+            &mut self.inner.borrow_mut(),
+            signals,
+            &parent,
+            self.process_group.get(),
+            children::Kind::Process,
+        );
+        let (child, bound) =
+            spawned.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))?;
+        Ok(Child {
+            inner: RefCell::new(Some(child)),
+            bound,
+        })
     }
 
-    fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
-        let result = self.inner.borrow_mut().status();
-        result.map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
+    fn try_status(
+        &self,
+        signals: &Arc<Signals>,
+        cancellation: NoneOr<&Token>,
+    ) -> anyhow::Result<process::ExitStatus> {
+        let child = self.try_spawn(signals, cancellation)?;
+        child
+            .wait(None)
+            .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))?
+            .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
 }
 
@@ -251,9 +287,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// Assign the command to process group `group`.
     ///
     /// On Unix, `0` starts the command as the leader of a new process group.
-    /// A grouped child can be terminated together with the other processes in
-    /// that group by calling [`Child.kill_all`]. This setting has no effect on
-    /// Windows.
+    /// Cancelling a grouped child's token, or calling [`Child.kill`],
+    /// reaches every process in the group, not just the child. This setting
+    /// has no effect on Windows.
     fn process_group<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] group: i32,
@@ -322,23 +358,36 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// Executes the command as a child process, returning a handle to it.
     ///
     /// By default, stdin, stdout and stderr are inherited from the parent.
-    fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
+    ///
+    /// The child is bound to `cancellation`, `ctx.cancellation.root` unless
+    /// given: when that token is cancelled (Ctrl+C for the root) the child is
+    /// sent a terminate signal, to its whole process group if it leads one,
+    /// and killed three seconds later if it is still running. Bind to
+    /// `ctx.cancellation.new()` to keep a child out of that and stop it
+    /// yourself. A child spawned from a post-task hook or `ctx.defer` after
+    /// a cancel is cleanup, not part of what was cancelled: without an
+    /// explicit token it gets one of its own and runs to completion.
+    fn spawn<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<&'v Token>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let child = cmd.try_spawn()?;
-        Ok(Child {
-            inner: RefCell::new(Some(child)),
-            process_group: cmd.process_group.get(),
-        })
+        cmd.try_spawn(&Env::from_eval(eval)?.signals, cancellation)
     }
 
     /// Executes a command as a child process, waiting for it to finish and collecting its status.
-    /// Unlike `cmd.spawn().wait()` and `cmd.spawn().wait_with_output()`, this function does not
-    /// close the stdin handle.
     ///
     /// By default, stdin, stdout and stderr are inherited from the parent.
-    fn status<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
+    /// The child is bound to `cancellation` as in [`spawn`], and the wait
+    /// ends the task if the root is cancelled meanwhile.
+    fn status<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<&'v Token>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<ExitStatus> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let status = cmd.try_status()?;
+        let status = cmd.try_status(&Env::from_eval(eval)?.signals, cancellation)?;
         Ok(ExitStatus(status))
     }
 }
@@ -348,7 +397,28 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
-    process_group: Option<i32>,
+    /// The child's binding to its cancellation token; `child.cancellation`.
+    #[allocative(skip)]
+    bound: Bound,
+}
+
+impl Child {
+    /// Wait for the child to exit, a safe point: once the root is cancelled
+    /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
+    /// first.
+    fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Option<process::ExitStatus>> {
+        children::wait(&self.inner, &self.bound, timeout)
+    }
+
+    /// The child's pid, or the group it leads, for a signal sent now. `None`
+    /// once the child was reaped: its pid may be someone else's by then, so a
+    /// signal after `wait()` goes nowhere.
+    fn target(&self) -> anyhow::Result<Option<Target>> {
+        if self.inner.borrow().is_none() {
+            return Err(anyhow::anyhow!("child is no longer active"));
+        }
+        Ok((!self.bound.exited()).then(|| self.bound.target()))
+    }
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -433,37 +503,49 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .id())
     }
 
-    /// Forces the child process to exit. If the child has already exited, its a no-op.
-    ///
-    /// This is equivalent to sending a SIGKILL on Unix platforms.
-    fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+    /// The child's cancellation token, a `child()` of the one passed as
+    /// `cancellation =` at the spawn (`ctx.cancellation.root` by default).
+    /// `child.cancellation.cancel()` stops this one child the way
+    /// cancellation does: a terminate signal (to its whole process group when
+    /// it leads one), then a kill three seconds later if needed.
+    #[starlark(attribute)]
+    fn cancellation<'v>(this: values::Value<'v>) -> anyhow::Result<Token> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        child
-            .inner
-            .borrow_mut()
-            .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .kill()?;
+        Ok(Token::new(
+            child.bound.token().clone(),
+            child.bound.signals().clone(),
+        ))
+    }
+
+    /// Send the child an interrupt now, what Ctrl+C at a terminal delivers
+    /// (SIGINT; a console break on Windows), to its whole process group when
+    /// it leads one. One signal, no escalation; `wait()` to see the result.
+    fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        if let Some(target) = child.target()? {
+            children::os::interrupt(target);
+        }
         Ok(NoneType)
     }
 
-    /// Force the child and every process in its configured process group to exit.
-    ///
-    /// Use this with a command configured by [`Command.process_group`]. A
-    /// command without that configuration falls back to killing only the
-    /// immediate child.
-    ///
-    /// **Warning:** On Windows this is equivalent to calling [`Child.kill`].
-    fn kill_all<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+    /// Ask the child to exit now (SIGTERM; a console break on Windows), to
+    /// its whole process group when it leads one. One signal, no escalation;
+    /// `wait()` to see the result.
+    fn terminate<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        let mut inner = child.inner.borrow_mut();
-        let inner = inner
-            .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?;
-        if let Some(process_group) = child.process_group {
-            kill_process_group(inner, process_group)?;
-        } else {
-            inner.kill()?;
+        if let Some(target) = child.target()? {
+            children::os::terminate(target);
+        }
+        Ok(NoneType)
+    }
+
+    /// Forces the child process to exit (SIGKILL), and with it every process
+    /// in its process group when it leads one. If the child has already
+    /// exited, it is a no-op.
+    fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        if let Some(target) = child.target()? {
+            children::os::kill(target);
         }
         Ok(NoneType)
     }
@@ -476,32 +558,44 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// before waiting. This helps avoid deadlock: it ensures that the
     /// child does not block waiting for input from the parent, while
     /// the parent waits for the child to exit.
+    ///
+    /// The wait ends the task instead if `ctx.cancellation.root` is
+    /// cancelled meanwhile and no `intercept()` is in effect; the child is
+    /// already stopping by then.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        let status = child
-            .inner
-            .borrow_mut()
-            .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .wait()?;
-        Ok(ExitStatus(status))
+        child
+            .wait(None)?
+            .map(ExitStatus)
+            .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
 
-    /// Non-blocking check for child exit. Returns None if the child is still running,
+    /// Check for child exit. Returns None if the child is still running,
     /// or ExitStatus if it has exited. Does not consume the child — stdout/stderr
     /// stream accessors remain callable after this returns a status, allowing pipe
     /// contents to be drained via child.stdout().read_to_string() etc.
+    ///
+    /// Non-blocking by default; with `timeout_ms` it waits up to that long
+    /// for the child to exit before returning `None`, a bounded wait for a
+    /// loop that also watches a cancellation token.
     fn try_wait<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = 0)] timeout_ms: i32,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        let status = child
-            .inner
-            .borrow_mut()
-            .as_mut()
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .try_wait()?;
+        if timeout_ms < 0 {
+            anyhow::bail!("timeout_ms must not be negative: {timeout_ms}");
+        }
+        let status = if timeout_ms == 0 {
+            let mut inner = child.inner.borrow_mut();
+            let inner = inner
+                .as_mut()
+                .ok_or(anyhow::anyhow!("child is no longer active"))?;
+            children::try_wait(inner, &child.bound)?
+        } else {
+            child.wait(Some(Duration::from_millis(timeout_ms as u64)))?
+        };
         Ok(match status {
             None => values::Value::new_none(),
             Some(s) => heap.alloc(ExitStatus(s)),
@@ -526,12 +620,11 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// `stdout('piped')` or `stderr('piped')`, respectively.
     fn wait_with_output<'v>(this: values::Value<'v>) -> anyhow::Result<Output> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
-        let output = child
+        let inner = child
             .inner
             .replace(None)
-            .ok_or(anyhow::anyhow!("child is no longer active"))?
-            .wait_with_output()?;
-        Ok(Output(output))
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        Ok(Output(children::wait_with_output(inner, &child.bound)?))
     }
 }
 
@@ -661,7 +754,10 @@ mod tests {
             process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
-        let err_msg = cmd.try_spawn().unwrap_err().to_string();
+        let err_msg = cmd
+            .try_spawn(&Signals::new(), NoneOr::None)
+            .unwrap_err()
+            .to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
     }
@@ -674,7 +770,10 @@ mod tests {
             process_group: Cell::new(None),
         };
         cmd.inner.borrow_mut().args(["--flag", "value"]);
-        let err_msg = cmd.try_status().unwrap_err().to_string();
+        let err_msg = cmd
+            .try_status(&Signals::new(), NoneOr::None)
+            .unwrap_err()
+            .to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
     }
@@ -691,79 +790,6 @@ mod tests {
             .env("SECRET_TOKEN", "super_secret");
         let description = cmd.describe();
         assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
-    }
-}
-
-#[cfg(unix)]
-fn kill_process_group(child: &mut process::Child, process_group: i32) -> anyhow::Result<()> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    let process_group = if process_group == 0 {
-        i32::try_from(child.id()).map_err(|_| anyhow!("child process ID is too large"))?
-    } else {
-        process_group
-    };
-    match signal::kill(Pid::from_raw(-process_group), Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(child: &mut process::Child, _process_group: i32) -> anyhow::Result<()> {
-    child.kill()?;
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
-mod process_group_tests {
-    use super::kill_process_group;
-    use nix::errno::Errno;
-    use nix::sys::signal;
-    use nix::unistd::Pid;
-    use std::os::unix::process::CommandExt;
-    use std::process::{self, Stdio};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn killing_process_group_terminates_descendants() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("descendant.pid");
-        let mut command = process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg("sleep 30 & echo $! > \"$DESCENDANT_PID_FILE\"")
-            .env("DESCENDANT_PID_FILE", &pid_file)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !pid_file.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        let descendant_pid: i32 = std::fs::read_to_string(&pid_file)
-            .expect("descendant pid file was not created")
-            .trim()
-            .parse()
-            .unwrap();
-
-        child.wait().unwrap();
-        kill_process_group(&mut child, 0).unwrap();
-
-        let descendant = Pid::from_raw(descendant_pid);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match signal::kill(descendant, None) {
-                Err(Errno::ESRCH) => break,
-                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                result => panic!("descendant survived process-group kill: {result:?}"),
-            }
-        }
     }
 }
 

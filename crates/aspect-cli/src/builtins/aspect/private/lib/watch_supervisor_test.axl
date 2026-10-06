@@ -14,7 +14,7 @@ def _child():
         "wait_count": 0,
     }
 
-    def kill_all():
+    def cancel():
         state["kill_count"] += 1
 
     def wait():
@@ -22,7 +22,7 @@ def _child():
         return state["status"]
 
     return struct(
-        kill_all = kill_all,
+        cancellation = struct(cancel = cancel),
         state = state,
         try_wait = lambda: state["status"],
         wait = wait,

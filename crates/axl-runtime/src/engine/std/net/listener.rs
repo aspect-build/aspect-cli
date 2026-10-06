@@ -18,6 +18,9 @@ use starlark::values::{
 
 use super::stream::{Conn, StreamInner, TcpStream, UnixStream};
 use super::{remaining, timeout};
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
 use crate::engine::error::{Attempt, IoError};
 
 /// How often `accept` with a timeout looks for a connection.
@@ -58,19 +61,30 @@ impl Listener {
         }
     }
 
-    /// Accept one connection, waiting at most `timeout`.
-    fn accept(&self, timeout: Option<Duration>) -> io::Result<(Conn, Option<String>)> {
-        let Some(timeout) = timeout else {
-            return self.accept_once();
-        };
-        let deadline = Instant::now() + timeout;
+    /// Accept one connection, waiting at most `timeout`. A safe point: polled
+    /// rather than blocked in `accept`, so a cancelled run ends the wait with
+    /// the task's exit.
+    fn accept(
+        &self,
+        signals: &Signals,
+        timeout: Option<Duration>,
+    ) -> io::Result<(Conn, Option<String>)> {
+        let deadline = timeout.map(|t| Instant::now() + t);
         self.set_nonblocking(true)?;
         let result = loop {
             match self.accept_once() {
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => match remaining(deadline) {
-                    Ok(left) => thread::sleep(left.min(ACCEPT_POLL)),
-                    Err(e) => break Err(e),
-                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if signals.should_unwind() {
+                        break Err(super::cancelled(signals));
+                    }
+                    match deadline {
+                        Some(deadline) => match remaining(deadline) {
+                            Ok(left) => thread::sleep(left.min(ACCEPT_POLL)),
+                            Err(e) => break Err(e),
+                        },
+                        None => thread::sleep(ACCEPT_POLL),
+                    }
+                }
                 other => break other,
             }
         };
@@ -81,19 +95,25 @@ impl Listener {
 
 /// A listener's socket, or nothing once it is closed.
 #[derive(Debug)]
-pub(super) struct ListenerInner(RefCell<Option<Listener>>);
+pub(super) struct ListenerInner {
+    listener: RefCell<Option<Listener>>,
+    signals: Arc<Signals>,
+}
 
 impl ListenerInner {
-    pub(super) fn new(listener: Listener) -> Self {
-        Self(RefCell::new(Some(listener)))
+    pub(super) fn new(listener: Listener, signals: Arc<Signals>) -> Self {
+        Self {
+            listener: RefCell::new(Some(listener)),
+            signals,
+        }
     }
 
     fn with<T>(&self, f: impl FnOnce(&Listener) -> io::Result<T>) -> anyhow::Result<T> {
-        let listener = self.0.borrow();
+        let listener = self.listener.borrow();
         let Some(listener) = listener.as_ref() else {
             anyhow::bail!("the listener is closed");
         };
-        Ok(f(listener).map_err(IoError::from)?)
+        f(listener).map_err(super::io_error)
     }
 }
 
@@ -168,8 +188,11 @@ fn inner<'v>(this: Value<'v>) -> &'v ListenerInner {
 
 fn op_tcp_accept(l: &ListenerInner, ms: Option<u32>) -> anyhow::Result<(TcpStream, String)> {
     let t = timeout(ms)?;
-    let (conn, addr) = l.with(|l| l.accept(t))?;
-    Ok((TcpStream(StreamInner::new(conn)), addr.unwrap_or_default()))
+    let (conn, addr) = l.with(|listener| listener.accept(&l.signals, t))?;
+    Ok((
+        TcpStream(StreamInner::new(conn, l.signals.clone())),
+        addr.unwrap_or_default(),
+    ))
 }
 
 fn op_unix_accept(
@@ -177,9 +200,9 @@ fn op_unix_accept(
     ms: Option<u32>,
 ) -> anyhow::Result<(UnixStream, NoneOr<String>)> {
     let t = timeout(ms)?;
-    let (conn, addr) = l.with(|l| l.accept(t))?;
+    let (conn, addr) = l.with(|listener| listener.accept(&l.signals, t))?;
     Ok((
-        UnixStream(StreamInner::new(conn)),
+        UnixStream(StreamInner::new(conn, l.signals.clone())),
         NoneOr::from_option(addr),
     ))
 }
@@ -205,7 +228,7 @@ fn op_unix_local_addr(l: &ListenerInner) -> anyhow::Result<NoneOr<String>> {
 }
 
 fn close(this: Value) -> anyhow::Result<NoneType> {
-    inner(this).0.borrow_mut().take();
+    inner(this).listener.borrow_mut().take();
     Ok(NoneType)
 }
 

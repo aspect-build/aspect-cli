@@ -25,6 +25,9 @@ use starlark::values::tuple::UnpackTuple;
 use super::arguments::{Arguments, FrozenArguments};
 use super::aspect::Aspect;
 use super::bazel::{Bazel, FrozenBazel};
+use std::sync::Arc;
+
+use super::cancellation::{Cancellation, Signals};
 use super::http::Http;
 use super::std::Std;
 use super::task_info::TaskInfo;
@@ -61,6 +64,9 @@ pub struct TaskContext<'v> {
     bazel: values::Value<'v>,
     /// The run's `TaskHooks`, shared with every feature's context.
     hooks: values::Value<'v>,
+    /// The run's cancellation state, behind `ctx.cancellation`.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
     #[allocative(skip)]
     pub defers: RefCell<Vec<Defer<'v>>>,
 }
@@ -85,6 +91,7 @@ impl<'v> TaskContext<'v> {
         task: values::Value<'v>,
         bazel: values::Value<'v>,
         hooks: values::Value<'v>,
+        signals: Arc<Signals>,
     ) -> Self {
         Self {
             args,
@@ -92,6 +99,7 @@ impl<'v> TaskContext<'v> {
             task,
             bazel,
             hooks,
+            signals,
             defers: RefCell::new(Vec::new()),
         }
     }
@@ -128,6 +136,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
             task: self.task.freeze(freezer)?,
             bazel: self.bazel.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
+            signals: self.signals,
         })
     }
 }
@@ -144,8 +153,18 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// The standard library. Gives access to common utilities such as
     /// filesystem, process execution, environment variables, and IO streams.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: values::Value<'v>) -> starlark::Result<Std> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(Std::new(ctx.signals.clone()))
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(this: values::Value<'v>) -> starlark::Result<Cancellation> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(Cancellation::new(ctx.signals.clone()))
     }
 
     /// Identity of the currently running task — its name, group(s),
@@ -242,6 +261,8 @@ pub struct FrozenTaskContext {
     task: values::FrozenValue,
     bazel: values::FrozenValue,
     hooks: values::FrozenValue,
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -269,8 +290,18 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     /// The standard library. Gives access to common utilities such as
     /// filesystem, process execution, environment variables, and IO streams.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: values::Value<'v>) -> starlark::Result<Std> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(Std::new(ctx.signals.clone()))
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(this: values::Value<'v>) -> starlark::Result<Cancellation> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(Cancellation::new(ctx.signals.clone()))
     }
 
     /// Identity of the currently running task — its name, group(s),

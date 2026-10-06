@@ -44,6 +44,11 @@ use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::{NoSerialize, ProvidesStaticType, ValueLike};
 
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
+use crate::engine::children::{self, Target, os};
+
 /// Bazel's exit code when a lock is held and `--noblock_for_lock` was given.
 const LOCK_HELD_NOBLOCK_FOR_LOCK: i32 = 9;
 
@@ -113,9 +118,11 @@ impl Signal {
     fn send(self, pid: u32) {
         match self {
             Signal::Int => {
-                super::process::sigint(pid);
+                os::interrupt(Target::Pid(pid));
             }
-            Signal::Kill => super::process::sigkill(pid),
+            Signal::Kill => {
+                os::kill(Target::Pid(pid));
+            }
         }
     }
 
@@ -247,7 +254,7 @@ enum Probe {
 }
 
 /// Runs `bazel [startup_flags] --noblock_for_lock info server_pid` and returns the result.
-fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
+fn check_bazel_server(signals: &Arc<Signals>, startup_flags: &[String]) -> CheckResult {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags)
         .arg("--noblock_for_lock")
@@ -256,10 +263,8 @@ fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    let output = match super::live::spawn_registered(&mut cmd) {
-        Ok((child, _guard)) => child.wait_with_output(),
-        Err(e) => Err(e),
-    };
+    let output =
+        children::spawn_bazel(&mut cmd, signals).and_then(|spawned| spawned.wait_with_output());
 
     match output {
         Ok(output) => CheckResult {
@@ -335,7 +340,7 @@ fn one_line(stderr: &str) -> String {
 
 fn describe_holder(pid: Option<u32>) -> String {
     match pid {
-        Some(pid) => match super::process::describe_process(pid) {
+        Some(pid) => match os::describe_process(pid) {
             Some(desc) => format!("pid {pid} ({desc})"),
             None => format!("pid {pid}"),
         },
@@ -361,7 +366,7 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
 }
 
 /// Tries to determine the Bazel output base by running `bazel [startup_flags] info output_base`.
-fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
+fn get_output_base(signals: &Arc<Signals>, startup_flags: &[String]) -> Option<PathBuf> {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags)
         .arg("info")
@@ -369,8 +374,10 @@ fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let output = children::spawn_bazel(&mut cmd, signals)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -464,12 +471,22 @@ fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
 /// flag and would queue behind a wedged server holding the lock, defeating
 /// the purpose of the health check. The output base comes from the startup
 /// flags for the same reason.
-pub fn run(startup_flags: &[String], log: &mut dyn FnMut(&str)) -> HealthCheckResult {
+pub fn run(
+    signals: &Arc<Signals>,
+    startup_flags: &[String],
+    log: &mut dyn FnMut(&str),
+) -> HealthCheckResult {
     let output_base = output_base_from_flags(startup_flags);
-    let mut probe = || check_bazel_server(startup_flags);
-    let result = run_with(&mut probe, output_base.as_deref(), &Timing::DEFAULT, log);
+    let mut probe = || check_bazel_server(signals, startup_flags);
+    let result = run_with(
+        signals,
+        &mut probe,
+        output_base.as_deref(),
+        &Timing::DEFAULT,
+        log,
+    );
     if result.outcome == "healthy"
-        && let Some(base) = output_base.or_else(|| get_output_base(startup_flags))
+        && let Some(base) = output_base.or_else(|| get_output_base(signals, startup_flags))
     {
         let _ = cleanup_stranded_sandbox_state(&base);
     }
@@ -487,6 +504,7 @@ pub fn run(startup_flags: &[String], log: &mut dyn FnMut(&str)) -> HealthCheckRe
 ///     server pid could not be found, or the re-probe after killing the
 ///     server still failed.
 fn run_with(
+    signals: &Signals,
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
     timing: &Timing,
@@ -494,7 +512,7 @@ fn run_with(
 ) -> HealthCheckResult {
     let mut last = classify(probe(), output_base);
     if matches!(last, Probe::ClientLockHeld { .. }) {
-        last = clear_client_lock(probe, output_base, timing, last, log);
+        last = clear_client_lock(signals, probe, output_base, timing, last, log);
     }
     match last {
         Probe::Healthy => HealthCheckResult::healthy(),
@@ -542,11 +560,14 @@ enum Poll {
     StillHeld(Probe),
     /// A different holder (by pid) has the lock now.
     HolderChanged(Probe, Option<u32>),
+    /// The run was cancelled while waiting: climb no further.
+    Cancelled(Probe),
 }
 
 /// Re-probe every `poll` until the lock is released, its holder changes, or
 /// `budget` elapses. Returns what happened and the time spent.
 fn poll_while_client_holds(
+    signals: &Signals,
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
     poll: Duration,
@@ -557,6 +578,9 @@ fn poll_while_client_holds(
     loop {
         std::thread::sleep(poll);
         let p = classify(probe(), output_base);
+        if signals.should_unwind() {
+            return (Poll::Cancelled(p), start.elapsed());
+        }
         let Probe::ClientLockHeld {
             holder: now_holding,
             ..
@@ -580,6 +604,7 @@ fn poll_while_client_holds(
 /// whoever holds the lock at each rung. Returns the first probe that is not
 /// `ClientLockHeld`, or the last one if the lock never cleared.
 fn clear_client_lock(
+    signals: &Signals,
     probe: &mut dyn FnMut() -> CheckResult,
     output_base: Option<&Path>,
     timing: &Timing,
@@ -614,8 +639,14 @@ fn clear_client_lock(
                 ));
                 signal.send(pid);
             }
-            let (poll, elapsed) =
-                poll_while_client_holds(probe, output_base, timing.poll, rung.wait, holder);
+            let (poll, elapsed) = poll_while_client_holds(
+                signals,
+                probe,
+                output_base,
+                timing.poll,
+                rung.wait,
+                holder,
+            );
             waited += elapsed;
             match poll {
                 Poll::Released(p) => {
@@ -626,6 +657,10 @@ fn clear_client_lock(
                     return p;
                 }
                 Poll::StillHeld(p) => last = p,
+                Poll::Cancelled(p) => {
+                    log("the run was cancelled while waiting for the output base lock");
+                    return p;
+                }
                 Poll::HolderChanged(p, new_holder) => {
                     log(&format!(
                         "output base lock holder changed from {} to {}",
@@ -684,11 +719,11 @@ fn kill_server_and_retry(
         return HealthCheckResult::unhealthy(diagnostic, Some(exit_code));
     };
 
-    if super::process::is_pid_running(pid) {
+    if os::is_running(Target::Pid(pid)) {
         log(&format!(
             "sending SIGKILL to bazel server pid {pid} so the next command starts a fresh server"
         ));
-        super::process::sigkill(pid);
+        os::kill(Target::Pid(pid));
     } else {
         log(&format!(
             "bazel server pid {pid} from {} is not running",
@@ -1013,7 +1048,7 @@ mod tests {
             output_base: Option<&Path>,
         ) -> (HealthCheckResult, Vec<String>) {
             let mut lines = Vec::new();
-            let result = run_with(probe, output_base, &FAST, &mut |l| {
+            let result = run_with(&Signals::new(), probe, output_base, &FAST, &mut |l| {
                 lines.push(l.to_string())
             });
             (result, lines)

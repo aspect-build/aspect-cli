@@ -15,7 +15,7 @@
 //! `axl_check!(c)` (= `eval(c).check()`).
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -26,6 +26,7 @@ use starlark::values::Value;
 use tokio::runtime::Runtime;
 
 use crate::engine::arguments::Arguments;
+use crate::engine::cancellation::Signals;
 use crate::engine::store::Env;
 use crate::eval::api::{dialect, get_globals};
 use crate::eval::{Loader, ModuleEnv, MultiPhaseEval};
@@ -39,6 +40,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         features: vec![],
         config: None,
         string_list_args: vec![],
+        signals: None,
     }
 }
 
@@ -49,6 +51,7 @@ pub struct EvalBuilder {
     features: Vec<String>,
     config: Option<String>,
     string_list_args: Vec<(String, Vec<String>)>,
+    signals: Option<Arc<Signals>>,
 }
 
 impl EvalBuilder {
@@ -82,6 +85,14 @@ impl EvalBuilder {
     /// Idempotent across tests; see `install_basil` for details.
     pub fn with_fake_bazel(mut self) -> Self {
         self.with_fake_bazel = true;
+        self
+    }
+
+    /// Run the task under `signals` instead of the process-wide instance, so
+    /// a test can `record` a signal (from another thread, while the task
+    /// blocks) without touching the other tests.
+    pub fn with_signals(mut self, signals: Arc<Signals>) -> Self {
+        self.signals = Some(signals);
         self
     }
 
@@ -119,6 +130,7 @@ impl EvalBuilder {
         let ast = AstModule::parse("test", self.code, &dialect()).map_err(|e| anyhow!("{}", e))?;
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
+            eval.extra = Some(&loader.env);
             if self.with_loader {
                 eval.set_loader(&loader);
             }
@@ -195,7 +207,8 @@ impl EvalBuilder {
         let rt = Runtime::new()?;
         let _g = rt.enter();
 
-        ModuleEnv::with(|env| -> anyhow::Result<Option<u8>> {
+        let signals = self.signals.clone().unwrap_or_else(Signals::new);
+        let result = ModuleEnv::with(|env| -> anyhow::Result<Option<u8>> {
             let modules: Vec<Mod> = vec![];
             let mut root_mod = Mod::new(
                 tmp.path().to_path_buf(),
@@ -207,13 +220,14 @@ impl EvalBuilder {
                     .features
                     .push((script_path.clone(), symbol.clone()));
             }
-            let loader = Loader::new(
+            let mut loader = Loader::new(
                 "test".to_string(),
                 tmp.path().to_path_buf(),
                 tmp.path().to_path_buf(),
                 None,
                 &modules,
             );
+            loader.env.signals = signals.clone();
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)
@@ -252,7 +266,11 @@ impl EvalBuilder {
                 )
                 .map_err(anyhow::Error::from)?;
             Ok(exit)
-        })
+        });
+        // As `main` does: children bound to a cancelled token are still
+        // stopping on the runtime; let that finish before it is dropped.
+        rt.block_on(signals.drain(Duration::from_secs(5)));
+        result
     }
 }
 

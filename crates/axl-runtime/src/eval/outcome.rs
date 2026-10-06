@@ -11,6 +11,7 @@ use starlark::values::Value;
 use starlark::values::ValueLike;
 
 use crate::diag;
+use crate::engine::cancellation::Signals;
 use crate::engine::task_info::TaskConclusion;
 use crate::eval::TaskExit;
 
@@ -37,11 +38,14 @@ pub(crate) enum Ending {
 
 impl Outcome {
     /// Resolve the body's result into an outcome and how it ended.
-    pub(crate) fn resolve(result: Result<Value<'_>, starlark::Error>) -> (Self, Ending) {
+    pub(crate) fn resolve(
+        result: Result<Value<'_>, starlark::Error>,
+        signals: &Signals,
+    ) -> (Self, Ending) {
         match result {
             Ok(ret) => (Self::from_return(ret), Ending::Returned),
-            Err(e) => match TaskExit::from_starlark(&e) {
-                Some(exit) => (Self::from_exit(exit), Ending::Exited(e)),
+            Err(e) => match TaskExit::from_starlark(&e, signals) {
+                Some(exit) => (Self::from_exit(&exit), Ending::Exited(e)),
                 None => (Self::from_error(&e), Ending::Failed(e)),
             },
         }

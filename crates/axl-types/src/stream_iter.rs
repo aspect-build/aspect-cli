@@ -37,7 +37,7 @@ impl<'v> values::StarlarkValue<'v> for ReadIterator {
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         let mut buf = vec![0; 65536];
         let r = match &self.readable {
-            stream::Readable::Stdin(stdin) => stdin.lock().read(&mut buf),
+            stream::Readable::Stdin(stdin) => (&**stdin).read(&mut buf),
             stream::Readable::ChildStderr(err) => err.lock().unwrap().borrow_mut().read(&mut buf),
             stream::Readable::ChildStdout(out) => out.lock().unwrap().borrow_mut().read(&mut buf),
             stream::Readable::File(file) => file.lock().unwrap().read(&mut buf),

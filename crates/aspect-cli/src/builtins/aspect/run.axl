@@ -105,7 +105,10 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
 
 def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
     """Rebuild on workspace changes, incrementally updating protocol-aware
-    targets and restarting other targets. Runs until Ctrl-C."""
+    targets and restarting other targets. Runs until Ctrl-C, the session's
+    normal ending: the watched target and any rebuild in flight are bound to
+    the root, so they are already stopping; the loop waits for the target and
+    returns 0."""
     ws = watch.new(ctx, rc = rc)
     detector = changedetector.new(ctx, r, target, ws.root)
     sources = source_tracker.new(ctx, ws.root, ws.ignored_paths, ws.ignored_patterns)
@@ -169,6 +172,10 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
     cycle = 0
     for _tick in sleep_iter(_WATCH_TICK_MS):
+        if ws.cancellation.cancelled:
+            ph.update("running", phases.ProgressStyles(body = "Stopping %s..." % target))
+            supervisor.stop()
+            return 0
         child_status = supervisor.poll()
         if child_status != None:
             ph.update(

@@ -6,10 +6,11 @@
 //! the method and its `try_` twin call. An I/O failure leaves it as an
 //! [`IoError`]; anything else, like a closed stream, is a plain error.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::time::{Duration, Instant};
 
 use allocative::Allocative;
 use either::Either;
@@ -25,8 +26,11 @@ use starlark::values::{
 };
 
 use super::listener::{Listener, ListenerInner, TcpListener, UnixListener};
-use super::{connect_tcp, timed, timeout, tls};
+use super::{NET_SLICE, connect_tcp, remaining, timeout, tls};
+use crate::engine::cancellation::Signals;
 use crate::engine::error::{Attempt, IoError};
+use crate::engine::store::Env;
+use std::sync::Arc;
 
 /// An open connection, over whichever transport made it.
 #[derive(Debug)]
@@ -124,26 +128,97 @@ impl Conn {
     }
 }
 
-/// A stream's connection, or nothing once it is closed.
+/// A stream's connection, or nothing once it is closed, with the read and
+/// write timeouts the script configured: the socket's own are driven in
+/// short slices so a blocked read or write stays a safe point.
 #[derive(Debug)]
-pub(super) struct StreamInner(RefCell<Option<Conn>>);
+pub(super) struct StreamInner {
+    conn: RefCell<Option<Conn>>,
+    read_timeout: Cell<Option<Duration>>,
+    write_timeout: Cell<Option<Duration>>,
+    signals: Arc<Signals>,
+}
+
+/// Which socket timeout a sliced operation drives.
+#[derive(Clone, Copy)]
+enum Dir {
+    Read,
+    Write,
+}
 
 impl StreamInner {
-    pub(super) fn new(conn: Conn) -> Self {
-        Self(RefCell::new(Some(conn)))
+    pub(super) fn new(conn: Conn, signals: Arc<Signals>) -> Self {
+        Self {
+            conn: RefCell::new(Some(conn)),
+            read_timeout: Cell::new(None),
+            write_timeout: Cell::new(None),
+            signals,
+        }
     }
 
     /// Run `f` on the open connection.
     fn with<T>(&self, f: impl FnOnce(&mut Conn) -> io::Result<T>) -> anyhow::Result<T> {
-        let mut conn = self.0.borrow_mut();
+        let mut conn = self.conn.borrow_mut();
         let Some(conn) = conn.as_mut() else {
             anyhow::bail!("the stream is closed");
         };
-        Ok(f(conn).map_err(|e| IoError::from(timed(e)))?)
+        f(conn).map_err(super::io_error)
+    }
+
+    /// Run `op`, a blocking read or write, as a safe point. The socket's
+    /// timeout is set to a short slice, and each time `op` runs out of it the
+    /// root token is checked; the script's own timeout (`set_read_timeout` /
+    /// `set_write_timeout`, or none) is the overall budget. `op` is called
+    /// again after a slice, so it must resume where it left off.
+    fn sliced<T>(
+        &self,
+        dir: Dir,
+        mut op: impl FnMut(&mut Conn) -> io::Result<T>,
+    ) -> anyhow::Result<T> {
+        let budget = match dir {
+            Dir::Read => self.read_timeout.get(),
+            Dir::Write => self.write_timeout.get(),
+        };
+        let deadline = budget.map(|b| Instant::now() + b);
+        let signals = &self.signals;
+        self.with(|conn| {
+            let set = |conn: &Conn, t: Option<Duration>| match dir {
+                Dir::Read => conn.set_read_timeout(t),
+                Dir::Write => conn.set_write_timeout(t),
+            };
+            let result = loop {
+                let slice = match deadline {
+                    Some(d) => match remaining(d) {
+                        Ok(left) => left.min(NET_SLICE),
+                        Err(e) => break Err(e),
+                    },
+                    None => NET_SLICE,
+                };
+                if let Err(e) = set(conn, Some(slice.max(Duration::from_millis(1)))) {
+                    break Err(e);
+                }
+                match op(conn) {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        if signals.should_unwind() {
+                            break Err(super::cancelled(signals));
+                        }
+                    }
+                    other => break other,
+                }
+            };
+            // The script's own timeout is back in place whatever happened.
+            let _ = set(conn, budget);
+            result
+        })
     }
 
     fn close(&self) {
-        if let Some(conn) = self.0.borrow_mut().take() {
+        if let Some(conn) = self.conn.borrow_mut().take() {
             conn.close();
         }
     }
@@ -271,7 +346,7 @@ fn data_bytes<'a>(data: &Either<&'a str, &'a StarlarkBytes>) -> &'a [u8] {
 const READ_CHUNK: usize = 64 * 1024;
 
 fn op_read(s: &StreamInner, n: u32) -> anyhow::Result<Vec<u8>> {
-    s.with(|c| {
+    s.sliced(Dir::Read, |c| {
         let mut buf = vec![0; (n as usize).min(READ_CHUNK)];
         let got = c.read(&mut buf)?;
         buf.truncate(got);
@@ -280,27 +355,31 @@ fn op_read(s: &StreamInner, n: u32) -> anyhow::Result<Vec<u8>> {
 }
 
 fn op_read_exact(s: &StreamInner, n: u32) -> anyhow::Result<Vec<u8>> {
-    s.with(|c| {
-        // Grown as bytes arrive, so memory follows what the peer sends
-        // rather than what the script asked for.
-        let mut buf = Vec::new();
-        c.take(n.into()).read_to_end(&mut buf)?;
+    // Grown as bytes arrive, so memory follows what the peer sends rather
+    // than what the script asked for. Bytes read before a slice ran out stay
+    // in `buf`, and the next slice reads the rest.
+    let mut buf = Vec::new();
+    s.sliced(Dir::Read, |c| {
+        let need = n as u64 - buf.len() as u64;
+        c.take(need).read_to_end(&mut buf)?;
         if buf.len() < n as usize {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!("the peer closed after {} of {n} bytes", buf.len()),
             ));
         }
-        Ok(buf)
-    })
+        Ok(())
+    })?;
+    Ok(buf)
 }
 
 fn op_read_to_end(s: &StreamInner) -> anyhow::Result<Vec<u8>> {
-    s.with(|c| {
-        let mut buf = Vec::new();
+    let mut buf = Vec::new();
+    s.sliced(Dir::Read, |c| {
         c.read_to_end(&mut buf)?;
-        Ok(buf)
-    })
+        Ok(())
+    })?;
+    Ok(buf)
 }
 
 fn op_read_to_string(s: &StreamInner) -> anyhow::Result<String> {
@@ -311,15 +390,32 @@ fn op_read_to_string(s: &StreamInner) -> anyhow::Result<String> {
 }
 
 fn op_write(s: &StreamInner, data: &[u8]) -> anyhow::Result<i64> {
-    s.with(|c| c.write(data).map(|n| n as i64))
+    s.sliced(Dir::Write, |c| c.write(data).map(|n| n as i64))
 }
 
 fn op_write_all(s: &StreamInner, data: &[u8]) -> anyhow::Result<NoneType> {
-    s.with(|c| c.write_all(data).map(|()| NoneType))
+    // Bytes written before a slice ran out are not written again.
+    let mut written = 0;
+    s.sliced(Dir::Write, |c| {
+        while written < data.len() {
+            match c.write(&data[written..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(NoneType)
+    })
 }
 
 fn op_flush(s: &StreamInner) -> anyhow::Result<NoneType> {
-    s.with(|c| c.flush().map(|()| NoneType))
+    s.sliced(Dir::Write, |c| c.flush().map(|()| NoneType))
 }
 
 fn op_shutdown(s: &StreamInner, how: &str) -> anyhow::Result<NoneType> {
@@ -334,12 +430,16 @@ fn op_shutdown(s: &StreamInner, how: &str) -> anyhow::Result<NoneType> {
 
 fn op_set_read_timeout(s: &StreamInner, ms: Option<u32>) -> anyhow::Result<NoneType> {
     let t = timeout(ms)?;
-    s.with(|c| c.set_read_timeout(t).map(|()| NoneType))
+    s.with(|c| c.set_read_timeout(t))?;
+    s.read_timeout.set(t);
+    Ok(NoneType)
 }
 
 fn op_set_write_timeout(s: &StreamInner, ms: Option<u32>) -> anyhow::Result<NoneType> {
     let t = timeout(ms)?;
-    s.with(|c| c.set_write_timeout(t).map(|()| NoneType))
+    s.with(|c| c.set_write_timeout(t))?;
+    s.write_timeout.set(t);
+    Ok(NoneType)
 }
 
 #[starlark_module]
@@ -702,32 +802,52 @@ impl<'v> StarlarkValue<'v> for Tls {
     }
 }
 
-fn op_tcp_connect(addr: &str, timeout_ms: Option<u32>) -> anyhow::Result<TcpStream> {
+fn op_tcp_connect(
+    signals: &Arc<Signals>,
+    addr: &str,
+    timeout_ms: Option<u32>,
+) -> anyhow::Result<TcpStream> {
     let t = timeout(timeout_ms)?;
-    let sock = connect_tcp(addr, t).map_err(IoError::from)?;
-    Ok(TcpStream(StreamInner::new(Conn::Tcp(sock))))
+    let sock = connect_tcp(signals, addr, t).map_err(super::io_error)?;
+    Ok(TcpStream(StreamInner::new(
+        Conn::Tcp(sock),
+        signals.clone(),
+    )))
 }
 
-fn op_tcp_listen(addr: &str) -> anyhow::Result<TcpListener> {
+fn op_tcp_listen(signals: &Arc<Signals>, addr: &str) -> anyhow::Result<TcpListener> {
     let l = std::net::TcpListener::bind(addr).map_err(IoError::from)?;
-    Ok(TcpListener(ListenerInner::new(Listener::Tcp(l))))
+    Ok(TcpListener(ListenerInner::new(
+        Listener::Tcp(l),
+        signals.clone(),
+    )))
 }
 
 #[cfg(unix)]
-fn op_unix_connect(path: &str, timeout_ms: Option<u32>) -> anyhow::Result<UnixStream> {
+fn op_unix_connect(
+    signals: &Arc<Signals>,
+    path: &str,
+    timeout_ms: Option<u32>,
+) -> anyhow::Result<UnixStream> {
     let deadline = timeout(timeout_ms)?.map(|t| std::time::Instant::now() + t);
     let owned = path.to_owned();
-    let sock = super::within(deadline, move || {
+    let sock = super::within(signals, deadline, move || {
         std::os::unix::net::UnixStream::connect(owned)
     })
-    .map_err(IoError::from)?;
-    Ok(UnixStream(StreamInner::new(Conn::Unix(sock))))
+    .map_err(super::io_error)?;
+    Ok(UnixStream(StreamInner::new(
+        Conn::Unix(sock),
+        signals.clone(),
+    )))
 }
 
 #[cfg(unix)]
-fn op_unix_listen(path: &str) -> anyhow::Result<UnixListener> {
+fn op_unix_listen(signals: &Arc<Signals>, path: &str) -> anyhow::Result<UnixListener> {
     let l = std::os::unix::net::UnixListener::bind(path).map_err(IoError::from)?;
-    Ok(UnixListener(ListenerInner::new(Listener::Unix(l))))
+    Ok(UnixListener(ListenerInner::new(
+        Listener::Unix(l),
+        signals.clone(),
+    )))
 }
 
 #[cfg(not(unix))]
@@ -740,24 +860,32 @@ fn unsupported<T>() -> anyhow::Result<T> {
 }
 
 #[cfg(not(unix))]
-fn op_unix_connect(_path: &str, _timeout_ms: Option<u32>) -> anyhow::Result<UnixStream> {
+fn op_unix_connect(
+    _signals: &Arc<Signals>,
+    _path: &str,
+    _timeout_ms: Option<u32>,
+) -> anyhow::Result<UnixStream> {
     unsupported()
 }
 
 #[cfg(not(unix))]
-fn op_unix_listen(_path: &str) -> anyhow::Result<UnixListener> {
+fn op_unix_listen(_signals: &Arc<Signals>, _path: &str) -> anyhow::Result<UnixListener> {
     unsupported()
 }
 
 fn op_tls_connect(
+    signals: &Arc<Signals>,
     addr: &str,
     timeout_ms: Option<u32>,
     server_name: Option<&str>,
     ca_pem: Option<&[u8]>,
 ) -> anyhow::Result<TlsStream> {
     let t = timeout(timeout_ms)?;
-    let stream = tls::connect(addr, t, server_name, ca_pem).map_err(IoError::from)?;
-    Ok(TlsStream(StreamInner::new(Conn::Tls(Box::new(stream)))))
+    let stream = tls::connect(signals, addr, t, server_name, ca_pem).map_err(super::io_error)?;
+    Ok(TlsStream(StreamInner::new(
+        Conn::Tls(Box::new(stream)),
+        signals.clone(),
+    )))
 }
 
 #[starlark_module]
@@ -771,8 +899,13 @@ fn tcp_methods(builder: &mut MethodsBuilder) {
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] addr: &str,
         #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<u32>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<TcpStream> {
-        op_tcp_connect(addr, timeout_ms.into_option())
+        op_tcp_connect(
+            &Env::from_eval(eval)?.signals,
+            addr,
+            timeout_ms.into_option(),
+        )
     }
 
     /// `connect`, returning an `(err, stream)` pair instead of raising a
@@ -783,7 +916,14 @@ fn tcp_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<u32>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Attempt<'v, IoError, TcpStream>> {
-        Attempt::new(op_tcp_connect(addr, timeout_ms.into_option()), eval)
+        Attempt::new(
+            op_tcp_connect(
+                &Env::from_eval(eval)?.signals,
+                addr,
+                timeout_ms.into_option(),
+            ),
+            eval,
+        )
     }
 
     /// Listen on `addr`, `"host:port"`. Port `0` picks a free port; the
@@ -791,8 +931,9 @@ fn tcp_methods(builder: &mut MethodsBuilder) {
     fn listen<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] addr: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<TcpListener> {
-        op_tcp_listen(addr)
+        op_tcp_listen(&Env::from_eval(eval)?.signals, addr)
     }
 
     /// `listen`, returning an `(err, listener)` pair instead of raising a
@@ -802,7 +943,7 @@ fn tcp_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = pos)] addr: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Attempt<'v, IoError, TcpListener>> {
-        Attempt::new(op_tcp_listen(addr), eval)
+        Attempt::new(op_tcp_listen(&Env::from_eval(eval)?.signals, addr), eval)
     }
 }
 
@@ -815,8 +956,13 @@ fn unix_ns_methods(builder: &mut MethodsBuilder) {
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] path: &str,
         #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<u32>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<UnixStream> {
-        op_unix_connect(path, timeout_ms.into_option())
+        op_unix_connect(
+            &Env::from_eval(eval)?.signals,
+            path,
+            timeout_ms.into_option(),
+        )
     }
 
     /// `connect`, returning an `(err, stream)` pair instead of raising a
@@ -827,7 +973,14 @@ fn unix_ns_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<u32>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Attempt<'v, IoError, UnixStream>> {
-        Attempt::new(op_unix_connect(path, timeout_ms.into_option()), eval)
+        Attempt::new(
+            op_unix_connect(
+                &Env::from_eval(eval)?.signals,
+                path,
+                timeout_ms.into_option(),
+            ),
+            eval,
+        )
     }
 
     /// Listen on a new Unix-domain socket at `path`. A file already at `path`,
@@ -836,8 +989,9 @@ fn unix_ns_methods(builder: &mut MethodsBuilder) {
     fn listen<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] path: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<UnixListener> {
-        op_unix_listen(path)
+        op_unix_listen(&Env::from_eval(eval)?.signals, path)
     }
 
     /// `listen`, returning an `(err, listener)` pair instead of raising a
@@ -847,7 +1001,7 @@ fn unix_ns_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Attempt<'v, IoError, UnixListener>> {
-        Attempt::new(op_unix_listen(path), eval)
+        Attempt::new(op_unix_listen(&Env::from_eval(eval)?.signals, path), eval)
     }
 }
 
@@ -871,9 +1025,11 @@ fn tls_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] ca_pem: NoneOr<
             Either<&'v str, &'v StarlarkBytes>,
         >,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<TlsStream> {
         let ca = ca_pem.into_option();
         op_tls_connect(
+            &Env::from_eval(eval)?.signals,
             addr,
             timeout_ms.into_option(),
             server_name.into_option(),
@@ -896,6 +1052,7 @@ fn tls_methods(builder: &mut MethodsBuilder) {
         let ca = ca_pem.into_option();
         Attempt::new(
             op_tls_connect(
+                &Env::from_eval(eval)?.signals,
                 addr,
                 timeout_ms.into_option(),
                 server_name.into_option(),

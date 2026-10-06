@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -28,6 +29,8 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use crate::engine::cancellation;
+use crate::engine::children;
 use crate::engine::std::io::Stdio as StdStdio;
 use crate::engine::store::Env;
 use axl_proto;
@@ -39,12 +42,13 @@ mod cancel;
 mod health_check;
 mod info;
 mod iter;
-pub mod live;
-mod process;
 mod query;
 mod sandbox_recovery;
 mod sink;
 mod stream;
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub(crate) use stream::redaction::redact_command_args;
 
 /// Resolve which `bazel` binary to spawn. Honors the `BAZEL_REAL` env var
 /// (the bazelisk convention) so wrapped invocations and tests can substitute
@@ -129,6 +133,7 @@ fn partition_build_events(
 /// (probed only when `rc` actually carries a gated option, so the common case
 /// pays nothing). A failed probe degrades to `None` (assumed-latest).
 fn resolve_rc_version(
+    signals: &Arc<cancellation::Signals>,
     requested: Option<String>,
     rc: &bazelrc::BazelRC,
 ) -> anyhow::Result<Option<semver::Version>> {
@@ -136,7 +141,7 @@ fn resolve_rc_version(
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(info::server_info().ok().and_then(|t| t.1));
+        return Ok(info::server_info(signals).ok().and_then(|t| t.1));
     }
     Ok(None)
 }
@@ -170,10 +175,11 @@ fn resolve_flags<'v>(
 /// Shared by every Bazel subcommand that accepts version-gated flags
 /// (`build` / `test` / `query`) so they filter conditional flags identically.
 fn resolve_flags_for_running_bazel<'v>(
+    signals: &Arc<cancellation::Signals>,
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<Vec<String>> {
     let version = if items.iter().any(|f| f.is_right()) {
-        info::server_info()
+        info::server_info(signals)
             .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
             .1
     } else {
@@ -374,12 +380,13 @@ fn effective_rc<'v>(
 /// `--ignore_all_rc_files`); otherwise fall back to raw `flags=` + the legacy
 /// `ctx.bazel.startup_flags` (Bazel reads its own rc).
 fn resolve_invocation_flags<'v>(
+    signals: &Arc<cancellation::Signals>,
     this: values::Value<'v>,
     command: &str,
     rc_param: NoneOr<values::Value<'v>>,
     flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let extras = resolve_flags_for_running_bazel(flags)?;
+    let extras = resolve_flags_for_running_bazel(signals, flags)?;
     match effective_rc(this, rc_param) {
         Some(rc) => {
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
@@ -387,6 +394,18 @@ fn resolve_invocation_flags<'v>(
             Ok((cmd, startup))
         }
         None => Ok((extras, read_startup_flags(this)?)),
+    }
+}
+
+/// The token a spawn is bound to: the one passed as `cancellation =`, else
+/// the run's root.
+fn cancellation_token(
+    signals: &cancellation::Signals,
+    token: NoneOr<&cancellation::Token>,
+) -> tokio_util::sync::CancellationToken {
+    match token.into_option() {
+        Some(token) => token.inner().clone(),
+        None => signals.default_binding(),
     }
 }
 
@@ -494,6 +513,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
+    /// * `cancellation` - The `cancellation.Token` the client is bound to;
+    ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
+    ///   one SIGINT, bazel's graceful cancel.
     /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
@@ -564,6 +586,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
             aspect::Aspect,
         >,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
+            &'v cancellation::Token,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
@@ -572,13 +597,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(this, "build", rc, &flags.items)?;
+            resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
         resolved_flags.extend(aspect::materialize(
+            &env.signals,
             &aspects.items,
             &resolved_startup_flags,
         )?);
-        let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
             "build",
@@ -595,6 +621,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 version: announce_version,
                 command: announce_command,
             },
+            env.signals.clone(),
+            &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
         )?;
         Ok(build)
@@ -617,6 +645,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
+    /// * `cancellation` - The `cancellation.Token` the client is bound to;
+    ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
+    ///   one SIGINT, bazel's graceful cancel.
     /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
@@ -685,6 +716,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
             aspect::Aspect,
         >,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
+            &'v cancellation::Token,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
@@ -693,13 +727,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(this, "test", rc, &flags.items)?;
+            resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
         resolved_flags.extend(aspect::materialize(
+            &env.signals,
             &aspects.items,
             &resolved_startup_flags,
         )?);
-        let env = Env::from_eval(eval)?;
+
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(
             "test",
@@ -716,6 +752,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 version: announce_version,
                 command: announce_command,
             },
+            env.signals.clone(),
+            &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
         )?;
         Ok(test)
@@ -757,9 +795,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<query::Query> {
         require_claimed_flags(this)?;
-        let extras = resolve_flags_for_running_bazel(&flags.items)?;
+        let extras = resolve_flags_for_running_bazel(&Env::from_eval(eval)?.signals, &flags.items)?;
         let (startup, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
                 let (startup, mut base) = rc.resolve_for_command("query")?;
@@ -769,6 +808,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None => (read_startup_flags(this)?, extras),
         };
         query::run(
+            &Env::from_eval(eval)?.signals,
             &expr,
             &startup,
             &command_flags,
@@ -817,6 +857,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<SmallMap<String, String>> {
         require_claimed_flags(this)?;
         let (startup_flags, command_flags) = match effective_rc(this, rc) {
@@ -837,11 +878,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
-        // Register with the live-bazel registry so OS-signal cancellation
-        // can reach this `bazel info` even if the daemon is busy.
-        let (child, _guard) = live::spawn_registered(&mut cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
-        let output = child
+        // Bound to the root, so a cancel reaches this `bazel info` even
+        // while the daemon is busy, and the wait is a safe point.
+        let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait_with_output()
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
@@ -877,7 +917,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     ctx.bazel.health_check()   # may start a server in the runner output base
     ///     ctx.bazel.shutdown()       # stop it before wiping that output base
     /// ```
-    fn shutdown<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
+    fn shutdown<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<i32> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
 
@@ -885,9 +928,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.args(&startup_flags);
         cmd.arg("shutdown");
         cmd.stdin(Stdio::null());
-        let (mut child, _guard) = live::spawn_registered(&mut cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
-        let status = child
+        let status = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait()
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
         Ok(status.code().unwrap_or(-1))
@@ -918,13 +960,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn version<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = true)] strip: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
-        Ok(match info::release_version() {
-            Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
-            Some(v) => NoneOr::Other(v.to_string()),
-            None => NoneOr::None,
-        })
+        Ok(
+            match info::release_version(&Env::from_eval(eval)?.signals) {
+                Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
+                Some(v) => NoneOr::Other(v.to_string()),
+                None => NoneOr::None,
+            },
+        )
     }
 
     /// Probe the Bazel server to determine whether it is responsive.
@@ -964,13 +1009,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
+        let signals = Env::from_eval(eval)?.signals.clone();
         let Some(log) = log.into_option() else {
-            return Ok(health_check::run(&startup_flags, &mut |line| {
+            return Ok(health_check::run(&signals, &startup_flags, &mut |line| {
                 crate::errln!("{line}")
             }));
         };
         let mut log_error = None;
-        let result = health_check::run(&startup_flags, &mut |line| {
+        let result = health_check::run(&signals, &startup_flags, &mut |line| {
             if log_error.is_some() {
                 return;
             }
@@ -1093,7 +1139,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let rc = bazelrc::BazelRC::new(root, &startup_flags.items, &flags.items)
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .with_skip_config_if_missing(skip_config_if_missing.items);
-        let version = resolve_rc_version(version.into_option(), &rc)?;
+        let version = resolve_rc_version(&env.signals, version.into_option(), &rc)?;
         Ok(rc.with_version(version))
     }
 
@@ -1167,18 +1213,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn cancel_invocation<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 5000)] force_kill_after_ms: i32,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<cancel::Cancellation> {
         require_claimed_flags(this)?;
         let all_flags = read_startup_flags(this)?;
         let force_kill_after_ms = force_kill_after_ms.max(0) as u64;
+        let signals = Env::from_eval(eval)?.signals.clone();
 
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
-        if let Some(pid) = info::client_pid(&all_flags) {
-            process::sigint(pid);
+        if let Some(pid) = info::client_pid(&signals, &all_flags) {
+            children::os::interrupt(children::Target::Pid(pid));
         }
 
-        Ok(cancel::Cancellation::new(all_flags, force_kill_after_ms))
+        Ok(cancel::Cancellation::new(
+            all_flags,
+            force_kill_after_ms,
+            signals,
+        ))
     }
 }
 
@@ -1265,11 +1317,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// `kinds=[build_event.TargetCompleted, "named_set_of_files", ...]`
     /// filters at iteration time.
     #[starlark(as_type = build::BuildEventIter)]
-    fn iterator(
+    fn iterator<'v>(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
         #[starlark(require = named, default = NoneOr::None)] tick_ms: NoneOr<i32>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::BuildEventIter> {
         let kinds = match kinds {
             NoneOr::None => None,
@@ -1291,7 +1344,11 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             NoneOr::Other(ms) if ms > 0 => Some(ms as u64),
             NoneOr::Other(ms) => anyhow::bail!("tick_ms must be a positive integer; got {ms}"),
         };
-        Ok(build::BuildEventIter::new(kinds, tick_ms))
+        Ok(build::BuildEventIter::new(
+            Env::from_eval(eval)?.signals.clone(),
+            kinds,
+            tick_ms,
+        ))
     }
 }
 

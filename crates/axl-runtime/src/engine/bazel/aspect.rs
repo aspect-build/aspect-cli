@@ -1,5 +1,10 @@
 use std::path::Path;
 use std::path::PathBuf;
+
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
+use crate::engine::children;
 use std::process::Stdio;
 
 use allocative::Allocative;
@@ -53,7 +58,7 @@ starlark::starlark_simple_value!(Aspect);
 /// Resolve `bazel info install_base` — the directory `@bazel_tools`
 /// (`embedded_tools`) is materialized under. Honors the invocation's startup
 /// flags (`--output_user_root` moves the install base).
-fn install_base(startup_flags: &[String]) -> anyhow::Result<PathBuf> {
+fn install_base(signals: &Arc<Signals>, startup_flags: &[String]) -> anyhow::Result<PathBuf> {
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("info");
@@ -61,8 +66,7 @@ fn install_base(startup_flags: &[String]) -> anyhow::Result<PathBuf> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd)?;
-    let output = child.wait_with_output()?;
+    let output = children::spawn_bazel(&mut cmd, signals)?.wait_with_output()?;
     if !output.status.success() {
         anyhow::bail!(
             "`bazel info install_base` failed while materializing aspects: {}",
@@ -93,13 +97,14 @@ fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
 /// concurrency-safe, and reused across runs. It self-heals if the install base
 /// is re-extracted (e.g. on a Bazel upgrade) since it's rewritten when absent.
 pub(crate) fn materialize(
+    signals: &Arc<Signals>,
     aspects: &[Aspect],
     startup_flags: &[String],
 ) -> anyhow::Result<Vec<String>> {
     if aspects.is_empty() {
         return Ok(vec![]);
     }
-    let embedded = install_base(startup_flags)?.join("embedded_tools");
+    let embedded = install_base(signals, startup_flags)?.join("embedded_tools");
     let mut flags = Vec::new();
     for aspect in aspects {
         let hash = sha256::digest(aspect.implementation.as_str());

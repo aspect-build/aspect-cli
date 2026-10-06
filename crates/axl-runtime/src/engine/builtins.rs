@@ -25,13 +25,18 @@ use starlark::values::{
     self, Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLike, starlark_value,
 };
 
+use super::cancellation::Signals;
 use super::hash::{HashObject, HashState};
+use super::store::Env;
+use std::sync::Arc;
 
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
 #[display("<sleep_iter>")]
 pub struct SleepIter {
     pub rate: u64,
     pub counter: AtomicU64,
+    #[allocative(skip)]
+    pub signals: Arc<Signals>,
 }
 
 starlark_simple_value!(SleepIter);
@@ -50,10 +55,21 @@ impl<'v> values::StarlarkValue<'v> for SleepIter {
         Ok(me)
     }
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        std::thread::sleep(Duration::from_millis(self.rate));
+        // The tick is where every polling loop sits. The iterator never ends
+        // on a cancel (the loop decides when to leave), but once the root is
+        // cancelled it stops sleeping, so the evaluator's own check ends a
+        // loop that is not watching within a few iterations rather than
+        // after that many ticks.
+        let _ = sleep(&self.signals, Duration::from_millis(self.rate));
         Some(heap.alloc(self.counter.fetch_add(1, Ordering::Relaxed)))
     }
     unsafe fn iter_stop(&self) {}
+}
+
+/// Sleep for `duration` as a safe point: the task's exit instead, once
+/// `ctx.cancellation.root` is cancelled and no `intercept()` is in effect.
+pub(crate) fn sleep(signals: &Signals, duration: Duration) -> Result<(), crate::eval::TaskExit> {
+    signals.block(tokio::time::sleep(duration))
 }
 
 static MONOTONIC_EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -410,7 +426,9 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// Blocks the current thread for `ms` milliseconds.
     ///
     /// Returns `None`. The sleep is synchronous; the calling task's thread
-    /// is parked for the full duration.
+    /// is parked for the full duration. It is a safe point: once
+    /// `ctx.cancellation.root` is cancelled the task exits instead, unless
+    /// `intercept()` is in effect.
     ///
     /// # Examples
     ///
@@ -418,9 +436,16 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// load("@std//time.axl", "sleep")
     /// sleep(250)  # pause for 250 ms
     /// ```
-    fn sleep(this: Value<'_>, ms: u32) -> anyhow::Result<starlark::values::none::NoneType> {
+    fn sleep<'v>(
+        this: Value<'v>,
+        ms: u32,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
         let _ = this;
-        std::thread::sleep(Duration::from_millis(ms as u64));
+        sleep(
+            &Env::from_eval(eval)?.signals,
+            Duration::from_millis(ms as u64),
+        )?;
         Ok(starlark::values::none::NoneType)
     }
 
@@ -428,7 +453,10 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// integer every `ms` milliseconds.
     ///
     /// Each call to `next` sleeps for `ms` milliseconds, then returns the
-    /// next tick (starting at `0`). Use `break` to stop iteration.
+    /// next tick (starting at `0`). Use `break` to stop iteration. The
+    /// iterator never ends on its own: a loop that owns the ending
+    /// (`ctx.cancellation.intercept()`) checks its token and breaks. Without
+    /// `intercept()`, a cancelled root ends the task at the loop as Ctrl+C asks.
     ///
     /// # Examples
     ///
@@ -438,11 +466,16 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     ///     if check_done():
     ///         break
     /// ```
-    fn sleep_iter(this: Value<'_>, ms: u32) -> anyhow::Result<SleepIter> {
+    fn sleep_iter<'v>(
+        this: Value<'v>,
+        ms: u32,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<SleepIter> {
         let _ = this;
         Ok(SleepIter {
             rate: ms as u64,
             counter: AtomicU64::new(0),
+            signals: Env::from_eval(eval)?.signals.clone(),
         })
     }
 

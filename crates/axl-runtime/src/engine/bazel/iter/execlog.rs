@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 
 use allocative::Allocative;
-use fibre::RecvError;
 use fibre::TryRecvError;
 use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
@@ -21,6 +20,7 @@ use starlark::values::starlark_value;
 
 use axl_proto::tools::protos::ExecLogEntry;
 use derive_more::Display;
+use fibre::RecvError;
 use fibre::spmc::Receiver;
 
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
@@ -92,6 +92,9 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
         Ok(me)
     }
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
+        // Blocks until the next entry or the stream's end. A cancelled run
+        // does not end the iterator: the client is being stopped, and the
+        // stream closes with it.
         match self.recv.borrow_mut().recv() {
             Ok(ev) => Some(ev.alloc_value(heap)),
             Err(RecvError::Disconnected) => None,

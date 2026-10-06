@@ -16,7 +16,10 @@ use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
+use std::sync::Arc;
+
 use super::stream;
+use crate::engine::cancellation::Signals;
 
 #[derive(Debug, Display, Clone, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.io.Stdio>")]
@@ -36,11 +39,20 @@ impl<'v> UnpackValue<'v> for Stdio {
 }
 
 impl Stdio {
-    pub fn new() -> Self {
+    /// The process's streams. A blocking read of stdin is a safe point: it
+    /// ends with the task's exit once the root token is cancelled, so a
+    /// cancelled run is not stuck behind a prompt.
+    pub fn new(signals: Arc<Signals>) -> Self {
+        let stdin = stream::Readable::from(std::io::stdin());
+        stdin.set_stdin_interrupt(Arc::new(move || {
+            signals
+                .should_unwind()
+                .then(|| std::io::Error::other(signals.exit_for()))
+        }));
         Self {
             stdout: stream::Writable::from(std::io::stdout()),
             stderr: stream::Writable::from(std::io::stderr()),
-            stdin: stream::Readable::from(std::io::stdin()),
+            stdin,
         }
     }
 }

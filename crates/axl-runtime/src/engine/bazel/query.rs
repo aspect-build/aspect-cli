@@ -26,6 +26,11 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use axl_proto::blaze_query as query;
 use prost::Message;
 
+use std::sync::Arc;
+
+use crate::engine::cancellation::Signals;
+use crate::engine::children;
+
 #[derive(Debug, Clone)]
 pub enum Target {
     // We leave environment_group out as its undocumented.
@@ -150,6 +155,7 @@ fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyh
 /// on a non-zero exit — a failed query is not the same as one that matched
 /// nothing. Used by `ctx.bazel.query(expr, rc=…)`.
 pub fn run(
+    signals: &Arc<Signals>,
     expr: &str,
     startup_flags: &[String],
     flags: &[String],
@@ -184,7 +190,7 @@ pub fn run(
     // extra `bazel info`, so only pay for it when actually announcing.
     if announce.version || announce.command {
         let version = if announce.version {
-            super::info::server_info_with_startup_flags(startup_flags)
+            super::info::server_info_with_startup_flags(signals, startup_flags)
                 .ok()
                 .and_then(|(_pid, version)| version)
         } else {
@@ -193,13 +199,11 @@ pub fn run(
         super::build::announce_spawn(announce, version.as_ref(), &cmd);
     }
 
-    // Register with the live-bazel registry so a CI cancel
-    // (SIGINT/SIGTERM to aspect-cli) escalates to the bazel
-    // client. Large queries can run for many seconds; without
-    // registration they'd outlive an aborted aspect-cli.
-    let (mut child, _guard) =
-        super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
-    let status = child.wait()?;
+    // Bound to the root so a cancel reaches the client: large queries can
+    // run for many seconds, and the wait is a safe point.
+    let status = children::spawn_bazel(&mut cmd, signals)
+        .with_context(|| "failed to spawn bazel")?
+        .wait()?;
 
     if !status.success() {
         let mut stderr = String::new();
