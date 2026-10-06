@@ -44,6 +44,8 @@ use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::{NoSerialize, ProvidesStaticType, ValueLike};
 
+use crate::engine::children::{self, Target, os};
+
 /// Bazel's exit code when a lock is held and `--noblock_for_lock` was given.
 const LOCK_HELD_NOBLOCK_FOR_LOCK: i32 = 9;
 
@@ -113,9 +115,11 @@ impl Signal {
     fn send(self, pid: u32) {
         match self {
             Signal::Int => {
-                super::process::sigint(pid);
+                os::interrupt(Target::Pid(pid));
             }
-            Signal::Kill => super::process::sigkill(pid),
+            Signal::Kill => {
+                os::kill(Target::Pid(pid));
+            }
         }
     }
 
@@ -256,10 +260,7 @@ fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    let output = match super::live::spawn_registered(&mut cmd) {
-        Ok((child, _guard)) => child.wait_with_output(),
-        Err(e) => Err(e),
-    };
+    let output = children::spawn_bazel(&mut cmd).and_then(|spawned| spawned.wait_with_output());
 
     match output {
         Ok(output) => CheckResult {
@@ -335,7 +336,7 @@ fn one_line(stderr: &str) -> String {
 
 fn describe_holder(pid: Option<u32>) -> String {
     match pid {
-        Some(pid) => match super::process::describe_process(pid) {
+        Some(pid) => match os::describe_process(pid) {
             Some(desc) => format!("pid {pid} ({desc})"),
             None => format!("pid {pid}"),
         },
@@ -369,8 +370,10 @@ fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let output = children::spawn_bazel(&mut cmd)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -542,6 +545,8 @@ enum Poll {
     StillHeld(Probe),
     /// A different holder (by pid) has the lock now.
     HolderChanged(Probe, Option<u32>),
+    /// The run was cancelled while waiting: climb no further.
+    Cancelled(Probe),
 }
 
 /// Re-probe every `poll` until the lock is released, its holder changes, or
@@ -554,9 +559,13 @@ fn poll_while_client_holds(
     holder: Option<u32>,
 ) -> (Poll, Duration) {
     let start = Instant::now();
+    let signals = crate::engine::cancellation::Signals::current();
     loop {
         std::thread::sleep(poll);
         let p = classify(probe(), output_base);
+        if signals.should_unwind() {
+            return (Poll::Cancelled(p), start.elapsed());
+        }
         let Probe::ClientLockHeld {
             holder: now_holding,
             ..
@@ -626,6 +635,10 @@ fn clear_client_lock(
                     return p;
                 }
                 Poll::StillHeld(p) => last = p,
+                Poll::Cancelled(p) => {
+                    log("the run was cancelled while waiting for the output base lock");
+                    return p;
+                }
                 Poll::HolderChanged(p, new_holder) => {
                     log(&format!(
                         "output base lock holder changed from {} to {}",
@@ -684,11 +697,11 @@ fn kill_server_and_retry(
         return HealthCheckResult::unhealthy(diagnostic, Some(exit_code));
     };
 
-    if super::process::is_pid_running(pid) {
+    if os::is_running(Target::Pid(pid)) {
         log(&format!(
             "sending SIGKILL to bazel server pid {pid} so the next command starts a fresh server"
         ));
-        super::process::sigkill(pid);
+        os::kill(Target::Pid(pid));
     } else {
         log(&format!(
             "bazel server pid {pid} from {} is not running",

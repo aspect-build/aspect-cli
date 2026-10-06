@@ -30,6 +30,8 @@ pub mod arg;
 pub mod arguments;
 pub(crate) mod bazel;
 pub(crate) mod builtins;
+pub mod cancellation;
+pub mod children;
 pub mod config_context;
 pub mod feature_context;
 pub mod feature_map;
@@ -67,6 +69,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     r#async::register_globals(globals);
+    cancellation::register_globals(globals);
     // After the Starlark stdlib, so its `fail` replaces the builtin.
     error::register_globals(globals);
     r#trait::register_globals(globals);

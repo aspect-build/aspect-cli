@@ -21,7 +21,7 @@ resolution. (The companion case — BES routed through Bazel via
 """
 
 load("../private/lib/aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
-load("../private/lib/environment.axl", "info")
+load("../private/lib/environment.axl", "info", "warn")
 load("../private/lib/text.axl", "join_url")
 
 def build_events_iterator(kinds = None, tick_ms = None):
@@ -137,10 +137,27 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     after the build.
     """
     bazel_backend = bazel_bes_backend(rc, command)
-    return (
+    sinks = (
         collect_bes_from_args(ctx, extra_backends = _backends_to_stream(bazel_trait, extra_backends), bazel_backend = bazel_backend) +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
+    ctx.defer(drain_bes_sinks, ctx, sinks)
+    return sinks
+
+# How long a cancelled run gives its BES sinks to forward bazel's final
+# events. Inside both CI cancel windows: the Buildkite agent SIGKILLs 9s after
+# its SIGTERM and GitHub Actions escalates 7.5s after its SIGINT.
+_DRAIN_TIMEOUT_MS = 5000
+
+def drain_bes_sinks(ctx, sinks: list) -> None:
+    """Give every sink a bounded window to finish forwarding. Registered as a
+    `ctx.defer` by `collect_bes_sinks`, so it runs after a Ctrl+C or CI cancel
+    ended the task before its own `sink.wait()`: the interrupted bazel has
+    written `BuildFinished`, and the backend should see it as interrupted
+    rather than time out. A no-op for a sink already waited on."""
+    for sink in sinks:
+        if sink.wait(timeout_ms = _DRAIN_TIMEOUT_MS) == False:
+            warn(ctx.std, "build events to %s were not fully delivered within %ds" % (sink.uri, _DRAIN_TIMEOUT_MS // 1000))
 
 def bes_link_data(bazel_trait, rc, sinks: list, command: str = "build") -> dict:
     """The `data` keys a task's results surface resolves the Aspect Web UI link

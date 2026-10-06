@@ -25,6 +25,7 @@ use starlark::values::tuple::UnpackTuple;
 use super::arguments::{Arguments, FrozenArguments};
 use super::aspect::Aspect;
 use super::bazel::{Bazel, FrozenBazel};
+use super::cancellation::Cancellation;
 use super::http::Http;
 use super::std::Std;
 use super::task_info::TaskInfo;
@@ -146,6 +147,16 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> starlark::Result<Cancellation> {
+        Ok(Cancellation {})
     }
 
     /// Identity of the currently running task — its name, group(s),
@@ -271,6 +282,16 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> starlark::Result<Cancellation> {
+        Ok(Cancellation {})
     }
 
     /// Identity of the currently running task — its name, group(s),

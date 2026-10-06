@@ -1113,13 +1113,17 @@ def _new(ctx, data):
         else:
             status = "passed"
         text = outcome.message.split("\n")[0] if outcome.message else outcome.text
+
+        # A run the OS (or the task) cancelled: the surfaces have no cancelled
+        # state, so it closes as failed, but says why.
+        ended_early = "Cancelled" if ctx.cancellation.root.cancelled else _ENDED_EARLY[status]
         _track_and_dispatch(ctx, surface, TaskUpdate(
             kind = surface["kind"],
             status = status,
             final = True,
             conclusion = text,
             data = _data,
-            progress = ProgressStyles(body = text if text else _ENDED_EARLY[status]),
+            progress = ProgressStyles(body = text if text else ended_early),
         ))
 
     ctx.hooks.post_task(close)

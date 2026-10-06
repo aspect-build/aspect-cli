@@ -308,7 +308,13 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
 
         let catch = this.catch.borrow().clone();
 
-        let result = env.rt.block_on(fut);
+        // A safe point: once the root token is cancelled the task's exit
+        // comes back, and an exit is never caught.
+        let _ = env;
+        let result = match crate::engine::cancellation::Signals::current().block(fut) {
+            Ok(result) => result,
+            Err(exit) => return Err(exit.into()),
+        };
         let result = apply_transforms(result, &transforms, eval);
         let Some(types) = catch else {
             return result;

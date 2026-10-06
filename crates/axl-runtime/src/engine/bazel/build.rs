@@ -29,11 +29,14 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::none::NoneOr;
+use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use axl_proto::build_event_stream::BuildEvent;
 
 use crate::engine::r#async::rt::AsyncRuntime;
+use crate::engine::children::{self, Bound, Recv, recv_cancellable};
+use tokio_util::sync::CancellationToken;
 
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
@@ -191,6 +194,10 @@ impl FileSignal {
             *guard = Some(result);
             self.cv.notify_all();
         }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.result.lock().unwrap().is_some()
     }
 
     fn wait(&self) -> Result<(), String> {
@@ -390,11 +397,26 @@ impl<'v> values::StarlarkValue<'v> for BuildEventSink {
 
 #[starlark_module]
 pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
-    /// Block until this sink finishes flushing. Idempotent.
-    fn wait<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<bool>> {
+    /// Block until this sink finishes flushing. Idempotent: `None` once it
+    /// has nothing left to wait for.
+    ///
+    /// With `timeout_ms`, gives up after that long and returns `False`,
+    /// leaving the sink flushing in the background for a later `wait()`.
+    /// This is how AXL drains build events after a cancel: the forwarders
+    /// get a bounded window to deliver bazel's `BuildFinished` before the
+    /// process exits. Returns `True` when the sink finished within the wait.
+    fn wait<'v>(
+        this: Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] timeout_ms: NoneOr<i32>,
+    ) -> anyhow::Result<NoneOr<bool>> {
         let sink = this
             .downcast_ref_err::<BuildEventSink>()
             .into_anyhow_result()?;
+        let timeout = match timeout_ms.into_option() {
+            Some(ms) if ms < 0 => anyhow::bail!("timeout_ms must not be negative: {ms}"),
+            Some(ms) => Some(Duration::from_millis(ms as u64)),
+            None => None,
+        };
         // Take Live out of the Mutex so we don't hold the lock across the
         // blocking join.
         let live = {
@@ -404,16 +426,42 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
                 SinkPhase::Idle => return Ok(NoneOr::None),
             }
         };
+        let deadline = timeout.map(|t| std::time::Instant::now() + t);
+        let finished = |done: &dyn Fn() -> bool| -> Result<bool, crate::eval::TaskExit> {
+            crate::engine::cancellation::Signals::current().block(async {
+                loop {
+                    if done() {
+                        return true;
+                    }
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+        };
         let (outcome, stats): (Result<(), String>, SinkStats) = match live {
-            SinkLive::Grpc { join } => match join.join() {
-                Ok((stats, Ok(()))) => (Ok(()), stats),
-                Ok((stats, Err(e))) => (Err(e.last_error), stats),
-                Err(_) => (
-                    Err("sink worker thread panicked".to_string()),
-                    SinkStats::default(),
-                ),
-            },
-            SinkLive::File { signal } => (signal.wait(), SinkStats::default()),
+            SinkLive::Grpc { join } => {
+                if !finished(&|| join.is_finished())? {
+                    *sink.phase.lock().unwrap() = SinkPhase::Live(SinkLive::Grpc { join });
+                    return Ok(NoneOr::Other(false));
+                }
+                match join.join() {
+                    Ok((stats, Ok(()))) => (Ok(()), stats),
+                    Ok((stats, Err(e))) => (Err(e.last_error), stats),
+                    Err(_) => (
+                        Err("sink worker thread panicked".to_string()),
+                        SinkStats::default(),
+                    ),
+                }
+            }
+            SinkLive::File { signal } => {
+                if !finished(&|| signal.is_complete())? {
+                    *sink.phase.lock().unwrap() = SinkPhase::Live(SinkLive::File { signal });
+                    return Ok(NoneOr::Other(false));
+                }
+                (signal.wait(), SinkStats::default())
+            }
         };
         let (failed, error) = match outcome {
             Ok(()) => (false, None),
@@ -424,7 +472,7 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
         out.error = error;
         out.events_sent = stats.sent;
         out.events_acked = stats.acked;
-        Ok(NoneOr::None)
+        Ok(NoneOr::Other(true))
     }
 }
 
@@ -576,34 +624,28 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
             }
         };
 
-        match self.config.tick_ms {
-            // Heartbeat mode: yield an event, or a Starlark `None` when the
-            // stream goes quiet for `ms`, so the caller's loop keeps ticking.
-            Some(ms) => match recv.recv_timeout(Duration::from_millis(ms)) {
-                Ok(envelope) => {
-                    *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(Value::new_none())
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    *self.state.lock().unwrap() = IterState::Done;
-                    None
-                }
-            },
-            // Blocking mode: yield events until the stream closes.
-            None => match recv.recv() {
-                Ok(envelope) => {
-                    *self.state.lock().unwrap() = IterState::Live { recv };
-                    Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
-                }
-                Err(_) => {
-                    *self.state.lock().unwrap() = IterState::Done;
-                    None
-                }
-            },
+        // Heartbeat mode yields a Starlark `None` when the stream goes quiet
+        // for `tick_ms`, so the caller's loop keeps ticking; blocking mode
+        // yields events until the stream closes. Both are safe points: once
+        // the root token is cancelled the iterator ends (the client has its
+        // SIGINT by then), and the loop's next call raises the task's exit.
+        match recv_cancellable(&*recv, self.config.tick_ms.map(Duration::from_millis)) {
+            Recv::Item(envelope) => {
+                *self.state.lock().unwrap() = IterState::Live { recv };
+                Some(BuildEventEnvelope::into_event(envelope).alloc_value(heap))
+            }
+            Recv::Tick => {
+                *self.state.lock().unwrap() = IterState::Live { recv };
+                Some(Value::new_none())
+            }
+            Recv::Closed => {
+                *self.state.lock().unwrap() = IterState::Done;
+                None
+            }
+            Recv::Cancelled => {
+                *self.state.lock().unwrap() = IterState::Live { recv };
+                None
+            }
         }
     }
 
@@ -792,25 +834,33 @@ pub struct Build {
     #[allocative(skip)]
     child: RefCell<Child>,
 
-    /// RAII guard that registers the bazel client PID with `bazel::live`
-    /// for the lifetime of the build. On OS-level shutdown signals to
-    /// aspect-cli, the binary's signal handler iterates the live registry
-    /// and forwards SIGINT to each registered client so bazel subprocesses
-    /// don't outlive aspect-cli.
-    ///
-    /// Wrapped in `RefCell<Option<…>>` so `wait()` / `try_wait()` can
-    /// `.take()` it the moment the child is observed exited. Otherwise the
-    /// PID stays in the registry until the Starlark `Build` object is
-    /// garbage-collected — and if the OS reuses the PID in that window,
-    /// the shutdown handler would SIGINT/SIGKILL an unrelated process.
+    /// The client's binding to the cancellation token it was spawned under:
+    /// cancelling that token sends the client one SIGINT, bazel's own
+    /// graceful cancel. `handle.cancellation` in AXL. Reaping the child
+    /// (`wait` / `try_wait`) marks it exited so a reused pid is never
+    /// signalled.
     #[allocative(skip)]
-    live_guard: RefCell<Option<super::live::LiveBazelGuard>>,
+    bound: Bound,
 
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
 
 impl Build {
+    /// Wait for the client to exit, a safe point: once the root is cancelled
+    /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
+    /// first. Reaping marks the binding exited.
+    fn wait_child(
+        &self,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        {
+            let mut child = self.child.borrow_mut();
+            drop(child.stdin.take());
+        }
+        children::wait_with(&self.bound, timeout, || self.child.borrow_mut().try_wait())
+    }
+
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
@@ -824,6 +874,7 @@ impl Build {
         stderr: Stdio,
         directory: Option<String>,
         announce: AnnounceSpawn,
+        cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
         let (pid, version) = super::info::server_info()?;
@@ -928,15 +979,11 @@ impl Build {
         cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
-
-        // Register the bazel client with the live-subprocess registry so
-        // aspect-cli's OS-signal handler can forward SIGINT to it on
-        // CI cancellation. The guard is stored on `Self` and unregisters
-        // when the `Build` is dropped (after `wait()`).
-        let live_guard = super::live::register(child.id());
+        // Bound to `cancellation` (the root unless the task said otherwise):
+        // cancelling it sends the client one SIGINT.
+        let (child, bound) =
+            children::spawn(&mut cmd, cancellation, None, children::Kind::Bazel)
+                .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
@@ -1035,7 +1082,7 @@ impl Build {
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
             sink_invocation_id: RefCell::new(sink_invocation_id),
-            live_guard: RefCell::new(Some(live_guard)),
+            bound,
             span: RefCell::new(span),
         })
     }
@@ -1098,20 +1145,52 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(WorkspaceEventIterator::new(event_stream.receiver()))
     }
 
-    fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
+    /// The client's cancellation token, a `child()` of the one passed as
+    /// `cancellation =` at the spawn (`ctx.cancellation.root` by default).
+    /// `build.cancellation.cancel()` sends the client one SIGINT, bazel's
+    /// own graceful cancel; the build then ends the way an interrupted bazel
+    /// does, with exit code 8, and `wait()` returns.
+    #[starlark(attribute)]
+    fn cancellation<'v>(
+        this: values::Value<'v>,
+    ) -> anyhow::Result<crate::engine::cancellation::Token> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
-        let status = build.child.borrow_mut().try_wait()?;
+        Ok(crate::engine::cancellation::Token::new(
+            build.bound.token().clone(),
+        ))
+    }
+
+    /// Send the client one SIGINT now, bazel's graceful cancel, without
+    /// going through its token.
+    fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let pid = build.child.borrow().id();
+        children::os::interrupt(children::Target::Pid(pid));
+        Ok(NoneType)
+    }
+
+    /// Check whether the invocation has finished: its `BuildStatus`, or
+    /// `None` while the client is still running. Non-blocking by default;
+    /// with `timeout_ms` it waits up to that long first, a bounded wait for
+    /// a loop that also watches a cancellation token.
+    fn try_wait<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = 0)] timeout_ms: i32,
+    ) -> anyhow::Result<NoneOr<BuildStatus>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        if timeout_ms < 0 {
+            anyhow::bail!("timeout_ms must not be negative: {timeout_ms}");
+        }
+        let status = if timeout_ms == 0 {
+            children::try_wait(&mut build.child.borrow_mut(), &build.bound)?
+        } else {
+            build.wait_child(Some(Duration::from_millis(timeout_ms as u64)))?
+        };
         Ok(match status {
-            Some(status) => {
-                // Child has been reaped — release the PID registration
-                // immediately so a reused PID can't be targeted by a
-                // later shutdown-signal escalation.
-                build.live_guard.borrow_mut().take();
-                NoneOr::Other(BuildStatus {
-                    success: status.success(),
-                    code: status.code(),
-                })
-            }
+            Some(status) => NoneOr::Other(BuildStatus {
+                success: status.success(),
+                code: status.code(),
+            }),
             None => NoneOr::None,
         })
     }
@@ -1126,6 +1205,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     ///
     /// `build_events()` remains usable after `wait()` for replaying historical
     /// events, because the build event stream retains its buffer.
+    ///
+    /// The wait ends the task instead if `ctx.cancellation.root` is
+    /// cancelled meanwhile and no `notify()` is in effect; the client has
+    /// its SIGINT by then.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
 
@@ -1133,13 +1216,9 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let span = build.span.borrow().clone();
         let _enter = span.enter();
 
-        let result = build.child.borrow_mut().wait()?;
-
-        // Child has been reaped — release the PID registration before any
-        // other work in this function. Otherwise the PID could be reused
-        // by the OS while we drain BES/execlog sinks, and a CI cancel in
-        // that window would target an unrelated process.
-        build.live_guard.borrow_mut().take();
+        let result = build
+            .wait_child(None)?
+            .expect("a wait without a timeout reports a status");
 
         // Wait for BES stream to complete.
         // Note: We don't take() the stream here so that build_events() can still

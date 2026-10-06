@@ -435,7 +435,8 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if ctx.args.watch:
         # Watch before the first run so edits made during it aren't missed.
-        ws = watch.new(ctx, rc = rc)
+        # Ctrl+C is the session's normal ending: the task owns it and exits 0.
+        ws = watch.new(ctx, rc = rc, cancellation = ctx.cancellation.notify())
 
         def rerun():
             ph.reset(gaz_init_data())
@@ -443,7 +444,7 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
 
         _run_gazelle(ph, rc, endpoint_auth_flags, announce_version, announce_command)
 
-        # Never concludes: re-runs per change until Ctrl-C ends the process.
+        # Re-runs per change until Ctrl-C, the session's normal ending.
         return watch.loop(ws, rerun)
 
     return _emit_final(ph, _run_gazelle(ph, rc, endpoint_auth_flags, announce_version, announce_command))

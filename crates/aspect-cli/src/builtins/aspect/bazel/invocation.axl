@@ -248,7 +248,9 @@ def _do_on_event(inv: _Invocation, event) -> None:
 def _do_should_retry(inv: _Invocation, sp, w) -> bool:
     """Retry the attempt `sp` produced? Explicit at the callsite, never folded
     into wait(). The index is read straight off the spawned struct."""
-    return w.code != 0 and inv.trait.build_retry(w.code) and sp.index < inv.max_attempts - 1
+
+    # 8 is bazel's "interrupted": a cancel, never something a retry fixes.
+    return w.code != 0 and w.code != 8 and inv.trait.build_retry(w.code) and sp.index < inv.max_attempts - 1
 
 def _do_finish(inv: _Invocation, w) -> None:
     """Conclude: summarize the BES upload, then fire `build_end` with the final

@@ -5,7 +5,11 @@ load("./environment.axl", "warn")
 load("./watch_result.axl", "watch_result")
 
 def _stop_child(child) -> None:
-    child.kill_all()
+    """Stop the child the way cancellation does: a terminate signal to its
+    process group, then a kill three seconds later if it is still running,
+    so a dev server gets to release its port and clean up before a restart or
+    at the end of the watch."""
+    child.cancellation.cancel()
     child.wait()
 
 def _restart_outcome(result: struct) -> struct:

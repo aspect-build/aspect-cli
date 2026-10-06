@@ -18,6 +18,7 @@ use starlark::values::{
 
 use super::stream::{Conn, StreamInner, TcpStream, UnixStream};
 use super::{remaining, timeout};
+use crate::engine::cancellation::Signals;
 use crate::engine::error::{Attempt, IoError};
 
 /// How often `accept` with a timeout looks for a connection.
@@ -58,19 +59,27 @@ impl Listener {
         }
     }
 
-    /// Accept one connection, waiting at most `timeout`.
+    /// Accept one connection, waiting at most `timeout`. A safe point: polled
+    /// rather than blocked in `accept`, so a cancelled run ends the wait with
+    /// the task's exit.
     fn accept(&self, timeout: Option<Duration>) -> io::Result<(Conn, Option<String>)> {
-        let Some(timeout) = timeout else {
-            return self.accept_once();
-        };
-        let deadline = Instant::now() + timeout;
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let signals = Signals::current();
         self.set_nonblocking(true)?;
         let result = loop {
             match self.accept_once() {
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => match remaining(deadline) {
-                    Ok(left) => thread::sleep(left.min(ACCEPT_POLL)),
-                    Err(e) => break Err(e),
-                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if signals.should_unwind() {
+                        break Err(super::cancelled());
+                    }
+                    match deadline {
+                        Some(deadline) => match remaining(deadline) {
+                            Ok(left) => thread::sleep(left.min(ACCEPT_POLL)),
+                            Err(e) => break Err(e),
+                        },
+                        None => thread::sleep(ACCEPT_POLL),
+                    }
+                }
                 other => break other,
             }
         };
@@ -93,7 +102,7 @@ impl ListenerInner {
         let Some(listener) = listener.as_ref() else {
             anyhow::bail!("the listener is closed");
         };
-        Ok(f(listener).map_err(IoError::from)?)
+        f(listener).map_err(super::io_error)
     }
 }
 

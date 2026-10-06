@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
+
+use crate::engine::children;
 use std::process::Stdio;
 
 use allocative::Allocative;
@@ -61,8 +63,7 @@ fn install_base(startup_flags: &[String]) -> anyhow::Result<PathBuf> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd)?;
-    let output = child.wait_with_output()?;
+    let output = children::spawn_bazel(&mut cmd)?.wait_with_output()?;
     if !output.status.success() {
         anyhow::bail!(
             "`bazel info install_base` failed while materializing aspects: {}",

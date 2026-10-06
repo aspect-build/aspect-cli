@@ -367,3 +367,69 @@ def _ask(ctx: TaskContext, addr: str) -> bytes | None:
 - **`ca_pem` replaces the trusted roots.** Without it, `tls.connect` trusts the
   operating system's certificate store. With it, only the certificates in that
   PEM bundle are trusted, which is what you want for a private endpoint.
+
+**§17 Cancellation.** Ctrl+C and SIGTERM reach a task as a cancelled token,
+never as an exception. `ctx.cancellation.root` is the run's root token: the
+operating system cancels it, and every process a task spawns is bound to it
+unless told otherwise. A task that never thinks about signals is already
+correct: when the root is cancelled, each bound child is stopped the way its
+kind needs (a `std.process.Child` gets a terminate signal, its whole process
+group when it leads one, then a kill three seconds later; a `bazel.Build` gets
+one SIGINT, bazel's own graceful cancel), and the body ends at its next
+blocking call exactly like `ctx.std.process.exit(130, "interrupted")` (143 for
+SIGTERM): post-task hooks, `ctx.defer` callbacks and the bookend still run, and
+`catch` never swallows it. `sleep_iter`, every `wait`, `block`, net read and
+`try_pop` loop is such a safe point.
+
+The whole vocabulary is eight names: `ctx.cancellation.root`,
+`ctx.cancellation.new()` (a token nothing cancels but you),
+`ctx.cancellation.notify()` (below), `tok.child()`, `tok.cancel()`,
+`tok.cancelled`, `tok.wait(timeout_ms)`, and `cancellation = tok` on
+`command(...).spawn()` / `.status()` and `ctx.bazel.build/test`. Every
+`std.process.Child` and `bazel.Build` carries its own token as
+`handle.cancellation`, a `child()` of the one it was spawned under, so
+`handle.cancellation.cancel()` stops that one process the appropriate way.
+`interrupt()`, `terminate()` and `kill()` send one signal with no escalation.
+
+```python
+# A library takes a token as a plain argument and never calls notify().
+def spawn(ctx: TaskContext, entrypoint: str, args: list[str], cancellation: cancellation.Token | None = None) -> std.process.Child:
+    return ctx.std.process.command(entrypoint, *args, cancellation = cancellation or ctx.cancellation.root).spawn()
+
+def loop(ws, run_cycle, cancellation: cancellation.Token) -> None:
+    for _tick in sleep_iter(100):
+        if cancellation.cancelled:
+            return
+        ...
+
+# A task scopes a library with a child token and cancels only that.
+sub = ctx.cancellation.root.child()
+sup = watch_supervisor.new(ctx, spawn, cancellation = sub)
+sub.cancel()
+```
+
+**Owning the ending.** A task whose normal ending *is* Ctrl+C (a watch
+session) calls `sig = ctx.cancellation.notify()` once. From then on the
+operating system cancels `sig` instead of `root`: nothing stops by itself, the
+task reads `sig.cancelled` on its tick, stops what it owns, and returns the
+code it wants (`run --watch` returns 0). Only a task does this, never a
+library. The runtime still guarantees the process can be stopped: a second
+Ctrl+C, or a SIGTERM the task has not answered within the exit window, kills
+every root-bound child and exits with 128 + the signal.
+
+```python
+def _watch(ctx: TaskContext) -> int:
+    ws = watch.new(ctx, rc = rc, cancellation = ctx.cancellation.notify())
+    sup = watch_supervisor.new(ctx, spawn, cancellation = ctx.cancellation.root.child())
+    for _tick in sleep_iter(100):
+        if ws.cancellation.cancelled:
+            sup.stop()          # child.cancellation.cancel(); child.wait()
+            return 0
+        ...
+```
+
+Cleanup that must wait on something after a cancel belongs in a post-task
+hook or a `ctx.defer`: blocking calls block normally there. The BES sink
+library registers `ctx.defer(drain_bes_sinks, ctx, sinks)` for exactly this,
+so an interrupted bazel's `BuildFinished` still reaches its backend within a
+bounded window.

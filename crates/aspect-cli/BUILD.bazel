@@ -131,6 +131,20 @@ rust_test(
 )
 
 rust_test(
+    name = "interrupt_test",
+    srcs = ["tests/interrupt.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/interrupt.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:libc",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "task_exit_test",
     srcs = ["tests/task_exit.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/task_exit.rs",

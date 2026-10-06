@@ -35,7 +35,7 @@ def _filter_batch(batch, root: str, ignored_paths: list[str], ignored_patterns: 
             events.append(event)
     return struct(events = events, rescan = batch.rescan) if events or batch.rescan else None
 
-def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
+def _new(ctx: TaskContext, rc = None, ignore: list[str] = [], cancellation: cancellation.Token | None = None) -> struct:
     """Start watching the bazel workspace. Returns a session:
 
       try_pop() → None | fs.WatchBatch — non-blocking; a settled batch of
@@ -43,6 +43,13 @@ def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
       root — the watched workspace root.
       ignored_paths — absolute path prefixes excluded from the watch.
       ignored_patterns — absolute `REPO.bazel` globs excluded from the watch.
+      cancellation — the token that ends the session: `loop` returns once it
+          is cancelled, and a task's own tick loop checks it the same way.
+
+    `cancellation` defaults to `ctx.cancellation.root`, so Ctrl+C ends the
+    task the default way (exit 130). A task that owns the ending passes the
+    token from `ctx.cancellation.notify()`: Ctrl+C then cancels only that
+    token, the loop returns 0, and the task closes its surfaces itself.
 
     Additional ignore paths may be absolute or relative to the invocation
     directory. Bazel ignore files are read once; restart the watch session
@@ -70,6 +77,7 @@ def _new(ctx: TaskContext, rc = None, ignore: list[str] = []) -> struct:
         return _filter_batch(batch, root, ignored_paths, ignored_patterns, is_directory = is_directory)
 
     return struct(
+        cancellation = cancellation or ctx.cancellation.root,
         ignored_paths = ignored_paths,
         ignored_patterns = ignored_patterns,
         try_pop = try_pop,
@@ -89,14 +97,18 @@ def _run_pending(ws: struct, run_cycle) -> bool:
     run_cycle()
     return True
 
-def _loop(ws: struct, run_cycle) -> None:
+def _loop(ws: struct, run_cycle) -> int:
     """Re-run `run_cycle` on each settled batch of workspace changes — the
     simple watch shape for tasks whose cycle is just re-running a bazel
     command. Batches already queued when a cycle starts are coalesced into
-    it; a failed cycle waits for the next change like any other. Runs until
-    Ctrl-C."""
+    it; a failed cycle waits for the next change like any other.
+
+    Runs until `ws.cancellation` is cancelled, then returns 0 (see `new`)."""
     for _tick in sleep_iter(_TICK_MS):
+        if ws.cancellation.cancelled:
+            return 0
         _run_pending(ws, run_cycle)
+    return 0
 
 watch = namespace(
     filter_batch = _filter_batch,

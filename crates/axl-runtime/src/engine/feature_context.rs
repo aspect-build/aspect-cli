@@ -9,6 +9,7 @@ use starlark::values::{
 };
 
 use super::aspect::Aspect;
+use super::cancellation::Cancellation;
 use super::http::Http;
 use super::std::Std;
 
@@ -140,6 +141,14 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Cancellation> {
+        Ok(Cancellation {})
     }
 
     /// Aspect platform APIs (auth, etc.).

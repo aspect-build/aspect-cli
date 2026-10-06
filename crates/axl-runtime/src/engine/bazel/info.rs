@@ -3,6 +3,8 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
+
+use crate::engine::children;
 use starlark::collections::SmallMap;
 
 /// Keys [`server_info`] requests and then looks up in the parsed output. Shared
@@ -73,11 +75,11 @@ pub fn server_info_with_startup_flags(
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
     // `bazel info` (without --noblock_for_lock) can hang on a busy
-    // server. Register so the OS signal handler can SIGINT it on
-    // CI-cancel.
-    let (child, _guard) = super::live::spawn_registered(&mut cmd)
-        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
-    let c = child.wait_with_output()?;
+    // server. Bound to the root so a cancel reaches it, and so the wait is
+    // a safe point.
+    let c = children::spawn_bazel(&mut cmd)
+        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
+        .wait_with_output()?;
     if !c.status.success() {
         let stderr = String::from_utf8_lossy(&c.stderr);
         let stderr = stderr.trim();
@@ -156,8 +158,10 @@ pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let output = children::spawn_bazel(&mut cmd)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
     // Exit code 9 means the lock is held — stderr contains the client PID.
     if output.status.code() != Some(9) {
         return None;
@@ -180,10 +184,10 @@ pub fn is_server_busy(startup_flags: &[String]) -> bool {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    let Ok((child, _guard)) = super::live::spawn_registered(&mut cmd) else {
+    let Ok(spawned) = children::spawn_bazel(&mut cmd) else {
         return false;
     };
-    matches!(child.wait_with_output(), Ok(o) if o.status.code() == Some(9))
+    matches!(spawned.wait_with_output(), Ok(o) if o.status.code() == Some(9))
 }
 
 /// Query the server PID without blocking on the lock.
@@ -202,8 +206,10 @@ pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let output = children::spawn_bazel(&mut cmd)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

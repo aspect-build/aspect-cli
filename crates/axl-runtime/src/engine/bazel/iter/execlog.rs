@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 
 use allocative::Allocative;
-use fibre::RecvError;
 use fibre::TryRecvError;
 use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
@@ -21,6 +20,8 @@ use starlark::values::starlark_value;
 
 use axl_proto::tools::protos::ExecLogEntry;
 use derive_more::Display;
+
+use crate::engine::children::{Recv, recv_cancellable};
 use fibre::spmc::Receiver;
 
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
@@ -92,9 +93,11 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
         Ok(me)
     }
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        match self.recv.borrow_mut().recv() {
-            Ok(ev) => Some(ev.alloc_value(heap)),
-            Err(RecvError::Disconnected) => None,
+        // A safe point: once the root token is cancelled the iterator ends
+        // and the loop's next call raises the task's exit.
+        match recv_cancellable(&*self.recv.borrow(), None) {
+            Recv::Item(ev) => Some(ev.alloc_value(heap)),
+            Recv::Tick | Recv::Closed | Recv::Cancelled => None,
         }
     }
     unsafe fn iter_stop(&self) {}

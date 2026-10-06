@@ -41,7 +41,7 @@ impl Outcome {
         match result {
             Ok(ret) => (Self::from_return(ret), Ending::Returned),
             Err(e) => match TaskExit::from_starlark(&e) {
-                Some(exit) => (Self::from_exit(exit), Ending::Exited(e)),
+                Some(exit) => (Self::from_exit(&exit), Ending::Exited(e)),
                 None => (Self::from_error(&e), Ending::Failed(e)),
             },
         }

@@ -50,10 +50,21 @@ impl<'v> values::StarlarkValue<'v> for SleepIter {
         Ok(me)
     }
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        std::thread::sleep(Duration::from_millis(self.rate));
+        // The tick is the safe point every polling loop has: once the root
+        // is cancelled the iterator ends, and the loop's next call raises
+        // the task's exit (an iterator cannot).
+        if sleep(Duration::from_millis(self.rate)).is_err() {
+            return None;
+        }
         Some(heap.alloc(self.counter.fetch_add(1, Ordering::Relaxed)))
     }
     unsafe fn iter_stop(&self) {}
+}
+
+/// Sleep for `duration` as a safe point: the task's exit instead, once
+/// `ctx.cancellation.root` is cancelled and no `notify()` is in effect.
+pub(crate) fn sleep(duration: Duration) -> Result<(), crate::eval::TaskExit> {
+    crate::engine::cancellation::Signals::current().block(tokio::time::sleep(duration))
 }
 
 static MONOTONIC_EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -410,7 +421,9 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// Blocks the current thread for `ms` milliseconds.
     ///
     /// Returns `None`. The sleep is synchronous; the calling task's thread
-    /// is parked for the full duration.
+    /// is parked for the full duration. It is a safe point: once
+    /// `ctx.cancellation.root` is cancelled the task exits instead, unless
+    /// `notify()` is in effect.
     ///
     /// # Examples
     ///
@@ -420,7 +433,7 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn sleep(this: Value<'_>, ms: u32) -> anyhow::Result<starlark::values::none::NoneType> {
         let _ = this;
-        std::thread::sleep(Duration::from_millis(ms as u64));
+        sleep(Duration::from_millis(ms as u64))?;
         Ok(starlark::values::none::NoneType)
     }
 
@@ -428,7 +441,10 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// integer every `ms` milliseconds.
     ///
     /// Each call to `next` sleeps for `ms` milliseconds, then returns the
-    /// next tick (starting at `0`). Use `break` to stop iteration.
+    /// next tick (starting at `0`). Use `break` to stop iteration. The tick
+    /// is a safe point: once `ctx.cancellation.root` is cancelled the loop
+    /// ends and the task exits as Ctrl+C asks, unless `notify()` is in
+    /// effect.
     ///
     /// # Examples
     ///

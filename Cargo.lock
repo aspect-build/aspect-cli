@@ -408,6 +408,7 @@ dependencies = [
  "uuid",
  "wasmi",
  "wasmi_wasi",
+ "windows-sys 0.59.0",
  "zstd",
 ]
 

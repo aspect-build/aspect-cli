@@ -20,6 +20,7 @@ use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
+use super::cancellation::Cancellation;
 use super::http::Http;
 use super::std::Std;
 use super::template;
@@ -138,6 +139,14 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
+    /// and what every spawn is bound to by default; `new()` is a token of
+    /// your own; `notify()` makes the task own the ending.
+    #[starlark(attribute)]
+    fn cancellation<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Cancellation> {
+        Ok(Cancellation {})
     }
 
     /// Expand template files.

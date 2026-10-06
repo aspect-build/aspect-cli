@@ -28,6 +28,8 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use crate::engine::cancellation;
+use crate::engine::children;
 use crate::engine::std::io::Stdio as StdStdio;
 use crate::engine::store::Env;
 use axl_proto;
@@ -39,12 +41,13 @@ mod cancel;
 mod health_check;
 mod info;
 mod iter;
-pub mod live;
-mod process;
 mod query;
 mod sandbox_recovery;
 mod sink;
 mod stream;
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub(crate) use stream::redaction::redact_command_args;
 
 /// Resolve which `bazel` binary to spawn. Honors the `BAZEL_REAL` env var
 /// (the bazelisk convention) so wrapped invocations and tests can substitute
@@ -390,6 +393,15 @@ fn resolve_invocation_flags<'v>(
     }
 }
 
+/// The token a spawn is bound to: the one passed as `cancellation =`, else
+/// the run's root.
+fn cancellation_token(token: NoneOr<&cancellation::Token>) -> tokio_util::sync::CancellationToken {
+    match token.into_option() {
+        Some(token) => token.inner().clone(),
+        None => cancellation::Signals::current().root().clone(),
+    }
+}
+
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// The active `RunCommand` set via `use_rc`, or `None` if none is active.
@@ -494,6 +506,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
+    /// * `cancellation` - The `cancellation.Token` the client is bound to;
+    ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
+    ///   one SIGINT, bazel's graceful cancel.
     /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
@@ -564,6 +579,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
             aspect::Aspect,
         >,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
+            &'v cancellation::Token,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
@@ -595,6 +613,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 version: announce_version,
                 command: announce_command,
             },
+            &cancellation_token(cancellation),
             env.rt.clone(),
         )?;
         Ok(build)
@@ -617,6 +636,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
+    /// * `cancellation` - The `cancellation.Token` the client is bound to;
+    ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
+    ///   one SIGINT, bazel's graceful cancel.
     /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
@@ -685,6 +707,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
             aspect::Aspect,
         >,
+        #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
+            &'v cancellation::Token,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
@@ -716,6 +741,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 version: announce_version,
                 command: announce_command,
             },
+            &cancellation_token(cancellation),
             env.rt.clone(),
         )?;
         Ok(test)
@@ -837,11 +863,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
-        // Register with the live-bazel registry so OS-signal cancellation
-        // can reach this `bazel info` even if the daemon is busy.
-        let (child, _guard) = live::spawn_registered(&mut cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
-        let output = child
+        // Bound to the root, so a cancel reaches this `bazel info` even
+        // while the daemon is busy, and the wait is a safe point.
+        let output = children::spawn_bazel(&mut cmd)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait_with_output()
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
@@ -885,9 +910,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.args(&startup_flags);
         cmd.arg("shutdown");
         cmd.stdin(Stdio::null());
-        let (mut child, _guard) = live::spawn_registered(&mut cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
-        let status = child
+        let status = children::spawn_bazel(&mut cmd)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait()
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
         Ok(status.code().unwrap_or(-1))
@@ -1175,7 +1199,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
         if let Some(pid) = info::client_pid(&all_flags) {
-            process::sigint(pid);
+            children::os::interrupt(children::Target::Pid(pid));
         }
 
         Ok(cancel::Cancellation::new(all_flags, force_kill_after_ms))

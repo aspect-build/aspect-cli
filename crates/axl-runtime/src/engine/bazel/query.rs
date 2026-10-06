@@ -26,6 +26,8 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use axl_proto::blaze_query as query;
 use prost::Message;
 
+use crate::engine::children;
+
 #[derive(Debug, Clone)]
 pub enum Target {
     // We leave environment_group out as its undocumented.
@@ -193,13 +195,11 @@ pub fn run(
         super::build::announce_spawn(announce, version.as_ref(), &cmd);
     }
 
-    // Register with the live-bazel registry so a CI cancel
-    // (SIGINT/SIGTERM to aspect-cli) escalates to the bazel
-    // client. Large queries can run for many seconds; without
-    // registration they'd outlive an aborted aspect-cli.
-    let (mut child, _guard) =
-        super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
-    let status = child.wait()?;
+    // Bound to the root so a cancel reaches the client: large queries can
+    // run for many seconds, and the wait is a safe point.
+    let status = children::spawn_bazel(&mut cmd)
+        .with_context(|| "failed to spawn bazel")?
+        .wait()?;
 
     if !status.success() {
         let mut stderr = String::new();
