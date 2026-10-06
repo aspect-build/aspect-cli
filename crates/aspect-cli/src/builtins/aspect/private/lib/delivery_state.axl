@@ -1,0 +1,101 @@
+"""The delivery state backend contract, and the trait that picks the implementation.
+
+`aspect delivery` keeps "which digests were already delivered" in a state
+backend. The task never talks to one directly: it builds a `Params` and calls
+whatever `DeliveryState.connect` is set to, getting back a `Backend` record
+whose verbs it drives. `connect = None` (the default) means the deliveryd HTTP
+client in `deliveryd.axl`; `redis_state.axl` offers a direct-Redis alternative
+a config.axl can select:
+
+    load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+    if DeliveryState in ctx.traits:
+        ctx.traits[DeliveryState].connect = redis_state.connect
+
+A backend reports "not configured" and "unreachable" the same way, through
+`Backend.status.ok`, so the task has one startup error path.
+"""
+
+load("./text.axl", "format_bytes_iec")
+
+# The backend's view of its storage, as reported by its startup probe. A v1
+# deliveryd reports none, so every field has a default.
+Storage = record(
+    reachable = field(bool, default = False),
+    ping_ms = field(int, default = 0),
+    used_bytes = field(int, default = 0),
+    max_bytes = field(int, default = 0),
+    used_pct = field(float, default = 0.0),
+    policy = field(str, default = ""),
+)
+
+Health = record(
+    ok = field(bool),
+    version = field(int),
+    status = field(str, default = ""),
+    storage = field(Storage, default = Storage()),
+    error = field(str, default = ""),
+)
+
+# Everything a delivery run holds constant about its state: `host`/`prefix` key
+# the state, `commit`/`signature` (the build URL) are the provenance stored
+# with each delivery.
+Params = record(
+    host = field(str),
+    prefix = field(str),
+    commit = field(str, default = ""),
+    signature = field(str, default = ""),
+)
+
+# What `connect` returns. `endpoint` must be credential-free: it is printed.
+# `deliver` takes `(label, digest, meta)`; implementations default `meta = {}`.
+Backend = record(
+    endpoint = field(str),
+    describe = field(str),
+    status = field(Health),
+    health = field(typing.Callable[[], Health]),
+    record = field(typing.Callable[[str, str], None]),
+    query = field(typing.Callable[[dict], dict]),
+    deliver = field(typing.Callable[[str, str, dict], None]),
+    delete = field(typing.Callable[[str], None]),
+)
+
+DeliveryState = trait(
+    connect = attr(
+        typing.Callable[[TaskContext, Params], Backend] | None,
+        default = None,
+        description = (
+            "Connects the delivery state backend: `(ctx, Params) -> Backend`. " +
+            "None (the default) uses the deliveryd HTTP client; set it to " +
+            "`redis_state.connect` to talk to Redis directly, or to any " +
+            "function returning a `delivery_state.Backend`."
+        ),
+    ),
+)
+
+def _format_pct(pct: float) -> str:
+    tenths = int(pct * 10)
+    return "{}.{}%".format(tenths // 10, tenths % 10)
+
+def describe_storage(health: Health) -> str:
+    """The storage half of a probe as one line, or "" when the backend reported
+    none (a v1 deliveryd, or an unreachable one)."""
+    s = health.storage
+    if not s.reachable:
+        return ""
+    parts = []
+    if s.max_bytes:
+        parts.append("{} / {} ({})".format(format_bytes_iec(s.used_bytes), format_bytes_iec(s.max_bytes), _format_pct(s.used_pct)))
+    elif s.used_bytes:
+        parts.append(format_bytes_iec(s.used_bytes) + " used")
+    if s.policy:
+        parts.append(s.policy)
+    parts.append("ping {}ms".format(s.ping_ms))
+    return " · ".join(parts)
+
+delivery_state = namespace(
+    Params = Params,
+    Backend = Backend,
+    Health = Health,
+    Storage = Storage,
+    describe_storage = describe_storage,
+)

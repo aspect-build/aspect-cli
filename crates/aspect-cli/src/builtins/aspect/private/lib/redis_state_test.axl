@@ -1,0 +1,469 @@
+"""Unit tests for lib/redis_state.axl.
+
+An in-memory Redis fake implements the handful of commands the backend sends
+(HGET/PTTL/GET/SET/HSET/PEXPIRE/UNLINK/PING/INFO) over dicts and records every
+pipeline, so the key scheme, TTL policy and legacy migration can be asserted
+command by command without a server. It stands in for the `redis.axl` client
+through `connect`'s `connect` seam; the client itself (AUTH, reconnect) is
+covered by `redis_test.axl`.
+"""
+
+load("./delivery_state.axl", "delivery_state")
+load("./redis.axl", "redis")
+load("./redis_state.axl", "redis_state")
+
+_ENDPOINT = "redis+insecure://127.0.0.1:6390"
+_INFO_MEMORY = "# Memory\r\nused_memory:3221225472\r\nmaxmemory:55834574848\r\nmaxmemory_policy:noeviction\r\n"
+_INFO_SERVER = "# Server\r\nredis_version:7.2.4\r\n"
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_redis(info_disabled = False):
+    """A Redis over dicts, shaped like a `redis.axl` client. `kv` holds strings
+    or hashes (dicts); `ttl` holds an absolute expiry in fake-clock ms for keys
+    that have one. `fail_next` queues errors to raise from the next pipelines."""
+    db = {
+        "kv": {},
+        "ttl": {},
+        "now": 1000000000000,
+        "calls": [],
+        "fail_next": [],
+        "closed": 0,
+    }
+
+    def pttl(k):
+        if k not in db["kv"]:
+            return -2
+        if k not in db["ttl"]:
+            return -1
+        return db["ttl"][k] - db["now"]
+
+    def run(cmd):
+        verb = cmd[0]
+        if verb == "PING":
+            return "PONG"
+        if verb == "INFO":
+            if info_disabled:
+                return redis.CommandError("ERR unknown command 'INFO'")
+            return {"memory": _INFO_MEMORY, "server": _INFO_SERVER}[cmd[1]]
+        if verb == "HGET":
+            v = db["kv"].get(cmd[1])
+            return v.get(cmd[2]) if type(v) == "dict" else None
+        if verb == "PTTL":
+            return pttl(cmd[1])
+        if verb == "GET":
+            v = db["kv"].get(cmd[1])
+            return v if type(v) == "string" else None
+        if verb == "SET":
+            db["kv"][cmd[1]] = cmd[2]
+            db["ttl"].pop(cmd[1], None)
+            if len(cmd) == 5 and cmd[3] == "PX":
+                db["ttl"][cmd[1]] = db["now"] + cmd[4]
+            return "OK"
+        if verb == "HSET":
+            h = db["kv"].get(cmd[1])
+            if type(h) != "dict":
+                h = {}
+                db["kv"][cmd[1]] = h
+            added = 0
+            for i in range(2, len(cmd), 2):
+                if cmd[i] not in h:
+                    added += 1
+                h[cmd[i]] = str(cmd[i + 1])
+            return added
+        if verb == "PEXPIRE":
+            if cmd[1] not in db["kv"]:
+                return 0
+            db["ttl"][cmd[1]] = db["now"] + cmd[2]
+            return 1
+        if verb == "UNLINK":
+            # The backend's keys share no hash tag: on cluster-mode servers
+            # (MemoryDB) more than one in a command is refused.
+            if len(cmd) > 2:
+                return redis.CommandError("CROSSSLOT Keys in request don't hash to the same slot")
+            n = 0
+            for k in cmd[1:]:
+                if k in db["kv"]:
+                    n += 1
+                    db["kv"].pop(k)
+                    db["ttl"].pop(k, None)
+            return n
+        fail("fake redis: unsupported command " + verb)
+
+    def pipeline(cmds):
+        if db["fail_next"]:
+            e = db["fail_next"][0]
+            db["fail_next"] = db["fail_next"][1:]
+            fail(e)
+        db["calls"].append(cmds)
+        replies = [run(c) for c in cmds]
+        for i in range(len(replies)):
+            if type(replies[i]) == "error":
+                fail(redis.CommandError(replies[i].message, command = str(cmds[i][0])))
+        return replies
+
+    def close():
+        db["closed"] += 1
+
+    def seed_hash(k, fields, ttl_ms = None):
+        db["kv"][k] = dict(fields)
+        if ttl_ms != None:
+            db["ttl"][k] = db["now"] + ttl_ms
+
+    def seed_string(k, v, ttl_ms = None):
+        db["kv"][k] = v
+        if ttl_ms != None:
+            db["ttl"][k] = db["now"] + ttl_ms
+
+    return struct(
+        endpoint = redis.parse_endpoint(_ENDPOINT),
+        pipeline = pipeline,
+        command = lambda *args: pipeline([list(args)])[0],
+        info = lambda section: redis.parse_info(pipeline([["INFO", section]])[0]),
+        close = close,
+        db = db,
+        pttl = pttl,
+        seed_hash = seed_hash,
+        seed_string = seed_string,
+        verbs = lambda: [[c[0] for c in cmds] for cmds in db["calls"]],
+    )
+
+def _ctx(env, files = {}, deferred = None):
+    recorded = deferred if deferred != None else []
+    return struct(
+        std = struct(
+            env = struct(var = lambda name: env.get(name)),
+            fs = struct(
+                exists = lambda path: path in files,
+                read_to_string = lambda path: files[path],
+            ),
+        ),
+        defer = lambda fn: recorded.append(fn),
+    )
+
+_PARAMS = delivery_state.Params(host = "gh", prefix = "deploy", commit = "abc123", signature = "https://ci/build/7")
+
+def _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT}, connects = None, pauses = None, **kwargs):
+    """Connect against `fake`, recording each client-factory call and pause."""
+    connect_log = connects if connects != None else []
+    pause_log = pauses if pauses != None else []
+
+    def connect(ctx, url, ca_pem = None, auth = None):
+        connect_log.append(struct(url = url, ca_pem = ca_pem, auth = auth))
+        return fake
+
+    return redis_state.connect(_ctx(env, kwargs.pop("files", {}), kwargs.pop("deferred", None)), kwargs.pop("params", _PARAMS), connect = connect, pause = lambda ms: pause_log.append(ms), **kwargs)
+
+def _v2(digest):
+    return "dd:sig:gh:deploy:" + digest
+
+def _legacy(digest):
+    return "delivery-signature:gh:" + digest + ":deploy"
+
+def _test_unset_endpoint_reports_status(ctx):
+    connects = []
+    dd = _connect(_fake_redis(), env = {}, connects = connects)
+    _eq("unset → not ok", dd.status.ok, False)
+    _eq("unset → names the variable", redis_state.ENDPOINT_ENV in dd.status.error, True)
+    _eq("unset → no connection attempted", len(connects), 0)
+    _eq("unset → no endpoint to print", dd.endpoint, "")
+    _eq("unset → describes itself", dd.describe, "redis direct")
+
+def _test_missing_ca_file_reports_status(ctx):
+    connects = []
+    dd = _connect(_fake_redis(), env = {redis_state.ENDPOINT_ENV: "rediss://cache:6379", redis_state.CA_FILE_ENV: "/nope/ca.pem"}, connects = connects)
+    _eq("missing CA → not ok", dd.status.ok, False)
+    _eq("missing CA → names the variable", redis_state.CA_FILE_ENV in dd.status.error, True)
+    _eq("missing CA → no connection attempted", len(connects), 0)
+
+def _test_credentials_in_url_rejected(ctx):
+    connects = []
+    dd = _connect(_fake_redis(), env = {redis_state.ENDPOINT_ENV: "rediss://app:s3cret@cache:6379"}, connects = connects)
+    _eq("userinfo → not ok", dd.status.ok, False)
+    _eq("userinfo → no connection attempted", len(connects), 0)
+    _eq("userinfo → points at the auth variable", redis_state.AUTH_ENV in dd.status.error, True)
+    _eq("userinfo → password not echoed", "s3cret" in dd.status.error or "s3cret" in dd.endpoint, False)
+    _eq("userinfo → no endpoint to print", dd.endpoint, "")
+
+def _test_connect_probes_and_describes(ctx):
+    fake = _fake_redis()
+    connects = []
+    deferred = []
+    dd = _connect(fake, connects = connects, deferred = deferred)
+    _eq("ok", dd.status.ok, True)
+    _eq("version is the key-scheme version", dd.status.version, 2)
+    _eq("endpoint is the credential-free display", dd.endpoint, _ENDPOINT)
+    _eq("describe names server version and transport", dd.describe, "redis 7.2.4 direct, plaintext")
+    _eq("storage from INFO memory", (dd.status.storage.used_bytes, dd.status.storage.max_bytes, dd.status.storage.policy), (3221225472, 55834574848, "noeviction"))
+    _eq("used_pct", int(dd.status.storage.used_pct * 100), 576)
+    _eq("describe_storage renders", delivery_state.describe_storage(dd.status).endswith("· noeviction · ping 0ms"), True)
+    _eq("one connection", len(connects), 1)
+    _eq("probe verbs", fake.verbs(), [["PING"], ["INFO", "INFO"]])
+    _eq("close deferred", len(deferred), 1)
+    deferred[0]()
+    _eq("deferred close closes", fake.db["closed"], 1)
+
+def _test_connect_passes_env_to_client(ctx):
+    connects = []
+    _connect(_fake_redis(), env = {
+        redis_state.ENDPOINT_ENV: "rediss://cache:6380",
+        redis_state.CA_FILE_ENV: "/etc/ca.pem",
+        redis_state.AUTH_ENV: "app:s3cret",
+    }, connects = connects, files = {"/etc/ca.pem": "-----BEGIN CERTIFICATE-----"})
+    c = connects[0]
+    _eq("url", c.url, "rediss://cache:6380")
+    _eq("ca pem read from the file", c.ca_pem, "-----BEGIN CERTIFICATE-----")
+    _eq("auth passed verbatim; the client parses it", c.auth, "app:s3cret")
+
+def _test_connect_retries_transport_errors(ctx):
+    fake = _fake_redis()
+    attempts = []
+    pauses = []
+
+    def flaky(ctx, url, ca_pem = None, auth = None):
+        attempts.append(1)
+        if len(attempts) < 3:
+            fail(std.io.Error("connection refused", kind = "connection_refused"))
+        return fake
+
+    dd = redis_state.connect(_ctx({redis_state.ENDPOINT_ENV: _ENDPOINT}), _PARAMS, connect = flaky, pause = lambda ms: pauses.append(ms))
+    _eq("eventually ok", dd.status.ok, True)
+    _eq("three attempts", len(attempts), 3)
+    _eq("paused between", pauses, [1000, 1000])
+
+def _test_persistent_failure_reports_status(ctx):
+    pauses = []
+
+    def dead(ctx, url, ca_pem = None, auth = None):
+        fail(std.io.Error("connection refused", kind = "connection_refused"))
+
+    dd = redis_state.connect(_ctx({redis_state.ENDPOINT_ENV: _ENDPOINT}), _PARAMS, connect = dead, pause = lambda ms: pauses.append(ms))
+    _eq("not ok", dd.status.ok, False)
+    _eq("error carries message and kind", dd.status.error, "connection refused (connection_refused)")
+    _eq("two pauses for three attempts", pauses, [1000, 1000])
+    _eq("endpoint still printed", dd.endpoint, _ENDPOINT)
+    _eq("describe without server version", dd.describe, "redis direct, plaintext")
+
+def _test_rejected_auth_is_not_retried(ctx):
+    attempts = []
+    pauses = []
+
+    def wrongpass(ctx, url, ca_pem = None, auth = None):
+        attempts.append(1)
+        fail(redis.CommandError("WRONGPASS invalid username-password pair", command = "AUTH"))
+
+    dd = redis_state.connect(_ctx({redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.AUTH_ENV: "wrong"}), _PARAMS, connect = wrongpass, pause = lambda ms: pauses.append(ms))
+    _eq("bad auth → not ok", dd.status.ok, False)
+    _eq("bad auth → server's message", dd.status.error.startswith("WRONGPASS"), True)
+    _eq("bad auth → one attempt, no pause", (len(attempts), pauses), (1, []))
+
+def _test_probe_failure_closes_and_retries(ctx):
+    fake = _fake_redis()
+    fake.db["fail_next"] = [std.io.Error("reset", kind = "connection_reset")]
+    connects = []
+    pauses = []
+    dd = _connect(fake, connects = connects, pauses = pauses)
+    _eq("ok on the second connection", dd.status.ok, True)
+    _eq("first client closed, two connections", (fake.db["closed"], len(connects)), (1, 2))
+    _eq("one pause", pauses, [1000])
+
+def _test_info_disabled_still_ok(ctx):
+    dd = _connect(_fake_redis(info_disabled = True))
+    _eq("ok without INFO", dd.status.ok, True)
+    _eq("reachable, ping only", (dd.status.storage.reachable, dd.status.storage.max_bytes), (True, 0))
+    _eq("describe without server version", dd.describe, "redis direct, plaintext")
+    _eq("storage line is ping only", delivery_state.describe_storage(dd.status), "ping 0ms")
+
+def _test_query_hit_without_refresh(ctx):
+    fake = _fake_redis()
+    fake.seed_hash(_v2("d1"), {"sig": "https://ci/1", "label": "//a:b"}, ttl_ms = redis_state.SIG_TTL_MS)
+    dd = _connect(fake)
+    got = dd.query({"//a:b": "d1"})
+    _eq("delivered", got, {"//a:b": "https://ci/1"})
+    reads = fake.db["calls"][-1]
+    _eq("one read pipeline: HGET sig + PTTL per digest", reads, [["HGET", _v2("d1"), "sig"], ["PTTL", _v2("d1")]])
+    _eq("full TTL → no write pipeline", fake.verbs()[2:], [["HGET", "PTTL"]])
+
+def _test_query_refreshes_a_waning_ttl(ctx):
+    fake = _fake_redis()
+    fake.seed_hash(_v2("low"), {"sig": "s-low"}, ttl_ms = redis_state.SIG_TTL_MS // 2 - 1)
+    fake.seed_hash(_v2("half"), {"sig": "s-half"}, ttl_ms = redis_state.SIG_TTL_MS // 2)
+    fake.seed_hash(_v2("none"), {"sig": "s-none"})
+    dd = _connect(fake)
+    got = dd.query({"low": "low", "half": "half", "none": "none"})
+    _eq("all delivered", got, {"low": "s-low", "half": "s-half", "none": "s-none"})
+    writes = fake.db["calls"][-1]
+    _eq("below half and no-expiry are refreshed; exactly half is not", writes, [
+        ["PEXPIRE", _v2("low"), redis_state.SIG_TTL_MS],
+        ["PEXPIRE", _v2("none"), redis_state.SIG_TTL_MS],
+    ])
+    _eq("refreshed TTL applied", fake.pttl(_v2("none")), redis_state.SIG_TTL_MS)
+
+def _test_query_migrates_legacy_signatures(ctx):
+    fake = _fake_redis()
+    fake.seed_string(_legacy("old"), "https://ci/legacy")
+    dd = _connect(fake)
+    got = dd.query({"//old:t": "old", "//new:t": "fresh"})
+    _eq("legacy hit is delivered; miss is absent", got, {"//old:t": "https://ci/legacy"})
+    _eq("three pipelines: v2 reads, legacy GETs, writes", fake.verbs()[2:], [["HGET", "PTTL", "HGET", "PTTL"], ["GET", "GET"], ["HSET", "PEXPIRE", "PEXPIRE"]])
+    _eq("legacy GETs only for the misses", fake.db["calls"][3], [["GET", _legacy("old")], ["GET", _legacy("fresh")]])
+
+    migrated = fake.db["kv"][_v2("old")]
+    _eq("v2 hash holds sig and at only", sorted(migrated.keys()), ["at", "sig"])
+    _eq("v2 sig copied", migrated["sig"], "https://ci/legacy")
+    _eq("at is unix seconds", int(migrated["at"]) > 1700000000, True)
+    _eq("v2 TTL set", fake.pttl(_v2("old")), redis_state.SIG_TTL_MS)
+    _eq("legacy key drains", fake.pttl(_legacy("old")), redis_state.LEGACY_TTL_MS)
+    _eq("nothing written for the miss", _v2("fresh") in fake.db["kv"], False)
+
+    # A second query finds the v2 hash and no longer touches the legacy key.
+    dd.query({"//old:t": "old"})
+    _eq("second query: v2 hit, no legacy read, no write", fake.verbs()[5:], [["HGET", "PTTL"]])
+
+def _test_legacy_ttl_is_configurable(ctx):
+    fake = _fake_redis()
+    fake.seed_string(_legacy("old"), "https://ci/legacy")
+    dd = _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "60"})
+    dd.query({"//old:t": "old"})
+    _eq("migrated legacy key drains on the configured TTL", fake.pttl(_legacy("old")), 60000)
+    dd.deliver("//new:t", "new")
+    _eq("delivered legacy key gets the configured TTL", fake.pttl(_legacy("new")), 60000)
+
+    fake = _fake_redis()
+    fake.seed_string(_legacy("old"), "https://ci/legacy")
+    dd = _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "0"})
+    dd.query({"//old:t": "old"})
+    _eq("0 → migration leaves the legacy key alone", fake.verbs()[-1], ["HSET", "PEXPIRE"])
+    _eq("0 → legacy key keeps no expiry", fake.pttl(_legacy("old")), -1)
+    dd.deliver("//new:t", "new")
+    _eq("0 → delivered legacy key has no expiry", (fake.db["kv"][_legacy("new")], fake.pttl(_legacy("new"))), ("https://ci/build/7", -1))
+
+    connects = []
+    dd = _connect(_fake_redis(), env = {redis_state.ENDPOINT_ENV: _ENDPOINT, redis_state.LEGACY_TTL_ENV: "7d"}, connects = connects)
+    _eq("malformed TTL → not ok", dd.status.ok, False)
+    _eq("malformed TTL → names the variable", redis_state.LEGACY_TTL_ENV in dd.status.error, True)
+    _eq("malformed TTL → no connection attempted", len(connects), 0)
+
+def _test_query_dedupes_and_maps_back(ctx):
+    fake = _fake_redis()
+    fake.seed_hash(_v2("shared"), {"sig": "s"}, ttl_ms = redis_state.SIG_TTL_MS)
+    dd = _connect(fake)
+    got = dd.query({"//a": "shared", "//b": "shared", "//c": "", "//d": "nope"})
+    _eq("every label holding a delivered digest", got, {"//a": "s", "//b": "s"})
+    _eq("shared digest read once, empty skipped", fake.db["calls"][2], [
+        ["HGET", _v2("shared"), "sig"],
+        ["PTTL", _v2("shared")],
+        ["HGET", _v2("nope"), "sig"],
+        ["PTTL", _v2("nope")],
+    ])
+    _eq("no digests → no round trip", dd.query({"//c": ""}), {})
+    _eq("no digests → no calls", len(fake.db["calls"]), 4)
+
+def _test_query_chunks_large_batches(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    digests = {"//t{}".format(i): "d{}".format(i) for i in range(redis_state.CHUNK_SIZE + 1)}
+    _eq("nothing delivered", dd.query(digests), {})
+    sizes = [len(cmds) for cmds in fake.db["calls"][2:]]
+    _eq("500 digests per read pipeline, then the remainder; legacy GETs per chunk", sizes, [redis_state.CHUNK_SIZE * 2, redis_state.CHUNK_SIZE, 2, 1])
+
+def _test_deliver_writes_hash_and_ttl(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    dd.deliver("//a:b", "d1")
+    hset, pexpire, legacy = fake.db["calls"][-1]
+    _eq("HSET fields", hset[:9], ["HSET", _v2("d1"), "sig", "https://ci/build/7", "label", "//a:b", "commit", "abc123", "at"])
+    _eq("at is unix seconds", hset[9] > 1700000000, True)
+    _eq("no meta field when empty", len(hset), 10)
+    _eq("TTL set in the same pipeline", pexpire, ["PEXPIRE", _v2("d1"), redis_state.SIG_TTL_MS])
+    _eq("legacy signature written for v1 readers", legacy, ["SET", _legacy("d1"), "https://ci/build/7", "PX", redis_state.LEGACY_TTL_MS])
+    _eq("legacy signature readable as v1 reads it", fake.db["kv"][_legacy("d1")], "https://ci/build/7")
+
+    dd.deliver("//a:b", "d1", meta = {"image": "sha256:beef"})
+    hset = fake.db["calls"][-1][0]
+    _eq("meta rides along as JSON", hset[10:], ["meta", "{\"image\":\"sha256:beef\"}"])
+
+    _eq("delivered afterwards", dd.query({"//a:b": "d1"}), {"//a:b": "https://ci/build/7"})
+
+def _test_delete_unlinks_every_key(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    dd.deliver("//a:b", "d1")
+    fake.seed_string(_legacy("d1"), "x")
+    fake.seed_string("gh:d1:deploy", "artifact-metadata")
+    dd.delete("d1")
+    _eq("one single-key UNLINK per key, never CROSSSLOT", fake.db["calls"][-1], [["UNLINK", _v2("d1")], ["UNLINK", _legacy("d1")], ["UNLINK", "gh:d1:deploy"]])
+    _eq("all gone", fake.db["kv"], {})
+    n = len(fake.db["calls"])
+    dd.delete("")
+    _eq("empty digest → no call", len(fake.db["calls"]), n)
+
+def _test_record_is_a_noop(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    n = len(fake.db["calls"])
+    dd.record("//a:b", "d1")
+    _eq("record sends nothing", len(fake.db["calls"]), n)
+
+def _test_errors_propagate_from_verbs(ctx):
+    # Reconnecting is the client's job; what reaches the backend is final.
+    fake = _fake_redis()
+    dd = _connect(fake)
+    fake.db["fail_next"] = [redis.CommandError("WRONGTYPE Operation against a key holding the wrong kind of value", command = "HGET")]
+    err, _ = catch(dd.query, {"//a:b": "d1"}, types = [redis.CommandError])
+    _eq("command error escapes query", err.command, "HGET")
+    fake.db["fail_next"] = [std.io.Error("timed out", kind = "timed_out")]
+    err, _ = catch(dd.deliver, "//a:b", "d1", types = [std.io.Error])
+    _eq("transport error escapes deliver", err.kind, "timed_out")
+
+def _test_health_reprobes(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    health = dd.health()
+    _eq("health ok", health.ok, True)
+    _eq("health storage", health.storage.max_bytes, 55834574848)
+    _eq("re-probed", fake.verbs()[2:], [["PING"], ["INFO", "INFO"]])
+
+    fake.db["fail_next"] = [std.io.Error("gone", kind = "connection_reset")]
+    health = dd.health()
+    _eq("health reports a failed probe", (health.ok, health.error), (False, "gone (connection_reset)"))
+
+_UNIT_TESTS = [
+    _test_unset_endpoint_reports_status,
+    _test_missing_ca_file_reports_status,
+    _test_credentials_in_url_rejected,
+    _test_connect_probes_and_describes,
+    _test_connect_passes_env_to_client,
+    _test_connect_retries_transport_errors,
+    _test_persistent_failure_reports_status,
+    _test_rejected_auth_is_not_retried,
+    _test_probe_failure_closes_and_retries,
+    _test_info_disabled_still_ok,
+    _test_query_hit_without_refresh,
+    _test_query_refreshes_a_waning_ttl,
+    _test_query_migrates_legacy_signatures,
+    _test_legacy_ttl_is_configurable,
+    _test_query_dedupes_and_maps_back,
+    _test_query_chunks_large_batches,
+    _test_deliver_writes_hash_and_ttl,
+    _test_delete_unlinks_every_key,
+    _test_record_is_a_noop,
+    _test_errors_propagate_from_verbs,
+    _test_health_reprobes,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("redis_state.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+redis_state_tests = task(
+    summary = "Run the direct-Redis delivery state AXL unit tests.",
+    kind = "test-redis-state",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

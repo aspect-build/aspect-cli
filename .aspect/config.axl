@@ -1,6 +1,7 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
+load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -54,8 +55,11 @@ load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
+load("@aspect//private/lib/redis_state_test.axl", "redis_state_tests")
+load("@aspect//private/lib/redis_test.axl", "redis_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
+load("@aspect//private/lib/resp_test.axl", "resp_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
@@ -537,9 +541,21 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-deployment-flags
     ctx.tasks.add(deployment_flags_tests)
 
-    # deliveryd.axl: v1/v2 negotiation and the wire shape of each verb.
+    # deliveryd.axl: the startup probe and the wire shape of each verb.
     # Run with: aspect dev test-deliveryd
     ctx.tasks.add(deliveryd_tests)
+
+    # resp.axl: RESP2 encoding, reply parsing across read boundaries, pipelining.
+    # Run with: aspect dev test-resp
+    ctx.tasks.add(resp_tests)
+
+    # redis.axl: Redis client — URL parsing, AUTH on connect, one-shot reconnect, INFO.
+    # Run with: aspect dev test-redis
+    ctx.tasks.add(redis_tests)
+
+    # redis_state.axl: deliveryd key-scheme parity, TTL refresh, legacy migration.
+    # Run with: aspect dev test-redis-state
+    ctx.tasks.add(redis_state_tests)
 
     # bazel/build_events.axl: the end-of-build BES upload summary line.
     # Run with: aspect dev test-bes-sinks
@@ -733,6 +749,11 @@ def config(ctx: ConfigContext):
     ctx.traits[DeliveryTrait].delivery_target = _on_delivery_target
     ctx.traits[DeliveryTrait].delivery_manifest = _on_delivery_manifest
     ctx.traits[DeliveryTrait].upload_manifest = _on_upload_manifest
+
+    # Delivery state straight from Redis when a runner provides one; otherwise
+    # the deliveryd default stands, so local runs behave as before.
+    if DeliveryState in ctx.traits and ctx.std.env.var(redis_state.ENDPOINT_ENV):
+        ctx.traits[DeliveryState].connect = redis_state.connect
 
     testing = ctx.std.env.var("ASPECT_CLI_TESTING")
 
