@@ -118,6 +118,20 @@ rust_test(
 )
 
 rust_test(
+    name = "shutdown_process_group_test",
+    srcs = ["tests/shutdown_process_group.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/shutdown_process_group.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:libc",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "setup_bazelrc_test",
     srcs = ["tests/setup_bazelrc.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/setup_bazelrc.rs",

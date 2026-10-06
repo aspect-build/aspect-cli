@@ -27,6 +27,12 @@ pub mod bazel_live {
     pub use crate::engine::bazel::live::*;
 }
 
+/// Process groups started by `std.process.Command`, re-exported so
+/// `aspect-cli`'s signal handler can interrupt them on shutdown.
+pub mod live_process_groups {
+    pub use crate::engine::std::live_groups::*;
+}
+
 #[cfg(test)]
 pub mod test;
 

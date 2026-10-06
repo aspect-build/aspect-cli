@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -31,6 +32,7 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkNever;
 
+use super::live_groups;
 use super::stream;
 use crate::eval::TaskExit;
 
@@ -325,9 +327,14 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         let child = cmd.try_spawn()?;
+        let process_group = cmd
+            .process_group
+            .get()
+            .map(|group| if group == 0 { child.id() as i32 } else { group });
         Ok(Child {
             inner: RefCell::new(Some(child)),
-            process_group: cmd.process_group.get(),
+            process_group,
+            live_group: RefCell::new(process_group.map(live_groups::register)),
         })
     }
 
@@ -349,6 +356,8 @@ pub struct Child {
     #[allocative(skip)]
     inner: RefCell<Option<process::Child>>,
     process_group: Option<i32>,
+    #[allocative(skip)]
+    live_group: RefCell<Option<live_groups::LiveGroupGuard>>,
 }
 
 impl<'v> AllocValue<'v> for Child {
@@ -453,15 +462,24 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// command without that configuration falls back to killing only the
     /// immediate child.
     ///
+    /// With a positive `grace_ms`, the group is first sent SIGINT and given up
+    /// to `grace_ms` milliseconds to exit before it is killed, so its processes
+    /// can clean up as they would after Ctrl-C.
+    ///
     /// **Warning:** On Windows this is equivalent to calling [`Child.kill`].
-    fn kill_all<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+    fn kill_all<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = 0)] grace_ms: i32,
+    ) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         let mut inner = child.inner.borrow_mut();
         let inner = inner
             .as_mut()
             .ok_or(anyhow::anyhow!("child is no longer active"))?;
         if let Some(process_group) = child.process_group {
-            kill_process_group(inner, process_group)?;
+            let grace = Duration::from_millis(grace_ms.max(0) as u64);
+            stop_process_group(inner, process_group, grace)?;
+            child.live_group.borrow_mut().take();
         } else {
             inner.kill()?;
         }
@@ -694,32 +712,42 @@ mod tests {
     }
 }
 
+/// SIGINT `process_group` and wait up to `grace` for it to empty, reaping
+/// `child` meanwhile, then SIGKILL whatever remains.
 #[cfg(unix)]
-fn kill_process_group(child: &mut process::Child, process_group: i32) -> anyhow::Result<()> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    let process_group = if process_group == 0 {
-        i32::try_from(child.id()).map_err(|_| anyhow!("child process ID is too large"))?
-    } else {
-        process_group
-    };
-    match signal::kill(Pid::from_raw(-process_group), Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(error) => Err(error.into()),
+fn stop_process_group(
+    child: &mut process::Child,
+    process_group: i32,
+    grace: Duration,
+) -> anyhow::Result<()> {
+    if !grace.is_zero() {
+        live_groups::interrupt(process_group)?;
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            child.try_wait()?;
+            if !live_groups::is_running(process_group) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
+    live_groups::kill(process_group)?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(child: &mut process::Child, _process_group: i32) -> anyhow::Result<()> {
+fn stop_process_group(
+    child: &mut process::Child,
+    _process_group: i32,
+    _grace: Duration,
+) -> anyhow::Result<()> {
     child.kill()?;
     Ok(())
 }
 
 #[cfg(all(test, unix))]
 mod process_group_tests {
-    use super::kill_process_group;
+    use super::stop_process_group;
     use nix::errno::Errno;
     use nix::sys::signal;
     use nix::unistd::Pid;
@@ -752,8 +780,9 @@ mod process_group_tests {
             .parse()
             .unwrap();
 
+        let process_group = child.id() as i32;
         child.wait().unwrap();
-        kill_process_group(&mut child, 0).unwrap();
+        stop_process_group(&mut child, process_group, Duration::ZERO).unwrap();
 
         let descendant = Pid::from_raw(descendant_pid);
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -762,6 +791,45 @@ mod process_group_tests {
                 Err(Errno::ESRCH) => break,
                 _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
                 result => panic!("descendant survived process-group kill: {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn graceful_stop_interrupts_group_before_killing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let marker = dir.path().join("interrupted");
+        let mut command = process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap 'touch \"$MARKER\"; exit 0' INT; sleep 30 & touch \"$READY\"; wait")
+            .env("READY", &ready)
+            .env("MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group = child.id() as i32;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child never became ready");
+
+        stop_process_group(&mut child, process_group, Duration::from_millis(500)).unwrap();
+
+        assert!(
+            marker.exists(),
+            "child was not interrupted before being killed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match signal::kill(Pid::from_raw(-process_group), None) {
+                Err(Errno::ESRCH) => break,
+                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                result => panic!("process group survived graceful stop: {result:?}"),
             }
         }
     }

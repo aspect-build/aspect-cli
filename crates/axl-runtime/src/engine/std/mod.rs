@@ -21,6 +21,7 @@ use crate::engine::error::{IoError, NativeError};
 mod env;
 mod fs;
 pub mod io;
+pub mod live_groups;
 mod net;
 mod process;
 pub mod stream;

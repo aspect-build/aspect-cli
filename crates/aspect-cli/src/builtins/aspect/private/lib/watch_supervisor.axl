@@ -4,8 +4,10 @@ load("@std//time.axl", "monotonic")
 load("./environment.axl", "warn")
 load("./watch_result.axl", "watch_result")
 
+_STOP_GRACE_MS = 3000
+
 def _stop_child(child) -> None:
-    child.kill_all()
+    child.kill_all(grace_ms = _STOP_GRACE_MS)
     child.wait()
 
 def _restart_outcome(result: struct) -> struct:

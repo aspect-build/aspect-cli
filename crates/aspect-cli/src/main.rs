@@ -67,6 +67,7 @@ use aspect_telemetry::{
 use axl_runtime::bazel_live;
 use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::live_process_groups;
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use tokio::task;
@@ -438,13 +439,15 @@ const SIGINT_GRACE: Duration = Duration::from_secs(3);
 const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// Total wall time between receiving the OS signal and `exit()`:
-///   - **No live bazel client** (e.g. an interactive prompt like `init`): we
+///   - **No live bazel client or process group** (e.g. an interactive prompt like `init`): we
 ///     recheck the registry after 1 × SIGINT_TICK (≈ 0.15s, to close the
 ///     spawn/register race) and, if still empty, exit — no SIGINT burst, no
 ///     grace window. There's nothing to cancel, so there's nothing to wait for.
 ///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs, then exit.
 ///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (3s) +
 ///     POST_KILL_GRACE (1s) ≈ 4.3s, and only when a client is actually live.
+/// Live process groups (see `live_process_groups`) are interrupted alongside
+/// and get SIGINT_GRACE from the signal to exit before they are SIGKILL'd.
 /// All well under typical CI cancel grace periods.
 
 /// Watch for SIGINT / SIGTERM. If no bazel client is live when the signal
@@ -557,8 +560,8 @@ fn install_shutdown_handler() {
 }
 
 async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
-    // Nothing to cancel — no bazel client is live (e.g. an interactive prompt
-    // like `init`, or any command not currently running bazel). Skip the SIGINT
+    // Nothing to cancel — no bazel client or process group is live (e.g. an
+    // interactive prompt like `init`, or any command not currently running bazel). Skip the SIGINT
     // burst, the messaging, and every grace window, and just exit. This keeps
     // Ctrl-C snappy and avoids the misleading "cancelling bazel subprocesses…"
     // line when no bazel is running.
@@ -569,13 +572,40 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     // would see an empty registry; the tick lets the registration complete so
     // we don't orphan a just-spawned client on CI cancellation. The 150ms is
     // imperceptible at an interactive prompt.
-    if bazel_live::live_pids().is_empty() {
+    let nothing_live =
+        || bazel_live::live_pids().is_empty() && live_process_groups::live_groups().is_empty();
+    if nothing_live() {
         tokio::time::sleep(SIGINT_TICK).await;
-        if bazel_live::live_pids().is_empty() {
+        if nothing_live() {
             std::process::exit(exit_code);
         }
     }
 
+    // Children in their own process group missed the terminal's SIGINT.
+    // Interrupt them now so they clean up while bazel cancels.
+    let groups_deadline = tokio::time::Instant::now() + SIGINT_GRACE;
+    if !live_process_groups::live_groups().is_empty() {
+        errln!("aspect-cli: received {signal_name}, stopping child processes…");
+        live_process_groups::interrupt_all();
+    }
+
+    if !bazel_live::live_pids().is_empty() {
+        cancel_bazel(signal_name).await;
+    }
+
+    while live_process_groups::any_running() && tokio::time::Instant::now() < groups_deadline {
+        tokio::time::sleep(SIGINT_TICK).await;
+    }
+    let killed = live_process_groups::force_kill_all_remaining();
+    if killed > 0 {
+        errln!("aspect-cli: SIGKILL'd {killed} process group(s) that didn't exit");
+    }
+
+    errln!("aspect-cli: exiting with code {exit_code}");
+    std::process::exit(exit_code);
+}
+
+async fn cancel_bazel(signal_name: &str) {
     errln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
     // Two graceful SIGINTs; the CI/off-CI split below decides what follows.
@@ -587,8 +617,8 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     if on_recognized_ci() {
         // Stop short of KillServerProcess and SIGKILL — let bazel finish its
         // own cleanup so a cancellation can't strand a poisoned sandbox.
-        errln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
-        std::process::exit(exit_code);
+        errln!("aspect-cli: on CI, leaving bazel to wind down");
+        return;
     }
 
     // Off CI: 3rd SIGINT (→ KillServerProcess), then SIGKILL the stragglers.
@@ -602,9 +632,6 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
         errln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
         tokio::time::sleep(POST_KILL_GRACE).await;
     }
-
-    errln!("aspect-cli: exiting with code {exit_code}");
-    std::process::exit(exit_code);
 }
 
 #[cfg(test)]

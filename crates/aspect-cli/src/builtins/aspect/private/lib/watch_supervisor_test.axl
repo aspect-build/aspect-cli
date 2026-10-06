@@ -14,7 +14,7 @@ def _child():
         "wait_count": 0,
     }
 
-    def kill_all():
+    def kill_all(grace_ms = 0):
         state["kill_count"] += 1
 
     def wait():
