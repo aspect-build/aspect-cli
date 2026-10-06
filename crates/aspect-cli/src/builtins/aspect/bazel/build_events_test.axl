@@ -20,7 +20,9 @@ def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
 
     `aspect.auth.deployment_for_host` returns None throughout: these tests cover
     endpoint matching, not the JWT attachment `aspect_endpoint_auth_test.axl`
-    owns, and an unowned host skips credential resolution entirely."""
+    owns, and an unowned host skips credential resolution entirely.
+    `collect_bes_sinks` registers the post-cancel drain with `ctx.defer`; the
+    fake accepts and drops it."""
     return struct(
         std = struct(
             io = struct(stdout = struct(is_tty = False)),
@@ -28,6 +30,7 @@ def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
         ),
         args = struct(bes_backends = bes_backends, bes_headers = bes_headers),
         aspect = struct(auth = struct(deployment_for_host = lambda host: None)),
+        defer = lambda fn, *args: None,
     )
 
 def _fake_rc(values):

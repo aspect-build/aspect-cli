@@ -65,24 +65,27 @@ def _test_marker(ctx):
     else:
         ctx.std.env.set_var(_ENV_KEY, prior)
 
-def _fake_task_ctx():
+def _fake_task_ctx(cancelled = False):
     """A `ctx` with only what `phases.new` and an update without a phase or
-    stream touch: a `Phases` handler list that records updates, and `hooks`
-    that capture the post-task registration. Returns `(ctx, updates, hooks)`."""
+    stream touch: a `Phases` handler list that records updates, `hooks` that
+    capture the post-task registration, and a root cancellation token the
+    close hook reads (`cancelled` says whether the run was cancelled).
+    Returns `(ctx, updates, hooks)`."""
     updates = []
     hooks = []
     ctx = struct(
         traits = {Phases: struct(task_update = [lambda _c, u: updates.append(u)], repro_fix_suggestion = [])},
         hooks = struct(post_task = lambda fn: hooks.append(fn)),
+        cancellation = struct(root = struct(cancelled = cancelled)),
     )
     return ctx, updates, hooks
 
-def _close_after(open_kind, conclusion_before_close, outcome):
+def _close_after(open_kind, conclusion_before_close, outcome, cancelled = False):
     """Drive one handle: open the surface under `open_kind` (unless None),
     send `conclusion_before_close` as the task's own final update (unless
     None), then run the post-task hook with `outcome`. Returns the updates the
     handler saw."""
-    ctx, updates, hooks = _fake_task_ctx()
+    ctx, updates, hooks = _fake_task_ctx(cancelled = cancelled)
     ph = phases.new(ctx, {"k": "v"})
     _eq("phases.new registers one post-task hook", len(hooks), 1)
     if open_kind != None:
@@ -110,6 +113,11 @@ def _test_close_surface(_ctx):
     _eq("early failure: first line of message", updates[-1].conclusion, "unknown deployment")
     _eq("early failure: body is the message", updates[-1].progress.body, "unknown deployment")
     _eq("early failure: data is the handle's", updates[-1].data, {"k": "v"})
+
+    # Ended by a cancel with nothing to say: failed, and the body says why.
+    updates = _close_after("lint_results", None, TaskConclusion(exit_code = 130), cancelled = True)
+    _eq("cancelled: status", updates[-1].status, "failed")
+    _eq("cancelled: body", updates[-1].progress.body, "Cancelled")
 
     # A flagged pass closes as a warning, matching the bookend's verdict.
     updates = _close_after("format_results", None, TaskConclusion(exit_code = 0, flagged = True, text = "reformatted 2 files"))
