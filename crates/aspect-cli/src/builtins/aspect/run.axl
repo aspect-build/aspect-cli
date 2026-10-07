@@ -173,27 +173,20 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             kind = "bazel_results",
         )
 
-    cycle = 0
-    for _tick in sleep_iter(_WATCH_TICK_MS):
-        if ws.cancellation.cancelled:
-            ph.update("running", phases.ProgressStyles(body = "Stopping %s..." % target))
-            supervisor.stop()
-            return 0
-        child_status = supervisor.poll()
-        if child_status != None:
-            ph.update(
-                "running",
-                phases.ProgressStyles(
-                    body = "%s exited with code %s — watching for changes..." % (target, child_status.code),
-                    stream = "%s exited with code %s" % (target, child_status.code),
-                ),
-            )
+    def on_exit(child_status):
+        ph.update(
+            "running",
+            phases.ProgressStyles(
+                body = "%s exited with code %s — watching for changes..." % (target, child_status.code),
+                stream = "%s exited with code %s" % (target, child_status.code),
+            ),
+        )
 
-        batch = ws.try_pop()
-        if batch == None:
-            continue
+    # Boxed so on_batch can mutate it; each rebuild needs a distinct phase name.
+    cycle = [0]
 
-        cycle += 1
+    def on_batch(batch):
+        cycle[0] += 1
         ph.reset(init_data())
         detector.begin_build()
         supervisor.build_started()
@@ -207,7 +200,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             False,
             announce_command,
             phases.Phase(
-                name = "rebuild_%d" % cycle,
+                name = "rebuild_%d" % cycle[0],
                 description = "Rebuild run target",
                 emoji = "🔨",
             ),
@@ -241,7 +234,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 phases.ProgressStyles(body = "Build failed — watching for changes..."),
                 kind = "bazel_results",
             )
-            continue
+            return
 
         detected = detector.changes(
             source_paths,
@@ -263,6 +256,14 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
                 phases.ProgressStyles(body = "%s %s — watching for changes..." % (target, result)),
                 kind = "bazel_results",
             )
+
+    return supervisor.run(
+        ws,
+        on_batch,
+        on_exit = on_exit,
+        on_stop = lambda: ph.update("running", phases.ProgressStyles(body = "Stopping %s..." % target)),
+        tick_ms = _WATCH_TICK_MS,
+    )
 
 def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
