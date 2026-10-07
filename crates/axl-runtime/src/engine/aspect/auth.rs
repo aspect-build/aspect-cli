@@ -1579,9 +1579,12 @@ const TENANT_API_TRACE_HEADER: &str = "frontegg-trace-id";
 
 /// The tenant API paths the CLI calls, all served under the issuer.
 ///
-/// The exchange must be v2: v1 accepts tenant API tokens only, while v2 also
-/// accepts the personal tokens the Aspect Web UI issues.
-const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v2/api-token";
+/// Two exchange paths: v1 accepts tenant API tokens only, v2 accepts those and
+/// the personal tokens the Aspect Web UI issues. Bare pairs stay on v1 so
+/// existing tokens behave as they always have; v2 takes over for every shape
+/// once the migration window for bare pairs closes.
+const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v1/api-token";
+const PERSONAL_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v2/api-token";
 const TENANT_API_SWITCH_PATH: &str = "/identity/resources/users/v1/tenant";
 const TENANT_API_TENANTS_PATH: &str = "/identity/resources/users/v3/me/tenants";
 
@@ -2034,8 +2037,9 @@ fn credentials_from_api_token_env(deployment: &str) -> anyhow::Result<Option<Cre
         }
     }
 
-    let (client_id, secret) = api_token_pair(&token).map_err(|e| anyhow::anyhow!("{var}: {e}"))?;
-    let entry = block_on(exchange_api_token(client_id, secret, &env))?;
+    let (client_id, secret, shape) =
+        api_token_pair(&token).map_err(|e| anyhow::anyhow!("{var}: {e}"))?;
+    let entry = block_on(exchange_api_token(client_id, secret, shape, &env))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
     // next caller will just miss and re-exchange.
@@ -2073,26 +2077,38 @@ fn buildkite_aspect_api_token(var: &str) -> Option<String> {
 /// The length of the hex fingerprint that closes a Web UI personal token.
 const PERSONAL_TOKEN_FINGERPRINT_LENGTH: usize = 12;
 
-/// The `clientId:secret` pair an API token carries, in either shape a user may
-/// hold.
+/// The two shapes of API token a user may hold, each exchanged at its own path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApiTokenShape {
+    /// `<clientId>:<secret>`, as the IdP's API-tokens portal issues it.
+    Bare,
+    /// `<userId>:<clientId>:<secret>:<fingerprint>`, as the Aspect Web UI issues
+    /// it. The envelope is for the cache and BES edges, which bind a token to
+    /// its user; the IdP exchange takes only the inner pair.
+    Personal,
+}
+
+impl ApiTokenShape {
+    fn exchange_path(self) -> &'static str {
+        match self {
+            ApiTokenShape::Bare => TENANT_API_TOKEN_EXCHANGE_PATH,
+            ApiTokenShape::Personal => PERSONAL_API_TOKEN_EXCHANGE_PATH,
+        }
+    }
+}
+
+/// The `clientId:secret` pair an API token carries, and the shape it came in.
 ///
-/// The IdP's API-tokens portal issues the bare pair, `<clientId>:<secret>`. The
-/// Aspect Web UI issues a personal token that wraps the same pair with the owner's
-/// user id in front and a hex fingerprint behind:
-/// `<userId>:<clientId>:<secret>:<fingerprint>`. The envelope is for the cache
-/// and BES edges, which bind a token to its user; the IdP exchange takes only
-/// the pair, so it is unwrapped here.
-///
-/// The wrapped shape is recognised by its envelope (two UUIDs and a fingerprint
+/// The personal shape is recognised by its envelope (two UUIDs and a fingerprint
 /// of fixed length) rather than by counting colons, so a bare pair whose secret
-/// contains colons still splits on its first colon.
-fn api_token_pair(token: &str) -> anyhow::Result<(&str, &str)> {
-    if let Some(pair) = personal_token_pair(token) {
-        return Ok(pair);
+/// contains colons still splits on its first colon, as it always has.
+fn api_token_pair(token: &str) -> anyhow::Result<(&str, &str, ApiTokenShape)> {
+    if let Some((client_id, secret)) = personal_token_pair(token) {
+        return Ok((client_id, secret, ApiTokenShape::Personal));
     }
     token
         .split_once(':')
-        .filter(|(client_id, secret)| !client_id.is_empty() && !secret.is_empty())
+        .map(|(client_id, secret)| (client_id, secret, ApiTokenShape::Bare))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "invalid API token format: expected client_id:secret, or a token issued by \
@@ -2118,6 +2134,7 @@ fn personal_token_pair(token: &str) -> Option<(&str, &str)> {
 async fn exchange_api_token(
     client_id: &str,
     secret: &str,
+    shape: ApiTokenShape,
     env: &AuthEnv,
 ) -> anyhow::Result<CredentialsEntry> {
     #[derive(Deserialize)]
@@ -2127,7 +2144,7 @@ async fn exchange_api_token(
     }
     let data: ApiTokenResponse = send_json(
         reqwest::Client::new()
-            .post(tenant_api_url(&env.domain, TENANT_API_TOKEN_EXCHANGE_PATH))
+            .post(tenant_api_url(&env.domain, shape.exchange_path()))
             .json(&serde_json::json!({ "clientId": client_id, "secret": secret })),
         "API token exchange",
     )
@@ -4045,8 +4062,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         }
 
         if let Some(api_token) = api_token {
-            let (client_id, secret) = api_token_pair(api_token)?;
-            let entry = block_on(exchange_api_token(client_id, secret, &env))?;
+            let (client_id, secret, shape) = api_token_pair(api_token)?;
+            let entry = block_on(exchange_api_token(client_id, secret, shape, &env))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
@@ -4680,33 +4697,40 @@ mod tests {
     const CLIENT_ID: &str = "ce46d289-e023-479e-9227-49fb2b7b195f";
     const SECRET: &str = "5b77414e-2fcb-4a7b-bc26-ae2909306af7";
 
-    /// Both shapes a user may hold yield the same pair for the exchange: the bare
-    /// `clientId:secret` the IdP portal issues, and the Web UI personal token
-    /// that wraps it in a user id and a fingerprint.
+    /// Both shapes a user may hold yield the same pair for the exchange, each
+    /// tagged with its shape so the bare one keeps its v1 path.
     #[test]
     fn api_token_pair_accepts_bare_and_web_ui_shapes() {
+        use ApiTokenShape::{Bare, Personal};
+
         let bare = format!("{CLIENT_ID}:{SECRET}");
-        assert_eq!(api_token_pair(&bare).unwrap(), (CLIENT_ID, SECRET));
+        assert_eq!(api_token_pair(&bare).unwrap(), (CLIENT_ID, SECRET, Bare));
 
         let wrapped = format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86b6dc6d7813");
-        assert_eq!(api_token_pair(&wrapped).unwrap(), (CLIENT_ID, SECRET));
+        assert_eq!(
+            api_token_pair(&wrapped).unwrap(),
+            (CLIENT_ID, SECRET, Personal)
+        );
 
         // The secret may itself hold colons in either shape.
         let bare = format!("{CLIENT_ID}:part:of:secret");
         assert_eq!(
             api_token_pair(&bare).unwrap(),
-            (CLIENT_ID, "part:of:secret")
+            (CLIENT_ID, "part:of:secret", Bare)
         );
         let wrapped = format!("{USER_ID}:{CLIENT_ID}:part:of:secret:86b6dc6d7813");
         assert_eq!(
             api_token_pair(&wrapped).unwrap(),
-            (CLIENT_ID, "part:of:secret")
+            (CLIENT_ID, "part:of:secret", Personal)
         );
+
+        assert!(Bare.exchange_path().contains("/v1/"));
+        assert!(Personal.exchange_path().contains("/v2/"));
     }
 
     /// Only the full envelope unwraps. Anything short of it is read as a bare
-    /// pair, so a bare pair is never mistaken for a wrapped one because its
-    /// secret happens to contain colons.
+    /// pair on its first colon, exactly as before the personal shape existed,
+    /// so no existing token changes meaning or exchange path.
     #[test]
     fn api_token_pair_unwraps_only_a_complete_envelope() {
         for token in [
@@ -4718,18 +4742,22 @@ mod tests {
             format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86b6dc6d781"),
             // Fingerprint that is not lowercase hex.
             format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86B6DC6D7813"),
+            // Halves the IdP will reject, but which always split here.
+            ":secret".to_string(),
+            "client:".to_string(),
         ] {
+            let (client_id, secret) = token.split_once(':').unwrap();
             assert_eq!(
                 api_token_pair(&token).unwrap(),
-                token.split_once(':').unwrap(),
+                (client_id, secret, ApiTokenShape::Bare),
                 "{token:?} should split on its first colon"
             );
         }
     }
 
     #[test]
-    fn api_token_pair_rejects_tokens_without_a_pair() {
-        for token in ["", "no-colon", ":secret", "client:"] {
+    fn api_token_pair_rejects_tokens_without_a_colon() {
+        for token in ["", "no-colon"] {
             let err = api_token_pair(token).unwrap_err().to_string();
             assert!(
                 err.contains("client_id:secret") && err.contains("Aspect Web UI"),
