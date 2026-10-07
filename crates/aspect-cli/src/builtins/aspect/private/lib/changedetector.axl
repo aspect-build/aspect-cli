@@ -308,7 +308,11 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
         return _read_manifest(ctx, _manifest_path(paths), root)
 
     def begin_build():
-        state["entrypoint_before_build"] = _entrypoint_state(r.determine_entrypoint(target))
+        entrypoint = _entrypoint_state(r.determine_entrypoint(target))
+
+        # Failed builds clear BES outputs; retain the last successful state.
+        if entrypoint != None:
+            state["entrypoint_before_build"] = entrypoint
         r.clear_default_outputs(target)
         r.clear_output_group_outputs(target, _MANIFEST_OUTPUT_GROUP)
 

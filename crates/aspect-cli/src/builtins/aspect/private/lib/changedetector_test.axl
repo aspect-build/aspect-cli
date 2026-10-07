@@ -614,6 +614,41 @@ def _test_detector_separates_unknown_deltas_from_restart_reasons(ctx):
     _eq("default-output change remains separate", result.outputs_changed, True)
     _eq("subsequent deltas are precise", result.changes_unknown, False)
 
+def _test_detector_preserves_launch_state_across_failed_build(ctx):
+    directory = ctx.std.fs.mkdtemp(prefix = "aspect-changedetector-failure-test-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory) if ctx.std.fs.exists(directory) else None)
+    manifest_path = directory + "/app.runfiles_manifest"
+    ctx.std.fs.write(manifest_path, "_main/app /out/bin/app\n")
+    original = _entrypoint(args = ["serve"])
+    state = {"entrypoint": original}
+
+    def clear_default_outputs(_target):
+        state["entrypoint"] = None
+
+    runnable = struct(
+        clear_default_outputs = clear_default_outputs,
+        clear_output_group_outputs = lambda _target, _group: None,
+        determine_entrypoint = lambda _target: state["entrypoint"],
+        get_default_outputs = lambda _target: [],
+        get_output_group_outputs = lambda _target, _group: [manifest_path],
+    )
+    detector = changedetector.new(ctx, runnable, "//:app", "/repo")
+    detector.capture_baseline()
+
+    detector.begin_build()
+    detector.record_build_failure()
+    detector.begin_build()
+    state["entrypoint"] = original
+    result = detector.changes([], [], [])
+
+    _eq("failed build makes changes unknown", result.changes_unknown, True)
+    _eq("restored launch state does not restart", result.restart_required, False)
+
+    detector.begin_build()
+    state["entrypoint"] = _entrypoint(args = ["serve", "--debug"])
+    result = detector.changes([], [], [])
+    _eq("real launch change still restarts", result.restart_required, True)
+
 _UNIT_TESTS = [
     _test_missing_execution_log_is_safe,
     _test_manifest_parses_source_and_generated_origins,
@@ -650,6 +685,7 @@ _UNIT_TESTS = [
     _test_unchanged_entrypoint_state_is_equal,
     _test_runinfo_changes_entrypoint_state,
     _test_detector_separates_unknown_deltas_from_restart_reasons,
+    _test_detector_preserves_launch_state_across_failed_build,
 ]
 
 def _test_impl(ctx):

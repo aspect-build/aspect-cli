@@ -1,0 +1,120 @@
+"""Unit tests for ibazel-compatible watch notifications."""
+
+load("./ibazel_strategy.axl", "ibazel_strategy")
+load("./watch_result.axl", "watch_result")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _stream(max_write = None):
+    state = {
+        "closed": 0,
+        "flushes": 0,
+        "output": "",
+    }
+
+    def write(message):
+        count = min(len(message), max_write) if max_write != None else len(message)
+        state["output"] += message[:count]
+        return count
+
+    def flush():
+        state["flushes"] += 1
+
+    def close():
+        state["closed"] += 1
+
+    return struct(
+        close = close,
+        flush = flush,
+        state = state,
+        write = write,
+    )
+
+def _test_candidate_requests_piped_stdin_and_environment(_ctx):
+    candidate = ibazel_strategy.new()
+    _eq("notification environment", candidate.environment, {"IBAZEL_NOTIFY_CHANGES": "y"})
+    _eq("piped stdin", candidate.stdin, "piped")
+    _eq("active immediately", candidate.try_connect(), (True, None))
+
+def _test_target_tag_enables_notifications(_ctx):
+    _eq("tag enables ibazel", ibazel_strategy.enabled(["manual", "ibazel_notify_changes"]), True)
+    _eq("missing tag disables ibazel", ibazel_strategy.enabled(["manual"]), False)
+
+def _test_build_notifications_cover_success_and_failure(_ctx):
+    stream = _stream()
+    candidate = ibazel_strategy.new()
+    _eq("attach", candidate.attach(struct(stdin = lambda: stream)), None)
+
+    _eq("build started", candidate.build_started(), None)
+    success = candidate.build_finished(watch_result.result(True, outputs_changed = True))
+    failure = candidate.build_finished(watch_result.result(False))
+
+    _eq("success kept", (success.action, success.status, success.error), (watch_result.KEEP, "updated", None))
+    _eq("failure kept", (failure.action, failure.status, failure.error), (watch_result.KEEP, "updated", None))
+    _eq(
+        "notification lines",
+        stream.state["output"],
+        "IBAZEL_BUILD_STARTED\nIBAZEL_BUILD_COMPLETED SUCCESS\nIBAZEL_BUILD_COMPLETED FAILURE\n",
+    )
+    _eq("notifications flushed", stream.state["flushes"], 3)
+
+def _test_entrypoint_change_restarts_after_notification(_ctx):
+    stream = _stream()
+    candidate = ibazel_strategy.new()
+    candidate.attach(struct(stdin = lambda: stream))
+
+    outcome = candidate.build_finished(watch_result.result(True, restart_required = True))
+
+    _eq("entrypoint change restarts", outcome.action, watch_result.RESTART)
+    _eq("completion precedes restart", stream.state["output"], "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+
+def _test_unknown_prior_changes_do_not_restart(_ctx):
+    stream = _stream()
+    candidate = ibazel_strategy.new()
+    candidate.attach(struct(stdin = lambda: stream))
+
+    outcome = candidate.build_finished(watch_result.result(True, changes_unknown = True))
+
+    _eq("unknown changes notify without restart", outcome.action, watch_result.KEEP)
+    _eq("recovery completion", stream.state["output"], "IBAZEL_BUILD_COMPLETED SUCCESS\n")
+
+def _test_partial_writes_are_completed(_ctx):
+    stream = _stream(max_write = 3)
+    _eq("partial write", ibazel_strategy.write(stream, "IBAZEL_BUILD_STARTED\n"), None)
+    _eq("complete partial output", stream.state["output"], "IBAZEL_BUILD_STARTED\n")
+
+def _test_close_releases_child_stdin_once(_ctx):
+    stream = _stream()
+    candidate = ibazel_strategy.new()
+    candidate.attach(struct(stdin = lambda: stream))
+
+    candidate.close()
+    candidate.close()
+
+    _eq("stdin closed once", stream.state["closed"], 1)
+
+_UNIT_TESTS = [
+    _test_candidate_requests_piped_stdin_and_environment,
+    _test_target_tag_enables_notifications,
+    _test_build_notifications_cover_success_and_failure,
+    _test_entrypoint_change_restarts_after_notification,
+    _test_unknown_prior_changes_do_not_restart,
+    _test_partial_writes_are_completed,
+    _test_close_releases_child_stdin_once,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("ibazel_strategy.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+ibazel_strategy_tests = task(
+    summary = "Run the ibazel watch-strategy AXL unit tests.",
+    kind = "test-ibazel-strategy",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

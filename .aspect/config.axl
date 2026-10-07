@@ -45,6 +45,7 @@ load("@aspect//private/lib/gitlab_features_test.axl", "gitlab_features_tests")
 load("@aspect//private/lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
 load("@aspect//private/lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//private/lib/health_check_ready_test.axl", "health_check_ready_tests")
+load("@aspect//private/lib/ibazel_strategy_test.axl", "ibazel_strategy_tests")
 load("@aspect//private/lib/incremental_build_protocol_host_test.axl", "incremental_build_protocol_host_tests")
 load("@aspect//private/lib/incremental_build_protocol_test.axl", "incremental_build_protocol_tests")
 load("@aspect//private/lib/init_test.axl", "init_tests")
@@ -407,6 +408,10 @@ def config(ctx: ConfigContext):
     # Incremental Build Protocol host negotiation and compatibility.
     # Run with: aspect dev test-incremental-build-protocol-host
     ctx.tasks.add(incremental_build_protocol_host_tests)
+
+    # ibazel-compatible build notifications over the watched child's stdin.
+    # Run with: aspect dev test-ibazel-strategy
+    ctx.tasks.add(ibazel_strategy_tests)
 
     # Watched-child update selection and permanent restart fallback.
     # Run with: aspect dev test-watch-supervisor
