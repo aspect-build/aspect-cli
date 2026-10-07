@@ -6,17 +6,18 @@ Run with:
 Classification is `lib/output_bases.axl`'s, covered by `aspect dev
 test-output-bases`; consent is `lib/confirm.axl`'s, covered by `aspect dev
 test-confirm`. This suite covers what `gc` adds: the plan and its document,
-selection of named bases, the period flags, download-cache pruning, and
-removal itself.
+selection of named bases and of everything under `--all`, the period flags,
+download-cache pruning, the needs-force refusal, and removal itself.
 
 `_reap` is exercised against real trees rather than mocked: it has to survive
 the read-only directories Bazel leaves under `bazel-out/`, and it must not
 follow the execroot's symlinks out into the user's checkout.
 """
 
-load("@aspect//gc.axl", "testonly_collect", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_reap", "testonly_remove_tree", "testonly_scan_download_cache", "testonly_select", "testonly_summary", "testonly_why")
+load("@aspect//gc.axl", "testonly_action", "testonly_collect", "testonly_decide", "testonly_document", "testonly_failure", "testonly_move_to_trash", "testonly_outcome", "testonly_own_base", "testonly_plan", "testonly_policy_entry", "testonly_policy_from_args", "testonly_preflight", "testonly_question", "testonly_reap", "testonly_remove_tree", "testonly_running_servers", "testonly_scan_download_cache", "testonly_select", "testonly_shows_output_base", "testonly_stop", "testonly_summary", "testonly_swept", "testonly_unrecognized_root", "testonly_usage_error", "testonly_why")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/output_bases_fixtures.axl", fx = "fixtures")
+load("./private/lib/wrapper.axl", "find_workspace_root")
 
 def _eq(label, got, want):
     if got != want:
@@ -217,6 +218,7 @@ def _test_why_names_the_rule_that_removes_a_base(ctx):
     _eq("idle, undetermined", testonly_why(_base("idle"), now), "unused for 45d")
     _eq("trash", testonly_why(_base("trash"), now), "left by an interrupted gc")
     _eq("a kept state is only removed on request", testonly_why(_base("live", "/ws"), now), "requested; live; workspace /ws")
+    _eq("or under --all", testonly_why(_base("live", "/ws"), now, forced = "--all"), "--all; live; workspace /ws")
     _eq("home shown as ~", testonly_why(_base("orphan", "/home/u/gone"), now, "/home/u"), "workspace gone: ~/gone")
 
 def _test_failure_names_only_what_failed(ctx):
@@ -408,6 +410,249 @@ def _test_summary(ctx):
     _eq("failed", testonly_summary(outcome(0), True), "reclaimed 2 MB; the rest could not be removed")
     held = testonly_outcome(reaped = 1, reaped_kb = 2048, skipped = 2, held = 1, pruned = 0, pruned_kb = 0)
     _eq("held apart from used", testonly_summary(held, False), "reclaimed 2 MB; left 1 Bazel output base alone, used after the scan; left 1 Bazel output base alone, its server could not be identified")
+    stopped = testonly_outcome(reaped = 2, reaped_kb = 2048, skipped = 0, pruned = 0, pruned_kb = 0, stopped = ["/a", "/b"])
+    _eq("servers stopped", testonly_summary(stopped, False), "reclaimed 2 MB; stopped 2 running Bazel servers")
+
+_TRASHED = "77777777777777777777777777777777"
+_YOUNG = "88888888888888888888888888888888"
+_FRESH_UNKNOWN = "99999999999999999999999999999999"
+_INSTALL_LIKE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+def _install_like(ctx, path):
+    """A directory shaped like a Bazel install base: md5-named, but holding
+    nothing an output base does."""
+    ctx.std.fs.create_dir_all(path + "/embedded_tools")
+    ctx.std.fs.write(path + "/build-label.txt", "8.0.0")
+    ctx.std.fs.write(path + "/A-server.jar", "")
+
+def _everything_fixture(ctx):
+    """`fx.fixture` plus a pool slot's base, an interrupted gc's trash, a
+    young orphan, a fresh undetermined base and an md5-named directory that is
+    not an output base, so that under a 30-day idle rule every state is
+    present; a stand-in server runs in the live base. Returns `(root, pid)`."""
+    root = fx.fixture(ctx)
+    tmp = root[:root.rfind("/")]
+    slot = root + "/" + fx.MARKER
+    ctx.std.fs.create_dir_all(slot)
+    ctx.std.fs.write(slot + "/DO_NOT_BUILD_HERE", ctx.std.env.home_dir() + "/.aspect/worktrees/aspect-gc-all-test/aspect-worktree-0123\n")
+    ctx.std.fs.create_dir_all(root + "/.gc-trash-" + _TRASHED + "/execroot")
+    fx.make_base(ctx, root, _YOUNG, tmp + "/young-workspace-gone")
+    ctx.std.fs.create_dir_all(root + "/" + _FRESH_UNKNOWN + "/execroot")
+    _install_like(ctx, root + "/" + _INSTALL_LIKE)
+    pid = _start_server(ctx, root + "/" + fx.LIVE, _SERVER)
+    return (root, pid)
+
+def _everything_plan(ctx, root, servers = True):
+    bases = fx.scan(ctx, root, 30 * fx.DAY_US)
+    removals, unrecognized = testonly_swept(bases, True, lambda b: testonly_shows_output_base(ctx, b))
+    return testonly_plan(
+        bases = bases,
+        removals = removals,
+        sizes = {},
+        cache_entries = 0,
+        stale = [],
+        servers = testonly_running_servers(ctx, removals, True) if servers else {},
+        unrecognized = unrecognized,
+    )
+
+def _states(bases):
+    return sorted({b.state: True for b in bases}.keys())
+
+def _test_all_removes_every_base_and_stops_its_server(ctx):
+    """`--all` takes a base in every state, stops the server running in one
+    the same way a named base's is, and leaves `install/`, `cache/`, anything
+    not named like a base, and an md5-named directory with no sign of Bazel."""
+    root, pid = _everything_fixture(ctx)
+    plan = _everything_plan(ctx, root)
+    _eq("every state", _states(plan.removals), ["grace", "idle", "live", "orphan", "pooled", "trash", "unknown"])
+    _eq("every base but the install-like one", len(plan.removals), len(plan.bases) - 1)
+    _eq("which is kept", [b.name for b in plan.unrecognized], [_INSTALL_LIKE])
+    _eq("policy mode takes only the removable states", _states(testonly_swept(plan.bases, False)[0]), ["idle", "orphan", "trash"])
+    _eq("the live base's server found", plan.servers, {root + "/" + fx.LIVE: pid})
+
+    outcome = testonly_collect(ctx, False, plan, True)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("all reaped", outcome.reaped, len(plan.removals))
+    _eq("server stopped", alive != 0, True)
+    _eq("recorded as stopped", outcome.stopped, [root + "/" + fx.LIVE])
+    _eq("only the install-like directory left", [b.name for b in fx.scan(ctx, root)], [_INSTALL_LIKE])
+    _eq("install survives", ctx.std.fs.exists(root + "/install/abc123"), True)
+    _eq("repo contents cache survives", ctx.std.fs.exists(root + "/cache/repos/v1/contents"), True)
+    _eq("a non-base survives", ctx.std.fs.exists(root + "/not-a-base"), True)
+
+    doc = testonly_document(root, False, {}, plan, outcome, True)
+    _eq("all in the document", doc["all"], True)
+    _eq("kept in the document", doc["kept"], [{"path": root + "/" + _INSTALL_LIKE, "reason": "not an output base: nothing in it says so"}])
+    stopped = {r["path"]: r.get("server_stopped") for r in doc["removals"]}
+    _eq("server_stopped on the base that had one", stopped[root + "/" + fx.LIVE], True)
+    _eq("and only there", [p for p, v in stopped.items() if v != None], [root + "/" + fx.LIVE])
+
+def _test_all_reports_a_server_that_came_up_after_planning(ctx):
+    """A server started while the prompt waited is stopped by `_reap` all the
+    same, and the document says so though the plan never saw it."""
+    root, pid = _everything_fixture(ctx)
+    plan = _everything_plan(ctx, root, servers = False)
+    outcome = testonly_collect(ctx, False, plan, True)
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    live = [r for r in testonly_document(root, False, {}, plan, outcome, True)["removals"] if r["path"] == root + "/" + fx.LIVE][0]
+    _eq("reported stopped", live["server_stopped"], True)
+
+def _test_all_dry_run_stops_nothing(ctx):
+    """Finding the servers to list must not touch them; a dry run reports
+    each as not stopped, and every base stays."""
+    root, pid = _everything_fixture(ctx)
+    plan = _everything_plan(ctx, root)
+    verdict, refusal = testonly_decide(plan, True, True, True, False)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("skipped", verdict, "skip")
+    _eq("no refusal", refusal, None)
+    _eq("server left running", alive, 0)
+    _eq("every base stays", len(fx.scan(ctx, root)), len(plan.bases))
+    nothing = testonly_outcome(reaped = 0, reaped_kb = 0, skipped = 0, pruned = 0, pruned_kb = 0)
+    doc = testonly_document(root, True, {}, plan, nothing, True)
+    live = [r for r in doc["removals"] if r["path"] == root + "/" + fx.LIVE][0]
+    _eq("not stopped", live["server_stopped"], False)
+    _eq("not attempted", live["outcome"], "not attempted")
+    _eq("a base without a server has no key", "server_stopped" in [r for r in doc["removals"] if r["path"] == root + "/" + fx.DEAD][0], False)
+
+def _test_all_under_an_install_like_root_removes_nothing(ctx):
+    """Pointed at `install/` by mistake, every entry is md5-named but none is
+    an output base: all are kept, and the root itself is refused."""
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-gc-install") + "/install"
+    _install_like(ctx, root + "/" + _INSTALL_LIKE)
+    _install_like(ctx, root + "/" + fx.LIVE)
+    bases = fx.scan(ctx, root)
+    _eq("both look like bases by name", len(bases), 2)
+    removals, unrecognized = testonly_swept(bases, True, lambda b: testonly_shows_output_base(ctx, b))
+    _eq("nothing to remove", removals, [])
+    _eq("both kept", len(unrecognized), 2)
+    refusal = testonly_unrecognized_root(root, removals, unrecognized, False)
+    _eq("refused", refusal.exit_code, 1)
+    _eq("names the root", root in refusal.message, True)
+    _eq("an install/ beside them is a real root", testonly_unrecognized_root(root, removals, unrecognized, True), None)
+    _eq("a base with evidence is a real root", testonly_unrecognized_root(root, bases[:1], bases[1:], False), None)
+    _eq("an empty root has nothing to refuse", testonly_unrecognized_root(root, [], [], False), None)
+    plan = testonly_plan(bases = bases, removals = removals, sizes = {}, cache_entries = 0, stale = [], unrecognized = unrecognized)
+    testonly_collect(ctx, False, plan, True)
+    _eq("both still there", ctx.std.fs.exists(root + "/" + _INSTALL_LIKE) and ctx.std.fs.exists(root + "/" + fx.LIVE), True)
+
+def _test_running_servers_skips_idle_in_policy_mode(ctx):
+    """A rule's idle pick is skipped, not stopped, when a server runs in it,
+    so policy mode lists no server for it; `--all` and named bases do."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.LIVE
+    pid = _start_server(ctx, base, _SERVER)
+    b = output_bases.Base(name = fx.LIVE, path = base, workspace = "/ws", state = "idle", pid = 0, last_used = 0)
+    by_rule = testonly_running_servers(ctx, [b], False)
+    forced = testonly_running_servers(ctx, [b], True)
+    output_bases.run(ctx, "kill", [str(pid)])
+    _eq("policy mode", by_rule, {})
+    _eq("--all or named", forced, {base: pid})
+
+def _unrelated(ctx, script = "sleep 30"):
+    """A detached live process that is not anyone's Bazel server."""
+    _code, out = output_bases.run(ctx, "sh", ["-c", "sh -c '" + script + "' >/dev/null 2>&1 & echo $!"])
+    return int(out.strip())
+
+def _test_all_removes_a_base_whose_pid_was_reused(ctx):
+    """A recorded pid now held by another process is not the base's server:
+    the base goes, and the process is never signalled."""
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+    pid = _unrelated(ctx)
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(pid))
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = pid, last_used = 0)
+    servers = testonly_running_servers(ctx, [b], True)
+    plan = testonly_plan(bases = [b], removals = [b], sizes = {}, cache_entries = 0, stale = [], servers = servers)
+    outcome = testonly_collect(ctx, False, plan, True)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("no server listed", servers, {})
+    _eq("reaped", outcome.results[base], "reaped")
+    _eq("the other process untouched", alive, 0)
+    _eq("no server_stopped", "server_stopped" in testonly_document(root, False, {}, plan, outcome, True)["removals"][0], False)
+
+def _test_all_fails_a_base_whose_server_cannot_be_identified(ctx):
+    root = fx.fixture(ctx)
+    base = root + "/" + fx.DEAD
+    ctx.std.fs.create_dir_all(base + "/server")
+    ctx.std.fs.write(base + "/server/server.pid.txt", "4242")
+    b = output_bases.Base(name = fx.DEAD, path = base, workspace = "", state = "orphan", pid = 4242, last_used = 0)
+    plan = testonly_plan(bases = [b], removals = [b], sizes = {}, cache_entries = 0, stale = [])
+    path = ctx.std.env.var("PATH")
+    ctx.std.env.set_var("PATH", "/aspect-no-such-dir")
+    outcome = testonly_collect(ctx, False, plan, True)
+    ctx.std.env.set_var("PATH", path)
+    _eq("failed", outcome.results[base], "failed")
+    _eq("a failure", testonly_failure(plan, outcome).exit_code, 1)
+    _eq("still there", ctx.std.fs.exists(base), True)
+
+def _test_stop_never_kills_a_reused_pid(ctx):
+    """A pid that outlives SIGTERM but is no longer the base's server — the OS
+    gave it to something else — is taken as the server gone, not SIGKILLed."""
+    root = fx.fixture(ctx)
+    pid = _unrelated(ctx, "trap \"\" TERM; while :; do sleep 1; done")
+    stopped = testonly_stop(ctx, pid, root + "/" + fx.DEAD)
+    alive, _ = output_bases.run(ctx, "kill", ["-0", str(pid)])
+    output_bases.run(ctx, "kill", ["-9", str(pid)])
+    _eq("the server is gone", stopped, True)
+    _eq("the other process was not killed", alive, 0)
+
+def _args(target, **periods):
+    flags = {"base_max_idle_days": 30, "orphan_grace_hours": 1, "download_cache_max_idle_days": 30} | periods
+    return struct(target = target, all = True, **flags)
+
+def _test_preflight_refuses_all_with_a_hash(ctx):
+    """`_gc_impl` returns this before resolving the root or scanning it."""
+    policy, refusal = testonly_preflight(_args([fx.LIVE]))
+    _eq("exit code", refusal.exit_code, 1)
+    _eq("the usage error", refusal.message.startswith("--all removes every Bazel output base"), True)
+    _eq("--all alone passes", testonly_preflight(_args([]))[1], None)
+    _eq("ages are accepted and moot", testonly_preflight(_args([], base_max_idle_days = 0, orphan_grace_hours = 0))[1], None)
+    _eq("a negative one is still refused", testonly_preflight(_args([], orphan_grace_hours = -1))[1].message.endswith("take 0 or more"), True)
+
+def _test_own_base_is_the_current_workspaces(ctx):
+    here = output_bases.canonical(ctx, find_workspace_root(ctx.std))
+    mine = output_bases.Base(name = "m", path = "/root/m", workspace = here, state = "live", pid = 0, last_used = 0)
+    other = output_bases.Base(name = "o", path = "/root/o", workspace = "/elsewhere", state = "live", pid = 0, last_used = 0)
+    _eq("found", testonly_own_base(ctx, [other, mine]), "/root/m")
+    _eq("none", testonly_own_base(ctx, [other]), "")
+
+def _test_all_with_named_bases_is_refused(ctx):
+    refusal = testonly_usage_error(True, [fx.LIVE])
+    _eq("exit code", refusal.exit_code, 1)
+    _eq("says why", "--all" in refusal.message and "<hash>" in refusal.message, True)
+    _eq("--all alone", testonly_usage_error(True, []), None)
+    _eq("hashes alone", testonly_usage_error(False, [fx.LIVE]), None)
+
+def _plan_of(n, servers = 0, stale = []):
+    removals = [_base("live", "/ws%d" % i) for i in range(n)]
+    return testonly_plan(
+        bases = removals,
+        removals = removals,
+        sizes = {},
+        cache_entries = len(stale),
+        stale = stale,
+        servers = {"/s%d" % i: i + 1 for i in range(servers)},
+    )
+
+def _test_all_off_a_terminal_needs_force(ctx):
+    plan = _plan_of(3, servers = 2)
+    verdict, refusal = testonly_decide(plan, True, False, False, False)
+    _eq("needs force", verdict, "needs-force")
+    _eq("exit code", refusal.exit_code, 1)
+    _eq("names what it declined", refusal.message.startswith("refusing to remove all 3 Bazel output bases, stopping 2 running Bazel servers with no terminal"), True)
+    _eq("--force proceeds", testonly_decide(plan, True, False, True, False), ("go", None))
+    _eq("a terminal asks", testonly_decide(plan, True, False, False, True), ("ask", None))
+
+def _test_all_question_states_count_size_and_servers(ctx):
+    _eq("bases and servers", testonly_question(_plan_of(58, servers = 12), True), "Remove all 58 Bazel output bases (0 KB), stopping 12 running Bazel servers?")
+    _eq("with stale cache", testonly_question(_plan_of(2, stale = [struct(path = "x", kb = 4)]), True), "Remove all 2 Bazel output bases (0 KB) and prune 1 Bazel download cache entry (4 KB)?")
+    _eq("no servers", testonly_action(_plan_of(1), True), "remove 1 Bazel output base")
+    _eq("policy mode", testonly_question(_plan_of(2), False), "Delete 2 Bazel output bases, freeing 0 KB?")
 
 _UNIT_TESTS = [
     _test_document_counts_every_state,
@@ -440,6 +685,19 @@ _UNIT_TESTS = [
     _test_a_cache_entry_fetched_after_the_scan_is_left_alone,
     _test_removals_carry_their_outcome,
     _test_a_pooled_base_says_so_when_removed,
+    _test_all_removes_every_base_and_stops_its_server,
+    _test_all_dry_run_stops_nothing,
+    _test_all_reports_a_server_that_came_up_after_planning,
+    _test_all_under_an_install_like_root_removes_nothing,
+    _test_running_servers_skips_idle_in_policy_mode,
+    _test_all_removes_a_base_whose_pid_was_reused,
+    _test_all_fails_a_base_whose_server_cannot_be_identified,
+    _test_stop_never_kills_a_reused_pid,
+    _test_preflight_refuses_all_with_a_hash,
+    _test_own_base_is_the_current_workspaces,
+    _test_all_with_named_bases_is_refused,
+    _test_all_off_a_terminal_needs_force,
+    _test_all_question_states_count_size_and_servers,
 ]
 
 def _test_impl(ctx):
