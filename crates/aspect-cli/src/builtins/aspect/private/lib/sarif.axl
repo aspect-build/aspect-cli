@@ -76,27 +76,63 @@ def _result_has_fix(result):
     independently of the SARIF stream).
     """
     for loc in result.get("relatedLocations", []):
-        msg = loc.get("message", {}).get("text", "")
-        if msg != "try" and not msg.startswith("try "):
-            continue
-        loc_region = loc.get("physicalLocation", {}).get("region", {})
-        if loc_region.get("byteOffset") == None or loc_region.get("byteLength") == None:
-            continue
-        return True
+        if _is_fix_hint(loc):
+            return True
     return False
+
+def _is_fix_hint(loc):
+    """True for a relatedLocation shaped as a `try "<replacement>"` byte-range fix."""
+    msg = loc.get("message", {}).get("text", "")
+    if msg != "try" and not msg.startswith("try "):
+        return False
+    loc_region = loc.get("physicalLocation", {}).get("region", {})
+    return loc_region.get("byteOffset") != None and loc_region.get("byteLength") != None
+
+def _related_files(result, file):
+    """Distinct relatedLocation uris other than `file`, skipping inline-fix hints."""
+    out = []
+    for loc in result.get("relatedLocations", []):
+        if _is_fix_hint(loc):
+            continue
+        uri = loc.get("physicalLocation", {}).get("artifactLocation", {}).get("uri", "")
+        if uri and uri != file and uri not in out:
+            out.append(uri)
+    return out
 
 def parse_sarif_diagnostics(content):
     """Parse SARIF JSON into a flat list of diagnostic dicts.
 
     Returns:
         List of dicts with keys: tool, file, line, end_line, rule_id, severity,
-        message, has_fix.
+        message, has_fix, related_files.
 
     `end_line` falls back to `line` when SARIF only specifies startLine. `has_fix`
     is True when the result carries an inline-fix relatedLocation (see
     `_result_has_fix`).
+
+    A result with a file but no region is file-level (`line == 0`); a result
+    with no file has `file == ""`. `related_files` lists the other files named
+    by the result's relatedLocations.
     """
     return sarif_diagnostics(json.try_decode(content, {}))
+
+def _primary_location(result):
+    """`(uri, line, end_line)` of the result's first location.
+
+    `line` is 0 when the location has no region, and `uri` is "" when the
+    result names no file.
+    """
+    locations = result.get("locations") or []
+    if not locations:
+        return ("", 0, 0)
+    physical = locations[0].get("physicalLocation", {})
+    uri = physical.get("artifactLocation", {}).get("uri", "") or ""
+    if not uri:
+        return ("", 0, 0)
+    region = physical.get("region", {})
+    line = region.get("startLine", 0) or 0
+    end_line = region.get("endLine", line) or line
+    return (uri, line, end_line)
 
 def sarif_diagnostics(sarif):
     """Flatten an already-decoded SARIF dict into diagnostic dicts.
@@ -108,16 +144,7 @@ def sarif_diagnostics(sarif):
     for run in sarif.get("runs", []):
         tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
         for result in run.get("results", []):
-            locations = result.get("locations", [])
-            if not locations:
-                continue
-            physical = locations[0].get("physicalLocation", {})
-            uri = physical.get("artifactLocation", {}).get("uri", "")
-            region = physical.get("region", {})
-            line = region.get("startLine", 0)
-            end_line = region.get("endLine", line) or line
-            if not uri or not line:
-                continue
+            uri, line, end_line = _primary_location(result)
             diagnostics.append({
                 "tool": tool_name,
                 "file": uri,
@@ -127,8 +154,29 @@ def sarif_diagnostics(sarif):
                 "severity": _translate_sarif_level(result.get("level", "warning")),
                 "message": result.get("message", {}).get("text", ""),
                 "has_fix": _result_has_fix(result),
+                "related_files": _related_files(result, uri),
             })
     return diagnostics
+
+def scope_files(d):
+    """Files whose change puts a diagnostic in a scoped strategy's scope: its own
+    file, plus its related files when it has no line to place in a hunk."""
+    own = [d["file"]] if d.get("file") else []
+    if d.get("line"):
+        return own
+    return own + (d.get("related_files") or [])
+
+def format_location(file, line, related_files, quote = lambda path: path, missing = "(no location)"):
+    """Render where a finding is: `file:line`, or `file` for a file-level finding,
+    or `missing` when there is no file. A finding without a line lists its
+    related files after it. `quote` wraps each path, e.g. in backticks.
+    """
+    if file and line:
+        return quote("%s:%d" % (file, line))
+    text = quote(file) if file else missing
+    if related_files:
+        text += " (related: %s)" % ", ".join([quote(f) for f in related_files])
+    return text
 
 def get_sarif_summary(sarif):
     """Return a human-readable summary of SARIF findings."""
