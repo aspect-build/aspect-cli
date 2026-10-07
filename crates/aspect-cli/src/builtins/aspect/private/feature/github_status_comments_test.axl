@@ -1786,6 +1786,123 @@ def _check_repro_dedup_consecutive_headings(ctx):
     if "Install `aspect`" not in body:
         fail("repro dedup: install hint missing from body")
 
+def _check_no_fix_for_a_passing_task(ctx):
+    """A passing task contributes no Fix row.
+
+    A command under a green heading reads as work to do when there is none. The
+    failing sibling still contributes, so the section itself is unaffected.
+    """
+    entries = [
+        {
+            "kind": "format",
+            "name": "format-task",
+            "job": "ci",
+            "status": "passed",
+            "elapsed_ms": 1000,
+            "fix_commands": rehydrate_commands([
+                {"command": "aspect format", "description": "", "slug": "format-fix"},
+            ]),
+        },
+        {
+            "kind": "lint",
+            "name": "lint-task",
+            "job": "ci",
+            "status": "failed",
+            "elapsed_ms": 1000,
+            "fix_commands": rehydrate_commands([
+                {"command": "aspect lint --fix -- //...", "description": "", "slug": "lint-fix"},
+            ]),
+        },
+    ]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 43,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    _eq("passing task contributes no fix command", "aspect format" in body, False)
+    _eq("no green heading under Fix", "#### ✅ format" in body, False)
+    _eq("the failing sibling still does", "aspect lint --fix -- //..." in body, True)
+
+def _check_identical_command_merges_across_kinds(ctx):
+    """One literal command reached by two kinds renders once.
+
+    A test task whose build failed reproduces with the same `aspect build …` as
+    the build task. Two identical code blocks under two headings is noise, so the
+    row merges and both tasks are attributed; `kind` drops out because neither
+    one describes the row.
+    """
+    shared = "aspect build -- //pkg:lib"
+    entries = [
+        {
+            "kind": "build",
+            "name": "build-task",
+            "job": "ci",
+            "status": "failed",
+            "elapsed_ms": 1000,
+            "repro_commands": rehydrate_commands([
+                {"command": shared, "description": "", "slug": "build-repro-aspect"},
+            ]),
+        },
+        {
+            "kind": "test",
+            "name": "test-task",
+            "job": "ci",
+            "status": "failed",
+            "elapsed_ms": 1000,
+            "repro_commands": rehydrate_commands([
+                {"command": shared, "description": "", "slug": "build-repro-aspect"},
+            ]),
+        },
+    ]
+    prepared = prepare_for_render(entries)
+    sections = bucket_entries(prepared)
+    rows, _fix = collect_repro_fix_rows(sections)
+    matching = [r for r in rows if r["command"] == shared]
+    _eq("one row for the shared command", len(matching), 1)
+    _eq("both tasks attributed", sorted(matching[0]["task_names"]), ["build-task", "test-task"])
+    _eq("kind dropped when contributors disagree", matching[0]["kind"], "")
+
+    body = render_body(
+        ctx,
+        MARKER_FMT % 44,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        sections,
+    )
+    _eq("command rendered once", body.count(shared), 1)
+    _eq("heading names both tasks", "(build-task · test-task)" in body, True)
+    _eq("no doubled space from the empty kind", "####  (" in body, False)
+
+def _check_body_has_no_start_date(ctx):
+    """The built-in body carries no start-time line; the footer's "Last updated"
+    is the timestamp a reader wants, and this one never changed."""
+    entries = [{
+        "kind": "build",
+        "name": "build-task",
+        "job": "ci",
+        "status": "passed",
+        "elapsed_ms": 1000,
+    }]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 45,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    _eq("no start-date line", "📅" in body, False)
+    _eq("the passed-in value is not rendered", "2026-01-01 00:00:00 UTC" in body, False)
+
 def _test_impl(ctx):
     _eq(
         "status-comment base roles are prs.write only (job-link role gated to GHA)",
@@ -1839,6 +1956,9 @@ def _test_impl(ctx):
     _check_select_sticky()
     _check_by_task_overflow()
     _check_format_overflow_note()
+    _check_no_fix_for_a_passing_task(ctx)
+    _check_identical_command_merges_across_kinds(ctx)
+    _check_body_has_no_start_date(ctx)
 
     scenarios = [
         (
