@@ -4,3 +4,8 @@ sh_library(
     name = "hello",
     srcs = ["hello.sh"],
 )
+
+sh_library(
+    name = "fixable",
+    srcs = ["fixable.sh"],
+)
