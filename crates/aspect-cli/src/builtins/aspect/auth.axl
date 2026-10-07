@@ -367,7 +367,7 @@ login = task(
         ),
         "with_api_token": args.boolean(
             default = False,
-            description = "Log in with an 'id:secret' API token read from stdin instead of the browser flow.",
+            description = "Log in with an API token read from stdin instead of the browser flow: one issued by the Aspect Web UI, or a bare 'id:secret' pair.",
         ),
         "deployment": args.string(
             description = "Log in to this configured Aspect Workflows deployment (see `aspect auth configure`) instead of Aspect Cloud. Selects which deployment to authenticate against.",

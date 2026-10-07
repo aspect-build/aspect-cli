@@ -1578,7 +1578,10 @@ impl IssuerKind {
 const TENANT_API_TRACE_HEADER: &str = "frontegg-trace-id";
 
 /// The tenant API paths the CLI calls, all served under the issuer.
-const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v1/api-token";
+///
+/// The exchange must be v2: v1 accepts tenant API tokens only, while v2 also
+/// accepts the personal tokens the Aspect Web UI issues.
+const TENANT_API_TOKEN_EXCHANGE_PATH: &str = "/identity/resources/auth/v2/api-token";
 const TENANT_API_SWITCH_PATH: &str = "/identity/resources/users/v1/tenant";
 const TENANT_API_TENANTS_PATH: &str = "/identity/resources/users/v3/me/tenants";
 
@@ -1921,8 +1924,8 @@ pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// falls inside the 60-second skew buffer (`is_expired_jwt`), so we don't
 /// hand out tokens that are about to be rejected.
 struct ApiTokenCacheEntry {
-    /// Source token (the raw `client_id:secret` value) the cached entry was
-    /// minted from. If the env var changes mid-run we mint a fresh one.
+    /// Source token (the raw API token value) the cached entry was minted from.
+    /// If the env var changes mid-run we mint a fresh one.
     source_token: String,
     /// Issuer the cached entry was exchanged against
     /// (`https://auth.aspect.build`, a self-hosted deployment's issuer, …). Reusing a
@@ -2031,9 +2034,7 @@ fn credentials_from_api_token_env(deployment: &str) -> anyhow::Result<Option<Cre
         }
     }
 
-    let (client_id, secret) = token
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{var} must be in 'client_id:secret' format"))?;
+    let (client_id, secret) = api_token_pair(&token).map_err(|e| anyhow::anyhow!("{var}: {e}"))?;
     let entry = block_on(exchange_api_token(client_id, secret, &env))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
@@ -2067,6 +2068,51 @@ fn buildkite_aspect_api_token(var: &str) -> Option<String> {
     }
     let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
     if token.is_empty() { None } else { Some(token) }
+}
+
+/// The length of the hex fingerprint that closes a Web UI personal token.
+const PERSONAL_TOKEN_FINGERPRINT_LENGTH: usize = 12;
+
+/// The `clientId:secret` pair an API token carries, in either shape a user may
+/// hold.
+///
+/// The IdP's API-tokens portal issues the bare pair, `<clientId>:<secret>`. The
+/// Aspect Web UI issues a personal token that wraps the same pair with the owner's
+/// user id in front and a hex fingerprint behind:
+/// `<userId>:<clientId>:<secret>:<fingerprint>`. The envelope is for the cache
+/// and BES edges, which bind a token to its user; the IdP exchange takes only
+/// the pair, so it is unwrapped here.
+///
+/// The wrapped shape is recognised by its envelope (two UUIDs and a fingerprint
+/// of fixed length) rather than by counting colons, so a bare pair whose secret
+/// contains colons still splits on its first colon.
+fn api_token_pair(token: &str) -> anyhow::Result<(&str, &str)> {
+    if let Some(pair) = personal_token_pair(token) {
+        return Ok(pair);
+    }
+    token
+        .split_once(':')
+        .filter(|(client_id, secret)| !client_id.is_empty() && !secret.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid API token format: expected client_id:secret, or a token issued by \
+                 the Aspect Web UI"
+            )
+        })
+}
+
+/// `token` unwrapped when it has the Web UI personal-token envelope, else None.
+fn personal_token_pair(token: &str) -> Option<(&str, &str)> {
+    let (user_id, rest) = token.split_once(':')?;
+    let (pair, fingerprint) = rest.rsplit_once(':')?;
+    let (client_id, secret) = pair.split_once(':')?;
+    let is_uuid = |s: &str| uuid::Uuid::parse_str(s).is_ok();
+    let is_fingerprint = fingerprint.len() == PERSONAL_TOKEN_FINGERPRINT_LENGTH
+        && fingerprint
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (is_uuid(user_id) && is_uuid(client_id) && !secret.is_empty() && is_fingerprint)
+        .then_some((client_id, secret))
 }
 
 async fn exchange_api_token(
@@ -3999,9 +4045,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         }
 
         if let Some(api_token) = api_token {
-            let (client_id, secret) = api_token.split_once(':').ok_or_else(|| {
-                anyhow::anyhow!("invalid API token format: expected client_id:secret")
-            })?;
+            let (client_id, secret) = api_token_pair(api_token)?;
             let entry = block_on(exchange_api_token(client_id, secret, &env))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
@@ -4630,6 +4674,68 @@ mod tests {
         );
         assert!(session_expired_message("gcp.acme").contains("--deployment gcp.acme"));
         assert!(!session_expired_message(ASPECT_CLOUD_DEPLOYMENT_NAME).contains("--deployment"));
+    }
+
+    const USER_ID: &str = "3676f5a2-1844-42c4-80ad-80f1a84b5881";
+    const CLIENT_ID: &str = "ce46d289-e023-479e-9227-49fb2b7b195f";
+    const SECRET: &str = "5b77414e-2fcb-4a7b-bc26-ae2909306af7";
+
+    /// Both shapes a user may hold yield the same pair for the exchange: the bare
+    /// `clientId:secret` the IdP portal issues, and the Web UI personal token
+    /// that wraps it in a user id and a fingerprint.
+    #[test]
+    fn api_token_pair_accepts_bare_and_web_ui_shapes() {
+        let bare = format!("{CLIENT_ID}:{SECRET}");
+        assert_eq!(api_token_pair(&bare).unwrap(), (CLIENT_ID, SECRET));
+
+        let wrapped = format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86b6dc6d7813");
+        assert_eq!(api_token_pair(&wrapped).unwrap(), (CLIENT_ID, SECRET));
+
+        // The secret may itself hold colons in either shape.
+        let bare = format!("{CLIENT_ID}:part:of:secret");
+        assert_eq!(
+            api_token_pair(&bare).unwrap(),
+            (CLIENT_ID, "part:of:secret")
+        );
+        let wrapped = format!("{USER_ID}:{CLIENT_ID}:part:of:secret:86b6dc6d7813");
+        assert_eq!(
+            api_token_pair(&wrapped).unwrap(),
+            (CLIENT_ID, "part:of:secret")
+        );
+    }
+
+    /// Only the full envelope unwraps. Anything short of it is read as a bare
+    /// pair, so a bare pair is never mistaken for a wrapped one because its
+    /// secret happens to contain colons.
+    #[test]
+    fn api_token_pair_unwraps_only_a_complete_envelope() {
+        for token in [
+            // Not a user id in front.
+            format!("not-a-uuid:{CLIENT_ID}:{SECRET}:86b6dc6d7813"),
+            // Not a client id in the middle.
+            format!("{USER_ID}:not-a-uuid:{SECRET}:86b6dc6d7813"),
+            // Fingerprint of the wrong length.
+            format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86b6dc6d781"),
+            // Fingerprint that is not lowercase hex.
+            format!("{USER_ID}:{CLIENT_ID}:{SECRET}:86B6DC6D7813"),
+        ] {
+            assert_eq!(
+                api_token_pair(&token).unwrap(),
+                token.split_once(':').unwrap(),
+                "{token:?} should split on its first colon"
+            );
+        }
+    }
+
+    #[test]
+    fn api_token_pair_rejects_tokens_without_a_pair() {
+        for token in ["", "no-colon", ":secret", "client:"] {
+            let err = api_token_pair(token).unwrap_err().to_string();
+            assert!(
+                err.contains("client_id:secret") && err.contains("Aspect Web UI"),
+                "{token:?}: {err}"
+            );
+        }
     }
 
     /// The variable scheme customers are documented against: the unsuffixed name
