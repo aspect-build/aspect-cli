@@ -1,0 +1,17 @@
+name: Regenerate the machine rc outside this checkout
+description: |
+  Internal-only. For a job that runs Bazel in a second workspace (a scaffolded
+  project, examples/large_bes).
+
+  On a GitHub-hosted runner, setup-aspect generates `~/.aspect/bazelrc` from
+  this checkout. That rc only *enables* aspect-common and aspect-cloud, whose
+  definitions are in the checkout's own committed rc, so `bazel` in any other
+  workspace fails on a `--config` nothing there defines. Regenerating it from
+  outside any workspace leaves it carrying its own definitions, valid in both.
+runs:
+  using: composite
+  steps:
+    - name: Regenerate the machine rc outside this checkout
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      run: aspect setup bazelrc --force
