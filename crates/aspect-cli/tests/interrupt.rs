@@ -434,3 +434,38 @@ owner = task(summary = "Test fixture.", implementation = _impl)
     assert_eq!(status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("child ended with signal 2"), "{stderr}");
 }
+
+/// The `run --watch` ending: Ctrl+C ends the supervisor's loop, which stops
+/// the watched target (its own process group, as `run --watch` starts it)
+/// gracefully, and the run exits 0.
+#[test]
+fn ctrl_c_ends_a_watch_session_and_stops_its_target() {
+    const WATCH: &str = r#"
+load("@aspect//private/lib/watch.axl", "watch")
+load("@aspect//private/lib/watch_supervisor.axl", "watch_supervisor")
+
+def _spawn(ctx):
+    return ctx.std.process.command("sh").args([
+        "-c",
+        "trap 'echo target handled SIGINT >&2; exit 0' INT; echo ready pid=$$ >&2; while :; do sleep 0.1; done",
+    ]).process_group(0).spawn()
+
+def _impl(ctx):
+    supervisor = watch_supervisor.new(ctx, lambda environment, stdin: _spawn(ctx))
+    supervisor.restart()
+    return supervisor.run(watch.new(ctx), lambda batch: None)
+
+watching = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start(WATCH, "watching");
+    let target_pid = run.announced_pid();
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("target handled SIGINT"), "{stderr}");
+    assert!(!stderr.contains("Traceback"), "{stderr}");
+    assert!(
+        wait_gone(target_pid, Duration::from_secs(5)),
+        "the watched target outlived aspect-cli"
+    );
+}

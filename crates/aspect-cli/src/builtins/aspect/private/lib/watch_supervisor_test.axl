@@ -228,13 +228,13 @@ def _test_child_exit_closes_pending_listener(ctx):
     _eq("pending child process group stopped", spawner.children[0].state["kill_count"], 1)
     _eq("exited child reaped", spawner.children[0].state["wait_count"], 1)
 
-def _test_stop_closes_protocol_and_stops_child(ctx):
+def _test_cancelled_run_closes_protocol_and_stops_child(ctx):
     candidate = _candidate([(True, None)])
     supervisor, spawner, _ = _supervisor(ctx, [[candidate]])
     supervisor.restart()
+    ws = struct(cancellation = struct(cancelled = True), try_pop = lambda: None)
 
-    supervisor.stop()
-
+    _eq("run returns 0", supervisor.run(ws, lambda batch: fail("no batch expected")), 0)
     _eq("protocol notified", candidate.state["exit_descriptions"], ["watch process stopped"])
     _eq("protocol closed", candidate.state["close_count"], 1)
     _eq("child process group stopped", spawner.children[0].state["kill_count"], 1)
@@ -433,7 +433,7 @@ _UNIT_TESTS = [
     _test_attachment_failure_falls_back_to_restart_mode,
     _test_build_start_failure_retries_protocol,
     _test_child_exit_closes_pending_listener,
-    _test_stop_closes_protocol_and_stops_child,
+    _test_cancelled_run_closes_protocol_and_stops_child,
     _test_child_exit_closes_active_protocol,
     _test_negotiation_failure_disables_protocol,
     _test_initialization_failure_disables_protocol,

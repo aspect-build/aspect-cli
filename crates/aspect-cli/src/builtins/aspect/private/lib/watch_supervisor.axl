@@ -1,6 +1,6 @@
 """Watched-child supervision with incremental-update and restart modes."""
 
-load("@std//time.axl", "monotonic")
+load("@std//time.axl", "monotonic", "sleep_iter")
 load("./environment.axl", "warn")
 load("./watch_result.axl", "watch_result")
 
@@ -207,13 +207,30 @@ def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, o
         restart()
         return None
 
+    def run(ws, on_batch, on_exit = None, on_stop = None, tick_ms = 100) -> int:
+        """Poll the child and hand each settled batch from `ws` to `on_batch`
+        until `ws.cancellation` is cancelled, then stop the child and return 0."""
+        for _tick in sleep_iter(tick_ms):
+            if ws.cancellation.cancelled:
+                if on_stop != None:
+                    on_stop()
+                stop()
+                return 0
+            status = poll()
+            if status != None and on_exit != None:
+                on_exit(status)
+            batch = ws.try_pop()
+            if batch != None:
+                on_batch(batch)
+        return 0
+
     ctx.defer(stop)
     return struct(
         build_finished = build_finished,
         build_started = build_started,
         poll = poll,
         restart = restart,
-        stop = stop,
+        run = run,
     )
 
 watch_supervisor = namespace(new = _new)
