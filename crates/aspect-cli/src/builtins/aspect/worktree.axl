@@ -974,8 +974,9 @@ def _not_ours(ctx: TaskContext, pool: dict, registry: dict, slot_id: str) -> Tas
 
     Applied after resolving, however the slot was named: a slot id, a prefix
     and a directory resolve whichever clone owns the slot, since `list` prints
-    them all. Another clone's slot is that clone's to release or enter, and one
-    whose clone is gone is nobody's but `prune`'s — which is where a release
+    them all. Another clone's slot is that clone's to enter — `release` and
+    `prune` act on it through that clone (`_elsewhere`) — and one whose
+    clone is gone is nobody's but `prune`'s — which is where a release
     by id would otherwise discard a checkout git cannot even read. So is a
     lease recorded for this clone's path that this clone's git does not list:
     the checkout of a clone that moved, with this one cloned where it was.
@@ -1282,7 +1283,7 @@ def _already_free_doc(pool: dict, slot_id: str) -> dict:
         "warnings": [],
     }
 
-def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, kept_ms: int = 0) -> TaskConclusion:
+def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, kept_ms: int = 0, root: str = "") -> TaskConclusion:
     """A lease another session holds that has not verifiably stopped — or has,
     with `kept_ms` of its grace left — which `release` was asked to end.
 
@@ -1309,7 +1310,7 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
     sibling = _sibling(me, agent)
     forced = ("--force covers uncommitted work only, not another session's lease. " if ctx.args.force == _FORCE_DIRTY and not sibling else "")
     path = slot_path(pool, slot_id)
-    work = _dirty(ctx, path)
+    work = _dirty(ctx, path, root)
     dirty = ("\nIt has uncommitted changes" + ("" if sibling else ", which --force=all would discard with the checkout") +
              ":\n" + _indented(work)) if work else ""
     return _refuse(
@@ -3384,13 +3385,31 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     if bad:
         return bad
     pool = _pool(ctx)
+
+    # A slot another clone owns, named by id or directory, is released as that
+    # clone would release it.
+    there = _elsewhere(ctx, pool, name, False) if name else None
+    if there:
+        pool = there.pool
+        if there.clone:
+            _info(ctx.std, "slot " + there.slot + " belongs to the clone at " + tilde(there.clone, ctx.std.env.home_dir()) +
+                           "; releasing it there")
     if not pool:
-        return _not_a_repository(ctx)
+        return _refuse(
+            ctx,
+            "not_a_repository",
+            "not inside a git repository, and no slot on this machine answers to " + (name or "nothing named") +
+            " — outside a clone, `release` takes a slot id or a slot's directory, as `aspect worktree list --all` shows them",
+        )
     lock = _lock_pool(ctx, pool)
     if not lock:
         return _pool_busy(ctx)
 
-    root = _output_root(ctx)
+    root = there.root if there else _output_root(ctx)
+
+    # Where the commands the messages suggest are run: the owning clone, when
+    # this is not it.
+    in_clone = (" in " + tilde(there.clone, ctx.std.env.home_dir())) if there and there.clone else ""
     registry = _adopted(ctx, pool)
     if registry.get("read_only", False):
         return _newer_registry(ctx, pool)
@@ -3472,7 +3491,7 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Another agent of the caller's own session: the session decides, so no
     # flag a subagent can pass overrides it.
     if _sibling(me, holder) or (protected and ctx.args.force != _FORCE_ALL):
-        return _held_by_another_session(ctx, pool, registry, target, kept_ms)
+        return _held_by_another_session(ctx, pool, registry, target, kept_ms, root)
 
     # Said in the result rather than done silently: ending somebody else's
     # lease, with `--force=all` or once its holder's grace is over, is what a
@@ -3513,10 +3532,16 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
         if repair:
             keep = "Make it readable, or copy what you need"
         elif work[0].startswith(VANISHED_CHECKOUT):
-            keep = ("If you moved it, `git worktree repair <its new path>` from the clone brings it back, " +
-                    "staged changes and any operation in progress with it; " +
-                    "otherwise keep its commits with the `git branch` the DH line names, and its refs from " +
-                    "`git for-each-ref refs/worktree` in that worktree's admin directory")
+            # Only the ways to keep what is actually listed: a staged index or
+            # an operation in progress comes back only with the checkout.
+            otherwise = []
+            if [line for line in work if line.startswith("DH ")]:
+                otherwise.append("keep its commits with the `git branch` the DH line names")
+            if [line for line in work if line.startswith("WR ")]:
+                otherwise.append("keep its refs from `git for-each-ref refs/worktree` in that worktree's admin directory")
+            keep = ("If you moved it, `git worktree repair <its new path>` from the clone" + in_clone + " brings it back, " +
+                    "staged changes and any operation in progress with it" +
+                    ("; otherwise " + ", and ".join(otherwise) if otherwise else ""))
         elif [line for line in work if line.startswith("IP ")]:
             keep = "Finish what is in progress — resolve any conflicts, then `--continue` it, or `--abort` it — and commit"
         else:
@@ -3526,7 +3551,7 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             "worktree_dirty",
             name + ", at " + path + ", " + ("holds " + _work_said(work) if repair or work[0].startswith(VANISHED_CHECKOUT) else "has uncommitted changes") + ":\n" +
             _indented(work) + "\n" +
-            keep + "." + whose + " Discarding them with the worktree is " +
+            keep + "." + whose + " Discarding " + ("it" if repair or work[0].startswith(VANISHED_CHECKOUT) else "them") + " with the worktree is " +
             ("this session's decision, since the work is its subagent's" if _own_subagent(me, holder) else "the user's decision") +
             ": `aspect worktree release " +
             shell_quote(target if _is_detached_name(name) else name) + _id_flag(ctx) + " --" +
@@ -3565,7 +3590,7 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             ) + "would leave %s dangling — reachable from no ref, for `git gc` to collect. " % (
                 "it" if orphans == 1 else "them"
             ) + "To keep %s, `git branch <branch> " % ("it" if orphans == 1 else "them") + (tip or "<commit>") +
-            "` from the clone" + (" for each tip" if len(tips) > 1 else "") + ". Discarding %s with the " % (
+            "` from the clone" + in_clone + (" for each tip" if len(tips) > 1 else "") + ". Discarding %s with the " % (
                 "it" if orphans == 1 else "them"
             ) + "worktree is the user's decision: `aspect worktree release " + shell_quote(target if _is_detached_name(name) else name) +
             _id_flag(ctx) + " --" + ("force=all" if needed == _FORCE_ALL else "force") + "`.",
@@ -3596,7 +3621,7 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             # `list` calling the slot empty while its directory is still there.
             _warn(ctx.std, "could not remove the checkout at " + path + "; the slot is free in " +
                            "the pool, but the directory is still on disk. Removing it, then " +
-                           "`git worktree prune` from this clone, clears it.")
+                           "`git worktree prune` from " + (in_clone.removeprefix(" in ") or "this clone") + ", clears it.")
     else:
         branched = ""
         slot["lock_digest"] = ""
@@ -3640,6 +3665,8 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     warnings = []
     if head and not on_remote and branched:
         push = _push_command(ctx, pool, released)
+        if push and in_clone:
+            push = push.replace("git ", "git -C " + shell_quote(there.clone) + " ", 1)
         warnings.append({
             "code": "head_not_on_remote",
             "message": (released + " is kept in the clone at " + _short(head) + ", but no remote has " +
@@ -4019,9 +4046,9 @@ def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: i
 
 def _slot_on_disk(ctx: TaskContext, asked: str) -> list:
     """The pool and slot id `asked` names, searched across every pool on this
-    machine, for `prune` run outside a clone, as a list of (pool, slot id): one
-    entry for a match, several for a prefix that fits more than one slot, none
-    when nothing does.
+    machine, as a list of (pool, slot id, exact): one entry for a match, several
+    for a prefix that fits more than one slot, none when nothing does. `exact`
+    is false for a match by prefix.
 
     Only a slot id, a unique prefix of one, or a slot's directory, never a
     branch: those are what `list --all` prints, and outside a clone there is no
@@ -4030,16 +4057,69 @@ def _slot_on_disk(ctx: TaskContext, asked: str) -> list:
     both ways.
     """
     want = asked.rstrip("/")
+    if "/" in want and not want.startswith("/"):
+        want = ctx.std.env.current_dir() + "/" + want.removeprefix("./")
     real = real_path(ctx.std, want) if want.startswith("/") else want
     prefixed = []
     for pool in pools_on_disk(ctx.std):
         registry = read_registry(ctx.std, pool["dir"])
         for slot_id in registry["slots"]:
-            if want == slot_id or slot_path(pool, slot_id) in (want, real) or (SLOT_PREFIX + slot_id) == want:
-                return [(pool, slot_id)]
+            if want == slot_id or slot_path(pool, slot_id) in (want, real) or (SLOT_PREFIX + slot_id) == want.rpartition("/")[2] and "/" not in asked:
+                return [(pool, slot_id, True)]
             if len(want) >= _MIN_SLOT_PREFIX and slot_id.startswith(want):
-                prefixed.append((pool, slot_id))
+                prefixed.append((pool, slot_id, False))
     return prefixed
+
+def _elsewhere(ctx: TaskContext, pool: dict, asked: str, prefix: bool) -> struct | None:
+    """The slot `asked` names when it is not one of this clone's: another
+    clone's, of this repository or another, or one whose clone is gone. None
+    when it is this clone's own, or no single slot answers.
+
+    The name is resolved here first, as everywhere: a branch, then a slot id,
+    then — where `prefix` — a unique prefix, so a branch that looks like hex
+    still means this clone's branch. Only a name nothing of this clone answers
+    to is looked for in every pool on disk, by slot id, prefix or directory:
+    those are unique on the machine, while branches are per clone.
+
+    For a slot whose clone still exists, `pool` is that clone's view of its
+    pool and `root` the output user root its rc files resolve, so the command
+    acts as running it there would: every ownership and work check asks the git
+    that holds the worktree. `clone` is that clone's directory. For a slot
+    whose clone is gone, `pool` is the pool it was found in and `clone` is "",
+    and the stranded refusals and `prune` apply as from outside a clone.
+    `Worktrees` settings — the grace period, the hooks — are still this
+    directory's.
+    """
+    if pool:
+        mine = _resolve_slot(ctx, pool, read_registry(ctx.std, pool["dir"]), asked, prefix)
+        if mine and (read_registry(ctx.std, pool["dir"])["slots"].get(mine) or {}).get("owner_git_dir", "") == pool["git_common_dir"]:
+            return None
+    hits = [h for h in _slot_on_disk(ctx, asked) if prefix or h[2]]
+    if len(hits) != 1:
+        return None
+    found, slot_id, _ = hits[0]
+    owner = (read_registry(ctx.std, found["dir"])["slots"].get(slot_id) or {}).get("owner_git_dir", "")
+    if pool and owner == pool["git_common_dir"]:
+        return None
+    if not owner or not ctx.std.fs.exists(owner):
+        # This pool's own stranded slots have their refusals where they are.
+        if pool and found["dir"] == pool["dir"]:
+            return None
+        return struct(pool = found, slot = slot_id, clone = "", root = _output_root(ctx))
+    if not owner.endswith("/.git"):
+        # A clone made with `--separate-git-dir`: its work tree is not named
+        # by its git directory, so its own view cannot be had from here.
+        return None
+    clone = owner.removesuffix("/.git")
+    there = pool_of(ctx.std, clone) if is_directory(ctx.std, clone) else {}
+    if not there or there["git_common_dir"] != owner or there["dir"] != found["dir"]:
+        return None
+    return struct(
+        pool = there,
+        slot = slot_id,
+        clone = clone,
+        root = output_bases.configured_output_user_root(ctx, clone) or output_user_root(ctx.std),
+    )
 
 def _prune_outside_a_clone(ctx: TaskContext) -> TaskConclusion:
     """`prune` outside a clone, with no slot named or one no pool has."""
@@ -4080,10 +4160,21 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     # owns.
     pool = _pool(ctx)
     located = ""
-    if not pool:
+
+    # A slot that is not this clone's, named by id, prefix or directory from
+    # anywhere, is pruned as its own clone would prune it — or, its clone gone,
+    # as from outside a clone.
+    there = _elsewhere(ctx, pool, ctx.args.target[0], True) if ctx.args.target else None
+    if there:
+        pool = there.pool
+        located = there.slot
+        if there.clone:
+            _info(ctx.std, "slot " + there.slot + " belongs to the clone at " + tilde(there.clone, ctx.std.env.home_dir()) +
+                           "; pruning it there")
+    elif not pool:
         hits = _slot_on_disk(ctx, ctx.args.target[0]) if ctx.args.target else []
         if len(hits) > 1:
-            ids = sorted([slot_id for _, slot_id in hits])
+            ids = sorted([slot_id for _, slot_id, _ in hits])
             return _refuse(
                 ctx,
                 "no_such_worktree",
@@ -4092,7 +4183,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             )
         if not hits:
             return _prune_outside_a_clone(ctx)
-        pool, located = hits[0]
+        pool, located, _ = hits[0]
 
     # `--dry-run` writes nothing, so it reads as `list` does, without the lock,
     # and a long `release` elsewhere does not keep it waiting.
@@ -4100,7 +4191,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not lock and not ctx.args.dry_run:
         return _pool_busy(ctx)
 
-    root = _output_root(ctx)
+    root = there.root if there else _output_root(ctx)
     taken = []
     registry = _adopted(ctx, pool, taken) if not ctx.args.dry_run else _adoption_preview(ctx, pool, taken)
     if registry.get("read_only", False) and not ctx.args.dry_run:
@@ -4271,10 +4362,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     pruned = []
     kept = [] + spared
     if verdict != confirm.SKIP and not declined:
-        # The output root comes from this directory's rc files, not the ones the
-        # slot's own clone read. For a slot of another clone, a base not found
-        # here may be under a root that clone set, and deleting the slot
-        # forgets where it was.
+        # The output root is the one the slot's own clone resolves where it
+        # still exists, and this directory's otherwise. For a slot of a clone
+        # that is gone, a base not found here may be under a root that clone
+        # set, and deleting the slot forgets where it was.
         for slot_id in [v for v in victims if located or registry["slots"][v].get("owner_git_dir", "") != pool["git_common_dir"]]:
             if not warmth_of(ctx.std, slot_path(pool, slot_id), root).base and registry["slots"][slot_id].get("had_base", False):
                 _warn(ctx.std, "slot " + slot_id + " had an output base, but none is under " + tilde(root, ctx.std.env.home_dir()) +
@@ -4957,14 +5048,14 @@ worktree_release = task(
     kind = "release",
     group = ["worktree"],
     summary = "End the lease on <branch>, or the slot you are in: remove the worktree, keep the slot warm.",
-    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.",
+    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.",
     implementation = _release_impl,
     traits = [Worktrees],
     args = {
         "branch": args.positional(
             minimum = 0,
             maximum = 1,
-            description = "The branch checked out in the slot, the slot id `aspect worktree list` shows in its first column, or the slot's directory. A detached slot also answers to the ref it was taken at, while no other slot is at it. Omitted, the slot the working directory is in.",
+            description = "The branch checked out in the slot, the slot id `aspect worktree list` shows in its first column, or the slot's directory. A detached slot also answers to the ref it was taken at, while no other slot is at it. A slot id or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is released as its own clone would release it. Omitted, the slot the working directory is in.",
         ),
         "force": args.string(
             default = _FORCE_OFF,
@@ -5009,7 +5100,7 @@ prune = task(
         "target": args.positional(
             minimum = 0,
             maximum = 1,
-            description = "A branch, a slot id or a unique prefix of one, or a slot's directory to delete, as `aspect worktree list` shows them. How long it has been idle is not consulted — naming it is the decision. Leave it out to work by idle time across every free slot. Outside a clone, a slot id or directory as `aspect worktree list --all` shows it, which is how a slot whose clone is gone is deleted.",
+            description = "A branch, a slot id or a unique prefix of one, or a slot's directory to delete, as `aspect worktree list` shows them. How long it has been idle is not consulted — naming it is the decision. Leave it out to work by idle time across every free slot. A slot id, prefix or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is pruned as its own clone would prune it; outside a clone, that is how a slot whose clone is gone is deleted.",
         ),
         "max_idle_days": args.int(
             default = PRUNE_IDLE_DAYS,
