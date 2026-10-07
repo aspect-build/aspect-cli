@@ -325,8 +325,8 @@ def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
         title = "Set ASPECT_API_TOKEN to authenticate the Aspect Workflows GitHub App",
         body = (
             "aspect-cli authenticates GitHub API calls via the Aspect Workflows " +
-            "GitHub App, which needs `ASPECT_API_TOKEN` (a `client_id:client_secret` " +
-            "pair from your Aspect organization) provided to the CI job.\n\n" +
+            "GitHub App, which needs `ASPECT_API_TOKEN` (an API token from your " +
+            "Aspect organization) provided to the CI job.\n\n" +
             "Without it, " + detail.degraded_features + " degrade. The task itself " +
             "completes regardless — only the GitHub-side surfaces are affected.\n\n" +
             "Issue an `ASPECT_API_TOKEN` from the Aspect Web UI " +

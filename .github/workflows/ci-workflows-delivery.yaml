@@ -66,7 +66,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Delivery Task
         # --force-target re-delivers every run so the manifest always
         # carries at least one `ok` outcome to exercise the per-target
@@ -95,7 +95,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
         # --warn-unresolved-digest for the same reason as delivery-gha: the
         # deliverable set includes the stamped, uncacheable py_deliverable.
@@ -124,7 +124,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Delivery unresolvable-digest must hard-fail
         run: |
           set -uo pipefail
@@ -173,7 +173,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: no-remote-exec deliverable must resolve a digest on every run
         run: |
           set -uo pipefail
@@ -217,7 +217,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: --dry-run skips the delivery build, --dry-run=build restores it
         run: |
           set -uo pipefail
@@ -271,7 +271,7 @@ jobs:
         run: .aspect/bootstrap.sh
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Delivery keeps sending task updates while a target runs
         env:
           ASPECT_TEST_TASK_UPDATE_STAMP: ${{ runner.temp }}/delivery-task-update-stamp

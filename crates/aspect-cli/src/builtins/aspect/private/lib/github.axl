@@ -281,7 +281,7 @@ def _classify_missing_credentials(ctx):
         msg = "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
         kind = _AUTH_KIND_NO_CREDENTIALS
     elif ctx.std.env.var("CI"):
-        msg = "no Aspect credentials — set ASPECT_API_TOKEN (client_id:secret) in the job env"
+        msg = "no Aspect credentials — set ASPECT_API_TOKEN (an API token from the Aspect Web UI) in the job env"
         kind = _AUTH_KIND_NO_CREDENTIALS
     else:
         msg = "not logged in — run `aspect auth login`"
