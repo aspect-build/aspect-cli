@@ -252,15 +252,24 @@ def _refuse(
     sentence that mentions them. The message says the same things in prose: one
     refusal, rendered for a person and for a program.
     """
+    return _refused(ctx, _refusal(code, message, retryable, facts), exit_code)
+
+def _refusal(code: str, message: str, retryable: bool = False, facts: dict = {}) -> dict:
+    """The JSON document of a `_refuse` refusal, for a caller that collects
+    refusals rather than ending on one."""
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "error": code,
+        "retryable": retryable,
+        "message": _shown(message),
+    } | facts
+
+def _refused(ctx: TaskContext, doc: dict, exit_code: int = 1) -> TaskConclusion:
+    """A `_refusal` document, ended on as `_refuse` ends."""
     if ctx.args.output == "json":
-        ctx.std.io.stdout.write(json.encode({
-            "schema_version": _SCHEMA_VERSION,
-            "error": code,
-            "retryable": retryable,
-            "message": _shown(message),
-        } | facts, indent = 2) + "\n")
+        ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
         return TaskConclusion(exit_code = exit_code)
-    return TaskConclusion(exit_code = exit_code, message = _shown(message))
+    return TaskConclusion(exit_code = exit_code, message = doc["message"])
 
 # Refs git would accept as a branch but nobody should own: `HEAD` resolves to
 # whatever is checked out, so a branch by that name makes every later `rev-parse`
@@ -1283,7 +1292,7 @@ def _already_free_doc(pool: dict, slot_id: str) -> dict:
         "warnings": [],
     }
 
-def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, kept_ms: int = 0, root: str = "") -> TaskConclusion:
+def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, kept_ms: int = 0, root: str = "") -> dict:
     """A lease another session holds that has not verifiably stopped — or has,
     with `kept_ms` of its grace left — which `release` was asked to end.
 
@@ -1297,6 +1306,8 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
     an explicit `--agent-kind`, or a script naming a session — and so cannot be
     shown to have stopped. A sibling subagent's lease is the session's to end,
     so for a sibling no override is offered.
+
+    Returned as a `_refusal` document, for `_release_slot` to hand back.
     """
     lease = registry["slots"][slot_id].get("lease") or {}
     agent = lease.get("agent") or {}
@@ -1313,8 +1324,7 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
     work = _dirty(ctx, path, root)
     dirty = ("\nIt has uncommitted changes" + ("" if sibling else ", which --force=all would discard with the checkout") +
              ":\n" + _indented(work)) if work else ""
-    return _refuse(
-        ctx,
+    return _refusal(
         "held_by_another_session",
         (forced + name + " is held by " + _holder(agent) + ", " + _kin(agent) + ". Leave it; " +
          "the session itself can release it or take it over; no flag overrides that from here." + dirty) if sibling else (forced + name + " is held by " + state + _holder(agent) + unknown + ". Releasing it " +
@@ -3380,10 +3390,20 @@ def _add_detached(ctx: TaskContext, pool: dict, ref: str) -> int | TaskConclusio
     return _allocate(ctx, pool, lock, registry, want, root, commit, detached = ref)
 
 def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
-    name = ctx.args.branch[0].removeprefix("refs/heads/") if ctx.args.branch else ""
+    """End the lease on the slot named, or the one the caller stands in; with
+    `--all`, on every slot this clone leases (`_release_all`).
+
+    The name is resolved here, and a slot of another clone is released through
+    that clone's view of its pool (`_elsewhere`). Whether the slot can be
+    released, and releasing it, is `_release_slot`; what is said about it
+    afterwards, once the lock is given back, is `_release_report`.
+    """
     bad = _invalid_agent(ctx)
     if bad:
         return bad
+    if ctx.args.all:
+        return _release_all(ctx)
+    name = ctx.args.branch[0].removeprefix("refs/heads/") if ctx.args.branch else ""
     pool = _pool(ctx)
 
     # A slot another clone owns, named by id or directory, is released as that
@@ -3471,6 +3491,32 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             write_registry(ctx.std, pool["dir"], registry)
         return _nothing_to_release(ctx, pool, registry, target)
 
+    done = _release_slot(ctx, pool, registry, target, name, root, in_clone)
+    if done.refusal:
+        return _refused(ctx, done.refusal)
+
+    # Recorded: what is left only reads, and asking every remote ref whether
+    # it contains a commit is no reason to keep other callers waiting.
+    _unlock(ctx, pool, lock)
+    doc = _release_report(ctx, pool, done, there.clone if there else "")
+    if ctx.args.output == "json":
+        ctx.std.io.stdout.write(json.encode({"schema_version": _SCHEMA_VERSION} | doc, indent = 2) + "\n")
+        return 0
+    _say_released(ctx, doc, root)
+    return 0
+
+def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, name: str, root: str, in_clone: str) -> struct:
+    """Judge leased slot `target` as `release <name>` does, and release it if
+    nothing refuses. Called holding the pool lock; the registry is written
+    before returning when the slot is released.
+
+    Returns a struct whose `refusal` is the document `_refuse` would write when
+    the slot is kept, with `reason` saying what was found in a phrase; or, with
+    `refusal` None, what `_release_report` needs to say about the release.
+    `in_clone` is ` in <clone>` when the slot's clone is not the one this runs
+    in, for the commands the messages suggest.
+    """
+
     # Somebody else's lease is theirs to end unless their process has verifiably
     # stopped. A holder whose process was never captured cannot be shown to
     # have stopped, so it counts as here, as it does for reclaiming. The agent
@@ -3491,7 +3537,16 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Another agent of the caller's own session: the session decides, so no
     # flag a subagent can pass overrides it.
     if _sibling(me, holder) or (protected and ctx.args.force != _FORCE_ALL):
-        return _held_by_another_session(ctx, pool, registry, target, kept_ms, root)
+        if _sibling(me, holder):
+            reason = "held by " + _holder(holder) + ", " + _kin(holder)
+        else:
+            reason = "held by " + _holder(holder) + (", kept for it for another " + phrase_ms(kept_ms) if kept_ms > 0 else "")
+        return struct(
+            refusal = _held_by_another_session(ctx, pool, registry, target, kept_ms, root),
+            reason = reason,
+            target = target,
+            name = name,
+        )
 
     # Said in the result rather than done silently: ending somebody else's
     # lease, with `--force=all` or once its holder's grace is over, is what a
@@ -3546,27 +3601,32 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             keep = "Finish what is in progress — resolve any conflicts, then `--continue` it, or `--abort` it — and commit"
         else:
             keep = "Commit them"
-        return _refuse(
-            ctx,
-            "worktree_dirty",
-            name + ", at " + path + ", " + ("holds " + _work_said(work) if repair or work[0].startswith(VANISHED_CHECKOUT) else "has uncommitted changes") + ":\n" +
-            _indented(work) + "\n" +
-            keep + "." + whose + " Discarding " + ("it" if repair or work[0].startswith(VANISHED_CHECKOUT) else "them") + " with the worktree is " +
-            ("this session's decision, since the work is its subagent's" if _own_subagent(me, holder) else "the user's decision") +
-            ": `aspect worktree release " +
-            shell_quote(target if _is_detached_name(name) else name) + _id_flag(ctx) + " --" +
-            ("force=all" if needed == _FORCE_ALL else "force") + "`. Not `git stash`: the stash is shared by every worktree of this clone." + repair,
-            # The porcelain lines themselves, so a caller that branched on the
-            # token does not have to recover them from the sentence.
-            facts = {
-                "slot": target,
-                "path": path,
-                "uncommitted": _porcelain_entries(work),
-                # Whose work it is, when not the caller's: an agent branching
-                # on the token cannot read that from the sentence.
-                "holder": holder,
-                "same_session": _same_harness_session(me, holder),
-            },
+        whole = repair or work[0].startswith(VANISHED_CHECKOUT)
+        return struct(
+            refusal = _refusal(
+                "worktree_dirty",
+                name + ", at " + path + ", " + ("holds " + _work_said(work) if whole else "has uncommitted changes") + ":\n" +
+                _indented(work) + "\n" +
+                keep + "." + whose + " Discarding " + ("it" if whole else "them") + " with the worktree is " +
+                ("this session's decision, since the work is its subagent's" if _own_subagent(me, holder) else "the user's decision") +
+                ": `aspect worktree release " +
+                shell_quote(target if _is_detached_name(name) else name) + _id_flag(ctx) + " --" +
+                ("force=all" if needed == _FORCE_ALL else "force") + "`. Not `git stash`: the stash is shared by every worktree of this clone." + repair,
+                # The porcelain lines themselves, so a caller that branched on the
+                # token does not have to recover them from the sentence.
+                facts = {
+                    "slot": target,
+                    "path": path,
+                    "uncommitted": _porcelain_entries(work),
+                    # Whose work it is, when not the caller's: an agent branching
+                    # on the token cannot read that from the sentence.
+                    "holder": holder,
+                    "same_session": _same_harness_session(me, holder),
+                },
+            ),
+            reason = ("holds " + _work_said(work)) if whole else "has uncommitted changes",
+            target = target,
+            name = name,
         )
 
     # A detached HEAD keeps nothing alive once its worktree goes: commits only
@@ -3579,22 +3639,27 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     tip = tips[0] if tips else ""
     named = ("(%s %s)" % ("tips" if len(tips) > 1 else "tip", ", ".join(_capped(tips))) if tips else "(its HEAD reflog could not be read; `git reflog` in the slot lists them)")
     if orphans and ctx.args.force != needed and ctx.args.force != _FORCE_ALL:
-        return _refuse(
-            ctx,
-            "unreferenced_commits",
-            "%s has %s only its HEAD reaches, at %s %s. Releasing " % (
-                ("slot " + target) if (registry["slots"][target].get("lease") or {}).get("detached", "") else name,
-                counted,
-                path,
-                named,
-            ) + "would leave %s dangling — reachable from no ref, for `git gc` to collect. " % (
-                "it" if orphans == 1 else "them"
-            ) + "To keep %s, `git branch <branch> " % ("it" if orphans == 1 else "them") + (tip or "<commit>") +
-            "` from the clone" + in_clone + (" for each tip" if len(tips) > 1 else "") + ". Discarding %s with the " % (
-                "it" if orphans == 1 else "them"
-            ) + "worktree is the user's decision: `aspect worktree release " + shell_quote(target if _is_detached_name(name) else name) +
-            _id_flag(ctx) + " --" + ("force=all" if needed == _FORCE_ALL else "force") + "`.",
-            facts = {"slot": target, "path": path, "commits": orphans, "head": tip, "tips": tips},
+        flag = "force=all" if needed == _FORCE_ALL else "force"
+        return struct(
+            refusal = _refusal(
+                "unreferenced_commits",
+                "%s has %s only its HEAD reaches, at %s %s. Releasing " % (
+                    ("slot " + target) if (registry["slots"][target].get("lease") or {}).get("detached", "") else name,
+                    counted,
+                    path,
+                    named,
+                ) + "would leave %s dangling — reachable from no ref, for `git gc` to collect. " % (
+                    "it" if orphans == 1 else "them"
+                ) + "To keep %s, `git branch <branch> " % ("it" if orphans == 1 else "them") + (tip or "<commit>") +
+                "` from the clone" + in_clone + (" for each tip" if len(tips) > 1 else "") + ". Discarding %s with the " % (
+                    "it" if orphans == 1 else "them"
+                ) + "worktree is the user's decision: `aspect worktree release " + shell_quote(target if _is_detached_name(name) else name) +
+                _id_flag(ctx) + " --" + flag + "`.",
+                facts = {"slot": target, "path": path, "commits": orphans, "head": tip, "tips": tips},
+            ),
+            reason = "has " + counted + " only its HEAD reaches",
+            target = target,
+            name = name,
         )
 
     # What the slot is left holding is what the next allocation scores it on, so
@@ -3602,7 +3667,6 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     # earlier occupant's digest — which would score it 100 for state it does not
     # have and send the next caller to the coldest slot in the pool.
     head = ""
-    discarded = work
 
     # Read before the worktree goes: afterwards a caller standing in it has no
     # current directory to ask about, and every later command from there fails
@@ -3644,10 +3708,36 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     # listing tell a reclaimed base from one that was never built.
     slot["had_base"] = slot.get("had_base", False) or warmth_of(ctx.std, path, root).base
     write_registry(ctx.std, pool["dir"], registry)
+    return struct(
+        refusal = None,
+        reason = "",
+        target = target,
+        name = name,
+        path = path,
+        head = head,
+        branched = branched,
+        released = released,
+        holder = holder,
+        overrode = overrode,
+        orphans = orphans,
+        counted = counted,
+        tips = tips,
+        tip = tip,
+        discarded = work,
+        server = server,
+        left = left,
+    )
 
-    # Recorded: what is left only reads, and asking every remote ref whether
-    # it contains a commit is no reason to keep other callers waiting.
-    _unlock(ctx, pool, lock)
+def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str) -> dict:
+    """What `release` says about a slot `_release_slot` released: its JSON
+    document, less `schema_version`, warnings included. Asks git whether a
+    remote has the head, so it is called with the lock given back.
+    `clone_there` is the slot's clone when it is not the one this runs in."""
+    path = done.path
+    head = done.head
+    holder = done.holder
+    orphans = done.orphans
+    tips = done.tips
 
     # The branch and its commits stay in the clone; whether any remote has them
     # is what decides whether releasing leaves work recoverable only from here.
@@ -3658,18 +3748,18 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     # Back to where the lease was taken from — usually the agent's own project,
     # which its harness may require it to stay in — and the main clone only
     # when that is unknown or gone.
-    came_from = "" if overrode else holder.get("cwd", "")
+    came_from = "" if done.overrode else holder.get("cwd", "")
     back = came_from if (came_from and ctx.std.fs.exists(came_from) and
                          not came_from.startswith(path + "/") and came_from != path) else clone
 
     warnings = []
-    if head and not on_remote and branched:
-        push = _push_command(ctx, pool, released)
-        if push and in_clone:
-            push = push.replace("git ", "git -C " + shell_quote(there.clone) + " ", 1)
+    if head and not on_remote and done.branched:
+        push = _push_command(ctx, pool, done.released)
+        if push and clone_there:
+            push = push.replace("git ", "git -C " + shell_quote(clone_there) + " ", 1)
         warnings.append({
             "code": "head_not_on_remote",
-            "message": (released + " is kept in the clone at " + _short(head) + ", but no remote has " +
+            "message": (done.released + " is kept in the clone at " + _short(head) + ", but no remote has " +
                         ("it: `" + push + "` keeps it safe" if push else "it, and this clone has none: the clone is its only copy")),
             "head": head,
         })
@@ -3678,61 +3768,258 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             "code": "unreferenced_commits_discarded",
             "message": ("dropped with the worktree: %s that no branch had, now dangling until " +
                         "`git gc` collects %s; `git branch <branch> %s` recovers %s") % (
-                counted,
+                done.counted,
                 "it" if orphans == 1 else "them",
                 " / ".join(_capped(tips)) or "<commit>",
                 "it" if orphans == 1 else "them",
             ),
-            "head": tip,
+            "head": done.tip,
             "tips": tips,
             "commits": orphans,
         })
-    if discarded:
+    if done.discarded:
         warnings.append({
             "code": "uncommitted_discarded",
-            "message": "discarded with the worktree:\n" + _indented(discarded),
-            "files": _porcelain_entries(discarded),
+            "message": "discarded with the worktree:\n" + _indented(done.discarded),
+            "files": _porcelain_entries(done.discarded),
         })
-    if overrode:
+    if done.overrode:
         warnings.append({
             "code": "overrode_another_session",
             "message": "ended a lease held by " + _holder(holder),
             "previous_holder": holder,
         })
-    if server:
+    if done.server:
         warnings.append({
             "code": "bazel_server_running",
             "message": ("a Bazel server (pid %d) still holds this slot's output base, which keeps " +
-                        "the next lease of it hot; it exits after Bazel's idle timeout") % server,
-            "server_pid": server,
+                        "the next lease of it hot; it exits after Bazel's idle timeout") % done.server,
+            "server_pid": done.server,
         })
-    if left:
+    if done.left:
         warnings.append({
             "code": "cwd_removed",
             "message": "this shell is in " + path + ", which no longer exists; `cd " + shell_quote(back) + "`",
             "cd": back,
         })
+    return {
+        "released": done.released,
+        "already_free": False,
+        "slot": done.target,
+        "path": path,
+        "head": head,
+        "head_on_remote": on_remote if head else None,
+        "discarded": _porcelain_entries(done.discarded),
+        "cwd_removed": done.left,
+        "clone": clone,
+        "warnings": warnings,
+    }
 
+def _say_released(ctx: TaskContext, doc: dict, root: str) -> None:
+    """The text report of one `_release_report` document."""
+    _info(ctx.std, "released " + doc["released"] + "; the slot stays in the pool, " +
+                   _warmth_note(ctx.std, doc["path"], doc["released"], root).partition(":")[0])
+    for w in doc["warnings"]:
+        _warn(ctx.std, w["message"])
+
+def _slot_names(slot: dict) -> tuple:
+    """`(branch, detached)` for the lease or reservation `slot` has: the branch,
+    or for a detached one "" and the ref it was taken at, as `list` reports
+    them."""
+    claim = slot.get("lease") or slot.get("reservation") or {}
+    name = claim.get("name", "")
+    if claim.get("detached", ""):
+        return ("", claim["detached"])
+    if _is_detached_name(name):
+        return ("", name.removeprefix("(detached at ").removesuffix(")"))
+    return (name, "")
+
+def _slot_label(branch: str, detached: str, slot_id: str) -> str:
+    """A slot as one line of `release --all` names it: its branch and id, or
+    for a detached slot its ref and id."""
+    if branch:
+        return branch + " (slot " + slot_id + ")"
+    if detached:
+        return "slot " + slot_id + " (detached at " + detached + ")"
+    return "slot " + slot_id
+
+def _skipped_slot(slot_id: str, names: tuple, reason: str) -> dict:
+    """An entry of `release --all`'s `skipped` list."""
+    return {"slot": slot_id, "branch": names[0], "detached": names[1], "reason": reason}
+
+def _release_all_plan(ctx: TaskContext, pool: dict, registry: dict, here: str) -> struct:
+    """The slots `release --all` acts on in `pool`'s clone: `leased`, the ids
+    to judge, in id order with `here` — the slot the caller stands in — last;
+    and `skipped`, a `_skipped_slot` for each slot being set up and each lease
+    this clone's git does not list (`_unlisted_lease`), which `release` of it
+    by id refuses and explains. Slots another clone owns are in neither."""
+    checked_out = _checked_out_branches(ctx, pool)
+    ours = [
+        sid
+        for sid in sorted(registry["slots"].keys())
+        if registry["slots"][sid].get("owner_git_dir", "") == pool["git_common_dir"]
+    ]
+    leased = []
+    skipped = []
+    for sid in ours:
+        slot = registry["slots"][sid]
+        if slot["state"] == RESERVED:
+            skipped.append(_skipped_slot(sid, _slot_names(slot), "being set up by an `aspect worktree add`"))
+        elif slot["state"] == LEASED and _unlisted_lease(ctx, pool, registry, sid, checked_out):
+            skipped.append(_skipped_slot(
+                sid,
+                _slot_names(slot),
+                "this clone's git does not list its checkout; `aspect worktree release " + sid + "` says why",
+            ))
+        elif slot["state"] == LEASED:
+            leased.append(sid)
+    return struct(
+        leased = [sid for sid in leased if sid != here] + [sid for sid in leased if sid == here],
+        skipped = skipped,
+    )
+
+def _collected_refusal(doc: dict, slot_id: str, names: tuple) -> dict:
+    """A slot's `_refusal` document as `release --all` lists it: the token and
+    message first, then the slot, branch and detached ref it is about, then its
+    own facts, without the `schema_version` the whole document carries once."""
+    return {
+        "error": doc["error"],
+        "retryable": doc["retryable"],
+        "message": doc["message"],
+        "slot": slot_id,
+        "branch": names[0],
+        "detached": names[1],
+    } | {k: v for k, v in doc.items() if k not in ["schema_version", "error", "retryable", "message", "branch"]}
+
+def _lease_key(slot: dict) -> tuple:
+    """What identifies one lease of a slot, to tell whether it is still the
+    lease `release --all` planned on."""
+    lease = slot.get("lease") or {}
+    return (slot.get("state", ""), slot.get("owner_git_dir", ""), lease.get("name", ""), lease.get("since", ""), lease.get("agent") or {})
+
+def _release_all(ctx: TaskContext) -> int | TaskConclusion:
+    """`release --all`: every slot this clone's pool leases, each judged and
+    released as `release <its branch>` would be.
+
+    The pool lock is held for one slot at a time: given back after each slot's
+    registry write, so other `aspect worktree` calls are not queued behind the
+    whole run, and taken again for the next. On taking it again the registry is
+    read afresh, and a slot that is no longer leased to the same holder, or no
+    longer this clone's, is skipped as changed; if the lock cannot be had, the
+    slots not reached are skipped, a warning says so, and the exit is
+    `_EX_TEMPFAIL` unless something was refused.
+
+    Slots being set up, and leases this clone's git does not list, are skipped
+    and reported. Other clones' slots and stranded ones are not this clone's to
+    release, and are left out. The slot the caller stands in goes last, so
+    nothing before it runs from a directory already removed; the `cwd_removed`
+    advice is said once, for the run.
+    """
+    if ctx.args.branch:
+        asked = ctx.args.branch[0]
+        return _refuse(
+            ctx,
+            "invalid_arguments",
+            "--all releases every slot this clone leases, so it takes no branch; `aspect worktree release " +
+            shell_quote(asked) + "` releases that one alone" + (
+                ". `--force all` reads as a bare --force and a branch called all: the grade is written `--force=all`" if asked == _FORCE_ALL and ctx.args.force == _FORCE_DIRTY else ""
+            ),
+            facts = {"asked": asked},
+        )
+    pool = _pool(ctx)
+    if not pool:
+        return _refuse(
+            ctx,
+            "not_a_repository",
+            "not inside a git repository, so there is no pool to release from — `--all` releases the slots " +
+            "the clone it runs in leases; run it from that clone",
+        )
+    lock = _lock_pool(ctx, pool)
+    if not lock:
+        return _pool_busy(ctx)
+    root = _output_root(ctx)
+    registry = _adopted(ctx, pool)
+    if registry.get("read_only", False):
+        return _newer_registry(ctx, pool)
+    if _reclaim_reservations(ctx, pool, registry):
+        write_registry(ctx.std, pool["dir"], registry)
+
+    plan = _release_all_plan(ctx, pool, registry, _slot_here(ctx, pool, registry))
+    planned = {sid: _lease_key(registry["slots"][sid]) for sid in plan.leased}
+    names = {sid: _slot_names(registry["slots"][sid]) for sid in plan.leased}
+    skipped = list(plan.skipped)
+
+    released = []
+    refused = []
+    warnings = []
+    lines = []
+    unreached = []
+    for i in range(len(plan.leased)):
+        sid = plan.leased[i]
+        if i > 0:
+            if not _relock(ctx, pool, lock):
+                unreached = plan.leased[i:]
+                break
+            registry = _adopted(ctx, pool)
+            if registry.get("read_only", False) or _lease_key(registry["slots"].get(sid) or {}) != planned[sid]:
+                _unlock(ctx, pool, lock)
+                skipped.append(_skipped_slot(sid, names[sid], "changed while --all ran"))
+                continue
+        branch = (registry["slots"][sid].get("lease") or {}).get("name", "")
+        done = _release_slot(ctx, pool, registry, sid, branch or sid, root, "")
+        _unlock(ctx, pool, lock)
+        if done.refusal:
+            refused.append(_collected_refusal(done.refusal, sid, names[sid]))
+            handle = names[sid][0] or sid
+            lines.append(struct(
+                refused = refused[-1],
+                text = ("refused " + _slot_label(names[sid][0], names[sid][1], sid) + ": " + done.refusal["error"] + " — " +
+                        done.reason + "; `aspect worktree release " + shell_quote(handle) + _id_flag(ctx) + "` shows the detail"),
+            ))
+            continue
+        doc = _release_report(ctx, pool, done, "")
+        warnings.extend([w for w in doc["warnings"] if w["code"] == "cwd_removed"])
+        doc["warnings"] = [w for w in doc["warnings"] if w["code"] != "cwd_removed"]
+        released.append(doc)
+        lines.append(struct(refused = None, doc = doc))
+
+    for sid in unreached:
+        skipped.append(_skipped_slot(sid, names[sid], "not reached: another `aspect worktree` call held the pool's lock"))
+    if unreached:
+        warnings.append({
+            "code": "pool_busy",
+            "message": ("another `aspect worktree` call held the pool's lock, so %s %s not reached; " +
+                        "`aspect worktree release --all` again takes up the rest") % (
+                pluralize(len(unreached), "slot"),
+                "was" if len(unreached) == 1 else "were",
+            ),
+            "slots": unreached,
+        })
+
+    code = 1 if refused else _EX_TEMPFAIL if unreached else 0
     if ctx.args.output == "json":
         ctx.std.io.stdout.write(json.encode({
             "schema_version": _SCHEMA_VERSION,
             "released": released,
-            "already_free": False,
-            "slot": target,
-            "path": path,
-            "head": head,
-            "head_on_remote": on_remote if head else None,
-            "discarded": _porcelain_entries(discarded),
-            "cwd_removed": left,
-            "clone": clone,
+            "refused": refused,
+            "skipped": skipped,
             "warnings": warnings,
         }, indent = 2) + "\n")
+        return code
+    if not lines and not skipped:
+        _info(ctx.std, "no slot of this clone's pool is leased, so there is nothing to release")
         return 0
-    _info(ctx.std, "released " + released + "; the slot stays in the pool, " +
-                   _warmth_note(ctx.std, path, released, root).partition(":")[0])
+    for line in lines:
+        if line.refused:
+            _warn(ctx.std, line.text)
+        else:
+            _say_released(ctx, line.doc, root)
+    for s in skipped:
+        _info(ctx.std, "skipped " + _slot_label(s["branch"], s["detached"], s["slot"]) + ": " + s["reason"])
+    _info(ctx.std, "released %d, refused %d, skipped %d" % (len(released), len(refused), len(skipped)))
     for w in warnings:
         _warn(ctx.std, w["message"])
-    return 0
+    return code
 
 def _path_impl(ctx: TaskContext) -> int | TaskConclusion:
     name = ctx.args.branch[0].removeprefix("refs/heads/")
@@ -5047,15 +5334,19 @@ add = task(
 worktree_release = task(
     kind = "release",
     group = ["worktree"],
-    summary = "End the lease on <branch>, or the slot you are in: remove the worktree, keep the slot warm.",
-    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.",
+    summary = "End the lease on <branch>, the slot you are in, or with --all every slot: remove the worktree, keep the slot warm.",
+    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.\n\n`--all` ends every lease this clone holds in its pool, one slot at a time, each judged as naming it would judge it: the refusals above and the `--force` grades apply to each slot, a sibling subagent's lease is never released, and a slot still being set up, or whose checkout this clone's git does not list, is skipped. The pool's lock is taken for one slot at a time, so other `aspect worktree` calls go on meanwhile; a slot whose lease changed in between is skipped. One line per slot says what happened, then a count; it exits 1 when any slot was refused.",
     implementation = _release_impl,
     traits = [Worktrees],
     args = {
         "branch": args.positional(
             minimum = 0,
             maximum = 1,
-            description = "The branch checked out in the slot, the slot id `aspect worktree list` shows in its first column, or the slot's directory. A detached slot also answers to the ref it was taken at, while no other slot is at it. A slot id or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is released as its own clone would release it. Omitted, the slot the working directory is in.",
+            description = "The branch checked out in the slot, the slot id `aspect worktree list` shows in its first column, or the slot's directory. A detached slot also answers to the ref it was taken at, while no other slot is at it. A slot id or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is released as its own clone would release it. Omitted, the slot the working directory is in. Not given with `--all`.",
+        ),
+        "all": args.boolean(
+            default = False,
+            description = "Release every slot this clone's pool leases, not one. Each is released or refused as `aspect worktree release <its branch>` would be, with the same `--force` grade; slots of other clones, and stranded ones, are not included. With `--output=json`, one document lists the slots `released`, `refused` and `skipped`.",
         ),
         "force": args.string(
             default = _FORCE_OFF,
@@ -5139,7 +5430,7 @@ worktree_list = task(
     kind = "list",
     group = ["worktree"],
     summary = "List this repository's worktree slots, what holds them, and how warm each is.",
-    description = _EXPERIMENTAL + "\n\n" + "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. A pool whose builds went to a different output user root has state neither command can see; this command reads warmth under the root this workspace resolves, given as `output_user_root` in its JSON and named under `--all` when it is not Bazel's default.\n\nSlots are listed in two tables, under a line counting how many are taken and free, because what is worth knowing about a slot somebody holds and one you could take are different things.\n\n`taken` — a worktree is checked out here:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          `in use`, or `setup` while an `aspect worktree add` is still checking a worktree out here\n    warmth         how much of Bazel's state this slot has behind it\n      hot          a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      warm         no server, but the output base is there\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    branch         what is checked out\n    agent          the kind of agent holding the slot — `claude-code`, `codex` — where one can be identified\n    session        its session id, in full, so it can be handed straight to that harness\n    notes          anything exceptional about the row\n\n`free` — no worktree here, and the slot is keeping its Bazel state for the next one:\n\n    slot           as above\n    warmth         as above. Which free slot the next `add` takes is decided by how well its last tree fits the branch asked for, not by warmth\n    last used      how long since the slot was last used: Bazel's last activity in it, or a worktree taken or given back there, whichever is newer; what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    last branch    what it held last, which is the signal for how warm it will be for the next thing you put in it\n    notes          anything exceptional about the row\n\n`session` and `notes` are left out when no slot fills them.\n\n`--verbose` adds a block per slot — its path, its output base and why one is absent (`not created yet`, or `reclaimed`), whether a Bazel server holds it, and every holder the slot remembers — then a section per agent session those holders name: its harness, its project, the command that returns to it, and every lease it took, active first. Most leases come from subagents, which report their parent's session, so that section is where the way back into each conversation is said once. A session gets no command where the harness does not publish one, or where the harness's own store no longer has it. Durations in the tables are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days; how long ago a lease ended is written in full.\n\nRows are ordered by what is happening: in use first, warmest down to cold, then the slots you could take, most recently used first.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days. One ordering differs: a slot's `history` is oldest first there, since that is the order it was written in, while the table shows it newest first.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take a free slot and check <branch> out in it, preferring the slot whose Bazel state best fits that branch — the one that last held it, where there is one. Checks out a branch this clone or a remote has; `--create` makes a new one, from HEAD or `--create=<ref>`, and `--detach` checks out any commit on no branch. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree that holds work — uncommitted changes, commits only a detached HEAD has — and names it.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale, and how long each has been idle. Without --dry-run it asks before deleting anything. For what the disk would actually give back, `aspect output-bases --measure-sizes` reports per-base sizes and `aspect gc` acts on them.",
+    description = _EXPERIMENTAL + "\n\n" + "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. A pool whose builds went to a different output user root has state neither command can see; this command reads warmth under the root this workspace resolves, given as `output_user_root` in its JSON and named under `--all` when it is not Bazel's default.\n\nSlots are listed in two tables, under a line counting how many are taken and free, because what is worth knowing about a slot somebody holds and one you could take are different things.\n\n`taken` — a worktree is checked out here:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          `in use`, or `setup` while an `aspect worktree add` is still checking a worktree out here\n    warmth         how much of Bazel's state this slot has behind it\n      hot          a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      warm         no server, but the output base is there\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    branch         what is checked out\n    agent          the kind of agent holding the slot — `claude-code`, `codex` — where one can be identified\n    session        its session id, in full, so it can be handed straight to that harness\n    notes          anything exceptional about the row\n\n`free` — no worktree here, and the slot is keeping its Bazel state for the next one:\n\n    slot           as above\n    warmth         as above. Which free slot the next `add` takes is decided by how well its last tree fits the branch asked for, not by warmth\n    last used      how long since the slot was last used: Bazel's last activity in it, or a worktree taken or given back there, whichever is newer; what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    last branch    what it held last, which is the signal for how warm it will be for the next thing you put in it\n    notes          anything exceptional about the row\n\n`session` and `notes` are left out when no slot fills them.\n\n`--verbose` adds a block per slot — its path, its output base and why one is absent (`not created yet`, or `reclaimed`), whether a Bazel server holds it, and every holder the slot remembers — then a section per agent session those holders name: its harness, its project, the command that returns to it, and every lease it took, active first. Most leases come from subagents, which report their parent's session, so that section is where the way back into each conversation is said once. A session gets no command where the harness does not publish one, or where the harness's own store no longer has it. Durations in the tables are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days; how long ago a lease ended is written in full.\n\nRows are ordered by what is happening: in use first, warmest down to cold, then the slots you could take, most recently used first.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days. One ordering differs: a slot's `history` is oldest first there, since that is the order it was written in, while the table shows it newest first.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take a free slot and check <branch> out in it, preferring the slot whose Bazel state best fits that branch — the one that last held it, where there is one. Checks out a branch this clone or a remote has; `--create` makes a new one, from HEAD or `--create=<ref>`, and `--detach` checks out any commit on no branch. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree that holds work — uncommitted changes, commits only a detached HEAD has — and names it.\n\n    aspect worktree release --all\n        End every lease this clone holds, each judged as naming it would be. A slot holding work, or held by another session, is refused and named, and the rest are released.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale, and how long each has been idle. Without --dry-run it asks before deleting anything. For what the disk would actually give back, `aspect output-bases --measure-sizes` reports per-base sizes and `aspect gc` acts on them.",
     implementation = _list_impl,
     traits = [Worktrees],
     args = {
@@ -5169,6 +5460,10 @@ testonly_capped = _capped
 testonly_indented = _indented
 testonly_utf8_len = _utf8_len
 testonly_release_grade = _release_grade
+testonly_release_all_plan = _release_all_plan
+testonly_collected_refusal = _collected_refusal
+testonly_slot_label = _slot_label
+testonly_slot_names = _slot_names
 testonly_own_subagent = _own_subagent
 testonly_same_harness_session = _same_harness_session
 testonly_history_columns = _HISTORY_COLUMNS
