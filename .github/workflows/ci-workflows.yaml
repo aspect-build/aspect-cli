@@ -4,6 +4,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `labeled` so adding ci:workflows-runners starts a run; see runner-smoke.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 permissions:
   id-token: write
 concurrency:
@@ -39,25 +42,22 @@ jobs:
       - name: tools/bazel wrapper tests
         run: ./tools/wrapper-test.sh
   pre-build:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      # launcher-install: false — we're about to build the CLI from source
-      # via bootstrap.sh; no point installing a launcher we'd immediately
-      # shadow. aspect-api-token is also omitted: auth login would run
-      # before any `aspect` binary exists.
+      # The stable launcher installed here is the `aspect` credential helper
+      # that bootstrap.sh's `--config=aspect-cloud` authenticates the cache
+      # with; the CLI under test is the one bootstrap.sh builds.
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Pre-build CLI
         run: |
           echo "Build and upload CLI to remote cache"
           .aspect/bootstrap.sh
-      # Surface the just-built binary to the ephemeral (GitHub-hosted) jobs
-      # below. Those runners are small and don't have remote-cache access yet,
-      # so we re-use the binary that the self-hosted runner already built rather
-      # than rebuilding from source per ephemeral job.
+      # Surface the just-built binary to the jobs below rather than rebuilding
+      # it from source in each one.
       - name: Upload aspect-cli binary
         uses: actions/upload-artifact@v7
         with:
@@ -86,7 +86,11 @@ jobs:
   #   head_sha  -> GITHUB_SHA              (so the check-run attaches to the PR
   #                                         head commit, not the merge commit)
   # On push (no PR) both resolve to empty and delivery behaves as a branch run.
+  #
+  # Delivery runs on self-hosted Aspect Workflows runners, so it is opt-in:
+  # workflow_dispatch, or a PR carrying the ci:workflows-runners label.
   dispatch-delivery:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:workflows-runners')
     runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 5
@@ -271,7 +275,7 @@ jobs:
       - name: Lint Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect lint --task:name lint-gha-debug
   build-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -279,11 +283,12 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task
         run: bazel build --task:name build-gha
   build-debug-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -291,11 +296,12 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Build Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 bazel build --task:name build-gha-debug
   test-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -303,11 +309,12 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task
         run: aspect test --task:name test-gha
   test-debug-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -315,6 +322,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect test --task:name test-gha-debug
@@ -323,9 +331,8 @@ jobs:
   # cache is disabled (--remote_cache=) so Bazel keeps outputs local and BES
   # reports `file://` URIs for test.log / action stderr — the path the inline
   # failure snippets resolve without the FUSE mount. A --disk_cache keeps it
-  # quick across runs. This is the surface that exercises the non-FUSE snippet
-  # path end-to-end; once our multi-tenant remote cache is available on
-  # ephemeral runners we can add a bytestream:// variant too.
+  # quick across runs. This is the surface that exercises the `file://` snippet
+  # path end-to-end; build-task / test-task cover the remote-cache variant.
   #
   # NOTE: while the DO-NOT-LAND commit drops the `manual` tag from
   # //examples/test_states:demo_{test,build}_fail, these jobs go red on purpose
@@ -437,8 +444,7 @@ jobs:
         run: python3 tools/cache-diff-integration.py --aspect "$(command -v aspect)" --bazel-version "${{ matrix.bazel }}"
   # `aspect cache diff` probes the remote cache with --experimental_remote_require_cached
   # to list the test targets affected by this commit — running nothing. It needs
-  # cache access, so (like build/test) it runs on a self-hosted aspect-workflows
-  # runner, not an ephemeral one.
+  # cache access, which config.axl's Aspect Cloud `--remote` default provides.
   #
   # Baseline = whatever the remote cache already holds (populated by mainline's
   # test-task uploads). We `needs: [pre-build]` (NOT test-task) so the probe reads
@@ -447,7 +453,7 @@ jobs:
   # The probe forces a fresh remote lookup per action via --nokeep_state_after_build
   # --nouse_action_cache, so it needs no separate or wiped output base.
   cache-diff-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -455,11 +461,12 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task
         run: aspect cache diff --task:name cache-diff-gha
   cache-diff-debug-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 30
     steps:
@@ -467,15 +474,17 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect cache diff --task:name cache-diff-gha-debug
   # Workflows runner smoke test: the freshly-built CLI starts, prints version /
   # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
   # Runs on a self-hosted runner because the ASPECT_WORKFLOWS_RUNNER_* values it
-  # dumps only exist there. Ported from the Buildkite `runner-smoke` step (which
-  # only runs on main); kept here so PRs catch CLI-startup / env-plumbing breakage.
+  # dumps only exist there, so it is opt-in like dispatch-delivery:
+  # workflow_dispatch, or a PR carrying the ci:workflows-runners label.
   runner-smoke:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:workflows-runners')
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
@@ -548,7 +557,7 @@ jobs:
   # like Buildkite's `$LAUNCHER`. The composite action exports $LAUNCHER and $CLI
   # into $GITHUB_ENV for the steps below.
   axl-tests:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 15
     steps:
@@ -556,6 +565,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
@@ -567,7 +577,7 @@ jobs:
   # CLI/launcher end-to-end smoke. Builds its own dev launcher (cheap — a
   # remote-cache hit on the pre-built tree).
   axl-smoke:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 15
     steps:
@@ -575,6 +585,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
@@ -662,7 +673,7 @@ jobs:
   # needed to add a shard.
   axl-suites:
     name: axl-suites (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 15
     strategy:
@@ -674,6 +685,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - uses: ./.github/actions/build-dev-launcher
         with:
@@ -719,7 +731,7 @@ jobs:
   # in 0.5.2 yet). sh_test has no coverage instrumentation so this exercises flag
   # plumbing + the "report not found" warning path rather than an LCOV payload.
   test-flags-task:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    runs-on: ubuntu-latest
     needs: [pre-build]
     timeout-minutes: 10
     steps:
@@ -727,6 +739,7 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
+          launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
       - name: Test Task — new flags
         run: |
@@ -759,6 +772,7 @@ jobs:
           rm -f "$REPORT"
   # The one status check the `main` ruleset requires. Add new jobs to `needs`;
   # `if: always()` lets it report red when a dependency fails or is cancelled.
+  # The opt-in Workflows-runner jobs may also be skipped.
   ci-ok:
     runs-on: ubuntu-latest
     if: always()
@@ -800,7 +814,12 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<<"$RESULTS" | sort
-          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | .key' <<<"$RESULTS")
+          failed=$(jq -r '
+            ["runner-smoke", "dispatch-delivery"] as $optional
+            | to_entries[]
+            | select(.value.result != "success")
+            | select(.value.result != "skipped" or (.key | IN($optional[]) | not))
+            | .key' <<<"$RESULTS")
           if [ -n "$failed" ]; then
             echo "::error::CI jobs that did not succeed: $(tr '\n' ' ' <<<"$failed")"
             exit 1

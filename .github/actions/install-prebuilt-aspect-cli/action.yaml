@@ -6,8 +6,8 @@ description: |
   installs it where this runner type expects to find the CLI:
 
     * GitHub-hosted ephemeral runner — installed on PATH as `aspect`
-      (`$HOME/.local/bin`, prepended via `$GITHUB_PATH`). These small runners
-      have no remote-cache access to rebuild the CLI from source efficiently.
+      (`$HOME/.local/bin`, prepended via `$GITHUB_PATH`), so each job skips
+      rebuilding the CLI from source.
 
     * Self-hosted Aspect Workflows runner (`ASPECT_WORKFLOWS_RUNNER` set) —
       written to the repo-relative `target/ci/aspect-cli`, the same path

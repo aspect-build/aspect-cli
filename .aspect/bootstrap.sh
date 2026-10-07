@@ -20,6 +20,12 @@ BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+# Off a Workflows runner, use Aspect Cloud when the job is logged in (the same
+# ASPECT_HAS_API_TOKEN gate as config.axl's `--remote` default). Its credential
+# helper is the `aspect` launcher setup-aspect installs.
+if [ -z "${ASPECT_WORKFLOWS_RUNNER:-}" ] && [ "${ASPECT_HAS_API_TOKEN:-}" = "true" ]; then
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-cloud"
+fi
 # --build_metadata flags for the pre-build invocation. Only set when we're
 # forwarding events to a BES backend (the Aspect Web UI or similar) —
 # otherwise the metadata has nowhere to surface.
