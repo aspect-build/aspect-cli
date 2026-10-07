@@ -46,12 +46,20 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      # The stable launcher installed here is the `aspect` credential helper
-      # that bootstrap.sh's `--config=aspect-cloud` authenticates the cache
-      # with; the CLI under test is the one bootstrap.sh builds.
+      # The stable launcher installed here only authenticates bootstrap.sh's
+      # Aspect Cloud cache; the CLI under test is the one bootstrap.sh builds.
+      # A released CLI cannot load this commit's .aspect config, so the login
+      # and the rc generation that setup-aspect would run in the checkout are
+      # skipped, and the login runs outside it instead.
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          bazelrc-generate: false
+      - name: Log in to Aspect Cloud
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        working-directory: ${{ runner.temp }}
+        env:
+          TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+        run: printf '%s' "$TOKEN" | aspect auth login --with-api-token
       - name: Pre-build CLI
         run: |
           echo "Build and upload CLI to remote cache"
