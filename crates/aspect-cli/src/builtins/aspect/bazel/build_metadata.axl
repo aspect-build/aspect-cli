@@ -18,6 +18,8 @@ strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
 load("../private/lib/ci.axl", "detect_buildkite_build_url")
+load("../private/lib/github.axl", "detect_commit_sha", "detect_synthesized_merge_sha")
+load("../private/lib/gitlab_detect.axl", "is_gitlab_synthesized_merge_pipeline")
 
 _VCS_HOST_TO_ENUM = {
     "github.com": "GITHUB",
@@ -85,17 +87,47 @@ def parse_git_remote_url(url):
         return {"host": host}
     return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
 
-def _git_show(process):
-    """Run `git show HEAD` and return a dict of commit fields.
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+def is_commit_sha(value: str) -> bool:
+    """True for the 7-64 character hex string a commit SHA is (SHA-1 or
+    SHA-256 object format).
+
+    Gates the PR head SHA before it reaches `git show` as a revision, and
+    the COMMIT_SHA a CI env var supplies when there is no git checkout. Both
+    come from the event payload or environment anyone who can trigger a build
+    controls, and `git show` reads a leading `-` as one of its own options:
+    `--output=<path>` overwrites that path. A value that is merely not a SHA
+    (Buildkite sets `BUILDKITE_COMMIT=HEAD` for a build with no commit pinned)
+    names no commit at all.
+    """
+    if len(value) < 7 or len(value) > 64:
+        return False
+    for i in range(len(value)):
+        if value[i] not in _HEX_DIGITS:
+            return False
+    return True
+
+def _git_show(process, rev, cwd = None):
+    """Run `git show <rev>` and return a dict of commit fields.
 
     Produces COMMIT_SHA, COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL, COMMIT_AUTHOR
     ("Name <email>"), COMMIT_MESSAGE, COMMIT_TIMESTAMP, TAG.
-    """
-    out = process.command("git").arg("show").arg("HEAD") \
-        .arg("--format=%H%n%aN%n%aE%n%s%n%aI%n%D").arg("--no-patch") \
-        .stdout("piped").stderr("piped").spawn().wait_with_output()
 
-    if not out.stdout:
+    `{}` when `rev` is not in the local object store. That is routine, not an
+    error: on a `fetch-depth: 1` merge-ref checkout the only commit fetched is
+    the synthesized merge itself, so the PR head `rev` resolves to nothing.
+    Callers keep the SHA they asked about and go without the description
+    rather than fall back to describing a different commit.
+    """
+    cmd = process.command("git").arg("show").arg(rev) \
+        .arg("--format=%H%n%aN%n%aE%n%s%n%aI%n%D").arg("--no-patch").arg("--no-show-signature") \
+        .stdout("piped").stderr("piped")
+    if cwd:
+        cmd = cmd.current_dir(cwd)
+    out = cmd.spawn().wait_with_output()
+
+    if not out.status.success or not out.stdout:
         return {}
 
     lines = out.stdout.strip().split("\n")
@@ -559,11 +591,43 @@ def get_task_metadata_flags(ctx):
 
 # Public entry point
 
-def get_build_metadata(std) -> dict:
+def detect_merged_pr_head(std, built_sha):
+    """The PR head behind `built_sha` when `built_sha` is a forge-synthesized
+    merge commit, else `""`.
+
+    On GitHub Actions `pull_request` the default checkout is
+    `refs/pull/N/merge` (`GITHUB_SHA`), and on GitLab merged-result /
+    merge-train pipelines it is `CI_COMMIT_SHA`: an ephemeral merge of the
+    head onto the base, authored by the forge, subject "Merge <head> into
+    <base>", in neither branch's history. Reporting it misattributes the
+    build, so the PR head is reported in its place.
+
+    Only that exact commit is redirected. A job that checks out another ref,
+    commits before building, or runs on `pull_request_target` (where
+    `GITHUB_SHA` is the base tip, not a merge) built something else, and is
+    described as built.
+    """
+    if not built_sha:
+        return ""
+    if is_gitlab_synthesized_merge_pipeline(std):
+        if built_sha == std.env.var("CI_COMMIT_SHA"):
+            return std.env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_SHA") or ""
+        return ""
+    merge_sha = detect_synthesized_merge_sha(std)
+    if built_sha != merge_sha:
+        return ""
+    pr_head = detect_commit_sha(std)
+    return "" if pr_head == merge_sha else pr_head
+
+def get_build_metadata(std, cwd = None) -> dict:
     """The build metadata for this checkout and CI environment, as {KEY: value}
     with empty values dropped. Rendered as `--build_metadata` flags by
     `get_build_metadata_flags` and as workspace status by
-    `workspace_status_lines`."""
+    `workspace_status_lines`.
+
+    `cwd` is the directory git runs in; production passes None (the process
+    dir) and tests point it at a scratch repo.
+    """
     meta = {}
 
     # 1: CI-host-specific metadata.
@@ -578,9 +642,13 @@ def get_build_metadata(std) -> dict:
 
     # 2: Overlay `git show` commit data — authoritative for COMMIT_* (works
     # offline and off-CI).
-    git_data = _git_show(std.process)
-    for k, v in git_data.items():
-        meta[k] = v
+    commit = _git_show(std.process, "HEAD", cwd = cwd)
+    pr_head = detect_merged_pr_head(std, commit.get("COMMIT_SHA") or meta.get("COMMIT_SHA", ""))
+    if is_commit_sha(pr_head):
+        commit = _git_show(std.process, pr_head, cwd = cwd) or {"COMMIT_SHA": pr_head}
+    meta.update(commit)
+    if not is_commit_sha(meta.get("COMMIT_SHA", "")):
+        meta.pop("COMMIT_SHA", None)
 
     # 3: VCS-URL override (mirror / vendored-checkout); after the CI collector
     # so it can correct where the code actually lives.
@@ -595,9 +663,9 @@ def get_build_metadata(std) -> dict:
 
     return {key: value for (key, value) in meta.items() if value}
 
-def get_build_metadata_flags(std):
+def get_build_metadata_flags(std, cwd = None):
     """Generate --build_metadata=KEY=VALUE flags (empty values skipped)."""
-    return ["--build_metadata=" + key + "=" + value for (key, value) in get_build_metadata(std).items()]
+    return ["--build_metadata=" + key + "=" + value for (key, value) in get_build_metadata(std, cwd = cwd).items()]
 
 def workspace_status_lines(meta: dict) -> list:
     """`KEY value` lines for Bazel's `--workspace_status_command`, which takes

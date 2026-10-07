@@ -1,5 +1,6 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
+load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
@@ -348,6 +349,10 @@ def config(ctx: ConfigContext):
     # GitHub event detection smoke: PR/merge_group/push shapes for detect_changed_files.
     # Run with: aspect dev test-github-detect
     ctx.tasks.add(github_detect_tests)
+
+    # Build metadata commit resolution: PR head vs. synthesized merge commit.
+    # Run with: aspect dev test-build-metadata
+    ctx.tasks.add(build_metadata_tests)
 
     # lint_results template snapshots.
     # Run with: aspect dev test-lint-template-snapshots
