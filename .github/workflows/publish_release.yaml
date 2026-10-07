@@ -16,6 +16,8 @@ permissions:
 jobs:
   build_release_artifacts:
     uses: ./.github/workflows/build_release_artifacts.yaml
+    with:
+      release: true
   release:
     name: Build MacOS and Linux release artifacts
     runs-on: ubuntu-latest

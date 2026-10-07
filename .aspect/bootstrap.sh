@@ -20,6 +20,19 @@ BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+# Off a Workflows runner, use Aspect Cloud when the job is logged in (the same
+# ASPECT_HAS_API_TOKEN gate as config.axl's `--remote` default). This spells out
+# --config=aspect-cloud's endpoints rather than naming it, because its `aspect`
+# credential helper runs in the workspace, where a released CLI cannot load
+# this commit's .aspect config. The wrapper runs it from outside the checkout.
+if [ -z "${ASPECT_WORKFLOWS_RUNNER:-}" ] && [ "${ASPECT_HAS_API_TOKEN:-}" = "true" ] && command -v aspect >/dev/null; then
+    HELPER_DIR="$(mktemp -d)"
+    printf '#!/bin/sh\ncd "%s" && exec "%s" "$@"\n' "${HELPER_DIR}" "$(command -v aspect)" >"${HELPER_DIR}/credential-helper"
+    chmod +x "${HELPER_DIR}/credential-helper"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-common --config=aspect-cache --config=aspect-bes"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=grpcs://cache.aspect.build --bes_backend=grpcs://bes.aspect.build --bes_results_url=https://app.aspect.build/i/"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --credential_helper=cache.aspect.build=${HELPER_DIR}/credential-helper --credential_helper=bes.aspect.build=${HELPER_DIR}/credential-helper"
+fi
 # --build_metadata flags for the pre-build invocation. Only set when we're
 # forwarding events to a BES backend (the Aspect Web UI or similar) —
 # otherwise the metadata has nowhere to surface.

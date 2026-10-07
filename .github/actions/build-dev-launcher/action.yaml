@@ -2,8 +2,10 @@ name: Build the dev launcher
 description: |
   Internal-only. Builds the UNSTAMPED dev launcher (= Buildkite's $LAUNCHER)
   from THIS commit and copies the host-native binary to a stable
-  `target/ci/aspect-launcher`, alongside the prebuilt `target/ci/aspect-cli`
-  that `install-prebuilt-aspect-cli` installed.
+  `target/ci/aspect-launcher`, alongside the prebuilt `target/ci/aspect-cli`.
+  `install-prebuilt-aspect-cli` writes that path itself on a Workflows runner;
+  on a GitHub-hosted runner, where it puts the CLI on PATH instead, this action
+  copies it there.
 
   `aspect tests axl` (and the launcher smoke commands) assert under CI that
   they were launched by the just-built, UNSTAMPED launcher:
@@ -59,6 +61,7 @@ runs:
         mkdir -p target/ci
         LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
         CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
+        [ -f "$CLI" ] || cp -f "$(command -v aspect)" "$CLI"
         launcher_version=""
         for cand in bazel-bin/crates/aspect-launcher/aspect-launcher bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
           [ -f "$cand" ] || continue
