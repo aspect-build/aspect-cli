@@ -201,6 +201,7 @@ def _new(ctx: TaskContext, spawn, candidate_factory = None, clock = monotonic, o
         build_started = build_started,
         poll = poll,
         restart = restart,
+        stop = stop,
     )
 
 watch_supervisor = namespace(new = _new)
