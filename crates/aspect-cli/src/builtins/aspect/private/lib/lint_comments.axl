@@ -159,9 +159,14 @@ def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = N
     422 the callers already collect. When the window IS scoped, an absent path
     means unchanged and gets no comment — the 422s this guard exists to prevent.
 
+    Always False for a line-less anchor (`line < 1`, a file-level or
+    location-less finding): hosts reject it, and the status surfaces carry it.
+
     Callers that gate comment *retention* must reuse this exact predicate: a
     narrower rule would reap comments the same run just posted.
     """
+    if not path or line < 1:
+        return False
     if not window.scoped:
         return True
     lines = window.lines_by_path.get(path)
