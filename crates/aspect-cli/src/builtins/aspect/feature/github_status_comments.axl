@@ -60,7 +60,8 @@ the hidden items per contributing task.
 
 Body-template variables:
     marker         \342\200\224 HTML comment identifying this comment across PATCHes.
-    started_at     \342\200\224 Earliest sibling-task start time, UTC.
+    started_at     \342\200\224 Earliest sibling-task start time, UTC. Not in the
+                     built-in body, which carries "Last updated" in the footer.
     status_badges  \342\200\224 {badge_key -> label}.
     entries        \342\200\224 per-task entry dicts, alphabetical by (job, kind, name).
                      `entry.kind` is the task kind (the command); `entry.name`
@@ -191,8 +192,7 @@ _DEFAULT_STATUS_BADGES = {
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
 ## Aspect Workflows Tasks
-{% if started_at %}📅 {{ started_at }}<br>
-{% endif %}{% if not entries -%}
+{% if not entries -%}
 _No tasks have reported yet._
 {% else -%}
 ## Task Results
@@ -245,7 +245,7 @@ Reproduce with:
 {% if fix_rows %}
 ## Fix
 {% for r in fix_rows %}{% if r.show_heading %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }} {% endif %}{% if r.task_names %}({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
@@ -259,7 +259,7 @@ Reproduce with:
 {% if repro_rows %}
 ## Reproduce
 {% for r in repro_rows %}{% if r.show_heading %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }} {% endif %}{% if r.task_names %}({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
@@ -953,14 +953,46 @@ _BUCKET_SEVERITY_RANK = {
 
 _RANK_EMOJI = {3: "❌", 2: "⚠️", 1: "🔄", 0: "✅"}
 
+def _merge_identical_commands(rows):
+    """Collapse rows whose command and description match across task kinds.
+
+    `dedup_and_attribute` keys on `(kind, command, description)`, so a command
+    two kinds both reach — `aspect build -- //pkg:lib` from a build task and from
+    a test task whose build failed — yields two identical code blocks under two
+    headings. Running it once serves both, so the row is merged and every
+    contributing task is attributed. `kind` is dropped when the contributors
+    disagree, because no single kind then describes the row and the task names
+    carry the attribution.
+
+    Runs before ranks and keys are assigned, so a merged row ranks by the most
+    severe of its contributors.
+    """
+    merged = {}
+    order = []
+    for r in rows:
+        k = (r["command"], r["description"])
+        if k not in merged:
+            merged[k] = r
+            order.append(k)
+            continue
+        first = merged[k]
+        if first["kind"] != r["kind"]:
+            first["kind"] = ""
+        for tn in r["task_names"]:
+            if tn not in first["task_names"]:
+                first["task_names"].append(tn)
+    return [merged[k] for k in order]
+
 def _collect_repro_fix_rows(sections):
     """Return `(repro_rows, fix_rows)` for the template, each row
     `{"kind", "command", "description", "task_names": [...], "severity_emoji"}`.
 
-    Scope: repro = non-passing (failed/failing/flagged); fix = every
-    contributor (so format/gazelle advertise fixes even on green). Dedup
-    on `(kind, command, description)`; `severity_emoji` = max across
-    contributors. Sorted most-severe first, first-seen tiebreak.
+    Scope: both are limited to tasks that are not passing — a command under a
+    green heading reads as work to do when there is none. Deduped on
+    `(kind, command, description)` and then across kinds on
+    `(command, description)`, so one literal command appears once however many
+    tasks reach it. `severity_emoji` = max across contributors. Sorted
+    most-severe first, first-seen tiebreak.
     """
 
     # task name → highest severity rank across buckets it appears in.
@@ -988,7 +1020,7 @@ def _collect_repro_fix_rows(sections):
                         "command": c.command,
                         "description": c.description,
                     })
-        rows = dedup_and_attribute(entries)
+        rows = _merge_identical_commands(dedup_and_attribute(entries))
         for r in rows:
             ranks = [task_rank.get(tn, 0) for tn in r["task_names"]] or [0]
             r["_rank"] = max(ranks)
@@ -1005,7 +1037,7 @@ def _collect_repro_fix_rows(sections):
         return sorted_rows
 
     repro_rows = _gather(("failed", "failing", "flagged"), "repro_commands")
-    fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")
+    fix_rows = _gather(("running", "failed", "failing", "flagged"), "fix_commands")
     return (repro_rows, fix_rows)
 
 def _command_key(kind, command, description):
