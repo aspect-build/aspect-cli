@@ -43,9 +43,10 @@ _RUNINFO_JSON_SUFFIX = ".aspect_runinfo.json"
 
 # The runinfo aspect source, applied via `ctx.bazel.aspect(...)`. `_tokenize` is a
 # Starlark port of Bazel's ShellUtils.tokenize (ShellUtils.java:90-143); the
-# args pipeline mirrors RunfilesSupport.java:608 — location-expand over `data`,
-# Make-var expand, then shell-tokenize — so the captured argv matches `bazel
-# run` byte-for-byte. Backslashes are doubled for the AXL string literal.
+# args pipeline mirrors RunfilesSupport.computeArgs — location-expand over
+# `data` with runfiles paths (`Expander.withDataLocations()`), Make-var expand,
+# then shell-tokenize — so the captured argv matches `bazel run` byte-for-byte.
+# Backslashes are doubled for the AXL string literal.
 _RUNINFO_BZL = """_BS = '\\\\'
 
 def _tokenize(s):
@@ -122,6 +123,13 @@ def _expand_and_tokenize_args(ctx, target):
     lookup = getattr(ctx.rule.attr, "data", []) + [target]
     out = []
     for a in raw:
+        # `bazel run` expands `args` with LocationExpander.withRunfilesPaths, so
+        # `$(location X)` there is X's runfiles-relative path, i.e. `$(rootpath X)`.
+        # From user code ctx.expand_location only offers the execpath flavour
+        # (`short_paths = True` is private-API gated), so rewrite the template
+        # names first. Bazel recognises a template by the literal "$(<name> ",
+        # so this substitution covers exactly the templates it would expand.
+        a = a.replace("$(locations ", "$(rootpaths ").replace("$(location ", "$(rootpath ")
         a = ctx.expand_location(a, lookup)
         a = ctx.expand_make_variables("args", a, {})
         out.extend(_tokenize(a))

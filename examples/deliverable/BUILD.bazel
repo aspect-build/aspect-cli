@@ -8,9 +8,14 @@ genrule(
     cmd = "echo 'payload contents' > $@",
 )
 
+# `$(location)` in a binary's `args` is special: `bazel run` expands it to the
+# runfiles-relative path (rootpath), not the execpath it means everywhere else.
+# deliver.sh opens the argument from the runfiles cwd, so `aspect run` and the
+# delivery task only pass if they expand it the way `bazel run` does.
 sh_binary(
     name = "sh_deliverable",
     srcs = ["deliver.sh"],
+    args = ["$(location :delivery_payload)"],
     data = [":delivery_payload"],
     tags = ["deliverable"],
 )
