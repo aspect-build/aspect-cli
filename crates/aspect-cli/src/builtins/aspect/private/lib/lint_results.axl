@@ -31,6 +31,7 @@ load(
     bazel_init_data = "init_data",
 )
 load("./result_text.axl", "emoji_for_status")
+load("./sarif.axl", "format_location", "scope_files")
 load("./text.axl", "pluralize")
 
 _DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit (~65535).
@@ -112,8 +113,11 @@ def init_data():
     """
     r = bazel_init_data()
     r["lint"] = {
-        "diagnostics": [],  # flat list of {tool, file, line, rule_id, severity, message?}
+        # flat list of {tool, file, line, rule_id, severity, message?, related_files?};
+        # line 0 = file-level finding, file "" = no location.
+        "diagnostics": [],
         "strategy": "",  # "soft" | "hard" | "hold-the-line" | "hold-the-file" | ""
+        "strategies": {},  # per-linter overrides in effect: {linter name: strategy name}
         "build_failed": False,
         "linter_exit_code": 0,  # non-zero → at least one linter errored
         "changed_files": [],  # [{"file", "lines", "hunk_lines"}] — hold-the-line/file only
@@ -242,7 +246,7 @@ _No lint diagnostics reported._{% else %}
 <summary>{{ group.icon }} {{ group.count }} {{ group.label }}</summary>
 
 {% for row in group.rows -%}
-- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · {% if row.rule_is_id %}`{{ row.rule_display }}`{% else %}{{ row.rule_display }}{% endif %}{% endif %}{% if row.message %} · {{ row.message }}{% endif %}{% if row.comment_url %} · [💬 {{ row.comment_label }}]({{ row.comment_url }}){% endif %}
+- {{ row.anchor }}{% if row.rule_display %} · {% if row.rule_is_id %}`{{ row.rule_display }}`{% else %}{{ row.rule_display }}{% endif %}{% endif %}{% if row.message %} · {{ row.message }}{% endif %}{% if row.comment_url %} · [💬 {{ row.comment_label }}]({{ row.comment_url }}){% endif %}
 {% endfor -%}
 {% if group.overflow %}
 
@@ -273,6 +277,16 @@ def _truncate(s, max_len):
     if max_len <= 3:
         return s[:max_len]
     return s[:max_len - 3] + "..."
+
+def _row_anchor(file_, line, related_files):
+    """Markdown location for a finding row, e.g. `` `pkg/a.py:3` ``."""
+    return format_location(
+        html_escape(file_),
+        line,
+        [html_escape(_truncate(f, _LABEL_MAX)) for f in related_files],
+        quote = lambda path: "`%s`" % path,
+        missing = "_(no location)_",
+    )
 
 def _group_rows_for_template(diags, suggestion_links):
     """Return one row dict per diagnostic for the Jinja2 template.
@@ -306,6 +320,7 @@ def _group_rows_for_template(diags, suggestion_links):
         rows.append({
             "file": html_escape(file_),
             "line": str(line),
+            "anchor": _row_anchor(file_, line, d.get("related_files") or []),
             "rule_display": html_escape(rule_display),
             "rule_is_id": rule_is_id,
             "message": html_escape(msg),
@@ -501,18 +516,26 @@ def _groups_for_template(groups):
         })
     return out
 
+def strategy_label(strategy, overrides):
+    """Run strategy plus per-linter overrides, e.g. `hold-the-line (ruff: hard)`."""
+    if not overrides:
+        return strategy
+    pairs = ["%s: %s" % (name, overrides[name]) for name in sorted(overrides.keys())]
+    return "%s (%s)" % (strategy, ", ".join(pairs))
+
 def _config_items(data):
-    """Build the Configuration row: `Strategy: <name>[ — filtered to N changed files]`,
-    surfacing the pass/fail-driving choice in the summary rather than the details body.
+    """Build the Configuration row: `Strategy: <name>[ (<linter>: <name>, …)][ — filtered
+    to N changed files]`, surfacing the pass/fail-driving choice in the summary rather
+    than the details body.
     """
     strategy = data["lint"].get("strategy", "") or ""
     if not strategy:
         return []
-    value = strategy
+    value = strategy_label(strategy, data["lint"].get("strategies") or {})
     if strategy in ("hold-the-line", "hold-the-file"):
         changed_count = len(data["lint"].get("changed_files", []) or [])
         if changed_count > 0:
-            value = "%s — filtered to %d changed files" % (strategy, changed_count)
+            value = "%s — filtered to %d changed files" % (value, changed_count)
     return [{"key": "Strategy", "value": value}]
 
 def _build_details_data(data, render_ctx, status, links = None):
@@ -711,7 +734,8 @@ def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_ch
     relatedLocations (only clippy does today).
 
     Annotations are emitted in `_SEVERITY_ORDER` (most severe first if capped),
-    preserving accumulation order within a severity.
+    preserving accumulation order within a severity. A file-level finding
+    (`line == 0`) annotates line 1 of its file; one with no file is skipped.
 
     Args:
         data: dict from init_data()
@@ -747,19 +771,21 @@ def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_ch
             continue
         line = d.get("line", 0) or 0
         path = d.get("file", "") or ""
-        if not line or not path:
-            # Annotations require a file+line anchor.
+        if not path:
+            # Annotations need a file; location-less findings show in the summary only.
             continue
-
-        # Suppress anchors where a patch auto-fix comment already lands, so an
-        # "auto" finding doesn't annotate AND comment at the same line. Empty in
-        # other modes.
-        if (path, line) in suppress:
-            continue
-        if apply_diff_filter:
-            file_lines = changed_lines.get(path)
-            if not file_lines or (line - 1) not in file_lines:
+        if line:
+            # Suppress anchors where a patch auto-fix comment already lands, so an
+            # "auto" finding doesn't annotate AND comment at the same line. Empty in
+            # other modes.
+            if (path, line) in suppress:
                 continue
+            if apply_diff_filter:
+                file_lines = changed_lines.get(path)
+                if not file_lines or (line - 1) not in file_lines:
+                    continue
+        elif apply_diff_filter and not any([f in changed_lines for f in scope_files(d)]):
+            continue
         total_eligible += 1
         sev = d.get("severity", "unknown") or "unknown"
         by_sev.setdefault(sev, []).append(d)
@@ -769,7 +795,7 @@ def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_ch
         for d in by_sev.get(sev, []):
             if len(annotations) >= max_annotations:
                 return (annotations, total_eligible)
-            line = d.get("line", 0) or 0
+            line = d.get("line", 0) or 1  # GitHub requires a line; file-level findings take line 1
             end_line = d.get("end_line", line) or line
             if end_line < line:
                 end_line = line
