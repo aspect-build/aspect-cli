@@ -268,6 +268,42 @@ cslot="$(json "$A" "$A_PID" add c1 --create=origin/main | jq -r .slot)"
 cd "$ROOT/repo"
 check "release a sibling clone's slot by id" "$(json "$A" "$A_PID" release "$cslot" | jq -r .released)" "c1"
 
+section "release --all: every lease of this clone, each judged as by name"
+g clone -q "$ROOT/remote.git" "$ROOT/repo3" 2>/dev/null
+cd "$ROOT/repo3"
+# The released, refused and skipped lists of `release --all`, then its exit status.
+release_all() {
+    local status=0
+    as "$A" "$A_PID" release --all "$@" --output=json >"$ROOT/all.json" 2>/dev/null || status=$?
+    jq -r '([.released[].released] | join(",")) + " | " + ([.refused[] | .branch + ":" + .error] | sort | join(",")) + " | " + (.skipped | length | tostring)' "$ROOT/all.json"
+    echo "exit $status"
+}
+check "nothing leased, nothing to release" "$(release_all)" "$(printf ' |  | 0\nexit 0')"
+json "$A" "$A_PID" add ra-clean --create=origin/main >/dev/null
+rpath="$(json "$A" "$A_PID" add ra-dirty --create=origin/main | jq -r .path)"
+echo wip >"$rpath/wip.txt"
+json "$B" "$B_PID" add ra-other --create=origin/main >/dev/null
+check "--all with a branch is a usage error" "$(outcome "$A" "$A_PID" release ra-clean --all)" "invalid_arguments"
+check "the clean one goes; the dirty one and another session's are refused" "$(release_all)" \
+    "$(printf 'ra-clean | ra-dirty:worktree_dirty,ra-other:held_by_another_session | 0\nexit 1')"
+check "the dirty one is untouched" "$(cat "$rpath/wip.txt")" "wip"
+check "--force discards the caller's own work" "$(release_all --force)" \
+    "$(printf 'ra-dirty | ra-other:held_by_another_session | 0\nexit 1')"
+check "--force=all ends another session's lease" "$(release_all --force=all)" "$(printf 'ra-other |  | 0\nexit 0')"
+check "and says so" "$(jq -r '.released[0].warnings | map(.code) | index("overrode_another_session") != null' "$ROOT/all.json")" "true"
+json "$A" "$A_PID" add ra-s1 --create=origin/main --agent-id=sessA-s1 >/dev/null
+check "a sibling subagent's slot is refused, even under --force=all" "$(release_all --force=all --agent-id=sessA-s2)" \
+    "$(printf ' | ra-s1:held_by_another_session | 0\nexit 1')"
+check "the session itself releases it" "$(release_all)" "$(printf 'ra-s1 |  | 0\nexit 0')"
+json "$A" "$A_PID" add ra-there --create=origin/main >/dev/null
+hpath="$(json "$A" "$A_PID" add ra-here --create=origin/main | jq -r .path)"
+doc="$(cd "$hpath" && json "$A" "$A_PID" release --all)"
+check "from inside a slot, that slot goes last" "$(jq -r '[.released[].released] | join(",")' <<<"$doc")" "ra-there,ra-here"
+check "and the cd advice is said once" "$(jq -r '[.released[] | select(.cwd_removed)] | length' <<<"$doc") $(jq -r '[.warnings[].code] | join(",")' <<<"$doc")" "1 cwd_removed"
+cd "$ROOT"
+check "outside a clone, --all refuses" "$(outcome "$A" "$A_PID" release --all)" "not_a_repository"
+cd "$ROOT/repo"
+
 section "machine output"
 bidi="$(printf 'bi\xe2\x80\xaedi')"
 out="$(as "$A" "$A_PID" add "$bidi" --create=origin/main --output=path 2>"$ROOT/stderr")"

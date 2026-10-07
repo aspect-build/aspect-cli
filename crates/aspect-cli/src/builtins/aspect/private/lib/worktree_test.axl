@@ -15,6 +15,7 @@ load(
     "testonly_being_set_up",
     "testonly_capped",
     "testonly_closest",
+    "testonly_collected_refusal",
     "testonly_free_columns",
     "testonly_held_by",
     "testonly_held_elsewhere",
@@ -32,6 +33,7 @@ load(
     "testonly_porcelain_entries",
     "testonly_protected_from",
     "testonly_push_command",
+    "testonly_release_all_plan",
     "testonly_release_grade",
     "testonly_remote_branches",
     "testonly_render_sessions",
@@ -43,6 +45,8 @@ load(
     "testonly_score_slot",
     "testonly_session_groups",
     "testonly_slot_in_use",
+    "testonly_slot_label",
+    "testonly_slot_names",
     "testonly_taken_columns",
     "testonly_utf8_len",
 )
@@ -3012,6 +3016,62 @@ def _test_a_session_and_its_subagents(ctx):
     _eq("but not from the session", testonly_protected_from(ctx.std, parent, stopped), False)
     _eq("and the session's own is protected from a subagent", testonly_protected_from(ctx.std, child, dict(parent, pid = 999999)), True)
 
+def _test_release_all_takes_this_clones_leases(ctx):
+    """`release --all` judges every slot this clone leases, the caller's own
+    last; a slot being set up is skipped, and other clones' slots and free ones
+    are in neither list."""
+    mine = "/nonexistent/repo/.git"
+    pool = {"git_common_dir": mine, "dir": "/nonexistent/pool"}
+    registry = {"slots": {
+        "c": {"state": LEASED, "owner_git_dir": mine, "lease": {"name": "fix/c"}},
+        "a": {"state": LEASED, "owner_git_dir": mine, "lease": {"name": "fix/a"}},
+        "b": {"state": LEASED, "owner_git_dir": mine, "lease": {"name": "fix/b"}},
+        "f": {"state": FREE, "owner_git_dir": mine},
+        "r": {"state": RESERVED, "owner_git_dir": mine, "reservation": {"name": "fix/r"}},
+        "o": {"state": LEASED, "owner_git_dir": "/other/.git", "lease": {"name": "fix/o"}},
+    }}
+    plan = testonly_release_all_plan(ctx, pool, registry, "a")
+    _eq("leased, the caller's slot last", plan.leased, ["b", "c", "a"])
+    _eq("set up, skipped", plan.skipped, [{"slot": "r", "branch": "fix/r", "detached": "", "reason": "being set up by an `aspect worktree add`"}])
+    _eq("outside any slot, id order", testonly_release_all_plan(ctx, pool, registry, "").leased, ["a", "b", "c"])
+    _eq("another clone's pool view", testonly_release_all_plan(ctx, dict(pool, git_common_dir = "/other/.git"), registry, "").leased, ["o"])
+    _eq("nothing leased", testonly_release_all_plan(ctx, pool, {"slots": {"f": registry["slots"]["f"]}}, "").leased, [])
+
+def _test_release_all_skips_a_lease_this_clones_git_does_not_list(ctx):
+    """A lease recorded for this clone whose checkout only another clone's git
+    lists is not judged by `--all`: it is skipped, pointing at the release by
+    id that explains it."""
+    env = _repo_with_worktree(ctx, dirty = False)
+    fresh = env.pool["dir"] + "/../fresh"
+    ctx.std.fs.create_dir_all(fresh)
+    run_git(ctx.std, ["init", "-q"], fresh)
+    other = git_out(ctx.std, ["rev-parse", "--path-format=absolute", "--git-common-dir"], fresh)
+    registry = {"slots": {env.slot_id: _leased(other, "wip", {})}}
+    plan = testonly_release_all_plan(ctx, dict(env.pool, git_common_dir = other), registry, "")
+    _eq("not judged", plan.leased, [])
+    _eq("skipped, by id", [(s["slot"], s["branch"]) for s in plan.skipped], [(env.slot_id, "wip")])
+    _eq("with the command that says why", ("`aspect worktree release " + env.slot_id + "`") in plan.skipped[0]["reason"], True)
+    _eq("the clone whose git lists it judges it", testonly_release_all_plan(ctx, env.pool, {"slots": {env.slot_id: _leased(env.pool["git_common_dir"], "wip", {})}}, "").leased, [env.slot_id])
+
+def _test_release_all_lists_a_refusal_once_per_slot(ctx):
+    """A slot's refusal is listed with its token and message first, the slot,
+    branch and detached ref it is about after, then its facts, and no
+    `schema_version` of its own. A detached slot has no branch: its ref is in
+    `detached`, whatever label the refusal's own facts carried."""
+    doc = {"schema_version": 1, "error": "worktree_dirty", "retryable": False, "message": "m", "slot": "s1", "path": "/p", "uncommitted": []}
+    got = testonly_collected_refusal(doc, "s1", ("fix/x", ""))
+    _eq("keys in order", list(got.keys()), ["error", "retryable", "message", "slot", "branch", "detached", "path", "uncommitted"])
+    _eq("branch", got["branch"], "fix/x")
+    _eq("no schema_version", "schema_version" in got, False)
+    held = dict(doc, error = "held_by_another_session", branch = "(detached at main)")
+    got = testonly_collected_refusal(held, "s1", ("", "main"))
+    _eq("a detached slot", (got["branch"], got["detached"]), ("", "main"))
+    _eq("a slot with a branch", testonly_slot_label("fix/x", "", "s1"), "fix/x (slot s1)")
+    _eq("a detached slot's label", testonly_slot_label("", "main", "s1"), "slot s1 (detached at main)")
+    _eq("a slot with no name", testonly_slot_label("", "", "s1"), "slot s1")
+    _eq("a detached lease's names", testonly_slot_names({"lease": {"name": "(detached at v1)", "detached": "v1"}}), ("", "v1"))
+    _eq("a reservation's", testonly_slot_names({"reservation": {"name": "fix/r"}}), ("fix/r", ""))
+
 def _test_commits_a_detached_head_left_behind_still_count(ctx):
     """A commit made at a detached HEAD that then moved on is reachable only
     from the slot's HEAD reflog, which goes with the checkout — so it counts,
@@ -3653,6 +3713,9 @@ _UNIT_TESTS = [
     _test_a_branch_name_part_is_measured_in_bytes,
     _test_a_session_and_its_subagents,
     _test_a_stopped_session_is_given_time_to_come_back,
+    _test_release_all_takes_this_clones_leases,
+    _test_release_all_skips_a_lease_this_clones_git_does_not_list,
+    _test_release_all_lists_a_refusal_once_per_slot,
     _test_commits_a_detached_head_left_behind_still_count,
     _test_a_gone_clones_slots_are_adopted_where_they_can_be,
     _test_a_registry_version_this_cli_does_not_know_is_read_only,
