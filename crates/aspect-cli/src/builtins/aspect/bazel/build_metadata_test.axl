@@ -9,25 +9,27 @@ is in neither branch, written by `noreply@github.com`, subject
 "Merge x into y".
 
 Covers:
-  - `detect_build_commit_sha` — the per-host resolution, including the two
-    synthesized-merge cases and the hosts (Buildkite, CircleCI, GHA push,
-    GitLab detached) where the plain env var is already the head.
+  - `detect_merged_pr_head` — redirects only the exact synthesized merge
+    commit, and leaves every other built commit (`pull_request_target`,
+    a custom checkout, Buildkite, CircleCI, GitLab detached) alone.
   - `get_build_metadata_flags` end to end against real scratch git repos
-    built into the GHA `pull_request` shape: a feature commit, a merge
-    commit standing in for `refs/pull/N/merge`, and an event payload
-    naming the feature commit as `pull_request.head.sha`. Asserts the
-    emitted COMMIT_* describe the feature commit, and that a head SHA
-    absent from a shallow checkout degrades to the SHA alone rather than
-    to the merge commit's description.
+    built into the GHA `pull_request` and GitLab merged-result shapes: a
+    feature commit, a merge commit standing in for the synthesized one,
+    and the env naming the feature commit as the PR head. Asserts the
+    emitted COMMIT_* describe the feature commit, that a head SHA absent
+    from a shallow checkout degrades to the SHA alone rather than to the
+    merge commit's description, and that a checkout that is not the
+    synthesized merge is described as built.
 
 Run with:
   aspect dev test-build-metadata
 """
 
-load("@aspect//bazel/build_metadata.axl", "detect_build_commit_sha", "get_build_metadata_flags", "is_commit_sha")
+load("@aspect//bazel/build_metadata.axl", "detect_merged_pr_head", "get_build_metadata_flags", "is_commit_sha")
 
 _HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _MERGE = "cccccccccccccccccccccccccccccccccccccccc"
+_OTHER = "dddddddddddddddddddddddddddddddddddddddd"
 
 _GIT_ENV = {
     "GIT_AUTHOR_NAME": "Test",
@@ -45,7 +47,7 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _env_std(vars, files = {}):
-    """Stub std with env + fs; enough for `detect_build_commit_sha`."""
+    """Stub std with env + fs; enough for `detect_merged_pr_head`."""
     return struct(
         env = struct(var = lambda name: vars.get(name, "")),
         fs = struct(
@@ -66,132 +68,90 @@ def _hybrid_std(ctx, vars):
 def _pr_event(head_sha, base_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
     return '{"pull_request": {"head": {"sha": "%s"}, "base": {"sha": "%s"}}}' % (head_sha, base_sha)
 
-def _expect_sha(label, vars, files, expected):
-    _eq(label, detect_build_commit_sha(_env_std(vars, files)), expected)
+def _expect_pr_head(label, vars, files, built_sha, expected):
+    _eq(label, detect_merged_pr_head(_env_std(vars, files), built_sha), expected)
 
-# ── detect_build_commit_sha ─────────────────────────────────────────
+# ── detect_merged_pr_head ───────────────────────────────────────────
 
-def _test_commit_sha_resolution(ctx):
+def _test_merged_pr_head(ctx):
     event_path = "/tmp/event.json"
     pr_files = {event_path: _pr_event(_HEAD)}
+    gha_pr = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_SHA": _MERGE,
+        "GITHUB_EVENT_PATH": event_path,
+    }
 
-    # The bug this module exists to prevent: GITHUB_SHA on `pull_request` is
-    # the refs/pull/N/merge commit, and the event payload holds the real head.
-    _expect_sha(
-        "GHA pull_request: head.sha, not the synthesized GITHUB_SHA",
-        {
-            "GITHUB_ACTIONS": "true",
-            "GITHUB_EVENT_NAME": "pull_request",
-            "GITHUB_SHA": _MERGE,
-            "GITHUB_EVENT_PATH": event_path,
-        },
+    _expect_pr_head("GHA pull_request, default checkout: the PR head", gha_pr, pr_files, _MERGE, _HEAD)
+    _expect_pr_head(
+        "GHA pull_request, checkout of another ref: no redirect",
+        gha_pr,
         pr_files,
-        _HEAD,
+        _OTHER,
+        "",
     )
-
-    # `pull_request_target` runs in the base-repo context, so GITHUB_SHA is
-    # the base tip — not a merge, but not the PR's commit either.
-    _expect_sha(
-        "GHA pull_request_target: head.sha, not the base tip",
-        {
-            "GITHUB_ACTIONS": "true",
-            "GITHUB_EVENT_NAME": "pull_request_target",
-            "GITHUB_SHA": _MERGE,
-            "GITHUB_EVENT_PATH": event_path,
-        },
-        pr_files,
-        _HEAD,
-    )
-
-    # No payload on disk (self-hosted runner quirks, a stripped env): the
-    # synthesized SHA is still better than nothing.
-    _expect_sha(
-        "GHA pull_request without an event payload: falls back to GITHUB_SHA",
-        {
-            "GITHUB_ACTIONS": "true",
-            "GITHUB_EVENT_NAME": "pull_request",
-            "GITHUB_SHA": _MERGE,
-            "GITHUB_EVENT_PATH": "/does/not/exist",
-        },
+    _expect_pr_head(
+        "GHA pull_request without an event payload: no head to redirect to",
+        gha_pr,
         {},
         _MERGE,
+        "",
     )
 
-    # Non-PR GHA events check out a real commit; GITHUB_SHA is it.
-    _expect_sha(
-        "GHA push: GITHUB_SHA",
+    _expect_pr_head(
+        "GHA pull_request_target: GITHUB_SHA is the base tip, not a merge",
+        dict(gha_pr, GITHUB_EVENT_NAME = "pull_request_target"),
+        pr_files,
+        _MERGE,
+        "",
+    )
+    _expect_pr_head(
+        "GHA push: no redirect",
         {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": _HEAD},
         {},
         _HEAD,
-    )
-    _expect_sha(
-        "GHA merge_group: GITHUB_SHA (the queue ref is the commit being built)",
-        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "merge_group", "GITHUB_SHA": _HEAD},
-        {},
-        _HEAD,
+        "",
     )
 
-    # GitLab's equivalent: CI_COMMIT_SHA is the synthesized merge on
-    # merged_result / merge_train, and the source-branch SHA is the head.
-    _expect_sha(
-        "GitLab merged_result: CI_MERGE_REQUEST_SOURCE_BRANCH_SHA wins over CI_COMMIT_SHA",
-        {
-            "GITLAB_CI": "true",
-            "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
-            "CI_COMMIT_SHA": _MERGE,
-            "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA": _HEAD,
-        },
+    gitlab_mr = {
+        "GITLAB_CI": "true",
+        "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+        "CI_COMMIT_SHA": _MERGE,
+        "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA": _HEAD,
+    }
+    _expect_pr_head("GitLab merged_result: the source-branch head", gitlab_mr, {}, _MERGE, _HEAD)
+    _expect_pr_head(
+        "GitLab merge_train: the source-branch head",
+        dict(gitlab_mr, CI_MERGE_REQUEST_EVENT_TYPE = "merge_train"),
         {},
+        _MERGE,
         _HEAD,
     )
-    _expect_sha(
-        "GitLab detached: CI_COMMIT_SHA is already the source-branch head",
-        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "detached", "CI_COMMIT_SHA": _HEAD},
+    _expect_pr_head("GitLab merged_result, another commit built: no redirect", gitlab_mr, {}, _OTHER, "")
+    _expect_pr_head(
+        "GitLab detached: CI_COMMIT_SHA is already the head",
+        dict(gitlab_mr, CI_MERGE_REQUEST_EVENT_TYPE = "detached", CI_COMMIT_SHA = _HEAD),
         {},
         _HEAD,
-    )
-
-    # The mirror setup: an Aspect-Workflows runner on a non-GitLab host that
-    # posts status to a GitLab MR. The status surface attaches to
-    # ASPECT_GITLAB_SHA, so the metadata has to name the same commit.
-    _expect_sha(
-        "ASPECT_GITLAB_SHA override: wins over the host's own SHA",
-        {
-            "BUILDKITE": "true",
-            "BUILDKITE_COMMIT": _MERGE,
-            "ASPECT_GITLAB_MR_IID": "7",
-            "ASPECT_GITLAB_SHA": _HEAD,
-        },
-        {},
-        _HEAD,
+        "",
     )
 
-    # ASPECT_GITLAB_MR_IID is the gate, matching `detect_gitlab_mr`: a stray
-    # ASPECT_GITLAB_SHA with no MR to attach to must not displace the host.
-    _expect_sha(
-        "ASPECT_GITLAB_SHA without the MR IID: the host's own SHA stands",
-        {"BUILDKITE": "true", "BUILDKITE_COMMIT": _HEAD, "ASPECT_GITLAB_SHA": _MERGE},
-        {},
-        _HEAD,
-    )
-
-    # Buildkite and CircleCI check out the PR head, so their env var is the
-    # head already — and must not be displaced by the GitLab probe.
-    _expect_sha(
-        "Buildkite: BUILDKITE_COMMIT",
+    _expect_pr_head(
+        "Buildkite: checks out the PR head, no redirect",
         {"BUILDKITE": "true", "BUILDKITE_COMMIT": _HEAD},
         {},
         _HEAD,
+        "",
     )
-    _expect_sha(
-        "CircleCI: CIRCLE_SHA1",
+    _expect_pr_head(
+        "CircleCI: checks out the PR head, no redirect",
         {"CIRCLECI": "true", "CIRCLE_SHA1": _HEAD},
         {},
         _HEAD,
+        "",
     )
-
-    # Off CI there is nothing to resolve; the caller falls back to HEAD.
-    _expect_sha("no CI host: empty, leaving HEAD in charge", {}, {}, "")
+    _expect_pr_head("off CI: no redirect", {}, {}, _HEAD, "")
 
 # ── is_commit_sha ─────────────────────────────────────────
 
@@ -211,7 +171,8 @@ def _test_commit_sha_shape(_ctx):
 
     _eq("empty", is_commit_sha(""), False)
     _eq("too short", is_commit_sha("9f2c1a"), False)
-    _eq("too long", is_commit_sha("a" * 41), False)
+    _eq("sha256", is_commit_sha("a" * 64), True)
+    _eq("too long", is_commit_sha("a" * 65), False)
 
 def _test_a_non_sha_never_reaches_git_show(ctx):
     """A `--output=<path>` in the environment would have `git show` truncate
@@ -226,6 +187,11 @@ def _test_a_non_sha_never_reaches_git_show(ctx):
 
     _eq("victim file intact", ctx.std.fs.read_to_string(victim), "untouched\n")
     _eq("described HEAD instead", meta.get("COMMIT_SHA"), merge_sha)
+
+    no_repo = ctx.std.fs.mkdtemp(prefix = "axl-build-metadata-nogit-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(no_repo) if ctx.std.fs.exists(no_repo) else None)
+    meta = _flags_map(get_build_metadata_flags(std, cwd = no_repo))
+    _eq("a non-SHA is never reported", meta.get("COMMIT_SHA"), None)
 
 # ── get_build_metadata_flags against a real repo ────────────────────
 
@@ -383,14 +349,88 @@ def _test_non_pr_build_still_describes_head(ctx):
     )
     _eq("branch build — USER falls back to the git author", meta.get("USER"), "Real Author")
 
+def _test_gitlab_merged_result_describes_the_head_commit(ctx):
+    repo, head_sha, merge_sha = _pull_request_repo(ctx)
+
+    std = _hybrid_std(ctx, {
+        "GITLAB_CI": "true",
+        "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+        "CI_COMMIT_SHA": merge_sha,
+        "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA": head_sha,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("merged_result — COMMIT_SHA is the source-branch head", meta.get("COMMIT_SHA"), head_sha)
+    _eq("merged_result — COMMIT_AUTHOR_EMAIL is the author", meta.get("COMMIT_AUTHOR_EMAIL"), "real@example.com")
+
+def _test_pull_request_target_describes_the_built_commit(ctx):
+    """`pull_request_target` builds the base tip; the PR head is never
+    checked out, so it is not what the build is about."""
+    repo, head_sha, merge_sha = _pull_request_repo(ctx)
+    base_sha = _git_ok(ctx, repo, ["rev-parse", "HEAD^1"])
+    _git_ok(ctx, repo, ["checkout", "-q", base_sha])
+    event_path = repo + "/event.json"
+    ctx.std.fs.write(event_path, _pr_event(head_sha, base_sha))
+
+    std = _hybrid_std(ctx, {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request_target",
+        "GITHUB_SHA": base_sha,
+        "GITHUB_EVENT_PATH": event_path,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("pull_request_target — COMMIT_SHA is the base tip built", meta.get("COMMIT_SHA"), base_sha)
+    _eq("pull_request_target — COMMIT_MESSAGE is the base tip's", meta.get("COMMIT_MESSAGE"), "base")
+
+def _test_commit_made_during_the_job_is_described(ctx):
+    """A job that commits before building (a version bump on push) built
+    HEAD, not the `GITHUB_SHA` the run was triggered for."""
+    repo, head_sha, _merge_sha = _pull_request_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", head_sha])
+    bump_sha = _commit_file(ctx, repo, "VERSION", "1.2.3\n", "chore: bump version")
+
+    std = _hybrid_std(ctx, {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF": "refs/heads/feature",
+        "GITHUB_SHA": head_sha,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = repo))
+
+    _eq("job commit — COMMIT_SHA is HEAD", meta.get("COMMIT_SHA"), bump_sha)
+    _eq("job commit — COMMIT_MESSAGE is HEAD's", meta.get("COMMIT_MESSAGE"), "chore: bump version")
+
+def _test_no_checkout_reports_the_pr_head(ctx):
+    """Without a git checkout the env SHA stands in for HEAD, and the
+    synthesized merge it names is still redirected to the PR head."""
+    no_repo = ctx.std.fs.mkdtemp(prefix = "axl-build-metadata-nogit-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(no_repo) if ctx.std.fs.exists(no_repo) else None)
+    event_path = no_repo + "/event.json"
+    ctx.std.fs.write(event_path, _pr_event(_HEAD))
+
+    std = _hybrid_std(ctx, {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_SHA": _MERGE,
+        "GITHUB_EVENT_PATH": event_path,
+    })
+    meta = _flags_map(get_build_metadata_flags(std, cwd = no_repo))
+
+    _eq("no checkout — COMMIT_SHA is the PR head", meta.get("COMMIT_SHA"), _HEAD)
+
 def _test_impl(ctx):
-    _test_commit_sha_resolution(ctx)
+    _test_merged_pr_head(ctx)
     _test_commit_sha_shape(ctx)
     _test_a_non_sha_never_reaches_git_show(ctx)
     _test_pull_request_describes_the_head_commit(ctx)
     _test_unfetched_head_yields_the_sha_alone(ctx)
     _test_non_pr_build_still_describes_head(ctx)
-    print("build_metadata.axl: OK (6 sections)")
+    _test_gitlab_merged_result_describes_the_head_commit(ctx)
+    _test_pull_request_target_describes_the_built_commit(ctx)
+    _test_commit_made_during_the_job_is_described(ctx)
+    _test_no_checkout_reports_the_pr_head(ctx)
+    print("build_metadata.axl: OK (10 sections)")
     return 0
 
 build_metadata_tests = task(
