@@ -31,7 +31,9 @@ fn is_ci_from(present: impl Fn(&str) -> bool) -> bool {
 //
 // When `--task:name` is unset, the CLI derives one. On a recognized CI host the
 // name is `<kind>-<ci-job>` (e.g. `test-ci-linux`) so status checks read
-// meaningfully and stay stable across runs. A `-2` / `-3` suffix disambiguates
+// meaningfully and stay stable across runs. A job already named for the kind
+// isn't prefixed again: job `test` yields `test`, job `test-linux` yields
+// `test-linux`, never `test-test…`. A `-2` / `-3` suffix disambiguates
 // the same `<kind>-<job>` generated again on the same run *on the same machine*
 // (e.g. one job script invoking the same kind twice). Off CI — or when no job
 // name is exposed — the caller falls back to a random suffix.
@@ -237,20 +239,35 @@ pub struct AutoTaskName {
 
 /// The auto-generated task name for `kind` when `--task:name` is unset.
 ///
-/// On a recognized CI host with a detectable job name: `<kind>-<job>`, made
-/// unique on the local machine via [`reserve_task_name_in_tmpdir`] (meaningful).
+/// On a recognized CI host with a detectable job name: `<kind>-<job>` (see
+/// [`ci_task_name_base`]), made unique on the local machine via
+/// [`reserve_task_name_in_tmpdir`] (meaningful).
 /// Otherwise `<kind>-<fallback_suffix>` (the caller supplies a random friendly
 /// suffix) — unique, no de-dup file, but a throwaway placeholder.
 pub fn auto_task_name(kind: &str, fallback_suffix: impl FnOnce() -> String) -> AutoTaskName {
     match detect_ci_job_name() {
         Some(job) => AutoTaskName {
-            name: reserve_task_name_in_tmpdir(&format!("{kind}-{job}")),
+            name: reserve_task_name_in_tmpdir(&ci_task_name_base(kind, &job)),
             meaningful: true,
         },
         None => AutoTaskName {
             name: format!("{kind}-{}", fallback_suffix()),
             meaningful: false,
         },
+    }
+}
+
+/// `<kind>-<job>`, unless `job` already is `kind` or starts with `<kind>-`
+/// (ASCII case-insensitively), in which case the kind prefix is the job's own.
+fn ci_task_name_base(kind: &str, job: &str) -> String {
+    let prefixed = job
+        .get(..kind.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(kind))
+        && matches!(job.as_bytes().get(kind.len()), None | Some(b'-'));
+    if prefixed {
+        format!("{kind}{}", &job[kind.len()..])
+    } else {
+        format!("{kind}-{job}")
     }
 }
 
@@ -439,6 +456,18 @@ mod tests {
             reserve_task_name("test-ci", |_| ClaimResult::Error),
             "test-ci"
         );
+    }
+
+    #[test]
+    fn ci_task_name_base_skips_redundant_kind() {
+        assert_eq!(ci_task_name_base("test", "ci-linux"), "test-ci-linux");
+        assert_eq!(ci_task_name_base("test", "test"), "test");
+        assert_eq!(ci_task_name_base("test", "Test"), "test");
+        assert_eq!(ci_task_name_base("test", "test-linux"), "test-linux");
+        assert_eq!(ci_task_name_base("build", "test"), "build-test");
+        // A job that merely shares a leading substring still gets the prefix.
+        assert_eq!(ci_task_name_base("test", "testing"), "test-testing");
+        assert_eq!(ci_task_name_base("test", "tes"), "test-tes");
     }
 
     #[test]
