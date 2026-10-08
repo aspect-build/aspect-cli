@@ -227,15 +227,11 @@ def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
             kept.append(s)
     return kept
 
-def filter_by_linter_strategy(diagnostics, strategy_for, changed_files):
-    """Filter diagnostics with their own linter's strategy (see `strategy_lookup`)."""
-    by_tool = {}
-    for d in diagnostics:
-        by_tool.setdefault(d.get("tool", ""), []).append(d)
-    kept = []
-    for tool, group in by_tool.items():
-        kept.extend(strategy_for(tool).filter(group, changed_files))
-    return kept
+def report_diagnostics(sarif, linter, strategy_for, changed_files):
+    """Diagnostics of one SARIF report, tagged with the rules_lint `linter` that
+    wrote it and kept by that linter's strategy."""
+    diagnostics = [d | {"linter": linter} for d in sarif_diagnostics(sarif)]
+    return strategy_for(linter).filter(diagnostics, changed_files)
 
 def filter_changeset(diagnostics, changed_files):
     """Keep ALL diagnostics from any changed file (file-level).
@@ -318,10 +314,9 @@ LintTrait = trait(
     # module docstring of feature/github_lint_comments.axl for the state machine.
     findings_destination = attr(str, default = "auto"),
 
-    # Per-linter `--strategy` overrides, e.g. {"ruff": "hard"}. A linter name
-    # matches the SARIF `tool.driver.name` and the rules_lint mnemonic
-    # (`*.AspectRulesLintRuff.*`), case-insensitively. Unlisted linters use
-    # `--strategy`. See `resolve_strategy_overrides`.
+    # Per-linter `--strategy` overrides, e.g. {"ruff": "hard"}. Keys are rules_lint
+    # linter names as listed under 🧹 Linters (`Ruff` for the `AspectRulesLintRuff`
+    # mnemonic), matched case-insensitively. Unlisted linters use `--strategy`.
     strategies = attr(dict[str, str], default = {}),
 
     # Lifecycle hooks. Each is a list of callables; features append to compose.
@@ -400,10 +395,15 @@ def resolve_strategy_overrides(overrides, unscoped):
     return effective
 
 def strategy_lookup(run_strategy, overrides):
-    """Return `tool -> Strategy`: the override whose linter name matches `tool`
-    case-insensitively, else `run_strategy`."""
-    by_tool = {linter.lower(): _STRATEGIES[name] for linter, name in overrides.items()}
-    return lambda tool: by_tool.get((tool or "").lower(), run_strategy)
+    """Return `linter -> Strategy`: the override for that rules_lint linter name,
+    matched case-insensitively, else `run_strategy`."""
+    by_linter = {linter.lower(): _STRATEGIES[name] for linter, name in overrides.items()}
+    return lambda linter: by_linter.get((linter or "").lower(), run_strategy)
+
+def unmatched_overrides(overrides, tools_run):
+    """Override keys that name none of the linters in `tools_run`, sorted."""
+    ran = {tool.lower(): True for tool in tools_run}
+    return sorted([linter for linter in overrides if linter.lower() not in ran])
 
 def _strategy_name(strategy):
     """Kebab-case label for a Strategy record, matching the `--strategy=…` form."""
@@ -437,7 +437,7 @@ def linter_error_message(failed_linters, strategy_name):
 
 def fails_on_severity(d, strategy_for):
     """True when the diagnostic's severity fails its linter's strategy."""
-    fail_on = strategy_for(d.get("tool", "")).fail_on_severity
+    fail_on = strategy_for(d.get("linter", "")).fail_on_severity
     return fail_on != None and d.get("severity", "") == fail_on
 
 def gating_linter_errors(failed_linters, strategy_for):
@@ -685,7 +685,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
     each tick until the post-build drain timeout warns and skips it.
     `failed_tool` names the linter when its `.exit_code` was non-zero (else ""),
     so the fail_on_linter_error path can report which tool failed.
-    SARIF is filtered per-batch against each linter's (pure) strategy scope
+    SARIF is filtered per-batch against its linter's (pure) strategy scope
     (`strategy_for`), so per-batch results equal a terminal pass and findings
     don't flicker as batches arrive.
 
@@ -714,7 +714,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
                 # findings silently.
                 warn(ctx.std, "Ignoring unparseable SARIF report: %s" % filepath)
                 return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
-            lint_accumulate(data, filter_by_linter_strategy(sarif_diagnostics(sarif), strategy_for, changed_files))
+            lint_accumulate(data, report_diagnostics(sarif, detect_lint_tool(file.name), strategy_for, changed_files))
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
             return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
@@ -1135,6 +1135,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Thread the linter set so the 🧹 chart and CLI summary share a sorted snapshot.
     data["lint"]["tools_run"] = sorted(lint_tools_run.keys())
     _print_linters_run(ctx, data["lint"]["tools_run"])
+    unmatched = unmatched_overrides(strategy_overrides, data["lint"]["tools_run"])
+    if unmatched and lint_tools_run and not build_failed:
+        warn(ctx.std, "LintTrait.strategies names linters that did not run: %s. Keys match the names under 🧹 Linters." % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
     # from the high-volume raw output streamed during the Lint phase.
@@ -1181,7 +1184,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         # Without this the path surfaces nothing: a linter that crashed without
         # emitting findings would fail with an unexplained exit 1. Only `hard`
         # fails on linter errors.
-        error(ctx.std, linter_error_message(gating_errors, _strategy_name(StrategyHard)))
+        error(ctx.std, linter_error_message(gating_errors, "hard"))
         exit_code = 1
     else:
         exit_code = 0
@@ -1278,7 +1281,8 @@ lint = task(
                 "window (broader; rendered details list these but per-line " +
                 "surfaces can't show them). 'hard': fails on any error and " +
                 "on linter-process failure. 'soft': surfaces diagnostics " +
-                "without ever failing."
+                "without ever failing. `LintTrait.strategies` overrides " +
+                "this per linter."
             ),
         ),
         "base_ref": args.string(

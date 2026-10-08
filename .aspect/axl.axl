@@ -17,16 +17,16 @@ load(
     "StrategyHoldTheLine",
     "fails_on_severity",
     "filter_all",
-    "filter_by_linter_strategy",
     "filter_changeset",
     "filter_hunks",
     "gating_linter_errors",
     "linter_error_message",
     "parse_patch_hunks",
+    "report_diagnostics",
     "resolve_strategy_overrides",
     "strategy_lookup",
+    "unmatched_overrides",
 )
-load("@aspect//private/lib/lint_results.axl", lint_strategy_label = "strategy_label")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
@@ -41,6 +41,7 @@ load(
 load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand", "phases")
+load("@aspect//private/lib/lint_results.axl", lint_strategy_label = "strategy_label")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
@@ -2723,30 +2724,38 @@ def test_lint_per_linter_strategy(tc: int) -> int:
         "resolve_strategy_overrides: unscoped degrades hold-the-* only",
     )
 
-    # Names match the SARIF driver name and the rules_lint mnemonic, case-insensitively.
+    # Keys match rules_lint linter names case-insensitively.
     strategy_for = strategy_lookup(StrategyHoldTheLine, overrides)
-    tc = test_case(tc, strategy_for("ruff") == StrategyHard, "strategy_lookup: SARIF driver name matches")
-    tc = test_case(tc, strategy_for("Ruff") == StrategyHard, "strategy_lookup: rules_lint mnemonic matches")
+    tc = test_case(tc, strategy_for("Ruff") == StrategyHard, "strategy_lookup: linter name matches case-insensitively")
     tc = test_case(tc, strategy_for("ESLint") == StrategyHoldTheLine, "strategy_lookup: unlisted linter uses run strategy")
-    tc = test_case(tc, strategy_for("") == StrategyHoldTheLine, "strategy_lookup: unnamed tool uses run strategy")
+    tc = test_case(tc, strategy_for("") == StrategyHoldTheLine, "strategy_lookup: unnamed linter uses run strategy")
 
-    # ruff hard + ESLint hold-the-line: ruff keeps everything, ESLint only in-hunk findings.
-    changed = [{"file": "src/a.ts", "hunk_lines": [9]}]
-    diags = [
-        {"tool": "ESLint", "file": "src/a.ts", "line": 10, "severity": "error"},
-        {"tool": "ESLint", "file": "src/b.ts", "line": 3, "severity": "error"},
-        {"tool": "ruff", "file": "pkg/mod.py", "line": 0, "severity": "error", "related_files": []},
-        {"tool": "ruff", "file": "pkg/other.py", "line": 4, "severity": "warning", "related_files": []},
-    ]
-    kept = filter_by_linter_strategy(diags, strategy_for, changed)
-    tc = test_case(tc, kept == [diags[0], diags[2], diags[3]], "filter_by_linter_strategy: each linter filtered by its own strategy (got %r)" % kept)
-    tc = test_case(tc, filter_by_linter_strategy(diags, strategy_lookup(StrategyHoldTheLine, {}), changed) == [diags[0]], "filter_by_linter_strategy: no overrides = run strategy")
+    # A report takes its rules_lint linter's strategy even when its SARIF driver
+    # name differs beyond case (`clang-tidy` from `AspectRulesLintClangTidy`).
+    changed = [{"file": "src/a.cc", "hunk_lines": [9]}]
+    clang_tidy = {"runs": [{"tool": {"driver": {"name": "clang-tidy"}}, "results": [
+        {"level": "error", "message": {"text": "in hunk"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/a.cc"}, "region": {"startLine": 10}}}]},
+        {"level": "error", "message": {"text": "unchanged file"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/b.cc"}, "region": {"startLine": 3}}}]},
+        {"level": "warning", "message": {"text": "file-level"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/c.cc"}}}]},
+    ]}]}
+    hard_for = strategy_lookup(StrategyHoldTheLine, {"clangtidy": "hard"})
+    kept = report_diagnostics(clang_tidy, "ClangTidy", hard_for, changed)
+    tc = test_case(tc, [d["message"] for d in kept] == ["in hunk", "unchanged file", "file-level"], "report_diagnostics: override applies by linter name, not SARIF driver name (got %r)" % kept)
+    tc = test_case(tc, all([d["linter"] == "ClangTidy" and d["tool"] == "clang-tidy" for d in kept]), "report_diagnostics: tags each diagnostic with its linter")
+    kept = report_diagnostics(clang_tidy, "ClangTidy", strategy_lookup(StrategyHoldTheLine, {}), changed)
+    tc = test_case(tc, [d["message"] for d in kept] == ["in hunk"], "report_diagnostics: no override = run strategy")
 
-    # Exit gating on severity uses each linter's own strategy.
-    tc = test_case(tc, fails_on_severity(diags[2], strategy_for), "fails_on_severity: error fails under hard override")
+    # Exit gating on severity uses each diagnostic's linter, not its SARIF tool.
+    diag = {"tool": "ruff", "linter": "Ruff", "severity": "error"}
     soft_for = strategy_lookup(StrategyHoldTheLine, {"ruff": "soft"})
-    tc = test_case(tc, not fails_on_severity(diags[2], soft_for), "fails_on_severity: soft override never fails")
-    tc = test_case(tc, not fails_on_severity(diags[3], strategy_for), "fails_on_severity: warning does not fail")
+    tc = test_case(tc, fails_on_severity(diag, strategy_for), "fails_on_severity: error fails under hard override")
+    tc = test_case(tc, not fails_on_severity(diag, soft_for), "fails_on_severity: soft override never fails")
+    tc = test_case(tc, not fails_on_severity(diag | {"severity": "warning"}, strategy_for), "fails_on_severity: warning does not fail")
+    tc = test_case(tc, fails_on_severity(diag | {"linter": "Pylint"}, soft_for), "fails_on_severity: keys on linter, not SARIF tool")
+
+    # Keys naming no linter that ran are reported, case-insensitively.
+    tc = test_case(tc, unmatched_overrides({"rufff": "hard", "eslint": "soft"}, ["ESLint", "Ruff"]) == ["rufff"], "unmatched_overrides: flags the typo only")
+    tc = test_case(tc, unmatched_overrides({}, ["ESLint"]) == [], "unmatched_overrides: no overrides")
 
     # Exit gating on linter errors: only linters whose strategy fails on them.
     tc = test_case(tc, gating_linter_errors({"ESLint": True}, strategy_for) == {}, "gating_linter_errors: hold-the-line linter error does not gate")
