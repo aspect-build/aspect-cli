@@ -113,8 +113,9 @@ def init_data():
     """
     r = bazel_init_data()
     r["lint"] = {
-        # flat list of {tool, file, line, rule_id, severity, message?, related_files?};
-        # line 0 = file-level finding, file "" = no location.
+        # flat list of {tool, file, line, rule_id, severity, message?, related_files?,
+        # linter?}; line 0 = file-level finding, file "" = no location. `tool` is the
+        # SARIF driver name, `linter` the rules_lint name that LintTrait.strategies keys on.
         "diagnostics": [],
         "strategy": "",  # "soft" | "hard" | "hold-the-line" | "hold-the-file" | ""
         "strategies": {},  # per-linter overrides in effect: {linter name: strategy name}
@@ -531,8 +532,9 @@ def _config_items(data):
     strategy = data["lint"].get("strategy", "") or ""
     if not strategy:
         return []
-    value = strategy_label(strategy, data["lint"].get("strategies") or {})
-    if strategy in ("hold-the-line", "hold-the-file"):
+    overrides = data["lint"].get("strategies") or {}
+    value = strategy_label(strategy, overrides)
+    if any([s in ("hold-the-line", "hold-the-file") for s in [strategy] + list(overrides.values())]):
         changed_count = len(data["lint"].get("changed_files", []) or [])
         if changed_count > 0:
             value = "%s — filtered to %d changed files" % (value, changed_count)

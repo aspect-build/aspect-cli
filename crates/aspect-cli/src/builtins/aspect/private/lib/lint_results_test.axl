@@ -838,8 +838,16 @@ def _check_file_level_findings_render(ctx, templates):
         fail("file-level render: line 0 leaked into a row anchor: %s" % body[:1500])
     if "3 errors" not in out["title"] or "1 warning" not in out["title"]:
         fail("file-level render: findings missing from totals: %r" % out["title"])
-    if "hold-the-line (buf: hard)" not in out["summary"]:
+    if "hold-the-line (buf: hard) — filtered to 2 changed files" not in out["summary"]:
         fail("file-level render: per-linter override missing from Strategy row: %s" % out["summary"])
+
+    # A scoped override under `--strategy=hard` still filters, so the row says so.
+    scoped_override = _make_results_file_level()
+    scoped_override["lint"]["strategy"] = "hard"
+    scoped_override["lint"]["strategies"] = {"eslint": "hold-the-line"}
+    out = render_check_output(ctx, scoped_override, "failed", _render_ctx(), _links(), templates = t)
+    if "hard (eslint: hold-the-line) — filtered to 2 changed files" not in out["summary"]:
+        fail("file-level render: scoped override missing the changed-file filter: %s" % out["summary"])
 
 def _check_fix_renders_before_reproduce(ctx):
     """The Fix block renders before the Reproduce block in the details body.
