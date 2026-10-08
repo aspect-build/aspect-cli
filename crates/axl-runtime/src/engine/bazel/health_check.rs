@@ -259,6 +259,7 @@ fn check_bazel_server(signals: &Arc<Signals>, startup_flags: &[String]) -> Check
     cmd.args(startup_flags)
         .arg("--noblock_for_lock")
         .arg("info")
+        .arg("--lockfile_mode=off")
         .arg("server_pid")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -370,6 +371,7 @@ fn get_output_base(signals: &Arc<Signals>, startup_flags: &[String]) -> Option<P
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags)
         .arg("info")
+        .arg("--lockfile_mode=off")
         .arg("output_base")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

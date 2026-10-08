@@ -73,6 +73,7 @@ pub fn server_info_with_startup_flags(
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("info");
+    cmd.arg("--lockfile_mode=off");
     cmd.arg(SERVER_PID_KEY);
     cmd.arg(RELEASE_KEY);
     cmd.stdout(Stdio::piped());
@@ -162,6 +163,7 @@ pub fn client_pid(signals: &Arc<Signals>, startup_flags: &[String]) -> Option<u3
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
+    cmd.arg("--lockfile_mode=off");
     cmd.arg("server_pid");
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
@@ -188,6 +190,7 @@ pub fn is_server_busy(signals: &Arc<Signals>, startup_flags: &[String]) -> bool 
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
+    cmd.arg("--lockfile_mode=off");
     cmd.arg("server_pid");
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -210,6 +213,7 @@ pub fn server_pid_nonblocking(signals: &Arc<Signals>, startup_flags: &[String]) 
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
+    cmd.arg("--lockfile_mode=off");
     cmd.arg("output_base");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
