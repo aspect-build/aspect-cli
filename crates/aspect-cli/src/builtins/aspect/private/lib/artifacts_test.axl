@@ -1,0 +1,50 @@
+"""Unit tests for `artifacts.axl`: `effective_profile_path`, which finds the
+profile Bazel wrote when another `--profile` outranks the one `ArtifactUpload`
+adds. Run with: aspect dev test-artifacts
+"""
+
+load("./artifacts.axl", "effective_profile_path")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_OURS = "/tmp/abc.profile.gz"
+
+def _test_effective_profile_path(_ctx):
+    _eq("no --profile", effective_profile_path(["--keep_going"], "/ws", _OURS), _OURS)
+    _eq("only ours", effective_profile_path(["--profile=" + _OURS], "/ws", _OURS), _OURS)
+
+    # The rc's, ours, then Workflows': the last one is what Bazel writes.
+    cmd_line = [
+        "--profile=/tmp/bazel-test-profile/test.profile.json.gz",
+        "--generate_json_trace_profile",
+        "--profile=" + _OURS,
+        "--profile=/workflows/command.profile.gz",
+        "--remote_build_event_upload=all",
+    ]
+    _eq("last wins", effective_profile_path(cmd_line, "/ws", _OURS), "/workflows/command.profile.gz")
+    _eq("split form", effective_profile_path(["--profile", "/a.gz"], "/ws", _OURS), "/a.gz")
+
+    _eq("relative", effective_profile_path(["--profile=out/p.gz"], "/ws/sub/", _OURS), "/ws/sub/out/p.gz")
+    _eq("relative, no cwd", effective_profile_path(["--profile=p.gz"], "", _OURS), "p.gz")
+    _eq("windows absolute", effective_profile_path(["--profile=C:\\t\\p.gz"], "/ws", _OURS), "C:\\t\\p.gz")
+    _eq("other flag", effective_profile_path(["--profiles_dir=/x"], "/ws", _OURS), _OURS)
+
+_UNIT_TESTS = [
+    _test_effective_profile_path,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("artifacts.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+artifacts_tests = task(
+    summary = "Run the artifacts AXL unit tests.",
+    kind = "test-artifacts",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -16,6 +16,7 @@ load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_s
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/agent_test.axl", "agent_tests")
+load("@aspect//private/lib/artifacts_test.axl", "artifacts_tests")
 load("@aspect//private/lib/aspect_cloud_api_test.axl", "aspect_cloud_api_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/aspect_flags_test.axl", "aspect_flags_tests")
@@ -435,6 +436,10 @@ def config(ctx: ConfigContext):
     # env compositions, and the opt-out with its protected set.
     # Run with: aspect dev test-aspect-flags
     ctx.tasks.add(aspect_flags_tests)
+
+    # Locating the profile Bazel wrote when another `--profile` outranks ArtifactUpload's.
+    # Run with: aspect dev test-artifacts
+    ctx.tasks.add(artifacts_tests)
 
     # The `KEY value` workspace status `aspect setup workspace-data` prints
     # for Bazel's --workspace_status_command.
