@@ -5120,7 +5120,7 @@ def _results_new(ctx, command, report_uploader = None):
             if not labels:
                 return
             _add(prefix + build_aspect_command(subcommand, [], labels), subcommand + "-repro-aspect", target = target)
-            _add(prefix + build_bazel_command(subcommand, labels), subcommand + "-repro-vanilla-bazel", description = "vanilla bazel", target = target)
+            _add(prefix + build_bazel_command(subcommand, labels), subcommand + "-repro-vanilla-bazel", target = target)
 
         for sub in ("build", "test"):
             if by_sub[sub]:

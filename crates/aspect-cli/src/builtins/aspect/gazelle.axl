@@ -267,7 +267,6 @@ def _append_fix_commands(ctx, data):
     if not has_tools_bazel_wrapper(ctx):
         data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
-            description = "vanilla bazel",
             slug = "gazelle-fix-vanilla-bazel",
         ))
 
