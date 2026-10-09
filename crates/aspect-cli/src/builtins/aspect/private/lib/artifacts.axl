@@ -38,7 +38,7 @@ Consumer:
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("./bazel_results.axl", "bes_get", "file_uri_to_path")
+load("./bazel_results.axl", "bes_get", "file_uri_to_path", "testlog_path", "testlogs_dir")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
@@ -560,16 +560,93 @@ def testlog_dest_dir(label, run, shard, attempt):
         return label_path
     return label_path + "/" + "_".join(parts)
 
-def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
-    """Append testlog entries (+ skip reasons) from a test_result BES
-    event into the closure-private lists.
+def new_testlog_state():
+    """Per-invocation state `_collect_test_files` keeps across events to place
+    test outputs Bazel reported only as remote URIs (see `pending_testlogs`)."""
+    return {
+        "exec_root": "",
+        "output_dirs": {},
+        # label -> [(run, shard, attempt)] for every test_result seen.
+        "attempts": {},
+        # label -> [{run, shard, attempt, logs_dir, name, dest}] awaiting counts.
+        "pending": {},
+    }
+
+def pending_testlogs(state, label, run_count, shard_count):
+    """Resolve a label's pending outputs once its TestSummary gives the counts.
+
+    Returns `[(dest, path)]`, where `path` is the on-disk location Bazel's
+    testlogs layout puts the file at (`testlog_path`) and `dest` is the archive
+    path `_collect_test_files` chose. An attempt is final when it is the
+    highest seen for its (run, shard). Only test.log / test.xml have a known
+    per-attempt location; anything else is dropped. Clears the label.
+    """
+    out = []
+    attempts = state["attempts"].get(label, [])
+    for p in state["pending"].pop(label, []):
+        if p["name"] not in ("test.log", "test.xml"):
+            continue
+        last = max([a for (r, sh, a) in attempts if r == p["run"] and sh == p["shard"]] or [p["attempt"]])
+        path = testlog_path(
+            p["logs_dir"],
+            p["run"],
+            p["shard"],
+            p["attempt"],
+            run_count,
+            shard_count,
+            p["attempt"] >= last,
+            p["name"].rsplit(".", 1)[1],
+        )
+        if path:
+            out.append((p["dest"], path))
+    return out
+
+def _collect_test_files(ctx, event, strategy, test_entries, skipped_files, state):
+    """Append testlog entries (+ skip reasons) from BES test events into the
+    closure-private lists.
+
+    A test_result's outputs are entered as soon as their URI resolves to a
+    file on disk. Bazel reports outputs it uploaded to a remote cache as
+    `bytestream://` URIs with no path_prefix even when they are on disk; those
+    wait in `state` until the label's test_summary supplies the shard/run
+    counts their testlogs path needs (`pending_testlogs`). workspace_config and
+    configuration events supply the exec root and output directory.
 
     A test_result event may carry the `aborted` payload variant (lacks
     `status` / `cached_locally` / `test_action_output`); all field reads
     go through `bes_get` so a schema mismatch no-ops instead of raising.
     """
-    if event.kind != "test_result":
+    kind = event.kind
+    if kind == "workspace_config":
+        state["exec_root"] = bes_get(event.payload, "local_exec_root", "") or ""
         return
+    if kind == "configuration":
+        config_id = bes_get(event.id, "id", "") or ""
+        output_dir = bes_get(event.payload, "mnemonic", "") or ""
+        if config_id and output_dir:
+            state["output_dirs"][config_id] = output_dir
+        return
+    if kind == "test_summary":
+        label = bes_get(event.id, "label", "") or ""
+        for dest, src in pending_testlogs(
+            state,
+            label,
+            bes_get(event.payload, "run_count", 0) or 0,
+            bes_get(event.payload, "shard_count", 0) or 0,
+        ):
+            if ctx.std.fs.exists(src):
+                test_entries.append({"src": src, "dest": dest, "label": label, "name": dest.rsplit("/", 1)[-1]})
+            else:
+                skipped_files.append({"label": label, "name": dest, "reason": "not found", "raw": src})
+        return
+    if kind != "test_result":
+        return
+
+    label = event.id.label
+    run = bes_get(event.id, "run", 1) or 1
+    shard = bes_get(event.id, "shard", 1) or 1
+    attempt = bes_get(event.id, "attempt", 1) or 1
+    state["attempts"].setdefault(label, []).append((run, shard, attempt))
 
     payload = event.payload
     status = bes_get(payload, "status", "") or ""
@@ -577,26 +654,32 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
     if not _should_collect_test(strategy, status, cached_locally):
         return
 
-    label = event.id.label
-    dest_dir = testlog_dest_dir(
-        label,
-        bes_get(event.id, "run", 0) or 0,
-        bes_get(event.id, "shard", 0) or 0,
-        bes_get(event.id, "attempt", 0) or 0,
-    )
+    dest_dir = testlog_dest_dir(label, run, shard, attempt)
+    config_id = bes_get(bes_get(event.id, "configuration", None), "id", "") or ""
+    logs_dir = testlogs_dir(state["exec_root"], state["output_dirs"].get(config_id, ""), label)
 
     for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
         src = file_uri_to_path(ctx.std.env, raw_uri)
         if not src:
             src = "/".join(file.path_prefix) + "/" + file.name
+        if src and ctx.std.fs.exists(src):
+            test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label, "name": file.name})
+            continue
+        if logs_dir and type(raw_uri) == "string" and raw_uri.startswith("bytestream://") and not file.path_prefix:
+            state["pending"].setdefault(label, []).append({
+                "run": run,
+                "shard": shard,
+                "attempt": attempt,
+                "logs_dir": logs_dir,
+                "name": file.name,
+                "dest": dest_dir + "/" + file.name,
+            })
+            continue
         if not src:
             skipped_files.append({"label": label, "name": file.name, "reason": "no path", "raw": repr(raw_uri)})
             continue
-        if not ctx.std.fs.exists(src):
-            skipped_files.append({"label": label, "name": file.name, "reason": "not found", "raw": src})
-            continue
-        test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label, "name": file.name})
+        skipped_files.append({"label": label, "name": file.name, "reason": "not found", "raw": src})
 
 def build_log_relpath(label, mnemonic, primary_output, stream):
     """Label-relative path for one failed build stream's log.
@@ -922,8 +1005,9 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     if not is_local and upload_testlogs:
         test_entries = []
+        testlog_state = new_testlog_state()
         channels.append(_LogChannel(
-            collect = lambda ctx, event: _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files),
+            collect = lambda ctx, event: _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files, testlog_state),
             cleanup = lambda ctx: None,
             entries = test_entries,
             group = _new_upload_group(),
