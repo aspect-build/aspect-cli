@@ -54,6 +54,7 @@ load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
+load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
@@ -502,6 +503,10 @@ def config(ctx: ConfigContext):
     # Durations in the coarsest unit that still distinguishes.
     # Run with: aspect dev test-duration
     ctx.tasks.add(duration_tests)
+
+    # JUnit/log failure snippets for status checks and PR comments.
+    # Run with: aspect dev test-log-snippet
+    ctx.tasks.add(log_snippet_tests)
 
     # Terminal tables: which columns a listing drops and which it keeps when
     # empty, and how cells align.
