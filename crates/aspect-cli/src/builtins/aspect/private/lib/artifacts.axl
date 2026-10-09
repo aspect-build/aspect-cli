@@ -796,28 +796,23 @@ _LogChannel = record(
     file_kind = field(str),
 )
 
-_PROFILE_FLAG = "--profile"
+_PROFILE_ENRICHMENT = ["--generate_json_trace_profile", "--experimental_profile_include_target_label"]
 
-def effective_profile_path(cmd_line, working_directory: str, default: str) -> str:
-    """The trace profile Bazel actually writes: the last `--profile` on the
-    parsed command line, rc files included, since a later one replaces an
-    earlier one. A relative path resolves against the command's working
-    directory, as Bazel resolves it. `default` when no `--profile` is set.
+def profile_flags(rc, command: str, default_path: str, working_directory: str):
+    """`(path, flags)` for uploading the trace profile of a `command` run under
+    `rc`: where Bazel will write it, and the flags to append.
 
-    `cmd_line` is `options_parsed.cmd_line` from the BEP; `working_directory`
-    is `build_started.working_directory`."""
-    path = None
-    for i, arg in enumerate(cmd_line):
-        if arg.startswith(_PROFILE_FLAG + "="):
-            path = arg[len(_PROFILE_FLAG) + 1:]
-        elif arg == _PROFILE_FLAG and i + 1 < len(cmd_line):
-            path = cmd_line[i + 1]
+    A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
+    another feature such as Workflows — is kept, and its path is the one
+    uploaded; a relative one resolves against `working_directory`, as Bazel
+    resolves it. Only when none is set is `--profile=default_path` added."""
+    path = rc.flag_value("--profile", command = command)
     if not path:
-        return default
+        return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])
     is_absolute = path.startswith("/") or path[1:3] in (":/", ":\\")
     if not is_absolute and working_directory:
         path = working_directory.rstrip("/") + "/" + path
-    return path
+    return (path, list(_PROFILE_ENRICHMENT))
 
 # Owner feature — co-located so it can bind closures to the private trait
 
@@ -828,11 +823,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
                      batch-uploads at the size threshold
       build_end    → final flush of every channel + upload profile/execlog/BEP
 
-    The profile is uploaded from wherever Bazel wrote it. Another `--profile`
-    can outrank the one added here — Workflows adds its own for the backend's
-    ingest, and an rc file may set one — so the path is read back from the
-    `options_parsed` event. A profile at a path this feature did not choose is
-    left in place for its owner.
+    The profile's flags come from an `rc_flags` hook, which sees the resolved
+    rc: a `--profile` already set there (Workflows sets one for the backend's
+    ingest) is uploaded from its own path and left in place for its owner;
+    otherwise the profile goes to a path of this feature's own.
 
     Test logs and build-failure logs are independent channels driven through
     the same batch/flush/publish path (see `channels` below), so they upload
@@ -882,12 +876,16 @@ def _artifact_upload_impl(ctx: FeatureContext):
     # uuid-namespaced so concurrent same-task runs don't share a tree.
     build_log_scratch = tmpdir + "/" + uuid + ".build-logs"
 
+    # Where the profile lands, settled once the rc is resolved.
+    profile = {"path": profile_path}
+
+    def _profile_rc_flags(ctx, rc, command):
+        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.current_dir())
+        profile["path"] = path
+        return flags
+
     if upload_profile:
-        bazel_trait.extra_flags.extend([
-            "--generate_json_trace_profile",
-            "--experimental_profile_include_target_label",
-            "--profile=" + profile_path,
-        ])
+        bazel_trait.rc_flags.append(_profile_rc_flags)
     if upload_exec_log:
         bazel_trait.execution_log_sinks.append(bazel.execution_log.compact_file(path = execlog_path))
     if upload_bep:
@@ -951,16 +949,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
             file_kind = "build_log_file",
         ))
 
-    # Where the profile lands, from the `build_started` and `options_parsed` events.
-    profile = {"path": profile_path, "working_directory": ""}
-
     def _on_build_event(ctx, event):
-        if upload_profile:
-            if event.kind == "build_started":
-                profile["working_directory"] = bes_get(event.payload, "working_directory", "") or ""
-            elif event.kind == "options_parsed":
-                cmd_line = bes_get(event.payload, "cmd_line", None) or []
-                profile["path"] = effective_profile_path(cmd_line, profile["working_directory"], profile_path)
         for channel in channels:
             channel.collect(ctx, event)
             _flush(ctx, channel, final = False)
@@ -977,7 +966,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 # Profile / BEP / exec-log — opt-in each. Files at paths this
                 # feature chose are removed on success AND failure (no retry,
                 # so a leftover file just leaks a potentially-sensitive
-                # artifact); a profile another `--profile` redirected is not
+                # artifact); a profile at a `--profile` set elsewhere is not
                 # ours to remove.
                 singletons = []
                 if upload_profile:
