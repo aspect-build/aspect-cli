@@ -212,15 +212,51 @@ def _attr_value(tag, name):
         return ""
     return tag[start:end]
 
+_XML_ENTITIES = {"lt": "<", "gt": ">", "quot": "\"", "apos": "'", "amp": "&"}
+
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+def _xml_char_ref(ref):
+    """Decode the body of a numeric character reference (`#xA` → "\n",
+    `#34` → `"`), or return None when it isn't a well-formed one."""
+    digits, base, allowed = ref[1:], 10, "0123456789"
+    if digits[:1] in ("x", "X"):
+        digits, base, allowed = digits[1:], 16, _HEX_DIGITS
+    if not digits:
+        return None
+    for c in digits.elems():
+        if c not in allowed:
+            return None
+    code = int(digits, base)
+    if code == 0 or code > 1114111 or (code >= 55296 and code <= 57343):
+        return None
+    return chr(code)
+
 def _xml_unescape(s):
-    """Reverse the five predefined XML entities. Sufficient for JUnit text/attrs."""
+    """Decode the predefined XML entities and numeric character references.
+
+    Single pass, so `&amp;lt;` decodes to `&lt;` rather than `<`. Numeric refs
+    matter in practice: Go's `encoding/xml` (rules_go's JUnit writer) escapes
+    newlines, tabs and quotes as `&#xA;`, `&#x9;`, `&#34;`. Anything that isn't
+    a recognizable reference is left as written.
+    """
     if "&" not in s:
         return s
-    return (s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&"))
+    pieces = s.split("&")
+    out = [pieces[0]]
+    for piece in pieces[1:]:
+        semi = piece.find(";")
+        ref = piece[:semi] if semi > 0 else ""
+        decoded = None
+        if ref.startswith("#"):
+            decoded = _xml_char_ref(ref)
+        elif ref:
+            decoded = _XML_ENTITIES.get(ref)
+        if decoded == None:
+            out.append("&" + piece)
+        else:
+            out.append(decoded + piece[semi + 1:])
+    return "".join(out)
 
 # Low-signal `<error>`/`<failure>` messages that Bazel SYNTHESIZES for tests
 # without native JUnit output (sh_test, cc_test, …) via tools/test/generate-xml.sh.
@@ -233,6 +269,8 @@ _SYNTHESIZED_JUNIT_PREFIXES = [
     "test did not complete",
     "test was not completed",
 ]
+
+_CDATA_OPEN = "<![CDATA["
 
 def _is_low_signal_junit(header, body):
     """True when a JUnit failure/error carries only a generic Bazel-synthesized
@@ -252,7 +290,9 @@ def extract_junit_failure_from_text(xml, options):
 
     Lightweight scan, not a real parser: find the first `<failure`/`<error`
     start-tag, read its `message`/`type` attrs, then capture body text up to the
-    matching close tag (or self-closing `/>`). Windowed/capped like a log snippet.
+    matching close tag (or self-closing `/>`). A `<![CDATA[...]]>` body is taken
+    verbatim; escaped text and attributes go through `_xml_unescape`.
+    Windowed/capped like a log snippet.
 
     Returns `none` for Bazel-synthesized low-signal failures (a generic "exited
     with error code N" and an empty element) so the caller falls back to the raw
@@ -281,9 +321,16 @@ def extract_junit_failure_from_text(xml, options):
 
     body = ""
     if not start_tag.rstrip().endswith("/>"):
-        close = xml.find("</", tag_end + 1)
-        if close > tag_end:
-            body = xml[tag_end + 1:close]
+        rest = xml[tag_end + 1:]
+        if rest.lstrip().startswith(_CDATA_OPEN):
+            opened = rest.find(_CDATA_OPEN) + len(_CDATA_OPEN)
+            closed = rest.find("]]>", opened)
+            if closed >= 0:
+                body = rest[opened:closed]
+        else:
+            close = rest.find("</")
+            if close >= 0:
+                body = _xml_unescape(rest[:close])
 
     header = ""
     if typ and message:
@@ -291,7 +338,7 @@ def extract_junit_failure_from_text(xml, options):
     else:
         header = message or typ
 
-    body = _xml_unescape(body).strip()
+    body = body.strip()
     if _is_low_signal_junit(header, body):
         return _EMPTY
 

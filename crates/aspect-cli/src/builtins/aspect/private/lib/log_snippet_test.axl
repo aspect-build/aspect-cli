@@ -1,0 +1,70 @@
+"""Unit tests for lib/log_snippet.axl.
+
+Run with:
+  aspect dev test-log-snippet
+"""
+
+load("./log_snippet.axl", "SnippetOptions", "extract_junit_failure_from_text")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _snippet(xml):
+    return extract_junit_failure_from_text(xml, SnippetOptions()).text
+
+def _test_go_junit_char_refs_decode(ctx):
+    """rules_go writes the failure body through Go's `encoding/xml`, which escapes
+    newlines, tabs and quotes as numeric references. Left encoded, the whole
+    failure renders as one line of `&#xA;` noise."""
+    xml = ('<testcase name="TestCompare"><failure message="Failed" type="">' +
+           "--- FAIL: TestCompare (0.00s)&#xA;    main_test.go:12: diff:&#xA;" +
+           "        - &#x9;&#34;this&#34;,&#xA;        + &#x9;&#39;that&#39;," +
+           "</failure></testcase>")
+    _eq("go body", _snippet(xml), "\n".join([
+        "Failed",
+        "--- FAIL: TestCompare (0.00s)",
+        "    main_test.go:12: diff:",
+        "        - \t\"this\",",
+        "        + \t'that',",
+    ]))
+
+def _test_named_and_decimal_refs_decode(ctx):
+    _eq("attrs", _snippet('<failure message="a &lt;b&gt; &amp; &#65;&#x42;"/>'), "a <b> & AB")
+
+def _test_unescape_is_single_pass(ctx):
+    """`&amp;lt;` is the text `&lt;`, not `<`: decoding twice would change what
+    the test printed."""
+    _eq("double", _snippet('<failure message="&amp;lt;tag&amp;gt;"/>'), "&lt;tag&gt;")
+
+def _test_malformed_refs_are_kept(ctx):
+    _eq("malformed", _snippet('<failure message="AT&amp;T &bogus; &#xZZ; &# a & b"/>'), "AT&T &bogus; &#xZZ; &# a & b")
+
+def _test_cdata_body_is_verbatim(ctx):
+    """CDATA is how most Java reporters write stack traces. It may contain `</`
+    and entity-like text, neither of which ends or decodes it."""
+    xml = ('<failure message="boom"><![CDATA[expected </b> but got &amp;\n' +
+           "\tat Foo.test(Foo.java:3)]]></failure>")
+    _eq("cdata", _snippet(xml), "boom\nexpected </b> but got &amp;\n\tat Foo.test(Foo.java:3)")
+
+_UNIT_TESTS = [
+    _test_go_junit_char_refs_decode,
+    _test_named_and_decimal_refs_decode,
+    _test_unescape_is_single_pass,
+    _test_malformed_refs_are_kept,
+    _test_cdata_body_is_verbatim,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("log_snippet.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+log_snippet_tests = task(
+    summary = "Run the log snippet extraction AXL unit tests.",
+    kind = "test-log-snippet",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
