@@ -1,0 +1,77 @@
+"""Unit tests for `artifacts.axl`: `profile_flags`, which keeps a `--profile` the
+run already carries instead of adding a second one `ArtifactUpload` would lose
+to, and `pending_testlogs`, which places uploaded test outputs on disk. Run
+with: aspect dev test-artifacts
+"""
+
+load("./artifacts.axl", "new_testlog_state", "pending_testlogs", "profile_flags")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_OURS = "/tmp/abc.profile.gz"
+
+def _profile(ctx, flags, working_directory = "/ws"):
+    return profile_flags(ctx.bazel.new_rc(flags = flags), "build", _OURS, working_directory)
+
+def _test_profile_flags(ctx):
+    path, flags = _profile(ctx, ["--keep_going"])
+    _eq("unset: ours", path, _OURS)
+    _eq("unset: adds ours", "--profile=" + _OURS in flags, True)
+
+    # The rc's, then Workflows': the last one is what Bazel writes, and none is added.
+    path, flags = _profile(ctx, ["--profile=/tmp/test.profile.json.gz", "--profile=/workflows/command.profile.gz"])
+    _eq("last wins", path, "/workflows/command.profile.gz")
+    _eq("set: none added", [f for f in flags if f.startswith("--profile")], [])
+    _eq("set: still enriched", "--experimental_profile_include_target_label" in flags, True)
+
+    _eq("relative", _profile(ctx, ["--profile=out/p.gz"], "/ws/sub/")[0], "/ws/sub/out/p.gz")
+    _eq("windows absolute", _profile(ctx, ["--profile=C:\\t\\p.gz"])[0], "C:\\t\\p.gz")
+
+def _test_pending_testlogs(ctx):
+    """Uploaded outputs of a retried, sharded test resolve to Bazel's testlogs
+    layout once the counts are known: the last attempt of each shard is
+    `test.<ext>`, earlier ones `test_attempts/attempt_<k>.<ext>`."""
+    state = new_testlog_state()
+    d = "/x/bazel-out/k8-fastbuild/testlogs/p/t"
+    for (shard, attempt) in [(1, 1), (1, 2), (2, 1)]:
+        state["attempts"].setdefault("//p:t", []).append((1, shard, attempt))
+        for name in ["test.log", "test.xml", "test.outputs__outputs.zip"]:
+            state["pending"].setdefault("//p:t", []).append({
+                "run": 1,
+                "shard": shard,
+                "attempt": attempt,
+                "logs_dir": d,
+                "name": name,
+                "dest": "p/t/s%d_a%d/%s" % (shard, attempt, name),
+            })
+    got = sorted(pending_testlogs(state, "//p:t", 1, 2))
+    _eq("resolved", got, sorted([
+        ("p/t/s1_a1/test.log", d + "/shard_1_of_2/test_attempts/attempt_1.log"),
+        ("p/t/s1_a1/test.xml", d + "/shard_1_of_2/test_attempts/attempt_1.xml"),
+        ("p/t/s1_a2/test.log", d + "/shard_1_of_2/test.log"),
+        ("p/t/s1_a2/test.xml", d + "/shard_1_of_2/test.xml"),
+        ("p/t/s2_a1/test.log", d + "/shard_2_of_2/test.log"),
+        ("p/t/s2_a1/test.xml", d + "/shard_2_of_2/test.xml"),
+    ]))
+    _eq("label cleared", pending_testlogs(state, "//p:t", 1, 2), [])
+
+_UNIT_TESTS = [
+    _test_profile_flags,
+    _test_pending_testlogs,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("artifacts.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+artifacts_tests = task(
+    summary = "Run the artifacts AXL unit tests.",
+    kind = "test-artifacts",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

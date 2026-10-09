@@ -9,12 +9,13 @@ Event kinds consumed:
   "structured_command_line"  — captures bes_results_url and reconstructs full command line strings
   "build_metadata"           — captures --build_metadata / --bes_metadata key=value pairs
   "workspace_status"         — captures workspace_status key=value pairs (BUILD_USER, etc.)
-  "configuration"            — captures cpu arch and compilation_mode (target config only)
+  "configuration"            — captures cpu arch and compilation_mode (target config only), and each config's output directory
+  "workspace_config"         — captures the exec root, which with the output directory locates testlogs on disk
   "action_completed"         — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
   "target_configured"        — caches rule kind per label; counts configured targets (incl. test targets, the live progress denominator)
   "target_completed"         — accumulates failed build targets
-  "test_result"              — captures per-attempt test.log + test.xml paths and duration (keyed by label)
-  "test_summary"             — buckets tests into failed / flaky / passed; tracks duration
+  "test_result"              — records each attempt's run/shard/attempt, status, test.log + test.xml paths and duration
+  "test_summary"             — buckets tests into failed / flaky / passed; tracks duration; settles the snippet's log path
   "build_metrics"            — captures action/target/package counts and timing
   "aborted"                  — captures build abort reason and description
 
@@ -23,11 +24,12 @@ Payload fields used:
   CommandLine.command_line_label, .sections[].section_type (ChunkList|OptionList oneof)
   BuildMetadata.metadata             — dict[str,str] of --build_metadata/--bes_metadata pairs
   WorkspaceStatus.item               — repeated list of {key, value} structs (proto field is "item")
-  Configuration.cpu, .compilation_mode, .is_tool_configuration
+  Configuration.cpu, .compilation_mode, .is_tool_configuration, .mnemonic (output directory)
+  WorkspaceConfig.local_exec_root
   ActionExecuted.success, .type, .stderr (File — uri only, never .contents)
   TargetComplete.success
-  TestResult.test_action_output (File list), .test_attempt_duration_millis
-  TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed)
+  TestResult.test_action_output (File list), .status, .test_attempt_duration_millis
+  TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed), .run_count, .shard_count
   BuildMetrics.action_summary.{actions_executed, actions_created}
   BuildMetrics.timing_metrics.{wall_time_in_ms, cpu_time_in_ms}
   BuildMetrics.target_metrics.targets_configured
@@ -95,8 +97,7 @@ BES_DRAIN_TICK_MS = 250
 
 # Default bb_clientd FUSE mount root on Aspect Workflows runners, used for
 # runners that predate the ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT platform env
-# (see bb_clientd_root). Also the root for `process_event`'s internal path
-# derivations, which have no env to read the runner configuration from.
+# (see bb_clientd_root).
 _DEFAULT_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
@@ -278,6 +279,128 @@ def uri_to_path_under_root(uri, bb_root) -> str:
         return bb_root + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
     return uri
 
+def bb_clientd_mounted(std, root) -> bool:
+    """True when a bb_clientd virtual filesystem is mounted at `root`.
+
+    Read from /proc/self/mounts: procfs never blocks, while stat()ing the
+    mount root would be served by the (possibly wedged) bb_clientd daemon
+    itself. Without procfs (macOS) fall back to a direct existence check.
+    """
+    mounts = std.fs.try_read_to_string("/proc/self/mounts")
+    if mounts:
+        return " " + root + " " in mounts
+    return std.fs.exists(root)
+
+def usable_bb_clientd_root(std) -> str | None:
+    """The bb_clientd root `bytestream://` URIs should resolve through, or None.
+
+    `bb_clientd_root` narrowed to a mount that is actually present: a runner
+    can declare (or default to) a root nothing is mounted at, and resolving
+    through it yields paths that never exist. None routes bytestream URIs to
+    the output-tree fallback in `local_output_path`. Resolve once per task and
+    pass the result to `process_event`.
+    """
+    root = bb_clientd_root(std.env)
+    if root != None and not bb_clientd_mounted(std, root):
+        return None
+    return root
+
+def local_output_path(file, bb_root, base_dir = "") -> str:
+    """Best local path for a BES `File`, or "".
+
+    With a bb_clientd mount (`bb_root` set), bytestream:// URIs resolve
+    through it. Without one, fall back to the file's output-tree path
+    (path_prefix/name, under `base_dir` when given, else relative to the
+    working directory), which exists when Bazel downloaded the output. file://
+    URIs are local paths either way. "" when nothing can serve the file (e.g.
+    inlined contents, or a bytestream URI with no path_prefix). The returned
+    path may still not exist; readers degrade on a missing file.
+    """
+    if file == None:
+        return ""
+    uri = bes_get(file, "file", "") or ""
+    if bb_root == None and type(uri) == "string" and uri.startswith("bytestream://"):
+        prefix = list(bes_get(file, "path_prefix", None) or [])
+        name = bes_get(file, "name", "") or ""
+        if not prefix or not name:
+            return ""
+        rel = "/".join(prefix) + "/" + name
+        return (base_dir + "/" + rel) if base_dir else rel
+    return uri_to_path_under_root(uri, bb_root)
+
+def testlogs_dir(exec_root, output_dir, label) -> str:
+    """Local testlogs directory for a main-repo test, or "".
+
+    `<exec_root>/bazel-out/<output_dir>/testlogs/<pkg>/<name>`, where
+    `output_dir` is the configuration's output directory (`k8-fastbuild`).
+    Bazel reports these outputs as `bytestream://` URIs with no
+    `path_prefix` when it uploads them, so this is the only local handle on a
+    file that is on disk. "" for an external-repo label or a missing input.
+    A sharded, multi-run or retried test's files sit below it; see
+    `testlog_path`.
+    """
+    if not exec_root or not output_dir or not label:
+        return ""
+    if label.startswith("@@//") or label.startswith("@//"):
+        label = label[label.index("//"):]
+    if not label.startswith("//") or ":" not in label:
+        return ""
+    pkg, name = label[2:].split(":", 1)
+    rel = (pkg + "/" + name) if pkg else name
+    return exec_root + "/bazel-out/" + output_dir + "/testlogs/" + rel
+
+def testlog_path(logs_dir, run, shard, attempt, run_count, shard_count, final, ext) -> str:
+    """One test attempt's `.log` / `.xml` under `logs_dir` (see `testlogs_dir`).
+
+    Mirrors Bazel's layout: a `shard_<i>_of_<n>_run_<j>_of_<m>` subdirectory,
+    each half present only when its count exceeds 1; the final attempt of a
+    shard/run is `test.<ext>`, an earlier one `test_attempts/attempt_<k>.<ext>`.
+    `run` / `shard` / `attempt` are BES's one-based TestResultId fields. The
+    counts come from TestSummary, after every TestResult: 0 means not known
+    yet, which resolves only when `run` and `shard` are both 1.
+    """
+    if not logs_dir:
+        return ""
+    if (shard_count == 0 and shard > 1) or (run_count == 0 and run > 1):
+        return ""
+    parts = []
+    if shard_count > 1:
+        parts.append("shard_%d_of_%d" % (shard, shard_count))
+    if run_count > 1:
+        parts.append("run_%d_of_%d" % (run, run_count))
+    d = logs_dir + ("/" + "_".join(parts) if parts else "")
+    if final:
+        return d + "/test." + ext
+    return d + "/test_attempts/attempt_%d.%s" % (attempt, ext)
+
+def _resolve_test_details(data, label, run_count = 0, shard_count = 0):
+    """Set `test_details[label]` from the label's recorded test_result attempts.
+
+    Picks the latest attempt that did not pass, else the latest attempt, so a
+    sharded test's snippet comes from a failing shard. A path BES resolved
+    (file://, bb_clientd, path_prefix) wins; otherwise it is derived with
+    `testlog_path`, re-derived at test_summary once the counts are known.
+    """
+    attempts = data["bazel"]["test_attempts"].get(label, [])
+    if not attempts:
+        return
+    failed = [a for a in attempts if a["status"] in _FAILED_STATUSES]
+    pick = failed[-1] if failed else attempts[-1]
+    final = pick["attempt"] >= max([a["attempt"] for a in attempts if a["run"] == pick["run"] and a["shard"] == pick["shard"]])
+    paths = {}
+    for ext in ("log", "xml"):
+        path = pick[ext + "_path"]
+        if not path and pick["has_" + ext]:
+            path = testlog_path(pick["logs_dir"], pick["run"], pick["shard"], pick["attempt"], run_count, shard_count, final, ext)
+        paths[ext] = path
+    data["bazel"]["test_details"][label] = {
+        "log_path": paths["log"],
+        # JUnit XML, when present: lets the snippet prefer structured
+        # <failure>/<error> output over scraping the raw test.log.
+        "xml_path": paths["xml"],
+        "duration_ms": pick["duration_ms"],
+    }
+
 def _repro_with_prefix(prefix, labels, max_chars):
     """Build a '<prefix> <labels>' repro command, truncating the label list to
     stay within max_chars. Returns (cmd, n_included); cmd is "" if no label fits.
@@ -355,7 +478,7 @@ def init_data():
             "skipped_targets_total": 0,
             # Failed actions grouped by label: [{label, mnemonics, stderr_path}]
             # (deduped). Capped at MAX_FAILED_ACTIONS labels. stderr_path is the
-            # local path resolved from the BES stderr File.uri ("" when absent),
+            # local path `local_output_path` gives the BES stderr File ("" when absent),
             # read on demand for the inline snippet — never the raw bytes.
             "failed_actions": [],
             # May exceed len(failed_actions) due to cap.
@@ -378,11 +501,18 @@ def init_data():
             "executed_duration_ms": 0,
             # Cached-test wall time (ms) — time saved by the cache.
             "cached_duration_ms": 0,
-            # Per-test detail from test_result (keyed by label, last attempt wins):
-            # {label -> {log_path, xml_path, duration_ms}}. log_path/xml_path are
-            # local (resolved from the BES URI), or "" if remote / unavailable.
-            # Read on demand at render time for the inline failure snippet.
+            # Per-test detail, for the latest attempt that did not pass (else the
+            # latest): {label -> {log_path, xml_path, duration_ms}}. log_path /
+            # xml_path are local paths from `local_output_path` (bb_clientd
+            # mount, else the output tree), falling back to `testlog_path` for
+            # an uploaded output with no path_prefix; "" when unresolvable. They
+            # may not exist. Read on demand at render time for the inline
+            # failure snippet.
             "test_details": {},
+            # Every test_result attempt per label, behind `test_details`:
+            # {label -> [{run, shard, attempt, status, duration_ms, logs_dir,
+            # log_path, xml_path, has_log, has_xml}]}.
+            "test_attempts": {},
 
             # label -> rule kind (e.g. "cc_library", "py_test") from
             # target_configured. Detects tests and displays the kind.
@@ -447,6 +577,12 @@ def init_data():
             # From the configuration event.
             "cpu_arch": "",
             "compilation_mode": "",
+            # Per-config output directory under bazel-out (`k8-fastbuild`; BES
+            # `Configuration.mnemonic`), keyed by configuration id; with
+            # `local_exec_root` (workspace_config), locates a test's testlogs
+            # when BES reports them only as remote URIs.
+            "config_output_dirs": {},
+            "local_exec_root": "",
             # From build_started; display-only, skip empty rows.
             "workspace_directory": "",
             "working_directory": "",
@@ -481,15 +617,19 @@ def init_data():
         },
     }
 
-def process_event(data, event):
+def process_event(data, event, bb_root):
     """Update data in-place from a single build event.
 
     All field access goes through bes_get() (guards AttributeError on schema
     mismatch). Missing-field warnings go through `trace` (ASPECT_DEBUG / OTel only).
 
     Args:
-        data:  dict from init_data(), mutated in place
-        event: BuildEvent from BazelTrait.build_event hook
+        data:    dict from init_data(), mutated in place
+        event:   BuildEvent from BazelTrait.build_event hook
+        bb_root: `usable_bb_clientd_root(ctx.std)`, resolved once per task. It
+                 decides how test log and action stderr URIs map to local paths
+                 (see `local_output_path`); None (no mount) falls back to the
+                 output tree.
 
     Returns:
         True when the change warrants a status check update.
@@ -608,10 +748,9 @@ def process_event(data, event):
             if label and label not in data["bazel"]["failed_action_labels"]:
                 data["bazel"]["failed_action_labels"].append(label)
 
-            # Resolve the stderr File.uri to a local path only (never .contents):
+            # Resolve the stderr File to a local path only (never .contents):
             # read on demand for the inline snippet, kept off the Starlark heap.
-            stderr_uri = bes_get(bes_get(payload, "stderr", None), "file", "") or ""
-            stderr_path = uri_to_path_under_root(stderr_uri, _DEFAULT_BB_CLIENTD_ROOT)
+            stderr_path = local_output_path(bes_get(payload, "stderr", None), bb_root, data["bazel"]["workspace_directory"])
 
             # One entry per label, deduped mnemonics (a target can fail multiple
             # actions, e.g. CppCompile + CppLink). First action's stderr_path
@@ -693,29 +832,41 @@ def process_event(data, event):
         return False
 
     elif kind == "test_result":
-        # Fires once per shard/run/attempt; last write wins. test_summary gives
-        # the authoritative final outcome.
+        # Fires once per shard/run/attempt. test_summary gives the authoritative
+        # final outcome, and the shard/run counts the derived paths need.
         label = bes_get(event.id, "label", "") or ""
         payload = event.payload
-        log_uri = ""
-        xml_uri = ""
+        log_file = None
+        xml_file = None
         if payload:
             for output in (bes_get(payload, "test_action_output", None) or []):
                 if not output:
                     continue
                 name = bes_get(output, "name", "")
                 if name == "test.log":
-                    log_uri = bes_get(output, "file", "") or ""
+                    log_file = output
                 elif name == "test.xml":
-                    xml_uri = bes_get(output, "file", "") or ""
-        duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
-        data["bazel"]["test_details"][label] = {
-            "log_path": uri_to_path_under_root(log_uri, _DEFAULT_BB_CLIENTD_ROOT),
-            # JUnit XML, when present: lets the snippet prefer structured
-            # <failure>/<error> output over scraping the raw test.log.
-            "xml_path": uri_to_path_under_root(xml_uri, _DEFAULT_BB_CLIENTD_ROOT),
-            "duration_ms": duration_ms,
-        }
+                    xml_file = output
+        ws = data["bazel"]["workspace_directory"]
+        config_id = bes_get(bes_get(event.id, "configuration", None), "id", "") or ""
+        logs_dir = testlogs_dir(
+            data["bazel"]["local_exec_root"],
+            data["bazel"]["config_output_dirs"].get(config_id, ""),
+            label,
+        )
+        data["bazel"]["test_attempts"].setdefault(label, []).append({
+            "run": bes_get(event.id, "run", 1) or 1,
+            "shard": bes_get(event.id, "shard", 1) or 1,
+            "attempt": bes_get(event.id, "attempt", 1) or 1,
+            "status": (bes_get(payload, "status", "") or "") if payload else "",
+            "duration_ms": (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0,
+            "logs_dir": logs_dir,
+            "log_path": local_output_path(log_file, bb_root, ws),
+            "xml_path": local_output_path(xml_file, bb_root, ws),
+            "has_log": log_file != None,
+            "has_xml": xml_file != None,
+        })
+        _resolve_test_details(data, label)
 
         # No update — test_summary is the authoritative signal.
         return False
@@ -725,6 +876,12 @@ def process_event(data, event):
         status = bes_get(payload, "overall_status", "") or ""
         label = bes_get(event.id, "label", "") or ""
         num_cached = bes_get(payload, "total_num_cached", 0) or 0
+        _resolve_test_details(
+            data,
+            label,
+            run_count = bes_get(payload, "run_count", 0) or 0,
+            shard_count = bes_get(payload, "shard_count", 0) or 0,
+        )
 
         # total_run_duration_millis is deprecated but still populated. Bucket by
         # whether the test ran or was served from cache.
@@ -929,12 +1086,15 @@ def process_event(data, event):
         # Read make_variable.TARGET_CPU / COMPILATION_MODE — idiomatic names
         # ("aarch64", "fastbuild"); top-level `cpu` is the internal platform name
         # ("darwin_arm64") which reads poorly.
-        id_config = bes_get(event.id, "configuration", None)
-        config_id = bes_get(id_config, "id", "") or ""
+        # `event.id` is the ConfigurationId itself.
+        config_id = bes_get(event.id, "id", "") or ""
         if config_id == "none":
             return False
         payload = event.payload
         cpu_or_mode_changed = False
+        output_dir = bes_get(payload, "mnemonic", "") or ""
+        if config_id and output_dir:
+            data["bazel"]["config_output_dirs"][config_id] = output_dir
         if payload:
             make_vars = bes_get(payload, "make_variable", None)
             cpu = ""
@@ -956,6 +1116,10 @@ def process_event(data, event):
                 cpu_or_mode_changed = True
 
         return cpu_or_mode_changed
+
+    elif kind == "workspace_config":
+        data["bazel"]["local_exec_root"] = bes_get(event.payload, "local_exec_root", "") or ""
+        return False
 
     elif kind == "aborted":
         data["bazel"]["aborted"] = True
@@ -4817,6 +4981,7 @@ RESULTS_KINDS = [
     "build_metrics",
     "build_finished",
     "configuration",
+    "workspace_config",
     "aborted",
 ]
 
@@ -4946,6 +5111,7 @@ def _results_new(ctx, command, report_uploader = None):
     """
     ph = phases.new(ctx, init_data())
     data = ph.data
+    bb_root = usable_bb_clientd_root(ctx.std)
 
     # first: next emit bypasses the surface throttle (priority).
     # last_monotonic: monotonic seconds at the last emit (0 → first tick emits).
@@ -5032,7 +5198,7 @@ def _results_new(ctx, command, report_uploader = None):
 
     def process(event):
         # `event` is a BuildEvent, or None on a quiet heartbeat tick.
-        interesting = process_event(data, event) if event != None else False
+        interesting = process_event(data, event, bb_root) if event != None else False
         heartbeat = _elapsed_ms(m["last_monotonic"]) >= MIN_HEARTBEAT_INTERVAL_MS
         if not (interesting or heartbeat):
             return
@@ -5074,7 +5240,7 @@ def _results_new(ctx, command, report_uploader = None):
             if not labels:
                 return
             _add(prefix + build_aspect_command(subcommand, [], labels), subcommand + "-repro-aspect", target = target)
-            _add(prefix + build_bazel_command(subcommand, labels), subcommand + "-repro-vanilla-bazel", description = "vanilla bazel", target = target)
+            _add(prefix + build_bazel_command(subcommand, labels), subcommand + "-repro-vanilla-bazel", target = target)
 
         for sub in ("build", "test"):
             if by_sub[sub]:

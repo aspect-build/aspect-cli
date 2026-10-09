@@ -21,7 +21,7 @@ load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "now_ms", "process_event", "uri_to_path_under_root")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -54,38 +54,6 @@ _PASS_READ_BUDGET_MS = 1000
 # Surfaces a stuck remote-cache/FUSE read while the task is still running —
 # without it, a wedged storage layer is silent until the post-build skip.
 _PENDING_READ_WARN_MS = 30000
-
-def _bb_clientd_mounted(ctx, root):
-    """True when a bb_clientd virtual filesystem is mounted at `root`.
-
-    Read from /proc/self/mounts: procfs never blocks, while stat()ing the
-    mount root would be served by the (possibly wedged) bb_clientd daemon
-    itself. Without procfs (macOS) fall back to a direct existence check.
-    """
-    mounts = ctx.std.fs.try_read_to_string("/proc/self/mounts")
-    if mounts:
-        return " " + root + " " in mounts
-    return ctx.std.fs.exists(root)
-
-def _lint_file_path(file, bb_root):
-    """Best local path for a BES-announced lint output file, or "".
-
-    With a bb_clientd mount (`bb_root` set), bytestream:// URIs resolve
-    through it. Without one (non-Aspect runners, runners without bb_clientd),
-    fall back to the file's output-tree path (path_prefix/name, relative to
-    the workspace): the lint build passes --remote_download_regex for lint
-    outputs, so Bazel downloads them into bazel-out even under minimal
-    downloads and the local copy serves the read. file:// URIs are local
-    paths either way. "" when nothing can serve the file (e.g. inlined
-    contents with no path_prefix).
-    """
-    uri = file.file
-    if bb_root == None and type(uri) == "string" and uri.startswith("bytestream://"):
-        prefix = list(file.path_prefix or [])
-        if prefix and file.name:
-            return "/".join(prefix) + "/" + file.name
-        return ""
-    return uri_to_path_under_root(uri, bb_root)
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def filter_all(diagnostics, changed_files):
@@ -583,7 +551,7 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, exp
     """Read a lint output file, or None when its contents can't be read yet.
 
     Paths under the bb_clientd mount (bytestream:// URIs resolved by
-    `_lint_file_path`) go through the bounded `poll_read_to_string`: the
+    `local_output_path`) go through the bounded `poll_read_to_string`: the
     inode exists as soon as the BES event arrives but reading blocks until
     the blob materializes — and blocks *forever* when the blob can't be
     fetched at all. A plain read would wedge the whole task inside one
@@ -721,7 +689,7 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
     exit_nonzero = False
     now = now_ms(ctx)
     for pfile in pending:
-        pfilepath = _lint_file_path(pfile, bb_root)
+        pfilepath = local_output_path(pfile, bb_root)
         result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
         if result == None:
             meta = pending_meta.setdefault(pfilepath, {"first_ms": now, "warned": False})
@@ -890,10 +858,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # bytestream:// URIs resolve through bb_clientd only when this runner has
     # a usable mount (declared by env and actually mounted); bb_root None
-    # routes them to the output-tree fallback instead (see _lint_file_path).
-    bb_root = bb_clientd_root(ctx.std.env)
-    if bb_root != None and not _bb_clientd_mounted(ctx, bb_root):
-        bb_root = None
+    # routes them to the output-tree fallback instead (see local_output_path).
+    bb_root = usable_bb_clientd_root(ctx.std)
     skipped_remote_files = 0
 
     # Emit on each interesting tick, and at least every MIN_HEARTBEAT_INTERVAL_MS
@@ -928,11 +894,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event):
+            if process_event(data, event, bb_root):
                 interesting = True
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
-                    filepath = _lint_file_path(file, bb_root)
+                    filepath = local_output_path(file, bb_root)
                     tool = detect_lint_tool(file.name)
                     if tool:
                         lint_tools_run[tool] = True
@@ -1002,7 +968,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 slow_warned = True
             if now_ms(ctx) >= post_build_deadline_ms:
                 for pfile in pending_files:
-                    pfilepath = _lint_file_path(pfile, bb_root)
+                    pfilepath = local_output_path(pfile, bb_root)
                     warn(ctx.std, "Lint file not readable %ds after build completed (skipping): %s" % (_POST_BUILD_DOWNLOAD_TIMEOUT_MS // 1000, pfilepath))
                 break
             sleep(BES_DRAIN_TICK_MS)

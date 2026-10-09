@@ -19,7 +19,7 @@ load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_l
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
@@ -238,7 +238,6 @@ def _append_fix_commands(ctx, data):
                 flags = bazel_flags,
                 max_chars = _BAZEL_ALT_MAX_CHARS,
             ),
-            description = "vanilla bazel",
             slug = "format-fix-vanilla-bazel",
         ))
 
@@ -377,6 +376,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # when bazel is silent. Per event: r.event() (entrypoint discovery),
     # build_event hooks (ArtifactUpload records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
+    bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
         for _ in range(10000):
@@ -386,7 +386,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event):
+            if process_event(data, event, bb_root):
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)

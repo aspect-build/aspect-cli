@@ -1378,7 +1378,7 @@ fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
             "build_tool_logs" => Ok(21),
             "build_metrics" => Ok(22),
             "build_metadata" => Ok(24),
-            "workspace_info" => Ok(25),
+            "workspace_info" | "workspace_config" => Ok(25),
             "target_summary" => Ok(26),
             "convenience_symlinks_identified" => Ok(27),
             "exec_request" => Ok(28),
