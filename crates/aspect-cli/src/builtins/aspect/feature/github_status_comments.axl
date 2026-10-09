@@ -88,7 +88,7 @@ load(
 )
 load("../private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "snippet_budget_for")
 load("../private/lib/checkrun.axl", "checkrun")
-load("../private/lib/ci.axl", "ci_identity", "detect_ci_host", "resolve_build_url")
+load("../private/lib/ci.axl", "ci_host_link_label", "ci_identity", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lifecycle.axl", "Phases")
@@ -126,11 +126,6 @@ load(
 GITHUB_STATUS_COMMENT_ROLES = ["prs.write"]
 
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
-
-# Fallback CI-host link label for entries serialized without host metadata
-# (older entries, or hosts not in the registry). New entries carry the detected
-# host's `ci_host_label` from `detect_ci_host`.
-_DEFAULT_CI_HOST_LABEL = "GitHub Actions"
 
 # Cross-workflow state block embedded in the rendered comment.
 #
@@ -301,22 +296,22 @@ def _links_cell_text(entry):
     """Build the row's link line; each link is omitted when its URL is unset
     (see `_publish` for URL sourcing):
 
-      Build Results  — Aspect Build Results UI (per-task BES sink view).
+      Aspect UI      — Aspect's Build Results UI (per-task BES sink view).
       BES            — generic BES link from `--bes_results_url` +
-                       invocation_id; independent of Build Results (both
+                       invocation_id; independent of Aspect UI (both
                        render when pointed at distinct backends).
       Status Check   — GitHub Status Check for the task.
-      <host>         — the CI build/job page, labelled for the host that
-                       produced the entry (GitHub Actions / Buildkite /
-                       CircleCI / GitLab); falls back to GitHub Actions for
-                       entries without host metadata.
+      Action / Job   — the CI build/job page, in the vocabulary of the host
+                       that produced the entry (`ci_host_link_label`):
+                       "Action" on GitHub Actions and for entries without
+                       host metadata, "Job" on Buildkite / CircleCI / GitLab.
     """
     parts = []
 
     if entry.get("aspect_url"):
-        parts.append("[Build Results](%s)" % entry["aspect_url"])
+        parts.append("[Aspect UI](%s)" % entry["aspect_url"])
 
-    # Independent of the Build Results link — both render when set.
+    # Independent of the Aspect UI link — both render when set.
     bes_url = entry.get("bes_url", "")
     if bes_url and bes_url != entry.get("aspect_url", ""):
         parts.append("[BES](%s)" % bes_url)
@@ -325,7 +320,7 @@ def _links_cell_text(entry):
         parts.append("[Status Check](%s)" % entry["check_run_url"])
 
     if entry.get("ci_run_url"):
-        label = entry.get("ci_host_label") or _DEFAULT_CI_HOST_LABEL
+        label = ci_host_link_label(entry.get("ci_host_label", ""))
         parts.append("[%s](%s)" % (label, entry["ci_run_url"]))
 
     return " · ".join(parts)
@@ -2010,7 +2005,7 @@ def _github_status_comments(ctx: FeatureContext):
 
         # Capture data on every renderable kind, not just bazel_results:
         # all results dicts extend `init_data()` so `resolve_aspect_url` /
-        # `_results_subset` work uniformly. Else the Aspect link is missing
+        # `_results_subset` work uniformly. Else the Aspect UI link is missing
         # from format/lint/gazelle/delivery rows.
         if update.kind in (
             "bazel_results",
