@@ -95,8 +95,7 @@ BES_DRAIN_TICK_MS = 250
 
 # Default bb_clientd FUSE mount root on Aspect Workflows runners, used for
 # runners that predate the ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT platform env
-# (see bb_clientd_root). Also the root for `process_event`'s internal path
-# derivations, which have no env to read the runner configuration from.
+# (see bb_clientd_root).
 _DEFAULT_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
@@ -278,6 +277,55 @@ def uri_to_path_under_root(uri, bb_root) -> str:
         return bb_root + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
     return uri
 
+def bb_clientd_mounted(std, root) -> bool:
+    """True when a bb_clientd virtual filesystem is mounted at `root`.
+
+    Read from /proc/self/mounts: procfs never blocks, while stat()ing the
+    mount root would be served by the (possibly wedged) bb_clientd daemon
+    itself. Without procfs (macOS) fall back to a direct existence check.
+    """
+    mounts = std.fs.try_read_to_string("/proc/self/mounts")
+    if mounts:
+        return " " + root + " " in mounts
+    return std.fs.exists(root)
+
+def usable_bb_clientd_root(std) -> str | None:
+    """The bb_clientd root `bytestream://` URIs should resolve through, or None.
+
+    `bb_clientd_root` narrowed to a mount that is actually present: a runner
+    can declare (or default to) a root nothing is mounted at, and resolving
+    through it yields paths that never exist. None routes bytestream URIs to
+    the output-tree fallback in `local_output_path`. Resolve once per task and
+    pass the result to `process_event`.
+    """
+    root = bb_clientd_root(std.env)
+    if root != None and not bb_clientd_mounted(std, root):
+        return None
+    return root
+
+def local_output_path(file, bb_root, base_dir = "") -> str:
+    """Best local path for a BES `File`, or "".
+
+    With a bb_clientd mount (`bb_root` set), bytestream:// URIs resolve
+    through it. Without one, fall back to the file's output-tree path
+    (path_prefix/name, under `base_dir` when given, else relative to the
+    working directory), which exists when Bazel downloaded the output. file://
+    URIs are local paths either way. "" when nothing can serve the file (e.g.
+    inlined contents, or a bytestream URI with no path_prefix). The returned
+    path may still not exist; readers degrade on a missing file.
+    """
+    if file == None:
+        return ""
+    uri = bes_get(file, "file", "") or ""
+    if bb_root == None and type(uri) == "string" and uri.startswith("bytestream://"):
+        prefix = list(bes_get(file, "path_prefix", None) or [])
+        name = bes_get(file, "name", "") or ""
+        if not prefix or not name:
+            return ""
+        rel = "/".join(prefix) + "/" + name
+        return (base_dir + "/" + rel) if base_dir else rel
+    return uri_to_path_under_root(uri, bb_root)
+
 def _repro_with_prefix(prefix, labels, max_chars):
     """Build a '<prefix> <labels>' repro command, truncating the label list to
     stay within max_chars. Returns (cmd, n_included); cmd is "" if no label fits.
@@ -355,7 +403,7 @@ def init_data():
             "skipped_targets_total": 0,
             # Failed actions grouped by label: [{label, mnemonics, stderr_path}]
             # (deduped). Capped at MAX_FAILED_ACTIONS labels. stderr_path is the
-            # local path resolved from the BES stderr File.uri ("" when absent),
+            # local path `local_output_path` gives the BES stderr File ("" when absent),
             # read on demand for the inline snippet — never the raw bytes.
             "failed_actions": [],
             # May exceed len(failed_actions) due to cap.
@@ -380,7 +428,8 @@ def init_data():
             "cached_duration_ms": 0,
             # Per-test detail from test_result (keyed by label, last attempt wins):
             # {label -> {log_path, xml_path, duration_ms}}. log_path/xml_path are
-            # local (resolved from the BES URI), or "" if remote / unavailable.
+            # local paths from `local_output_path` (bb_clientd mount, else the
+            # output tree), or "" when unresolvable; they may not exist.
             # Read on demand at render time for the inline failure snippet.
             "test_details": {},
 
@@ -481,15 +530,19 @@ def init_data():
         },
     }
 
-def process_event(data, event):
+def process_event(data, event, bb_root):
     """Update data in-place from a single build event.
 
     All field access goes through bes_get() (guards AttributeError on schema
     mismatch). Missing-field warnings go through `trace` (ASPECT_DEBUG / OTel only).
 
     Args:
-        data:  dict from init_data(), mutated in place
-        event: BuildEvent from BazelTrait.build_event hook
+        data:    dict from init_data(), mutated in place
+        event:   BuildEvent from BazelTrait.build_event hook
+        bb_root: `usable_bb_clientd_root(ctx.std)`, resolved once per task. It
+                 decides how test log and action stderr URIs map to local paths
+                 (see `local_output_path`); None (no mount) falls back to the
+                 output tree.
 
     Returns:
         True when the change warrants a status check update.
@@ -608,10 +661,9 @@ def process_event(data, event):
             if label and label not in data["bazel"]["failed_action_labels"]:
                 data["bazel"]["failed_action_labels"].append(label)
 
-            # Resolve the stderr File.uri to a local path only (never .contents):
+            # Resolve the stderr File to a local path only (never .contents):
             # read on demand for the inline snippet, kept off the Starlark heap.
-            stderr_uri = bes_get(bes_get(payload, "stderr", None), "file", "") or ""
-            stderr_path = uri_to_path_under_root(stderr_uri, _DEFAULT_BB_CLIENTD_ROOT)
+            stderr_path = local_output_path(bes_get(payload, "stderr", None), bb_root, data["bazel"]["workspace_directory"])
 
             # One entry per label, deduped mnemonics (a target can fail multiple
             # actions, e.g. CppCompile + CppLink). First action's stderr_path
@@ -697,23 +749,24 @@ def process_event(data, event):
         # the authoritative final outcome.
         label = bes_get(event.id, "label", "") or ""
         payload = event.payload
-        log_uri = ""
-        xml_uri = ""
+        log_file = None
+        xml_file = None
         if payload:
             for output in (bes_get(payload, "test_action_output", None) or []):
                 if not output:
                     continue
                 name = bes_get(output, "name", "")
                 if name == "test.log":
-                    log_uri = bes_get(output, "file", "") or ""
+                    log_file = output
                 elif name == "test.xml":
-                    xml_uri = bes_get(output, "file", "") or ""
+                    xml_file = output
+        ws = data["bazel"]["workspace_directory"]
         duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
-            "log_path": uri_to_path_under_root(log_uri, _DEFAULT_BB_CLIENTD_ROOT),
+            "log_path": local_output_path(log_file, bb_root, ws),
             # JUnit XML, when present: lets the snippet prefer structured
             # <failure>/<error> output over scraping the raw test.log.
-            "xml_path": uri_to_path_under_root(xml_uri, _DEFAULT_BB_CLIENTD_ROOT),
+            "xml_path": local_output_path(xml_file, bb_root, ws),
             "duration_ms": duration_ms,
         }
 
@@ -4938,6 +4991,7 @@ def _results_new(ctx, command, report_uploader = None):
     """
     ph = phases.new(ctx, init_data())
     data = ph.data
+    bb_root = usable_bb_clientd_root(ctx.std)
 
     # first: next emit bypasses the surface throttle (priority).
     # last_monotonic: monotonic seconds at the last emit (0 → first tick emits).
@@ -5024,7 +5078,7 @@ def _results_new(ctx, command, report_uploader = None):
 
     def process(event):
         # `event` is a BuildEvent, or None on a quiet heartbeat tick.
-        interesting = process_event(data, event) if event != None else False
+        interesting = process_event(data, event, bb_root) if event != None else False
         heartbeat = _elapsed_ms(m["last_monotonic"]) >= MIN_HEARTBEAT_INTERVAL_MS
         if not (interesting or heartbeat):
             return

@@ -4,7 +4,7 @@ load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_l
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event", "usable_bb_clientd_root")
 load("./private/lib/changedetector.axl", "changedetector")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -61,6 +61,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
         execution_log = execution_log or False,
     )
 
+    bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         for _ in range(10000):
             event = events.try_pop()
@@ -69,7 +70,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
             r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            process_event(ph.data, event)
+            process_event(ph.data, event, bb_root)
         if events.done:
             break
 
@@ -346,6 +347,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_command = announce_command,
     )
 
+    bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         for _ in range(10000):
             event = events.try_pop()
@@ -354,7 +356,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
             r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            process_event(data, event)
+            process_event(data, event, bb_root)
         if events.done:
             break
 
