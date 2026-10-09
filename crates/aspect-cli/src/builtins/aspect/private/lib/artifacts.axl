@@ -796,6 +796,24 @@ _LogChannel = record(
     file_kind = field(str),
 )
 
+_PROFILE_ENRICHMENT = ["--generate_json_trace_profile", "--experimental_profile_include_target_label"]
+
+def profile_flags(rc, command: str, default_path: str, working_directory: str):
+    """`(path, flags)` for uploading the trace profile of a `command` run under
+    `rc`: where Bazel will write it, and the flags to append.
+
+    A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
+    another feature such as Workflows — is kept, and its path is the one
+    uploaded; a relative one resolves against `working_directory`, as Bazel
+    resolves it. Only when none is set is `--profile=default_path` added."""
+    path = rc.flag_value("--profile", command = command)
+    if not path:
+        return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])
+    is_absolute = path.startswith("/") or path[1:3] in (":/", ":\\")
+    if not is_absolute and working_directory:
+        path = working_directory.rstrip("/") + "/" + path
+    return (path, list(_PROFILE_ENRICHMENT))
+
 # Owner feature — co-located so it can bind closures to the private trait
 
 def _artifact_upload_impl(ctx: FeatureContext):
@@ -804,6 +822,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
       build_event  → each active `_LogChannel` collects its entries and
                      batch-uploads at the size threshold
       build_end    → final flush of every channel + upload profile/execlog/BEP
+
+    The profile's flags come from an `rc_flags` hook, which sees the resolved
+    rc: a `--profile` already set there (Workflows sets one for the backend's
+    ingest) is uploaded from its own path and left in place for its owner;
+    otherwise the profile goes to a path of this feature's own.
 
     Test logs and build-failure logs are independent channels driven through
     the same batch/flush/publish path (see `channels` below), so they upload
@@ -853,12 +876,16 @@ def _artifact_upload_impl(ctx: FeatureContext):
     # uuid-namespaced so concurrent same-task runs don't share a tree.
     build_log_scratch = tmpdir + "/" + uuid + ".build-logs"
 
+    # Where the profile lands, settled once the rc is resolved.
+    profile = {"path": profile_path}
+
+    def _profile_rc_flags(ctx, rc, command):
+        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.current_dir())
+        profile["path"] = path
+        return flags
+
     if upload_profile:
-        bazel_trait.extra_flags.extend([
-            "--generate_json_trace_profile",
-            "--experimental_profile_include_target_label",
-            "--profile=" + profile_path,
-        ])
+        bazel_trait.rc_flags.append(_profile_rc_flags)
     if upload_exec_log:
         bazel_trait.execution_log_sinks.append(bazel.execution_log.compact_file(path = execlog_path))
     if upload_bep:
@@ -936,23 +963,28 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 for channel in channels:
                     _flush(ctx, channel, final = True)
 
-                # Profile / BEP / exec-log — opt-in each. Source files are
-                # removed on success AND failure (no retry, so a leftover
-                # file just leaks a potentially-sensitive artifact).
+                # Profile / BEP / exec-log — opt-in each. Files at paths this
+                # feature chose are removed on success AND failure (no retry,
+                # so a leftover file just leaks a potentially-sensitive
+                # artifact); a profile at a `--profile` set elsewhere is not
+                # ours to remove.
                 singletons = []
                 if upload_profile:
-                    singletons.append(("profile", profile_path, "profile.gz"))
+                    singletons.append(("profile", profile["path"], "profile.gz"))
                 if upload_bep:
                     singletons.append(("bep", bep_path, "bep.binpb"))
                 if upload_exec_log:
                     singletons.append(("execlog", execlog_path, "execlog.zstd"))
                 for kind, src, filename in singletons:
                     if not ctx.std.fs.exists(src):
+                        if kind == "profile":
+                            warn(ctx.std, "Profile upload skipped: Bazel wrote no profile at " + src)
                         continue
                     _upload_file(ctx, kind, filename, src)
-                    ctx.std.fs.remove_file(src)
+                    if src in (profile_path, bep_path, execlog_path):
+                        ctx.std.fs.remove_file(src)
 
-        _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, not is_local)
+        _trace_summary(ctx, items, channels, skipped_files, profile["path"], execlog_path, bep_path, not is_local)
 
         # Reap channel scratch unconditionally — even when check() skipped the
         # upload, build events may have already staged log files.
