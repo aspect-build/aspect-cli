@@ -365,6 +365,8 @@ def _render_all(ctx, templates = None):
 
     _check_failed_actions_invoke_snippet_macro(ctx)
 
+    _check_failed_overflow_is_noted(ctx, templates)
+
     print(sep)
     print("All " + str(len(scenarios)) + " delivery scenarios rendered without error.")
     return 0
@@ -387,6 +389,17 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
     out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
     if "//pkg:target" not in out["text"]:
         fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
+
+def _check_failed_overflow_is_noted(ctx, templates):
+    """Failures past the per-group row cap are counted, not silently dropped —
+    the default preset lists failures outside a `<details>`, on its own path."""
+    data = _make_base()
+    for i in range(60):
+        add_result(data, "//apps/svc%d:release" % i, "fail", message = "exit 1", output_sha = _SHA_1)
+    t = resolve_templates(templates, "delivery", renderer_kind = "delivery_results") if templates else None
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links(), templates = t)
+    if "10 more" not in out["text"]:
+        fail("failed-group overflow not noted: %r" % out["text"][:600])
 
 def _check_long_subject_title_is_capped(ctx):
     """A resolved subject longer than the title budget is truncated with a
