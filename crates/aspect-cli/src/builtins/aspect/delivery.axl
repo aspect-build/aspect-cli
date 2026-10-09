@@ -192,7 +192,7 @@ load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "usable_bb_clientd_root", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
@@ -650,13 +650,14 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS
         # even when bazel is silent.
         last_emit_ms = now_ms(ctx)
+        bb_root = usable_bb_clientd_root(ctx.std)
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
             for _ in range(10000):
                 event = events.try_pop()
                 if event == None:
                     break
-                if process_event(data, event):
+                if process_event(data, event, bb_root):
                     interesting = True
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)

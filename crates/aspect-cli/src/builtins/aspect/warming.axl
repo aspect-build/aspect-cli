@@ -30,7 +30,7 @@ load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_l
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -184,6 +184,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # when bazel is silent. Per event: build_event hooks (artifact recording) +
     # process_event (populate the bazel state for the rendered sections).
     last_emit_ms = now_ms(ctx)
+    bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
         for _ in range(10000):
@@ -192,7 +193,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event):
+            if process_event(data, event, bb_root):
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             ph.dispatch(phases.Update(

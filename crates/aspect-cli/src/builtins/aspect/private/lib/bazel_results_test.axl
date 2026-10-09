@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "truncate_label")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -934,9 +934,9 @@ def _test_target_configured_counts_test_targets(ctx):
     narrative. Non-test targets bump `targets_configured_counted` but not
     the test count."""
     data = init_data()
-    process_event(data, _make_target_configured("//pkg:lib", "cc_library"))
-    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
-    process_event(data, _make_target_configured("//pkg:b_test", "py_test"))
+    process_event(data, _make_target_configured("//pkg:lib", "cc_library"), None)
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"), None)
+    process_event(data, _make_target_configured("//pkg:b_test", "py_test"), None)
 
     _eq("only *_test targets counted", data["bazel"]["test_targets_configured"], 2)
     _eq("every configured target counted", data["bazel"]["targets_configured_counted"], 3)
@@ -947,9 +947,9 @@ def _test_target_configured_dedups_aspect_events(ctx):
     run count and doesn't overshoot (e.g. "10 of 20 tests run" that never
     catches up)."""
     data = init_data()
-    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
-    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
-    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"), None)
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"), None)
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"), None)
 
     _eq("test label counted once despite aspect re-emits", data["bazel"]["test_targets_configured"], 1)
 
@@ -964,7 +964,7 @@ def _test_failed_test_survives_passed_bucket_cap(ctx):
 
     # Drive `passed_tests` past the cap.
     for i in range(MAX_TEST_TARGETS + 50):
-        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"))
+        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"), None)
 
     _eq(
         "passed bucket capped at MAX_TEST_TARGETS",
@@ -978,7 +978,7 @@ def _test_failed_test_survives_passed_bucket_cap(ctx):
     )
 
     # The failure arrives after the cap was hit. With per-bucket caps it lands.
-    process_event(data, _make_test_summary("//pkg/broken:test", "failed", duration_ms = 1000))
+    process_event(data, _make_test_summary("//pkg/broken:test", "failed", duration_ms = 1000), None)
 
     failed = [t["label"] for t in data["bazel"]["failed_tests"]]
     _eq("failed test recorded despite full passed bucket", failed, ["//pkg/broken:test"])
@@ -989,9 +989,9 @@ def _test_flaky_test_survives_passed_bucket_cap(ctx):
     survive a full passed bucket."""
     data = init_data()
     for i in range(MAX_TEST_TARGETS + 5):
-        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"))
+        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"), None)
 
-    process_event(data, _make_test_summary("//pkg/flake:test", "flaky"))
+    process_event(data, _make_test_summary("//pkg/flake:test", "flaky"), None)
 
     flaky = [t["label"] for t in data["bazel"]["flaky_tests"]]
     _eq("flaky test recorded despite full passed bucket", flaky, ["//pkg/flake:test"])
@@ -1338,8 +1338,62 @@ def _test_build_started_preserves_aspect_results_url(ctx):
     process_event(data, struct(
         kind = "build_started",
         payload = struct(uuid = "bazel-uuid-1", start_time_millis = 1),
-    ))
+    ), None)
     _eq("discovered base survives build_started", data["aspect_results_url"], "https://app.gcp.aspect.build/i")
+
+def _test_local_output_path(ctx):
+    """`local_output_path` resolves bytestream URIs through bb_clientd only when
+    a mount is given, otherwise through the output tree; file:// is verbatim."""
+    bs = struct(
+        file = "bytestream://cache.example:443/blobs/abc/12",
+        path_prefix = ["bazel-out", "k8-fastbuild", "testlogs", "pkg", "a_test"],
+        name = "test.log",
+    )
+    _eq(
+        "bytestream through mount",
+        local_output_path(bs, "/mnt/bb"),
+        "/mnt/bb/cas/cache.example/blobs/sha256/file/abc-12",
+    )
+    _eq(
+        "bytestream without mount falls back to the output tree under base_dir",
+        local_output_path(bs, None, "/ws"),
+        "/ws/bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log",
+    )
+    _eq(
+        "bytestream without mount or base_dir is relative",
+        local_output_path(bs, None),
+        "bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log",
+    )
+    _eq(
+        "bytestream without mount or path_prefix is unresolvable",
+        local_output_path(struct(file = bs.file, path_prefix = [], name = "stderr"), None, "/ws"),
+        "",
+    )
+    _eq(
+        "file uri is verbatim",
+        local_output_path(struct(file = "file:///out/test.log", path_prefix = [], name = "test.log"), None, "/ws"),
+        "/out/test.log",
+    )
+    _eq("missing file", local_output_path(None, None), "")
+
+def _test_test_result_paths_follow_bb_root(ctx):
+    """`process_event` resolves test.log/test.xml with the caller's `bb_root`
+    instead of a fixed mount, falling back to the workspace output tree."""
+    data = init_data()
+    data["bazel"]["workspace_directory"] = "/ws"
+    out = lambda name: struct(
+        name = name,
+        file = "bytestream://cache.example/blobs/h/1",
+        path_prefix = ["bazel-out", "k8-fastbuild", "testlogs", "pkg", "a_test"],
+    )
+    process_event(data, struct(
+        kind = "test_result",
+        id = struct(label = "//pkg:a_test"),
+        payload = struct(test_action_output = [out("test.log"), out("test.xml")], test_attempt_duration_millis = 5),
+    ), None)
+    detail = data["bazel"]["test_details"]["//pkg:a_test"]
+    _eq("log path", detail["log_path"], "/ws/bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log")
+    _eq("xml path", detail["xml_path"], "/ws/bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.xml")
 
 def _test_build_started_preserves_bazel_streamed(ctx):
     """`process_event`'s build_started reset wipes top-level state for the new
@@ -1359,7 +1413,7 @@ def _test_build_started_preserves_bazel_streamed(ctx):
             command = "build",
             start_time_millis = 1000,
         ),
-    ))
+    ), None)
     _eq("sink id preserved", data["sink_invocation_id"], "sink-1")
     _eq("bazel-streamed flag preserved", data["bes_streamed_by_bazel"], True)
     _eq("bazel invocation id captured", data["bazel"]["invocation_id"], "bazel-uuid-1")
@@ -1471,7 +1525,7 @@ def _test_results_kinds_all_processed(ctx):
         )
 
         # Returns a bool ("warrants a status update"); we only assert no crash.
-        result = process_event(init_data(), event)
+        result = process_event(init_data(), event, None)
         if result != True and result != False:
             fail("process_event(%s) returned non-bool: %r" % (kind, result))
 
@@ -1851,6 +1905,8 @@ _UNIT_TESTS = [
     _test_aspect_web_ui_url_bazel_streamed,
     _test_aspect_web_ui_url_discovered_base,
     _test_build_started_preserves_aspect_results_url,
+    _test_local_output_path,
+    _test_test_result_paths_follow_bb_root,
     _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
