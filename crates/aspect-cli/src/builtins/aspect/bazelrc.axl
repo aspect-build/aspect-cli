@@ -422,6 +422,16 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     helper = _HELPER_NAME if env_deployment else _credential_helper(ctx)
     default = _default_deployment(deployments) if machine_rc else None
 
+    # `auto` declines a deployment nothing here can authenticate, since the
+    # helper reaching its endpoints would have no token to give and Bazel
+    # treats that as fatal. An explicit `--remote` is the caller's to make.
+    # Decided before chaining, which would enable the checkout's sections and
+    # so the same helper.
+    if default != None and ctx.args.remote in ["", AUTO] and not can_authenticate(ctx, default):
+        spec = parse_remote("none")
+        info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
+                      (default.name, login_hint(default), config_name(default)))
+
     # A checkout that defines its own sections is enabled rather than restated,
     # so nothing here can override what the repository edited. Not where the
     # endpoints are this machine's: a runner's services are nowhere in a
@@ -441,13 +451,6 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     endpoint_env = environment
     auth = {}
     if default != None and not chain_to_repo:
-        # `auto` declines a deployment nothing here can authenticate, since the
-        # helper reaching its endpoints would have no token to give and Bazel
-        # treats that as fatal. An explicit `--remote` is the caller's to make.
-        if ctx.args.remote in ["", AUTO] and not can_authenticate(ctx, default):
-            spec = parse_remote("none")
-            info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
-                          (default.name, login_hint(default), config_name(default)))
         endpoint_env = deployment_environment(default, environment.ci)
         auth = deployment_group_auth(default, helper)
 
