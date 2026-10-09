@@ -36,7 +36,7 @@ _DETAILS_LIMIT = 65000
 # identical hash already delivered for this commit; "warn" = informational
 # warning (no output_sha / no entrypoint); "fail" = delivery target run
 # exited non-zero; "pending" = dry-run marker or not-yet-attempted.
-_OUTCOME_ORDER = ["fail", "warn", "skip", "pending", "ok"]
+_OUTCOME_ORDER = ["fail", "warn", "ok", "skip", "pending"]
 
 _OUTCOME_ICONS = {
     "ok": "✅",

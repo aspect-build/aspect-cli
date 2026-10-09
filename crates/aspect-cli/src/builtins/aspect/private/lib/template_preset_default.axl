@@ -222,9 +222,7 @@ _… {{ overflow }} more not shown._
 # delivery. The only kind whose *success* carries a payload — what shipped, under
 # which digest — and the Aspect UI has no view of a delivery at all, so the
 # per-target results are the body rather than a summary of it.
-_DELIVERY_DETAILS = _ABORT_NOTICE + """{% for s in summary_rows %}- {{ s.icon }} **{{ s.count }}** {{ s.label }}{% if s.note %} ({{ s.note }}){% endif %}
-{% endfor %}
-{% for group in groups %}{% if group.outcome == "fail" or group.outcome == "warn" %}### {{ group.icon }} {{ group.count }} {{ group.heading }}
+_DELIVERY_DETAILS = _ABORT_NOTICE + """{% for group in groups %}{% if group.outcome == "fail" or group.outcome == "warn" %}### {{ group.icon }} {{ group.count }} {{ group.heading }}
 
 {% for r in group.entries %}- `{{ r.label }}`{% if r.message %} — {{ r.message }}{% endif %}
 {% endfor %}
