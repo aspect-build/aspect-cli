@@ -10,7 +10,6 @@ load("@aspect//feature/deployment.axl", "Deployment")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//gc_test.axl", "gc_tests")
-load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
 load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
@@ -75,7 +74,6 @@ load("@aspect//private/lib/watch_supervisor_test.axl", "watch_supervisor_tests")
 load("@aspect//private/lib/watch_test.axl", "watch_tests")
 load("@aspect//private/lib/worktree_test.axl", "worktree_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
-load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
 load("@aspect//workspace_data_test.axl", "workspace_data_tests")
 load("@std//time.axl", "time")
@@ -147,36 +145,6 @@ def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> Rep
 
 def _customize_message(s: str, a: str) -> str:
     return s + a
-
-# Example custom `suggestion` tip: CI build page + (for Bazel-on-Workflows
-# tasks) Web UI invocation + BES results, one link per line. Registered below
-# via lifecycle.task_update.append. Each emit rebuilds the body and re-adds the
-# tip under the same id (last-emit-wins, grows as links resolve); no tip when
-# none known. surfaces=TASK_SCREENS keeps it off the cross-task PR summary.
-def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
-    lines = []
-    aspect_url = aspect_web_ui_url(ctx.std.env, update.data)
-    if aspect_url:
-        lines.append("✨ [Aspect Web UI](%s) — invocation details, test logs, build logs, and timing" % aspect_url)
-    if update.data.get("bazel"):  # render_bes_url reads data["bazel"]; only Bazel tasks have it
-        bes_url = render_bes_url(update.data)
-        if bes_url:
-            lines.append("🔗 [BES results](%s)" % bes_url)
-    host = detect_ci_host(ctx.std.env)
-    ci_url = detect_build_url(ctx.std.env)
-    if host and ci_url:
-        lines.append("%s [%s](%s) — raw CI logs for this job" % (host["icon"], host["label"], ci_url))
-    if not lines:
-        return
-    add_tip(
-        ctx,
-        id = "click-through-links",
-        severity = TIP_SUGGESTION,
-        type = TIP_TEMPLATE_RAW,
-        surfaces = TASK_SCREENS,
-        title = "Click through for invocation details and logs",
-        body = "\n".join(lines),
-    )
 
 def _stamp_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
     """Write the epoch second of each task update to
@@ -298,8 +266,6 @@ def config(ctx: ConfigContext):
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
-    # Offer the click-through-links tip on whatever task runs.
-    lifecycle.task_update.append(_links_task_update)
     lifecycle.task_update.append(_stamp_task_update)
 
     # Announce the resolved Bazel version on every supporting task.
