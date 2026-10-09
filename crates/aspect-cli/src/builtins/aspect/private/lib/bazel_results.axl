@@ -326,6 +326,27 @@ def local_output_path(file, bb_root, base_dir = "") -> str:
         return (base_dir + "/" + rel) if base_dir else rel
     return uri_to_path_under_root(uri, bb_root)
 
+def testlogs_dir(exec_root, mnemonic, label) -> str:
+    """Local testlogs directory for a main-repo test, or "".
+
+    `<exec_root>/bazel-out/<mnemonic>/testlogs/<pkg>/<name>`, which holds
+    test.log / test.xml for an unsharded, single-run test once Bazel has run
+    or fetched it. Bazel reports these outputs as `bytestream://` URIs with no
+    `path_prefix` when it uploads them, so this is the only local handle on a
+    file that is on disk. "" for an external-repo label or a missing input;
+    the directory of a sharded or multi-run test is a level deeper, so its
+    path will not exist and readers degrade.
+    """
+    if not exec_root or not mnemonic or not label:
+        return ""
+    if label.startswith("@@//") or label.startswith("@//"):
+        label = label[label.index("//"):]
+    if not label.startswith("//") or ":" not in label:
+        return ""
+    pkg, name = label[2:].split(":", 1)
+    rel = (pkg + "/" + name) if pkg else name
+    return exec_root + "/bazel-out/" + mnemonic + "/testlogs/" + rel
+
 def _repro_with_prefix(prefix, labels, max_chars):
     """Build a '<prefix> <labels>' repro command, truncating the label list to
     stay within max_chars. Returns (cmd, n_included); cmd is "" if no label fits.
@@ -429,7 +450,8 @@ def init_data():
             # Per-test detail from test_result (keyed by label, last attempt wins):
             # {label -> {log_path, xml_path, duration_ms}}. log_path/xml_path are
             # local paths from `local_output_path` (bb_clientd mount, else the
-            # output tree), or "" when unresolvable; they may not exist.
+            # output tree), falling back to `testlogs_dir` for an uploaded output
+            # with no path_prefix; "" when unresolvable. They may not exist.
             # Read on demand at render time for the inline failure snippet.
             "test_details": {},
 
@@ -496,6 +518,11 @@ def init_data():
             # From the configuration event.
             "cpu_arch": "",
             "compilation_mode": "",
+            # Per-config output directory name (`k8-fastbuild`), keyed by
+            # configuration id; with `local_exec_root` (workspace_config), locates
+            # a test's testlogs when BES reports them only as remote URIs.
+            "config_mnemonics": {},
+            "local_exec_root": "",
             # From build_started; display-only, skip empty rows.
             "workspace_directory": "",
             "working_directory": "",
@@ -761,12 +788,24 @@ def process_event(data, event, bb_root):
                 elif name == "test.xml":
                     xml_file = output
         ws = data["bazel"]["workspace_directory"]
+        config_id = bes_get(bes_get(event.id, "configuration", None), "id", "") or ""
+        logs_dir = testlogs_dir(
+            data["bazel"]["local_exec_root"],
+            data["bazel"]["config_mnemonics"].get(config_id, ""),
+            label,
+        )
+        log_path = local_output_path(log_file, bb_root, ws)
+        xml_path = local_output_path(xml_file, bb_root, ws)
+        if logs_dir and log_file and not log_path:
+            log_path = logs_dir + "/test.log"
+        if logs_dir and xml_file and not xml_path:
+            xml_path = logs_dir + "/test.xml"
         duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
-            "log_path": local_output_path(log_file, bb_root, ws),
+            "log_path": log_path,
             # JUnit XML, when present: lets the snippet prefer structured
             # <failure>/<error> output over scraping the raw test.log.
-            "xml_path": local_output_path(xml_file, bb_root, ws),
+            "xml_path": xml_path,
             "duration_ms": duration_ms,
         }
 
@@ -982,12 +1021,15 @@ def process_event(data, event, bb_root):
         # Read make_variable.TARGET_CPU / COMPILATION_MODE — idiomatic names
         # ("aarch64", "fastbuild"); top-level `cpu` is the internal platform name
         # ("darwin_arm64") which reads poorly.
-        id_config = bes_get(event.id, "configuration", None)
-        config_id = bes_get(id_config, "id", "") or ""
+        # `event.id` is the ConfigurationId itself.
+        config_id = bes_get(event.id, "id", "") or ""
         if config_id == "none":
             return False
         payload = event.payload
         cpu_or_mode_changed = False
+        mnemonic = bes_get(payload, "mnemonic", "") or ""
+        if config_id and mnemonic:
+            data["bazel"]["config_mnemonics"][config_id] = mnemonic
         if payload:
             make_vars = bes_get(payload, "make_variable", None)
             cpu = ""
@@ -1009,6 +1051,10 @@ def process_event(data, event, bb_root):
                 cpu_or_mode_changed = True
 
         return cpu_or_mode_changed
+
+    elif kind == "workspace_config":
+        data["bazel"]["local_exec_root"] = bes_get(event.payload, "local_exec_root", "") or ""
+        return False
 
     elif kind == "aborted":
         data["bazel"]["aborted"] = True
@@ -4862,6 +4908,7 @@ RESULTS_KINDS = [
     "build_metrics",
     "build_finished",
     "configuration",
+    "workspace_config",
     "aborted",
 ]
 

@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "truncate_label")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlogs_dir", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -1395,6 +1395,41 @@ def _test_test_result_paths_follow_bb_root(ctx):
     _eq("log path", detail["log_path"], "/ws/bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.log")
     _eq("xml path", detail["xml_path"], "/ws/bazel-out/k8-fastbuild/testlogs/pkg/a_test/test.xml")
 
+def _test_testlogs_dir(ctx):
+    """`testlogs_dir` maps a main-repo label to its testlogs directory."""
+    root = "/ob/execroot/_main"
+    _eq("package target", testlogs_dir(root, "k8-fastbuild", "//a/b:t"), root + "/bazel-out/k8-fastbuild/testlogs/a/b/t")
+    _eq("root package", testlogs_dir(root, "k8-fastbuild", "//:t"), root + "/bazel-out/k8-fastbuild/testlogs/t")
+    _eq("canonical main repo", testlogs_dir(root, "k8-fastbuild", "@@//a:t"), root + "/bazel-out/k8-fastbuild/testlogs/a/t")
+    _eq("external repo", testlogs_dir(root, "k8-fastbuild", "@@rules_x+//a:t"), "")
+    _eq("no exec root", testlogs_dir("", "k8-fastbuild", "//a:t"), "")
+    _eq("no mnemonic", testlogs_dir(root, "", "//a:t"), "")
+
+def _test_test_result_uploaded_logs_resolve_to_testlogs(ctx):
+    """When Bazel uploads test outputs, BES reports them as bytestream URIs with
+    no path_prefix; the log is still on disk under the configuration's testlogs."""
+    data = init_data()
+    process_event(data, struct(
+        kind = "workspace_config",
+        id = struct(),
+        payload = struct(local_exec_root = "/ob/execroot/_main"),
+    ), None)
+    process_event(data, struct(
+        kind = "configuration",
+        id = struct(id = "cfg1"),
+        payload = struct(mnemonic = "k8-fastbuild", make_variable = {}, cpu = "k8"),
+    ), None)
+    out = lambda name: struct(name = name, file = "bytestream://cache.example/blobs/h/1", path_prefix = [])
+    process_event(data, struct(
+        kind = "test_result",
+        id = struct(label = "//oci_go_image:oci_go_image_test", configuration = struct(id = "cfg1")),
+        payload = struct(test_action_output = [out("test.log"), out("test.xml")], test_attempt_duration_millis = 23),
+    ), None)
+    detail = data["bazel"]["test_details"]["//oci_go_image:oci_go_image_test"]
+    want = "/ob/execroot/_main/bazel-out/k8-fastbuild/testlogs/oci_go_image/oci_go_image_test"
+    _eq("log path", detail["log_path"], want + "/test.log")
+    _eq("xml path", detail["xml_path"], want + "/test.xml")
+
 def _test_build_started_preserves_bazel_streamed(ctx):
     """`process_event`'s build_started reset wipes top-level state for the new
     stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
@@ -1509,6 +1544,7 @@ def _test_results_kinds_locked(ctx):
         "target_configured",
         "test_result",
         "test_summary",
+        "workspace_config",
         "workspace_status",
     ]
     _eq("RESULTS_KINDS set", sorted(RESULTS_KINDS), expected)
@@ -1907,6 +1943,8 @@ _UNIT_TESTS = [
     _test_build_started_preserves_aspect_results_url,
     _test_local_output_path,
     _test_test_result_paths_follow_bb_root,
+    _test_testlogs_dir,
+    _test_test_result_uploaded_logs_resolve_to_testlogs,
     _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
