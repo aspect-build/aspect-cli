@@ -1,9 +1,10 @@
 """Unit tests for `artifacts.axl`: `profile_flags`, which keeps a `--profile` the
 run already carries instead of adding a second one `ArtifactUpload` would lose
-to. Run with: aspect dev test-artifacts
+to, and `pending_testlogs`, which places uploaded test outputs on disk. Run
+with: aspect dev test-artifacts
 """
 
-load("./artifacts.axl", "profile_flags")
+load("./artifacts.axl", "new_testlog_state", "pending_testlogs", "profile_flags")
 
 def _eq(label, got, want):
     if got != want:
@@ -28,8 +29,37 @@ def _test_profile_flags(ctx):
     _eq("relative", _profile(ctx, ["--profile=out/p.gz"], "/ws/sub/")[0], "/ws/sub/out/p.gz")
     _eq("windows absolute", _profile(ctx, ["--profile=C:\\t\\p.gz"])[0], "C:\\t\\p.gz")
 
+def _test_pending_testlogs(ctx):
+    """Uploaded outputs of a retried, sharded test resolve to Bazel's testlogs
+    layout once the counts are known: the last attempt of each shard is
+    `test.<ext>`, earlier ones `test_attempts/attempt_<k>.<ext>`."""
+    state = new_testlog_state()
+    d = "/x/bazel-out/k8-fastbuild/testlogs/p/t"
+    for (shard, attempt) in [(1, 1), (1, 2), (2, 1)]:
+        state["attempts"].setdefault("//p:t", []).append((1, shard, attempt))
+        for name in ["test.log", "test.xml", "test.outputs__outputs.zip"]:
+            state["pending"].setdefault("//p:t", []).append({
+                "run": 1,
+                "shard": shard,
+                "attempt": attempt,
+                "logs_dir": d,
+                "name": name,
+                "dest": "p/t/s%d_a%d/%s" % (shard, attempt, name),
+            })
+    got = sorted(pending_testlogs(state, "//p:t", 1, 2))
+    _eq("resolved", got, sorted([
+        ("p/t/s1_a1/test.log", d + "/shard_1_of_2/test_attempts/attempt_1.log"),
+        ("p/t/s1_a1/test.xml", d + "/shard_1_of_2/test_attempts/attempt_1.xml"),
+        ("p/t/s1_a2/test.log", d + "/shard_1_of_2/test.log"),
+        ("p/t/s1_a2/test.xml", d + "/shard_1_of_2/test.xml"),
+        ("p/t/s2_a1/test.log", d + "/shard_2_of_2/test.log"),
+        ("p/t/s2_a1/test.xml", d + "/shard_2_of_2/test.xml"),
+    ]))
+    _eq("label cleared", pending_testlogs(state, "//p:t", 1, 2), [])
+
 _UNIT_TESTS = [
     _test_profile_flags,
+    _test_pending_testlogs,
 ]
 
 def _test_impl(ctx):
