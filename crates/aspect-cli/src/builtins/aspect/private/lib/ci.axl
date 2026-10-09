@@ -36,26 +36,37 @@ load("./github.axl", "detect_github_actions_build_url", "github_actions_run_url"
 _JOB_URL_CACHE_ENV = "ASPECT_JOB_URL_CACHE"
 
 # Per-CI-host metadata. Order is the detection precedence: `detect_ci_host`
-# returns the first entry whose `marker` env var is set.
+# returns the first entry whose `marker` env var is set. `link` is the host's
+# own short noun for the page `detect_build_url` returns.
 _CI_HOSTS = [
-    {"marker": "GITHUB_ACTIONS", "label": "GitHub Actions", "icon": "🐙"},
-    {"marker": "BUILDKITE", "label": "Buildkite", "icon": "🏗"},
-    {"marker": "CIRCLECI", "label": "CircleCI", "icon": "⭕"},
-    {"marker": "GITLAB_CI", "label": "GitLab CI", "icon": "🦊"},
+    {"marker": "GITHUB_ACTIONS", "label": "GitHub Actions", "icon": "🐙", "link": "Action"},
+    {"marker": "BUILDKITE", "label": "Buildkite", "icon": "🏗", "link": "Job"},
+    {"marker": "CIRCLECI", "label": "CircleCI", "icon": "⭕", "link": "Job"},
+    {"marker": "GITLAB_CI", "label": "GitLab CI", "icon": "🦊", "link": "Job"},
 ]
 
 def detect_ci_host(env: std.Env) -> dict | None:
     """Return the running CI host, or `None` off a recognized host.
 
-    The entry is `{"marker": str, "label": str, "icon": str}` — a
-    human-readable label and icon for the host (GitHub Actions /
-    Buildkite / CircleCI / GitLab), to pair with the URL
-    `detect_build_url` returns.
+    The entry is `{"marker": str, "label": str, "icon": str, "link": str}` —
+    a human-readable label and icon for the host (GitHub Actions /
+    Buildkite / CircleCI / GitLab), and a short link label, to pair with
+    the URL `detect_build_url` returns.
     """
     for host in _CI_HOSTS:
         if env.var(host["marker"]):
             return host
     return None
+
+def ci_host_link_label(label: str) -> str:
+    """The short link label for the host whose `label` is given, e.g.
+    "GitHub Actions" → "Action". Keyed by `label` because that is what
+    serialized status entries carry; an unrecognized or empty label gets the
+    GitHub Actions one."""
+    for host in _CI_HOSTS:
+        if host["label"] == label:
+            return host["link"]
+    return _CI_HOSTS[0]["link"]
 
 # Per-host run identity. `run_id` is the broadest scope sibling jobs in one
 # logical run share (GHA run, BK build, CCI workflow): the status-comment
