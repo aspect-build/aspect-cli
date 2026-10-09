@@ -109,6 +109,15 @@ Strategies (`--strategy=`):
 | `hard`          | any error or linter-process failure                                                   |
 | `soft`          | nothing (diagnostics still rendered)                                                  |
 
+Per-linter strategy — `LintTrait.strategies` overrides `--strategy` for the linters it names. Keys are the rules_lint linter names listed under 🧹 Linters (`ruff` matches `AspectRulesLintRuff`), case-insensitively, and the override applies to that linter's findings, patches, and process failures. An unknown strategy name fails before the build, and a key naming a linter that did not run draws a warning. When change detection fails, `hold-the-line` and `hold-the-file` overrides fall back to `hard` along with the run. The Strategy row shows overrides, e.g. `hold-the-line (ruff: hard)`.
+
+```python
+def config(ctx: ConfigContext):
+    ctx.traits[LintTrait].strategies = {"ruff": "hard"}
+```
+
+File-level findings — a SARIF result with a file but no `region` is file-level; a result with no location has no file. Both keep the files named by their `relatedLocations`, and scoped strategies keep them when their file or a related file changed. They count toward totals and the exit code, list in the status body, and never post as review comments. When `findings_destination` annotates (any mode but `comments`), a file-level finding annotates line 1 of its file.
+
 Diagnostic destination — `LintTrait.findings_destination`:
 
 - `auto` *(default)* — split by surface affordance: on a PR, fix-bearing findings post as PR review comments (suggestion block renders inline) and non-fix findings post as check-run annotations; off a PR, every finding posts as an annotation (no comments surface available).

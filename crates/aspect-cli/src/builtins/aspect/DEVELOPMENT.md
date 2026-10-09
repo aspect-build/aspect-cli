@@ -192,6 +192,7 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 | `LintTrait.changed_files`    |                                                                           |                                                                                                              | ⚠️ Legacy — task→features data on a trait field. Migrate to hook signature: `lint_start(ctx, changed_files)`. |
 | `LintTrait.suggestions`, `LintTrait.comment_urls` |                                                      |                                                                                                              | ⚠️ Legacy — feature→task data on a trait field. Migrate to reversed hook return value or a Pattern-2 wrapper. |
 | `LintTrait.findings_destination` |                                                                       |                                                                                                              | ⚠️ Legacy — user-facing config. Migrate to feature `args`. |
+| `LintTrait.strategies`       |                                                                           |                                                                                                              | ⚠️ Legacy — user-facing config (per-linter `--strategy` overrides). Migrate alongside `findings_destination`. |
 
 > **Note:** All public traits are re-exported from [`traits.axl`](traits.axl) for user `config.axl` ergonomics (`load("@aspect//:traits.axl", ...)`). Internal modules load from the owning module directly — the facade is a user-facing convenience, not the source of truth.
 
@@ -589,7 +590,8 @@ data = {
 
   ┌─ Per-kind extensions (added by private/lib/<kind>_results.init_data) ───┐
   │ # lint     → data["lint"]                                          │
-  │   "diagnostics", "strategy", "build_failed", "linter_exit_code",   │
+  │   "diagnostics", "strategy", "strategies", "build_failed",         │
+  │   "linter_exit_code",                                              │
   │   "changed_files", "tools_run",                                    │
   │   "counts_by_severity", "counts_by_tool"                           │
   │ # format   → data["format"]                                        │

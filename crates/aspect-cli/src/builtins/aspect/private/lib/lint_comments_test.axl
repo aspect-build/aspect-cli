@@ -99,6 +99,11 @@ def _test_can_attempt_comment():
     _eq("unscoped posts everything", can_attempt_comment(unscoped, "pkg/anything.ts", 999), True)
     _eq("unscoped ignores ranges", can_attempt_comment(unscoped, "pkg/anything.ts", 1, start_line = 999), True)
 
+    # File-level (line 0) and location-less findings never comment, even unscoped.
+    _eq("unscoped rejects line 0", can_attempt_comment(unscoped, "pkg/anything.ts", 0), False)
+    _eq("unscoped rejects empty path", can_attempt_comment(unscoped, "", 0), False)
+    _eq("scoped rejects line 0 on a changed file", can_attempt_comment(window, "pkg/direct.ts", 0), False)
+
     # start_line == 0 is an invalid range, not "absent".
     _eq("zero start_line rejected", can_attempt_comment(window, "pkg/direct.ts", 10, start_line = 0), False)
     _eq("inverted range rejected", can_attempt_comment(window, "pkg/range.ts", 30, start_line = 32), False)

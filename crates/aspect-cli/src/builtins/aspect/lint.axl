@@ -27,9 +27,9 @@ load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "wa
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
-load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
+load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
+load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "sarif_diagnostics", "scope_files")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -99,6 +99,8 @@ def filter_hunks(diagnostics, changed_files):
     (added-only) on older fixtures. SARIF lines are 1-based, `hunk_lines`
     0-based, so compare `(diag.line - 1)`. Line-level (unlike `filter_changeset`)
     so the strategy filter matches what PR comments / annotations can surface.
+
+    A diagnostic without a line is kept when any of its `scope_files` changed.
     """
     if not changed_files:
         return []  # no change context → treat as no relevant diagnostics
@@ -113,7 +115,11 @@ def filter_hunks(diagnostics, changed_files):
     for d in diagnostics:
         path = d.get("file", "")
         line = d.get("line", 0) or 0
-        if not path or not line:
+        if not line:
+            if any([f in by_file for f in scope_files(d)]):
+                result.append(d)
+            continue
+        if not path:
             continue
         region = by_file.get(path)
         if region == None:
@@ -174,11 +180,13 @@ def parse_patch_hunks(content):
         })
     return hunks
 
-def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
-    """Return the subset of `patches` whose hunks land in the strategy's scope.
+def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
+    """Return the paths of `patches` whose hunks land in their linter's scope.
 
-    Synthesizes a diagnostic at every line of each hunk's post-fix range and
-    keeps the patch iff any survives `strategy.filter`. Unparseable patches
+    `patches` holds `{"path", "name"}` entries; the linter comes from the
+    rules_lint mnemonic in `name`. Synthesizes a diagnostic at every line of
+    each hunk's post-fix range and keeps the patch iff any survives that
+    linter's strategy filter. Unparseable patches
     default-keep (no hunks ⇒ can't filter); unreadable patches (transient FUSE
     read failure) drop with a warning — downstream tar/apply would fail on
     them anyway. soft/hard keep all; hold-the-file keeps patches touching a
@@ -187,7 +195,8 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
     if not patches:
         return []
     kept = []
-    for patch_path in patches:
+    for patch in patches:
+        patch_path = patch["path"]
         content = _read_lint_file(ctx, patch_path)
         if content == None:
             warn(ctx.std, "Failed to read lint patch (skipping): %s" % patch_path)
@@ -200,30 +209,29 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
         for h in hunks:
             for ln in range(h["start_line"], h["end_line"] + 1):
                 synthetic.append({"file": h["file"], "line": ln})
-        if strategy.filter(synthetic, changed_files):
+        if strategy_for(detect_lint_tool(patch["name"])).filter(synthetic, changed_files):
             kept.append(patch_path)
     return kept
 
-def _filter_suggestions_by_strategy(suggestions, strategy, changed_files):
+def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
     """Drop suggestions whose anchor `(file, end_line || start_line)` is out of
-    the strategy's scope, reusing `strategy.filter` so gating matches diagnostics.
+    their linter's scope, so gating matches diagnostics.
     """
-    if not suggestions:
-        return []
-    synthetic = []
-    for s in suggestions:
-        anchor = s.get("end_line", 0) or s.get("start_line", 0) or 0
-        synthetic.append({"file": s.get("file", "") or "", "line": anchor})
-    kept = strategy.filter(synthetic, changed_files)
-    kept_anchors = {(d["file"], d["line"]): True for d in kept}
-    return [
-        s
-        for s in suggestions
-        if (
-            (s.get("file", "") or ""),
-            (s.get("end_line", 0) or s.get("start_line", 0) or 0),
-        ) in kept_anchors
-    ]
+    kept = []
+    for s in suggestions or []:
+        anchor = {
+            "file": s.get("file", "") or "",
+            "line": s.get("end_line", 0) or s.get("start_line", 0) or 0,
+        }
+        if strategy_for(s.get("tool", "")).filter([anchor], changed_files):
+            kept.append(s)
+    return kept
+
+def report_diagnostics(sarif, linter, strategy_for, changed_files):
+    """Diagnostics of one SARIF report, tagged with the rules_lint `linter` that
+    wrote it and kept by that linter's strategy."""
+    diagnostics = [d | {"linter": linter} for d in sarif_diagnostics(sarif)]
+    return strategy_for(linter).filter(diagnostics, changed_files)
 
 def filter_changeset(diagnostics, changed_files):
     """Keep ALL diagnostics from any changed file (file-level).
@@ -236,7 +244,7 @@ def filter_changeset(diagnostics, changed_files):
     if not changed_files:
         return []  # no change context → treat as no relevant diagnostics
     changed_paths = {cf["file"]: True for cf in changed_files}
-    return [d for d in diagnostics if d["file"] in changed_paths]
+    return [d for d in diagnostics if any([f in changed_paths for f in scope_files(d)])]
 
 Strategy = record(
     filter = field(typing.Callable[[list, list], list]),
@@ -306,6 +314,11 @@ LintTrait = trait(
     # module docstring of feature/github_lint_comments.axl for the state machine.
     findings_destination = attr(str, default = "auto"),
 
+    # Per-linter `--strategy` overrides, e.g. {"ruff": "hard"}. Keys are rules_lint
+    # linter names as listed under 🧹 Linters (`Ruff` for the `AspectRulesLintRuff`
+    # mnemonic), matched case-insensitively. Unlisted linters use `--strategy`.
+    strategies = attr(dict[str, str], default = {}),
+
     # Lifecycle hooks. Each is a list of callables; features append to compose.
 
     # Once before the build, after changed_files is set. (ctx) -> None
@@ -362,6 +375,36 @@ def validate_findings_destination(value):
         )
     return value
 
+def resolve_strategy_overrides(overrides, unscoped):
+    """Validate `LintTrait.strategies` and return the overrides in effect.
+
+    Fails on an unknown strategy name. Without change context (`unscoped`) the
+    run falls back to `hard`, and so do `hold-the-line` / `hold-the-file`
+    overrides, which have nothing to scope against.
+    """
+    effective = {}
+    for linter, name in overrides.items():
+        if name not in _STRATEGIES:
+            fail(
+                "lint: invalid LintTrait.strategies[%r]=%r — expected one of %s" %
+                (linter, name, ", ".join(_STRATEGIES.keys())),
+            )
+        if unscoped and name in ("hold-the-line", "hold-the-file"):
+            name = "hard"
+        effective[linter] = name
+    return effective
+
+def strategy_lookup(run_strategy, overrides):
+    """Return `linter -> Strategy`: the override for that rules_lint linter name,
+    matched case-insensitively, else `run_strategy`."""
+    by_linter = {linter.lower(): _STRATEGIES[name] for linter, name in overrides.items()}
+    return lambda linter: by_linter.get((linter or "").lower(), run_strategy)
+
+def unmatched_overrides(overrides, tools_run):
+    """Override keys that name none of the linters in `tools_run`, sorted."""
+    ran = {tool.lower(): True for tool in tools_run}
+    return sorted([linter for linter in overrides if linter.lower() not in ran])
+
 def _strategy_name(strategy):
     """Kebab-case label for a Strategy record, matching the `--strategy=…` form."""
     if strategy == StrategyHoldTheLine:
@@ -379,16 +422,27 @@ def linter_error_message(failed_linters, strategy_name):
     when known. A non-zero `.exit_code` whose BES name didn't parse leaves
     `failed_linters` empty, so fall back to an unnamed message.
 
-    `failed_linters` is a set-like dict of tool names.
+    `failed_linters` is a set-like dict of tool names; "" stands for a failure
+    whose tool name didn't parse.
     """
-    if failed_linters:
-        head = "Linter process(es) exited non-zero: %s." % ", ".join(sorted(failed_linters.keys()))
+    names = sorted([t for t in failed_linters.keys() if t])
+    if names:
+        head = "Linter process(es) exited non-zero: %s." % ", ".join(names)
     else:
         head = "A linter process exited non-zero."
     return (
         "%s See the linter output under the 🔬 Lint phase above for details. " % head +
         "(strategy=%s fails on any linter error.)" % strategy_name
     )
+
+def fails_on_severity(d, strategy_for):
+    """True when the diagnostic's severity fails its linter's strategy."""
+    fail_on = strategy_for(d.get("linter", "")).fail_on_severity
+    return fail_on != None and d.get("severity", "") == fail_on
+
+def gating_linter_errors(failed_linters, strategy_for):
+    """The subset of `failed_linters` whose strategy fails on a linter error."""
+    return {tool: True for tool in failed_linters if strategy_for(tool).fail_on_linter_error}
 
 _SEV_CLI_ICON = {
     "error": "🚨",
@@ -429,12 +483,11 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     print(label)
     for d in relevant:
         icon = _SEV_CLI_ICON.get(d.get("severity", "") or "", "❓")
-        file_path = d.get("file", "?") or "?"
-        line = d.get("line", 0) or 0
         tool = d.get("tool", "") or ""
         rule_id = d.get("rule_id", "") or ""
         message = d.get("message", "") or ""
-        parts = ["%s %s:%d" % (icon, file_path, line)]
+        location = format_location(d.get("file", ""), d.get("line", 0), d.get("related_files"))
+        parts = ["%s %s" % (icon, location)]
         if tool:
             parts.append(tool)
         if rule_id:
@@ -622,7 +675,7 @@ def _probe_timeout_ms(ctx, pass_deadline_ms):
         return 0
     return min(remaining, _LINT_FILE_PROBE_TIMEOUT_MS)
 
-def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, probe_timeout_ms):
+def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_files, lint_trait, github_output, patches, probe_timeout_ms):
     """Read and process one BES lint output file.
 
     Returns None when the file's contents can't be read yet (see
@@ -632,8 +685,9 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     each tick until the post-build drain timeout warns and skips it.
     `failed_tool` names the linter when its `.exit_code` was non-zero (else ""),
     so the fail_on_linter_error path can report which tool failed.
-    SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
-    results equal a terminal pass and findings don't flicker as batches arrive.
+    SARIF is filtered per-batch against its linter's (pure) strategy scope
+    (`strategy_for`), so per-batch results equal a terminal pass and findings
+    don't flicker as batches arrive.
 
     Every read is gated on the file's BES-declared length so a
     still-materializing blob is retried rather than parsed half-written.
@@ -660,7 +714,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
                 # findings silently.
                 warn(ctx.std, "Ignoring unparseable SARIF report: %s" % filepath)
                 return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
-            lint_accumulate(data, strategy.filter(sarif_diagnostics(sarif), changed_files))
+            lint_accumulate(data, report_diagnostics(sarif, detect_lint_tool(file.name), strategy_for, changed_files))
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
             return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
@@ -675,7 +729,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         # with a plain read_to_string that has no completeness check.
         if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
-        patches.append(filepath)
+        patches.append({"path": filepath, "name": file.name})
         for hook in lint_trait.lint_patch:
             hook(ctx, filepath, file.name)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
@@ -697,15 +751,16 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
 
 def _record_lint_result(result, failed_linters):
     """Fold one non-None `_try_process_lint_file` result into `failed_linters`
-    (a set-like dict of tool names that exited non-zero) and return
+    (a set-like dict of tool names that exited non-zero; "" when the name
+    didn't parse) and return
     `(interesting, exit_nonzero)`. Shared by the live BES loop and the
     post-build drain so both treat a result identically.
     """
-    if result["linter_exit_code"] != 0 and result["failed_tool"]:
+    if result["linter_exit_code"] != 0:
         failed_linters[result["failed_tool"]] = True
     return (result["interesting"], result["linter_exit_code"] != 0)
 
-def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters, pass_deadline_ms):
+def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy_for, changed_files, lint_trait, github_output, patches, failed_linters, pass_deadline_ms):
     """One pass over pending files → (still_pending, was_interesting, exit_nonzero).
     still_pending holds files whose remote download hasn't landed or whose
     contents couldn't be read yet. `pass_deadline_ms` caps this pass's total
@@ -722,7 +777,7 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
     now = now_ms(ctx)
     for pfile in pending:
         pfilepath = _lint_file_path(pfile, bb_root)
-        result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
+        result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy_for, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
         if result == None:
             meta = pending_meta.setdefault(pfilepath, {"first_ms": now, "warned": False})
             if not meta["warned"] and now - meta["first_ms"] >= _PENDING_READ_WARN_MS:
@@ -744,6 +799,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
+    strategy_overrides = resolve_strategy_overrides(lint_trait.strategies, unscoped = False)
 
     data = lint_init_data()
     ph = phases.new(ctx, data)
@@ -802,12 +858,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if detect_result.get("unscoped"):
         # Change detection failed (e.g. shallow checkout). Override to
         # StrategyHard (filter_all, ignores changed_files) so we surface all
-        # findings rather than silently hiding them; any --strategy is overridden.
+        # findings rather than silently hiding them; any --strategy is overridden,
+        # and so are scoped per-linter overrides.
         warn(ctx.std, "Could not determine the changed-file set (%s). Linting with `strategy=hard` (all findings shown, no hold-the-line scoping). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
         strategy = StrategyHard
+        strategy_overrides = resolve_strategy_overrides(strategy_overrides, unscoped = True)
         changed_files = []
     else:
         changed_files = detect_result["files"]
+    data["lint"]["strategies"] = strategy_overrides
+    strategy_for = strategy_lookup(strategy, strategy_overrides)
     lint_trait.changed_files = changed_files
     lint_trait.changed_files_scoped = not detect_result.get("unscoped")
     data["lint"]["changed_files"] = changed_files
@@ -909,7 +969,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             pending_files,
             pending_meta,
             data,
-            strategy,
+            strategy_for,
             changed_files,
             lint_trait,
             github_output,
@@ -940,7 +1000,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                         if not filepath:
                             skipped_remote_files += 1
                             continue
-                        result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
+                        result = _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
                         if result == None:
                             pending_files.append(file)
                         else:
@@ -984,7 +1044,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 pending_files,
                 pending_meta,
                 data,
-                strategy,
+                strategy_for,
                 changed_files,
                 lint_trait,
                 github_output,
@@ -1021,9 +1081,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # 8. BazelTrait.build_end hooks
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
-    # Scope patches to the strategy so we neither rewrite out-of-scope files
-    # locally nor publish an artifact of unrelated fixes. soft/hard keep all.
-    scoped_patches = _filter_patches_by_strategy(ctx, patches, strategy, changed_files)
+    # Scope patches to their linter's strategy so we neither rewrite out-of-scope
+    # files locally nor publish an artifact of unrelated fixes. soft/hard keep all.
+    scoped_patches = _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files)
 
     # 8b. Upload patches as one artifact on a CI host that supports it, so users
     # can apply them offline when a feature didn't post them as PR suggestions.
@@ -1075,10 +1135,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Thread the linter set so the 🧹 chart and CLI summary share a sorted snapshot.
     data["lint"]["tools_run"] = sorted(lint_tools_run.keys())
     _print_linters_run(ctx, data["lint"]["tools_run"])
+    unmatched = unmatched_overrides(strategy_overrides, data["lint"]["tools_run"])
+    if unmatched and lint_tools_run and not build_failed:
+        warn(ctx.std, "LintTrait.strategies names linters that did not run: %s. Keys match the names under 🧹 Linters." % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
     # from the high-volume raw output streamed during the Lint phase.
-    _print_relevant_findings(ctx, relevant, _strategy_name(strategy))
+    _print_relevant_findings(ctx, relevant, lint_strategy_label(_strategy_name(strategy), strategy_overrides))
 
     # 11. lint_end hooks receive filtered diagnostics
     for hook in lint_trait.lint_end:
@@ -1089,7 +1152,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # excluded lines ("0 findings but 3 auto-fixes?").
     data["lint"]["suggestions"] = _filter_suggestions_by_strategy(
         list(lint_trait.suggestions),
-        strategy,
+        strategy_for,
         changed_files,
     )
 
@@ -1098,6 +1161,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 12. Exit code. `not lint_tools_run` guards the silent zero-aspect case —
     # a green `aspect lint` in CI must mean "passed", not "never ran".
+    gating_errors = gating_linter_errors(failed_linters, strategy_for)
     if build_failed:
         exit_code = 1
     elif not lint_tools_run:
@@ -1114,12 +1178,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 "--aspects=… via a bazelrc --config."
             ))
         exit_code = 1
-    elif strategy.fail_on_severity and any([d["severity"] == strategy.fail_on_severity for d in relevant]):
+    elif any([fails_on_severity(d, strategy_for) for d in relevant]):
         exit_code = 1
-    elif strategy.fail_on_linter_error and linter_exit_code != 0:
+    elif gating_errors:
         # Without this the path surfaces nothing: a linter that crashed without
-        # emitting findings would fail with an unexplained exit 1.
-        error(ctx.std, linter_error_message(failed_linters, _strategy_name(strategy)))
+        # emitting findings would fail with an unexplained exit 1. Only `hard`
+        # fails on linter errors.
+        error(ctx.std, linter_error_message(gating_errors, "hard"))
         exit_code = 1
     else:
         exit_code = 0
@@ -1216,7 +1281,8 @@ lint = task(
                 "window (broader; rendered details list these but per-line " +
                 "surfaces can't show them). 'hard': fails on any error and " +
                 "on linter-process failure. 'soft': surfaces diagnostics " +
-                "without ever failing."
+                "without ever failing. `LintTrait.strategies` overrides " +
+                "this per linter."
             ),
         ),
         "base_ref": args.string(
