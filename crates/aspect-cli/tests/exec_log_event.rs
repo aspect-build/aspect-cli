@@ -76,7 +76,8 @@ struct Report {
     gaps: u32,
     /// The distinct `ctx.task.current_phase().name` values the hook saw, in
     /// first-seen order — how a hook tells one Bazel invocation of a task from
-    /// the next. `<none>` stands in for a phase the runtime had not opened yet.
+    /// the next. `<none>` stands in for a phase the site never opens: under
+    /// `cache diff` it is what a hook reads for the whole invocation.
     phases: Vec<String>,
     /// `ctx.task.name`, the other half of the answer: which task's invocation
     /// this was, for a hook several tasks registered.

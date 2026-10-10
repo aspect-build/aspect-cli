@@ -12,9 +12,10 @@
 //! handle hides: a hook watching `aspect delivery` hears about three
 //! invocations, and a per-file rule is satisfied by the first. A spawn that
 //! deliberately carries no handle is named in `DEVIATIONS`, which records that
-//! file's whole shape — spawn sites, handles, pumps — beside the reason, and is
-//! the one place that decision is recorded. Every count in a row is asserted, so
-//! a stale entry fails rather than lingering.
+//! file's whole shape — spawn sites, handles, pumps — beside the reason.
+//! `sites` and `opens` are asserted for every row, so a stale entry fails rather
+//! than lingering; `pumps` is only reached when the file opens a handle at all,
+//! which leaves it recorded but unchecked on the two rows with `opens: 0`.
 //!
 //! The source tree is embedded at compile time, the same way the CLI embeds it
 //! to ship it, so these assertions need no data dependency and no filesystem.
@@ -72,13 +73,18 @@ fn handle_waits(source: &str) -> Vec<usize> {
 
 /// One file whose wiring is not the default shape, recorded in full.
 ///
-/// Every count is asserted, so a file listed here cannot quietly grow another
-/// spawn site or lose a handle: `sites` catches a new invocation, `opens` and
-/// `pumps` catch one that stopped dispatching. All three are needed — recording
+/// `sites` and `opens` are asserted for every row, so a file listed here cannot
+/// quietly grow another spawn site or lose a handle: `sites` catches a new
+/// invocation, `opens` one that stopped dispatching. Both are needed — recording
 /// only `opens` would exempt the file's *spawn* count, so a new unwired
 /// `ctx.bazel.build(` in a file already listed here would change nothing the
 /// check looks at, and the files listed here are the ones most likely to grow
 /// one.
+///
+/// `pumps` is the exception: `every_opened_handle_is_closed_and_pumped_as_recorded`
+/// skips a file that opens no handle, so the `pumps: 0` recorded for
+/// `cache_selection.axl` and `invocation_test.axl` documents those rows without
+/// guarding them. A row with `opens` above zero has its `pumps` asserted.
 struct Wiring {
     path: &'static str,
     /// Real `ctx.bazel.build(` / `.test(` call sites in the file.
