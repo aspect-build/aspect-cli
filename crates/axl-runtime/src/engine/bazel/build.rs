@@ -1666,12 +1666,6 @@ mod tests {
         out
     }
 
-    /// How many entries `--scenario=execlog_beyond_capacity` writes. Longer than
-    /// `CHANNEL_CAPACITY`, which is the only length that can tell a stream that
-    /// delivers everything apart from one that stops at the ring.
-    #[cfg(unix)]
-    const BEYOND_CAPACITY_ENTRIES: u32 = 3000;
-
     /// `execution_log = True` must deliver the whole log to `execution_logs()`.
     ///
     /// The stream hands this iterator its one subscriber rather than cloning it,
@@ -1691,10 +1685,12 @@ mod tests {
     fn execution_logs_delivers_the_whole_log() {
         use std::time::Duration;
 
+        // The scenario writes 3000 entries, which has to outrun the ring for the
+        // count below to mean anything.
         let capacity = super::super::stream::execlog::channel_capacity() as u32;
         assert!(
-            BEYOND_CAPACITY_ENTRIES > capacity,
-            "the scenario's log must outrun the ring ({capacity}) to be worth asserting on",
+            capacity < 3000,
+            "the ring ({capacity}) must be smaller than the scenario's log",
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -1743,7 +1739,7 @@ Test = task(implementation = _impl)
         let text = std::fs::read_to_string(&report).expect("the task should have reported");
         let seen: u32 = text.trim().parse().unwrap();
         assert_eq!(
-            seen, BEYOND_CAPACITY_ENTRIES,
+            seen, 3000,
             "`execution_log = True` must be lossless; a count short of the log is the \
              prefix a dropping producer leaves, and one short by a varying amount is \
              the race it leaves",
@@ -1816,8 +1812,10 @@ Test = task(implementation = _impl)
     fn a_slow_consumer_still_receives_every_entry() {
         use std::time::Duration;
 
-        let script = format!(
-            r#"
+        let result = with_daemon_stand_in(|| {
+            crate::test::with_timeout(Duration::from_secs(120), || {
+                crate::test::eval(
+                    r#"
 def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
@@ -1834,17 +1832,14 @@ def _impl(ctx):
             busy += i
     status = build.wait()
     if not status.success: return 1
-    if seen != {entries}: return 3
+    if seen != 3000: return 3
     return 0
 
 Test = task(implementation = _impl)
 "#,
-            entries = BEYOND_CAPACITY_ENTRIES,
-        );
-
-        let result = with_daemon_stand_in(move || {
-            crate::test::with_timeout(Duration::from_secs(120), move || {
-                crate::test::eval(&script).with_fake_bazel().run_task(0)
+                )
+                .with_fake_bazel()
+                .run_task(0)
             })
         });
         match result {
@@ -1852,8 +1847,7 @@ Test = task(implementation = _impl)
             Some(exit) => assert_eq!(
                 exit.expect("run_task"),
                 Some(0),
-                "a consumer the decoder outruns must still see all \
-                 {BEYOND_CAPACITY_ENTRIES} entries",
+                "a consumer the decoder outruns must still see all 3000 entries",
             ),
         }
     }
