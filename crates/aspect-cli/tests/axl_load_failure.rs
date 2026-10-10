@@ -76,9 +76,26 @@ fn run_in_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
     run_in_rooted_workspace(&rooted, args)
 }
 
+/// [`run_in_workspace`] with `ASPECT_DEBUG` set, which is the escape hatch
+/// for the config diagnostic a derived failure suppresses.
+fn run_in_debug_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
+    let rooted: Vec<(String, &str)> = files
+        .iter()
+        .map(|(name, contents)| (format!(".aspect/{name}"), *contents))
+        .collect();
+    let rooted: Vec<(&str, &str)> = rooted.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+    run_fixture(&rooted, args, true)
+}
+
 /// [`run_in_workspace`] with the paths taken from the workspace root instead,
 /// for a fixture that needs a `MODULE.aspect` or a file under `.aspect/lib/`.
 fn run_in_rooted_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
+    run_fixture(files, args, false)
+}
+
+/// Build the scratch workspace and run `aspect <args>` in it. `debug` sets
+/// `ASPECT_DEBUG`, which every other case clears.
+fn run_fixture(files: &[(&str, &str)], args: &[&str], debug: bool) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     let home = dir.path().join("home");
     std::fs::create_dir(&home).expect("home");
@@ -90,19 +107,32 @@ fn run_in_rooted_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
             .expect("fixture parent");
         std::fs::write(&path, contents).expect("writing a fixture");
     }
-    let output = Command::new(aspect_cli())
+    let mut cmd = Command::new(aspect_cli());
+    let cmd = cmd
         .args(args)
         .current_dir(dir.path())
         .env("HOME", &home)
         .env(
             "ASPECT_CREDENTIALS_FILE",
             dir.path().join("credentials.json"),
-        )
-        .env_remove("ASPECT_DEBUG")
-        .output()
-        .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
+        );
+    let output = if debug {
+        cmd.env("ASPECT_DEBUG", "1")
+    } else {
+        cmd.env_remove("ASPECT_DEBUG")
+    }
+    .output()
+    .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
     dir.close().expect("removing temp dir");
     output
+}
+
+/// `output`'s exit code, or a panic naming what it did instead.
+fn output_code(output: &Output) -> i32 {
+    output
+        .status
+        .code()
+        .unwrap_or_else(|| panic!("killed by a signal: {:?}", output.status))
 }
 
 fn stdout(output: &Output) -> String {
@@ -481,4 +511,89 @@ fn a_tasks_own_help_survives_an_unparsable_script() {
         stderr(&group)
     );
     assert_one_error_prefix(&stderr(&group));
+}
+
+/// An error that ends the run does not excuse dropping the typos recorded on
+/// the way to it: the gate is what to act on, but the typo is still a typo,
+/// and losing it is the silence this tolerance exists to avoid.
+#[test]
+fn a_file_failure_recorded_before_a_gate_is_still_reported() {
+    // Phase 2's gate, with a phase-1 failure already on the books.
+    let config_gate = run_in_workspace(
+        &[
+            ("broken.axl", UNPARSABLE_SCRIPT),
+            ("config.axl", EXITING_CONFIG),
+        ],
+        &["help"],
+    );
+    let stderr = stderr(&config_gate);
+    assert_eq!(output_code(&config_gate), 3, "--- stderr ---\n{stderr}");
+    assert!(
+        stderr.contains("broken.axl") && stderr.contains("Parse error"),
+        "the typo must survive the gate:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ERROR: this repo requires a newer aspect CLI"),
+        "and so must the gate:\n{stderr}"
+    );
+
+    // Phase 1's own gate: an error type declared `traceback = False`, raised
+    // from a script body. Phase 1 finishes loading first, so both typos are
+    // reported however `read_dir` happened to order the files.
+    const SCRIPT_GATE: &str = r#"
+Gate = error.type(traceback = False)
+
+fail(Gate("this checkout needs a newer CLI"))
+"#;
+    let script_gate = run_in_workspace(
+        &[
+            ("aaa.axl", UNPARSABLE_SCRIPT),
+            ("bbb.axl", UNPARSABLE_SCRIPT),
+            ("zzz.axl", SCRIPT_GATE),
+        ],
+        &["help"],
+    );
+    let stderr = self::stderr(&script_gate);
+    assert_eq!(output_code(&script_gate), 1, "--- stderr ---\n{stderr}");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .count(),
+        2,
+        "both typos must be reported, in any directory order:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ERROR: this checkout needs a newer CLI"),
+        "the gate still ends the run:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "a `traceback = False` gate prints no traceback:\n{stderr}"
+    );
+}
+
+/// The derived config diagnostic is suppressed, not lost: `ASPECT_DEBUG`
+/// prints it, for when the guess that it was derived turns out wrong.
+#[test]
+fn aspect_debug_prints_the_suppressed_config_diagnostic() {
+    let files = [
+        ("policy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+        ("config.axl", CONFIG_NEEDING_MYTASK),
+    ];
+    let quiet = run_in_workspace(&files, &["version"]);
+    assert_degraded(&quiet, "policy.axl");
+    assert!(
+        !stderr(&quiet).contains("no task found"),
+        "suppressed by default:\n{}",
+        stderr(&quiet)
+    );
+
+    let debug = run_in_debug_workspace(&files, &["version"]);
+    assert_eq!(debug.status.code(), Some(0), "{}", stderr(&debug));
+    assert!(
+        stderr(&debug).contains("no task found"),
+        "ASPECT_DEBUG must print it:\n{}",
+        stderr(&debug)
+    );
 }

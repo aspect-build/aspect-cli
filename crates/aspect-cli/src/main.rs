@@ -183,10 +183,20 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
+            // What the two phases could not load, and what that costs the
+            // command the user typed — see `Unloadable` for the policy. Every
+            // path that raises out of here reports it first: an error that
+            // ends the run does not excuse dropping the typo recorded before
+            // it, which is the silence this tolerance exists to avoid.
+            let mut unloadable = Unloadable::default();
+
             // Phase 1: discover tasks and features.
-            let script_failures = mpe
-                .eval(&scripts, &root_mod, &modules)
-                .map_err(anyhow::Error::from)?;
+            let phase1 = mpe.eval(&scripts, &root_mod, &modules);
+            unloadable.scripts = phase1.files;
+            if let Some(error) = phase1.ended {
+                unloadable.warn();
+                return Err(anyhow::Error::from(error));
+            }
 
             // Phase 2: run config files.
             let config_entries: Vec<(&Path, &Mod)> = configs
@@ -198,16 +208,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         .map(|(path, r#mod)| (path.as_path(), r#mod)),
                 )
                 .collect();
-            let config_failures = mpe
-                .execute_configs(&config_entries)
-                .map_err(|err| anyhow::Error::from(err).context(ConfigError))?;
-
-            // What the two phases could not load, and what that costs the
-            // command the user typed — see [`Unloadable`] for the policy.
-            let mut unloadable = Unloadable {
-                scripts: script_failures,
-                configs: config_failures,
+            let phase2 = match mpe.execute_configs(&config_entries) {
+                Ok(phase2) => phase2,
+                Err(err) => {
+                    unloadable.warn();
+                    return Err(anyhow::Error::from(err).context(ConfigError));
+                }
             };
+            unloadable.configs = phase2.files;
+            if let Some(error) = phase2.ended {
+                unloadable.warn();
+                return Err(anyhow::Error::from(error).context(ConfigError));
+            }
 
             // Build the CLI surface from current eval state.
             let cmd = Cmd {
@@ -412,17 +424,26 @@ impl std::fmt::Display for ConfigError {
 /// `ctx.tasks.add(...)` and then failed leaves that task in the listing even
 /// though running it would hit this same refusal.
 ///
-/// Not held here, and so still fatal to every command: a `MODULE.aspect` that
-/// does not parse, and a task-name conflict, both of which are settled before
-/// these lists exist.
+/// What is *not* held here is still fatal to every command, because it is
+/// settled outside the two tolerant phases. Before them: a `MODULE.aspect`
+/// that does not parse. After them, each needing the finished surface to
+/// judge: a trait field a config left holding the wrong type
+/// (`EvalError::TraitTypeMismatch`, raised once every config has run), and a
+/// task whose name collides with another task or with a reserved command name
+/// (`CmdError::NameConflict` / `CmdError::ReservedName`, raised while the Clap
+/// surface is built). A config typo of that first kind still costs the user
+/// every command, this change notwithstanding.
 ///
 /// `describe` and `feature` fail too, deliberately. They render the resolved
 /// AXL surface itself, and a caller reading `aspect describe --output=json`
 /// must not be handed a list that quietly lost entries.
 ///
-/// A [`axl_runtime::TaskExit`] never reaches these lists — an author's
+/// A [`axl_runtime::TaskExit`] never reaches these lists either — an author's
 /// `ctx.std.process.exit(...)` gate, or a Ctrl-C, ends the run on every
-/// command. [`MultiPhaseEval::eval`] raises those instead of recording them.
+/// command. The phases hand it back as `PhaseFailures::ended` rather than
+/// recording it, and `run` reports whatever they had recorded before it on
+/// the way out.
+#[derive(Default)]
 struct Unloadable {
     /// Phase 1: task and feature scripts.
     scripts: Vec<AxlFileFailure>,
@@ -445,7 +466,9 @@ impl Unloadable {
     /// loaded. Printing its diagnostic as a second, equal-looking warning
     /// would point the user at a file that is very likely fine. The same
     /// reasoning orders [`Self::into_error`] and skips the trait check in
-    /// [`MultiPhaseEval::execute_configs`].
+    /// [`MultiPhaseEval::execute_configs`]. `ASPECT_DEBUG` prints the
+    /// suppressed diagnostic anyway, for the case where the guess is wrong
+    /// and the config really did have its own problem.
     fn warn(&self) {
         for failure in &self.scripts {
             errln!(
@@ -473,6 +496,12 @@ impl Unloadable {
                 "warning: {} then failed too, most likely because of the above — fix that first",
                 paths.join(", ")
             );
+            for failure in &self.configs {
+                TaskExit::debug_traceback(&format_args!(
+                    "{}",
+                    strip_error_prefix(&failure.error.to_string())
+                ));
+            }
         }
     }
 
