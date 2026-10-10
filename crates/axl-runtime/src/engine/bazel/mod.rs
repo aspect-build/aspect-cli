@@ -127,7 +127,8 @@ fn partition_build_events(
 
 /// Split the `execution_log=` argument into "is the stream enabled", the sinks
 /// and the iterator handles. Mirrors `partition_build_events`: `True` enables the
-/// stream with no AXL-side consumer, and a list enables it and names its consumers.
+/// stream naming no consumer up front — `build.execution_logs()` can still claim
+/// the stream's own subscriber later — and a list enables it and names consumers.
 fn partition_execution_log(
     arg: Either<bool, UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>>,
 ) -> (
@@ -563,16 +564,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
     ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
     ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
-    ///   to write the log to one or more files. Sinks and the iterator can be combined:
-    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
-    ///   entries in-process.
+    ///   to write the log to one or more files. A compact sink and the iterator can be
+    ///   combined: passing such a list still allows calling `build.execution_logs()` to
+    ///   iterate entries in-process. Either way that iteration is complete — the producer
+    ///   blocks for its consumer rather than dropping — so it has to run **before**
+    ///   `wait()`, which releases that consumer.
     ///
-    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. Unlike
-    ///   `build.execution_logs()`, a handle is visible before Bazel starts, which is what
-    ///   lets the producer choose its lossless send path — a handle receives every entry,
-    ///   where `build.execution_logs()` drops entries a slow consumer could not keep up
-    ///   with. `kinds=` filters by entry kind in Rust, before anything is turned into a
-    ///   Starlark value. A handle must be drained before `wait()`, which releases any
+    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. A handle
+    ///   clones a subscriber of its own, so it combines with a decoded `file()` sink where
+    ///   `build.execution_logs()` does not, and `kinds=` filters by entry kind in Rust
+    ///   before anything is turned into a Starlark value — worth reaching for on a log of
+    ///   10k-50k entries. A handle must be drained before `wait()`, which releases any
     ///   still-bound handle so an undrained one cannot hang the build.
     ///
     /// **Examples**
@@ -700,16 +702,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
     ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
     ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
-    ///   to write the log to one or more files. Sinks and the iterator can be combined:
-    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
-    ///   entries in-process.
+    ///   to write the log to one or more files. A compact sink and the iterator can be
+    ///   combined: passing such a list still allows calling `build.execution_logs()` to
+    ///   iterate entries in-process. Either way that iteration is complete — the producer
+    ///   blocks for its consumer rather than dropping — so it has to run **before**
+    ///   `wait()`, which releases that consumer.
     ///
-    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. Unlike
-    ///   `build.execution_logs()`, a handle is visible before Bazel starts, which is what
-    ///   lets the producer choose its lossless send path — a handle receives every entry,
-    ///   where `build.execution_logs()` drops entries a slow consumer could not keep up
-    ///   with. `kinds=` filters by entry kind in Rust, before anything is turned into a
-    ///   Starlark value. A handle must be drained before `wait()`, which releases any
+    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. A handle
+    ///   clones a subscriber of its own, so it combines with a decoded `file()` sink where
+    ///   `build.execution_logs()` does not, and `kinds=` filters by entry kind in Rust
+    ///   before anything is turned into a Starlark value — worth reaching for on a log of
+    ///   10k-50k entries. A handle must be drained before `wait()`, which releases any
     ///   still-bound handle so an undrained one cannot hang the build.
     ///
     /// **Examples**
@@ -1418,12 +1421,11 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// Create a handle iterating this build's decoded execution log. Pass it in
     /// `execution_log=[...]` and then `for entry in handle:`.
     ///
-    /// Prefer this over `build.execution_logs()` whenever missing an entry would be
-    /// wrong rather than merely unfortunate. A handle exists before Bazel is spawned,
-    /// so the runtime knows an every-entry consumer is subscribed and blocks rather
-    /// than dropping; `build.execution_logs()` is handed out after the spawn, by
-    /// which time the producer has already chosen to drop entries a slow consumer
-    /// cannot keep up with.
+    /// Prefer this over `build.execution_logs()` for the cost, not for completeness:
+    /// both receive every entry, because the producer blocks for whatever subscribers
+    /// it has. What a handle adds is the `kinds=` filter below, and a subscriber of
+    /// its own — so it can sit alongside a decoded `file()` sink, where
+    /// `build.execution_logs()` takes the stream's one and only and is refused.
     ///
     /// Optional `kinds=` filters by `ExecLogEntry.type` variant — the same names
     /// `type(entry.type)` returns — before the entry becomes a Starlark value. This
