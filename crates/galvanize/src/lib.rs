@@ -253,11 +253,15 @@ pub struct StreamingFile {
     path: PathBuf,
     inner: File,
     holder_pid: u32,
-    /// Test-only hook, run once the holder is found to have closed the file and
-    /// before the re-read that follows. The bug the re-read exists for lives in
-    /// exactly that window — the writer finishing and closing between our empty
-    /// read and the question about it — and a test cannot otherwise land a write
-    /// there, because the window is only as wide as one procfs walk.
+    /// Test-only hook, run exactly once — on the first read that finds the holder
+    /// has closed the file, and before the re-read that follows. The bug the
+    /// re-read exists for lives in exactly that window — the writer finishing and
+    /// closing between our empty read and the question about it — and a test
+    /// cannot otherwise land a write there, because the window is only as wide as
+    /// one procfs walk.
+    ///
+    /// Taken rather than re-invoked, so a hook that writes cannot keep feeding a
+    /// reader that drains to EOF.
     #[cfg(test)]
     on_holder_closed: Option<Box<dyn FnMut() + Send>>,
 }
@@ -331,7 +335,7 @@ impl Read for StreamingFile {
                     return Ok(0);
                 }
                 #[cfg(test)]
-                if let Some(hook) = self.on_holder_closed.as_mut() {
+                if let Some(mut hook) = self.on_holder_closed.take() {
                     hook();
                 }
                 match self.inner.read(buf)? {
