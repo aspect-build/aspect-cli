@@ -951,8 +951,20 @@ impl Build {
         // asks Bazel for the compact log, and the backend reads the file at that
         // path. Adding a second `--execution_log_compact_file` below would win on
         // last-write-wins and silently repoint Bazel away from it.
-        let injected_execlog_path =
-            bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE).map(PathBuf::from);
+        //
+        // An empty value clears the flag rather than naming a file, so it is not a
+        // request; treating it as a path would have the reader tail "" and report a
+        // clean empty stream. A relative value is joined to the spawn's directory,
+        // because that is what Bazel resolves it against while the reader runs from
+        // the CLI's own cwd.
+        let injected_execlog_path = bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE)
+            .filter(|path| !path.is_empty())
+            .map(|path| match &directory {
+                Some(dir) if std::path::Path::new(&path).is_relative() => {
+                    std::path::Path::new(dir).join(path)
+                }
+                _ => PathBuf::from(path),
+            });
 
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
@@ -1023,8 +1035,12 @@ impl Build {
                 // Something already named the path and put the flag on the command
                 // line. Tail that file and leave the flag alone; every CompactFile
                 // sink is served by the tee rather than by Bazel writing directly,
-                // so each still gets its copy.
-                Some(out) => Some(out),
+                // so each still gets its copy — except one naming this very file,
+                // which Bazel is already writing and the tee would truncate under it.
+                Some(out) => {
+                    compact_paths.retain(|path| std::path::Path::new(path) != out);
+                    Some(out)
+                }
                 // Nothing asked yet, so this call owns the flag. A CompactFile sink
                 // lends its path, letting Bazel write straight to the caller's
                 // destination with no temp file or tee step for that copy.
