@@ -29,8 +29,29 @@ use crate::engine::arguments::Arguments;
 use crate::engine::cancellation::Signals;
 use crate::engine::store::Env;
 use crate::eval::api::{dialect, get_globals};
-use crate::eval::{Loader, ModuleEnv, MultiPhaseEval};
+use crate::eval::{Loader, ModuleEnv, MultiPhaseEval, PhaseFailures};
 use crate::module::Mod;
+
+/// Turn whatever a tolerant phase came back with into the test's error.
+///
+/// The phases are deliberately tolerant for the CLI's sake; a test snippet
+/// that does not load has nothing left to assert, so here it is fatal. A
+/// snippet that failed would fail its test either way — `run_task` would hit
+/// "task index out of range" on the empty task map — but with the load error
+/// in hand rather than that one, the test says what actually went wrong.
+///
+/// `ended` is raised ahead of the recorded files: it is the error the phase
+/// stopped on, and it reaches the caller with its `TaskExit` still at the
+/// root of the chain, which is what the exit tests assert against.
+fn raise_first(failures: PhaseFailures) -> anyhow::Result<()> {
+    if let Some(error) = failures.ended {
+        return Err(anyhow::Error::from(error));
+    }
+    match failures.files.into_iter().next() {
+        Some(failure) => Err(anyhow::Error::from(failure.error)),
+        None => Ok(()),
+    }
+}
 
 pub fn eval(code: &str) -> EvalBuilder {
     EvalBuilder {
@@ -230,8 +251,7 @@ impl EvalBuilder {
             loader.env.signals = signals.clone();
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
-            mpe.eval(&scripts, &root_mod, &modules)
-                .map_err(anyhow::Error::from)?;
+            raise_first(mpe.eval(&scripts, &root_mod, &modules))?;
             if !self.features.is_empty() || self.config.is_some() {
                 let config_path = tmp.path().join("config.axl");
                 let mut configs: Vec<(&std::path::Path, &Mod)> = vec![];
@@ -239,7 +259,7 @@ impl EvalBuilder {
                     std::fs::write(&config_path, code)?;
                     configs.push((&config_path, &root_mod));
                 }
-                mpe.execute_configs(&configs).map_err(anyhow::Error::from)?;
+                raise_first(mpe.execute_configs(&configs).map_err(anyhow::Error::from)?)?;
                 mpe.execute_features_with_args(|_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }

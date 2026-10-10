@@ -12,8 +12,11 @@
 //! top-level error arm, for an exit raised from a feature or config impl.
 //! Neither prints a traceback unless `ASPECT_DEBUG` is set.
 //!
-//! The downcast finds `TaskExit` only at the root of the anyhow chain; a
-//! `.context(...)` wrapper hides it and the error renders as a traceback.
+//! The downcast walks the whole anyhow chain, context wrappers included, so
+//! an exit stays findable however a phase wrapped it: the CLI's top-level arm
+//! finds a `config.axl`'s exit through the `ConfigError` context `main`
+//! attaches to it. [`TaskExit::from_anyhow`] additionally follows
+//! [`EvalError`] links and opens the `io::Error` a cancelled wait arrives in.
 //!
 //! Code 0 is an early success. Like any exit it skips whatever the body had
 //! yet to run, including a status surface's final update, so a task that
@@ -65,6 +68,14 @@ impl TaskExit {
         match err {
             EvalError::StarlarkError(e) => Self::from_starlark(e, signals),
             EvalError::UnknownError(e) => Self::from_anyhow(e, signals),
+            // No startup phase builds this variant today, but a cancelled
+            // wait carries its exit inside an `io::Error`, so if one ever
+            // reaches here it must still be recognized as an exit rather
+            // than read as a file that failed to load.
+            EvalError::IOError(e) => e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<TaskExit>())
+                .cloned(),
             _ => None,
         }
     }

@@ -116,6 +116,47 @@ fn task_label_for(
     }
 }
 
+/// An AXL file that failed during startup evaluation, recorded instead of
+/// raised.
+///
+/// Phases 1 and 2 collect these so one unloadable file costs only what that
+/// file defines. Whoever drove the phase decides what a non-empty list means,
+/// but ignoring a non-empty one hides a real error — it is never "empty and
+/// fine".
+///
+/// A [`TaskExit`] is deliberately *not* one of these; see
+/// [`MultiPhaseEval::ends_the_run`].
+#[derive(Debug)]
+pub struct AxlFileFailure {
+    /// Absolute path of the `.axl` file that failed.
+    pub path: PathBuf,
+    pub error: EvalError,
+}
+
+/// What a tolerant startup phase came back with.
+///
+/// The two fields travel together because both have to be reported. `ended`
+/// is what the run must end on whatever the command; `files` is what the
+/// phase had already recorded on the way to it, and a typo recorded before a
+/// `ctx.std.process.exit()` gate fired is still a typo the user needs to
+/// hear about. Raising `ended` on its own would drop those, which is the
+/// silence this whole tolerance exists to avoid.
+#[derive(Debug, Default)]
+pub struct PhaseFailures {
+    /// Files that failed without ending the run.
+    pub files: Vec<AxlFileFailure>,
+    /// The error that ended the phase early, if one did. Nothing after it in
+    /// the phase ran, so `files` is only what came before.
+    pub ended: Option<EvalError>,
+}
+
+impl PhaseFailures {
+    /// Whether the phase came back with nothing to report.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.ended.is_none()
+    }
+}
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -136,12 +177,19 @@ impl<'v> ModuleEnv<'v> {
 /// Multi-phase Starlark evaluator with one shared Module heap.
 ///
 /// Phases:
-/// 1. `eval`              — load task and feature scripts; inserts discovered
-///                          `Task` and `Feature` values into `self.tasks` /
-///                          `self.features` on the shared heap.
-/// 2. `eval_config`       — run config.axl files; mutations visible via shared heap.
-/// 3. `eval_feature_impls`— run enabled feature implementations.
-/// 4. `execute_with_args` — call the selected task implementation.
+/// 1. `eval`                        — load task and feature scripts; inserts
+///                                    discovered `Task` and `Feature` values
+///                                    into `self.tasks` / `self.features` on
+///                                    the shared heap.
+/// 2. `execute_configs`             — run config.axl files; mutations visible
+///                                    via shared heap.
+/// 3. `execute_features_with_args`  — run enabled feature implementations.
+/// 4. `execute_tasks_with_args`     — call the selected task implementation.
+///
+/// Phases 1 and 2 report an unloadable file as an [`AxlFileFailure`] rather
+/// than stopping, so one bad `.aspect/*.axl` costs only what that file
+/// defines; every later phase still fails outright. Phase 2 therefore runs
+/// even when Phase 1 recorded a failure, which it did not before.
 pub struct MultiPhaseEval<'v, 'l> {
     env: &'l ModuleEnv<'v>,
     loader: &'l AxlLoader<'l>,
@@ -200,101 +248,210 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Each file is loaded into its own frozen module (via `AxlLoader::eval_module`).
     /// `FrozenTask` and `FrozenFeature` values discovered in those modules are
     /// inserted into `self.tasks` and `self.features` on the shared heap.
+    ///
+    /// A file that cannot be loaded does not stop the phase: it comes back as
+    /// an [`AxlFileFailure`] and only the tasks and features *it* declares are
+    /// missing, so the rest of the surface is still discovered. That is what
+    /// keeps a typo in one `.aspect/*.axl` file from costing the user every
+    /// `aspect` command, `aspect help` included. A file registers its tasks
+    /// only once every symbol it was asked for has checked out, so a file that
+    /// fails contributes nothing to the shared heap — not even the symbols
+    /// that were fine.
+    ///
+    /// An error that must end the run whatever the command comes back as
+    /// [`PhaseFailures::ended`] — see [`Self::ends_the_run`]. It does not cut
+    /// this phase short: every script is still loaded, so one pass reports
+    /// every typo and the output does not depend on `read_dir` order.
+    ///
+    /// A caller that needs the whole surface must treat a non-empty return as
+    /// the failure it is — `aspect-cli`'s `main` holds the policy for which
+    /// commands may run degraded, and [`crate::test::EvalBuilder`] raises the
+    /// first failure so an AXL test still fails on a bad snippet.
     #[tracing::instrument(skip_all)]
     pub fn eval(
         &mut self,
         scripts: &[PathBuf],
         root_mod: &'l Mod,
         modules: &'l Vec<Mod>,
-    ) -> Result<(), EvalError> {
-        let heap = self.heap();
-        let task_map = self
-            .tasks
-            .downcast_ref::<TaskMap>()
-            .expect("self.tasks is a TaskMap");
-        let feature_map = self
-            .features
-            .downcast_ref::<FeatureMap>()
-            .expect("self.features is a FeatureMap");
+    ) -> PhaseFailures {
+        let mut out = PhaseFailures::default();
 
         // Evaluate auto-discovered AXL scripts (axl_sources in repo root)
         for path in scripts {
-            let frozen = self.eval_file(&root_mod, path)?;
-            for symbol in frozen.tasks() {
-                let owned = frozen
-                    .get(symbol.as_str())
-                    .map_err(|_| EvalError::MissingSymbol(symbol.clone()))?;
-                let frozen_value = owned
-                    .value()
-                    .unpack_frozen()
-                    .expect("value from FrozenModule is always frozen");
-                heap.access_owned_frozen_value(&owned);
-                let live_task = Task::from_frozen(frozen_value, heap);
-                task_map.insert(heap.alloc(live_task));
+            if let Err(error) = self.eval_script_tasks(root_mod, path) {
+                self.record(&mut out, path, error);
             }
         }
 
         // Evaluate module specs (use_task and use_feature entries from MODULE.aspect)
         for mode in modules.iter().chain(vec![root_mod]) {
             for (abs_path, (label, symbols)) in mode.tasks.iter() {
-                let frozen = self.eval_file(&mode, &abs_path)?;
-                for symbol in symbols {
-                    if !frozen.has_name(symbol) {
-                        return Err(EvalError::UnknownError(anyhow!(
-                            "task symbol {:?} not found in @{} module use_task({:?})",
-                            symbol,
-                            mode.name,
-                            label
-                        )));
-                    }
-                    if !frozen.has_task(symbol) {
-                        return Err(EvalError::UnknownError(anyhow!(
-                            "invalid use_task({:?}, {:?}) in @{} module",
-                            label,
-                            symbol,
-                            mode.name
-                        )));
-                    }
-                    let owned = frozen
-                        .get(symbol)
-                        .map_err(|_| EvalError::MissingSymbol(symbol.clone()))?;
-                    let frozen_value = owned
-                        .value()
-                        .unpack_frozen()
-                        .expect("value from FrozenModule is always frozen");
-                    heap.access_owned_frozen_value(&owned);
-                    let live_task = Task::from_frozen(frozen_value, heap);
-                    task_map.insert(heap.alloc(live_task));
+                if let Err(error) = self.eval_used_tasks(mode, abs_path, label, symbols) {
+                    self.record(&mut out, abs_path, error);
                 }
             }
 
             for (abs_path, symbol) in mode.features.iter() {
-                let frozen = self.eval_file(&mode, &abs_path)?;
-                let owned = frozen
-                    .get(symbol.as_str())
-                    .map_err(|_| EvalError::MissingSymbol(symbol.clone()))?;
-                let frozen_value = owned.value().unpack_frozen().ok_or_else(|| {
-                    EvalError::UnknownError(anyhow!(
-                        "symbol {:?} in {:?} did not freeze",
-                        symbol,
-                        abs_path
-                    ))
-                })?;
-                if frozen_value.downcast_ref::<FrozenFeature>().is_none() {
-                    return Err(EvalError::UnknownError(anyhow!(
-                        "symbol {:?} in {:?} is not a feature",
-                        symbol,
-                        abs_path
-                    )));
+                if let Err(error) = self.eval_used_feature(mode, abs_path, symbol) {
+                    self.record(&mut out, abs_path, error);
                 }
-                // Register the frozen heap as a dependency of the live heap so the
-                // FrozenValue back-pointer (kept on the thawed Feature) stays valid.
-                heap.access_owned_frozen_value(&owned);
-                let live_feature = Feature::from_frozen(frozen_value, heap);
-                feature_map.insert(heap.alloc(live_feature));
             }
         }
 
+        out
+    }
+
+    /// Record one file's failure: an error that [`Self::ends_the_run`] goes to
+    /// [`PhaseFailures::ended`], first one winning, and anything else onto the
+    /// file list.
+    ///
+    /// Returns whether an ending error has now been seen, which is Phase 2's
+    /// cue to stop. The two phases answer that differently on purpose. Phase 1
+    /// keeps loading: the files it has yet to read may hold typos of their own,
+    /// reporting them all in one pass is the point of the tolerance, and
+    /// stopping early would make the output depend on directory order, since
+    /// scripts are discovered by `read_dir`. Phase 2 stops: a config body has
+    /// a `ctx` and can write files and send requests, and running more of them
+    /// after an author's `exit()` would be doing the work that exit exists to
+    /// prevent.
+    fn record(&self, out: &mut PhaseFailures, path: &Path, error: EvalError) -> bool {
+        if self.ends_the_run(&error) {
+            out.ended.get_or_insert(error);
+        } else {
+            out.files.push(AxlFileFailure {
+                path: path.to_path_buf(),
+                error,
+            });
+        }
+        out.ended.is_some()
+    }
+
+    /// Whether `error` is somebody's decision to end the run rather than a
+    /// file that would not load: `ctx.std.process.exit(code, message)`, an
+    /// error value whose type was declared `traceback = False`, or a wait cut
+    /// short by Ctrl-C.
+    ///
+    /// Such an error carries the code and message the run is meant to end
+    /// with, so it keeps propagating past the per-file tolerance. Recording it
+    /// instead would turn a deliberate gate — a `config.axl` that exits with
+    /// "this repo requires a newer aspect CLI" — into a warning on exactly the
+    /// commands someone runs to check their setup, and would print the
+    /// traceback that [`TaskExit`] exists to suppress.
+    fn ends_the_run(&self, error: &EvalError) -> bool {
+        TaskExit::from_eval_error(error, &self.loader.env.signals).is_some()
+    }
+
+    /// Register every task a discovered script exports. One unit of Phase 1's
+    /// per-file fault tolerance — see [`Self::eval`].
+    fn eval_script_tasks(&self, scope: &'l Mod, path: &Path) -> Result<(), EvalError> {
+        let frozen = self.eval_file(scope, path)?;
+        let symbols = frozen.tasks();
+        self.register_tasks(&frozen, symbols.iter().map(String::as_str))
+    }
+
+    /// Register the tasks one `use_task(label, symbols)` entry names.
+    fn eval_used_tasks(
+        &self,
+        scope: &'l Mod,
+        abs_path: &Path,
+        label: &str,
+        symbols: &[String],
+    ) -> Result<(), EvalError> {
+        let frozen = self.eval_file(scope, abs_path)?;
+        for symbol in symbols {
+            if !frozen.has_name(symbol) {
+                return Err(EvalError::UnknownError(anyhow!(
+                    "task symbol {:?} not found in @{} module use_task({:?})",
+                    symbol,
+                    scope.name,
+                    label
+                )));
+            }
+            if !frozen.has_task(symbol) {
+                return Err(EvalError::UnknownError(anyhow!(
+                    "invalid use_task({:?}, {:?}) in @{} module",
+                    label,
+                    symbol,
+                    scope.name
+                )));
+            }
+        }
+        self.register_tasks(&frozen, symbols.iter().map(String::as_str))
+    }
+
+    /// Thaw `symbols` out of `frozen` and insert them into the shared
+    /// `TaskMap` — all of them or none.
+    ///
+    /// Every task is thawed before the first is inserted, so a file whose
+    /// later symbol is missing leaves no half of itself behind for `aspect
+    /// help` to list and `aspect <task>` to then fail on. Phase 1's whole
+    /// bargain is that an unloadable file costs exactly what that file
+    /// defines, which only holds if registration is all-or-nothing.
+    fn register_tasks<'s>(
+        &self,
+        frozen: &FrozenModule,
+        symbols: impl IntoIterator<Item = &'s str>,
+    ) -> Result<(), EvalError> {
+        let heap = self.heap();
+        let task_map = self
+            .tasks
+            .downcast_ref::<TaskMap>()
+            .expect("self.tasks is a TaskMap");
+
+        let mut thawed = vec![];
+        for symbol in symbols {
+            let owned = frozen
+                .get(symbol)
+                .map_err(|_| EvalError::MissingSymbol(symbol.to_string()))?;
+            let frozen_value = owned
+                .value()
+                .unpack_frozen()
+                .expect("value from FrozenModule is always frozen");
+            heap.access_owned_frozen_value(&owned);
+            thawed.push(Task::from_frozen(frozen_value, heap));
+        }
+        for live_task in thawed {
+            task_map.insert(heap.alloc(live_task));
+        }
+        Ok(())
+    }
+
+    /// Register the feature one `use_feature(label, symbol)` entry names.
+    fn eval_used_feature(
+        &self,
+        scope: &'l Mod,
+        abs_path: &Path,
+        symbol: &str,
+    ) -> Result<(), EvalError> {
+        let heap = self.heap();
+        let feature_map = self
+            .features
+            .downcast_ref::<FeatureMap>()
+            .expect("self.features is a FeatureMap");
+
+        let frozen = self.eval_file(scope, abs_path)?;
+        let owned = frozen
+            .get(symbol)
+            .map_err(|_| EvalError::MissingSymbol(symbol.to_string()))?;
+        let frozen_value = owned.value().unpack_frozen().ok_or_else(|| {
+            EvalError::UnknownError(anyhow!(
+                "symbol {:?} in {:?} did not freeze",
+                symbol,
+                abs_path
+            ))
+        })?;
+        if frozen_value.downcast_ref::<FrozenFeature>().is_none() {
+            return Err(EvalError::UnknownError(anyhow!(
+                "symbol {:?} in {:?} is not a feature",
+                symbol,
+                abs_path
+            )));
+        }
+        // Register the frozen heap as a dependency of the live heap so the
+        // FrozenValue back-pointer (kept on the thawed Feature) stays valid.
+        heap.access_owned_frozen_value(&owned);
+        let live_feature = Feature::from_frozen(frozen_value, heap);
+        feature_map.insert(heap.alloc(live_feature));
         Ok(())
     }
 
@@ -350,8 +507,33 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// file's writes win over an earlier one's — the user-global
     /// `~/.aspect/config.axl` is passed last, scoped to its own module so its
     /// relative loads resolve within `~/.aspect` rather than the project.
+    ///
+    /// As in Phase 1, a config that fails is recorded in
+    /// [`PhaseFailures::files`] and the remaining ones still run, so a typo in
+    /// one `config.axl` leaves the CLI usable enough to find it; one that
+    /// [`Self::ends_the_run`] stops the phase as [`PhaseFailures::ended`].
+    /// `Err` is for a failure no single file owns — the trait type check
+    /// below, which is skipped once any config failed, because it judges the
+    /// state all configs were supposed to produce and would report the gap
+    /// rather than the typo that caused it.
+    ///
+    /// Note what Phase 1's tolerance changed here: this phase now runs even
+    /// when Phase 1 could not load every script, where before a Phase 1 error
+    /// stopped the CLI outright. Three consequences. A config is evaluated
+    /// against a task map that may be missing entries, so its own failure is
+    /// often just that — `ctx.tasks["x"]` for an `x` whose file never loaded —
+    /// and a caller should treat a config failure accompanying a script
+    /// failure as derived from it rather than as a second, independent
+    /// problem. Mutations a config made before failing stay on the shared
+    /// heap, this phase's whole purpose being to mutate it. And a config's
+    /// side effects — a file it writes, a request it sends — now happen in a
+    /// workspace whose scripts did not all load, which before this change
+    /// they never did.
     #[tracing::instrument(name = "execute.configs", skip_all)]
-    pub fn execute_configs(&mut self, configs: &[(&Path, &'l Mod)]) -> Result<(), EvalError> {
+    pub fn execute_configs(
+        &mut self,
+        configs: &[(&Path, &'l Mod)],
+    ) -> Result<PhaseFailures, EvalError> {
         let heap = self.heap();
 
         // Register trait types from all tasks into a TraitMap; instances are created lazily
@@ -383,21 +565,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.loader.env.signals.clone(),
         ));
 
+        let mut out = PhaseFailures::default();
         for (config_path, scope) in configs {
-            let frozen = self.eval_file(scope, config_path)?;
-
-            let function_name = "config";
-            let def = frozen
-                .get(function_name)
-                .map_err(|_| EvalError::MissingConfig(config_path.to_path_buf()))?;
-            let func = heap.access_owned_frozen_value(&def);
-
-            let mut eval = Evaluator::new(&self.env.0);
-            eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
-            eval.set_loader(self.loader);
-            eval.extra = Some(&self.loader.env);
-            arm_cancel_check(&mut eval, &self.loader.env.signals);
-            eval.eval_function(func, &[context_value], &[])?;
+            if let Err(error) = self.run_config(scope, config_path, context_value) {
+                // Stop only once an ending error has been seen. An ordinary
+                // failure is recorded and the remaining configs still run.
+                if self.record(&mut out, config_path, error) {
+                    break;
+                }
+            }
+        }
+        if !out.is_empty() {
+            return Ok(out);
         }
 
         // Assignment to a trait field is type-checked as it happens, but a list
@@ -417,6 +596,31 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             return Err(EvalError::TraitTypeMismatch(mismatches));
         }
 
+        Ok(PhaseFailures::default())
+    }
+
+    /// Call one config file's `config(ctx)`. One unit of Phase 2's per-file
+    /// fault tolerance — see [`Self::execute_configs`].
+    fn run_config(
+        &self,
+        scope: &'l Mod,
+        config_path: &Path,
+        context_value: Value<'v>,
+    ) -> Result<(), EvalError> {
+        let heap = self.heap();
+        let frozen = self.eval_file(scope, config_path)?;
+
+        let def = frozen
+            .get("config")
+            .map_err(|_| EvalError::MissingConfig(config_path.to_path_buf()))?;
+        let func = heap.access_owned_frozen_value(&def);
+
+        let mut eval = Evaluator::new(&self.env.0);
+        eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
+        eval.set_loader(self.loader);
+        eval.extra = Some(&self.loader.env);
+        arm_cancel_check(&mut eval, &self.loader.env.signals);
+        eval.eval_function(func, &[context_value], &[])?;
         Ok(())
     }
 
@@ -1487,12 +1691,15 @@ def config(ctx):
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);
-            mpe.eval(&[script], &root_mod, &modules).unwrap();
-            mpe.execute_configs(&[
-                (proj_config.as_path(), &root_mod),
-                (user_config.as_path(), &user_mod),
-            ])
-            .unwrap();
+            assert!(mpe.eval(&[script], &root_mod, &modules).is_empty());
+            assert!(
+                mpe.execute_configs(&[
+                    (proj_config.as_path(), &root_mod),
+                    (user_config.as_path(), &user_mod),
+                ])
+                .unwrap()
+                .is_empty()
+            );
 
             let tasks = mpe.tasks();
             assert_eq!(tasks.len(), 1);
