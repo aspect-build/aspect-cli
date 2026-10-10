@@ -897,8 +897,9 @@ def _test_impl(ctx):
     _test_flags_delta(ctx)
     _test_auth_flags(ctx)
 
-    # Run last: these register a real active rc on `ctx.bazel`, so keeping them
-    # after the pure subtests prevents bleed-through.
+    # Run last: these build real `RunCommand`s off `ctx.bazel`, and the
+    # `setup_command` ones register an active rc, so keeping them after the pure
+    # subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_setup_command_trait_base_flags(ctx)
     _test_sibling_rc_transforms_startup(ctx)
