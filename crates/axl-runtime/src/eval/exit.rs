@@ -64,6 +64,13 @@ impl TaskExit {
     }
 
     /// The exit carried by `err`, whichever variant a phase wrapped it in.
+    ///
+    /// Only the two variants that can carry one are opened; every other
+    /// answers `None`, `IOError` included. A startup phase reaches the
+    /// filesystem only to open an AXL file, and a read that failed carries no
+    /// [`TaskExit`] — a cancelled wait, which does carry one inside an
+    /// `io::Error`, arrives wrapped in `UnknownError` and is opened by
+    /// [`Self::from_anyhow`].
     pub fn from_eval_error(err: &EvalError, signals: &Signals) -> Option<TaskExit> {
         match err {
             EvalError::StarlarkError(e) => Self::from_starlark(e, signals),
