@@ -4,8 +4,8 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta", "testonly_scope_injected")
-load("./aspect_flags.axl", "flag_text")
+load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta", "testonly_scope_injected", "testonly_unscoped_injected")
+load("./aspect_flags.axl", "flag_text", "omit_flags")
 load("./auth_fakes.axl", "fake_auth")
 load("./deployment_flags.axl", "deployment_auth_flags")
 
@@ -23,10 +23,12 @@ def _trait(
         task_flags = [],
         base = [],
         flags = None,
-        startup_flags = None):
+        startup_flags = None,
+        filters = []):
     """A real `BazelTrait` with just the startup/command-flag fields the helpers
     read."""
     return BazelTrait(
+        injected_flag_filters = filters,
         extra_startup_flags = extra_startup,
         extra_flags = extra,
         extra_build_flags = extra_build,
@@ -234,24 +236,106 @@ def _test_injected_config_requests_stay_unscoped(ctx):
     )
 
 def _test_flag_transforms(ctx):
-    """The optional `trait.flags` / `trait.startup_flags` transforms run last and
-    replace the whole list — the exported seam a user `config.axl` rewrites
-    flags through. They run after the injected flags were scoped, so a
-    transform matching on flag text reads it off the tuple."""
+    """The optional `trait.flags` / `trait.startup_flags` transforms replace the
+    whole list — the exported seam a user `config.axl` rewrites flags through.
+
+    `trait.flags` sees each entry as its producer spelled it, NOT as the
+    `(flag, version, command)` triple scoping mints: a plain `extra_flags`
+    string arrives as a plain string, and the plain `!=` here is the assertion.
+    Scoping is applied after the transform returns, so the entry the transform
+    kept still comes back scoped."""
     t = _trait(
-        extra = ["--trait-extra"],
-        flags = lambda flags: [f for f in flags if flag_text(f) != "--trait-extra"] + ["--rewritten"],
+        extra = ["--trait-extra", "--trait-keep"],
+        flags = lambda flags: [f for f in flags if f != "--trait-extra"] + ["--rewritten"],
         startup_flags = lambda flags: flags + ["--startup-rewritten"],
     )
     _eq(
         "flags transform replaces the list",
         bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t)),
-        ["--cli", "--rewritten"],
+        ["--cli", ("--trait-keep", "", "build"), "--rewritten"],
     )
     _eq(
         "startup transform replaces the list",
         bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = t)),
         ["--client", "--startup-rewritten"],
+    )
+
+def _test_flag_transform_sees_unscoped_texts(ctx):
+    """Regression: the `trait.flags` transform is a public seam, and the
+    commonest thing a repository does through it is match on flag text.
+
+    The failure this guards: scoping ran before the transform, so every injected
+    entry arrived as a `(flag, version, command)` triple. A repository whose
+    `config.axl` set `flags = lambda fs: [f for f in fs if not
+    f.startswith("--remote_")]` to strip injected remote flags matched nothing,
+    and every flag it was deliberately removing came back — silently, with no
+    error. Variants that throw instead of silently reverting: `" ".join(flags)`,
+    `flag.split("=")`, `"--x" in flags`.
+
+    Checked against each of the four fields and a `task_flags` hook, since the
+    whole injected set now flows through one planner. A producer that scoped or
+    version-gated its OWN entry still arrives as the tuple it wrote — that is
+    its spelling, and `flag_text` reads either shape."""
+    seen = []
+
+    def strip_remote(flags):
+        seen.extend(flags)
+        return [f for f in flags if not f.startswith("--remote_")]
+
+    t = _trait(
+        extra = ["--remote_timeout=3600", "--keep_extra"],
+        extra_build = ["--remote_accept_cached", "--keep_build"],
+        extra_test = ["--remote_test=1", "--keep_test"],
+        extra_query = ["--remote_query=1", "--keep_query"],
+        extra_info = ["--remote_info=1", "--keep_info"],
+        task_flags = [lambda c: ["--remote_hook=1", "--keep_hook"]],
+        flags = strip_remote,
+    )
+    got = bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t))
+
+    # Every entry the transform was handed was a plain string: `startswith`
+    # matched, so none of the `--remote_*` flags survived.
+    for flag in seen:
+        if type(flag) != "string":
+            fail("the transform must see plain texts, got %r in %r" % (flag, seen))
+    for flag in got:
+        if flag_text(flag).startswith("--remote_"):
+            fail("a flag the transform removed came back: %r" % (got,))
+
+    # And what it kept is still scoped to the field that carried it.
+    _eq(
+        "kept flags keep their sections",
+        got,
+        [
+            "--cli",
+            ("--keep_extra", "", "build"),
+            ("--keep_build", "", "build"),
+            ("--keep_hook", "", "build"),
+            ("--keep_test", "", "test"),
+            ("--keep_query", "", "query"),
+            ("--keep_info", "", "info"),
+        ],
+    )
+
+def _test_flag_transform_additions_stay_unscoped(ctx):
+    """A flag the transform invented has no injected entry to claim, so it stays
+    unscoped — the default a typed flag gets, and what the whole list did before
+    scoping existed. A transform that duplicates an entry gets one scoped copy
+    (the claim) and one unscoped (the surplus); claiming once is what keeps a
+    text the user ALSO typed from being scoped."""
+    t = _trait(extra = ["--injected"], flags = lambda flags: flags + ["--invented", "--injected"])
+    _eq(
+        "invented and surplus entries are unscoped",
+        bazel.flags.resolve(_fake_ctx(trait = t)),
+        [("--injected", "", "build"), "--invented", "--injected"],
+    )
+
+    # A text that is both typed and injected: the user's copy claims the
+    # unscoped slot, so a typed flag keeps reaching every command.
+    _eq(
+        "a typed flag keeps its unscoped slot",
+        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--jobs=8"], trait = _trait(extra = ["--jobs=8"]))),
+        ["--jobs=8", ("--jobs=8", "", "build")],
     )
 
 def _test_passthrough_flags_follow_explicit_ones(ctx):
@@ -531,12 +615,11 @@ def _test_per_command_fields_reach_exactly_their_command(ctx):
             if got != want:
                 fail("%s on `bazel %s`: reached=%r, want %r (expansion: %r)" % (field, command, got, want, rc.expand(command = command)))
 
-# The two flags that make the per-command fields necessary rather than nicer.
-# Measured with `bazel canonicalize-flags --for_command=…` on Bazel 9.3.0:
-#
-#                                    build   test    query   info
-#   --test_verbose_timeout_warnings  REJECT  ok      REJECT  REJECT
-#   --show_make_env                  REJECT  REJECT  REJECT  ok
+# The two flags that make the per-command fields necessary rather than nicer:
+# `bazel build` rejects both, `bazel test` accepts only the first and
+# `bazel info` only the second. The measured acceptance matrix, and the Bazel
+# version it was taken on, live beside `_UNSCOPED_INJECTED` in
+# `bazel/flags.axl` — one home, so this file does not drift from it.
 #
 # `--test_verbose_timeout_warnings` is the one Bazel itself recommends, in the
 # "There were tests whose specified size is too big" warning, so following
@@ -657,11 +740,198 @@ def _test_a_fields_section_is_a_default_not_a_rewrite(ctx):
             testonly_scope_injected([always, elsewhere], section),
             [always, elsewhere],
         )
+
+def _test_unscoped_injected_only_carved_out_for_the_build_group(ctx):
+    """The `_UNSCOPED_INJECTED` carve-out — a `--config` reference and the
+    repository-graph flags — applies to the `build` group and to nothing else.
+
+    `extra_flags` means "the invocation's flags", so a reference there has to
+    keep expanding per command and a repo-resolution flag there has to keep
+    reaching the query that selects the targets. The three per-command fields
+    name a command, and their docs promise that command only, so a `--config` in
+    `extra_query_flags` is scoped to `query` with the rest of its group — it
+    confines that config to a query instead of quietly applying `common:NAME`
+    and `build:NAME` to every build as well.
+
+    Both spellings of a reference, and the negated spelling of a boolean, since
+    a carved-out two-token entry has to take its value with it."""
+    listed = ["--config=ci", "--config", "ci", "--repo_env=A=1", "--repository_cache", "/tmp/rc", "--noenable_bzlmod", "--jobs=8"]
+
+    _eq(
+        "build group: carved out, values travelling with their flags",
+        testonly_scope_injected(listed, "build", True),
+        ["--config=ci", "--config", "ci", "--repo_env=A=1", "--repository_cache", "/tmp/rc", "--noenable_bzlmod", ("--jobs=8", "", "build")],
+    )
+
+    for section in ["test", "query", "info"]:
         _eq(
-            "a config reference stays unscoped in every field (%s)" % section,
-            testonly_scope_injected(["--config=ci", "--config", "ci", "--jobs=8"], section),
-            ["--config=ci", "--config", "ci", ("--jobs=8", "", section)],
+            "%s field: no carve-out, the whole list is scoped" % section,
+            testonly_scope_injected(listed, section),
+            [(flag, "", section) for flag in listed],
         )
+
+    # Every name on the list is accepted by `bazel query` — that acceptance is
+    # the entry condition, since leaving a query-rejected flag unscoped is
+    # exactly the `Unrecognized option` failure #1578 fixed. `--config` is on
+    # the list as a reference rather than an option.
+    for name in testonly_unscoped_injected:
+        if not name.startswith("--"):
+            fail("_UNSCOPED_INJECTED must hold flag names, got %r" % name)
+    for name in ["--config", "--repo_env", "--registry", "--repository_cache", "--override_repository"]:
+        if name not in testonly_unscoped_injected:
+            fail("expected %s in _UNSCOPED_INJECTED" % name)
+    for name in ["--flaky_test_attempts", "--test_output", "--jobs", "--remote_timeout"]:
+        if name in testonly_unscoped_injected:
+            fail("%s is a command option, not a repository one; it must stay scoped" % name)
+
+def _test_repository_flags_reach_a_query(ctx):
+    """A repository-graph flag injected through `extra_flags` reaches the sidecar
+    `query`, so the query that selects a task's targets resolves external repos
+    the way the build does.
+
+    The regression this guards: scoping the whole injected set to `build` took
+    `--repo_env` off the query. The delivery query drives the loading phase —
+    it is what decides which targets get built — so resolving under a different
+    repo env than the build is a wrong answer, not a slow one. The same scoping
+    took the runner's `--repository_cache` and
+    `--experimental_repository_cache_hardlinks` off it, moving a cold download
+    onto the query.
+
+    `--repo_env` through `extra_flags` is live in this repository's own
+    `.aspect/config.axl`; `--repository_cache` is live on every Workflows
+    runner."""
+    trait = _trait(extra = [
+        "--repo_env=DUMMY_FEATURE_FLAG=true",
+        "--repository_cache=/tmp/warm",
+        "--experimental_repository_cache_hardlinks",
+        "--flaky_test_attempts=3",
+    ])
+    rc = _rc_over(ctx, trait)
+    for flag in ["--repo_env=DUMMY_FEATURE_FLAG=true", "--repository_cache=/tmp/warm", "--experimental_repository_cache_hardlinks"]:
+        for command in _COMMANDS:
+            if not _reaches(rc, command, flag):
+                fail("%s must reach `bazel %s`: %r" % (flag, command, rc.expand(command = command)))
+
+    # And the command option beside them is still scoped, so the fix does not
+    # reopen the bug: a query that took `--flaky_test_attempts` would die.
+    if _reaches(rc, "query", "--flaky_test_attempts=3"):
+        fail("a command option must still be kept off the query: %r" % rc.expand(command = "query"))
+
+    # A per-command field names a command, so the same flag there is confined.
+    confined = _rc_over(ctx, _trait(extra_test = ["--repo_env=ONLY=test"]))
+    if _reaches(confined, "query", "--repo_env=ONLY=test"):
+        fail("extra_test_flags must not reach a query: %r" % confined.expand(command = "query"))
+    if not _reaches(confined, "test", "--repo_env=ONLY=test"):
+        fail("extra_test_flags must reach test: %r" % confined.expand(command = "test"))
+
+def _test_injected_config_expands_per_command(ctx):
+    """The point of leaving a `--config=NAME` reference unscoped: Bazel expands
+    it against the sections the running command reads, so a `common:NAME`
+    section keeps reaching a sidecar `query` while a `build:NAME` one stays out
+    of it.
+
+    This is what the documented `extra_flags = ["--config=ci"]` recipe rests on
+    — scoping the request itself would throw the `common:NAME` half away — and
+    until now it was only ever verified by hand."""
+    rc = ctx.bazel.new_rc(flags = [
+        ("--keep_going", "", "common:ci"),
+        ("--jobs=16", "", "build:ci"),
+        ("--output=label", "", "query:ci"),
+    ] + bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--config=ci"]))))
+
+    for command in ["build", "test", "info"]:
+        expanded = [flag_text(f) for f in rc.expand(command = command)]
+        if "--keep_going" not in expanded or "--jobs=16" not in expanded:
+            fail("`common:ci` + `build:ci` must both reach `bazel %s`: %r" % (command, expanded))
+        if "--output=label" in expanded:
+            fail("`query:ci` must not reach `bazel %s`: %r" % (command, expanded))
+
+    expanded = [flag_text(f) for f in rc.expand(command = "query")]
+    if "--keep_going" not in expanded:
+        fail("`common:ci` must still reach a query — that is why the reference stays unscoped: %r" % expanded)
+    if "--output=label" not in expanded:
+        fail("`query:ci` must reach a query: %r" % expanded)
+    if "--jobs=16" in expanded:
+        fail("`build:ci` must not reach a query: %r" % expanded)
+
+def _test_injected_config_expands_at_the_unscoped_rank(ctx):
+    """Where a carved-out `--config` reference lands in the precedence table:
+    rank 9, with the unscoped block, ahead of the `build`-section entries it was
+    listed beside.
+
+    A consequence of the carve-out worth pinning rather than discovering: a
+    `--config` listed AFTER a plain entry in the same `extra_flags` list does
+    not override it, because the plain entry is scoped to `build` (rank 10) and
+    the reference expands unscoped (rank 9). Bazel takes the last, so the plain
+    entry wins. Documented in this module's docstring; the recipe is to not set
+    the same option both ways."""
+    rc = ctx.bazel.new_rc(flags = [
+        ("--remote_timeout=7200", "", "build:slowlink"),
+    ] + bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--remote_timeout=3600", "--config=slowlink"]))))
+
+    expanded = [flag_text(f) for f in rc.expand(command = "build")]
+    _eq("config expands ahead of the scoped entries beside it", expanded, ["--remote_timeout=7200", "--remote_timeout=3600"])
+
+def _test_injected_flag_filters_apply_to_every_field(ctx):
+    """`injected_flag_filters` — the user's `--bazel-flags:omit` policy — is
+    applied to every flag a feature injects and to none of the user's own.
+
+    Nothing covered this before, in either direction, and the per-group refactor
+    is the first thing that could break it: the filters now run once per
+    non-empty group rather than once over the whole injected list."""
+    omit = lambda flags: omit_flags(flags, ["--dropped"])
+    trait = _trait(
+        extra = ["--dropped=1", "--kept_extra"],
+        extra_build = ["--dropped=2", "--kept_build"],
+        extra_test = ["--dropped=3", "--kept_test"],
+        extra_query = ["--dropped=4", "--kept_query"],
+        extra_info = ["--dropped=5", "--kept_info"],
+        task_flags = [lambda c: ["--dropped=6", "--kept_hook"]],
+        filters = [omit],
+    )
+    _eq(
+        "every field is filtered, the user's own flag is not",
+        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--dropped=mine"], trait = trait)),
+        [
+            "--dropped=mine",
+            ("--kept_extra", "", "build"),
+            ("--kept_build", "", "build"),
+            ("--kept_hook", "", "build"),
+            ("--kept_test", "", "test"),
+            ("--kept_query", "", "query"),
+            ("--kept_info", "", "info"),
+        ],
+    )
+
+def _test_injected_flag_filters_run_once_per_nonempty_group(ctx):
+    """A filter is called once per non-empty injected group — not once per
+    group, and not once per flag.
+
+    Two things this pins. A filter that ADDS a flag must not have its addition
+    multiplied into all four rc sections, which an unguarded per-group call did:
+    one filter produced four copies of its flag, one per section. And a filter
+    sees the flags as the feature spelled them, never as a
+    `(flag, version, command)` triple, since filtering runs before scoping."""
+    calls = []
+
+    def add_one(flags):
+        calls.append(list(flags))
+        return list(flags) + ["--added-by-filter"]
+
+    got = bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--one"], filters = [add_one])))
+    _eq("one call for the one non-empty group", len(calls), 1)
+    _eq("the filter saw the feature's spelling", calls[0], ["--one"])
+    _eq(
+        "the addition lands once, in the group's section",
+        got,
+        [("--one", "", "build"), ("--added-by-filter", "", "build")],
+    )
+
+    # Nothing injected at all: no group, so no call. The filters are the user's
+    # opt-out policy and there is nothing to ask about an empty list.
+    calls.pop()
+    bazel.flags.resolve(_fake_ctx(trait = _trait(filters = [add_one])))
+    _eq("no injected flags, no filter call", calls, [])
 
 def _test_config_names(ctx):
     """`testonly_config_names` extracts `--config=NAME` names from plain and
@@ -880,7 +1150,12 @@ def _test_impl(ctx):
     _test_injected_flags_carry_their_own_scope(ctx)
     _test_injected_config_requests_stay_unscoped(ctx)
     _test_a_fields_section_is_a_default_not_a_rewrite(ctx)
+    _test_unscoped_injected_only_carved_out_for_the_build_group(ctx)
     _test_flag_transforms(ctx)
+    _test_flag_transform_sees_unscoped_texts(ctx)
+    _test_flag_transform_additions_stay_unscoped(ctx)
+    _test_injected_flag_filters_apply_to_every_field(ctx)
+    _test_injected_flag_filters_run_once_per_nonempty_group(ctx)
     _test_passthrough_flags_follow_explicit_ones(ctx)
     _test_resolving_claims_the_bucket(ctx)
     _test_disclaim_accounts_for_both_buckets(ctx)
@@ -907,8 +1182,11 @@ def _test_impl(ctx):
     _test_per_command_fields_reach_exactly_their_command(ctx)
     _test_build_rejected_flags_have_a_home(ctx)
     _test_injected_flag_precedence(ctx)
+    _test_repository_flags_reach_a_query(ctx)
+    _test_injected_config_expands_per_command(ctx)
+    _test_injected_config_expands_at_the_unscoped_rank(ctx)
 
-    print("bazel_flags_test.axl: OK (30 sections)")
+    print("bazel_flags_test.axl: OK (39 sections)")
     return 0
 
 bazel_flags_tests = task(

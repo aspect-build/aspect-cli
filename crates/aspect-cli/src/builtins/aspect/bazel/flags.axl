@@ -21,8 +21,27 @@ the trait field that carried it: `extra_flags` and `extra_build_flags` and the
 `extra_query_flags` to `query`, `extra_info_flags` to `info`. That is what keeps
 an injected build-only option out of a task's sidecar `query`, and an
 `info`-only or `test`-only option off the `bazel build` command line, where
-Bazel would reject either outright. An injected `--config=NAME` stays unscoped,
-since Bazel's expansion is already section-aware; see `_scope_injected`.
+Bazel would reject either outright.
+
+Two kinds of entry in the `build` group stay unscoped anyway, because `build` is
+the wrong scope for them and `query` accepts them: a `--config=NAME` reference,
+whose expansion Bazel already makes section-aware, and a flag that configures
+the repository graph (`--repo_env`, `--registry`, `--repository_cache`, …). A
+task's sidecar query drives the loading phase, so it has to resolve external
+repositories the way the build does and reuse the same warmed cache; see
+`_UNSCOPED_INJECTED`. Neither carve-out applies to the three per-command fields:
+there the author named a command, and the field's own docs promise that command
+only.
+
+Scoping is applied AFTER the `trait.flags` transform, not before. The transform
+is a public seam a repository's `config.axl` rewrites flags through, and it sees
+each entry as the feature spelled it — a plain string for a plain entry, or the
+tuple a producer that version-gated or scoped its own entry appended. A
+`(flag, version, command)` triple minted by scoping never reaches it, so a
+transform matching on flag text (`f.startswith("--remote_")`) keeps working.
+`_plan_sections` decides each entry's section up front and `_apply_plan` puts it
+back on afterwards, matching by entry value; an entry the transform invented is
+left unscoped, the same default a typed flag gets.
 
 Precedence is NOT the order of the resolved list. `parse_rc` hands the whole
 list to `bazelrc::options_for`, which emits the rc files first and then the
@@ -32,21 +51,26 @@ the effective order — lowest precedence first — is:
 
     rank  bazel build        bazel test         bazel query        bazel info
     ----  -----------------  -----------------  -----------------  -----------------
-      1   rc `always`        rc `always`        rc `always`        rc `always`
-      2   rc `common`        rc `common`        rc `common`        rc `common`
+      1   rc `common`        rc `common`        rc `common`        rc `common`
+      2   rc `always`        rc `always`        rc `always`        rc `always`
       3   rc `build`         rc `build`         —                  rc `build`
       4   —                  rc `test`          rc `query`         rc `info`
       5   base_flags         base_flags         base_flags         base_flags
       6   task `base_flags=` task `base_flags=` task `base_flags=` task `base_flags=`
       7   --bazel-flag       --bazel-flag       --bazel-flag       --bazel-flag
       8   passthrough        passthrough        passthrough        passthrough
-      9   extra_flags        extra_flags        —                  extra_flags
-     10   extra_build_flags  extra_build_flags  —                  extra_build_flags
-     11   task_flags         task_flags         —                  task_flags
-     12   —                  extra_test_flags   extra_query_flags  extra_info_flags
+      9   unscoped injected: a `--config=NAME` reference from the `build` group,
+          expanded here (`common:NAME` + the running command's own `NAME`
+          sections), and the `_UNSCOPED_INJECTED` repository flags
+     10   extra_flags        extra_flags        —                  extra_flags
+     11   extra_build_flags  extra_build_flags  —                  extra_build_flags
+     12   task_flags         task_flags         —                  task_flags
+     13   —                  extra_test_flags   extra_query_flags  extra_info_flags
 
-Ranks 1-4 are the rc files, 5-12 the caller's flags; `—` means that command
-does not read the section the entry lands in, so the entry never reaches it.
+Ranks 1-4 are the rc files, 5-13 the caller's flags; `—` means that command
+does not read the section the entry lands in, so the entry never reaches it. A
+`--config=NAME` in one of the three per-command fields is scoped with the rest
+of its group, so it expands at rank 13 instead of rank 9.
 
 Two keys, in order: how specific the rc section is, then position in the
 resolved list. So the per-command field always wins over the `build`-section
@@ -57,6 +81,27 @@ overrides `trait.base_flags`, by design; what a feature injects into the
 still wins over a typed flag, which is what `--bazel-flags:omit` is for —
 dropping an injected flag rather than shadowing it. `aspect query` and the
 sidecar queries read the `query` column; `ctx.bazel.info` reads the `info` one.
+
+Two wrinkles in that table are artifacts of how a run command is rendered rather
+than of Bazel's own order:
+
+* ranks 1 and 2 are swapped relative to vanilla Bazel, which applies `always`
+  before `common`. A `common`-section option is rendered as
+  `--default_override=0:common=…`, which Bazel applies ahead of anything on the
+  command line, while an `always` option is passed literally — so here `always`
+  wins. Pre-existing, and the same reason `aspect setup bazelrc` writes
+  `common`.
+* for the same reason, "every caller flag wins over the rc files" is false for a
+  caller flag that names the `common` section itself — reachable only through
+  the `(flag, version, "common")` tuple escape. Such a flag is rendered as a
+  `--default_override` and loses to a literal rc-file `build` entry. Name a
+  command section, or `always`, rather than `common`.
+
+Rank 9's expansion position is why a `--config=NAME` listed after a plain entry
+in the same `build`-group list does not override it: the reference is unscoped
+and expands at rank 9, while its list-neighbours are scoped to `build` at ranks
+10-12. List a `--config` whose sections are meant to win as the only thing that
+sets those options, or set them in the command section directly.
 
 `resolve_startup` / `resolve` fold each bucket in alongside the explicit
 `--bazel-startup-flag` / `--bazel-flag` values and claim it as they go: the
@@ -287,7 +332,9 @@ def _resolve_startup_flags(ctx) -> list:
 # rejects outright, so `build` is not a safe home for them. No section means
 # "build and test but not query", and none means "build and test but not info"
 # either, so a per-command section is the only place such a flag can live.
-# Measured with `bazel canonicalize-flags --for_command=…` on Bazel 9.3.0:
+# Measured with `bazel canonicalize-flags --for_command=…` on Bazel 9.0.1, the
+# version `.bazelversion` pins (it reproduces on 9.3.0) — this is the one home
+# for the table, referenced from `trait.axl` and `bazel_flags_test.axl`:
 #
 #                                    build   test    query   info
 #   --flaky_test_attempts=2          ok      ok      REJECT  ok
@@ -302,88 +349,209 @@ _TEST_SECTION = "test"
 _QUERY_SECTION = "query"
 _INFO_SECTION = "info"
 
-def _scope_injected(flags: list, command: str) -> list:
-    """`flags` with every entry scoped to the rc section `command`, as the
-    `(flag, version_condition, command)` entries `parse_rc` reads.
+# No section at all: the entry is passed as a plain flag, lands in the rc's
+# `always` bucket, and reaches every command.
+_UNSCOPED = ""
+
+# Injected flags that stay unscoped even in the `build` group, by flag name.
+#
+# These configure the repository graph — what the loading phase resolves, and
+# where it fetches and caches it — rather than the command. A task's sidecar
+# `query` runs the loading phase too: it is the thing that decides which targets
+# a delivery builds, so it has to resolve external repositories under the same
+# repo env, registries and overrides as the build that follows, and reuse the
+# same warmed repository cache rather than paying for a cold download. Scoping
+# these to `build` would silently split the two apart (`--repo_env` is injected
+# through `extra_flags` by this repository's own `.aspect/config.axl`, and a
+# Workflows runner injects `--repository_cache` the same way).
+#
+# Every name here is accepted by `bazel query` — verified with
+# `bazel canonicalize-flags --for_command=query` on Bazel 9.0.1 — so leaving
+# them unscoped cannot reintroduce the `Unrecognized option` failure that
+# scoping exists to prevent. That acceptance is the entry condition for the
+# list: a flag `query` rejects does not belong here however repository-shaped it
+# looks.
+#
+# `--config` is on the list for a different reason: it is a reference, not an
+# option. Bazel expands it against the sections the running command reads, so an
+# unscoped request already keeps a `common:NAME` section reaching a query while
+# `build:NAME` stays out of it — scoping the request itself would throw the
+# second away, and that is what the documented `extra_flags = ["--config=ci"]`
+# recipe rests on.
+_UNSCOPED_INJECTED = [
+    # A reference, expanded per command by Bazel itself.
+    "--config",
+    # Which external repositories exist and how they resolve.
+    "--repo_env",
+    "--registry",
+    "--override_repository",
+    "--inject_repository",
+    "--override_module",
+    "--enable_bzlmod",
+    "--enable_workspace",
+    "--lockfile_mode",
+    "--check_direct_dependencies",
+    "--ignore_dev_dependency",
+    # Where their archives come from and are kept.
+    "--repository_cache",
+    "--experimental_repository_cache_hardlinks",
+    "--distdir",
+    "--vendor_dir",
+    "--experimental_downloader_config",
+]
+
+def _unscoped_injected_name(text: str) -> str:
+    """The `_UNSCOPED_INJECTED` name `text` spells, or `""` when it spells none.
+
+    Reads the flag name the way Bazel does: the part before any `=`, with a
+    `--no` prefix stripped so the negated spelling of a boolean
+    (`--noenable_bzlmod`) matches its name. Stripping `--no` cannot
+    false-positive, since the result only matters when it hits the fixed list."""
+    name = text.split("=")[0]
+    if name.startswith("--no") and ("--" + name[len("--no"):]) in _UNSCOPED_INJECTED:
+        return "--" + name[len("--no"):]
+    return name if name in _UNSCOPED_INJECTED else ""
+
+def _scoped_entry(flag, command: str):
+    """`flag` carrying `command` as its rc section, in the
+    `(flag, version_condition, command)` shape `parse_rc` reads. An empty
+    `command` means leave it exactly as it came — already scoped by its
+    producer, or deliberately unscoped."""
+    if not command:
+        return flag
+    if type(flag) == "tuple":
+        return flag if len(flag) >= 3 else (flag[0], flag[1], command)
+    return (flag, "", command)
+
+def _plan_sections(flags: list, command: str, carve_out: bool = False) -> list:
+    """`[(entry, section)]` for one injected group: every entry of `flags` paired
+    with the rc section it must end up in, `_UNSCOPED` for one that must not be
+    scoped at all.
+
+    Computed before the `trait.flags` transform runs, so the transform sees the
+    entries as their producer spelled them and `_apply_plan` can put the sections
+    back afterwards.
 
     `command` is the *default* section — the one named by the trait field the
-    flags came from. Two entries keep what they came with instead:
+    flags came from. Three kinds of entry do not take it:
 
     * one that already names its own section — how a producer scopes tighter
       (`exec_log_flags`), how a `task_flags` hook picks a section per flag, and
       how a feature keeps a flag on every command, `query` included
-      (`(flag, "", "always")`). A field's section is a default, never a
-      rewrite: an explicit section wins in every one of the four fields, so a
-      producer that mutates the live trait's list gets the same answer whichever
-      list it appended to;
-    * a `--config=NAME` request (and the value of its two-token spelling),
-      because it is a reference, not an option. Bazel expands it against the
-      sections the running command reads, so a `build:NAME` section already
-      stays out of a `query` while a `common:NAME` one still applies — scoping
-      the request itself would throw the second away. This is what keeps the
-      documented `extra_flags = ["--config=ci"]` meaning what it says, and it
-      is why the per-command fields do not scope a reference either: to confine
-      a config to one command, write its options in that command's section
-      (`query:NAME`) and Bazel's own section-awareness does the scoping."""
-    scoped = []
-    expect_config_value = False
+      (`(flag, "", "always")`). A field's section is a default, never a rewrite:
+      an explicit section wins in every one of the four fields, so a producer
+      that mutates the live trait's list gets the same answer whichever list it
+      appended to;
+    * a version-gated pair with no section, which gains `command` like a plain
+      string;
+    * when `carve_out` is set — the `build` group only — an entry naming an
+      `_UNSCOPED_INJECTED` flag, and the value of its two-token spelling. The
+      three per-command fields pass `carve_out = False`: there the author named
+      a command, so `extra_query_flags = ["--config=NAME"]` is scoped to `query`
+      and confines that config to a query, which is what the field promises."""
+    plan = []
+    pair_section = _UNSCOPED
+    expect_value = False
     for flag in flags:
         text = flag[0] if type(flag) == "tuple" else flag
 
-        # The value of a two-token `--config NAME` travels with its flag, so it
-        # stays unscoped too. A flag-shaped follower is not a value: Bazel
-        # reports the missing one better than we could (`_requested_config_names`
-        # reads the pair the same way).
-        if expect_config_value and not text.startswith("-"):
-            expect_config_value = False
-            scoped.append(flag)
+        # The value of a two-token `--repo_env FOO=1` travels with its flag, so
+        # it takes the same section. A flag-shaped follower is not a value:
+        # Bazel reports the missing one better than we could
+        # (`_requested_config_names` reads a `--config` pair the same way).
+        if expect_value and not text.startswith("-"):
+            expect_value = False
+            plan.append((flag, pair_section))
             continue
 
-        expect_config_value = text == _CONFIG_FLAG
-        if expect_config_value or text.startswith(_CONFIG_PREFIX):
-            scoped.append(flag)
-        elif type(flag) == "tuple":
-            scoped.append(flag if len(flag) >= 3 else (flag[0], flag[1], command))
-        else:
-            scoped.append((flag, "", command))
-    return scoped
+        expect_value = False
+        if type(flag) == "tuple" and len(flag) >= 3:
+            plan.append((flag, _UNSCOPED))
+            continue
 
-def _injected_command_flags(ctx, bazel_trait) -> list:
-    """Every command flag the active traits inject, filtered by the user's
-    `injected_flag_filters` and scoped to the rc section its field names.
+        name = _unscoped_injected_name(text) if carve_out else ""
+        section = _UNSCOPED if name else command
+        if name and "=" not in text:
+            expect_value = True
+            pair_section = section
+        plan.append((flag, section))
+    return plan
+
+def _apply_plan(flags: list, plan: list) -> list:
+    """`flags` with each entry scoped to the section `plan` recorded for it.
+
+    `flags` is what the `trait.flags` transform returned (or the pre-transform
+    list when no transform is set), and `plan` is `[(entry, section)]` — the
+    user's own flags first, each mapped to `_UNSCOPED`, then every injected
+    group's plan in list order. Each plan entry is claimed at most once and
+    matching is by value, so:
+
+    * a transform that returned the list untouched reproduces exactly the
+      sections `_plan_sections` chose;
+    * a text that was both typed by the user and injected resolves to the user's
+      unscoped slot first, which keeps a typed flag reaching every command;
+    * an entry the transform invented, or one it returned more times than it was
+      given, has nothing left to claim and stays unscoped — the same default a
+      typed flag gets, and what the whole list did before any scoping existed;
+    * an entry the transform returned already scoped is matched (or not) like
+      any other, and `_scoped_entry` leaves a triple alone either way."""
+    pending = list(plan)
+    out = []
+    for flag in flags:
+        section = _UNSCOPED
+        for i in range(len(pending)):
+            if pending[i][0] == flag:
+                section = pending[i][1]
+                pending.pop(i)
+                break
+        out.append(_scoped_entry(flag, section))
+    return out
+
+def _scope_injected(flags: list, command: str, carve_out: bool = False) -> list:
+    """`flags` scoped to `command` in one step, for a caller with no
+    `trait.flags` transform to interleave. Plan and apply, composed."""
+    return [_scoped_entry(flag, section) for (flag, section) in _plan_sections(flags, command, carve_out)]
+
+def _injected_groups(ctx, bazel_trait) -> list:
+    """The command flags the active traits inject, as
+    `[(flags, section, carve_out)]` groups — filtered by the user's
+    `injected_flag_filters` but not yet scoped.
 
     The four `extra_*_flags` fields and the `task_flags` hooks, in section
     order: the `build` group (`extra_flags`, `extra_build_flags`, the hook
     results) first, then `test`, then `query`, then `info`. Within one section
     the order is the order listed here, so a hook result wins a collision with
-    `extra_flags`; across sections `options_for` re-sorts into Bazel's own
-    section order anyway, so this list's order only decides collisions inside a
-    section.
+    `extra_flags`; across sections `options_for` regroups into Bazel's own
+    section order anyway, so this order only decides collisions inside a section.
 
-    The filters run per group, before scoping, so an `injected_flag_filters`
-    hook keeps seeing the flags as the feature spelled them. They are pure
-    (`omit_flags`), so running them once per group rather than once per
-    invocation drops nothing and adds nothing."""
+    Only the `build` group carves out the `_UNSCOPED_INJECTED` flags: the other
+    three name a command, and their docs promise that command only.
+
+    An empty group is skipped rather than filtered. The filters are the user's
+    opt-out policy, so there is nothing to ask about an empty list — and a hook
+    that *adds* a flag instead of dropping one would otherwise add it once per
+    group, multiplying one entry into all four sections. Running them per
+    non-empty group is also what lets a hook see each flag as the feature
+    spelled it rather than as a scoped triple."""
     build = list(bazel_trait.extra_flags) + list(bazel_trait.extra_build_flags)
     for hook in bazel_trait.task_flags:
         build.extend(hook(ctx))
 
-    groups = [
-        (build, _BUILD_SECTION),
-        (list(bazel_trait.extra_test_flags), _TEST_SECTION),
-        (list(bazel_trait.extra_query_flags), _QUERY_SECTION),
-        (list(bazel_trait.extra_info_flags), _INFO_SECTION),
-    ]
-
-    injected = []
-    for (flags, section) in groups:
-        injected.extend(_scope_injected(_filter_injected(ctx, flags), section))
-    return injected
+    groups = []
+    for (flags, section, carve_out) in [
+        (build, _BUILD_SECTION, True),
+        (list(bazel_trait.extra_test_flags), _TEST_SECTION, False),
+        (list(bazel_trait.extra_query_flags), _QUERY_SECTION, False),
+        (list(bazel_trait.extra_info_flags), _INFO_SECTION, False),
+    ]:
+        if flags:
+            groups.append((_filter_injected(ctx, flags), section, carve_out))
+    return groups
 
 def _resolve_flags(ctx) -> list:
-    """`ctx.args.bazel_flags + post-command passthrough +
-    _injected_command_flags(ctx)`, then the `trait.flags(flags)` transform if
-    set. Requires a `bazel_flags` CLI arg.
+    """`ctx.args.bazel_flags + post-command passthrough + what the traits inject`,
+    with the `trait.flags(flags)` transform applied in the middle and the rc
+    sections put on after it. Requires a `bazel_flags` CLI arg.
 
     Passthrough flags follow the explicit `--bazel-flag` ones: both are
     user-typed, and on a collision Bazel takes the last, so the direct spelling
@@ -391,12 +559,19 @@ def _resolve_flags(ctx) -> list:
 
     The user's own flags stay unscoped — typed for this invocation, they apply
     to every Bazel command it makes, which is what lets a task's sidecar `query`
-    honor an `--bazel-flag=--noenable_bzlmod`. What features inject is scoped by
-    `_injected_command_flags`, which filters before scoping: an
-    `injected_flag_filters` hook still sees the flags as the feature spelled
-    them, while the `trait.flags` transform (applied last, to the whole list)
-    sees the scoped tuples — `flag_text` / `flag_name` in
-    `lib/aspect_flags.axl` read either shape.
+    honor an `--bazel-flag=--noenable_bzlmod`. What features inject is grouped
+    and filtered by `_injected_groups` and sectioned by `_plan_sections`.
+
+    The transform runs on the unsectioned list on purpose. It is a public seam,
+    and a repository's `config.axl` matches on flag text through it
+    (`[f for f in flags if not f.startswith("--remote_")]`); handing it the
+    `(flag, version, command)` triples that scoping mints would make such a
+    transform match nothing and silently stop doing its job. So it sees each
+    entry as the producer spelled it — a plain string, or the tuple a producer
+    that version-gated or scoped its own entry appended — and `_apply_plan`
+    restores the sections afterwards. `flag_text` / `flag_name` in
+    `lib/aspect_flags.axl` read either shape, for a transform that wants to be
+    indifferent.
 
     The returned list's order is not the precedence order. `options_for` groups
     the whole list by rc section before Bazel sees it, so precedence is section
@@ -404,12 +579,17 @@ def _resolve_flags(ctx) -> list:
     in this file's module docstring."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_flags")
-    flags = list(ctx.args.bazel_flags)
-    flags.extend(_claim_bucket(ctx, _PASSTHROUGH_FLAGS_ARG))
-    flags.extend(_injected_command_flags(ctx, bazel_trait))
+    user = list(ctx.args.bazel_flags)
+    user.extend(_claim_bucket(ctx, _PASSTHROUGH_FLAGS_ARG))
+
+    plan = [(flag, _UNSCOPED) for flag in user]
+    for (flags, section, carve_out) in _injected_groups(ctx, bazel_trait):
+        plan.extend(_plan_sections(flags, section, carve_out))
+
+    flags = [flag for (flag, _) in plan]
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
-    return flags
+    return _apply_plan(flags, plan)
 
 def _setup_command(ctx, command: str, base_flags: list = []):
     """Prepare `ctx.bazel` for upcoming `ctx.bazel.<command>` calls and return the
@@ -559,3 +739,4 @@ testonly_config_names = _requested_config_names
 # the constructor rejects a tuple), and the rule has to hold for all four
 # sections, not just the one a hook happens to use.
 testonly_scope_injected = _scope_injected
+testonly_unscoped_injected = _UNSCOPED_INJECTED

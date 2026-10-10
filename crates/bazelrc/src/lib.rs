@@ -317,6 +317,14 @@ impl BazelRC {
     /// on a build-like command; `--bazel-flags:omit` is how a user drops an injected flag
     /// rather than shadowing it.
     ///
+    /// One exception to "caller flags win": a caller flag that names the `common` section
+    /// itself. `resolve_for_command` renders a `common`-section option as
+    /// `--default_override=0:common=…`, which Bazel applies ahead of everything on the command
+    /// line, so such a flag loses to a literal rc-file `build` entry despite being emitted
+    /// after it here. Nothing in-tree does that — callers name a command section or leave the
+    /// flag unscoped (`always`) — and the same rendering is why `options_for("always")`
+    /// out-ranks `options_for("common")` in practice.
+    ///
     /// For example, `options_for("test")` returns:
     ///   `always` + `common` + `build` + `test` (rc-file) + `always` + `build` + `test` (caller)
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
