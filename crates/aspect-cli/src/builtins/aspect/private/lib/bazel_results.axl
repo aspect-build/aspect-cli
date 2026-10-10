@@ -3024,13 +3024,13 @@ def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date 
     for entry in (extra_meta or []):
         row6.append(_item("📌", entry["key"] + " = " + entry["value"]))
 
-    # Row 7: external links (Aspect Workflows · CI host).
+    # Row 7: external links (Aspect UI · CI host).
     row7 = []
 
     # Keyed on sink_invocation_id (resolve_aspect_url).
     aspect_url = (links or {}).get("aspect_url", "") or ""
     if aspect_url:
-        row7.append(_item("✨", "[Aspect](" + aspect_url + ")"))
+        row7.append(_item("✨", "[Aspect UI](" + aspect_url + ")"))
 
     # Keyed on Bazel's invocation_id; complementary to Aspect (distinct backend +
     # UUID), shown alongside when both configured.
@@ -3337,7 +3337,7 @@ SHARED_DETAILS_BODY_TEMPLATE = SNIPPET_MACRO + """{% if artifacts_browse_url or 
 <summary>🔁 Retry attempts ({{ retry_attempt_rows|length }})</summary>
 
 {% for a in retry_attempt_rows -%}
-- Attempt {{ a.attempt }} ({{ a.outcome }}){% if a.aspect_url %} — [Aspect]({{ a.aspect_url }}){% endif %}
+- Attempt {{ a.attempt }} ({{ a.outcome }}){% if a.aspect_url %} — [Aspect UI]({{ a.aspect_url }}){% endif %}
 {% endfor %}
 </details>
 
