@@ -191,7 +191,7 @@ fn assert_degraded(output: &Output, file: &str) {
         stderr.contains("warning: ") && stderr.contains(file),
         "expected a warning naming {file} in:\n{stderr}"
     );
-    assert_one_error_prefix(&stderr);
+    assert_no_doubled_error_prefix(&stderr);
 }
 
 /// The command failed with the AXL diagnostic as its reason.
@@ -203,15 +203,47 @@ fn assert_failed_on_axl(output: &Output, needle: &str) {
         "expected exit code 1\n--- stderr ---\n{stderr}"
     );
     assert!(stderr.contains(needle), "expected {needle:?} in:\n{stderr}");
-    assert_one_error_prefix(&stderr);
+    assert_no_doubled_error_prefix(&stderr);
 }
 
 /// Starlark renders its diagnostics with their own `error: ` title, so the CLI
-/// must not prefix them again.
-fn assert_one_error_prefix(stderr: &str) {
+/// must not prefix them again — neither adjacently, which `error: error:` is,
+/// nor as a second `error:` line further down, which two diagnostics both
+/// presented as the run’s own failure look like. A run has one failure, so it
+/// gets one `error:`.
+///
+/// A Starlark traceback carries its own `error:` head line below
+/// `Traceback (most recent call last):`, and that head belongs to the
+/// diagnostic the traceback is part of rather than being a second failure, so
+/// lines inside a traceback block do not count. (The CLI prefixes the
+/// traceback’s first line, which leaves two `error:` lines on stderr for the
+/// one failure — pre-existing, and not what this checks.)
+fn assert_no_doubled_error_prefix(stderr: &str) {
     assert!(
         !stderr.contains("error: error:"),
         "the diagnostic was prefixed twice:\n{stderr}"
+    );
+    let mut in_traceback = false;
+    let mut reported: Vec<&str> = Vec::new();
+    for line in stderr.lines() {
+        if line
+            .trim_end()
+            .ends_with("Traceback (most recent call last):")
+        {
+            if line.starts_with("error: ") {
+                reported.push(line);
+            }
+            in_traceback = true;
+        } else if line.trim().is_empty() {
+            in_traceback = false;
+        } else if line.starts_with("error: ") && !in_traceback {
+            reported.push(line);
+        }
+    }
+    assert!(
+        reported.len() <= 1,
+        "a run reports one failure, so one `error:`; got {}: {reported:?}\n{stderr}",
+        reported.len()
     );
 }
 
@@ -256,8 +288,9 @@ fn help_survives_an_unparsable_script_and_lists_what_did_load() {
     }
 }
 
-/// `--help`, `--version` and a bare `aspect` are rendered by Clap rather than
-/// by the `help` / `version` subcommands, so they are their own path.
+/// `--help`, `--version`, a bare `aspect` and a bare `aspect <group>` are
+/// rendered by Clap rather than by the `help` / `version` subcommands, so they
+/// are their own path.
 #[test]
 fn clap_rendered_help_survives_an_unparsable_script() {
     let flag = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &["--help"]);
@@ -285,6 +318,23 @@ fn clap_rendered_help_survives_an_unparsable_script() {
         "expected the warning and the help:\n{}",
         stderr(&bare)
     );
+
+    // A bare `aspect <group>` with no leaf is the same Clap error, one level
+    // down: `arg_required_else_help` renders the group’s own help.
+    for group in ["auth", "worktree", "setup"] {
+        let output = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &[group]);
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "`aspect {group}`:\n{stderr}");
+        assert!(
+            stderr.contains("warning:") && stderr.contains("policy.axl"),
+            "`aspect {group}` must still report the broken file:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("aspect {group}")),
+            "`aspect {group}` must print the group’s help:\n{stderr}"
+        );
+        assert_no_doubled_error_prefix(&stderr);
+    }
 }
 
 #[test]
@@ -353,7 +403,7 @@ fn the_fixture_workspace_is_where_the_test_thinks_it_is() {
     let named = stderr
         .lines()
         .find_map(|line| line.strip_prefix("warning: "))
-        .and_then(|line| line.split(" could not be loaded").next())
+        .and_then(|line| line.split(" failed; ").next())
         .map(Path::new)
         .expect("a warning naming the file");
     assert!(
@@ -434,10 +484,43 @@ fn a_config_failure_after_a_script_failure_is_marked_as_derived() {
     assert_eq!(
         stderr
             .lines()
-            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
             .count(),
         1,
         "expected exactly one load warning:\n{stderr}"
+    );
+}
+
+/// The same derived config on a command that dispatches a task. The script is
+/// raised as the run’s `error:` and so prints *below* the summary line, which
+/// is why that line names the script it blames instead of saying "the above".
+#[test]
+fn a_derived_config_names_its_cause_when_the_command_cannot_run() {
+    let output = run_in_workspace(
+        &[
+            ("policy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+            ("config.axl", CONFIG_NEEDING_MYTASK),
+        ],
+        &["build", "//..."],
+    );
+    assert_failed_on_axl(&output, "Parse error");
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("config.axl then failed too, most likely because of")
+            && stderr.contains("policy.axl — fix that first"),
+        "the summary must name the script it blames:\n{stderr}"
+    );
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
+            .count(),
+        0,
+        "the derived config must not be promoted to a warning of its own:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no task found"),
+        "nor have its own diagnostic printed:\n{stderr}"
     );
 }
 
@@ -546,7 +629,7 @@ fn a_tasks_own_help_survives_an_unparsable_script() {
         "expected the warning alongside the group help:\n{}",
         stderr(&group)
     );
-    assert_one_error_prefix(&stderr(&group));
+    assert_no_doubled_error_prefix(&stderr(&group));
 }
 
 /// An error that ends the run does not excuse dropping the typos recorded on
@@ -600,7 +683,7 @@ fail(Gate("this checkout needs a newer CLI"))
     assert_eq!(
         stderr
             .lines()
-            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
             .count(),
         2,
         "both typos must be reported, in any directory order:\n{stderr}"
@@ -743,7 +826,7 @@ two = task(kind = "dup", summary = "two.", implementation = _impl)
             stderr.contains("broken.axl") && stderr.contains("Parse error"),
             "the typo must survive the conflict:\n{stderr}"
         );
-        assert_one_error_prefix(&stderr);
+        assert_no_doubled_error_prefix(&stderr);
     }
 }
 
@@ -783,12 +866,12 @@ fn every_broken_script_is_reported_even_when_the_command_cannot_run() {
         assert_eq!(
             stderr
                 .lines()
-                .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+                .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
                 .count(),
             1,
             "`aspect {what}`: one raised, one warned:\n{stderr}"
         );
-        assert_one_error_prefix(&stderr);
+        assert_no_doubled_error_prefix(&stderr);
     }
 }
 
@@ -843,7 +926,7 @@ fn a_file_referenced_twice_is_reported_once() {
     assert_eq!(
         stderr
             .lines()
-            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
             .count(),
         1,
         "one file, one warning:\n{stderr}"
@@ -887,7 +970,7 @@ fn an_unparsable_module_aspect_is_fatal_and_warns_about_nothing() {
             !stderr.contains("warning:"),
             "nothing had been loaded yet, so there is nothing to warn about:\n{stderr}"
         );
-        assert_one_error_prefix(&stderr);
+        assert_no_doubled_error_prefix(&stderr);
     }
 }
 
@@ -931,7 +1014,7 @@ def config(ctx):
         stderr.contains("expected type `list[int]`"),
         "and the mismatch is still what ends the run:\n{stderr}"
     );
-    assert_one_error_prefix(&stderr);
+    assert_no_doubled_error_prefix(&stderr);
 }
 
 /// The caveat on a degraded `help`: phase 2 mutates the shared heap as it

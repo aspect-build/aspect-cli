@@ -138,9 +138,11 @@ pub enum AxlFileRole {
 impl AxlFileRole {
     /// The role of a file reached two ways, both of which its failure costs.
     ///
-    /// Only a `MODULE.aspect` reaches one file twice, by naming the same path
-    /// in a `use_task` and a `use_feature`, so the two roles merged are always
-    /// those two: each phase records only its own roles, into its own list.
+    /// Collapsing every disagreement to [`Self::TasksAndFeature`] is exact
+    /// because that is the only disagreement reachable: phase 1 records
+    /// [`Self::Tasks`] and [`Self::Feature`], phase 2 only [`Self::Config`],
+    /// and each phase accumulates into its own list — so `Config` never meets
+    /// either of the others, however many modules name the same path.
     fn merged(self, other: Self) -> Self {
         if self == other {
             self

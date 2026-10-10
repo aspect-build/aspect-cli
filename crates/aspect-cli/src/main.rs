@@ -184,14 +184,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
             // What the two phases could not load, and what that costs the
-            // command the user typed — see `Unloadable` for the policy. Every
-            // path that raises while any of it is still unreported goes
-            // through `Unloadable::reporting` or `into_error`, both of which
-            // report first: an error that ends the run does not excuse
-            // dropping the typo recorded before it, which is the silence this
-            // tolerance exists to avoid. Past the degraded-run decision below
-            // there is nothing left unreported, so the raises after it are
-            // ordinary.
+            // command the user typed — see `Unloadable` for the policy it
+            // implements. Past the degraded-run decision below there is
+            // nothing left unreported, so the raises after it are ordinary.
             let mut unloadable = Unloadable::default();
 
             // Phase 1: discover tasks and features.
@@ -450,49 +445,54 @@ impl Unloadable {
     /// file and what its absence costs. Silence here would be worse than the
     /// old hard failure — the point is that the user still sees the typo.
     fn warn(&self) {
-        self.warn_with_scripts(!self.scripts.is_empty());
+        self.warn_blaming(None);
     }
 
-    /// [`Self::warn`], told whether a script failed rather than reading it off
-    /// the list. [`Self::into_error`] takes the failure it raises off the list
-    /// first, so the list alone can no longer answer that — and the answer
-    /// must not change: a config that broke *because of* the very script being
-    /// raised is the clearest derived failure there is.
+    /// [`Self::warn`], plus the script failure [`Self::into_error`] has taken
+    /// off `scripts` to raise as the run’s error. That failure is still the
+    /// likeliest cause of any config failure, so it is named as the cause even
+    /// though it is no longer on the list.
     ///
-    /// A derived config is summarised in one line rather than given a warning
-    /// of its own, because that is almost always what it is:
-    /// `ctx.tasks["x"]` for an `x` whose file never loaded. Printing its
-    /// diagnostic as a second, equal-looking warning would point the user at a
-    /// file that is very likely fine. The same reasoning orders
-    /// [`Self::into_error`] and skips the trait check in
+    /// A derived config is summarised in one line naming the script it is
+    /// blamed on rather than given a warning of its own, because that is
+    /// almost always what it is: `ctx.tasks["x"]` for an `x` whose file never
+    /// loaded. Printing its diagnostic as a second, equal-looking warning
+    /// would point the user at a file that is very likely fine. The cause is
+    /// named rather than referred to as "the above", which it is not when the
+    /// raised failure is printed below as the run’s `error:`. The same
+    /// reasoning orders [`Self::into_error`] and skips the trait check in
     /// [`MultiPhaseEval::execute_configs`]. `ASPECT_DEBUG` prints the
     /// suppressed diagnostic anyway, for the case where the guess is wrong
     /// and the config really did have its own problem.
-    fn warn_with_scripts(&self, a_script_failed: bool) {
+    fn warn_blaming(&self, raised: Option<&AxlFileFailure>) {
         for failure in &self.scripts {
             Self::warn_one(failure);
         }
 
-        if !a_script_failed {
+        let Some(cause) = raised.or_else(|| self.scripts.first()) else {
             for failure in &self.configs {
                 Self::warn_one(failure);
             }
-        } else if !self.configs.is_empty() {
-            let paths: Vec<String> = self
-                .configs
-                .iter()
-                .map(|f| f.path.display().to_string())
-                .collect();
-            errln!(
-                "warning: {} then failed too, most likely because of the above — fix that first",
-                paths.join(", ")
-            );
-            for failure in &self.configs {
-                TaskExit::debug_traceback(&format_args!(
-                    "{}",
-                    strip_error_prefix(&failure.error.to_string())
-                ));
-            }
+            return;
+        };
+        if self.configs.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = self
+            .configs
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        errln!(
+            "warning: {} then failed too, most likely because of {} — fix that first",
+            paths.join(", "),
+            cause.path.display()
+        );
+        for failure in &self.configs {
+            TaskExit::debug_traceback(&format_args!(
+                "{}",
+                strip_error_prefix(&failure.error.to_string())
+            ));
         }
     }
 
@@ -500,7 +500,7 @@ impl Unloadable {
     /// followed by the file's own diagnostic.
     fn warn_one(failure: &AxlFileFailure) {
         errln!(
-            "warning: {} {}",
+            "warning: {} failed; {}",
             failure.path.display(),
             cost_of_losing(failure.role)
         );
@@ -519,17 +519,16 @@ impl Unloadable {
     /// prints it as the run's `error:`, and warning about it as well would
     /// print the same diagnostic twice.
     fn into_error(&mut self) -> Option<anyhow::Error> {
-        let a_script_failed = !self.scripts.is_empty();
-        if a_script_failed {
+        if !self.scripts.is_empty() {
             let failure = self.scripts.remove(0);
-            self.warn_with_scripts(a_script_failed);
+            self.warn_blaming(Some(&failure));
             return Some(anyhow::Error::from(failure.error));
         }
         if self.configs.is_empty() {
             return None;
         }
         let failure = self.configs.remove(0);
-        self.warn_with_scripts(a_script_failed);
+        self.warn_blaming(None);
         Some(anyhow::Error::from(failure.error).context(ConfigError))
     }
 }
@@ -538,18 +537,21 @@ impl Unloadable {
 /// `warning:` line ends with. Derived from the role the phase was loading it
 /// for: a `use_feature` file defines no tasks, and the flags its feature adds
 /// to every task subcommand go missing with it.
+///
+/// The clause says only what was lost. How the file broke is not something the
+/// role knows — a `use_task` naming a missing symbol fails a file that parses
+/// perfectly — so [`Unloadable::warn_one`] supplies the verb.
 fn cost_of_losing(role: AxlFileRole) -> &'static str {
     match role {
-        AxlFileRole::Tasks => "could not be loaded; the tasks it defines are unavailable",
+        AxlFileRole::Tasks => "the tasks it defines are unavailable",
         AxlFileRole::Feature => {
-            "could not be loaded; the feature it defines is unavailable, along with the flags \
-             it adds to every task"
+            "the feature it defines is unavailable, along with the flags it adds to every task"
         }
         AxlFileRole::TasksAndFeature => {
-            "could not be loaded; the tasks and the feature it defines are unavailable, along \
-             with the flags that feature adds to every task"
+            "the tasks and the feature it defines are unavailable, along with the flags that \
+             feature adds to every task"
         }
-        AxlFileRole::Config => "failed; the settings it applies are missing or incomplete",
+        AxlFileRole::Config => "the settings it applies are missing or incomplete",
     }
 }
 
@@ -920,7 +922,7 @@ mod degrade_policy_tests {
     /// Starlark's own `error: ` title is dropped so the caller supplies the
     /// only one; anything else is left exactly as it came.
     #[test]
-    fn only_a_leading_error_prefix_is_dropped() {
+    fn only_leading_error_prefixes_are_dropped() {
         assert_eq!(
             strip_error_prefix("error: Parse error: x"),
             "Parse error: x"
