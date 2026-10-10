@@ -568,7 +568,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let mut out = PhaseFailures::default();
         for (config_path, scope) in configs {
             if let Err(error) = self.run_config(scope, config_path, context_value) {
-                if !self.record(&mut out, config_path, error) {
+                // Stop only once an ending error has been seen. An ordinary
+                // failure is recorded and the remaining configs still run.
+                if self.record(&mut out, config_path, error) {
                     break;
                 }
             }

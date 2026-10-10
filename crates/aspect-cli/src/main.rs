@@ -228,7 +228,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 aspect_root: &aspect_root,
                 modules: &modules,
             };
-            let mut root_cmd = cmd.build(&cli_version)?;
+            // A name conflict or a reserved name is judged here, on the
+            // finished surface, so it is one of the raise paths that has to
+            // report what did not load on its way out.
+            let mut root_cmd = match cmd.build(&cli_version) {
+                Ok(root_cmd) => root_cmd,
+                Err(err) => {
+                    unloadable.warn();
+                    return Err(err.into());
+                }
+            };
             // Finalize the surface (this is what injects `--help`) so routing
             // sees every flag Clap knows, then let the selected task collect the
             // flags Clap would reject — see `Cmd::route_unrecognized_flags`.

@@ -65,13 +65,69 @@ def config(ctx):
     ctx.tasks["mytask"].args.something = "true"
 "#;
 
+/// How to run one fixture. Built by [`Fixture::new`] and driven by
+/// [`Fixture::run`]; the helpers below cover the common shapes.
+struct Fixture<'a> {
+    /// `(path, contents)` pairs, relative to the workspace root. Written in
+    /// the order given, which is also the order `read_dir` reports them in on
+    /// the filesystems we test on — see
+    /// `a_file_failure_recorded_before_a_gate_is_still_reported`.
+    files: &'a [(&'a str, &'a str)],
+    /// Directory to run from, relative to the workspace root. The CLI searches
+    /// `.aspect` from the aspect root down to the cwd, so a nested config is
+    /// only picked up when the cwd is at or below it.
+    cwd: &'a str,
+    /// Whether to set `ASPECT_DEBUG`, which every other case clears.
+    debug: bool,
+}
+
+impl<'a> Fixture<'a> {
+    fn new(files: &'a [(&'a str, &'a str)]) -> Self {
+        Fixture {
+            files,
+            cwd: ".",
+            debug: false,
+        }
+    }
+
+    /// Build the workspace, run `aspect <args>` in it, and hand back the
+    /// output together with the workspace, which the caller may inspect for
+    /// what the run left behind before dropping it.
+    fn run(&self, args: &[&str]) -> (Output, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).expect("home");
+        std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+        std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+        for (path, contents) in self.files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a fixture path has a parent"))
+                .expect("fixture parent");
+            std::fs::write(&path, contents).expect("writing a fixture");
+        }
+        let cwd = dir.path().join(self.cwd);
+        std::fs::create_dir_all(&cwd).expect("cwd");
+
+        let mut cmd = Command::new(aspect_cli());
+        let cmd = cmd.args(args).current_dir(&cwd).env("HOME", &home).env(
+            "ASPECT_CREDENTIALS_FILE",
+            dir.path().join("credentials.json"),
+        );
+        let output = if self.debug {
+            cmd.env("ASPECT_DEBUG", "1")
+        } else {
+            cmd.env_remove("ASPECT_DEBUG")
+        }
+        .output()
+        .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
+        (output, dir)
+    }
+}
+
 /// Run `aspect <args>` in a scratch workspace whose `.aspect/` holds `files`,
 /// each a `(name, contents)` pair.
 fn run_in_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
-    let rooted: Vec<(String, &str)> = files
-        .iter()
-        .map(|(name, contents)| (format!(".aspect/{name}"), *contents))
-        .collect();
+    let rooted = under_dot_aspect(files);
     let rooted: Vec<(&str, &str)> = rooted.iter().map(|(p, c)| (p.as_str(), *c)).collect();
     run_in_rooted_workspace(&rooted, args)
 }
@@ -79,52 +135,25 @@ fn run_in_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
 /// [`run_in_workspace`] with `ASPECT_DEBUG` set, which is the escape hatch
 /// for the config diagnostic a derived failure suppresses.
 fn run_in_debug_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
-    let rooted: Vec<(String, &str)> = files
-        .iter()
-        .map(|(name, contents)| (format!(".aspect/{name}"), *contents))
-        .collect();
+    let rooted = under_dot_aspect(files);
     let rooted: Vec<(&str, &str)> = rooted.iter().map(|(p, c)| (p.as_str(), *c)).collect();
-    run_fixture(&rooted, args, true)
+    let mut fixture = Fixture::new(&rooted);
+    fixture.debug = true;
+    fixture.run(args).0
 }
 
 /// [`run_in_workspace`] with the paths taken from the workspace root instead,
 /// for a fixture that needs a `MODULE.aspect` or a file under `.aspect/lib/`.
 fn run_in_rooted_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
-    run_fixture(files, args, false)
+    Fixture::new(files).run(args).0
 }
 
-/// Build the scratch workspace and run `aspect <args>` in it. `debug` sets
-/// `ASPECT_DEBUG`, which every other case clears.
-fn run_fixture(files: &[(&str, &str)], args: &[&str], debug: bool) -> Output {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let home = dir.path().join("home");
-    std::fs::create_dir(&home).expect("home");
-    std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
-    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
-    for (path, contents) in files {
-        let path = dir.path().join(path);
-        std::fs::create_dir_all(path.parent().expect("a fixture path has a parent"))
-            .expect("fixture parent");
-        std::fs::write(&path, contents).expect("writing a fixture");
-    }
-    let mut cmd = Command::new(aspect_cli());
-    let cmd = cmd
-        .args(args)
-        .current_dir(dir.path())
-        .env("HOME", &home)
-        .env(
-            "ASPECT_CREDENTIALS_FILE",
-            dir.path().join("credentials.json"),
-        );
-    let output = if debug {
-        cmd.env("ASPECT_DEBUG", "1")
-    } else {
-        cmd.env_remove("ASPECT_DEBUG")
-    }
-    .output()
-    .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
-    dir.close().expect("removing temp dir");
-    output
+/// Rebase `files` under `.aspect/`.
+fn under_dot_aspect<'a>(files: &[(&'a str, &'a str)]) -> Vec<(String, &'a str)> {
+    files
+        .iter()
+        .map(|(name, contents)| (format!(".aspect/{name}"), *contents))
+        .collect()
 }
 
 /// `output`'s exit code, or a panic naming what it did instead.
@@ -538,8 +567,14 @@ fn a_file_failure_recorded_before_a_gate_is_still_reported() {
     );
 
     // Phase 1's own gate: an error type declared `traceback = False`, raised
-    // from a script body. Phase 1 finishes loading first, so both typos are
-    // reported however `read_dir` happened to order the files.
+    // from a script body. Phase 1 finishes loading before it raises, so both
+    // typos are reported whatever order the scripts were discovered in.
+    //
+    // The gate is written FIRST on purpose. Scripts are discovered with
+    // `read_dir`, which on the filesystems we test on returns them in creation
+    // order, so writing the gate first is what makes this fixture discriminate:
+    // a phase that stopped at the gate would report neither typo. Written last,
+    // it would pass either way.
     const SCRIPT_GATE: &str = r#"
 Gate = error.type(traceback = False)
 
@@ -547,9 +582,9 @@ fail(Gate("this checkout needs a newer CLI"))
 "#;
     let script_gate = run_in_workspace(
         &[
-            ("aaa.axl", UNPARSABLE_SCRIPT),
-            ("bbb.axl", UNPARSABLE_SCRIPT),
             ("zzz.axl", SCRIPT_GATE),
+            ("aaa.axl", UNPARSABLE_SCRIPT),
+            ("mmm.axl", UNPARSABLE_SCRIPT),
         ],
         &["help"],
     );
@@ -596,4 +631,111 @@ fn aspect_debug_prints_the_suppressed_config_diagnostic() {
         "ASPECT_DEBUG must print it:\n{}",
         stderr(&debug)
     );
+}
+
+/// A config that ends the run stops the configs after it. A config body has a
+/// `ctx` and can write files and send requests, so running more of them past
+/// an author's `exit()` would be doing the work that exit exists to prevent.
+///
+/// `search_sources` finds at most one `config.axl` per directory, so a second
+/// config means a nested `.aspect/` plus a cwd at or below it.
+#[test]
+fn a_config_gate_stops_the_configs_after_it() {
+    const WRITES_A_MARKER: &str = r#"
+def config(ctx):
+    ctx.std.fs.write_file("ran", "yes")
+"#;
+    let files = [
+        (".aspect/config.axl", EXITING_CONFIG),
+        ("sub/.aspect/config.axl", WRITES_A_MARKER),
+    ];
+    let mut fixture = Fixture::new(&files);
+    fixture.cwd = "sub";
+    let (output, dir) = fixture.run(&["version"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(
+        output_code(&output),
+        3,
+        "the gate must end the run\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        !dir.path().join("sub/ran").exists(),
+        "the config after the gate must not have run:\n{stderr}"
+    );
+    // Nor may it be reported: it never ran, so it has nothing to say.
+    assert!(
+        !stderr.contains("sub"),
+        "a config that never ran must not be named:\n{stderr}"
+    );
+    dir.close().expect("removing temp dir");
+}
+
+/// An ordinary config failure is recorded and the remaining configs still run,
+/// so one typo does not hide the next. The inverse of
+/// `a_config_gate_stops_the_configs_after_it`, and the pair pins the polarity
+/// of what `record` returns.
+#[test]
+fn every_broken_config_is_reported() {
+    let files = [
+        (
+            ".aspect/config.axl",
+            "def config(ctx):\n    ctx.tasks[\"nope-one\"].args.x = 1\n",
+        ),
+        (
+            "sub/.aspect/config.axl",
+            "def config(ctx):\n    ctx.tasks[\"nope-two\"].args.x = 1\n",
+        ),
+    ];
+    let mut fixture = Fixture::new(&files);
+    fixture.cwd = "sub";
+    let (output, dir) = fixture.run(&["version"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output_code(&output), 0, "--- stderr ---\n{stderr}");
+    for named in ["nope-one", "nope-two"] {
+        assert!(
+            stderr.contains(named),
+            "expected {named}'s config to be reported too:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        stderr.lines().filter(|l| l.starts_with("warning:")).count(),
+        2,
+        "expected one warning per broken config:\n{stderr}"
+    );
+    dir.close().expect("removing temp dir");
+}
+
+/// A task-name conflict is judged on the finished surface, after both phases,
+/// so it is a raise path like any other and has to report what did not load on
+/// its way out.
+#[test]
+fn a_name_conflict_still_reports_what_did_not_load() {
+    const RESERVED_NAME: &str = r#"
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+describe_task = task(kind = "describe", summary = "clashes with a command.", implementation = _impl)
+"#;
+    const DUPLICATE_NAME: &str = r#"
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+one = task(kind = "dup", summary = "one.", implementation = _impl)
+two = task(kind = "dup", summary = "two.", implementation = _impl)
+"#;
+    for clashing in [RESERVED_NAME, DUPLICATE_NAME] {
+        let output = run_in_workspace(
+            &[("broken.axl", UNPARSABLE_SCRIPT), ("clash.axl", clashing)],
+            &["help"],
+        );
+        let stderr = stderr(&output);
+        assert_eq!(output_code(&output), 1, "--- stderr ---\n{stderr}");
+        assert!(
+            stderr.contains("broken.axl") && stderr.contains("Parse error"),
+            "the typo must survive the conflict:\n{stderr}"
+        );
+        assert_one_error_prefix(&stderr);
+    }
 }
