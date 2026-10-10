@@ -36,9 +36,9 @@ a comment feature simply leaves `body` on the built-in. Slots a preset does not
 define always fall through, which is the same rule that makes the empty `full`
 preset render the original layout exactly.
 
-`default` sets every slot: `title`, `summary` and a `details` per renderer for
-the check-run, commit-status and annotation surfaces, and `body` for the PR
-comment and MR note.
+`default` is such a preset: it sets `title`, `summary` and a `details` per
+renderer, so it governs the check-run, commit-status and annotation surfaces,
+while the PR comment and MR note keep their built-in `body`.
 
 Author a preset's templates as new strings, never by extracting fragments out
 of the built-in template constants — live configs `.replace()` against those

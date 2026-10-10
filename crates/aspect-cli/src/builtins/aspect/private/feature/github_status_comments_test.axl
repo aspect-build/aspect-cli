@@ -80,7 +80,6 @@ load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "phases")
 load("../lib/repro_commands.axl", "rehydrate_commands")
-load("../lib/template_presets.axl", "template_presets")
 load("../lib/tips.axl", "tips")
 
 def _eq(label, got, want):
@@ -1882,8 +1881,7 @@ def _check_identical_command_merges_across_kinds(ctx):
     _eq("no doubled space from the empty kind", "####  (" in body, False)
 
 def _check_body_has_no_start_date(ctx):
-    """The built-in body carries no start-time line; the footer's "Last updated"
-    is the timestamp a reader wants, and this one never changed."""
+    """The built-in body carries no start-time line."""
     entries = [{
         "kind": "build",
         "name": "build-task",
@@ -1904,15 +1902,11 @@ def _check_body_has_no_start_date(ctx):
     _eq("no start-date line", "📅" in body, False)
     _eq("the passed-in value is not rendered", "2026-01-01 00:00:00 UTC" in body, False)
 
-def _check_default_preset_footer(ctx):
-    """The `default` preset's body ends on the one attribution line; the
-    timestamp and API quota stay on the built-in body `full` falls through to."""
-    preset_body = template_presets.templates("default")["body"]
-    _eq("default body takes no timestamp", "last_updated_at" in preset_body, False)
-    _eq("default body takes no API quota", "api_usage" in preset_body, False)
-    _eq("full keeps the built-in body", template_presets.templates("full").get("body"), None)
-    _eq("built-in body keeps the timestamp", "last_updated_at" in DEFAULT_BODY_TEMPLATE, True)
-    _eq("built-in body keeps the API quota", "api_usage" in DEFAULT_BODY_TEMPLATE, True)
+def _check_footer(ctx):
+    """The built-in body ends on the one install + attribution line, and takes
+    neither the publish time nor the API quota line."""
+    _eq("body takes no timestamp", "last_updated_at" in DEFAULT_BODY_TEMPLATE, False)
+    _eq("body takes no API quota", "api_usage" in DEFAULT_BODY_TEMPLATE, False)
 
     entries = [{
         "kind": "lint",
@@ -1933,7 +1927,7 @@ def _check_default_preset_footer(ctx):
         MARKER_FMT % 46,
         prepared,
         "",
-        preset_body,
+        DEFAULT_BODY_TEMPLATE,
         DEFAULT_STATUS_BADGES,
         bucket_entries(prepared),
     )
@@ -2002,7 +1996,7 @@ def _test_impl(ctx):
     _check_no_fix_for_a_passing_task(ctx)
     _check_identical_command_merges_across_kinds(ctx)
     _check_body_has_no_start_date(ctx)
-    _check_default_preset_footer(ctx)
+    _check_footer(ctx)
 
     scenarios = [
         (
