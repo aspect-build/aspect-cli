@@ -260,10 +260,11 @@ pub struct StreamingFile {
     /// cannot otherwise land a write there, because the window is only as wide as
     /// one procfs walk.
     ///
-    /// Taken rather than re-invoked, so a hook that writes cannot keep feeding a
-    /// reader that drains to EOF.
+    /// `FnOnce` rather than `FnMut`: it is taken, never restored, so a hook that
+    /// writes cannot keep feeding a reader that drains to EOF. The type says so
+    /// rather than only this comment.
     #[cfg(test)]
-    on_holder_closed: Option<Box<dyn FnMut() + Send>>,
+    on_holder_closed: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl StreamingFile {
@@ -303,7 +304,7 @@ impl StreamingFile {
 
     /// Run `f` inside the window described on [`Self::on_holder_closed`].
     #[cfg(test)]
-    fn with_holder_closed_hook(mut self, f: Box<dyn FnMut() + Send>) -> Self {
+    fn with_holder_closed_hook(mut self, f: Box<dyn FnOnce() + Send>) -> Self {
         self.on_holder_closed = Some(f);
         self
     }
@@ -335,7 +336,7 @@ impl Read for StreamingFile {
                     return Ok(0);
                 }
                 #[cfg(test)]
-                if let Some(mut hook) = self.on_holder_closed.take() {
+                if let Some(hook) = self.on_holder_closed.take() {
                     hook();
                 }
                 match self.inner.read(buf)? {
