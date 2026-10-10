@@ -190,7 +190,10 @@ _PROFILE = "--profile"
 _EXECUTION_LOG_COMPACT_FILE = "--execution_log_compact_file"
 
 def flag_text(flag) -> str:
-    """The flag text of a plain or `(flag, constraint)` entry."""
+    """The flag text of a plain entry or of a `(flag, constraint)` /
+    `(flag, constraint, command)` tuple — any arity, since only the first item is
+    read. What a `trait.flags` transform uses to match on text without caring
+    which shape an entry arrived in."""
     return flag[0] if type(flag) == "tuple" else flag
 
 def flag_name(flag) -> str:
