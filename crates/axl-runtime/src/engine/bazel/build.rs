@@ -1260,18 +1260,22 @@ impl Build {
 
         // Same two-pid split for the execution log: the daemon writes the file, but
         // only the client can say the invocation is over and none is coming.
-        // A decoded `File` sink or an iterator handle is a consumer that must see
-        // every entry, so the producer blocks rather than dropping. Both are known
-        // here, before Bazel writes anything, which is the whole reason the iterator
-        // is passed in rather than fetched from the returned handle.
-        let lossless = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
+        //
+        // The producer always blocks rather than dropping, because a decoded stream
+        // always has exactly one consumer that must see every entry: a decoded
+        // `File` sink or an `iterator()` handle named here, or else the stream's own
+        // subscriber, which is what a later `build.execution_logs()` takes. Blocking
+        // cannot reach Bazel — Bazel writes the log to a regular file and this
+        // process tails it — so a consumer slower than the decoder lengthens the
+        // `join()` inside `wait()` and nothing else.
+        let named_consumers = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
         let mut execlog_stream = match execlog_path {
             Some(p) => Some(ExecLogStream::spawn_with_file(
                 p,
                 pid,
                 child.id(),
                 compact_paths,
-                lossless,
+                true, // lossless; see above
             )?),
             None => None,
         };
@@ -1354,11 +1358,12 @@ impl Build {
             bind_execlog_iters(stream, &execlog_iters)?;
         }
 
-        // Every consumer has cloned what it needs, so the stream must not go on
-        // holding an unread subscriber of its own — see `ExecLogStream::recv`. The
-        // exception is a stream with no consumer at all, whose subscriber is what
-        // a later `build.execution_logs()` would take.
-        if lossless {
+        // Every named consumer has cloned what it needs, so the stream must not go
+        // on holding an unread subscriber of its own — see `ExecLogStream::recv`.
+        // The exception is a stream no consumer was named for, whose subscriber is
+        // what a later `build.execution_logs()` takes: that one is read rather than
+        // unread, so leaving it in place caps nothing.
+        if named_consumers {
             if let Some(stream) = execlog_stream.as_mut() {
                 stream.take_initial_subscriber();
             }
@@ -1441,8 +1446,9 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                  added — nothing would drain it, and an undrained subscriber stalls \
                  the log for every other consumer. Pass an \
                  `execution_log.iterator()` handle in `execution_log=[...]` and \
-                 iterate that: it can be combined with sinks, and it is the only \
-                 form guaranteed not to drop entries."
+                 iterate that instead: it clones a subscriber of its own, so it can \
+                 be combined with sinks, and its `kinds=` filter runs in Rust before \
+                 an entry becomes a Starlark value."
             ))?;
         Ok(ExecutionLogIterator::new(recv))
     }
@@ -1515,11 +1521,12 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// Block until the Bazel invocation finishes and return a `BuildStatus`.
     ///
-    /// After `wait()` returns, the execution log pipe has been closed and the
-    /// producer thread has exited. Calling `execution_logs()` after `wait()`
-    /// will fail — the stream is consumed as part of the wait. Iterate
-    /// `execution_logs()` **before** calling `wait()` if you need to process
-    /// entries.
+    /// `execution_logs()` has to be iterated **before** `wait()`, not merely
+    /// preferably: the join below starts by releasing the stream's own subscriber
+    /// — the one `execution_logs()` hands out — so a call afterwards has nothing
+    /// to subscribe to and fails. The producer blocks for that subscriber for as
+    /// long as it exists, which is what makes the iteration complete; releasing it
+    /// is what lets a build nobody iterated end.
     ///
     /// The same applies, more sharply, to an `execution_log.iterator()` handle:
     /// `wait()` releases every handle still bound to this build before joining
@@ -1659,33 +1666,43 @@ mod tests {
         out
     }
 
-    /// `build.execution_logs()` must not stop at the decoded channel's capacity.
+    /// How many entries `--scenario=execlog_beyond_capacity` writes. Longer than
+    /// `CHANNEL_CAPACITY`, which is the only length that can tell a stream that
+    /// delivers everything apart from one that stops at the ring.
+    #[cfg(unix)]
+    const BEYOND_CAPACITY_ENTRIES: u32 = 3000;
+
+    /// `execution_log = True` must deliver the whole log to `execution_logs()`.
     ///
     /// The stream hands this iterator its one subscriber rather than cloning it,
     /// because an unread clone left behind caps the ring (see
-    /// `ExecLogStream::recv`). With one, a caller receives exactly the first
-    /// `CHANNEL_CAPACITY` entries and then a clean end of stream — no error, and
-    /// no dependence on how fast it reads. In a real log, whose leading records
-    /// are inputs rather than spawns, such a prefix can contain no spawns at all,
-    /// so the failure is a confidently wrong answer rather than a short one.
+    /// `ExecLogStream::recv`). That subscriber is registered when the stream
+    /// spawns, before Bazel writes anything, so the producer blocks for it exactly
+    /// as it does for a sink or a handle: every entry arrives, contiguously, and
+    /// how fast the caller reads decides only how long the build's `wait()` takes.
     ///
-    /// What this does *not* assert is that every entry arrives. `execution_log =
-    /// True` is the lossy strategy by contract: the reader drops entries that get
-    /// more than the capacity ahead of the consumer, and against a fake bazel
-    /// whose log is already complete on disk it certainly does. The guarantee is
-    /// that there is no fixed ceiling. `execution_log.iterator()` is the lossless
-    /// form, covered below.
+    /// The assertion is contiguity and the exact count, not just "more than the
+    /// capacity". A short prefix is the shape the failure takes, and in a real log,
+    /// whose leading records are inputs rather than spawns, a prefix can contain no
+    /// spawns at all — a confidently wrong answer rather than an obviously short
+    /// one. The timeout is because a blocking producer fails by parking.
     #[cfg(unix)]
     #[test]
-    fn execution_logs_is_not_capped_at_the_channel_capacity() {
+    fn execution_logs_delivers_the_whole_log() {
+        use std::time::Duration;
+
         let capacity = super::super::stream::execlog::channel_capacity() as u32;
+        assert!(
+            BEYOND_CAPACITY_ENTRIES > capacity,
+            "the scenario's log must outrun the ring ({capacity}) to be worth asserting on",
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("report.txt");
-
-        let exit = with_daemon_stand_in(|| {
-            crate::test::eval(&format!(
-                r#"
+        // `with_timeout` runs the body on a thread that may outlive this frame,
+        // so the script is rendered here rather than borrowing the path inside it.
+        let script = format!(
+            r#"
 def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
@@ -1693,42 +1710,152 @@ def _impl(ctx):
         stderr = None,
     )
     seen = 0
-    highest = 0
     for entry in build.execution_logs():
-        if entry.id <= highest:
-            return 2  # ids must advance; a replay or reorder is a different bug
-        highest = entry.id
         seen += 1
+        if entry.id != seen:
+            # basil numbers its entries 1..N, so anything else is a gap, a
+            # replay or a reorder.
+            return 2
     status = build.wait()
     if not status.success: return 1
-    ctx.std.fs.create({report:?}).write("%d %d\n" % (seen, highest))
+    ctx.std.fs.create({report:?}).write("%d\n" % seen)
     return 0
 
 Test = task(implementation = _impl)
 "#,
-                report = report.to_str().unwrap(),
-            ))
-            .with_fake_bazel()
-            .run_task(0)
-            .expect("run_task")
+            report = report.to_str().unwrap(),
+        );
+
+        let result = with_daemon_stand_in(move || {
+            crate::test::with_timeout(Duration::from_secs(60), move || {
+                crate::test::eval(&script).with_fake_bazel().run_task(0)
+            })
         });
-        assert_eq!(exit, Some(0), "the build should have succeeded");
+        match result {
+            None => panic!("timed out: the execution log's producer parked"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "every entry must arrive, with contiguous ids",
+            ),
+        }
 
         let text = std::fs::read_to_string(&report).expect("the task should have reported");
-        let mut parts = text.split_whitespace();
-        let seen: u32 = parts.next().unwrap().parse().unwrap();
-        let highest: u32 = parts.next().unwrap().parse().unwrap();
+        let seen: u32 = text.trim().parse().unwrap();
+        assert_eq!(
+            seen, BEYOND_CAPACITY_ENTRIES,
+            "`execution_log = True` must be lossless; a count short of the log is the \
+             prefix a dropping producer leaves, and one short by a varying amount is \
+             the race it leaves",
+        );
+    }
 
-        assert!(
-            seen > capacity,
-            "expected more than the channel capacity ({capacity}); got {seen}, which is \
-             the prefix an unread subscriber would cap this at",
+    /// `execution_log = True` on a task that never calls `execution_logs()`.
+    ///
+    /// This is the one behavioural cost of a blocking producer: with nobody
+    /// draining, it parks at `CHANNEL_CAPACITY`. What unparks it is `wait()` ->
+    /// `ExecLogStream::join()`, whose first act is to release the stream's own
+    /// subscriber; the blocked `send` then fails, `forward` reports no readers
+    /// left, and the reader drains the remaining bytes without decoding them. So
+    /// the build still ends — and because Bazel writes the log to a regular file
+    /// that this process tails, the park never reached Bazel either.
+    ///
+    /// The timeout is the whole assertion; a regression here is a hang.
+    #[cfg(unix)]
+    #[test]
+    fn a_log_nobody_iterates_does_not_hang_the_build() {
+        use std::time::Duration;
+
+        let result = with_daemon_stand_in(|| {
+            crate::test::with_timeout(Duration::from_secs(60), || {
+                crate::test::eval(
+                    r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = True,
+        stderr = None,
+    )
+    status = build.wait()
+    if not status.success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+                )
+                .with_fake_bazel()
+                .run_task(0)
+            })
+        });
+
+        match result {
+            None => panic!(
+                "timed out: an execution log nobody iterated parked the reader past \
+                 the end of the build",
+            ),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "a build whose log nobody reads must still end cleanly",
+            ),
+        }
+    }
+
+    /// A consumer slower than the decoder must still receive every entry.
+    ///
+    /// The decoder reads a log already complete on disk, so it outruns any AXL
+    /// loop; a loop that also does per-entry work falls more than a ring behind
+    /// within the first few hundred entries. That used to cost entries, by a
+    /// different amount every run. Now it costs only time: the producer parks
+    /// until the loop catches up.
+    ///
+    /// The per-entry work is arithmetic rather than a sleep, so the cost scales
+    /// with the machine instead of adding a fixed second to CI.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_consumer_still_receives_every_entry() {
+        use std::time::Duration;
+
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = True,
+        stderr = None,
+    )
+    seen = 0
+    busy = 0
+    for entry in build.execution_logs():
+        seen += 1
+        if entry.id != seen:
+            return 2  # a gap: the producer dropped what this loop fell behind on
+        for i in range(500):
+            busy += i
+    status = build.wait()
+    if not status.success: return 1
+    if seen != {entries}: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            entries = BEYOND_CAPACITY_ENTRIES,
         );
-        assert!(
-            highest > capacity,
-            "expected entries from beyond the capacity, not just a bigger prefix; \
-             highest id was {highest}",
-        );
+
+        let result = with_daemon_stand_in(move || {
+            crate::test::with_timeout(Duration::from_secs(120), move || {
+                crate::test::eval(&script).with_fake_bazel().run_task(0)
+            })
+        });
+        match result {
+            None => panic!("timed out: a slow consumer parked the reader for good"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "a consumer the decoder outruns must still see all \
+                 {BEYOND_CAPACITY_ENTRIES} entries",
+            ),
+        }
     }
 
     /// The lossless form: a decoded `file()` sink and a live `iterator()` handle on
@@ -2208,6 +2335,43 @@ Test = task(implementation = _impl)
 "#;
         let err = with_daemon_stand_in(|| {
             crate::test::eval(script)
+                .with_fake_bazel()
+                .run_task(0)
+                .expect_err("a second consumer must be refused")
+        });
+        let err = err.to_string();
+        assert!(
+            err.contains("already has a consumer") && err.contains("execution_log.iterator()"),
+            "the refusal should name the replacement: {err}",
+        );
+    }
+
+    /// The same refusal beside a decoded `file()` sink, the other consumer that
+    /// clones the stream's subscriber. A compact sink is not one — it is tee'd
+    /// from the raw bytes before decoding — so `execution_logs()` still works
+    /// alongside those.
+    #[cfg(unix)]
+    #[test]
+    fn execution_logs_is_refused_beside_a_decoded_file_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink_path = dir.path().join("decoded.binpb");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [bazel.execution_log.file(path = {sink:?})],
+        stderr = None,
+    )
+    build.execution_logs()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            sink = sink_path.to_str().unwrap(),
+        );
+        let err = with_daemon_stand_in(move || {
+            crate::test::eval(&script)
                 .with_fake_bazel()
                 .run_task(0)
                 .expect_err("a second consumer must be refused")
