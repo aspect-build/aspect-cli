@@ -52,6 +52,31 @@ use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
 use super::stream::{BuildEventEnvelope, BuildEventStream};
 
+/// Subscribe each `execution_log.iterator()` handle to `stream`.
+///
+/// Unwinds on failure — a handle passed twice, or reused from an earlier build,
+/// errors on its second bind with earlier handles already subscribed. They have
+/// to be released here because the caller returns before anything else would
+/// drop them: the reader would then block against subscribers no AXL code can
+/// reach, leaving a sibling `File` sink's writer waiting on entries that never come.
+fn bind_execlog_iters(stream: &ExecLogStream, iters: &[ExecLogIter]) -> io::Result<()> {
+    for (bound, iter) in iters.iter().enumerate() {
+        let bind = || -> io::Result<()> {
+            let recv = stream.receiver().ok_or_else(|| {
+                io::Error::other("execution log stream has no subscriber to clone")
+            })?;
+            iter.bind(recv).map_err(io::Error::other)
+        };
+        if let Err(err) = bind() {
+            for already in &iters[..bound] {
+                already.release();
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
 /// as a child's stdio slot.
 ///
@@ -1108,56 +1133,27 @@ impl Build {
             }
         }
 
-        // Subscribe the iterator handles. Each gets its own receiver clone: the
-        // channel is a broadcast ring, so hooks read the same entries the file
-        // sinks do instead of competing with them for entries.
-        //
-        // A bind can fail — a handle passed twice, or reused from an earlier
-        // build — and by then earlier handles in the list are already subscribed.
-        // Releasing them on the way out matters because this returns before
-        // `detach_initial_subscriber` below, so nothing else would: the reader
-        // thread would park at the ring bound with subscribers no AXL code can
-        // reach any more, and a sibling decoded `File` sink would be left
-        // truncated because its writer never sees the rest of the stream.
+        // One receiver clone each: the channel is a broadcast ring, so the handles
+        // read the same entries the file sinks do rather than competing for them.
         if !execlog_iters.is_empty() {
-            // Unreachable today: `partition_execution_log` turns the stream on for
-            // any list, so a list holding a handle always has a stream. Kept as
-            // the explicit invariant rather than an unwrap.
             let stream = execlog_stream.as_ref().ok_or_else(|| {
+                // `partition_execution_log` turns the stream on for any list, so a
+                // list holding a handle always has one. Stated, not unwrapped.
                 io::Error::other(
                     "ctx.bazel.build/test: execution_log list contained `iterator()` handles \
                      but no execution log stream is configured",
                 )
             })?;
-            let mut bound = 0;
-            for iter in &execlog_iters {
-                let failure = match stream.receiver() {
-                    None => Some(io::Error::other(
-                        "execution log stream has no subscriber to clone",
-                    )),
-                    Some(recv) => iter.bind(recv).err().map(io::Error::other),
-                };
-                if let Some(err) = failure {
-                    for already in &execlog_iters[..bound] {
-                        already.release();
-                    }
-                    return Err(err);
-                }
-                bound += 1;
-            }
+            bind_execlog_iters(stream, &execlog_iters)?;
         }
 
-        // Every real consumer is now subscribed, so give up the stream's own
-        // unread clone. It is a subscriber too, with its tail stuck at entry
-        // zero, and on the lossless path the producer parks on it the moment the
-        // 1000-entry ring fills — nothing would reach a file sink or a hook past
-        // that point until `join()`, which is to say until the build is over.
-        // Keeping it is right only when nothing else subscribed: then it is what
-        // `build.execution_logs()` clones from, and what makes the producer skip
-        // decoding once even that is gone.
+        // Every consumer has cloned what it needs, so the stream must not go on
+        // holding an unread subscriber of its own — see `ExecLogStream::recv`. The
+        // exception is a stream with no consumer at all, whose subscriber is what
+        // a later `build.execution_logs()` would take.
         if lossless {
             if let Some(stream) = execlog_stream.as_mut() {
-                stream.detach_initial_subscriber();
+                stream.take_initial_subscriber();
             }
         }
         // The tracing sink only emits via `tracing::event!` and never fails;
@@ -1443,31 +1439,24 @@ mod tests {
 
     /// `build.execution_logs()` must not stop at the decoded channel's capacity.
     ///
-    /// This is the regression test for silent truncation in a shipped public
-    /// builtin, not a hypothetical. `ExecLogStream` kept its own subscriber clone
-    /// and `execution_logs()` *cloned* it, so the unread original pinned the
-    /// broadcast ring's slowest tail at entry zero. Past the capacity every
-    /// `try_send` reported the ring full, so the caller received exactly the first
-    /// `CHANNEL_CAPACITY` entries and then end-of-stream — no error, and no
-    /// dependence on how fast it read. Measured on this scenario before the fix:
-    /// 1000 entries, ids 1..=1000, out of a 3000-entry log. In a real log, whose
-    /// first thousand records are inputs rather than spawns, that prefix contains
-    /// no spawns at all.
-    ///
-    /// The fix is `take_initial_subscriber`: hand the one subscriber to the one
-    /// consumer instead of cloning it.
+    /// The stream hands this iterator its one subscriber rather than cloning it,
+    /// because an unread clone left behind caps the ring (see
+    /// `ExecLogStream::recv`). With one, a caller receives exactly the first
+    /// `CHANNEL_CAPACITY` entries and then a clean end of stream — no error, and
+    /// no dependence on how fast it reads. In a real log, whose leading records
+    /// are inputs rather than spawns, such a prefix can contain no spawns at all,
+    /// so the failure is a confidently wrong answer rather than a short one.
     ///
     /// What this does *not* assert is that every entry arrives. `execution_log =
-    /// True` is the lossy path by contract — the producer uses `try_send` and
-    /// drops when the consumer falls behind, which against a fake bazel that has
-    /// already written the whole log on disk it certainly does. The guarantee is
-    /// only that there is no longer a fixed ceiling, which is what the bug was.
-    /// `execution_log.iterator()` is the lossless form, covered below.
+    /// True` is the lossy strategy by contract: the reader drops entries that get
+    /// more than the capacity ahead of the consumer, and against a fake bazel
+    /// whose log is already complete on disk it certainly does. The guarantee is
+    /// that there is no fixed ceiling. `execution_log.iterator()` is the lossless
+    /// form, covered below.
     #[cfg(unix)]
     #[test]
     fn execution_logs_is_not_capped_at_the_channel_capacity() {
-        // `bounded::<ExecLogEntry>(1000)` in `stream::execlog`.
-        const CHANNEL_CAPACITY: u32 = 1000;
+        let capacity = super::super::stream::execlog::channel_capacity() as u32;
 
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("report.txt");
@@ -1509,27 +1498,26 @@ Test = task(implementation = _impl)
         let highest: u32 = parts.next().unwrap().parse().unwrap();
 
         assert!(
-            seen > CHANNEL_CAPACITY,
-            "expected more than the channel capacity ({CHANNEL_CAPACITY}); got {seen}, \
-             which is the truncation this fixes",
+            seen > capacity,
+            "expected more than the channel capacity ({capacity}); got {seen}, which is \
+             the prefix an unread subscriber would cap this at",
         );
         assert!(
-            highest > CHANNEL_CAPACITY,
+            highest > capacity,
             "expected entries from beyond the capacity, not just a bigger prefix; \
              highest id was {highest}",
         );
     }
 
-    /// The lossless form, and the combination that used to deadlock: a decoded
-    /// `file()` sink and a live `iterator()` handle on one build, over a log
-    /// longer than the channel capacity.
+    /// The lossless form: a decoded `file()` sink and a live `iterator()` handle on
+    /// one build, over a log longer than the channel capacity.
     ///
-    /// Both consumers must see **every** entry — a handle switches the producer to
+    /// Both consumers must see **every** entry — a handle switches the reader to
     /// blocking sends, and the channel is a broadcast, so the two do not compete.
-    /// Before `detach_initial_subscriber` this hung instead: the sink made the
-    /// sends blocking, and the stream's own unread clone then parked the producer
-    /// at the capacity with the consumer waiting on an entry that could not come
-    /// until `join()` — which is inside the `wait()` the consumer runs before.
+    /// This is also the combination most exposed to an unread subscriber left on
+    /// the stream: blocking sends park against it at the capacity, and the drain
+    /// runs before the `wait()` that would release it, so the two would wait on
+    /// each other. Hence the timeout.
     #[cfg(unix)]
     #[test]
     fn a_file_sink_and_a_live_handle_both_see_the_whole_log() {

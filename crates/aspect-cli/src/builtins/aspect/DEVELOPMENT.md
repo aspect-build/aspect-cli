@@ -720,9 +720,9 @@ def config(ctx: ConfigContext):
 
 **`spawn.metrics` is thinner than it looks.** `input_files` and `input_bytes` are documented in `spawn.proto` as "0 if unavailable", and unavailable in practice means *locally executed* — only the cache and remote-execution paths populate them. So on a cold build, the one where input counts are most interesting, they read 0 throughout. Count from the input-set graph instead (`len(res.inputs(spawn))`), which is why the resolver exists.
 
-**Registering a hook makes the stream lossless.** Without one, the producer uses `try_send` and drops entries a slow consumer cannot keep up with — that is what `build.execution_logs()` gets, and it is a real risk rather than a theoretical one, because the reader decodes a file that is already on disk and will outrun an AXL loop. A registered hook switches the producer to blocking sends, so a hook sees every entry of the kinds it asked for. `execution_log.iterator()` is the only form with that guarantee; prefer it to `build.execution_logs()` whenever a missing entry would be a wrong answer rather than an imprecise one.
+**Registering a hook makes the stream lossless.** Without one, the reader uses `try_send` and drops entries a consumer has fallen behind on — that is what `build.execution_logs()` reads, and it drops in practice, not just in principle, because the reader decodes a file already on disk and outruns any AXL loop. A registered hook switches the reader to blocking sends, so a hook sees every entry of the kinds it asked for. `execution_log.iterator()` is the only form with that guarantee; prefer it to `build.execution_logs()` whenever a missing entry would make an answer wrong rather than imprecise.
 
-A sink and a handle can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast. What cannot be combined is `build.execution_logs()` with either of them: it would add a subscriber nothing drains, which stalls the log for everyone else, so it errors and names the replacement.
+A sink and a handle can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast. `build.execution_logs()` cannot be combined with either: it would add a subscriber nothing drains, which caps the log for every other consumer, so it errors and names the replacement.
 
 **A hook cannot slow Bazel down.** In production Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails it, so a slow consumer parks the CLI's reader thread, not Bazel. The cost of an expensive hook is paid at the end of the build, in `close` and the `join()` inside `wait()`, never as a stalled action graph. A fully cached build logs nothing at all — Bazel does not record actions it did not run, and local action-cache hits are not logged either.
 
@@ -814,8 +814,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 3b. Execution-log wiring. `xl.sinks` is the trait's `execution_log_sinks`
     #     plus, when an `exec_log_event` hook is registered, the iterator handle
-    #     that feeds it. It has to be opened BEFORE the spawn (that is what makes
-    #     the stream lossless) and freshly per attempt (a handle is single-use).
+    #     that feeds it. Opened after `build_start` (which can register one) and
+    #     before the spawn (which is what makes the stream lossless), freshly per
+    #     attempt since a handle is single-use. Tasks driving the
+    #     `bazel.build(ctx)` handle get all of this from it instead.
     xl = bzl.exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(flags = flags, build_events = build_events,
@@ -836,8 +838,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         for handler in bazel_trait.build_event:
             handler(ctx, event)
         bzl.exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
-        #                                   # (tasks on the bazel.build(ctx) handle
-        #                                   #  get this inside sp.on_event instead)
         if process_event(data, event, bb_root):
             task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data)
 

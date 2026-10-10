@@ -11,10 +11,10 @@ and the callsite's loop counter), never stored.
 
 The one thing the constructor cannot resolve is the execution-log wiring: an
 `exec_log_event` handle binds to a single build, so each attempt opens its own
-(`./exec_log.axl`) and threads it through the `_spawned` struct the same way.
-That is also why `on_event` hangs off the spawned struct rather than the handle:
-it dispatches both BES events and execution log entries, and only the attempt
-knows which log it is reading."""
+(`@aspect//bazel/exec_log.axl`) and threads it through the `_spawned` struct the
+same way. `on_event` hangs off that struct rather than the handle for the same
+reason — it dispatches both BES events and execution log entries, and only the
+attempt knows which log it is reading."""
 
 load(
     "@aspect//bazel/build_events.axl",
@@ -172,13 +172,6 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     """Spawn attempt `index` and RETURN a `_spawned` struct — the live handle is
     threaded via that return value, never stored on `inv`."""
 
-    # Execution-log wiring for this attempt: the trait's sinks plus, when an
-    # `exec_log_event` hook is registered, the iterator handle that feeds it.
-    # Resolved before the spawn because that is what tells the runtime an
-    # every-entry consumer exists, and freshly per attempt because a handle binds
-    # to exactly one build.
-    xl = exec_log.open(inv.trait)
-
     # Disclose what this bazel call was wired with, after the spawn phase line so
     # both land under the phase they describe: the `build_start` hooks (the
     # deployment's injected `--remote_cache` / `--remote_executor` announcement),
@@ -207,6 +200,11 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # with no BEP fifo at all.
     be = ([iterator] if iterator else []) + list(inv.sinks)
     build_events = be if be else False
+
+    # Read the trait after `build_start`, which is a hook that may register an
+    # `exec_log_event` subscription of its own, and freshly per attempt, since a
+    # handle binds to exactly one build.
+    xl = exec_log.open(inv.trait)
 
     if inv.command == "test":
         handle = inv.ctx.bazel.test(
@@ -247,12 +245,10 @@ def _do_wait(inv: _Invocation, handle, xl: struct):
     still-Live gRPC sink on the next spawn errors; wait() resets it to Idle), then
     fire `bazel_attempt_end` before the retry decision.
 
-    The execution log is drained first, and that order is load-bearing rather than
-    stylistic: a bound `exec_log_event` handle is a subscriber the log producer
-    blocks for, and `handle.wait()` joins that producer. Waiting first would join a
-    thread waiting on us. (`wait()` releases a still-bound handle rather than
-    deadlocking, so the cost of getting this wrong is dropped entries, not a hang —
-    but dropped entries are not the contract.)"""
+    The execution log is drained first, and that order is load-bearing: a bound
+    `exec_log_event` handle is a subscriber the log reader blocks for, and
+    `handle.wait()` joins that reader. Waiting first would join a thread that is
+    waiting on us."""
     exec_log.close(inv.ctx, xl)
     status = handle.wait()
     for sink in inv.sinks:
@@ -265,15 +261,14 @@ def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
     """Dispatch one BES event to the trait's `build_event` hooks, and fire any
     `exec_log_event` hooks on whatever the execution log has written so far.
 
-    Both live here so a task's drain loop stays one call per event. The execution
-    log is pumped before the `event == None` early return, because a quiet BES
-    tick says nothing about the log: Bazel can be busy writing actions while the
-    event stream has nothing to report.
+    Both live here so a task's drain loop stays one call per event. The log is
+    pumped before the `event == None` early return, because a quiet BES tick says
+    nothing about the log: Bazel can be busy writing actions while the event
+    stream has nothing to report.
 
-    The `xl.entries` test is what keeps this free for the overwhelming majority
-    of runs, which register no `exec_log_event` hook at all: a field read and a
-    comparison, rather than a call into the dispatcher, on a path that runs once
-    per BES event.
+    The `xl.entries` guard is what keeps that free for a run with no
+    `exec_log_event` hook — a field read, not a call into the dispatcher, on a
+    path that runs once per BES event.
     """
     if xl.entries != None:
         exec_log.pump(inv.ctx, xl)

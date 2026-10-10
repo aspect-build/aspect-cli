@@ -317,11 +317,9 @@ fn scenario(name: &str) -> Scenario {
         },
 
         // A clean run that also writes a compact execution log longer than the
-        // decoded channel's 1000-entry capacity. Entry counts below the capacity
-        // cannot distinguish a stream that delivers everything from one that
-        // silently stops at the capacity, which is exactly the bug
-        // `take_initial_subscriber` / `detach_initial_subscriber` fix. 3000 is
-        // comfortably past it and still a fraction of a second to write.
+        // decoded channel's capacity. A shorter log cannot tell a stream that
+        // delivers everything apart from one that silently stops at the capacity;
+        // 3000 is comfortably past it and still a fraction of a second to write.
         //
         // 50ms open_delay as in `success`, so an AXL iterator that subscribes
         // after the spawn is not racing the BES burst.

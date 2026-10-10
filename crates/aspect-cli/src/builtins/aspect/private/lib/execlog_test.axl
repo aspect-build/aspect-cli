@@ -115,14 +115,14 @@ def _test_flatten_respects_its_budget(_ctx):
         fail("budget of 2 should not have resolved every member: got %r" % got)
 
 def _test_flatten_spends_its_budget_on_distinct_ids_not_edges(_ctx):
-    """The budget the resolver passes is "entries written so far", so it is only
-    a real bound if the walk costs one iteration per distinct id. Deduplicating
-    at pop time instead spends one per *edge*, and a shared depset — two parents
-    naming one child set — then overruns a budget sized to the graph.
+    """The budget the resolver passes is "entries written so far", so it is only a
+    real bound if the walk costs one iteration per distinct id. A walk that spent
+    one per *edge* would overrun it on any shared depset — two parents naming one
+    child set, which is routine.
 
     This is the shape that makes it visible: 6 distinct ids, 8 edges. A budget of
-    exactly 6 must still resolve every file, because truncation here is silent
-    and would poison the action-key fingerprint rather than fail."""
+    exactly 6 must still resolve every file, because truncation here is silent and
+    would poison the action-key fingerprint rather than fail."""
     paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
     digests = {1: "aaa", 2: "bbb", 3: "ccc"}
 
@@ -312,8 +312,8 @@ def _test_as_map_splits_on_the_last_at(_ctx):
 
 def _test_resolver_indexes_as_it_goes(_ctx):
     """The streaming contract: `observe` every entry, then ask about the spawn.
-    Uses the resolver's own seams, since a struct cannot impersonate a payload's
-    AXL type — `_record` coverage above is what pins the kind dispatch."""
+    Only the parts a struct can reach — a struct cannot impersonate a payload's
+    AXL type, so `_record` above is what pins the kind dispatch."""
     res = execlog.resolver()
     _eq("fresh resolver has seen nothing", res.entries(), 0)
 

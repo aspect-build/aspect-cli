@@ -1,15 +1,14 @@
 //! The two AXL-facing views of a build's decoded execution log.
 //!
-//! [`ExecutionLogIterator`] is the original one, handed out by
-//! `build.execution_logs()` after the spawn: unfiltered, and counted too late
-//! for the producer to know a consumer exists, so entries may have been dropped
-//! before the first `try_pop`.
+//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and
+//! handed out after the spawn, too late for the reader to know a consumer exists
+//! — so it reads the lossy stream and may miss entries it fell behind on.
 //!
-//! [`ExecLogIter`] is the handle form, `bazel.execution_log.iterator(kinds =
-//! [...])`, created before the spawn and passed in `execution_log = [...]`.
-//! Being visible at spawn time is what makes it lossless, and its `kinds=`
-//! filter is applied here in Rust so a consumer that only wants spawns does not
-//! pay a Starlark allocation per file in the build.
+//! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
+//! before the spawn and passed in `execution_log = [...]`. Being visible at spawn
+//! time is what makes it lossless, and its `kinds=` filter is applied here in
+//! Rust so a consumer that only wants spawns does not pay a Starlark allocation
+//! per file in the build.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -258,13 +257,11 @@ impl ExecLogIter {
 
     /// Unsubscribe, dropping any entries still buffered.
     ///
-    /// `build.wait()` calls this before joining the execlog stream, which is
-    /// what keeps a task that never drained its handle from hanging: a bound
-    /// subscriber forces blocking sends, so the producer would otherwise park
-    /// forever on a full channel with nobody reading. Releasing it leaves the
-    /// producer with no subscribers, which it treats as "nobody is listening"
-    /// and finishes. A task that drains before `wait()` — the contract the AXL
-    /// side follows — loses nothing to this.
+    /// `build.wait()` calls this before joining the stream, which is what bounds
+    /// a task that never drained its handle: a bound subscriber makes the sends
+    /// blocking, so the reader would otherwise wait on a consumer that is not
+    /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
+    /// nothing to it.
     pub fn release(&self) {
         *self.state.lock().unwrap() = ExecLogIterState::Done;
     }
@@ -327,9 +324,24 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         Ok(me)
     }
 
+    /// Blocks until the next entry this handle's `kinds=` filter wants, or the end
+    /// of the stream.
+    ///
+    /// Cancellation-aware, as every blocking builtin must be (see
+    /// `engine::cancellation`), and here that earns its keep: a drain sits on the
+    /// critical path of every bazel-driving task, right before the one other
+    /// cancellation-aware wait, and the end-of-stream signal is the Bazel *daemon*
+    /// closing the log file — which an interrupted invocation need not make happen
+    /// promptly. A cancel ends the iteration, which also drops the subscriber and
+    /// so frees a reader blocked on it; the loop's next call raises the task's
+    /// exit, since an iterator cannot raise one itself.
+    ///
+    /// Entries of other kinds are discarded rather than yielded as `None`: unlike
+    /// the BES iterator's quiet tick, a filtered-out entry carries nothing a
+    /// caller could act on, and a log is mostly filtered-out entries.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        // Take `recv` out from under the lock so the blocking wait does not hold
-        // it: `release()` has to be able to run while a drain is parked here.
+        // Taken out from under the lock so a parked wait does not hold it, which
+        // is what lets `release()` run while a drain is in progress.
         let recv = {
             let mut state = self.state.lock().unwrap();
             match std::mem::replace(&mut *state, ExecLogIterState::Pending) {
@@ -341,43 +353,24 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
             }
         };
 
-        // Blocks until the next wanted entry or the stream's end, through
-        // `recv_cancellable` rather than a bare `recv()` so the wait stays a safe
-        // point: it rechecks the root token every poll slice and gives up on a
-        // cancel. That is load-bearing now that an AXL drain runs here on the
-        // critical path of every bazel-driving task, immediately before the one
-        // other cancellation-aware wait (`wait_child`). A bare `recv()` would
-        // park for as long as the reader thread does — and the reader's
-        // end-of-stream signal is the daemon closing the log file, which an
-        // interrupted invocation need not make happen promptly — leaving the body
-        // unable to answer a second Ctrl-C or the signal deadline.
-        //
-        // Entries of other kinds are discarded here rather than yielded as
-        // `None`: unlike the BES iterator's quiet tick, a filtered-out entry
-        // carries no signal a caller could act on, and a log is mostly
-        // filtered-out entries.
         loop {
             match recv_cancellable(&self.signals, &recv, None) {
                 Recv::Item(entry) => {
                     if !self.wants(&entry) {
                         continue;
                     }
-                    // A `release()` that landed while we were parked wins: the
-                    // state is already Done and must stay that way.
+                    // A `release()` that landed while we were parked wins.
                     let mut state = self.state.lock().unwrap();
                     if matches!(*state, ExecLogIterState::Pending) {
                         *state = ExecLogIterState::Live { recv };
                     }
                     return Some(entry.alloc_value(heap));
                 }
-                // Ending on a cancel also drops `recv`, which frees a producer
-                // parked on this subscriber. The loop's next call raises the
-                // task's exit; an iterator cannot raise one itself.
                 Recv::Closed | Recv::Cancelled => {
                     *self.state.lock().unwrap() = ExecLogIterState::Done;
                     return None;
                 }
-                // Unreachable with `tick = None`, which has no deadline to pass.
+                // No deadline to pass with `tick = None`.
                 Recv::Tick => continue,
             }
         }
@@ -582,9 +575,8 @@ mod tests {
         assert_eq!(ids, vec![1, 2]);
     }
 
-    /// `release()` is the safety net `build.wait()` pulls. After it, the handle
-    /// behaves as a drained one and — the part that matters — its subscriber
-    /// clone is gone, so a producer parked on a full channel is freed.
+    /// After `release()` the handle behaves as a drained one, and — the part that
+    /// matters — its subscriber is gone, so a reader blocked on it is freed.
     #[test]
     fn release_unsubscribes_and_frees_a_parked_producer() {
         // Capacity 1 so the second send parks unless the receiver is gone.
@@ -605,12 +597,8 @@ mod tests {
         );
     }
 
-    /// The reason the handle carries `Signals` at all. A drain runs on the
-    /// critical path of every bazel-driving task, just before `build.wait()`, and
-    /// the stream's end-of-input is the Bazel *daemon* closing the log file —
-    /// which an interrupted invocation need not make happen promptly. A bare
-    /// `recv()` here would leave the AXL body unable to answer the signal
-    /// deadline or a second Ctrl-C.
+    /// Blocking iteration must stay a safe point: with no end-of-stream in sight,
+    /// a cancelled run has to end the loop rather than wait in it.
     #[test]
     fn iteration_ends_on_a_cancel_rather_than_parking() {
         let signals = Signals::new();
@@ -681,12 +669,11 @@ mod tests {
     /// output is either an id into the entry table (`type(...) == "int"`) or the
     /// raw path Bazel recorded when it could not resolve one (`"string"`).
     ///
-    /// Worth a test of its own because getting it wrong degrades silently rather
-    /// than failing: `_spawn_key` would fall back to `label!mnemonic` for every
-    /// spawn, colliding siblings, and `outputs()` would come back empty. The
-    /// entry here is a real decoded proto rather than a hand-built struct, so a
-    /// change in how starbuf represents a scalar oneof breaks this test instead
-    /// of the resolver.
+    /// Worth a test of its own because a mismatch degrades silently rather than
+    /// failing: `_spawn_key` would fall back to `label!mnemonic` for every spawn,
+    /// colliding siblings, and `outputs()` would come back empty. The entry is a
+    /// real decoded proto rather than a hand-built struct, so a change in how
+    /// starbuf represents a scalar oneof breaks this test and not the resolver.
     #[test]
     fn a_decoded_spawn_exposes_its_outputs_as_ints_or_raw_strings() {
         use prost::Message;

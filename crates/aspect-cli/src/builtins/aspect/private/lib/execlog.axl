@@ -101,14 +101,12 @@ def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) 
     than a slow one.
 
     `seen` marks an id as *queued*, not as visited, and nothing is queued twice.
-    That is what makes `budget` a true bound rather than an optimistic one: the
-    loop runs at most once per distinct reachable id, so a budget of "ids written
-    to the log so far" cannot be exhausted by a graph the log actually contains.
-    Deduplicating at pop time instead would spend an iteration per *edge* — a
-    depset referenced by two parents, which is routine rather than exotic, would
-    burn two — and the walk could hit the budget and return a truncated input
-    list. Truncation here is silent and poisons `inputs_hash`, so the action
-    looks changed (or unchanged) for no reason. Cycles terminate for the same
+    That is what makes `budget` a true bound: the loop runs at most once per
+    distinct reachable id, so a budget of "ids written to the log so far" cannot
+    be exhausted by a graph the log actually contains. Deduplicating at pop time
+    would instead cost an iteration per *edge*, which a depset with two parents
+    exceeds, and the walk could hit the budget and return a truncated input list —
+    silent, and enough to poison `inputs_hash`. Cycles terminate for the same
     reason duplicates do.
 
     `root_id == 0` is Bazel's "no set", not set number zero: it means the spawn
@@ -244,10 +242,12 @@ def _resolver() -> struct:
     )
 
 def _record(kind: str, entry_id: int, payload, paths: dict, digests: dict, sets: dict) -> None:
-    """The body of `observe`, split out so it can be exercised without a real
-    proto payload: the kind arrives as a string rather than being read off the
-    value. Kinds not listed here contribute no ids — `spawn`, `invocation` and
-    `symlink_action` are read by callers, not resolved against."""
+    """Index whatever one entry contributes to the id table.
+
+    Takes `kind` as a string rather than reading it off `payload`, so it can be
+    exercised without a real proto. Kinds absent here contribute no ids —
+    `spawn`, `invocation` and `symlink_action` are read by callers rather than
+    resolved against."""
     if kind == FILE:
         paths[entry_id] = payload.path
         digests[entry_id] = _digest_of(payload)

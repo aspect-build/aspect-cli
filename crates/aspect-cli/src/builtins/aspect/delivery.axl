@@ -600,9 +600,8 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         # spawn.proto), the same blind spot aquery has; accepted.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.name)
 
-        # `exec_log.open` already carries `bazel_trait.execution_log_sinks`, plus
-        # the handle feeding any `exec_log_event` hook. Opened per attempt: a
-        # handle binds to exactly one build.
+        # The trait's execution_log_sinks plus any exec_log_event handle; per
+        # attempt, since a handle binds to one build.
         xl = bzl.exec_log.open(bazel_trait)
         phase1_execlog_sinks = xl.sinks + [bazel.execution_log.file(path = phase1_execlog_path)]
 
@@ -672,9 +671,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             if events.done:
                 break
 
-        # Drain the execution log before waiting: a bound hook handle is a
-        # subscriber the log producer blocks for, and `wait()` joins that producer.
-        bzl.exec_log.close(ctx, xl)
+        bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
         status = build.wait()
 
         # Flush the CLI-streamed BES sinks before any retry — re-binding a

@@ -6,12 +6,15 @@ Three things here can be wrong in a way nothing else would notice:
     asked for, which is the exact failure the filter exists to make impossible;
   * `exact` — too eager and hooks receive kinds they did not ask for, too shy and
     every entry pays for a `type()` call it did not need. The trap is that one
-    unfiltered hook makes the union "every kind", which looks like "nobody
-    filters" and is not;
+    unfiltered hook makes the union "every kind", which reads like "nobody
+    filters" and is not the same thing;
   * `open` with no hooks registered — it must return a *falsy* sink list, because
     `ctx.bazel.build(execution_log = [])` means "stream on with no consumer", not
     "off". Getting that wrong turns on the execution log for every build in the
     CLI.
+
+Each helper is also exercised in composition, since the interesting failures are
+in what one stage makes of another's output rather than in any stage alone.
 
 The live half — a real log, a bound handle, hooks firing per entry — needs a
 Bazel build and is covered by the Rust side (`iter::execlog`) instead.
@@ -67,8 +70,7 @@ def _test_one_unfiltered_hook_widens_the_union_to_everything(_ctx):
     """`kinds = []` means "every kind". Narrowing the stream to another hook's
     list would starve it, so None has to win.
 
-    This fixture is also the one that breaks `_is_exact`; it is carried through
-    all three helpers in
+    This fixture is carried through all three helpers in
     `_test_mixed_hooks_compose_from_union_through_exact_into_fire`."""
     hooks = [_recorder([], "a", kinds = ["spawn"]), _recorder([], "b")]
     _eq("None wins", bzl.exec_log.testonly_union_kinds(hooks), None)
@@ -114,9 +116,8 @@ def _test_not_exact_when_one_hook_is_unfiltered_beside_a_narrow_one(_ctx):
     _eq("but the narrow hook needs the re-check", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
 
 def _test_fire_routes_by_kind_when_hooks_disagree(ctx):
-    """The `exact = False` branch, the one the mixed case routes into: an
-    unfiltered hook fires, a hook that asked for this kind fires, a hook that
-    asked for another kind does not."""
+    """The `exact = False` branch: an unfiltered hook fires, a hook that asked for
+    this kind fires, a hook that asked for another kind does not."""
     seen = []
     hooks = [
         _recorder(seen, "auditor"),  # kinds = [] → all
@@ -134,10 +135,10 @@ def _test_mixed_hooks_compose_from_union_through_exact_into_fire(ctx):
     """The three helpers on one set of hooks, threaded the way `open` and `_fire`
     thread them — `exact` comes from `_is_exact`, not from the test.
 
-    This composition is what was missing: every helper had its own test, and the
-    fixture that breaks `_is_exact` already existed in the union test above
-    without ever reaching `_is_exact`. Checking each stage in isolation cannot
-    catch a stage that reads another's output wrongly."""
+    Checking each stage alone cannot catch a stage that reads another's output
+    wrongly, and this is the fixture where that goes wrong: one unfiltered hook
+    makes the union "every kind", and a narrow hook beside it must still be
+    filtered."""
     seen = []
     hooks = [_recorder(seen, "auditor"), _recorder(seen, "narrow", kinds = ["spawn"])]
 
@@ -167,6 +168,20 @@ def _test_agreeing_hooks_compose_onto_the_fast_path(ctx):
     # Delivered under the fast path, so the entry's own kind is never consulted.
     bzl.exec_log.testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
     _eq("both fire, in order", [n for n, _ in seen], ["first", "second"])
+
+def _test_a_hook_repeating_a_kind_still_matches_the_union(_ctx):
+    """`kinds` is a list, so a caller can repeat itself — a composed list, say.
+    Comparing raw lists against the deduplicated union would then report a
+    disagreement that is not one, and every entry would pay for a `type()` call
+    no hook needed."""
+    hooks = [
+        _recorder([], "a", kinds = ["spawn", "spawn", "file"]),
+        _recorder([], "b", kinds = ["file", "spawn"]),
+    ]
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    _eq("union is deduplicated", kinds, ["file", "spawn"])
+    _eq("duplicates do not look like disagreement", bzl.exec_log.testonly_is_exact(hooks, kinds), True)
+    _eq("per-hook kinds deduplicate too", bzl.exec_log.testonly_wanted_kinds(hooks[0]), ["file", "spawn"])
 
 def _test_fire_delivers_to_every_hook_in_registration_order(ctx):
     seen = []
@@ -217,6 +232,22 @@ def _test_open_with_a_hook_adds_a_handle_alongside_the_sinks(_ctx):
     _eq("hooks carried", len(h.hooks), 1)
     _eq("single hook needs no re-check", h.exact, True)
 
+def _test_open_reads_the_trait_when_called(_ctx):
+    """`open` runs after the `build_start` hooks, which can themselves register an
+    `exec_log_event` subscription, so it has to read the trait at call time rather
+    than reflect a view taken earlier in the invocation."""
+    trait = BazelTrait()
+    before = bzl.exec_log.open(trait)
+    _eq("nothing registered yet", before.entries, None)
+    _eq("and no hooks", before.hooks, [])
+
+    trait.exec_log_event.append(_recorder([], "late", kinds = ["spawn"]))
+
+    after = bzl.exec_log.open(trait)
+    if after.entries == None:
+        fail("open() must see a hook registered after an earlier call")
+    _eq("and carry it", len(after.hooks), 1)
+
 def _test_open_is_fresh_per_call(_ctx):
     """A handle binds to exactly one build, so each attempt must get its own —
     two calls returning the same handle would fail the second spawn."""
@@ -253,6 +284,7 @@ _UNIT_TESTS = [
     _test_fire_routes_by_kind_when_hooks_disagree,
     _test_mixed_hooks_compose_from_union_through_exact_into_fire,
     _test_agreeing_hooks_compose_onto_the_fast_path,
+    _test_a_hook_repeating_a_kind_still_matches_the_union,
     _test_fire_delivers_to_every_hook_in_registration_order,
     _test_fire_with_no_hooks_is_a_noop,
     _test_wants_filters_a_narrow_hook,
@@ -260,6 +292,7 @@ _UNIT_TESTS = [
     _test_open_without_hooks_leaves_the_log_off,
     _test_open_without_hooks_still_forwards_the_traits_sinks,
     _test_open_with_a_hook_adds_a_handle_alongside_the_sinks,
+    _test_open_reads_the_trait_when_called,
     _test_open_is_fresh_per_call,
     _test_open_with_disagreeing_hooks_is_not_exact,
     _test_pump_and_close_are_noops_without_a_handle,

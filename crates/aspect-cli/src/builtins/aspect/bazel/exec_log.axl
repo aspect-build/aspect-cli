@@ -41,22 +41,27 @@ applied in Rust before an entry becomes a Starlark value. `kinds = ["spawn"]` is
 commonly a few percent of the stream.
 """
 
-load("./trait.axl", "BazelTrait", "ExecLogHook")
+load("@aspect//bazel/trait.axl", "BazelTrait", "ExecLogHook")
 
 # Entries dispatched per `pump` call. Bounds one non-blocking visit so a burst
 # cannot monopolize a tick loop that also has BES events and a progress line to
 # get to; whatever is left is picked up on the next tick, or by `close`.
 _PUMP_BUDGET = 10000
 
+def _wanted_kinds(hook: ExecLogHook) -> list[str]:
+    """One hook's kinds, deduplicated and sorted, so two hooks that asked for the
+    same set compare equal however each spelled it."""
+    return sorted({kind: True for kind in hook.kinds})
+
 def _union_kinds(hooks: list[ExecLogHook]) -> list[str] | None:
     """The kinds the runtime must deliver: the union of what every hook asked
-    for, or None for "every kind" when any hook wants everything.
+    for, or None for "every kind".
 
     None is deliberately infectious. A hook with `kinds = []` reads all kinds, so
     narrowing the stream on another hook's behalf would silently starve it — the
-    failure mode this whole module exists to avoid. No hooks at all is None for a
-    different reason: `kinds = []` is not a value the runtime accepts, so an empty
-    union must never reach it."""
+    failure mode this whole module exists to avoid. No hooks at all is also None,
+    because `kinds = []` is not a value the runtime accepts and an empty union
+    must never reach it."""
     out = {}
     for hook in hooks:
         if not hook.kinds:
@@ -66,23 +71,19 @@ def _union_kinds(hooks: list[ExecLogHook]) -> list[str] | None:
     return sorted(out) if out else None
 
 def _is_exact(hooks: list[ExecLogHook], kinds: list[str] | None) -> bool:
-    """Whether the Rust-side filter is already exactly right for every hook, so
+    """Whether the runtime's filter is already exactly right for every hook, so
     dispatch can skip re-checking each entry's kind in AXL.
 
-    True in two cases: no hook filters at all, so every entry is wanted by
-    everyone; or every hook asked for the same set, which is then the set the
-    runtime was given. False whenever hooks disagree, because the union is wider
-    than the narrowest hook asked for and delivering it unchecked would hand that
-    hook kinds it never asked for.
-
-    `kinds == None` is *not* on its own a reason to say True: `_union_kinds`
-    returns None as soon as **one** hook is unfiltered, which is exactly the
-    mixed case — an unfiltered auditor beside a `kinds = ["spawn"]` hook — where
-    the narrow hook most needs the re-check."""
+    True when no hook filters, so every entry is wanted by everyone; or when every
+    hook asked for the same set, which is then the set the runtime was given.
+    False when hooks disagree, because the union is wider than the narrowest hook
+    asked for and delivering it unchecked would hand that hook kinds it never
+    asked for — an unfiltered auditor beside a `kinds = ["spawn"]` hook is the
+    common shape, and `_union_kinds` reports None for it."""
     if kinds == None:
         return all([not hook.kinds for hook in hooks])
     for hook in hooks:
-        if sorted(hook.kinds) != kinds:
+        if _wanted_kinds(hook) != kinds:
             return False
     return True
 
@@ -93,7 +94,11 @@ def _open(bazel_trait: BazelTrait) -> struct:
     `execution_log_sinks` plus the hook handle, so a caller passes it instead of
     building that list itself. Falsy when nothing wants the log at all, which is
     what `ctx.bazel.build` needs to skip the stream entirely (an empty list means
-    "stream on with no consumer")."""
+    "stream on with no consumer").
+
+    Call once per Bazel invocation, after the `build_start` hooks: a handle binds
+    to a single build, and `build_start` can itself register an `exec_log_event`
+    subscription."""
     hooks = list(bazel_trait.exec_log_event)
     sinks = list(bazel_trait.execution_log_sinks)
     if not hooks:
@@ -160,4 +165,5 @@ exec_log = struct(
     testonly_is_exact = _is_exact,
     testonly_fire = _fire,
     testonly_wants = _wants,
+    testonly_wanted_kinds = _wanted_kinds,
 )

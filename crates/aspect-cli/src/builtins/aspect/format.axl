@@ -345,9 +345,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    # Execution-log wiring: the trait's own sinks plus, when an `exec_log_event`
-    # hook is registered, the handle that feeds it. Opened before the spawn —
-    # that is what lets the runtime see an every-entry consumer and stop dropping.
+    # The trait's execution_log_sinks plus any exec_log_event handle.
     xl = bzl.exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(
@@ -407,9 +405,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if events.done:
             break
 
-    # Drain the execution log before waiting: a bound hook handle is a subscriber
-    # the log producer blocks for, and `build.wait()` joins that producer.
-    bzl.exec_log.close(ctx, xl)
+    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()
