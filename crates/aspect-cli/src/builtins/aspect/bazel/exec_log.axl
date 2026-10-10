@@ -49,10 +49,10 @@ identifying which of those produced it.
 spawns Bazel, which puts the whole window these three verbs cover — `open`,
 every `pump`, and `close` — inside that phase: a hook reads `build` under
 delivery's phase 1 and `deliver` under its phase 3, `lint` under `lint`,
-`populate` under `ci warming`, and `build_retry_<n>` / `test_retry_<n>` on an
-attempt after the first. `cache diff` is the exception: it opens no phase at
-all, so a hook there reads `None` and has nothing to name its one invocation
-with. `ExecLogHook` in `./trait.axl` documents it from the hook's side;
+`populate` under `ci warming`, `rebuild_<n>` on a `run --watch` rebuild, and
+`build_retry_<n>` / `test_retry_<n>` on an attempt after the first. `cache diff`
+is the exception: it opens no phase at all, so a hook there reads `None` and has
+nothing to name its one invocation with. `ExecLogHook` in `./trait.axl` documents it from the hook's side;
 `crates/aspect-cli/tests/exec_log_event.rs` asserts the name a hook actually
 read at every call site, that exception included.
 
@@ -67,12 +67,20 @@ uploader's `build_end` both uploads the execution log and deletes it — a lefto
 file leaks its highest-risk artifact, action command lines and environment
 variables, with no on-disk redaction. So an invocation that spawns Bazel after
 `build_end` has run passes `[.entries]` rather than `.sinks`: the hook dispatch
-without the file. Exactly one invocation per run gets `.sinks`, and which one
-that is can depend on the run — `aspect delivery` fires `build_end` after phase 2
-when phases 1/2 run and after phase 3 when they are skipped, so phase 3 decides
-from `phase_1_2_runs` rather than once and for all. A single fixed path could not
-hold two invocations' logs anyway; a caller that wants a second invocation's log
-on disk has to key the path on the phase.
+without the file. The rule is *at most one* `.sinks` write left unclaimed, and
+never one by an invocation that spawns after the run's **final** `build_end` —
+not that only one invocation per run ever gets `.sinks`. Several do: `run --watch`
+re-enters `_build_once` per rebuild and passes `.sinks` every time, and a retry
+loop passes `xl.sinks or False` on each attempt. Neither leaks, because each of
+those writes is followed by its own `build_end` — the watch rebuild's dispatch
+fires inside `_build_once` after `wait()`, so the uploader claims and deletes
+each log in turn, and the retries overwrite one path that the last `build_end`
+claims. What must not happen is a write with no `build_end` after it. That is why
+`aspect delivery`'s phase 3 decides from `phase_1_2_runs` rather than once and
+for all: `build_end` fires after phase 2 when phases 1/2 run, and after phase 3
+when they are skipped. A single fixed path could not hold two invocations' logs
+anyway; a caller that wants a second invocation's log on disk has to key the path
+on the phase.
 
 ## Back-pressure
 
@@ -159,11 +167,14 @@ def _open(bazel_trait: BazelTrait) -> struct:
     what `ctx.bazel.build` needs to skip the stream entirely (an empty list means
     "stream on with no consumer") — hence `xl.sinks or False` at the call sites.
 
-    `.entries` is the handle on its own, `None` when no hook is registered. Only a
-    task spawning Bazel a second time after its `build_end` hooks have run passes
-    `[.entries]` instead of `.sinks`, to dispatch without re-writing the trait's
-    file sinks; see "One task, several invocations" above. It is never both —
-    `.sinks` already holds the handle, and binding one twice is an error.
+    `.entries` is the handle on its own, `None` when no hook is registered. A task
+    passes `[.entries]` instead of `.sinks` when its invocation spawns after the
+    run's *final* `build_end`, to dispatch without re-writing the trait's file
+    sinks with nothing left to claim them. Spawning after *a* `build_end` is not
+    enough on its own — a `run --watch` rebuild and a retried attempt both do that
+    and both pass `.sinks`, because each has a `build_end` of its own still to
+    come; see "One task, several invocations" above. It is never both — `.sinks`
+    already holds the handle, and binding one twice is an error.
 
     Call once per Bazel invocation, after the `build_start` hooks: a handle binds
     to a single build, and `build_start` can itself register an `exec_log_event`
