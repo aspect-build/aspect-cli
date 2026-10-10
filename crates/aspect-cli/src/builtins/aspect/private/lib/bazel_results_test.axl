@@ -434,9 +434,9 @@ def _make_results_aborted_nokeep_going():
 def _make_results_aborted_in_loading():
     """Ctrl-C before anything is analysed. Nothing reaches `target_completed`,
     so no `Aborted` payload lands in an arm that records detail and the reason
-    and description stay empty — the exit code is the only abort signal. Pins
-    the bare notice (no " — <reason>" rider); see
-    `_test_interrupt_during_loading_aborts_with_no_detail`."""
+    and description stay empty — the exit code is the only abort signal.
+    Renders the bare notice (no " — <reason>" rider); the state it stands for
+    is asserted in `_test_interrupt_during_loading_aborts_with_no_detail`."""
     r = _make_results_aborted()
     r["bazel"]["invocation_id"] = "abort777-4567-89ab-cdef-012345678901"
     r["bazel"]["abort_reason"] = ""
@@ -1860,8 +1860,9 @@ def _test_interrupt_during_loading_aborts_with_no_detail(ctx):
     `target_completed`, so the only `Aborted` payloads ride `pattern_expanded`
     — an id with no `process_event` arm — and no detail is recorded. The exit
     code still decides, so the verdict is `aborted` with an empty reason, and
-    the notice renders bare (no " — <reason>" rider). Snapshotted as scenario
-    "5d" so the bare form is pinned rather than merely well-formed."""
+    the notice renders bare (no " — <reason>" rider). The empty reason is
+    asserted here; scenario "5d" renders the resulting notice so the bare form
+    is visible in the snapshot output."""
     data = _data_after([
         _abort_event("pattern_expanded", "user_interrupted", id = struct(pattern = ["//..."])),
         _finished_event(exit_codes.INTERRUPTED),
