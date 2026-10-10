@@ -444,20 +444,18 @@ def main():
                 "a test spawn's inputs must include what its runfiles tree holds: "
                 f"{[s['inputs'] for s in runners]}"
             )
-            # The kind count alone only proves the entry was delivered. A
-            # `symlink_entry_set` line is `<name>@<target path>`, and the target is
-            # resolved from the id table at observe time, degrading to `""` for an id
-            # a partial log never carried — so every lookup could fail and the kind
-            # count would not move. A `renamed/` line with a non-empty right-hand
-            # side is the resolution itself.
-            assert any(
-                i.startswith("renamed/") and i.rpartition("@")[2]
-                for s in runners
-                for i in s["inputs"]
-            ), (
-                "no `renamed/` runfile resolved to a target path, so the resolver's "
-                "observe-time id lookup degraded to \"\" for every symlink entry: "
-                f"{[s['inputs'] for s in runners]}"
+            # A `symlink_entry_set` line is `<name>@<target path>`, resolved from the
+            # id table at observe time; the kind count moves even when every lookup
+            # degrades to `""`, so the right-hand side is what proves resolution.
+            renamed = [i for s in runners for i in s["inputs"] if i.startswith("renamed/")]
+            assert renamed, (
+                "no `renamed/` runfile reached the report, so there is no symlink "
+                f"entry to check resolution on: {[s['inputs'] for s in runners]}"
+            )
+            assert all(i.rpartition("@")[2] for i in renamed), (
+                "a `renamed/` runfile resolved to no target path, so the resolver's "
+                "observe-time id lookup degraded to \"\" for a symlink entry: "
+                f"{renamed}"
             )
 
             # 3. Change one source. The action that reads it re-runs, and its

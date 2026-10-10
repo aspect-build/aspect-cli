@@ -331,3 +331,48 @@ fn every_drain_precedes_the_wait_it_guards() {
         }
     }
 }
+
+/// `delivery.axl`'s phase 3 resolves its `execution_log` from `phase_1_2_runs`,
+/// and only the arm where phases 1/2 were skipped may pass the trait's file sinks.
+///
+/// `tests/exec_log_event.rs` covers that arm behaviourally: with phases 1/2
+/// skipped, phase 3 is the task's only build, so it writes the sinks and the
+/// uploader's `build_end` is handed a file. The *other* arm — the common path,
+/// where phase 1 already wrote the sinks and `build_end` already claimed and
+/// deleted them — has no behavioural guard, because reaching it needs a remote
+/// cache answering `GetActionResult` and the basil fake serves none. Reverting it
+/// to an unconditional `xl.sinks or False` therefore leaves every test in that
+/// file passing while restoring the leak it fixed: phase 3's log is written to a
+/// path no `build_end` will claim, and an execution log is the highest-risk
+/// artifact a run produces — action command lines and environment variables, with
+/// no on-disk redaction.
+///
+/// So this asserts on the resolved value in the source rather than on observed
+/// behaviour. It is whitespace-insensitive but otherwise literal, which is the
+/// point: the branch, not just its effect, is what must not be flattened.
+#[test]
+fn delivery_phase_3_withholds_the_file_sinks_when_phases_1_and_2_ran() {
+    const PATH: &str = "delivery.axl";
+    const EXPECTED: &str = "if phase_1_2_runs: \
+                            phase3_execution_log = [xl.entries] if xl.entries != None else False \
+                            else: phase3_execution_log = xl.sinks or False";
+
+    let (_, source) = sources()
+        .into_iter()
+        .find(|(p, _)| p == PATH)
+        .unwrap_or_else(|| panic!("{PATH} should be embedded in the built-in tree"));
+    let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let wanted = EXPECTED.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flat.contains(&wanted),
+        "{PATH}: phase 3 must choose its `execution_log` from `phase_1_2_runs`, \
+         passing `[xl.entries]` when phases 1/2 ran and `xl.sinks` only when they \
+         were skipped. Expected to find:\n\n{wanted}\n\nIf this block was \
+         reformatted, update the expectation. If the branch was removed, restore \
+         it: writing the trait's file sinks from an invocation whose `build_end` \
+         has already run leaves the execution log on disk with nothing to delete \
+         it. See \"One task, several invocations\" in \
+         `builtins/aspect/bazel/exec_log.axl`.",
+    );
+}
