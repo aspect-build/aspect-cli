@@ -14,5 +14,5 @@ pub use exit::TaskExit;
 pub use load::AxlLoader as Loader;
 pub(crate) use load_path::join_confined;
 pub(crate) use load_path::validate_module_name;
-pub use multi_phase::{FinishedEval, ModuleEnv, MultiPhaseEval, TimingMode};
+pub use multi_phase::{AxlFileFailure, FinishedEval, ModuleEnv, MultiPhaseEval, TimingMode};
 pub use task::FrozenTaskModuleLike;

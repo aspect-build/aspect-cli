@@ -65,7 +65,7 @@ use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
 use axl_runtime::ci::on_recognized_ci;
-use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{AxlFileFailure, Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
@@ -184,8 +184,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
             // Phase 1: discover tasks and features.
-            mpe.eval(&scripts, &root_mod, &modules)
-                .map_err(anyhow::Error::from)?;
+            let script_failures = mpe.eval(&scripts, &root_mod, &modules);
 
             // Phase 2: run config files.
             let config_entries: Vec<(&Path, &Mod)> = configs
@@ -197,8 +196,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         .map(|(path, r#mod)| (path.as_path(), r#mod)),
                 )
                 .collect();
-            mpe.execute_configs(&config_entries)
+            let config_failures = mpe
+                .execute_configs(&config_entries)
                 .map_err(|err| anyhow::Error::from(err).context(ConfigError))?;
+
+            // What the two phases could not load, and what that costs the
+            // command the user typed — see [`Unloadable`] for the policy.
+            let mut unloadable = Unloadable {
+                scripts: script_failures,
+                configs: config_failures,
+            };
 
             // Build the CLI surface from current eval state.
             let cmd = Cmd {
@@ -220,10 +227,35 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let matches = match root_cmd.try_get_matches_from_mut(argv) {
                 Ok(m) => m,
                 Err(err) => {
+                    // `--help`, `--version` and a bare `aspect` all land here:
+                    // Clap renders them itself rather than failing, and none
+                    // needs a task definition, so they still run degraded.
+                    if is_display_only(&err) {
+                        unloadable.warn();
+                        err.print().ok();
+                        return Ok(ExitCode::from(err.exit_code() as u8));
+                    }
+                    // Any other parse error was judged against a surface built
+                    // from a workspace that did not fully load, so the command
+                    // the user typed may be one of the tasks that went missing.
+                    // The load failure explains that; Clap's does not.
+                    if let Some(err) = unloadable.into_error() {
+                        return Err(err);
+                    }
                     err.print().ok();
                     return Ok(ExitCode::from(err.exit_code() as u8));
                 }
             };
+
+            // Everything past here either reports the CLI's own surface or
+            // dispatches a task; see `Unloadable` for which may run degraded.
+            if !unloadable.is_empty() {
+                if runs_without_tasks(matches.subcommand_name()) {
+                    unloadable.warn();
+                } else if let Some(err) = unloadable.into_error() {
+                    return Err(err);
+                }
+            }
 
             match matches.subcommand_name() {
                 Some("version") => {
@@ -354,6 +386,102 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
+/// AXL that failed during startup, held rather than raised.
+///
+/// The whole CLI surface — the task list, their flags, the features — is
+/// defined in AXL, so one `.aspect/*.axl` file that does not parse used to
+/// fail every command: the `aspect help` the user needs to find the typo and
+/// the `aspect version` they run to check their setup included. Phases 1 and 2
+/// now carry on past an unloadable file ([`MultiPhaseEval::eval`],
+/// [`MultiPhaseEval::execute_configs`]) and hand what failed to this type,
+/// which holds the policy for what that costs.
+///
+/// Commands that report the CLI's own identity rather than anything AXL
+/// defines — `version` and `help`, plus Clap's own `--help` / `--version` and
+/// a bare `aspect` — run anyway. Every failure is printed as a warning naming
+/// its file first, so the user still learns about the typo and keeps a CLI to
+/// work with; `help` then lists the built-ins and whichever user tasks did
+/// load. Every other command fails on the first failure exactly as before:
+/// the missing thing may be the definition of the task being run, and
+/// building against a config that half-applied would be worse than stopping.
+///
+/// `describe` and `feature` fail too, deliberately. They render the resolved
+/// AXL surface itself, and a caller reading `aspect describe --output=json`
+/// must not be handed a list that quietly lost entries.
+struct Unloadable {
+    /// Phase 1: task and feature scripts.
+    scripts: Vec<AxlFileFailure>,
+    /// Phase 2: `config.axl` files.
+    configs: Vec<AxlFileFailure>,
+}
+
+impl Unloadable {
+    fn is_empty(&self) -> bool {
+        self.scripts.is_empty() && self.configs.is_empty()
+    }
+
+    /// Report every failure on stderr, each behind a `warning:` line naming
+    /// the file and what its absence costs. Silence here would be worse than
+    /// the old hard failure — the point is that the user still sees the typo.
+    fn warn(&self) {
+        let scripts = self.scripts.iter().map(|f| {
+            (
+                f,
+                "could not be loaded; the tasks it defines are unavailable",
+            )
+        });
+        let configs = self
+            .configs
+            .iter()
+            .map(|f| (f, "did not finish; the settings it applies are incomplete"));
+        for (failure, consequence) in scripts.chain(configs) {
+            errln!("warning: {} {}", failure.path.display(), consequence);
+            errln!("{}", strip_error_prefix(&failure.error.to_string()));
+        }
+    }
+
+    /// The run's failure, for a command that cannot proceed without the AXL
+    /// that did not load. Scripts are reported ahead of configs, a config
+    /// error typically being a consequence of a task that never loaded. A
+    /// phase-2 failure keeps the [`ConfigError`] marker so `main` still
+    /// renders the `--output=json` document for it.
+    fn into_error(&mut self) -> Option<anyhow::Error> {
+        if let Some(failure) = self.scripts.drain(..).next() {
+            return Some(anyhow::Error::from(failure.error));
+        }
+        self.configs
+            .drain(..)
+            .next()
+            .map(|failure| anyhow::Error::from(failure.error).context(ConfigError))
+    }
+}
+
+/// Whether `subcommand` reports the CLI's own identity rather than anything
+/// AXL defines, and so may run against a workspace that did not fully load.
+fn runs_without_tasks(subcommand: Option<&str>) -> bool {
+    matches!(subcommand, Some("version") | Some("help"))
+}
+
+/// Whether Clap stopped to render help or the version rather than to reject
+/// the command line. `DisplayHelpOnMissingArgumentOrSubcommand` is a bare
+/// `aspect`, which prints the same help under `arg_required_else_help`.
+fn is_display_only(err: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    )
+}
+
+/// Drop the `error: ` a Starlark diagnostic renders for itself, so a caller
+/// can put the message behind exactly one prefix of its own. Without this the
+/// CLI printed `error: error: Parse error: …` for every AXL failure.
+fn strip_error_prefix(message: &str) -> &str {
+    message.trim_start_matches("error: ")
+}
+
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
 /// `--`. Read from the raw arguments because a config error stops the CLI
 /// before they are parsed.
@@ -378,7 +506,7 @@ fn main() -> ExitCode {
         return match credential_helper::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                errln!("error: {err:?}");
+                errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
                 ExitCode::FAILURE
             }
         };
@@ -400,20 +528,20 @@ fn main() -> ExitCode {
             // reading `--output=json` otherwise gets nothing to parse.
             if err.downcast_ref::<ConfigError>().is_some() {
                 let message = format!("{:#}", err.root_cause());
-                errln!("error: {}", message.trim_start_matches("error: "));
+                errln!("error: {}", strip_error_prefix(&message));
                 if wants_json_output(std::env::args().skip(1)) {
                     outln!(
                         "{}",
                         serde_json::json!({
                             "schema_version": 1,
                             "error": "config_error",
-                            "message": message.trim_start_matches("error: "),
+                            "message": strip_error_prefix(&message),
                         })
                     );
                 }
                 return ExitCode::FAILURE;
             }
-            errln!("error: {err:?}");
+            errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
             ExitCode::FAILURE
         }
     }
