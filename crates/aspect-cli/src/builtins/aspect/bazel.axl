@@ -18,6 +18,7 @@ load(
     "@aspect//bazel/flags.axl",
     "testonly_config_names",
     "testonly_flags_delta",
+    "testonly_scope_injected",
     _announce = "announce",
     _core_args = "core_args",
     _flags = "flags",
