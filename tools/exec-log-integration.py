@@ -93,9 +93,18 @@ combine = rule(
 def _fixture_test(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(out, "#!/bin/sh\\nexit 0\\n", is_executable = True)
+
+    # `symlinks =` is what puts a `symlink_entry_set` entry in the log; a
+    # runfiles tree built from `files =` alone has none. That entry is the one
+    # kind the resolver reads as a name-to-id mapping rather than a list, so
+    # without it the mapping path is only ever exercised against a hand-built
+    # dict in the AXL unit tests.
     return [DefaultInfo(
         executable = out,
-        runfiles = ctx.runfiles(files = ctx.files.data),
+        runfiles = ctx.runfiles(
+            files = ctx.files.data,
+            symlinks = {"renamed/" + f.basename: f for f in ctx.files.data},
+        ),
     )]
 
 fixture_test = rule(
@@ -230,8 +239,10 @@ def scaffold(root: Path, report_dir: Path, bazel_version: str, output_base: Path
 
 
 # A compact log holding no entries is still a valid zstd frame, and Bazel writes
-# one for a build that ran no actions. Measured at 66 bytes; the bound is
-# deliberately loose because it is only used to tell an empty log from a full one.
+# one for any build that gets past package loading, including one that runs no
+# actions: 28 bytes on Bazel 7, 66 on 8 and 9. The bound is deliberately loose
+# because it is only used to tell an empty log from a full one, and the empty
+# frame's size is Bazel's to change.
 EMPTY_LOG_CEILING = 256
 
 
@@ -411,12 +422,19 @@ def main():
             # 2. A test run: a test's runfiles are the only thing that puts a
             #    runfiles_tree entry in the log, and a spawn names the tree
             #    rather than the set inside it — so the resolver has to treat the
-            #    tree as a set or every runfile drops out of the action key.
+            #    tree as a set or every runfile drops out of the action key. The
+            #    fixture's `symlinks =` adds a symlink_entry_set, the one kind the
+            #    resolver reads as a name-to-id mapping; without it that path sees
+            #    only the hand-built dict in the AXL unit tests.
             run("test", [aspect, "test", "--task:name=test-run", *ASPECT_STARTUP, "--", "//..."])
             tested = report(reports, workspace, "test-run")
             check_shared(tested, "test run")
             assert tested["kinds"].get("runfiles_tree", 0) > 0, (
                 f"the test run logged no runfiles tree: {tested['kinds']}"
+            )
+            assert tested["kinds"].get("symlink_entry_set", 0) > 0, (
+                "the test run logged no symlink entry set, so the resolver's "
+                f"name-to-id mapping saw no real data: {tested['kinds']}"
             )
             runners = [s for s in tested["spawns"] if "runs" in s["key"] or s["mnemonic"] == "TestRunner"]
             assert runners, f"no test spawn in the log: {tested['spawns']}"
