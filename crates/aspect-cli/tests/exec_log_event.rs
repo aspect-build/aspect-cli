@@ -746,12 +746,10 @@ fn a_failed_build_without_a_log_stays_quiet() {
 /// and 2 are skipped.
 ///
 /// Sinks and hook handle travel together everywhere else (`exec_log.open`
-/// returns both in one list), and delivery is the task where a build that spawns
-/// *after* `build_end` must not be handed the sinks: the artifact uploader's
-/// `build_end` uploads the execution log it asked for and then deletes it,
-/// precisely because a leftover file leaks its highest-risk artifact — action
-/// command lines and environment variables, unredacted — so re-creating that
-/// path leaves a file behind with nothing left to claim it.
+/// returns both in one list), and delivery is the task where a build spawning
+/// after the run's *final* `build_end` must not be handed the sinks. "One task,
+/// several invocations" in `builtins/aspect/bazel/exec_log.axl` is the canonical
+/// account of what writing them there would cost.
 ///
 /// Which build that is depends on the run, which is why phase 3 reads
 /// `phase_1_2_runs` rather than deciding once. `--mode=always --dry-run=build

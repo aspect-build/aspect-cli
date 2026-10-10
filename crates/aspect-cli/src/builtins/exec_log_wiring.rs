@@ -343,9 +343,8 @@ fn every_drain_precedes_the_wait_it_guards() {
 /// cache answering `GetActionResult` and the basil fake serves none. Reverting it
 /// to an unconditional `xl.sinks or False` therefore leaves every test in that
 /// file passing while restoring the leak it fixed: phase 3's log is written to a
-/// path no `build_end` will claim, and an execution log is the highest-risk
-/// artifact a run produces — action command lines and environment variables, with
-/// no on-disk redaction.
+/// path no `build_end` will claim. "One task, several invocations" in
+/// `builtins/aspect/bazel/exec_log.axl` says what that costs.
 ///
 /// So this asserts on the resolved value in the source rather than on observed
 /// behaviour. It is whitespace-insensitive but otherwise literal, which is the
