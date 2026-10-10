@@ -4,11 +4,12 @@
 //! The hook's lifecycle is three calls a task has to make in the right places —
 //! `open` before the spawn, `pump` in the drain loop, `close` before `wait()`
 //! (see `builtins/aspect/bazel/exec_log.axl`) — hand-written at nine call sites
-//! across eight files. Each one fails *quietly*: a missing `open` leaves the log
-//! off, a missing `pump` means hooks only fire at the end of the build, and a
-//! missing `close` or one moved after `wait()` loses entries. Nothing about the
-//! AXL unit tests, which exercise the dispatcher against synthetic handles, would
-//! notice any of that.
+//! across seven files, two of them (`run.axl`, `delivery.axl`) wiring more than
+//! one. Each one fails *quietly*: a missing `open` leaves the log off, a missing
+//! `pump` means hooks only fire at the end of the build, and a missing `close` or
+//! one moved after `wait()` loses entries. Nothing about the AXL unit tests,
+//! which exercise the dispatcher against synthetic handles, would notice any of
+//! that.
 //!
 //! So each case here runs the real CLI against a scratch workspace whose
 //! `.aspect/config.axl` registers an `exec_log_event` hook, with basil standing
@@ -23,6 +24,13 @@
 //!     entry, so `pumped` in the status file means the dispatch happened inside
 //!     the task's drain loop. A task that only drains after the event stream
 //!     closes cannot get there, and the status reads `timeout`.
+//!   * **under a phase that names the invocation** — every call-site case
+//!     asserts the `ctx.task.current_phase().name` the hook read, because that
+//!     is the only thing telling a hook which of a task's Bazel invocations it
+//!     is in, and it is live-task state no unit test can produce. `delivery`
+//!     contributes a case per wired phase (`build`, `deliver`), and
+//!     `a_hook_tells_one_invocation_of_a_task_from_the_next` pins two
+//!     invocations apart inside one task.
 //!
 //! The retry case covers the third seam: a hook registered by a `build_start`
 //! hook must still see attempt 0's entries (the ordering bug `open`-before-
@@ -59,6 +67,13 @@ struct Report {
     /// Entries whose `id` was not the next one expected within its attempt.
     /// Non-zero means a gap, a repeat or a reorder.
     gaps: u32,
+    /// The distinct `ctx.task.current_phase().name` values the hook saw, in
+    /// first-seen order — how a hook tells one Bazel invocation of a task from
+    /// the next. `<none>` stands in for a phase the runtime had not opened yet.
+    phases: Vec<String>,
+    /// `ctx.task.name`, the other half of the answer: which task's invocation
+    /// this was, for a hook several tasks registered.
+    task: String,
     /// basil's side of the pump handshake: `pumped`, `timeout`, or `None` for
     /// a scenario that does not run one.
     handshake: Option<String>,
@@ -77,13 +92,18 @@ struct Fixture {
 }
 
 /// The `.aspect/config.axl` a case runs under: one `exec_log_event` hook that
-/// checks each entry's `id` against the next one expected, and republishes a
-/// one-line report whenever a whole log has arrived.
+/// checks each entry's `id` against the next one expected, notes the task phase
+/// the entry arrived under, and republishes a one-line report whenever a whole
+/// log has arrived.
 ///
 /// The report is written from the hook rather than from `build_end`, because
 /// `run --watch` never reaches a `build_end` and the point is to cover it too.
 /// Writing it per completed log (rather than per entry) keeps 3000 dispatches
 /// from becoming 3000 file writes.
+///
+/// The phase is read from the hook's own `TaskContext` — not the config-time
+/// `ctx` closed over for `fs` — because that is the context a real hook gets and
+/// the only one carrying a live task.
 fn fixture(report: &Path, handshake: &Path, scenario: &str, f: Fixture) -> String {
     let mut setup = String::new();
     if f.no_bes {
@@ -109,17 +129,26 @@ _REPORT = "{report}"
 _HANDSHAKE = "{handshake}"
 
 def config(ctx: ConfigContext):
-    state = {{"total": 0, "gaps": 0}}
+    state = {{"total": 0, "gaps": 0, "phases": []}}
 
-    def _on_entry(_ctx, entry):
+    def _on_entry(task_ctx, entry):
         if entry.id != (state["total"] % _BLOCK) + 1:
             state["gaps"] += 1
         state["total"] += 1
+        phase = task_ctx.task.current_phase()
+        name = phase.name if phase else "<none>"
+        if name not in state["phases"]:
+            state["phases"].append(name)
         if state["total"] == 1:
             # basil is holding back the last build event until this appears.
             ctx.std.fs.create(_HANDSHAKE).write("x")
         if state["total"] % _BLOCK == 0:
-            ctx.std.fs.create(_REPORT).write("total=%d gaps=%d\n" % (state["total"], state["gaps"]))
+            ctx.std.fs.create(_REPORT).write("total=%d gaps=%d phases=%s task=%s\n" % (
+                state["total"],
+                state["gaps"],
+                ",".join(state["phases"]),
+                task_ctx.task.name,
+            ))
 
     def _hook():
         return ExecLogHook(on_entry = _on_entry)
@@ -309,14 +338,21 @@ impl Case {
                 context()
             )
         });
-        let field = |name: &str| -> u32 {
+        let raw = |name: &str| -> &str {
             text.split_whitespace()
-                .find_map(|f| f.strip_prefix(name)?.parse().ok())
+                .find_map(|f| f.strip_prefix(name))
                 .unwrap_or_else(|| panic!("no {name} field in report {text:?}"))
+        };
+        let field = |name: &str| -> u32 {
+            raw(name)
+                .parse()
+                .unwrap_or_else(|_| panic!("unparseable {name} field in report {text:?}"))
         };
         Report {
             total: field("total="),
             gaps: field("gaps="),
+            phases: raw("phases=").split(',').map(str::to_string).collect(),
+            task: raw("task=").to_string(),
             handshake: std::fs::read_to_string(root.join("pumped.status"))
                 .ok()
                 .map(|s| s.trim().to_string()),
@@ -347,7 +383,13 @@ fn assert_complete(case: &str, report: &Report, logs: u32) {
 /// after the stream ends, nothing in the drain loop can reach it and only
 /// `close` can, so an empty hook means the end-of-build drain is gone or runs
 /// after the `wait()` that releases its handle.
-fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool) {
+///
+/// `phase` is the task phase every entry of this site must arrive under. It is
+/// asserted at each site rather than once, because the phase is what a hook has
+/// to identify the invocation with, and a site that opened no phase before
+/// spawning Bazel would hand it `<none>` — readable only here, where a live task
+/// is driving the hook.
+fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool, phase: &str) {
     let drive = |case: &Case| -> Report {
         if watch {
             case.run_until_reported(args)
@@ -365,26 +407,40 @@ fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool) {
         "{name}: the first entry must reach the hook before the build ends, which is \
          what calling `exec_log.pump` in the task's drain loop does",
     );
+    assert_eq!(
+        report.phases,
+        vec![phase.to_string()],
+        "{name}: every entry should arrive under the `{phase}` phase, which is what \
+         `ctx.task.current_phase()` has to give a hook that needs to know which \
+         invocation it is in",
+    );
 
     let drained = Case::new("execlog_after_bes", Fixture::default(), bazelrc);
-    assert_complete(name, &drive(&drained), 1);
+    let report = drive(&drained);
+    assert_complete(name, &report, 1);
+    assert_eq!(
+        report.phases,
+        vec![phase.to_string()],
+        "{name}: the entries `exec_log.close` carries after the event stream ends are \
+         still inside the phase that spawned Bazel",
+    );
 }
 
 /// `bazel/invocation.axl`, the call site `build` and `test` share.
 #[test]
 fn the_build_task_dispatches_every_entry() {
-    assert_site("build", &["build", "//..."], None, false);
+    assert_site("build", &["build", "//..."], None, false, "build");
 }
 
 #[test]
 fn the_test_task_dispatches_every_entry() {
-    assert_site("test", &["test", "//..."], None, false);
+    assert_site("test", &["test", "//..."], None, false, "test");
 }
 
 /// `run.axl`'s `_run_impl`.
 #[test]
 fn the_run_task_dispatches_every_entry() {
-    assert_site("run", &["run", "//fixture:target"], None, false);
+    assert_site("run", &["run", "//fixture:target"], None, false, "build");
 }
 
 /// `run.axl`'s `_build_once`, the second of that file's two call sites, reached
@@ -397,33 +453,41 @@ fn the_run_watch_task_dispatches_every_entry() {
         &["run", "--watch", "//fixture:target"],
         None,
         true,
+        "build",
     );
 }
 
 #[test]
 fn the_lint_task_dispatches_every_entry() {
-    assert_site("lint", &["lint", "//..."], None, false);
+    assert_site("lint", &["lint", "//..."], None, false, "lint");
 }
 
 #[test]
 fn the_format_task_dispatches_every_entry() {
-    assert_site("format", &["format"], None, false);
+    assert_site("format", &["format"], None, false, "build");
 }
 
 #[test]
 fn the_gazelle_task_dispatches_every_entry() {
-    assert_site("gazelle", &["gazelle"], None, false);
+    assert_site("gazelle", &["gazelle"], None, false, "build");
 }
 
 #[test]
 fn the_warming_task_dispatches_every_entry() {
-    assert_site("ci warming", &["ci", "warming", "//..."], None, false);
+    assert_site(
+        "ci warming",
+        &["ci", "warming", "//..."],
+        None,
+        false,
+        "populate",
+    );
 }
 
 /// `delivery.axl`'s `_get_output_shas` — the phase-1 build, which runs only
 /// when there is a remote cache to read digests from and change detection or a
 /// dry run to read them for. Its phase-2 build has no hook handle, so the hook
-/// still sees exactly one log.
+/// still sees exactly one log; phase 3 is skipped by a bare `--dry-run` and gets
+/// its own case below.
 #[test]
 fn the_delivery_task_dispatches_every_entry() {
     assert_site(
@@ -438,6 +502,68 @@ fn the_delivery_task_dispatches_every_entry() {
         ],
         Some("build --remote_cache=grpc://127.0.0.1:1\n"),
         false,
+        "build",
+    );
+}
+
+/// `delivery.axl`'s phase 3, the release build the dispatch reads its artifacts
+/// from — a second call site in the same file, and the one a per-file wiring
+/// check cannot distinguish from phase 1.
+///
+/// Reaching it without a remote cache is what makes the case a single log:
+/// `--mode=always --dry-run=build --track-state=false` is the one combination
+/// that drops phases 1 and 2 when no cache is configured (see the combination
+/// matrix in `delivery.axl`) while `=build` keeps the delivery build. So the
+/// 3000 entries here are phase 3's own, and `deliver` is the phase they arrived
+/// under — not `build`, which would mean phase 1 had run after all.
+#[test]
+fn the_delivery_release_build_dispatches_every_entry() {
+    assert_site(
+        "delivery --dry-run=build",
+        &[
+            "delivery",
+            "--mode=always",
+            "--dry-run=build",
+            "--track-state=false",
+            "--commit-sha=0000000000000000000000000000000000000000",
+            "//fixture:target",
+        ],
+        None,
+        false,
+        "deliver",
+    );
+}
+
+/// A hook can tell one Bazel invocation of a task from the next.
+///
+/// This is the question a hook has to answer before it can attribute anything:
+/// `aspect delivery` drives Bazel three times, and `build` retries drive it up
+/// to three, so "which invocation am I in" is not answerable from an entry —
+/// entries carry no invocation of their own. `ctx.task.current_phase().name` is
+/// the answer, and a retry is the sharpest case for it: two invocations, one
+/// task, one hook, no `build_start` in between.
+///
+/// The two names are the contract, not just two different strings: the phase the
+/// task opens per attempt is `build` then `build_retry_2`
+/// (`private/lib/bazel_results.axl` builds the second from the attempt index), so
+/// a hook aggregating per invocation keys on exactly this. `ctx.task.name` is
+/// the other half, for a hook that several tasks registered; its suffix is
+/// generated per run, so only the prefix is assertable.
+#[test]
+fn a_hook_tells_one_invocation_of_a_task_from_the_next() {
+    let case = Case::new("execlog_retryable_failure", Fixture::default(), None);
+    let report = case.run(&["build", "--bazel-retry-attempts=2", "//..."]);
+    assert_complete("build --bazel-retry-attempts=2", &report, 2);
+    assert_eq!(
+        report.phases,
+        vec!["build".to_string(), "build_retry_2".to_string()],
+        "each attempt opens its own phase before spawning Bazel, so the phase name is \
+         what separates attempt 0's entries from attempt 1's",
+    );
+    assert!(
+        report.task.starts_with("build-"),
+        "the hook should also be able to name the task it fired for; got {:?}",
+        report.task,
     );
 }
 

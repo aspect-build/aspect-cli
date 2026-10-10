@@ -7,6 +7,15 @@
 //! reads the AXL sources and so covers the call sites that exist, which is what
 //! turns "a new task forgot the wiring" from a silent omission into a failure.
 //!
+//! Coverage is per `ctx.bazel.build` / `.test` site, not per file, because the
+//! tasks that drive Bazel more than once are exactly the ones where a missing
+//! handle hides: a hook watching `aspect delivery` hears about three
+//! invocations, and a per-file rule is satisfied by the first. A spawn that
+//! deliberately carries no handle is named in `EXEMPT` (the whole file cannot
+//! produce a log) or `PARTIALLY_WIRED` (some sites are wired and some are not),
+//! with the reason — these two tables are where that decision is recorded, and
+//! a stale entry fails rather than lingering.
+//!
 //! The source tree is embedded at compile time, the same way the CLI embeds it
 //! to ship it, so these assertions need no data dependency and no filesystem.
 
@@ -61,10 +70,11 @@ fn handle_waits(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Files that spawn Bazel without an `exec_log_event` handle, and why.
+/// Files whose every Bazel spawn goes unwired, and why.
 ///
 /// Add to this only for an invocation that cannot produce an execution log —
-/// not for one whose wiring has not been written yet.
+/// not for one whose wiring has not been written yet. A file that wires some of
+/// its spawns and not others belongs in `PARTIALLY_WIRED` instead.
 const EXEMPT: &[(&str, &str)] = &[
     (
         "cache_diff.axl",
@@ -78,6 +88,36 @@ const EXEMPT: &[(&str, &str)] = &[
     (
         "bazel/invocation_test.axl",
         "a test fixture driving ctx.bazel.build directly, not a task",
+    ),
+];
+
+/// Files that spawn Bazel more often than they open a handle, as
+/// `(path, opens, why the difference is correct)`.
+///
+/// Every other file gets one `exec_log.open` per spawn site, which is what makes
+/// a newly added invocation that forgot the wiring a failure rather than a hook
+/// that silently stops hearing about a build. A file listed here has been looked
+/// at; the reason is the record, so write one that will still answer the
+/// question in a year. An entry whose `opens` has caught up with its spawn count
+/// is stale and fails too.
+const PARTIALLY_WIRED: &[(&str, usize, &str)] = &[
+    (
+        "bazel/invocation.axl",
+        1,
+        "`ctx.bazel.test` and `ctx.bazel.build` are the two arms of one branch — \
+         the handle is opened above it, per attempt, and whichever arm runs gets it",
+    ),
+    (
+        "delivery.axl",
+        2,
+        "phase 2, the checksum re-run, has no handle on purpose: it is a cache \
+         lookup over phase 1's warm analysis under \
+         `--experimental_remote_require_cached`, so every spawn it would log is \
+         either a probe for an action phase 1 already logged or a `DeliveryHash` \
+         probe that stands for no work the user asked for. A hook auditing spawns \
+         would double-count the first and have to learn to ignore the second. The \
+         trait's `build_event` hooks are withheld from that phase for the same \
+         reason, and the two streams describe the same thing",
     ),
 ];
 
@@ -127,6 +167,50 @@ fn every_task_that_spawns_bazel_wires_exec_log_event() {
              pump in the drain loop, close before wait()), or add the file to EXEMPT \
              in {} with the reason it cannot produce an execution log.",
             file!(),
+        );
+    }
+}
+
+/// Every spawn site has a handle of its own, or a reason in `PARTIALLY_WIRED`.
+///
+/// `every_task_that_spawns_bazel_wires_exec_log_event` is per *file*, so a file
+/// that drives Bazel several times passes on one wired call site — which is how
+/// `delivery.axl` passed while two of its three phases dispatched nothing. This
+/// counts sites instead, so the second and third invocation of a multi-phase
+/// task are decisions somebody made rather than call sites nobody looked at.
+#[test]
+fn every_spawn_site_opens_a_handle_or_is_named() {
+    for (path, source) in sources() {
+        let sites = spawn_lines(source).len();
+        if sites == 0 || EXEMPT.iter().any(|(name, _)| *name == path) {
+            continue;
+        }
+        let opens = calls(source, "open").len();
+        let Some((_, expected, why)) = PARTIALLY_WIRED.iter().find(|(name, ..)| *name == path)
+        else {
+            assert_eq!(
+                opens,
+                sites,
+                "{path} spawns Bazel at {sites} site(s) but opens {opens} \
+                 `exec_log_event` handle(s), so some invocation dispatches nothing. Wire \
+                 it as `builtins/aspect/bazel/exec_log.axl` documents (open before the \
+                 spawn, pump in the drain loop, close before wait()), or name the file in \
+                 PARTIALLY_WIRED in {} with the reason that spawn cannot or should not \
+                 carry a handle.",
+                file!(),
+            );
+            continue;
+        };
+        assert!(
+            *expected < sites,
+            "{path} is listed in PARTIALLY_WIRED ({why}), but now opens a handle at \
+             every one of its {sites} spawn site(s) — drop the entry",
+        );
+        assert_eq!(
+            opens, *expected,
+            "{path} is listed in PARTIALLY_WIRED as opening {expected} handle(s) \
+             ({why}); it opens {opens}. Update the entry's count and its reason \
+             together, or wire the remaining site(s).",
         );
     }
 }
