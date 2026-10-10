@@ -370,6 +370,28 @@ jobs:
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - name: Verify cache hits, misses, and exclusions
         run: python3 tools/cache-diff-integration.py --aspect "$(command -v aspect)" --bazel-version "${{ matrix.bazel }}"
+  # `BazelTrait.exec_log_event` against a real Bazel. The Rust end-to-end tests
+  # drive every task that fires the hook, but against the basil fake, whose log
+  # is synthetic `file` entries — no spawns, input sets or runfiles trees. This
+  # builds a workspace that produces each of those for real, so the resolver in
+  # `private/lib/execlog.axl` and the `kinds` filter are exercised against data
+  # Bazel shaped. Matrixed like cache-diff-integration because the compact log's
+  # contents are Bazel's to change between releases.
+  exec-log-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: ["7.4.0", "8.6.0", "9.2.0"]
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - name: Verify exec_log_event against a real execution log
+        run: python3 tools/exec-log-integration.py --aspect "$(command -v aspect)" --bazel-version "${{ matrix.bazel }}"
   # `aspect cache diff` probes the remote cache with --experimental_remote_require_cached
   # to list the test targets affected by this commit — running nothing. It needs
   # cache access, which config.axl's Aspect Cloud `--remote` default provides.
@@ -726,6 +748,7 @@ jobs:
       - test-task
       - init-preset
       - cache-diff-integration
+      - exec-log-integration
       - cache-diff-task
       - cache-diff-debug-task
       - runner-smoke
