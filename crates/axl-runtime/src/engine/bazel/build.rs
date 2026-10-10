@@ -708,9 +708,99 @@ fn event_kind_in(event: &BuildEvent, kinds: &HashSet<i32>) -> bool {
     kinds.contains(&payload_discriminant(payload))
 }
 
-/// Maps a payload variant to its proto field number — same integers the
-/// `bazel.build.build_event.*` constants resolve to, so `kinds=` matches by
-/// integer set lookup.
+/// Every BES payload kind a `kinds=` list can name, as
+/// `(tag, type_name, legacy_aliases)`.
+///
+/// `tag` is this runtime's payload discriminant: the integer
+/// [`payload_discriminant`] returns and the set `kinds=` is matched against.
+/// It is deliberately opaque and is *not* the BEP proto field number (the two
+/// numberings diverge for most kinds); only the two sides agreeing matters,
+/// which `payload_tags_agree_with_the_kind_table` pins.
+///
+/// `type_name` is the snake_case name of the payload *message*, which is
+/// exactly the string `type(event.payload)` returns in AXL. Every kind is
+/// reachable under that name, so a `kinds=` filter can be written with the
+/// same literal the `type(event.payload) == "..."` test uses. Closing that
+/// gap is why this table exists: `"action_completed"` was accepted while
+/// `type()` reported `action_executed`, so the filter read correctly and the
+/// comparison never matched.
+///
+/// `legacy_aliases` are the other spellings `kinds=` has always accepted —
+/// the BEP `payload` oneof field name (`action`, `completed`, …) and, where
+/// it differs, the `event.kind` string (`action_completed`,
+/// `target_completed`, …). They are a public AXL surface that third-party
+/// `.aspect/*.axl` passes, so they stay accepted.
+const EVENT_KINDS: &[(i32, &str, &[&str])] = &[
+    (3, "progress", &[]),
+    (4, "aborted", &[]),
+    (5, "build_started", &["started"]),
+    (6, "pattern_expanded", &["expanded"]),
+    (7, "target_configured", &["configured"]),
+    (8, "action_executed", &["action", "action_completed"]),
+    (9, "target_complete", &["completed", "target_completed"]),
+    (10, "test_result", &[]),
+    (11, "build_finished", &["finished"]),
+    (12, "unstructured_command_line", &[]),
+    (13, "command_line", &["structured_command_line"]),
+    (14, "options_parsed", &[]),
+    (15, "named_set_of_files", &["named_set"]),
+    (16, "workspace_status", &[]),
+    (17, "fetch", &[]),
+    (19, "configuration", &[]),
+    (20, "test_summary", &[]),
+    (21, "build_tool_logs", &[]),
+    (22, "build_metrics", &[]),
+    (24, "build_metadata", &[]),
+    (25, "workspace_config", &["workspace_info"]),
+    (26, "target_summary", &[]),
+    (27, "convenience_symlinks_identified", &[]),
+    (28, "exec_request_constructed", &["exec_request"]),
+    (30, "test_progress", &[]),
+];
+
+/// The tail of a `kinds=` rejection: every accepted spelling, with the
+/// `type(event.payload)` names first because those are the ones that also
+/// work as a `type()` comparison literal.
+fn event_kind_help() -> String {
+    let mut types: Vec<&str> = EVENT_KINDS.iter().map(|(_, name, _)| *name).collect();
+    types.sort_unstable();
+    let mut legacy: Vec<&str> = EVENT_KINDS
+        .iter()
+        .flat_map(|(_, _, aliases)| aliases.iter().copied())
+        .collect();
+    legacy.sort_unstable();
+    format!(
+        "name a payload the way `type(event.payload)` reports it — {} — or use \
+         one of the older aliases, also accepted: {}",
+        types.join(", "),
+        legacy.join(", "),
+    )
+}
+
+/// Resolve one `kinds=` list element to a payload tag. Accepts the payload's
+/// `type(event.payload)` name, any legacy alias, or the raw tag integer.
+pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
+    if let Some(n) = value.unpack_i32() {
+        return Ok(n);
+    }
+    if let Some(s) = value.unpack_str() {
+        for (tag, type_name, aliases) in EVENT_KINDS {
+            if s == *type_name || aliases.contains(&s) {
+                return Ok(*tag);
+            }
+        }
+        anyhow::bail!("unknown build_event kind '{s}'; {}", event_kind_help());
+    }
+    anyhow::bail!(
+        "kinds entry must be a build event payload name or its payload tag; got \
+         {}. To name a payload, {}",
+        value.get_type(),
+        event_kind_help(),
+    )
+}
+
+/// Maps a payload variant to this runtime's payload tag — the integers
+/// [`EVENT_KINDS`] lists, so `kinds=` matches by integer set lookup.
 fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload) -> i32 {
     use axl_proto::build_event_stream::build_event::Payload;
     match p {
@@ -1288,6 +1378,156 @@ mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
     //! binary, selected per-test via `--scenario=<name>`.
 
+    /// Every accepted `kinds=` spelling, the tag it resolves to, and the
+    /// string `type(event.payload)` reports for that payload — pinned
+    /// together, because the whole point of [`EVENT_KINDS`] is that the three
+    /// agree. A row drifting apart is the bug this table replaced: `kinds =
+    /// ["action_completed"]` was accepted while `type(event.payload)`
+    /// returned `action_executed`, so the filter read right and never matched.
+    mod event_kinds {
+        use super::super::*;
+        use axl_proto::build_event_stream::build_event::Payload;
+        use starlark::values::Heap;
+
+        /// One default-constructed payload per `Payload` variant, in
+        /// [`EVENT_KINDS`] order. Exhaustive by construction: the match in
+        /// `payload_discriminant` fails to compile if a variant is added
+        /// upstream, and `the_table_covers_every_payload_variant` fails if
+        /// one is missing from here.
+        fn every_payload() -> Vec<Payload> {
+            vec![
+                Payload::Progress(Default::default()),
+                Payload::Aborted(Default::default()),
+                Payload::Started(Default::default()),
+                Payload::Expanded(Default::default()),
+                Payload::Configured(Default::default()),
+                Payload::Action(Default::default()),
+                Payload::Completed(Default::default()),
+                Payload::TestResult(Default::default()),
+                Payload::Finished(Default::default()),
+                Payload::UnstructuredCommandLine(Default::default()),
+                Payload::StructuredCommandLine(Default::default()),
+                Payload::OptionsParsed(Default::default()),
+                Payload::NamedSetOfFiles(Default::default()),
+                Payload::WorkspaceStatus(Default::default()),
+                Payload::Fetch(Default::default()),
+                Payload::Configuration(Default::default()),
+                Payload::TestSummary(Default::default()),
+                Payload::BuildToolLogs(Default::default()),
+                Payload::BuildMetrics(Default::default()),
+                Payload::BuildMetadata(Default::default()),
+                Payload::WorkspaceInfo(Default::default()),
+                Payload::TargetSummary(Default::default()),
+                Payload::ConvenienceSymlinksIdentified(Default::default()),
+                Payload::ExecRequest(Default::default()),
+                Payload::TestProgress(Default::default()),
+            ]
+        }
+
+        #[test]
+        fn the_table_covers_every_payload_variant() {
+            assert_eq!(
+                every_payload().len(),
+                EVENT_KINDS.len(),
+                "a Payload variant is missing from EVENT_KINDS or every_payload()"
+            );
+            let mut tags: Vec<i32> = EVENT_KINDS.iter().map(|(tag, ..)| *tag).collect();
+            tags.sort_unstable();
+            tags.dedup();
+            assert_eq!(
+                tags.len(),
+                EVENT_KINDS.len(),
+                "duplicate tag in EVENT_KINDS"
+            );
+
+            let mut names: Vec<&str> = EVENT_KINDS
+                .iter()
+                .flat_map(|(_, type_name, aliases)| {
+                    std::iter::once(*type_name).chain(aliases.iter().copied())
+                })
+                .collect();
+            names.sort_unstable();
+            let total = names.len();
+            names.dedup();
+            assert_eq!(names.len(), total, "duplicate alias in EVENT_KINDS");
+        }
+
+        /// `payload_discriminant` is the receive side of the filter and
+        /// `EVENT_KINDS` the send side; a disagreement silently drops events.
+        #[test]
+        fn payload_tags_agree_with_the_kind_table() {
+            for (payload, (tag, type_name, _)) in every_payload().into_iter().zip(EVENT_KINDS) {
+                assert_eq!(payload_discriminant(&payload), *tag, "tag for {type_name}");
+            }
+        }
+
+        /// The agreement test: the name the table advertises is the string
+        /// AXL's `type(event.payload)` returns for that payload.
+        #[test]
+        fn every_kind_is_named_the_way_type_reports_it() {
+            Heap::temp(|heap| {
+                for (payload, (_, type_name, _)) in every_payload().into_iter().zip(EVENT_KINDS) {
+                    let reported = heap.alloc(payload).get_type();
+                    assert_eq!(
+                        reported, *type_name,
+                        "`type(event.payload)` reports {reported:?}, so `kinds=` must accept it"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn every_alias_resolves_to_its_tag() {
+            Heap::temp(|heap| {
+                for (tag, type_name, aliases) in EVENT_KINDS {
+                    for name in std::iter::once(type_name).chain(aliases.iter()) {
+                        let v = heap.alloc_str(name).to_value();
+                        assert_eq!(parse_event_kind(v).unwrap(), *tag, "alias {name}");
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn a_raw_tag_number_passes_through() {
+            Heap::temp(|heap| {
+                assert_eq!(parse_event_kind(heap.alloc(8i32)).unwrap(), 8);
+            });
+        }
+
+        /// A typo has to name every valid kind: without the list a user has
+        /// no way to discover the spellings.
+        #[test]
+        fn an_unknown_kind_enumerates_the_valid_names() {
+            Heap::temp(|heap| {
+                let v = heap.alloc_str("not_a_real_kind").to_value();
+                let err = parse_event_kind(v)
+                    .expect_err("expected a rejection")
+                    .to_string();
+                assert!(err.contains("not_a_real_kind"), "unexpected error: {err}");
+                for (_, type_name, aliases) in EVENT_KINDS {
+                    for name in std::iter::once(type_name).chain(aliases.iter()) {
+                        assert!(
+                            err.contains(name),
+                            "the error should list {name}, got: {err}"
+                        );
+                    }
+                }
+            });
+        }
+
+        /// A non-string, non-int entry still gets told what a kind looks like.
+        #[test]
+        fn a_wrong_typed_entry_enumerates_the_valid_names() {
+            Heap::temp(|heap| {
+                let err = parse_event_kind(heap.alloc(vec![1i32]))
+                    .expect_err("expected a rejection")
+                    .to_string();
+                assert!(err.contains("action_executed"), "unexpected error: {err}");
+            });
+        }
+    }
+
     /// Iter handle subscribed pre-spawn receives every event from a clean
     /// build, even on the warm-daemon path that drops late subscribers.
     #[test]
@@ -1600,6 +1840,73 @@ Test = task(implementation = _impl)
             r#"bazel.build_events.iterator(kinds = ["target_completed", "named_set_of_files"])"#
         )
         .expect("snippet should validate");
+    }
+
+    /// The regression this branch exists for: a `kinds=` filter naming a
+    /// payload the way `type(event.payload)` reports it delivers exactly
+    /// those events, and the same literal reads the payload test. Before the
+    /// fix `"action_executed"` was rejected outright and the accepted
+    /// `"action_completed"` never matched `type(event.payload)`.
+    #[test]
+    fn kinds_filter_delivers_the_payload_type_it_names() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator(kinds = ["action_executed"])
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_named_set"],
+        build_events = [iter],
+        stderr = None,
+    )
+    count = 0
+    matched = 0
+    for event in iter:
+        count += 1
+        if type(event.payload) == "action_executed":
+            matched += 1
+    build.wait()
+    if count != 1: return 1
+    if matched != 1: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The legacy spelling keeps selecting the same payload, so a
+    /// third-party `.aspect/*.axl` filter does not change behavior.
+    #[test]
+    fn the_legacy_action_completed_alias_selects_the_same_events() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator(kinds = ["action_completed"])
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_named_set"],
+        build_events = [iter],
+        stderr = None,
+    )
+    count = 0
+    for event in iter:
+        count += 1
+        if type(event.payload) != "action_executed": return 3
+        if event.kind != "action_completed": return 4
+    build.wait()
+    if count != 1: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 
     /// `kinds=` drops non-matching events before yielding.
