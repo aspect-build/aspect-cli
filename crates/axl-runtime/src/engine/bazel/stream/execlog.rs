@@ -27,6 +27,28 @@ pub enum ExecLogStreamError {
     Close(#[from] CloseError),
 }
 
+/// What the reader thread found at the execution log's path.
+///
+/// Bazel creates the compact log once a command gets past target-pattern parsing
+/// and package loading — including for a build that runs no actions at all, which
+/// still leaves an empty zstd frame (28 bytes on Bazel 7, 66 on 8 and 9). It does
+/// *not* create one for a pattern that names no target, an unparseable BUILD file
+/// or a rejected flag, and every one of those exits nonzero.
+///
+/// So the absence of a log is only remarkable on an invocation that *succeeded*,
+/// and that is the one the caller is asked to warn about: a successful build whose
+/// log never appeared is the shape a dead nominated holder produces, where every
+/// hook fires zero times and nothing says so. On a failed build the absence is
+/// ordinary and Bazel has already printed the reason, so a warning there would
+/// only crowd it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderOutcome {
+    /// The log appeared and was read to the end of the stream.
+    Read,
+    /// The invocation ended before the log appeared.
+    NeverAppeared,
+}
+
 /// Decoded entries buffered between the reader thread and its subscribers.
 ///
 /// A broadcast ring: the producer may not lap its slowest subscriber, so this is
@@ -85,7 +107,7 @@ fn forward(sender: &Sender<ExecLogEntry>, entry: ExecLogEntry, lossless: bool) -
 
 #[derive(Debug)]
 pub struct ExecLogStream {
-    handle: JoinHandle<Result<(), ExecLogStreamError>>,
+    handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
     /// The one subscriber the stream starts with, and the only thing a further
     /// subscriber can be cloned from — so once it is gone, nothing can join.
     ///
@@ -197,7 +219,7 @@ impl ExecLogStream {
                     Err(ExecLogStreamError::IO(err)) if err.kind() == io::ErrorKind::BrokenPipe => {
                         sender.close()?;
                         out_raw.get_mut().get_mut().flush()?;
-                        return Ok(());
+                        return Ok(ReaderOutcome::Read);
                     }
                     Err(err) => return Err(err),
                 }
@@ -264,25 +286,16 @@ impl ExecLogStream {
             let out_raw = match galvanize::StreamingFile::open(path.clone(), server_pid, client_pid)
             {
                 Ok(f) => f,
-                // Bazel exited without ever writing an execution log — a rejected
-                // command line, say. An empty stream, not a failure: the build's own
-                // exit code is the thing the caller wants to see.
+                // Bazel exited without ever writing an execution log. An empty
+                // stream, not a failure: the build's own exit code is the thing the
+                // caller wants to see.
                 //
-                // It is said out loud, though. Bazel creates the file as soon as it
-                // starts a build, whether or not any action runs, so reaching this
-                // means the invocation ended before the log appeared — a client or
-                // daemon that died, or a path Bazel was never actually given. Left
-                // quiet, that is indistinguishable from a build whose actions were
-                // all cached: every hook fires zero times and the build passes.
+                // Whether that is worth saying out loud depends on the exit code,
+                // which this thread does not have — so it reports the fact and
+                // `join()`'s caller decides. See [`ReaderOutcome::NeverAppeared`].
                 Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
-                    crate::errln!(
-                        "WARNING: bazel produced no execution log at {} ({err}). Any \
-                         `exec_log_event` hook and any execution-log sink saw nothing \
-                         for this invocation.",
-                        path.display(),
-                    );
                     sender.close()?;
-                    return Ok(());
+                    return Ok(ReaderOutcome::NeverAppeared);
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -323,7 +336,7 @@ impl ExecLogStream {
                     Err(ExecLogStreamError::IO(err)) if err.kind() == io::ErrorKind::BrokenPipe => {
                         sender.close()?;
                         out_raw.get_mut().get_mut().inner.flush()?;
-                        return Ok(());
+                        return Ok(ReaderOutcome::Read);
                     }
                     Err(err) => return Err(err),
                 }
@@ -372,7 +385,9 @@ impl ExecLogStream {
     /// consumer left the reader stops decoding and drains. Then waits for the
     /// reader thread and every attached file-sink writer, surfacing the first
     /// write error if any.
-    pub fn join(mut self) -> Result<(), ExecLogStreamError> {
+    /// Join the reader and every file sink, reporting what the reader found at
+    /// the log's path. See [`ReaderOutcome`] for what a caller does with it.
+    pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
         self.recv.take();
         let reader_result = self.handle.join().expect("join error");
         for h in self.file_sink_handles {

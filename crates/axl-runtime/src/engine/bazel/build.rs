@@ -51,6 +51,7 @@ use super::stream::ExecLogStream;
 use super::stream::Subscriber;
 use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
+use super::stream::execlog::ReaderOutcome;
 use super::stream::{BuildEventEnvelope, BuildEventStream};
 
 /// The Bazel flag naming where the compact execution log is written. Read off the
@@ -941,6 +942,16 @@ impl Build {
         // takes a log that does not exist yet as a log that never will and ends
         // the stream clean and empty: every `exec_log_event` hook fires zero
         // times, every sink writes nothing, and the build passes.
+        //
+        // Only the execution log was ever exposed to that. The BES and workspace
+        // readers take this pid too, but they read a FIFO: `Pipe::open` blocks for
+        // a *writer* rather than for a pid, and the pid is consulted only on an
+        // empty read, which on a blocking FIFO cannot happen until every writer
+        // has closed — by which point "not open" is the right answer whether the
+        // pid is alive or dead. Everything they decide is keyed on the client pid
+        // anyway. A regular file has no kernel primitive for "wait for a writer",
+        // so galvanize substitutes pid liveness, and that substitution is what made
+        // a stale pid matter here and nowhere else.
         let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
 
         let span = tracing::info_span!(
@@ -1441,9 +1452,22 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         }
 
         // Wait for Execlog stream to complete.
+        //
+        // This is the one place that has both the reader's verdict and bazel's exit
+        // code, which is what makes the warning safe to print: a log that never
+        // appeared is ordinary on a failed invocation (a mistyped target pattern
+        // never reaches the phase that creates one, and bazel has already said so)
+        // and an anomaly on a successful one. See `ReaderOutcome`.
         let execlog_stream = build.execlog_stream.take();
         if let Some(execlog_stream) = execlog_stream {
             match execlog_stream.join() {
+                Ok(ReaderOutcome::NeverAppeared) if result.success() => {
+                    errln!(
+                        "WARNING: bazel completed successfully but wrote no execution \
+                         log, so `exec_log_event` hooks and execution-log sinks saw \
+                         nothing for this invocation."
+                    );
+                }
                 Ok(_) => {}
                 Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
             }
