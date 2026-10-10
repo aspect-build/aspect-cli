@@ -505,7 +505,6 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    # The trait's execution_log_sinks plus any exec_log_event handle.
     xl = bzl.exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(

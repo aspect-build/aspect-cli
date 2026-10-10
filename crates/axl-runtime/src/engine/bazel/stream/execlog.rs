@@ -31,9 +31,12 @@ pub enum ExecLogStreamError {
 ///
 /// Bazel creates the compact log once a command gets past target-pattern parsing
 /// and package loading — including for a build that runs no actions at all, which
-/// still leaves an empty zstd frame (28 bytes on Bazel 7, 66 on 8 and 9). It does
-/// *not* create one for a pattern that names no target, an unparseable BUILD file
-/// or a rejected flag, and every one of those exits nonzero.
+/// still leaves an empty zstd frame (28 bytes on Bazel 7, 66 on 8 and 9). A
+/// pattern that resolves and matches nothing (`//...` in an empty workspace,
+/// `//pkg:all`) is one of those: it exits 0 and writes the empty frame. Bazel does
+/// *not* create one for a pattern that does not resolve — no such package or
+/// target — an unparseable BUILD file or a rejected flag, and every one of those
+/// exits nonzero.
 ///
 /// So the absence of a log is only remarkable on an invocation that *succeeded*,
 /// and that is the one the caller is asked to warn about: a successful build whose
@@ -41,6 +44,12 @@ pub enum ExecLogStreamError {
 /// hook fires zero times and nothing says so. On a failed build the absence is
 /// ordinary and Bazel has already printed the reason, so a warning there would
 /// only crowd it out.
+///
+/// The outcome reaches a caller only through `join()`, and `Build` joins the
+/// stream from `wait()` alone — there is no `Drop` path and `wait_timeout` does
+/// not join — so a task that never calls `wait()` never learns it, and no warning
+/// is printed. Every wired site calls `wait()`, so this is a note about where the
+/// verdict lives rather than a gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReaderOutcome {
     /// The log appeared and was read to the end of the stream.
@@ -379,14 +388,13 @@ impl ExecLogStream {
         self.file_sink_handles.push(handle);
     }
 
-    /// Wait for the execlog stream to finish.
+    /// Join the reader and every file sink, reporting what the reader found at
+    /// the log's path. See [`ReaderOutcome`] for what a caller does with it.
     ///
     /// Releases the stream's own subscriber if it still holds one, so that with no
     /// consumer left the reader stops decoding and drains. Then waits for the
     /// reader thread and every attached file-sink writer, surfacing the first
     /// write error if any.
-    /// Join the reader and every file sink, reporting what the reader found at
-    /// the log's path. See [`ReaderOutcome`] for what a caller does with it.
     pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
         self.recv.take();
         let reader_result = self.handle.join().expect("join error");

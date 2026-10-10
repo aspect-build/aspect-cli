@@ -12,8 +12,8 @@
 //! handle hides: a hook watching `aspect delivery` hears about three
 //! invocations, and a per-file rule is satisfied by the first. A spawn that
 //! deliberately carries no handle is named in `DEVIATIONS`, which records that
-//! file's whole shape — spawn sites, handles, pumps — beside the reason,
-//! with the reason — these two tables are where that decision is recorded, and
+//! file's whole shape — spawn sites, handles, pumps — beside the reason, and is
+//! the one place that decision is recorded. Every count in a row is asserted, so
 //! a stale entry fails rather than lingering.
 //!
 //! The source tree is embedded at compile time, the same way the CLI embeds it
@@ -74,10 +74,11 @@ fn handle_waits(source: &str) -> Vec<usize> {
 ///
 /// Every count is asserted, so a file listed here cannot quietly grow another
 /// spawn site or lose a handle: `sites` catches a new invocation, `opens` and
-/// `pumps` catch one that stopped dispatching. An earlier version recorded only
-/// `opens`, which meant a fourth unwired `ctx.bazel.build(` in `delivery.axl`
-/// changed nothing it checked — the two files most likely to grow an invocation
-/// were exactly where the check stopped working.
+/// `pumps` catch one that stopped dispatching. All three are needed — recording
+/// only `opens` would exempt the file's *spawn* count, so a new unwired
+/// `ctx.bazel.build(` in a file already listed here would change nothing the
+/// check looks at, and the files listed here are the ones most likely to grow
+/// one.
 struct Wiring {
     path: &'static str,
     /// Real `ctx.bazel.build(` / `.test(` call sites in the file.
@@ -104,28 +105,47 @@ const DEVIATIONS: &[Wiring] = &[
         sites: 2,
         opens: 1,
         pumps: 1,
-        why: "`ctx.bazel.test` and `ctx.bazel.build` are the two arms of one               branch — the handle is opened above it, per attempt, and whichever               arm runs gets it",
+        why: "`ctx.bazel.test` and `ctx.bazel.build` are the two arms of one \
+              branch — the handle is opened above it, per attempt, and whichever \
+              arm runs gets it",
     },
     Wiring {
         path: "cache_diff.axl",
         sites: 3,
         opens: 1,
         pumps: 0,
-        why: "two of the three spawns are the probe's invalidate and observe               passes, which run under `--experimental_remote_require_cached`: it               denies anything not already cached, so nothing executes and there               is nothing to log. The third, `--mode=precise`'s pre-pass, does               execute and upload actions and is wired. It pumps nothing because               it asks for no event stream and so has no drain loop to pump from,               which leaves every hook firing from `close`",
+        why: "two of the three spawns are the probe's invalidate and observe \
+              passes, which run under `--experimental_remote_require_cached`: it \
+              denies anything not already cached, so nothing executes and there \
+              is nothing to log. The third, `--mode=precise`'s pre-pass, does \
+              execute and upload actions and is wired. It pumps nothing because \
+              it asks for no event stream and so has no drain loop to pump from, \
+              which leaves every hook firing from `close`",
     },
     Wiring {
         path: "delivery.axl",
         sites: 3,
         opens: 2,
         pumps: 2,
-        why: "phase 2, the checksum re-run, has no handle on purpose: it is a               cache lookup over phase 1's warm analysis under               `--experimental_remote_require_cached`, so every spawn it would log               is either a probe for an action phase 1 already logged or a               `DeliveryHash` probe that stands for no work the user asked for. A               hook auditing spawns would double-count the first and have to learn               to ignore the second. The trait's `build_event` hooks are withheld               from that phase for the same reason, and the two streams describe               the same thing",
+        why: "phase 2, the checksum re-run, has no handle on purpose: it is a \
+              cache lookup over phase 1's warm analysis under \
+              `--experimental_remote_require_cached`, so every spawn it would log \
+              is either a probe for an action phase 1 already logged or a \
+              `DeliveryHash` probe that stands for no work the user asked for. A \
+              hook auditing spawns would double-count the first and have to learn \
+              to ignore the second. The trait's `build_event` hooks are withheld \
+              from that phase for the same reason, and the two streams describe \
+              the same thing",
     },
     Wiring {
         path: "private/lib/cache_selection.axl",
         sites: 1,
         opens: 0,
         pumps: 0,
-        why: "a `--noanalyze` probe: it prevents analysis and every build and               test action, so Bazel runs nothing and logs nothing",
+        why: "a `--noanalyze` probe: it prevents analysis and every build and \
+              test action, so Bazel executes nothing. It still writes a log — an \
+              empty zstd frame, 28 bytes on Bazel 7 and 66 on 8 and 9 — but there \
+              are no entries in it to dispatch",
     },
     Wiring {
         path: "bazel/invocation_test.axl",
@@ -165,10 +185,10 @@ fn sources() -> Vec<(String, &'static str)> {
 /// Every spawn site opens a handle, unless the file says otherwise in full.
 ///
 /// Per *site*, not per file: a file that drives Bazel several times would
-/// otherwise pass on one wired call site, which is how `delivery.axl` passed
-/// while two of its three phases dispatched nothing. Counting sites makes the
-/// second and third invocation of a multi-phase task decisions somebody made
-/// rather than call sites nobody looked at.
+/// otherwise pass on one wired call site while its other phases dispatched
+/// nothing — `delivery.axl` has three. Counting sites makes the second and third
+/// invocation of a multi-phase task decisions somebody made rather than call
+/// sites nobody looked at.
 #[test]
 fn every_spawn_site_opens_a_handle_or_is_recorded() {
     for (path, source) in sources() {
@@ -253,13 +273,14 @@ fn every_opened_handle_is_closed_and_pumped_as_recorded() {
             "{path}: one `exec_log.close` per `exec_log.open` — a handle that is \
              never drained loses every entry still in flight when `wait()` releases it",
         );
-        let expected_pumps = deviation(&path).map_or(opens, |w| w.pumps);
+        let recorded = deviation(&path);
+        let expected_pumps = recorded.map_or(opens, |w| w.pumps);
         assert_eq!(
             calls(source, "pump").len(),
             expected_pumps,
             "{path}: expected {expected_pumps} `exec_log.pump` call(s){}. Pump in the \
              invocation's own drain loop, or record the difference in DEVIATIONS in {}.",
-            deviation(&path).map_or(String::new(), |w| format!(" ({})", w.why)),
+            recorded.map_or(String::new(), |w| format!(" ({})", w.why)),
             file!(),
         );
     }
