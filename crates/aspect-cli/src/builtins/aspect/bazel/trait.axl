@@ -1,5 +1,11 @@
-"""The `BazelTrait` interface, Bazel exit codes, the retry budget constants, and
-the `dispatch_*` helpers that fire the trait's lifecycle hooks.
+"""The `BazelTrait` interface, the `ExecLogHook` subscription record, Bazel exit
+codes, the retry budget constants, and the `dispatch_*` helpers that fire the
+trait's lifecycle hooks.
+
+The `exec_log_event` hooks are driven from `./exec_log.axl` rather than by a
+`dispatch_*` helper here: unlike `build_end`, they need a handle created before
+the spawn and drained before `wait()`, which is a lifecycle rather than a single
+call.
 
 Exit codes correspond to Bazel's ExitCode.java:
 https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/util/ExitCode.java
@@ -60,6 +66,28 @@ def default_retry(code: int) -> bool:
     """
     return code == exit_codes.BLAZE_INTERNAL_ERROR or code == exit_codes.LOCAL_ENVIRONMENTAL_ERROR
 
+# One `exec_log_event` subscription: the callback, plus the entry kinds it wants.
+#
+# `kinds` is not a convenience. A compact execution log carries one entry per
+# spawn *plus* one per file, directory, input set and runfiles tree, so a medium
+# build produces tens of thousands of entries where only a few hundred are
+# spawns. Naming the kinds lets the runtime drop the rest before they ever
+# become Starlark values (`bazel.execution_log.iterator(kinds = ...)`), which is
+# the difference between a dispatch that costs nothing and one that adds seconds
+# to the end of every build. `[]` means every kind, and is only the right answer
+# for a hook that genuinely reads all of them.
+#
+# `on_entry` receives `(ctx, entry)` where `entry` is a
+# `bazel.build.execution_log.ExecLogEntry`: `entry.id` plus `entry.type`, the
+# payload, whose AXL type name (`type(entry.type)`) is the kind. A raw entry
+# refers to other entries by id — a spawn names `input_set_id`, not paths — so
+# `@aspect//private/lib/execlog.axl` carries the resolver that turns those ids
+# back into paths and digests.
+ExecLogHook = record(
+    on_entry = field(typing.Callable[[TaskContext, typing.Any], None]),
+    kinds = field(list[str], default = []),
+)
+
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
     extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
@@ -90,6 +118,7 @@ BazelTrait = trait(
     # Lifecycle hooks — lists of callables; callers close over their own state
     build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
     build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
+    exec_log_event = attr(list[ExecLogHook], default = [], description = "Hooks called for each compact execution log entry Bazel writes during the build. Each is an `ExecLogHook(on_entry = fn, kinds = [...])`; the union of every hook's `kinds` is filtered in Rust before dispatch, so name them. Registering any hook also switches the execution log producer to its lossless path — a hook sees every entry of the kinds it asked for, never a sample"),
     build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
     bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),

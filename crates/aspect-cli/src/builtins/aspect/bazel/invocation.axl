@@ -7,7 +7,11 @@ exposes the flow as verbs the task drives in a visible loop (see `build.axl`):
 the verbs are thin forwarders over that single record, and the top-level `_do_*`
 functions thread it — no closure tower, no mutable state dict. The live
 invocation and the attempt index are threaded as values (the `_spawned` struct
-and the callsite's loop counter), never stored."""
+and the callsite's loop counter), never stored.
+
+The one thing the constructor cannot resolve is the execution-log wiring: an
+`exec_log_event` handle binds to a single build, so each attempt opens its own
+(`./exec_log.axl`) and threads it through the `_spawned` struct the same way."""
 
 load(
     "@aspect//bazel/build_events.axl",
@@ -22,6 +26,7 @@ load(
     "dropped_bes_backends",
     "summarize_bes_upload",
 )
+load("@aspect//bazel/exec_log.axl", "exec_log")
 load("@aspect//bazel/flags.axl", "resolve_announce", "resolve_rc_flags", "setup_command")
 load("@aspect//bazel/trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -164,6 +169,13 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     """Spawn attempt `index` and RETURN a `_spawned` struct — the live handle is
     threaded via that return value, never stored on `inv`."""
 
+    # Execution-log wiring for this attempt: the trait's sinks plus, when an
+    # `exec_log_event` hook is registered, the iterator handle that feeds it.
+    # Resolved before the spawn because that is what tells the runtime an
+    # every-entry consumer exists, and freshly per attempt because a handle binds
+    # to exactly one build.
+    xl = exec_log.open(inv.trait)
+
     # Disclose what this bazel call was wired with, after the spawn phase line so
     # both land under the phase they describe: the `build_start` hooks (the
     # deployment's injected `--remote_cache` / `--remote_executor` announcement),
@@ -196,7 +208,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     if inv.command == "test":
         handle = inv.ctx.bazel.test(
             build_events = build_events,
-            execution_log = inv.trait.execution_log_sinks or False,
+            execution_log = xl.sinks or False,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
@@ -205,7 +217,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     else:
         handle = inv.ctx.bazel.build(
             build_events = build_events,
-            execution_log = inv.trait.execution_log_sinks or False,
+            execution_log = xl.sinks or False,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
@@ -223,13 +235,22 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
         index = index,
         events = iterator if iterator else [],
         sink_invocation_id = handle.sink_invocation_id,
-        wait = lambda: _do_wait(inv, handle),
+        pump = lambda: exec_log.pump(inv.ctx, xl),
+        wait = lambda: _do_wait(inv, handle, xl),
     )
 
-def _do_wait(inv: _Invocation, handle):
-    """Block on the attempt, flush BES sinks (rebinding a still-Live gRPC sink on
-    the next spawn errors; wait() resets it to Idle), then fire `bazel_attempt_end`
-    before the retry decision."""
+def _do_wait(inv: _Invocation, handle, xl: struct):
+    """Drain the execution log, block on the attempt, flush BES sinks (rebinding a
+    still-Live gRPC sink on the next spawn errors; wait() resets it to Idle), then
+    fire `bazel_attempt_end` before the retry decision.
+
+    The execution log is drained first, and that order is load-bearing rather than
+    stylistic: a bound `exec_log_event` handle is a subscriber the log producer
+    blocks for, and `handle.wait()` joins that producer. Waiting first would join a
+    thread waiting on us. (`wait()` releases a still-bound handle rather than
+    deadlocking, so the cost of getting this wrong is dropped entries, not a hang —
+    but dropped entries are not the contract.)"""
+    exec_log.close(inv.ctx, xl)
     status = handle.wait()
     for sink in inv.sinks:
         sink.wait()

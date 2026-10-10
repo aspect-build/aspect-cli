@@ -505,9 +505,15 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
+    # Execution-log wiring: the trait's own sinks plus, when an `exec_log_event`
+    # hook is registered, the handle that feeds it. Opened before the spawn —
+    # that is what lets the runtime see an every-entry consumer and stop dropping.
+    xl = bzl.exec_log.open(bazel_trait)
+
     build = ctx.bazel.build(
         ctx.args.gazelle_target,
         build_events = build_events,
+        execution_log = xl.sinks or False,
         flags = r.flags + endpoint_auth_flags,
         aspects = r.aspects,
         directory = ctx.std.env.bazel_root_dir(),
@@ -539,6 +545,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
+        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -560,6 +567,9 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         if events.done:
             break
 
+    # Drain the execution log before waiting: a bound hook handle is a subscriber
+    # the log producer blocks for, and `build.wait()` joins that producer.
+    bzl.exec_log.close(ctx, xl)
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()

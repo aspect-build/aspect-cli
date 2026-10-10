@@ -1,0 +1,194 @@
+"""Tests for the `exec_log_event` wiring in `bazel/exec_log.axl`.
+
+Three things here can be wrong in a way nothing else would notice:
+
+  * the kinds union — too narrow and a hook silently stops seeing the entries it
+    asked for, which is the exact failure the filter exists to make impossible;
+  * `exact` — too eager and hooks receive kinds they did not ask for, too shy and
+    every entry pays for a `type()` call it did not need;
+  * `open` with no hooks registered — it must return a *falsy* sink list, because
+    `ctx.bazel.build(execution_log = [])` means "stream on with no consumer", not
+    "off". Getting that wrong turns on the execution log for every build in the
+    CLI.
+
+The live half — a real log, a bound handle, hooks firing per entry — needs a
+Bazel build and is covered by the Rust side (`iter::execlog`) instead.
+
+Run with:
+  aspect dev test-bazel-exec-log
+"""
+
+load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook", bzl = "bazel")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _recorder(seen, name, kinds = []):
+    """A hook that appends `(name, entry)` to `seen`, so a test can pin which
+    hooks fired and in what order."""
+
+    def _on_entry(_ctx, entry):
+        seen.append((name, entry))
+
+    return ExecLogHook(on_entry = _on_entry, kinds = kinds)
+
+def _handle(hooks, exact):
+    """The shape `_fire` reads off `open`'s result, without a build behind it."""
+    return struct(sinks = [], entries = None, hooks = hooks, exact = exact)
+
+def _test_union_of_one_hook(_ctx):
+    hook = _recorder([], "a", kinds = ["spawn"])
+    _eq("single hook", bzl.exec_log.testonly_union_kinds([hook]), ["spawn"])
+
+def _test_union_merges_and_sorts(_ctx):
+    hooks = [
+        _recorder([], "a", kinds = ["spawn", "file"]),
+        _recorder([], "b", kinds = ["file", "input_set"]),
+    ]
+    _eq(
+        "deduplicated and sorted",
+        bzl.exec_log.testonly_union_kinds(hooks),
+        ["file", "input_set", "spawn"],
+    )
+
+def _test_one_unfiltered_hook_widens_the_union_to_everything(_ctx):
+    """`kinds = []` means "every kind". Narrowing the stream to another hook's
+    list would starve it, so None has to win."""
+    hooks = [_recorder([], "a", kinds = ["spawn"]), _recorder([], "b")]
+    _eq("None wins", bzl.exec_log.testonly_union_kinds(hooks), None)
+
+    # Also when the unfiltered hook registered first.
+    hooks = [_recorder([], "b"), _recorder([], "a", kinds = ["spawn"])]
+    _eq("order does not matter", bzl.exec_log.testonly_union_kinds(hooks), None)
+
+def _test_no_hooks_means_no_filter(_ctx):
+    _eq("empty", bzl.exec_log.testonly_union_kinds([]), None)
+
+def _test_exact_when_the_union_is_every_kind(_ctx):
+    """Nothing was filtered out, so there is nothing to re-check in AXL."""
+    _eq("no filter", bzl.exec_log.testonly_is_exact([_recorder([], "a")], None), True)
+
+def _test_exact_when_every_hook_asked_for_the_same_kinds(_ctx):
+    hooks = [
+        _recorder([], "a", kinds = ["spawn", "file"]),
+        _recorder([], "b", kinds = ["file", "spawn"]),
+    ]
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    _eq("same set, different order", bzl.exec_log.testonly_is_exact(hooks, kinds), True)
+
+def _test_not_exact_when_hooks_disagree(_ctx):
+    """The union over-delivers for the narrower hook, so dispatch has to re-check."""
+    hooks = [
+        _recorder([], "a", kinds = ["spawn"]),
+        _recorder([], "b", kinds = ["spawn", "file"]),
+    ]
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    _eq("disagreement", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
+
+def _test_fire_delivers_to_every_hook_in_registration_order(ctx):
+    seen = []
+    hooks = [_recorder(seen, "first", kinds = ["spawn"]), _recorder(seen, "second", kinds = ["spawn"])]
+    bzl.exec_log.testonly_fire(ctx, _handle(hooks, True), "entry-1")
+    _eq("both, in order", seen, [("first", "entry-1"), ("second", "entry-1")])
+
+def _test_fire_with_no_hooks_is_a_noop(ctx):
+    bzl.exec_log.testonly_fire(ctx, _handle([], True), "entry-1")
+
+def _test_wants_filters_a_narrow_hook(_ctx):
+    """The AXL-side re-check used only when hooks disagree."""
+    narrow = _recorder([], "a", kinds = ["spawn"])
+    _eq("asked for it", bzl.exec_log.testonly_wants(narrow, "spawn"), True)
+    _eq("did not ask for it", bzl.exec_log.testonly_wants(narrow, "file"), False)
+
+def _test_wants_passes_everything_to_an_unfiltered_hook(_ctx):
+    everything = _recorder([], "a")
+    _eq("spawn", bzl.exec_log.testonly_wants(everything, "spawn"), True)
+    _eq("file", bzl.exec_log.testonly_wants(everything, "file"), True)
+    _eq("even an unknown kind", bzl.exec_log.testonly_wants(everything, "whatever"), True)
+
+def _test_open_without_hooks_leaves_the_log_off(_ctx):
+    """No hooks and no sinks: the sink list must be falsy so the caller's
+    `xl.sinks or False` turns the execution log off entirely."""
+    h = bzl.exec_log.open(BazelTrait())
+    _eq("no handle", h.entries, None)
+    _eq("no hooks", h.hooks, [])
+    _eq("falsy sinks", bool(h.sinks), False)
+
+def _test_open_without_hooks_still_forwards_the_traits_sinks(_ctx):
+    """A feature that registered a `CompactFile` sink must keep working whether
+    or not anything subscribed to `exec_log_event`."""
+    sink = bazel.execution_log.compact_file(path = "/tmp/exec.binpb.zst")
+    h = bzl.exec_log.open(BazelTrait(execution_log_sinks = [sink]))
+    _eq("sink forwarded", len(h.sinks), 1)
+    _eq("no handle", h.entries, None)
+
+def _test_open_with_a_hook_adds_a_handle_alongside_the_sinks(_ctx):
+    sink = bazel.execution_log.compact_file(path = "/tmp/exec.binpb.zst")
+    trait = BazelTrait(
+        execution_log_sinks = [sink],
+        exec_log_event = [_recorder([], "a", kinds = ["spawn"])],
+    )
+    h = bzl.exec_log.open(trait)
+    _eq("sink + handle", len(h.sinks), 2)
+    _eq("handle is the last element", h.sinks[1], h.entries)
+    _eq("hooks carried", len(h.hooks), 1)
+    _eq("single hook needs no re-check", h.exact, True)
+
+def _test_open_is_fresh_per_call(_ctx):
+    """A handle binds to exactly one build, so each attempt must get its own —
+    two calls returning the same handle would fail the second spawn."""
+    trait = BazelTrait(exec_log_event = [_recorder([], "a", kinds = ["spawn"])])
+    first = bzl.exec_log.open(trait)
+    second = bzl.exec_log.open(trait)
+    if first.entries == second.entries:
+        fail("open() must mint a fresh iterator handle per invocation")
+
+def _test_open_with_disagreeing_hooks_is_not_exact(_ctx):
+    trait = BazelTrait(exec_log_event = [
+        _recorder([], "a", kinds = ["spawn"]),
+        _recorder([], "b", kinds = ["file"]),
+    ])
+    h = bzl.exec_log.open(trait)
+    _eq("re-check needed", h.exact, False)
+
+def _test_pump_and_close_are_noops_without_a_handle(ctx):
+    """Every call site calls both unconditionally, so neither may care whether a
+    hook was registered."""
+    h = bzl.exec_log.open(BazelTrait())
+    _eq("nothing dispatched", bzl.exec_log.pump(ctx, h), 0)
+    bzl.exec_log.close(ctx, h)
+
+_UNIT_TESTS = [
+    _test_union_of_one_hook,
+    _test_union_merges_and_sorts,
+    _test_one_unfiltered_hook_widens_the_union_to_everything,
+    _test_no_hooks_means_no_filter,
+    _test_exact_when_the_union_is_every_kind,
+    _test_exact_when_every_hook_asked_for_the_same_kinds,
+    _test_not_exact_when_hooks_disagree,
+    _test_fire_delivers_to_every_hook_in_registration_order,
+    _test_fire_with_no_hooks_is_a_noop,
+    _test_wants_filters_a_narrow_hook,
+    _test_wants_passes_everything_to_an_unfiltered_hook,
+    _test_open_without_hooks_leaves_the_log_off,
+    _test_open_without_hooks_still_forwards_the_traits_sinks,
+    _test_open_with_a_hook_adds_a_handle_alongside_the_sinks,
+    _test_open_is_fresh_per_call,
+    _test_open_with_disagreeing_hooks_is_not_exact,
+    _test_pump_and_close_are_noops_without_a_handle,
+]
+
+def _test_impl(ctx: TaskContext) -> int:
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("exec_log.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+exec_log_tests = task(
+    summary = "Run the exec_log_event dispatch AXL unit tests.",
+    kind = "test-bazel-exec-log",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

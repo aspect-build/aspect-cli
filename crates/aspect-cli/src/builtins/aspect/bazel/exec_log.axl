@@ -1,0 +1,156 @@
+"""The one place `BazelTrait.exec_log_event` hooks are wired up and fired.
+
+Every task that drives Bazel needs the same three steps, and getting any of them
+wrong fails quietly, so none of them live at the call sites:
+
+  `open(trait)`      before the spawn. Returns the `execution_log=` list to pass
+                     to `ctx.bazel.build` / `.test` — the trait's own sinks, plus
+                     one `bazel.execution_log.iterator()` handle when a hook is
+                     registered. The handle has to exist *before* the spawn: it
+                     is what tells the runtime an every-entry consumer is
+                     subscribed, which is what makes the stream lossless.
+  `pump(ctx, h)`     optional, inside the task's existing BES tick loop. Fires
+                     hooks on whatever has arrived, without blocking, so a hook
+                     that reports progress reports it during the build.
+  `close(ctx, h)`    after the task's own drain loop and **before** `build.wait()`.
+                     Drains to the end of the stream and fires the rest.
+
+Why `close` must precede `wait()`: a bound handle is a subscriber the producer
+blocks for, and `wait()` joins the producer. Calling it the other way round would
+join a thread that is waiting for us. `build.wait()` releases any handle still
+bound for exactly this reason — a task that skips `close` loses entries instead
+of hanging — but losing entries is not the contract, so call `close`.
+
+## Back-pressure
+
+A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
+Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails
+it (`ExecLogStream::spawn_with_file`). A slow consumer parks the CLI's reader
+thread on a full 1000-entry channel; Bazel keeps writing to the file regardless.
+So the cost of an expensive hook is paid at the end of the build, in `close` and
+in the `join()` inside `wait()`, and never as a stalled action graph.
+
+The channel is a broadcast: every subscriber receives every entry. Hooks are
+therefore an *additional* consumer alongside a `File` sink and
+`build.execution_logs()`, not a competitor for entries.
+
+What this does not fix is volume. One entry per spawn plus one per file,
+directory, input set and runfiles tree is 10k-50k entries on a medium build, and
+a Starlark call per entry is real money — hence `ExecLogHook.kinds`, which is
+applied in Rust before an entry becomes a Starlark value. `kinds = ["spawn"]` is
+commonly a few percent of the stream.
+"""
+
+load("./trait.axl", "BazelTrait", "ExecLogHook")
+
+# Entries dispatched per `pump` call. Bounds one non-blocking visit so a burst
+# cannot monopolize a tick loop that also has BES events and a progress line to
+# get to; whatever is left is picked up on the next tick, or by `close`.
+_PUMP_BUDGET = 10000
+
+def _union_kinds(hooks: list[ExecLogHook]) -> list[str] | None:
+    """The kinds the runtime must deliver: the union of what every hook asked
+    for, or None for "every kind" when any hook wants everything.
+
+    None is deliberately infectious. A hook with `kinds = []` reads all kinds, so
+    narrowing the stream on another hook's behalf would silently starve it — the
+    failure mode this whole module exists to avoid. No hooks at all is None for a
+    different reason: `kinds = []` is not a value the runtime accepts, so an empty
+    union must never reach it."""
+    out = {}
+    for hook in hooks:
+        if not hook.kinds:
+            return None
+        for kind in hook.kinds:
+            out[kind] = True
+    return sorted(out) if out else None
+
+def _is_exact(hooks: list[ExecLogHook], kinds: list[str] | None) -> bool:
+    """Whether the Rust-side filter is already exactly right for every hook, so
+    dispatch can skip re-checking each entry's kind in AXL.
+
+    True when no hook filters (nothing to re-check) or when every hook asked for
+    the same set the runtime was given. False only when hooks disagree, which is
+    when the union delivers one hook entries another asked for."""
+    if kinds == None:
+        return True
+    for hook in hooks:
+        if sorted(hook.kinds) != kinds:
+            return False
+    return True
+
+def _open(bazel_trait: BazelTrait) -> struct:
+    """Resolve this invocation's execution-log wiring. See the module docstring.
+
+    `.sinks` goes straight to `execution_log =`; it is already the trait's
+    `execution_log_sinks` plus the hook handle, so a caller passes it instead of
+    building that list itself. Falsy when nothing wants the log at all, which is
+    what `ctx.bazel.build` needs to skip the stream entirely (an empty list means
+    "stream on with no consumer")."""
+    hooks = list(bazel_trait.exec_log_event)
+    sinks = list(bazel_trait.execution_log_sinks)
+    if not hooks:
+        return struct(sinks = sinks, entries = None, hooks = [], exact = True)
+
+    kinds = _union_kinds(hooks)
+    entries = bazel.execution_log.iterator() if kinds == None else bazel.execution_log.iterator(kinds = kinds)
+    return struct(
+        sinks = sinks + [entries],
+        entries = entries,
+        hooks = hooks,
+        exact = _is_exact(hooks, kinds),
+    )
+
+def _wants(hook: ExecLogHook, kind: str) -> bool:
+    """Whether `hook` asked for entries of `kind`. `kinds = []` means all."""
+    return not hook.kinds or kind in hook.kinds
+
+def _fire(ctx: TaskContext, h: struct, entry) -> None:
+    """Hand one entry to every hook that asked for its kind."""
+    if h.exact:
+        for hook in h.hooks:
+            hook.on_entry(ctx, entry)
+        return
+
+    # Hooks disagree about kinds, so the runtime's union over-delivers for some
+    # of them. One `type()` per entry, not one per hook.
+    kind = type(entry.type)
+    for hook in h.hooks:
+        if _wants(hook, kind):
+            hook.on_entry(ctx, entry)
+
+def _pump(ctx: TaskContext, h: struct) -> int:
+    """Dispatch what has already arrived and return how many entries that was.
+    Never blocks. Safe to call any number of times, including when no hook is
+    registered."""
+    if h.entries == None:
+        return 0
+    seen = 0
+    for _ in range(_PUMP_BUDGET):
+        entry = h.entries.try_pop()
+        if entry == None:
+            break
+        _fire(ctx, h, entry)
+        seen += 1
+    return seen
+
+def _close(ctx: TaskContext, h: struct) -> None:
+    """Drain to the end of the stream, dispatching as entries arrive. Blocks
+    until Bazel closes the log, so this belongs after the task's own drain loop
+    and before `build.wait()` — see the module docstring for why that order is
+    not interchangeable."""
+    if h.entries == None:
+        return
+    for entry in h.entries:
+        _fire(ctx, h, entry)
+
+exec_log = struct(
+    open = _open,
+    pump = _pump,
+    close = _close,
+    Hook = ExecLogHook,
+    testonly_union_kinds = _union_kinds,
+    testonly_is_exact = _is_exact,
+    testonly_fire = _fire,
+    testonly_wants = _wants,
+)

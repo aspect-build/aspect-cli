@@ -812,10 +812,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     announce_bes_sinks(ctx, bes_sinks)
 
     # 6. Build + stream events
+    # Execution-log wiring: the trait's own sinks plus, when an `exec_log_event`
+    # hook is registered, the handle that feeds it. Opened before the spawn —
+    # that is what lets the runtime see an every-entry consumer and stop dropping.
+    xl = bzl.exec_log.open(bazel_trait)
+
     # TODO: re-introduce --quiet once we can capture (not only inherit-or-not)
     # Bazel's stdout/stderr. Today suppressing both hides build failures.
     build = ctx.bazel.build(
         build_events = build_events,
+        execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,
         flags = endpoint_auth_flags,
@@ -867,6 +873,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
+        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
         pass_deadline_ms = now_ms(ctx) + _PASS_READ_BUDGET_MS
 
         pending_files, pending_interesting, pending_exit_nonzero = _drain_pending_files(
@@ -929,6 +936,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     # 7. Wait for build
+    # Drain the execution log before waiting: a bound hook handle is a subscriber
+    # the log producer blocks for, and `build.wait()` joins that producer.
+    bzl.exec_log.close(ctx, xl)
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()

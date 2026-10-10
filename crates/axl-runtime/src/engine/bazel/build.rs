@@ -39,6 +39,7 @@ use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Bound, Recv, recv_cancellable};
 use tokio_util::sync::CancellationToken;
 
+use super::iter::ExecLogIter;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::sink::execlog::ExecLogSink;
@@ -835,6 +836,15 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
+    /// The `bazel.execution_log.iterator()` handles subscribed to
+    /// `execlog_stream`. Held so `wait()` can release them before joining the
+    /// stream: each one is a subscriber the producer blocks for, so a task that
+    /// never drained its handle would otherwise park the reader thread forever
+    /// on a full channel. Holds no Starlark values — an `ExecLogIter` clone is
+    /// its filter plus an `Arc` to the shared bind state.
+    #[allocative(skip)]
+    execlog_iters: Vec<ExecLogIter>,
+
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -880,7 +890,7 @@ impl Build {
         verb: &str,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks, iters): (bool, Vec<BuildEventSink>, Vec<BuildEventIter>),
-        (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
+        (execution_logs, execlog_sinks, execlog_iters): (bool, Vec<ExecLogSink>, Vec<ExecLogIter>),
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
@@ -1018,13 +1028,18 @@ impl Build {
 
         // Same two-pid split for the execution log: the daemon writes the file, but
         // only the client can say the invocation is over and none is coming.
+        // A decoded `File` sink or an iterator handle is a consumer that must see
+        // every entry, so the producer blocks rather than dropping. Both are known
+        // here, before Bazel writes anything, which is the whole reason the iterator
+        // is passed in rather than fetched from the returned handle.
+        let lossless = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
         let mut execlog_stream = match execlog_path {
             Some(p) => Some(ExecLogStream::spawn_with_file(
                 p,
                 pid,
                 child.id(),
                 compact_paths,
-                !decoded_sinks.is_empty(),
+                lossless,
             )?),
             None => None,
         };
@@ -1085,8 +1100,43 @@ impl Build {
         if let Some(stream) = execlog_stream.as_mut() {
             for sink in decoded_sinks {
                 if let ExecLogSink::File { path } = sink {
-                    stream.attach_file_sink(ExecLogSink::spawn_file(stream.receiver(), path));
+                    let recv = stream.receiver().ok_or_else(|| {
+                        io::Error::other("execution log stream has no subscriber to clone")
+                    })?;
+                    stream.attach_file_sink(ExecLogSink::spawn_file(recv, path));
                 }
+            }
+        }
+
+        // Subscribe the iterator handles. Each gets its own receiver clone: the
+        // channel is a broadcast ring, so hooks read the same entries the file
+        // sinks do instead of competing with them for entries.
+        if !execlog_iters.is_empty() {
+            let stream = execlog_stream.as_ref().ok_or_else(|| {
+                io::Error::other(
+                    "ctx.bazel.build/test: execution_log list contained `iterator()` handles \
+                     but no execution log stream is configured",
+                )
+            })?;
+            for iter in &execlog_iters {
+                let recv = stream.receiver().ok_or_else(|| {
+                    io::Error::other("execution log stream has no subscriber to clone")
+                })?;
+                iter.bind(recv).map_err(io::Error::other)?;
+            }
+        }
+
+        // Every real consumer is now subscribed, so give up the stream's own
+        // unread clone. It is a subscriber too, with its tail stuck at entry
+        // zero, and on the lossless path the producer parks on it the moment the
+        // 1000-entry ring fills — nothing would reach a file sink or a hook past
+        // that point until `join()`, which is to say until the build is over.
+        // Keeping it is right only when nothing else subscribed: then it is what
+        // `build.execution_logs()` clones from, and what makes the producer skip
+        // decoding once even that is gone.
+        if lossless {
+            if let Some(stream) = execlog_stream.as_mut() {
+                stream.detach_initial_subscriber();
             }
         }
         // The tracing sink only emits via `tracing::event!` and never fails;
@@ -1101,6 +1151,7 @@ impl Build {
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
+            execlog_iters,
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1151,7 +1202,14 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             "call `ctx.bazel.build` with `execution_log = true` in order to receive execution log events."
         ))?;
 
-        Ok(ExecutionLogIterator::new(execlog_stream.receiver()))
+        let recv = execlog_stream.receiver().ok_or(anyhow::anyhow!(
+            "this build's execution log already has a consumer that must see every entry \
+             (a decoded `execution_log.file(...)` sink or an `execution_log.iterator()` \
+             handle), so no further subscriber can be added. Pass an \
+             `execution_log.iterator()` handle in `execution_log=[...]` and iterate that \
+             instead — it is also the only form that is guaranteed not to drop entries."
+        ))?;
+        Ok(ExecutionLogIterator::new(recv))
     }
 
     // Creates an iterable `WorkspaceEventIterator` type.
@@ -1263,6 +1321,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
             }
         };
+
+        // Release any iterator handle still bound. A bound handle forces the
+        // producer's blocking sends, so one the task never drained would park the
+        // reader thread on a full channel and hang the join below. The AXL side
+        // drains before calling `wait()` (see `bazel/exec_log.axl`); this is the
+        // net under a task that does not, trading dropped entries for a build
+        // that ends.
+        for iter in &build.execlog_iters {
+            iter.release();
+        }
 
         // Wait for Execlog stream to complete.
         let execlog_stream = build.execlog_stream.take();

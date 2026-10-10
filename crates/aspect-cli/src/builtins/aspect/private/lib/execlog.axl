@@ -1,0 +1,281 @@
+"""Turn compact-execution-log entry ids back into paths, digests and action keys.
+
+A raw entry is not usable on its own. A compact log is a stream of entries that
+reference each other by id: a `spawn` says `input_set_id = 42`, an `input_set`
+names `file` ids and nested set ids, and only a `file` carries the digest that
+actually feeds Bazel's action key. So a hook handed one `spawn` entry knows the
+label and the mnemonic and nothing about what went into it.
+
+`resolver()` closes that gap for a consumer reading the log in order — which is
+every `BazelTrait.exec_log_event` hook. Feed it every entry; it keeps the three
+small id-keyed maps that make resolution possible and answers questions about
+the spawns:
+
+    res = execlog.resolver()
+    def _on_entry(ctx, entry):
+        res.observe(entry)                   # always, for every kind
+        if type(entry.type) == "spawn":
+            print(res.spawn_key(entry.type), res.inputs(entry.type))
+
+`observe` is cheap — a couple of dict writes for a file, nothing for most kinds.
+Resolution is not, so it only happens when asked: flattening every input set in
+a 20 MB log expands to gigabytes, and the whole point of keeping the maps is to
+be able to flatten the handful of spawns a caller cares about instead. A hook
+that calls `inputs()` on every spawn of a large build should expect to pay for
+it.
+
+Ordering is what makes the streaming form correct: Bazel writes an entry before
+anything references it, so by the time a spawn arrives every id it names is
+already in the maps. A caller that reads a log out of order (or reads only part
+of one) gets partial answers rather than wrong ones — an unresolvable id is
+dropped, not guessed at.
+
+Lifted from the two-pass `aspect execlog diff` implementation so the live path
+and the offline path share one definition of a spawn's identity. The offline
+diff needs more than this (a second pass, per-dimension differs); it keeps those
+and loads the resolution from here.
+"""
+
+load("@std//hash.axl", "sha256")
+
+# `type(entry.type)` for each `ExecLogEntry.type` variant. The same names
+# `bazel.execution_log.iterator(kinds = [...])` accepts.
+INVOCATION = "invocation"
+FILE = "file"
+DIRECTORY = "directory"
+UNRESOLVED_SYMLINK = "unresolved_symlink"
+INPUT_SET = "input_set"
+RUNFILES_TREE = "runfiles_tree"
+SPAWN = "spawn"
+SYMLINK_ACTION = "symlink_action"
+SYMLINK_ENTRY_SET = "symlink_entry_set"
+
+# The kinds a resolver has to see for `inputs`/`tools` to be complete. A hook
+# that wants resolution must ask the runtime for at least these, not just
+# `["spawn"]` — the spawn alone carries no paths.
+RESOLVER_KINDS = [FILE, DIRECTORY, UNRESOLVED_SYMLINK, INPUT_SET, RUNFILES_TREE, SPAWN]
+
+# Upper bound on ids visited while flattening one input set, when the caller
+# gives no budget of its own. A set cannot reach more ids than the log has
+# entries, and a resolver fed in order knows how many it has seen, so this only
+# applies to a caller flattening against maps it built by hand (tests) or one
+# that wants a tighter cap than "the whole log".
+DEFAULT_FLATTEN_BUDGET = 1000000
+
+Fingerprint = record(
+    key = field(str),
+    label = field(str),
+    mnemonic = field(str),
+    runner = field(str),
+    cache_hit = field(bool),
+    args_hash = field(str),
+    env_hash = field(str),
+    inputs_hash = field(str),
+    tools_hash = field(str),
+    platform_hash = field(str),
+    overall = field(str),
+)
+
+def _hash(parts: list) -> str:
+    h = sha256()
+    for part in parts:
+        h.update(str(part))
+
+        # Length-prefixing would be tidier, but a NUL cannot appear in an
+        # argv entry or an env name, so it is already unambiguous here.
+        h.update("\x00")
+    return h.hexdigest()
+
+def _digest_of(payload) -> str:
+    """The content hash a `file` entry carries, or `""` when it has none —
+    which Bazel omits for empty files."""
+    d = getattr(payload, "digest", None)
+    return d.hash if d != None else ""
+
+def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) -> list:
+    """Resolve an input set id to a sorted list of `path@digest` strings.
+
+    Iterative rather than recursive: input sets nest arbitrarily deep in a large
+    repo, and a blown evaluation stack part-way through a log is a worse failure
+    than a slow one. `seen` makes a cycle (or, far more often, a set reachable by
+    several paths) terminate and be counted once. `budget` bounds the walk at
+    more ids than any one set can reach, so a malformed log cannot spin.
+
+    `root_id == 0` is Bazel's "no set", not set number zero: it means the spawn
+    has no inputs, and resolves to the empty list.
+    """
+    if root_id == 0:
+        return []
+
+    seen = {}
+    stack = [root_id]
+    out = []
+
+    for _ in range(budget):
+        if not stack:
+            break
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen[current] = True
+
+        if current in sets:
+            direct, transitive = sets[current]
+            for child in direct:
+                stack.append(child)
+            for child in transitive:
+                stack.append(child)
+            continue
+
+        path = paths.get(current)
+        if path != None:
+            out.append(path + "@" + digests.get(current, ""))
+
+    return sorted(out)
+
+def _spawn_key(spawn, paths: dict) -> str:
+    """The identity of an action across two builds, or across two tasks.
+
+    Bazel gives no stable action id, so the primary output path stands in: it is
+    unique within a build and identical between two builds of the same target,
+    which is exactly the property a key needs. Outputs are ids into the entry
+    table, except when Bazel could not resolve one and recorded the raw path
+    instead.
+    """
+    for output in spawn.outputs:
+        value = output.type
+        if type(value) == "string":
+            return value
+        resolved = paths.get(value)
+        if resolved != None:
+            return resolved
+
+    # A spawn with no usable output is rare (a failed action that produced
+    # nothing). Falling back to the label keeps it addressable instead of
+    # silently dropping it, at the cost of colliding with its siblings.
+    return spawn.target_label + "!" + spawn.mnemonic
+
+def _platform_properties(spawn) -> list:
+    platform = spawn.platform
+    if platform == None:
+        return []
+    return sorted([p.name + "=" + p.value for p in platform.properties])
+
+def _fingerprint(spawn, sets: dict, paths: dict, digests: dict, budget: int) -> Fingerprint:
+    """Hash each dimension of the action key separately, then the whole.
+
+    Separately because the per-dimension hashes are what let a reader say *why*
+    two runs of an action differ; `overall` alone can only say that they do.
+    """
+    args_hash = _hash(spawn.args)
+    env_hash = _hash(sorted([v.name + "=" + v.value for v in spawn.env_vars]))
+    inputs_hash = _hash(_flatten(sets, paths, digests, spawn.input_set_id, budget))
+    tools_hash = _hash(_flatten(sets, paths, digests, spawn.tool_set_id, budget))
+    platform_hash = _hash(_platform_properties(spawn))
+
+    return Fingerprint(
+        key = _spawn_key(spawn, paths),
+        label = spawn.target_label,
+        mnemonic = spawn.mnemonic,
+        runner = spawn.runner,
+        cache_hit = spawn.cache_hit,
+        args_hash = args_hash,
+        env_hash = env_hash,
+        inputs_hash = inputs_hash,
+        tools_hash = tools_hash,
+        platform_hash = platform_hash,
+        overall = _hash([args_hash, env_hash, inputs_hash, tools_hash, platform_hash]),
+    )
+
+def _as_map(flattened: list) -> dict:
+    """`["a@dig", ...]` → `{"a": "dig", ...}`. Splits on the last `@` because a
+    path may contain one and a digest may not."""
+    out = {}
+    for item in flattened:
+        path, _, digest = item.rpartition("@")
+        out[path] = digest
+    return out
+
+def _resolver() -> struct:
+    """A stateful id table fed one entry at a time. See the module docstring.
+
+    The returned struct's methods close over three dicts and an entry counter;
+    the counter doubles as the flatten budget, since a set cannot reach more ids
+    than have been written before it.
+    """
+    paths = {}
+    digests = {}
+    sets = {}
+    count = [0]
+
+    def observe(entry) -> None:
+        """Record whatever this entry contributes to the id table. Call for
+        every entry, of every kind: the kinds that contribute nothing still
+        advance the budget."""
+        count[0] += 1
+        payload = entry.type
+        if payload == None:
+            return
+        _record(type(payload), entry.id, payload, paths, digests, sets)
+
+    return struct(
+        observe = observe,
+        entries = lambda: count[0],
+        path_of = lambda entry_id: paths.get(entry_id),
+        digest_of = lambda entry_id: digests.get(entry_id),
+        spawn_key = lambda spawn: _spawn_key(spawn, paths),
+        flatten = lambda set_id: _flatten(sets, paths, digests, set_id, count[0] + 1),
+        inputs = lambda spawn: _flatten(sets, paths, digests, spawn.input_set_id, count[0] + 1),
+        tools = lambda spawn: _flatten(sets, paths, digests, spawn.tool_set_id, count[0] + 1),
+        outputs = lambda spawn: _outputs(spawn, paths),
+        fingerprint = lambda spawn: _fingerprint(spawn, sets, paths, digests, count[0] + 1),
+    )
+
+def _record(kind: str, entry_id: int, payload, paths: dict, digests: dict, sets: dict) -> None:
+    """The body of `observe`, split out so it can be exercised without a real
+    proto payload: the kind arrives as a string rather than being read off the
+    value. Kinds not listed here contribute no ids — `spawn`, `invocation` and
+    `symlink_action` are read by callers, not resolved against."""
+    if kind == FILE:
+        paths[entry_id] = payload.path
+        digests[entry_id] = _digest_of(payload)
+    elif kind == DIRECTORY or kind == UNRESOLVED_SYMLINK:
+        paths[entry_id] = payload.path
+    elif kind == INPUT_SET:
+        sets[entry_id] = (payload.input_ids, payload.transitive_set_ids)
+    elif kind == RUNFILES_TREE:
+        # A spawn names the tree, not the set inside it, so the tree has to
+        # resolve as if it were a set or every runfile drops out of the key.
+        paths[entry_id] = payload.path
+        sets[entry_id] = ([], [payload.input_set_id])
+
+def _outputs(spawn, paths: dict) -> list:
+    """Every output path this spawn declared, resolved where possible.
+
+    An output is an id into the entry table, or the raw path Bazel recorded when
+    it could not resolve one (a declared output that was missing or the wrong
+    type). Both are paths to a reader, so both come back."""
+    out = []
+    for output in spawn.outputs:
+        value = output.type
+        if type(value) == "string":
+            out.append(value)
+            continue
+        resolved = paths.get(value)
+        if resolved != None:
+            out.append(resolved)
+    return out
+
+execlog = struct(
+    resolver = _resolver,
+    as_map = _as_map,
+    Fingerprint = Fingerprint,
+    RESOLVER_KINDS = RESOLVER_KINDS,
+    DEFAULT_FLATTEN_BUDGET = DEFAULT_FLATTEN_BUDGET,
+    testonly_flatten = _flatten,
+    testonly_record = _record,
+    testonly_fingerprint = _fingerprint,
+    testonly_hash = _hash,
+    testonly_spawn_key = _spawn_key,
+    testonly_outputs = _outputs,
+)

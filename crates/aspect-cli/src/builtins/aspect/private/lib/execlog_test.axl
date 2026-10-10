@@ -1,0 +1,331 @@
+"""Unit tests for the compact-execution-log id resolver.
+
+Everything here is a pure function of its inputs, which is the whole reason the
+resolver's dispatch is split into `_record(kind, ...)`: a real `ExecLogEntry`
+payload can only come from a Bazel build, but the id bookkeeping that makes a
+spawn readable is exactly what a wrong answer would come from, so it is tested
+against hand-built payloads instead.
+
+What is *not* covered here is the end-to-end path — a real log, read live, with
+hooks firing — which needs a build. `bazel/exec_log_test.axl` covers the
+dispatch half of that seam.
+
+Run with:
+  aspect dev test-execlog
+"""
+
+load("./execlog.axl", "execlog")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _file(path, digest = None):
+    return struct(path = path, digest = struct(hash = digest) if digest != None else None)
+
+def _output(value):
+    """One `ExecLogEntry.Output`: its oneof is either an output id (int) or the
+    raw path Bazel recorded when it could not resolve one (string)."""
+    return struct(type = value)
+
+def _spawn(
+        outputs = [],
+        label = "//pkg:target",
+        mnemonic = "Genrule",
+        args = ["/bin/true"],
+        env = [],
+        input_set_id = 0,
+        tool_set_id = 0,
+        platform = None,
+        runner = "local",
+        cache_hit = False):
+    return struct(
+        outputs = outputs,
+        target_label = label,
+        mnemonic = mnemonic,
+        args = args,
+        env_vars = env,
+        input_set_id = input_set_id,
+        tool_set_id = tool_set_id,
+        platform = platform,
+        runner = runner,
+        cache_hit = cache_hit,
+    )
+
+_BUDGET = execlog.DEFAULT_FLATTEN_BUDGET
+
+def _test_flatten_resolves_direct_and_transitive_members(_ctx):
+    """A set's members are ids; nested sets have to be walked, or every input
+    reached through one silently drops out of the key."""
+    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
+    digests = {1: "aaa", 2: "bbb", 3: "ccc"}
+    sets = {10: ([1, 2], []), 11: ([3], [10])}
+
+    _eq(
+        "direct members",
+        execlog.testonly_flatten(sets, paths, digests, 10, _BUDGET),
+        ["a.txt@aaa", "b.txt@bbb"],
+    )
+    _eq(
+        "transitive members included",
+        execlog.testonly_flatten(sets, paths, digests, 11, _BUDGET),
+        ["a.txt@aaa", "b.txt@bbb", "c.txt@ccc"],
+    )
+
+def _test_flatten_of_no_set_is_empty(_ctx):
+    """Bazel writes `input_set_id = 0` for "no inputs", which is not set 0."""
+    _eq("id zero", execlog.testonly_flatten({0: ([1], [])}, {1: "a"}, {}, 0, _BUDGET), [])
+
+def _test_flatten_terminates_on_a_cycle(_ctx):
+    """A set reachable from itself must be counted once and stop, not spin until
+    the budget runs out — and must still report the files it reached."""
+    paths = {1: "a.txt"}
+    sets = {10: ([1], [11]), 11: ([], [10])}
+    _eq(
+        "cycle visited once",
+        execlog.testonly_flatten(sets, paths, {1: "aaa"}, 10, _BUDGET),
+        ["a.txt@aaa"],
+    )
+
+def _test_flatten_counts_a_shared_set_once(_ctx):
+    """The common case the `seen` set is really for: a diamond, where one set is
+    reachable by two routes."""
+    paths = {1: "a.txt"}
+    sets = {10: ([1], []), 11: ([], [10]), 12: ([], [10]), 13: ([], [11, 12])}
+    _eq(
+        "diamond",
+        execlog.testonly_flatten(sets, paths, {1: "aaa"}, 13, _BUDGET),
+        ["a.txt@aaa"],
+    )
+
+def _test_flatten_drops_unresolvable_ids(_ctx):
+    """An id with no entry behind it is dropped rather than guessed at: a
+    partially read log should give a partial answer, not a wrong one."""
+    _eq(
+        "unknown id",
+        execlog.testonly_flatten({10: ([1, 99], [])}, {1: "a.txt"}, {1: "aaa"}, 10, _BUDGET),
+        ["a.txt@aaa"],
+    )
+
+def _test_flatten_respects_its_budget(_ctx):
+    """The budget is a hard stop, so a malformed log cannot hang a build."""
+    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
+    got = execlog.testonly_flatten({10: ([1, 2, 3], [])}, paths, {}, 10, 2)
+    if len(got) >= 3:
+        fail("budget of 2 should not have resolved every member: got %r" % got)
+
+def _test_flatten_tolerates_a_missing_digest(_ctx):
+    """Bazel omits the digest for an empty file."""
+    _eq(
+        "empty digest",
+        execlog.testonly_flatten({10: ([1], [])}, {1: "empty.txt"}, {}, 10, _BUDGET),
+        ["empty.txt@"],
+    )
+
+def _test_record_indexes_each_kind(_ctx):
+    """`observe`'s whole content: which kinds contribute paths, digests and sets."""
+    paths, digests, sets = {}, {}, {}
+
+    execlog.testonly_record("file", 1, _file("a.txt", "aaa"), paths, digests, sets)
+    execlog.testonly_record("directory", 2, _file("d"), paths, digests, sets)
+    execlog.testonly_record("unresolved_symlink", 3, _file("link"), paths, digests, sets)
+    execlog.testonly_record(
+        "input_set",
+        10,
+        struct(input_ids = [1, 2], transitive_set_ids = [11]),
+        paths,
+        digests,
+        sets,
+    )
+    execlog.testonly_record("spawn", 20, _spawn(), paths, digests, sets)
+
+    _eq("file path", paths[1], "a.txt")
+    _eq("file digest", digests[1], "aaa")
+    _eq("directory path", paths[2], "d")
+    _eq("symlink path", paths[3], "link")
+    _eq("input set members", sets[10], ([1, 2], [11]))
+    _eq("a directory carries no digest", 2 in digests, False)
+    _eq("a spawn contributes no id", 20 in paths, False)
+    _eq("a spawn is not a set", 20 in sets, False)
+
+def _test_record_makes_a_runfiles_tree_resolve_as_a_set(_ctx):
+    """A spawn names the runfiles tree, not the input set inside it. If the tree
+    does not also resolve as a set, every runfile drops out of the action key."""
+    paths, digests, sets = {}, {}, {}
+    execlog.testonly_record("file", 1, _file("app.py", "aaa"), paths, digests, sets)
+    execlog.testonly_record(
+        "input_set",
+        10,
+        struct(input_ids = [1], transitive_set_ids = []),
+        paths,
+        digests,
+        sets,
+    )
+    execlog.testonly_record(
+        "runfiles_tree",
+        20,
+        struct(path = "app.runfiles", input_set_id = 10),
+        paths,
+        digests,
+        sets,
+    )
+
+    _eq("tree has a path", paths[20], "app.runfiles")
+    _eq(
+        "tree resolves to its contents",
+        execlog.testonly_flatten(sets, paths, digests, 20, _BUDGET),
+        ["app.py@aaa"],
+    )
+
+def _test_spawn_key_prefers_the_resolved_primary_output(_ctx):
+    paths = {5: "bazel-out/bin/gen/banner.txt"}
+    key = execlog.testonly_spawn_key(_spawn(outputs = [_output(5)]), paths)
+    _eq("resolved output id", key, "bazel-out/bin/gen/banner.txt")
+
+def _test_spawn_key_uses_a_raw_path_when_bazel_could_not_resolve_one(_ctx):
+    key = execlog.testonly_spawn_key(_spawn(outputs = [_output("gen/missing.txt")]), {})
+    _eq("invalid output path", key, "gen/missing.txt")
+
+def _test_spawn_key_skips_outputs_it_cannot_resolve(_ctx):
+    """An unresolvable id must not become the key — the next output can be."""
+    key = execlog.testonly_spawn_key(_spawn(outputs = [_output(99), _output(5)]), {5: "out.txt"})
+    _eq("first resolvable output wins", key, "out.txt")
+
+def _test_spawn_key_falls_back_to_the_label(_ctx):
+    """A failed action can produce nothing. Keeping it addressable beats dropping
+    it, even though siblings then collide."""
+    key = execlog.testonly_spawn_key(_spawn(outputs = [], label = "//a:b", mnemonic = "CppCompile"), {})
+    _eq("label fallback", key, "//a:b!CppCompile")
+
+def _test_outputs_returns_every_declared_path(_ctx):
+    got = execlog.testonly_outputs(
+        _spawn(outputs = [_output(5), _output("raw/path.txt"), _output(99)]),
+        {5: "out/a.txt"},
+    )
+    _eq("resolved + raw, unresolvable dropped", got, ["out/a.txt", "raw/path.txt"])
+
+def _test_fingerprint_separates_the_key_dimensions(_ctx):
+    """An input change must move `inputs_hash` and `overall` and nothing else —
+    that separation is what lets a reader be told *why* an action re-ran."""
+    paths = {1: "a.txt", 5: "out.txt"}
+    sets = {10: ([1], [])}
+    spawn = _spawn(outputs = [_output(5)], input_set_id = 10)
+
+    before = execlog.testonly_fingerprint(spawn, sets, paths, {1: "aaa"}, _BUDGET)
+    after = execlog.testonly_fingerprint(spawn, sets, paths, {1: "bbb"}, _BUDGET)
+
+    _eq("same action, same key", before.key, after.key)
+    _eq("args unchanged", before.args_hash, after.args_hash)
+    _eq("env unchanged", before.env_hash, after.env_hash)
+    _eq("tools unchanged", before.tools_hash, after.tools_hash)
+    _eq("platform unchanged", before.platform_hash, after.platform_hash)
+    if before.inputs_hash == after.inputs_hash:
+        fail("a changed input digest must move inputs_hash")
+    if before.overall == after.overall:
+        fail("a changed input digest must move the overall key")
+
+def _test_fingerprint_is_order_insensitive_for_env_and_inputs(_ctx):
+    """Bazel does not promise an order for either, so the key must not depend on
+    one — otherwise two identical builds compare as different."""
+    paths = {1: "a.txt", 2: "b.txt"}
+    digests = {1: "aaa", 2: "bbb"}
+    env_a = [struct(name = "A", value = "1"), struct(name = "B", value = "2")]
+    env_b = [struct(name = "B", value = "2"), struct(name = "A", value = "1")]
+
+    one = execlog.testonly_fingerprint(
+        _spawn(env = env_a, input_set_id = 10),
+        {10: ([1, 2], [])},
+        paths,
+        digests,
+        _BUDGET,
+    )
+    two = execlog.testonly_fingerprint(
+        _spawn(env = env_b, input_set_id = 10),
+        {10: ([2, 1], [])},
+        paths,
+        digests,
+        _BUDGET,
+    )
+    _eq("env order", one.env_hash, two.env_hash)
+    _eq("input order", one.inputs_hash, two.inputs_hash)
+    _eq("overall", one.overall, two.overall)
+
+def _test_fingerprint_reads_platform_properties(_ctx):
+    plain = execlog.testonly_fingerprint(_spawn(), {}, {}, {}, _BUDGET)
+    with_platform = execlog.testonly_fingerprint(
+        _spawn(platform = struct(properties = [struct(name = "OSFamily", value = "Linux")])),
+        {},
+        {},
+        {},
+        _BUDGET,
+    )
+    if plain.platform_hash == with_platform.platform_hash:
+        fail("platform properties must reach the key")
+
+def _test_hash_is_unambiguous_across_part_boundaries(_ctx):
+    """NUL-separated rather than concatenated: `["ab", "c"]` must not hash the
+    same as `["a", "bc"]`, or two different argvs share a key."""
+    if execlog.testonly_hash(["ab", "c"]) == execlog.testonly_hash(["a", "bc"]):
+        fail("parts must not run together")
+    _eq(
+        "same parts, same hash",
+        execlog.testonly_hash(["a", "b"]),
+        execlog.testonly_hash(["a", "b"]),
+    )
+
+def _test_as_map_splits_on_the_last_at(_ctx):
+    """A path may contain `@` (an external repo root, say); a digest may not."""
+    _eq(
+        "path with @",
+        execlog.as_map(["external/rules_foo@1.2.3/src/a.txt@aaa"]),
+        {"external/rules_foo@1.2.3/src/a.txt": "aaa"},
+    )
+
+def _test_resolver_indexes_as_it_goes(_ctx):
+    """The streaming contract: `observe` every entry, then ask about the spawn.
+    Uses the resolver's own seams, since a struct cannot impersonate a payload's
+    AXL type — `_record` coverage above is what pins the kind dispatch."""
+    res = execlog.resolver()
+    _eq("fresh resolver has seen nothing", res.entries(), 0)
+
+    # Stand in for observe(), which would read the kind off a real payload.
+    res.observe(struct(id = 1, type = None))
+    _eq("a payload-less entry still advances the count", res.entries(), 1)
+    _eq("nothing to resolve", res.path_of(1), None)
+
+_UNIT_TESTS = [
+    _test_flatten_resolves_direct_and_transitive_members,
+    _test_flatten_of_no_set_is_empty,
+    _test_flatten_terminates_on_a_cycle,
+    _test_flatten_counts_a_shared_set_once,
+    _test_flatten_drops_unresolvable_ids,
+    _test_flatten_respects_its_budget,
+    _test_flatten_tolerates_a_missing_digest,
+    _test_record_indexes_each_kind,
+    _test_record_makes_a_runfiles_tree_resolve_as_a_set,
+    _test_spawn_key_prefers_the_resolved_primary_output,
+    _test_spawn_key_uses_a_raw_path_when_bazel_could_not_resolve_one,
+    _test_spawn_key_skips_outputs_it_cannot_resolve,
+    _test_spawn_key_falls_back_to_the_label,
+    _test_outputs_returns_every_declared_path,
+    _test_fingerprint_separates_the_key_dimensions,
+    _test_fingerprint_is_order_insensitive_for_env_and_inputs,
+    _test_fingerprint_reads_platform_properties,
+    _test_hash_is_unambiguous_across_part_boundaries,
+    _test_as_map_splits_on_the_last_at,
+    _test_resolver_indexes_as_it_goes,
+]
+
+def _test_impl(ctx: TaskContext) -> int:
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("execlog.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+execlog_tests = task(
+    summary = "Run the execution-log resolver AXL unit tests.",
+    kind = "test-execlog",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

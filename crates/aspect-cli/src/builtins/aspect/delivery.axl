@@ -599,8 +599,12 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         # phase-2 key drift. Local-action-cache hits aren't logged (per
         # spawn.proto), the same blind spot aquery has; accepted.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.name)
-        phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
-        phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
+
+        # `exec_log.open` already carries `bazel_trait.execution_log_sinks`, plus
+        # the handle feeding any `exec_log_event` hook. Opened per attempt: a
+        # handle binds to exactly one build.
+        xl = bzl.exec_log.open(bazel_trait)
+        phase1_execlog_sinks = xl.sinks + [bazel.execution_log.file(path = phase1_execlog_path)]
 
         # Emit the phase header before spawning bazel so it precedes the
         # spawn disclosure and the long build output. Phase 1 inherits the
@@ -653,6 +657,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         bb_root = usable_bb_clientd_root(ctx.std)
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
+            bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
             for _ in range(10000):
                 event = events.try_pop()
                 if event == None:
@@ -666,6 +671,10 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                 last_emit_ms = now_ms(ctx)
             if events.done:
                 break
+
+        # Drain the execution log before waiting: a bound hook handle is a
+        # subscriber the log producer blocks for, and `wait()` joins that producer.
+        bzl.exec_log.close(ctx, xl)
         status = build.wait()
 
         # Flush the CLI-streamed BES sinks before any retry — re-binding a

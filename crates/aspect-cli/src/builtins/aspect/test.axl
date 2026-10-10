@@ -100,6 +100,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         rs.invocation(sp)
         for event in sp.events:
             bz.on_event(event)
+            sp.pump()  # exec_log_event hooks, on whatever the log has written so far
             rs.process(event)
         w = sp.wait()
         if w.success or not bz.should_retry(sp, w):
