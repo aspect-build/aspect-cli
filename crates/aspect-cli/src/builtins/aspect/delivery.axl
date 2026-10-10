@@ -1307,7 +1307,10 @@ def _delivery_impl(ctx):
         # The query runs off the active run command, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
         # external repos the way the build does — e.g. an rc-set
-        # `--noenable_bzlmod` is honored — without a separate flag dance.
+        # `--noenable_bzlmod` is honored — without a separate flag dance. What
+        # the `query` command does not accept never arrives: the rc's `build`
+        # section, where features inject (`bazel/flags.axl`), is one `query`
+        # does not read.
         targets = [t.name for t in ctx.bazel.query(
             query_expr,
             rc = rc,

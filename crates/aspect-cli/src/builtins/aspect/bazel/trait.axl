@@ -62,7 +62,7 @@ def default_retry(code: int) -> bool:
 
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
-    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
+    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation. Scoped to Bazel's `build` rc section, which every build-like command inherits (test/run/coverage/cquery/aquery/info) and `query` does not, so a build-only option here cannot break a task's sidecar query. An entry that names its own section keeps it — a `(flag, version, command)` tuple appended to the list, `command = \"always\"` for a flag that must reach `query` too"),
     extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
     build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
     execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
@@ -81,7 +81,7 @@ BazelTrait = trait(
     # features can inject ctx.task-dependent flags (e.g. --build_metadata=
     # ASPECT_TASK_NAME=...). Invoked by the `bazel.build(ctx)` handle for
     # build/test and by each task's impl for lint/delivery.
-    task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
+    task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time. Scoped to the `build` rc section like extra_flags, with the same per-entry opt-out"),
 
     # For flags that depend on the resolved rc rather than the CLI args. `rc` is
     # the builtin RunCommand (unmodelable here), so it's typed loosely.

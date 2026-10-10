@@ -13,6 +13,15 @@ replaceable from `config.axl` — tells the router which flags take a separate
 value, so `-c opt` is collected as a pair instead of leaving `opt` behind as a
 target pattern.
 
+What a task types and what a feature injects are scoped differently. The user's
+flags are unscoped — typed for this invocation, they apply to every Bazel
+command it makes — while `trait.extra_flags` / `trait.task_flags` are scoped to
+Bazel's `build` section, the one every build-like command inherits and `query`
+does not. That is what keeps an injected build-only option out of a task's
+sidecar `query`, where Bazel would reject it outright. An injected
+`--config=NAME` stays unscoped, since Bazel's expansion is already section-aware;
+see `_scope_injected`.
+
 `resolve_startup` / `resolve` fold each bucket in alongside the explicit
 `--bazel-startup-flag` / `--bazel-flag` values and claim it as they go: the
 runtime refuses to spawn Bazel while a bucket holds unclaimed flags, so
@@ -226,14 +235,70 @@ def _resolve_startup_flags(ctx) -> list:
         flags = bazel_trait.startup_flags(flags)
     return flags
 
+# The rc section a feature-injected command flag lands in. `build` is the
+# section Bazel's own command graph inherits from for every build-like command —
+# test/run/coverage/cquery/aquery/info/fetch — and `query` is the one command
+# that does not, which is exactly the scope `extra_flags` / `task_flags`
+# document ("every build/test invocation"). An unscoped flag would land in
+# `always` instead and reach a task's sidecar `query` too, where a build-only
+# option (`--flaky_test_attempts`, `--combined_report`) is a hard parse error.
+_INJECTED_COMMAND = "build"
+
+def _scope_injected(flags: list) -> list:
+    """`flags` with every entry scoped to `_INJECTED_COMMAND`, as the
+    `(flag, version_condition, command)` entries `parse_rc` reads.
+
+    Two entries keep what they came with:
+
+    * one that already names its own section — how a producer scopes tighter
+      (`exec_log_flags`) and how a feature keeps a flag on every command,
+      `query` included (`(flag, "", "always")`);
+    * a `--config=NAME` request (and the value of its two-token spelling),
+      because it is a reference, not an option. Bazel expands it against the
+      sections the running command reads, so a `build:NAME` section already
+      stays out of a `query` while a `common:NAME` one still applies — scoping
+      the request itself would throw the second away. This is what keeps the
+      documented `extra_flags = ["--config=ci"]` meaning what it says."""
+    scoped = []
+    expect_config_value = False
+    for flag in flags:
+        text = flag[0] if type(flag) == "tuple" else flag
+
+        # The value of a two-token `--config NAME` travels with its flag, so it
+        # stays unscoped too. A flag-shaped follower is not a value: Bazel
+        # reports the missing one better than we could (`_requested_config_names`
+        # reads the pair the same way).
+        if expect_config_value and not text.startswith("-"):
+            expect_config_value = False
+            scoped.append(flag)
+            continue
+
+        expect_config_value = text == _CONFIG_FLAG
+        if expect_config_value or text.startswith(_CONFIG_PREFIX):
+            scoped.append(flag)
+        elif type(flag) == "tuple":
+            scoped.append(flag if len(flag) >= 3 else (flag[0], flag[1], _INJECTED_COMMAND))
+        else:
+            scoped.append((flag, "", _INJECTED_COMMAND))
+    return scoped
+
 def _resolve_flags(ctx) -> list:
     """`ctx.args.bazel_flags + post-command passthrough + trait.extra_flags +
-    trait.task_flags(ctx) hooks` (the injected part filtered), then the
-    `trait.flags(flags)` transform if set. Requires a `bazel_flags` CLI arg.
+    trait.task_flags(ctx) hooks` (the injected part filtered and scoped), then
+    the `trait.flags(flags)` transform if set. Requires a `bazel_flags` CLI arg.
 
     Passthrough flags follow the explicit `--bazel-flag` ones: both are
     user-typed, and on a collision Bazel takes the last, so the direct spelling
-    wins."""
+    wins.
+
+    The user's own flags stay unscoped — typed for this invocation, they apply
+    to every Bazel command it makes, which is what lets a task's sidecar `query`
+    honor an `--bazel-flag=--noenable_bzlmod`. What features inject is scoped to
+    `build` by `_scope_injected`, which runs after the filters: an
+    `injected_flag_filters` hook still sees the flags as the feature spelled
+    them, while the `trait.flags` transform (applied last, to the whole list)
+    sees the scoped tuples — `flag_text` / `flag_name` in
+    `lib/aspect_flags.axl` read either shape."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_flags")
     flags = list(ctx.args.bazel_flags)
@@ -241,7 +306,7 @@ def _resolve_flags(ctx) -> list:
     injected = list(bazel_trait.extra_flags)
     for hook in bazel_trait.task_flags:
         injected.extend(hook(ctx))
-    flags.extend(_filter_injected(ctx, injected))
+    flags.extend(_scope_injected(_filter_injected(ctx, injected)))
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
     return flags
