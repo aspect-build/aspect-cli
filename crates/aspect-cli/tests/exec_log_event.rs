@@ -1,0 +1,452 @@
+//! `BazelTrait.exec_log_event` fires, for real, from every built-in task that
+//! drives Bazel.
+//!
+//! The hook's lifecycle is three calls a task has to make in the right places —
+//! `open` before the spawn, `pump` in the drain loop, `close` before `wait()`
+//! (see `builtins/aspect/bazel/exec_log.axl`) — hand-written at nine call sites
+//! across eight files. Each one fails *quietly*: a missing `open` leaves the log
+//! off, a missing `pump` means hooks only fire at the end of the build, and a
+//! missing `close` or one moved after `wait()` loses entries. Nothing about the
+//! AXL unit tests, which exercise the dispatcher against synthetic handles, would
+//! notice any of that.
+//!
+//! So each case here runs the real CLI against a scratch workspace whose
+//! `.aspect/config.axl` registers an `exec_log_event` hook, with basil standing
+//! in for Bazel, and asserts on what the hook actually received:
+//!
+//!   * **every entry, in order** — basil's log is 3000 entries, past the decoded
+//!     channel's 1000-entry capacity, so a handle that was never opened (0), a
+//!     log repointed away from the reader (0) or a drain that stopped early
+//!     (< 3000) are all distinguishable from a complete one.
+//!   * **during the build, not after it** — `BASIL_EXECLOG_PUMP_HANDSHAKE` makes
+//!     basil hold back the final build event until the hook has seen its first
+//!     entry, so `pumped` in the status file means the dispatch happened inside
+//!     the task's drain loop. A task that only drains after the event stream
+//!     closes cannot get there, and the status reads `timeout`.
+//!
+//! The retry case covers the third seam: a hook registered by a `build_start`
+//! hook must still see attempt 0's entries (the ordering bug `open`-before-
+//! `build_start` would reintroduce), and every attempt must get a handle of its
+//! own, since a handle binds to one build.
+//!
+//! Whether a task *succeeds* is beside the point and deliberately not asserted:
+//! basil builds nothing, so `run`, `lint`, `format`, `gazelle` and `delivery`
+//! all fail once they look for an output. They fail after their Bazel
+//! invocation, which is the part under test.
+
+mod common;
+
+use common::aspect_cli;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// Entries per log basil writes for the scenarios used here, from its
+/// `execlog_entries`. Each attempt numbers its own log from 1.
+const BLOCK: u32 = 3000;
+
+/// Bound on a single `aspect` invocation. Generous: it is here to turn a hang
+/// (a `close` that waits on a producer joined by `wait()`) into a failure, not
+/// to bound a healthy run, which takes under two seconds.
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What the fixture hook recorded, parsed from its report file.
+struct Report {
+    /// Entries dispatched to the hook across the whole task.
+    total: u32,
+    /// Entries whose `id` was not the next one expected within its attempt.
+    /// Non-zero means a gap, a repeat or a reorder.
+    gaps: u32,
+    /// basil's side of the pump handshake: `pumped`, `timeout`, or `None` for
+    /// a scenario that does not run one.
+    handshake: Option<String>,
+}
+
+/// The `.aspect/config.axl` every case runs under: one `exec_log_event` hook
+/// that checks each entry's `id` against the next one expected, and republishes
+/// a one-line report whenever a whole log has arrived.
+///
+/// The report is written from the hook rather than from `build_end`, because
+/// `run --watch` never reaches a `build_end` and the point is to cover it too.
+/// Writing it per completed log (rather than per entry) keeps 3000 dispatches
+/// from becoming 3000 file writes.
+///
+/// `late` registers the hook from a `build_start` hook instead of at config
+/// time, which is the shape the attempt-0 ordering bug needed: `open` has to
+/// read the trait after `build_start`, not before.
+fn fixture(report: &Path, handshake: &Path, scenario: &str, late: bool) -> String {
+    let register = if late {
+        // `build_start` fires on attempt 0 only, so this appends exactly once.
+        r#"    t.build_start.append(lambda _ctx: t.exec_log_event.append(_hook()))"#
+    } else {
+        r#"    t.exec_log_event.append(_hook())"#
+    };
+    format!(
+        r#""""Test fixture: record every execution log entry the task dispatches."""
+
+load("@aspect//traits.axl", "BazelTrait", "ExecLogHook")
+
+_BLOCK = {block}
+_REPORT = "{report}"
+_HANDSHAKE = "{handshake}"
+
+def config(ctx: ConfigContext):
+    state = {{"total": 0, "gaps": 0}}
+
+    def _on_entry(_ctx, entry):
+        if entry.id != (state["total"] % _BLOCK) + 1:
+            state["gaps"] += 1
+        state["total"] += 1
+        if state["total"] == 1:
+            # basil is holding back the last build event until this appears.
+            ctx.std.fs.create(_HANDSHAKE).write("x")
+        if state["total"] % _BLOCK == 0:
+            ctx.std.fs.create(_REPORT).write("total=%d gaps=%d\n" % (state["total"], state["gaps"]))
+
+    def _hook():
+        return ExecLogHook(on_entry = _on_entry)
+
+    t = ctx.traits[BazelTrait]
+{register}
+    t.extra_flags.append("--scenario={scenario}")
+"#,
+        block = BLOCK,
+        report = report.display(),
+        handshake = handshake.display(),
+        scenario = scenario,
+        register = register,
+    )
+}
+
+/// Locate basil, the fake `bazel` the CLI is pointed at.
+///
+/// Bazel sets `BASIL_BIN` from the `rust_test` rule's `env` via
+/// `$(rootpath //crates/basil)`, relative to the runfiles root that is a
+/// Bazel-run test's cwd. Under cargo, `CARGO_BIN_EXE_*` covers only this
+/// crate's own binaries, so basil is built on demand and found next to this
+/// test executable — the same recursive-cargo pattern `axl_runtime::test` uses.
+fn basil_bin() -> &'static str {
+    static BIN: OnceLock<String> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Ok(p) = std::env::var("BASIL_BIN") {
+            return std::fs::canonicalize(&p)
+                .unwrap_or_else(|e| panic!("BASIL_BIN={p:?} not found: {e}"))
+                .to_string_lossy()
+                .into_owned();
+        }
+        let test_exe = std::env::current_exe().expect("current_exe");
+        let mut path: PathBuf = test_exe.parent().expect("test exe parent").to_path_buf();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.push("basil");
+        if !path.exists() {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+            let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .expect("workspace root above crates/aspect-cli")
+                .to_path_buf();
+            let status = Command::new(&cargo)
+                .args(["build", "--quiet", "-p", "basil"])
+                .current_dir(&workspace_root)
+                .status()
+                .expect("invoking cargo to build basil");
+            assert!(status.success(), "cargo build -p basil failed: {status}");
+        }
+        assert!(path.exists(), "basil not found at {}", path.display());
+        path.to_string_lossy().into_owned()
+    })
+}
+
+/// The environment a case runs under: the developer's own, minus everything
+/// that would make the result depend on where the test ran.
+///
+/// `ASPECT_*` would override the fixture's config, and the CI identity
+/// variables steer the built-in tasks into their CI code paths (status checks,
+/// runner detection) — the same filtering `tools/cache-diff-integration.py`
+/// does for the same reason. `HOME` and `PATH` stay: the CLI resolves its
+/// builtins cache under `HOME`.
+fn base_env() -> HashMap<String, String> {
+    const DROP_PREFIXES: &[&str] = &[
+        "ASPECT_",
+        "BASIL_",
+        "BUILDKITE_",
+        "CIRCLE",
+        "GITHUB_",
+        "GITLAB_",
+    ];
+    std::env::vars()
+        .filter(|(k, _)| k != "CI" && !DROP_PREFIXES.iter().any(|p| k.starts_with(p)))
+        .collect()
+}
+
+/// A scratch workspace plus the live process that stands in for the Bazel
+/// daemon, dropped together when the case ends.
+///
+/// The stand-in is what keeps the execution log readable: the reader asks the
+/// pid `bazel info server_pid` reported whether more bytes are coming, and
+/// basil's own `info` process is already reaped by then — a dead holder reads a
+/// not-yet-created log as "the writer is gone" and ends the stream empty. A
+/// live process that holds nothing open is the right answer, and passing its pid
+/// through the child's environment (rather than this test process's) is what
+/// lets the cases run in parallel.
+struct Case {
+    dir: tempfile::TempDir,
+    daemon: Child,
+}
+
+impl Drop for Case {
+    fn drop(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+    }
+}
+
+impl Case {
+    fn new(scenario: &str, late: bool, bazelrc: Option<&str>) -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
+        std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
+        if let Some(rc) = bazelrc {
+            std::fs::write(root.join(".bazelrc"), rc).expect(".bazelrc");
+        }
+        std::fs::create_dir(root.join(".aspect")).expect(".aspect");
+        std::fs::write(
+            root.join(".aspect/config.axl"),
+            fixture(
+                &root.join("report.txt"),
+                &root.join("pumped"),
+                scenario,
+                late,
+            ),
+        )
+        .expect("config.axl");
+
+        let daemon = Command::new("/bin/sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawning the daemon stand-in");
+        Self { dir, daemon }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let root = self.dir.path();
+        let mut cmd = Command::new(aspect_cli());
+        cmd.args(args)
+            .current_dir(root)
+            .env_clear()
+            .envs(base_env())
+            .env("BAZEL_REAL", basil_bin())
+            .env("BASIL_SERVER_PID", self.daemon.id().to_string())
+            .env("BASIL_EXECLOG_PUMP_HANDSHAKE", root.join("pumped"))
+            .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    /// Run to completion and report what the hook saw.
+    fn run(&self, args: &[&str]) -> Report {
+        let output = self
+            .command(args)
+            .output()
+            .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
+        self.report(args, Some(&output))
+    }
+
+    /// Run until the hook has published a report, then stop the CLI.
+    ///
+    /// For `run --watch`, whose session ends only on Ctrl-C: there is no exit to
+    /// wait for, so the report is the completion signal.
+    fn run_until_reported(&self, args: &[&str]) -> Report {
+        let mut child = self
+            .command(args)
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawning `aspect {}`: {e}", args.join(" ")));
+        let deadline = Instant::now() + RUN_TIMEOUT;
+        while Instant::now() < deadline && !self.dir.path().join("report.txt").exists() {
+            if child.try_wait().expect("try_wait").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        self.report(args, None)
+    }
+
+    fn report(&self, args: &[&str], output: Option<&std::process::Output>) -> Report {
+        let root = self.dir.path();
+        let context = || match output {
+            Some(o) => format!(
+                "`aspect {}` exited with {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                args.join(" "),
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr),
+            ),
+            None => format!("`aspect {}`", args.join(" ")),
+        };
+        let text = std::fs::read_to_string(root.join("report.txt")).unwrap_or_else(|_| {
+            panic!(
+                "the exec_log_event hook never received a whole log; it reports once per \
+                 {BLOCK} entries.\n{}",
+                context()
+            )
+        });
+        let field = |name: &str| -> u32 {
+            text.split_whitespace()
+                .find_map(|f| f.strip_prefix(name)?.parse().ok())
+                .unwrap_or_else(|| panic!("no {name} field in report {text:?}"))
+        };
+        Report {
+            total: field("total="),
+            gaps: field("gaps="),
+            handshake: std::fs::read_to_string(root.join("pumped.status"))
+                .ok()
+                .map(|s| s.trim().to_string()),
+        }
+    }
+}
+
+/// Assert the hook saw `logs` whole logs, each entry once and in order.
+fn assert_complete(case: &str, report: &Report, logs: u32) {
+    assert_eq!(
+        report.total,
+        BLOCK * logs,
+        "{case}: the hook should have received {} entries",
+        BLOCK * logs,
+    );
+    assert_eq!(
+        report.gaps, 0,
+        "{case}: every entry should arrive once, in order, numbered from 1 per attempt",
+    );
+}
+
+/// Every site, under both halves of the lifecycle.
+///
+/// The two scenarios differ only in *when* basil publishes the log, which is
+/// what separates the two verbs that read it. Published before the event stream
+/// ends, only `pump` can see it during the build — and basil holds the last
+/// event back until it does, so `pumped` is proof rather than a race. Published
+/// after the stream ends, nothing in the drain loop can reach it and only
+/// `close` can, so an empty hook means the end-of-build drain is gone or runs
+/// after the `wait()` that releases its handle.
+fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool) {
+    let drive = |case: &Case| -> Report {
+        if watch {
+            case.run_until_reported(args)
+        } else {
+            case.run(args)
+        }
+    };
+
+    let pumped = Case::new("execlog_beyond_capacity", false, bazelrc);
+    let report = drive(&pumped);
+    assert_complete(name, &report, 1);
+    assert_eq!(
+        report.handshake.as_deref(),
+        Some("pumped"),
+        "{name}: the first entry must reach the hook before the build ends, which is \
+         what calling `exec_log.pump` in the task's drain loop does",
+    );
+
+    let drained = Case::new("execlog_after_bes", false, bazelrc);
+    assert_complete(name, &drive(&drained), 1);
+}
+
+/// `bazel/invocation.axl`, the call site `build` and `test` share.
+#[test]
+fn the_build_task_dispatches_every_entry() {
+    assert_site("build", &["build", "//..."], None, false);
+}
+
+#[test]
+fn the_test_task_dispatches_every_entry() {
+    assert_site("test", &["test", "//..."], None, false);
+}
+
+/// `run.axl`'s `_run_impl`.
+#[test]
+fn the_run_task_dispatches_every_entry() {
+    assert_site("run", &["run", "//fixture:target"], None, false);
+}
+
+/// `run.axl`'s `_build_once`, the second of that file's two call sites, reached
+/// only by the watch session's first build. A watch session ends on Ctrl-C, so
+/// the hook's report is what this one waits for instead of an exit.
+#[test]
+fn the_run_watch_task_dispatches_every_entry() {
+    assert_site(
+        "run --watch",
+        &["run", "--watch", "//fixture:target"],
+        None,
+        true,
+    );
+}
+
+#[test]
+fn the_lint_task_dispatches_every_entry() {
+    assert_site("lint", &["lint", "//..."], None, false);
+}
+
+#[test]
+fn the_format_task_dispatches_every_entry() {
+    assert_site("format", &["format"], None, false);
+}
+
+#[test]
+fn the_gazelle_task_dispatches_every_entry() {
+    assert_site("gazelle", &["gazelle"], None, false);
+}
+
+#[test]
+fn the_warming_task_dispatches_every_entry() {
+    assert_site("ci warming", &["ci", "warming", "//..."], None, false);
+}
+
+/// `delivery.axl`'s `_get_output_shas` — the phase-1 build, which runs only
+/// when there is a remote cache to read digests from and change detection or a
+/// dry run to read them for. Its phase-2 build has no hook handle, so the hook
+/// still sees exactly one log.
+#[test]
+fn the_delivery_task_dispatches_every_entry() {
+    assert_site(
+        "delivery",
+        &[
+            "delivery",
+            "--mode=always",
+            "--dry-run",
+            "--track-state=false",
+            "--commit-sha=0000000000000000000000000000000000000000",
+            "//fixture:target",
+        ],
+        Some("build --remote_cache=grpc://127.0.0.1:1\n"),
+        false,
+    );
+}
+
+/// Retries, the seam `_test_open_is_fresh_per_call` covers only in the unit.
+///
+/// The hook is registered by a `build_start` hook, which fires on attempt 0
+/// only, so the 3000 entries of the first log are the ones an `open` resolved
+/// before `build_start` would have missed — it would see 3000 in total, from
+/// attempt 1, rather than 6000. The second 3000 are numbered from 1 again,
+/// which a reused handle could not deliver: it is bound to the first build.
+#[test]
+fn every_retry_attempt_dispatches_its_own_log_to_a_build_start_hook() {
+    let case = Case::new("execlog_retryable_failure", true, None);
+    let report = case.run(&["build", "--bazel-retry-attempts=2", "//..."]);
+    assert_complete("build --bazel-retry-attempts=2", &report, 2);
+    assert_eq!(
+        report.handshake.as_deref(),
+        Some("pumped"),
+        "the hook a build_start hook registered must receive attempt 0's entries \
+         during attempt 0, not only once the build is over",
+    );
+}

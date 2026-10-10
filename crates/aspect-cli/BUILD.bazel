@@ -145,6 +145,27 @@ rust_test(
     ],
 )
 
+# Drives every built-in task that spawns Bazel against the basil fake, with an
+# `exec_log_event` hook registered, so a lost `open` / `pump` / `close` at any
+# call site fails here rather than silently.
+rust_test(
+    name = "exec_log_event_test",
+    size = "medium",
+    srcs = ["tests/exec_log_event.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/exec_log_event.rs",
+    data = [
+        ":aspect-cli",
+        "//crates/basil",
+    ],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+        "BASIL_BIN": "$(rootpath //crates/basil)",
+    },
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
 rust_test(
     name = "task_exit_test",
     srcs = ["tests/task_exit.rs"] + INTEGRATION_TEST_COMMON_SRCS,

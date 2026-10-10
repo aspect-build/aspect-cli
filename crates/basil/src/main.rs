@@ -22,6 +22,9 @@
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
 //!     capacity is invisible without a log longer than it.
 //!
+//!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
+//!     [`await_pump_handshake`].
+//!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
 //! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
@@ -101,19 +104,36 @@ fn run_build(args: &[String]) {
         find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
 
+    let log = || match &execlog_path {
+        Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
+        _ => {}
+    };
+
     // Before the BES write, which blocks on a FIFO until the reader opens it.
     // Bazel writes the execution log as it executes, i.e. during the build, and
     // the reader tails it; writing it first here is the closest a one-shot fake
     // gets to that, and it means the entries are already on disk while the AXL
     // side is draining BES.
-    if let Some(path) = execlog_path {
-        if s.execlog_entries > 0 {
-            write_execlog(&path, s.execlog_entries);
-        }
+    if s.execlog_delay.is_zero() {
+        log();
     }
 
+    // The handshake needs a log the consumer can read before the event stream
+    // ends — meaningless without a log at all, and unsatisfiable for a scenario
+    // that deliberately publishes one afterwards.
+    let handshake = if s.execlog_entries > 0 && s.execlog_delay.is_zero() {
+        env::var("BASIL_EXECLOG_PUMP_HANDSHAKE").ok()
+    } else {
+        None
+    };
+
     if let Some(path) = bes_path {
-        write_scenario(&path, &s);
+        write_scenario(&path, &s, handshake.as_deref());
+    }
+
+    if !s.execlog_delay.is_zero() {
+        thread::sleep(s.execlog_delay);
+        log();
     }
 
     match s.exit {
@@ -185,10 +205,15 @@ struct Scenario {
     /// `--execution_log_compact_file`, when the runtime asked for one. Zero
     /// writes no log at all, which is what a build that ran no actions does.
     execlog_entries: u32,
+    /// How long after the event stream closes to publish that log. Zero
+    /// publishes it before BES, where a consumer can read it during the build;
+    /// non-zero puts it out of reach of anything but an end-of-build drain.
+    execlog_delay: Duration,
 }
 
-fn write_scenario(path: &str, scenario: &Scenario) {
-    for events in &scenario.attempts {
+fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
+    let last_attempt = scenario.attempts.len().saturating_sub(1);
+    for (attempt, events) in scenario.attempts.iter().enumerate() {
         // One open/write/close per attempt: the read side observes a writer
         // appear, drain bytes, and disappear — same as Bazel reopening the
         // BEP file on each retry.
@@ -199,7 +224,14 @@ fn write_scenario(path: &str, scenario: &Scenario) {
         if !scenario.open_delay.is_zero() {
             thread::sleep(scenario.open_delay);
         }
-        for ev in events {
+        for (i, ev) in events.iter().enumerate() {
+            // Holding back the last event of the last attempt is what keeps the
+            // consumer's drain loop alive for the handshake.
+            if let Some(file) = handshake {
+                if attempt == last_attempt && i + 1 == events.len() {
+                    await_pump_handshake(file);
+                }
+            }
             let mut buf = Vec::new();
             ev.encode_length_delimited(&mut buf)
                 .expect("basil: encode BuildEvent");
@@ -207,6 +239,39 @@ fn write_scenario(path: &str, scenario: &Scenario) {
                 .unwrap_or_else(|e| panic!("basil: writing to BES path: {e}"));
         }
     }
+}
+
+/// How long [`await_pump_handshake`] waits for the consumer. Long enough that a
+/// loaded machine cannot time out a working handshake, short enough that a
+/// broken one reports rather than hangs out the test runner's own limit.
+const PUMP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Wait for `file` to appear, then record whether it did in `{file}.status`.
+///
+/// Set `BASIL_EXECLOG_PUMP_HANDSHAKE=<file>` and have the consumer create
+/// `<file>` the first time an execution log entry reaches it. basil then holds
+/// back the final build event until that happens, which makes "the consumer
+/// dispatched an entry *during* the build" an observable fact rather than a
+/// race: the only way the consumer can see an entry before the event stream
+/// ends is from inside its own drain loop.
+///
+/// `{file}.status` holds `pumped` or `timeout`, so the absence of a mid-build
+/// dispatch is a specific assertion failure instead of a test-wide hang. A
+/// consumer that only drains after the stream closes cannot write `<file>`
+/// until basil gives up, which is exactly what `timeout` records.
+fn await_pump_handshake(file: &str) {
+    let deadline = std::time::Instant::now() + PUMP_HANDSHAKE_TIMEOUT;
+    let mut status = "timeout";
+    while std::time::Instant::now() < deadline {
+        if fs::metadata(file).is_ok() {
+            status = "pumped";
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let path = format!("{file}.status");
+    fs::write(&path, format!("{status}\n"))
+        .unwrap_or_else(|e| panic!("basil: writing handshake status {path:?}: {e}"));
 }
 
 /// Write `count` `ExecLogEntry` messages to `path` in the compact execution log
@@ -264,6 +329,7 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(0, true)]],
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -279,6 +345,7 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(39, true)]],
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -293,6 +360,7 @@ fn scenario(name: &str) -> Scenario {
             ],
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // Like `success`, but basil exits with code 2 (a genuine Bazel
@@ -304,6 +372,7 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(2, true)]],
             exit: ExitBehavior::Code(2),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
@@ -315,6 +384,7 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![],
             exit: ExitBehavior::Code(2),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // Like `success`, but basil is killed by SIGKILL after the event
@@ -329,6 +399,7 @@ fn scenario(name: &str) -> Scenario {
             // libc dep for a single constant.
             exit: ExitBehavior::Signal(9),
             execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
         },
 
         // A clean run that also writes a compact execution log longer than the
@@ -343,6 +414,39 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(0, true)]],
             exit: ExitBehavior::Code(0),
             execlog_entries: 3000,
+            execlog_delay: Duration::ZERO,
+        },
+
+        // The same log, published only after the event stream has closed. A
+        // task's drain loop ends with that stream, so nothing it does can read
+        // this log — only the end-of-build drain (`exec_log.close`, before
+        // `wait()`) can, which is what makes a missing or misplaced drain
+        // visible as an empty hook rather than as a coin flip.
+        //
+        // Two seconds is an order of magnitude more than the 250ms tick a task
+        // takes to notice the stream ended, so the ordering does not depend on
+        // scheduling. Bazel is slower than this to finish a build after its last
+        // build event in practice.
+        "execlog_after_bes" => Scenario {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
+            execlog_entries: 3000,
+            execlog_delay: Duration::from_secs(2),
+        },
+
+        // A log of the same shape, on an invocation Bazel fails with
+        // BLAZE_INTERNAL_ERROR (37) — which `BazelTrait.build_retry` retries by
+        // default, so a task driving this runs its whole spawn → drain → wait
+        // cycle once per attempt. Each attempt writes its own log, numbered from
+        // 1 again, so a consumer that receives `1..=3000` twice has proved that
+        // every attempt got a live handle of its own.
+        "execlog_retryable_failure" => Scenario {
+            open_delay: Duration::from_millis(50),
+            attempts: vec![vec![build_started(), build_finished(37, true)]],
+            exit: ExitBehavior::Code(37),
+            execlog_entries: 3000,
+            execlog_delay: Duration::ZERO,
         },
 
         other => {

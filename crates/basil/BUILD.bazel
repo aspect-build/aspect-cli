@@ -5,6 +5,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     version_key = None,
     visibility = [
+        "//crates/aspect-cli:__pkg__",
         "//crates/axl-runtime:__pkg__",
     ],
     deps = [
