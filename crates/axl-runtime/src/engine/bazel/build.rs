@@ -785,11 +785,18 @@ fn event_kind_help() -> String {
 /// Resolve one `kinds=` list element to a payload tag. Accepts the payload's
 /// `type(event.payload)` name, any legacy alias, or the raw tag integer.
 ///
-/// A tag no row claims is rejected rather than passed through: these integers
-/// are this runtime's own numbering, not BEP field numbers, so an unclaimed one
-/// can only ever match nothing. Silently filtering to the empty set is the
-/// failure mode worth refusing — and an older docstring did call them proto
-/// field numbers, so someone may hold a number from that reading.
+/// A tag no row claims is rejected rather than passed through, because it could
+/// only ever filter to the empty set, and silently matching nothing is the
+/// failure mode worth refusing.
+///
+/// This does **not** rescue someone who read an older docstring's claim that
+/// these are BEP proto field numbers. They are this runtime's own numbering, and
+/// 11 of the 25 real field numbers are themselves claimed tags meaning a
+/// different kind — `7` (BEP `ActionExecuted`) selects `target_configured`,
+/// `8` (`TargetComplete`) selects `action_executed`. Those stay silent, and no
+/// validation can catch them. The integers are documented as opaque and
+/// `event_kind_help()` lists only names, so there is no supported way to obtain
+/// a correct one; the path survives for compatibility alone.
 pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
     if let Some(n) = value.unpack_i32() {
         if !EVENT_KINDS.iter().any(|(tag, _, _)| *tag == n) {
@@ -805,9 +812,17 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
         }
         anyhow::bail!("unknown build_event kind '{s}'; {}", event_kind_help());
     }
+    // `unpack_i32` rejects an int too large for i32, which would otherwise reach
+    // the wrong-type arm below and tell an int it is not a tag.
+    if value.get_type() == "int" {
+        anyhow::bail!(
+            "build_event payload tag out of range: {value}; {}",
+            event_kind_help()
+        );
+    }
     anyhow::bail!(
         "kinds entry must be a build event payload name or its payload tag; got \
-         {}. {}",
+         {}; {}",
         value.get_type(),
         event_kind_help(),
     )
@@ -1512,6 +1527,25 @@ mod tests {
                 assert_eq!(
                     parse_event_kind(heap.alloc(*action_tag)).unwrap(),
                     *action_tag
+                );
+            });
+        }
+
+        /// An int outside `i32` fails `unpack_i32`, so without its own arm it
+        /// reaches the wrong-type bail and gets told an int is not a tag.
+        #[test]
+        fn a_tag_too_large_for_i32_is_reported_as_a_tag_not_a_type_error() {
+            Heap::temp(|heap| {
+                let err = parse_event_kind(heap.alloc(1_099_511_627_776i64))
+                    .expect_err("an out-of-range tag must be rejected")
+                    .to_string();
+                assert!(
+                    err.contains("out of range"),
+                    "should name the range, not the type: {err}"
+                );
+                assert!(
+                    !err.contains("got int"),
+                    "an int must not be told it is not a tag: {err}"
                 );
             });
         }
