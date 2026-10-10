@@ -15,6 +15,13 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
+//!     When `--execution_log_compact_file <path>` is also present, a scenario
+//!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there,
+//!     in the real format: one zstd frame over varint-length-prefixed messages,
+//!     written as a regular file the way Bazel writes it. Entry counts above the
+//!     decoded channel's 1000-entry capacity are the point — truncation past the
+//!     capacity is invisible without a log longer than it.
+//!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
 //! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
@@ -32,6 +39,7 @@ use axl_proto::build_event_stream::{
     build_event_id::{BuildFinishedId, BuildStartedId, Id},
     build_finished::ExitCode,
 };
+use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
 use prost::Message;
 
 fn main() {
@@ -88,9 +96,21 @@ fn run_info(args: &[String]) {
 
 fn run_build(args: &[String]) {
     let bes_path = find_flag_value(args, "--build_event_binary_file");
+    let execlog_path = find_flag_value(args, "--execution_log_compact_file");
     let scenario_name =
         find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
+
+    // Before the BES write, which blocks on a FIFO until the reader opens it.
+    // Bazel writes the execution log as it executes, i.e. during the build, and
+    // the reader tails it; writing it first here is the closest a one-shot fake
+    // gets to that, and it means the entries are already on disk while the AXL
+    // side is draining BES.
+    if let Some(path) = execlog_path {
+        if s.execlog_entries > 0 {
+            write_execlog(&path, s.execlog_entries);
+        }
+    }
 
     if let Some(path) = bes_path {
         write_scenario(&path, &s);
@@ -161,6 +181,10 @@ struct Scenario {
     open_delay: Duration,
     attempts: Vec<Vec<BuildEvent>>,
     exit: ExitBehavior,
+    /// How many `ExecLogEntry` messages to write to
+    /// `--execution_log_compact_file`, when the runtime asked for one. Zero
+    /// writes no log at all, which is what a build that ran no actions does.
+    execlog_entries: u32,
 }
 
 fn write_scenario(path: &str, scenario: &Scenario) {
@@ -185,6 +209,32 @@ fn write_scenario(path: &str, scenario: &Scenario) {
     }
 }
 
+/// Write `count` `ExecLogEntry` messages to `path` in the compact execution log
+/// format: one zstd frame over varint-length-prefixed protobufs.
+///
+/// The entries are `file` records, which is the cheapest kind to synthesize and
+/// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
+/// a test can assert it received a contiguous `1..=count` and catch a prefix.
+fn write_execlog(path: &str, count: u32) {
+    let file = fs::File::create(path)
+        .unwrap_or_else(|e| panic!("basil: creating execlog path {path:?}: {e}"));
+    let mut encoder = zstd::Encoder::new(file, 0).expect("basil: zstd encoder");
+    for id in 1..=count {
+        let entry = ExecLogEntry {
+            id,
+            r#type: Some(exec_log_entry::Type::File(exec_log_entry::File {
+                path: format!("basil/f{id}.txt"),
+                digest: None,
+            })),
+        };
+        encoder
+            .write_all(&entry.encode_length_delimited_to_vec())
+            .unwrap_or_else(|e| panic!("basil: writing execlog: {e}"));
+    }
+    let mut file = encoder.finish().expect("basil: finishing zstd frame");
+    file.flush().expect("basil: flushing execlog");
+}
+
 /// Resolve a scenario by name. Each scenario documents the behavior or bug
 /// it targets. Add new ones here.
 fn scenario(name: &str) -> Scenario {
@@ -198,6 +248,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::from_millis(50),
             attempts: vec![vec![build_started(), build_finished(0, true)]],
             exit: ExitBehavior::Code(0),
+            execlog_entries: 0,
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -212,6 +263,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
             exit: ExitBehavior::Code(0),
+            execlog_entries: 0,
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -225,6 +277,7 @@ fn scenario(name: &str) -> Scenario {
                 vec![build_started(), build_finished(0, true)],
             ],
             exit: ExitBehavior::Code(0),
+            execlog_entries: 0,
         },
 
         // Like `success`, but basil exits with code 2 (a genuine Bazel
@@ -235,6 +288,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(2, true)]],
             exit: ExitBehavior::Code(2),
+            execlog_entries: 0,
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
@@ -245,6 +299,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![],
             exit: ExitBehavior::Code(2),
+            execlog_entries: 0,
         },
 
         // Like `success`, but basil is killed by SIGKILL after the event
@@ -258,6 +313,23 @@ fn scenario(name: &str) -> Scenario {
             // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
             // libc dep for a single constant.
             exit: ExitBehavior::Signal(9),
+            execlog_entries: 0,
+        },
+
+        // A clean run that also writes a compact execution log longer than the
+        // decoded channel's 1000-entry capacity. Entry counts below the capacity
+        // cannot distinguish a stream that delivers everything from one that
+        // silently stops at the capacity, which is exactly the bug
+        // `take_initial_subscriber` / `detach_initial_subscriber` fix. 3000 is
+        // comfortably past it and still a fraction of a second to write.
+        //
+        // 50ms open_delay as in `success`, so an AXL iterator that subscribes
+        // after the spawn is not racing the BES burst.
+        "execlog_beyond_capacity" => Scenario {
+            open_delay: Duration::from_millis(50),
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
+            execlog_entries: 3000,
         },
 
         other => {

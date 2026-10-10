@@ -1218,18 +1218,27 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     // Every call to this function will return a new iterator.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
-        let execlog_stream = build.execlog_stream.borrow();
-        let execlog_stream = execlog_stream.as_ref().ok_or(anyhow::anyhow!(
+        let mut execlog_stream = build.execlog_stream.borrow_mut();
+        let execlog_stream = execlog_stream.as_mut().ok_or(anyhow::anyhow!(
             "call `ctx.bazel.build` with `execution_log = true` in order to receive execution log events."
         ))?;
 
-        let recv = execlog_stream.receiver().ok_or(anyhow::anyhow!(
-            "this build's execution log already has a consumer that must see every entry \
-             (a decoded `execution_log.file(...)` sink or an `execution_log.iterator()` \
-             handle), so no further subscriber can be added. Pass an \
-             `execution_log.iterator()` handle in `execution_log=[...]` and iterate that \
-             instead — it is also the only form that is guaranteed not to drop entries."
-        ))?;
+        // Take the stream's subscriber rather than clone it. Cloning leaves the
+        // original in place with nobody reading it, which pins the broadcast
+        // ring's slowest tail at entry zero and silently truncates this iterator
+        // at the channel capacity — 1000 entries, however fast the caller reads.
+        let recv = execlog_stream
+            .take_initial_subscriber()
+            .ok_or(anyhow::anyhow!(
+                "this build's execution log already has a consumer: either \
+             `execution_logs()` was called twice, or the build was configured with a \
+             decoded `execution_log.file(...)` sink or an `execution_log.iterator()` \
+             handle. A second subscriber cannot be added — nothing would drain it, and \
+             an undrained subscriber stalls the log for every other consumer. Pass an \
+             `execution_log.iterator()` handle in `execution_log=[...]` and iterate \
+             that: it can be combined with sinks, and it is the only form guaranteed \
+             not to drop entries."
+            ))?;
         Ok(ExecutionLogIterator::new(recv))
     }
 
@@ -1385,6 +1394,206 @@ mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
     //! binary, selected per-test via `--scenario=<name>`.
 
+    use axl_proto::tools::protos::ExecLogEntry;
+    use prost::Message;
+
+    /// Serializes the tests that drive the execution log through basil.
+    ///
+    /// They set `BASIL_SERVER_PID`, which is process-wide, so running two at
+    /// once would have one clobber the other's daemon stand-in and the loser
+    /// would read a dead pid — which is a passing result for some of these tests
+    /// and a failing one for others, i.e. flaky either way.
+    static EXECLOG_BASIL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with a live process standing in for the Bazel daemon.
+    ///
+    /// The execlog reader asks two pids whether more bytes are coming: the
+    /// client, whose death means no log is coming at all, and the daemon, which
+    /// holds the file open while writing it. basil's `info` invocation is a
+    /// separate short-lived process, so by the time the reader looks the pid it
+    /// reported is already reaped — `galvanize::StreamingFile::open` then reads a
+    /// not-yet-created file as "the writer is gone" and ends the stream empty,
+    /// before basil has written a byte. A live pid that holds nothing open is the
+    /// right stand-in: it keeps `open` waiting for the file, and end-of-file
+    /// still terminates the read cleanly.
+    #[cfg(unix)]
+    fn with_daemon_stand_in<T>(body: impl FnOnce() -> T) -> T {
+        let _serial = EXECLOG_BASIL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut daemon = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn the daemon stand-in");
+        // SAFETY: process-wide env mutation, serialized against the other
+        // execlog-through-basil tests by `EXECLOG_BASIL`. A concurrent non-execlog
+        // bazel test reading this as its server pid gets a live process that holds
+        // none of its paths open — the same answer the dead pid it reads today
+        // produces.
+        unsafe {
+            std::env::set_var("BASIL_SERVER_PID", daemon.id().to_string());
+        }
+        let out = body();
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("BASIL_SERVER_PID");
+        }
+        out
+    }
+
+    /// `build.execution_logs()` must not stop at the decoded channel's capacity.
+    ///
+    /// This is the regression test for silent truncation in a shipped public
+    /// builtin, not a hypothetical. `ExecLogStream` kept its own subscriber clone
+    /// and `execution_logs()` *cloned* it, so the unread original pinned the
+    /// broadcast ring's slowest tail at entry zero. Past the capacity every
+    /// `try_send` reported the ring full, so the caller received exactly the first
+    /// `CHANNEL_CAPACITY` entries and then end-of-stream — no error, and no
+    /// dependence on how fast it read. Measured on this scenario before the fix:
+    /// 1000 entries, ids 1..=1000, out of a 3000-entry log. In a real log, whose
+    /// first thousand records are inputs rather than spawns, that prefix contains
+    /// no spawns at all.
+    ///
+    /// The fix is `take_initial_subscriber`: hand the one subscriber to the one
+    /// consumer instead of cloning it.
+    ///
+    /// What this does *not* assert is that every entry arrives. `execution_log =
+    /// True` is the lossy path by contract — the producer uses `try_send` and
+    /// drops when the consumer falls behind, which against a fake bazel that has
+    /// already written the whole log on disk it certainly does. The guarantee is
+    /// only that there is no longer a fixed ceiling, which is what the bug was.
+    /// `execution_log.iterator()` is the lossless form, covered below.
+    #[cfg(unix)]
+    #[test]
+    fn execution_logs_is_not_capped_at_the_channel_capacity() {
+        // `bounded::<ExecLogEntry>(1000)` in `stream::execlog`.
+        const CHANNEL_CAPACITY: u32 = 1000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.txt");
+
+        let exit = with_daemon_stand_in(|| {
+            crate::test::eval(&format!(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = True,
+        stderr = None,
+    )
+    seen = 0
+    highest = 0
+    for entry in build.execution_logs():
+        if entry.id <= highest:
+            return 2  # ids must advance; a replay or reorder is a different bug
+        highest = entry.id
+        seen += 1
+    status = build.wait()
+    if not status.success: return 1
+    ctx.std.fs.create({report:?}).write("%d %d\n" % (seen, highest))
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+                report = report.to_str().unwrap(),
+            ))
+            .with_fake_bazel()
+            .run_task(0)
+            .expect("run_task")
+        });
+        assert_eq!(exit, Some(0), "the build should have succeeded");
+
+        let text = std::fs::read_to_string(&report).expect("the task should have reported");
+        let mut parts = text.split_whitespace();
+        let seen: u32 = parts.next().unwrap().parse().unwrap();
+        let highest: u32 = parts.next().unwrap().parse().unwrap();
+
+        assert!(
+            seen > CHANNEL_CAPACITY,
+            "expected more than the channel capacity ({CHANNEL_CAPACITY}); got {seen}, \
+             which is the truncation this fixes",
+        );
+        assert!(
+            highest > CHANNEL_CAPACITY,
+            "expected entries from beyond the capacity, not just a bigger prefix; \
+             highest id was {highest}",
+        );
+    }
+
+    /// The lossless form, and the combination that used to deadlock: a decoded
+    /// `file()` sink and a live `iterator()` handle on one build, over a log
+    /// longer than the channel capacity.
+    ///
+    /// Both consumers must see **every** entry — a handle switches the producer to
+    /// blocking sends, and the channel is a broadcast, so the two do not compete.
+    /// Before `detach_initial_subscriber` this hung instead: the sink made the
+    /// sends blocking, and the stream's own unread clone then parked the producer
+    /// at the capacity with the consumer waiting on an entry that could not come
+    /// until `join()` — which is inside the `wait()` the consumer runs before.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_sink_and_a_live_handle_both_see_the_whole_log() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink_path = dir.path().join("decoded.binpb");
+        // `with_timeout` runs the body on a thread that may outlive this frame,
+        // so the script is rendered here rather than borrowing the path inside it.
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [entries, bazel.execution_log.file(path = {sink:?})],
+        stderr = None,
+    )
+    seen = 0
+    for entry in entries:
+        seen += 1
+        if entry.id != seen:
+            return 2  # a gap: the lossless path dropped something
+    status = build.wait()
+    if not status.success: return 1
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            sink = sink_path.to_str().unwrap(),
+        );
+
+        // The timeout is here to catch the old deadlock, not to bound a healthy
+        // run, which finishes in well under a second.
+        let result = with_daemon_stand_in(move || {
+            crate::test::with_timeout(Duration::from_secs(60), move || {
+                crate::test::eval(&script).with_fake_bazel().run_task(0)
+            })
+        });
+
+        match result {
+            None => panic!("timed out: a file sink plus a live handle deadlocked"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "a handle alongside a file sink must see all 3000 entries, contiguously",
+            ),
+        }
+
+        // The sink's writer is joined inside `wait()`, so its file is complete by
+        // now: 3000 length-delimited entries, not a prefix.
+        let written = std::fs::read(&sink_path).expect("the sink should have written a file");
+        let mut buf = written.as_slice();
+        let mut count = 0;
+        while !buf.is_empty() {
+            let entry = ExecLogEntry::decode_length_delimited(&mut buf)
+                .expect("the sink should hold whole entries");
+            count += 1;
+            assert_eq!(entry.id, count, "the sink should hold a contiguous run");
+        }
+        assert_eq!(count, 3000, "the decoded file sink should be complete");
+    }
+
     /// Iter handle subscribed pre-spawn receives every event from a clean
     /// build, even on the warm-daemon path that drops late subscribers.
     #[test]
@@ -1481,22 +1690,12 @@ Test = task(implementation = _impl)
     fn a_rejected_command_line_does_not_hang_the_execlog_reader() {
         use std::time::Duration;
 
-        let mut daemon = std::process::Command::new("/bin/sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn the daemon stand-in");
-        // SAFETY: process-wide env mutation. A concurrent bazel test reading this
-        // as its server pid gets a live process that holds none of its paths open
-        // — the same answer the dead pid it reads today produces.
-        unsafe {
-            std::env::set_var("BASIL_SERVER_PID", daemon.id().to_string());
-        }
-
         // Generous: the timeout is here to catch a hang, not to bound a
         // healthy run, which finishes in well under a second.
-        let result = crate::test::with_timeout(Duration::from_secs(60), || {
-            crate::test::eval(
-                r#"
+        let result = with_daemon_stand_in(|| {
+            crate::test::with_timeout(Duration::from_secs(60), || {
+                crate::test::eval(
+                    r#"
 def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=rejects_command_line"],
@@ -1510,17 +1709,11 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
-            )
-            .with_fake_bazel()
-            .run_task(0)
+                )
+                .with_fake_bazel()
+                .run_task(0)
+            })
         });
-
-        let _ = daemon.kill();
-        let _ = daemon.wait();
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("BASIL_SERVER_PID");
-        }
 
         match result {
             None => panic!("timed out: a rejected command line hung the execlog reader"),

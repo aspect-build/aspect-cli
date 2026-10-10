@@ -334,15 +334,39 @@ impl ExecLogStream {
     }
 
     /// A fresh subscriber to the decoded stream, or `None` once the initial
-    /// subscriber clone is gone — after `detach_initial_subscriber` or `join()`.
-    /// Nothing can subscribe from then on: fibre mints a subscriber by cloning an
-    /// existing one, so there is nothing left to clone.
+    /// subscriber clone is gone — after `detach_initial_subscriber`,
+    /// `take_initial_subscriber` or `join()`. Nothing can subscribe from then on:
+    /// fibre mints a subscriber by cloning an existing one, so there is nothing
+    /// left to clone.
+    ///
+    /// Every clone this hands out is a subscriber the producer must not lap, so a
+    /// caller takes one only for a consumer that will actually drain it — and the
+    /// stream's own unread clone has to go once they are wired, which is what
+    /// `detach_initial_subscriber` is for.
     pub fn receiver(&self) -> Option<Receiver<ExecLogEntry>> {
         self.recv.as_ref().cloned()
     }
 
+    /// Hand the stream's own subscriber clone to a single consumer, rather than
+    /// cloning it, leaving the stream with none.
+    ///
+    /// This is what `build.execution_logs()` needs, and the difference between
+    /// cloning and taking is the difference between delivering 1000 entries and
+    /// delivering all of them. Cloning leaves the original in place, unread, with
+    /// its tail at entry zero; the ring is then permanently full from the
+    /// producer's side, and on the `try_send` path every entry past the capacity
+    /// is dropped no matter how fast the consumer reads. Taking it means the only
+    /// subscriber is the one being drained.
+    ///
+    /// Returns `None` when the clone has already gone to someone else, which is
+    /// the honest answer: a second consumer cannot be added, because it would be
+    /// a subscriber with nothing reading it and would re-pin the ring.
+    pub fn take_initial_subscriber(&mut self) -> Option<Receiver<ExecLogEntry>> {
+        self.recv.take()
+    }
+
     /// Drop the stream's own unread subscriber clone, now that real consumers
-    /// are subscribed.
+    /// are subscribed, so nothing can subscribe later either.
     ///
     /// Called once, right after the file sinks and iterator handles are bound.
     /// Until then the clone has to exist, because it is what they are cloned
