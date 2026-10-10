@@ -2214,7 +2214,7 @@ def _test_impl(ctx):
                     "build-task",
                     "build",
                     "aborted",
-                    _aborted(make_build_passed(), "timeout"),
+                    _aborted(make_build_passed(), "user_interrupted"),
                     30000,
                 ),
                 _entry(
@@ -2721,7 +2721,11 @@ def _test_impl(ctx):
     return 0
 
 def _aborted(data, reason):
-    """Mark a fixture as aborted so it routes through the aborted badge."""
+    """Mark a fixture as aborted so it routes through the aborted badge.
+
+    `reason` is a snake_case `Aborted.AbortReason` as the BES reader yields it
+    ("user_interrupted", "incomplete", …); it is detail text, not the trigger.
+    """
     data["bazel"]["aborted"] = True
     data["bazel"]["abort_reason"] = reason
     return data

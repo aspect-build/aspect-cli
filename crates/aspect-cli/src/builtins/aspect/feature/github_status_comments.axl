@@ -167,7 +167,7 @@ _FALLBACK_CREATE_GRACE_S = 45
 #   "warning" — passed/running with non-fatal signal
 #   "running" — in flight, no warning
 #   "passed"  — terminal clean
-#   "aborted" — Bazel aborted (timeout, OOM, ctrl-c)
+#   "aborted" — Bazel exited INTERRUPTED (8); an OOM is "failed"
 # Emoji-only, prefixed to the task row (`✅ build-gha [build]`), effectively
 # replacing the per-kind icon. The row still carries its outcome in words through
 # `_result_text`, so the emoji is not the only signal.
@@ -729,7 +729,9 @@ def _results_subset(
         # Producer-authored inline failure snippets [{label,kind,bucket,snippet,
         # truncated}]; deduped + sticky-selected against the global budget at render.
         "failure_snippets": list(failure_snippets or []),
-        # abort_reason: human-readable rider (timeout, OOM, ctrl-c, …).
+        # abort_reason: the snake_case `Aborted.AbortReason` of the last
+        # `Aborted` payload seen ("user_interrupted", "incomplete", …) —
+        # detail text only, rendered when `aborted` is set.
         "abort_reason": bz.get("abort_reason", ""),
     }
 

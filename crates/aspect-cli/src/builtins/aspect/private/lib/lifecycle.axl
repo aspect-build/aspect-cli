@@ -80,8 +80,12 @@ def terminal_progress(noun: str, verb: str, detail: str = "") -> ProgressStyles:
 # Lifecycle severity bucket:
 #   running — clean in-flight; warning — non-fatal (live or terminal);
 #   failing — hard failure in-flight; passed/failed — terminal;
-#   aborted — bazel terminated (timeout, OOM, ctrl-c).
+#   aborted — the invocation never finished: Bazel exited INTERRUPTED (8).
 # `warning` is both live and terminal — read `TaskUpdate.final` to tell.
+# `aborted` is exit 8 and nothing else: an OOM (33) or a lost remote
+# environment (32) is a `failed` build, matching how the Aspect Web UI buckets
+# the same invocation. The verdict is set in the `build_finished` arm of
+# `bazel_results.process_event`, never from an `Aborted` payload's reason.
 # `phases.update(...)` validates against this enum; `TaskUpdate.status`
 # stays `str` so surfaces compare with plain literals.
 Status = enum("running", "failing", "warning", "passed", "failed", "aborted")
