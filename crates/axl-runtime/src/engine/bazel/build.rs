@@ -1885,6 +1885,78 @@ Test = task(implementation = _impl)
         }
     }
 
+    /// `bazel info server_pid` must be asked with the startup flags the build
+    /// will use.
+    ///
+    /// That pid is the execution log's nominated holder. Bazel kills a running
+    /// server whose startup options differ from the ones it is handed, so a pid
+    /// read without the build's startup flags belongs to a server the build then
+    /// replaces. Dead, the holder makes the reader take a log that does not exist
+    /// yet for one that never will: it ends the stream clean and empty, every
+    /// `exec_log_event` hook fires zero times, every sink writes nothing, and the
+    /// build passes. Reproduced against a real Bazel with
+    /// `--bazel-startup-flag=--nosystem_rc`, which is enough on its own.
+    ///
+    /// Asserted on basil's argv rather than on an entry count, because basil has
+    /// no server to restart — the fake cannot show the consequence, only that the
+    /// two invocations were told the same thing.
+    #[cfg(unix)]
+    #[test]
+    fn the_server_pid_is_read_with_the_builds_startup_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        // Distinctive enough that a concurrent basil appending to the same file
+        // cannot be mistaken for this test's invocations.
+        let marker = "--nosystem_rc";
+        let script = format!(
+            r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = [{marker:?}], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--scenario=success"],
+        stderr = None,
+    )
+    status = build.wait()
+    return 0 if status.success else 1
+
+Test = task(implementation = _impl)
+"#,
+        );
+
+        let exit = with_daemon_stand_in(|| {
+            // SAFETY: process-wide, but `with_daemon_stand_in` holds the lock that
+            // serializes the basil tests for the whole closure.
+            unsafe {
+                std::env::set_var("BASIL_ARGV_LOG", &argv_log);
+            }
+            let out = crate::test::eval(&script).with_fake_bazel().run_task(0);
+            unsafe {
+                std::env::remove_var("BASIL_ARGV_LOG");
+            }
+            out
+        });
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "the build should have run"
+        );
+
+        let recorded = std::fs::read_to_string(&argv_log).expect("basil should have logged argv");
+        let info: Vec<&str> = recorded
+            .lines()
+            .filter(|line| line.split_whitespace().any(|a| a == "info"))
+            .collect();
+        assert!(!info.is_empty(), "no `info` invocation in:\n{recorded}");
+        for line in info {
+            assert!(
+                line.contains(marker),
+                "`bazel info` ran without the build's startup flags, so the server pid \
+                 it reports is not the server that runs the build:\n  {line}",
+            );
+        }
+    }
+
     /// `build.execution_logs()` takes the stream's one subscriber rather than
     /// cloning it, so a second consumer is refused rather than silently capping
     /// the log for everyone.

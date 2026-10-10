@@ -47,6 +47,7 @@ use prost::Message;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    record_argv(&args);
     // First non-flag arg is the verb (e.g. "info", "build"). Flags before it
     // (like bazel startup flags) are tolerated and ignored — we don't model
     // bazel's real flag positioning rules.
@@ -67,6 +68,26 @@ fn main() {
             eprintln!("basil: unsupported verb: {other}");
             process::exit(2);
         }
+    }
+}
+
+/// Append this invocation's argv to `BASIL_ARGV_LOG`, one line per invocation,
+/// when a test asked for it.
+///
+/// The CLI runs `bazel info server_pid` before `bazel build` and nominates that
+/// pid as the execution log's holder. Bazel kills a running server whose startup
+/// options differ from the ones it is handed, so the two invocations have to
+/// agree or the pid belongs to a server the build replaces — and the only place
+/// that agreement is visible is the argv each one received.
+///
+/// Appends rather than truncates, because one build is several invocations, and
+/// a reader is expected to pick out the lines it cares about.
+fn record_argv(args: &[String]) {
+    let Ok(path) = env::var("BASIL_ARGV_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all((args.join(" ") + "\n").as_bytes());
     }
 }
 
