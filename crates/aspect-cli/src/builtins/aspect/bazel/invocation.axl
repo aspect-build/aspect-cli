@@ -11,7 +11,10 @@ and the callsite's loop counter), never stored.
 
 The one thing the constructor cannot resolve is the execution-log wiring: an
 `exec_log_event` handle binds to a single build, so each attempt opens its own
-(`./exec_log.axl`) and threads it through the `_spawned` struct the same way."""
+(`./exec_log.axl`) and threads it through the `_spawned` struct the same way.
+That is also why `on_event` hangs off the spawned struct rather than the handle:
+it dispatches both BES events and execution log entries, and only the attempt
+knows which log it is reading."""
 
 load(
     "@aspect//bazel/build_events.axl",
@@ -235,7 +238,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
         index = index,
         events = iterator if iterator else [],
         sink_invocation_id = handle.sink_invocation_id,
-        pump = lambda: exec_log.pump(inv.ctx, xl),
+        on_event = lambda event: _do_on_event(inv, xl, event),
         wait = lambda: _do_wait(inv, handle, xl),
     )
 
@@ -258,9 +261,22 @@ def _do_wait(inv: _Invocation, handle, xl: struct):
         handler(inv.ctx, status.code)
     return status
 
-def _do_on_event(inv: _Invocation, event) -> None:
-    """Dispatch one BES event to the trait's `build_event` hooks. `event` is None
-    on a quiet tick — nothing to do."""
+def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
+    """Dispatch one BES event to the trait's `build_event` hooks, and fire any
+    `exec_log_event` hooks on whatever the execution log has written so far.
+
+    Both live here so a task's drain loop stays one call per event. The execution
+    log is pumped before the `event == None` early return, because a quiet BES
+    tick says nothing about the log: Bazel can be busy writing actions while the
+    event stream has nothing to report.
+
+    The `xl.entries` test is what keeps this free for the overwhelming majority
+    of runs, which register no `exec_log_event` hook at all: a field read and a
+    comparison, rather than a call into the dispatcher, on a path that runs once
+    per BES event.
+    """
+    if xl.entries != None:
+        exec_log.pump(inv.ctx, xl)
     if event == None:
         return
     for handler in inv.trait.build_event:
@@ -294,7 +310,6 @@ def _handle(ctx, command: str):
         bazel_streams_bes = inv.bazel_streams_bes,
         start = lambda: _do_start(inv),
         spawn = lambda index, extra_flags = [], aspects = [], events = False: _do_spawn(inv, index, extra_flags, aspects, events),
-        on_event = lambda event: _do_on_event(inv, event),
         should_retry = lambda sp, w: _do_should_retry(inv, sp, w),
         finish = lambda w: _do_finish(inv, w),
     )

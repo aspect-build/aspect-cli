@@ -1466,6 +1466,10 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// regular file that the CLI tails, a slow consumer never slows Bazel down — it
     /// only lengthens the wait at the end of the build.
     ///
+    /// Iterating blocks, but stays a safe point: a cancelled run ends the iteration
+    /// rather than parking in it, so the task's body still reaches its next blocking
+    /// call and the signal deadline is still effective.
+    ///
     /// ```python
     /// entries = bazel.execution_log.iterator(kinds = ["spawn"])
     /// build = ctx.bazel.build("//...", execution_log = [entries])
@@ -1478,6 +1482,7 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
         let kinds = match kinds {
             NoneOr::None => None,
@@ -1494,7 +1499,12 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
                 Some(set)
             }
         };
-        Ok(iter::ExecLogIter::new(kinds))
+        // The run's signals travel with the handle, so blocking iteration over it
+        // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
+        Ok(iter::ExecLogIter::new(
+            Env::from_eval(eval)?.signals.clone(),
+            kinds,
+        ))
     }
 }
 

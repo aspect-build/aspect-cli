@@ -69,11 +69,18 @@ def _is_exact(hooks: list[ExecLogHook], kinds: list[str] | None) -> bool:
     """Whether the Rust-side filter is already exactly right for every hook, so
     dispatch can skip re-checking each entry's kind in AXL.
 
-    True when no hook filters (nothing to re-check) or when every hook asked for
-    the same set the runtime was given. False only when hooks disagree, which is
-    when the union delivers one hook entries another asked for."""
+    True in two cases: no hook filters at all, so every entry is wanted by
+    everyone; or every hook asked for the same set, which is then the set the
+    runtime was given. False whenever hooks disagree, because the union is wider
+    than the narrowest hook asked for and delivering it unchecked would hand that
+    hook kinds it never asked for.
+
+    `kinds == None` is *not* on its own a reason to say True: `_union_kinds`
+    returns None as soon as **one** hook is unfiltered, which is exactly the
+    mixed case — an unfiltered auditor beside a `kinds = ["spawn"]` hook — where
+    the narrow hook most needs the re-check."""
     if kinds == None:
-        return True
+        return all([not hook.kinds for hook in hooks])
     for hook in hooks:
         if sorted(hook.kinds) != kinds:
             return False

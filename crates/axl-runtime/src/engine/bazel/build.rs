@@ -1111,18 +1111,39 @@ impl Build {
         // Subscribe the iterator handles. Each gets its own receiver clone: the
         // channel is a broadcast ring, so hooks read the same entries the file
         // sinks do instead of competing with them for entries.
+        //
+        // A bind can fail — a handle passed twice, or reused from an earlier
+        // build — and by then earlier handles in the list are already subscribed.
+        // Releasing them on the way out matters because this returns before
+        // `detach_initial_subscriber` below, so nothing else would: the reader
+        // thread would park at the ring bound with subscribers no AXL code can
+        // reach any more, and a sibling decoded `File` sink would be left
+        // truncated because its writer never sees the rest of the stream.
         if !execlog_iters.is_empty() {
+            // Unreachable today: `partition_execution_log` turns the stream on for
+            // any list, so a list holding a handle always has a stream. Kept as
+            // the explicit invariant rather than an unwrap.
             let stream = execlog_stream.as_ref().ok_or_else(|| {
                 io::Error::other(
                     "ctx.bazel.build/test: execution_log list contained `iterator()` handles \
                      but no execution log stream is configured",
                 )
             })?;
+            let mut bound = 0;
             for iter in &execlog_iters {
-                let recv = stream.receiver().ok_or_else(|| {
-                    io::Error::other("execution log stream has no subscriber to clone")
-                })?;
-                iter.bind(recv).map_err(io::Error::other)?;
+                let failure = match stream.receiver() {
+                    None => Some(io::Error::other(
+                        "execution log stream has no subscriber to clone",
+                    )),
+                    Some(recv) => iter.bind(recv).err().map(io::Error::other),
+                };
+                if let Some(err) = failure {
+                    for already in &execlog_iters[..bound] {
+                        already.release();
+                    }
+                    return Err(err);
+                }
+                bound += 1;
             }
         }
 
@@ -1285,6 +1306,14 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// will fail — the stream is consumed as part of the wait. Iterate
     /// `execution_logs()` **before** calling `wait()` if you need to process
     /// entries.
+    ///
+    /// The same applies, more sharply, to an `execution_log.iterator()` handle:
+    /// `wait()` releases every handle still bound to this build before joining
+    /// the log's producer, so a handle stops yielding from here on and anything
+    /// it had not been drained of is gone. That is deliberate — a bound handle is
+    /// a subscriber the producer blocks for, so a handle nobody drained would
+    /// otherwise park the producer and hang this `wait()` — but it does mean the
+    /// drain belongs *before* the call, not after.
     ///
     /// `build_events()` remains usable after `wait()` for replaying historical
     /// events, because the build event stream retains its buffer.

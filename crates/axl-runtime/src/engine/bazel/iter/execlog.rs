@@ -42,6 +42,9 @@ use derive_more::Display;
 use fibre::RecvError;
 use fibre::spmc::Receiver;
 
+use crate::engine::cancellation::Signals;
+use crate::engine::children::{Recv, recv_cancellable};
+
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
 #[display("<execlog_iterator>")]
 pub struct ExecutionLogIterator {
@@ -219,13 +222,19 @@ pub struct ExecLogIter {
     kinds: Option<Arc<HashSet<i32>>>,
     #[allocative(skip)]
     state: Arc<Mutex<ExecLogIterState>>,
+    /// The run's cancellation state, carried from construction so blocking
+    /// iteration stays a safe point. Without it a drain would park in a bare
+    /// `recv()` and the AXL body would stop answering signals — see `iter_next`.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 impl ExecLogIter {
-    pub fn new(kinds: Option<HashSet<i32>>) -> Self {
+    pub fn new(signals: Arc<Signals>, kinds: Option<HashSet<i32>>) -> Self {
         Self {
             kinds: kinds.map(Arc::new),
             state: Arc::new(Mutex::new(ExecLogIterState::Pending)),
+            signals,
         }
     }
 
@@ -332,13 +341,24 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
             }
         };
 
-        // Blocks until the next wanted entry or the stream's end. Entries of
-        // other kinds are discarded here rather than yielded as `None`: unlike
-        // the BES iterator's quiet tick, a filtered-out entry carries no signal
-        // a caller could act on, and a log is mostly filtered-out entries.
+        // Blocks until the next wanted entry or the stream's end, through
+        // `recv_cancellable` rather than a bare `recv()` so the wait stays a safe
+        // point: it rechecks the root token every poll slice and gives up on a
+        // cancel. That is load-bearing now that an AXL drain runs here on the
+        // critical path of every bazel-driving task, immediately before the one
+        // other cancellation-aware wait (`wait_child`). A bare `recv()` would
+        // park for as long as the reader thread does — and the reader's
+        // end-of-stream signal is the daemon closing the log file, which an
+        // interrupted invocation need not make happen promptly — leaving the body
+        // unable to answer a second Ctrl-C or the signal deadline.
+        //
+        // Entries of other kinds are discarded here rather than yielded as
+        // `None`: unlike the BES iterator's quiet tick, a filtered-out entry
+        // carries no signal a caller could act on, and a log is mostly
+        // filtered-out entries.
         loop {
-            match recv.recv() {
-                Ok(entry) => {
+            match recv_cancellable(&self.signals, &recv, None) {
+                Recv::Item(entry) => {
                     if !self.wants(&entry) {
                         continue;
                     }
@@ -350,10 +370,15 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
                     }
                     return Some(entry.alloc_value(heap));
                 }
-                Err(RecvError::Disconnected) => {
+                // Ending on a cancel also drops `recv`, which frees a producer
+                // parked on this subscriber. The loop's next call raises the
+                // task's exit; an iterator cannot raise one itself.
+                Recv::Closed | Recv::Cancelled => {
                     *self.state.lock().unwrap() = ExecLogIterState::Done;
                     return None;
                 }
+                // Unreachable with `tick = None`, which has no deadline to pass.
+                Recv::Tick => continue,
             }
         }
     }
@@ -408,6 +433,7 @@ pub(crate) fn exec_log_iter_methods(registry: &mut MethodsBuilder) {
 mod tests {
     use super::*;
     use fibre::spmc::bounded;
+    use starlark::values::StarlarkValue;
 
     fn entry(id: u32, t: exec_log_entry::Type) -> ExecLogEntry {
         ExecLogEntry {
@@ -518,7 +544,7 @@ mod tests {
     #[test]
     fn try_pop_skips_entries_of_other_kinds() {
         let (sender, recv) = bounded::<ExecLogEntry>(16);
-        let iter = ExecLogIter::new(Some([7].into_iter().collect()));
+        let iter = ExecLogIter::new(Signals::new(), Some([7].into_iter().collect()));
         iter.bind(recv).unwrap();
 
         for e in [
@@ -544,7 +570,7 @@ mod tests {
     #[test]
     fn no_filter_yields_every_kind() {
         let (sender, recv) = bounded::<ExecLogEntry>(16);
-        let iter = ExecLogIter::new(None);
+        let iter = ExecLogIter::new(Signals::new(), None);
         iter.bind(recv).unwrap();
         for e in [file(1), spawn(2, "//a:a")] {
             sender.send(e).unwrap();
@@ -563,7 +589,7 @@ mod tests {
     fn release_unsubscribes_and_frees_a_parked_producer() {
         // Capacity 1 so the second send parks unless the receiver is gone.
         let (sender, recv) = bounded::<ExecLogEntry>(1);
-        let iter = ExecLogIter::new(None);
+        let iter = ExecLogIter::new(Signals::new(), None);
         iter.bind(recv).unwrap();
         sender.send(file(1)).unwrap();
 
@@ -579,11 +605,45 @@ mod tests {
         );
     }
 
+    /// The reason the handle carries `Signals` at all. A drain runs on the
+    /// critical path of every bazel-driving task, just before `build.wait()`, and
+    /// the stream's end-of-input is the Bazel *daemon* closing the log file —
+    /// which an interrupted invocation need not make happen promptly. A bare
+    /// `recv()` here would leave the AXL body unable to answer the signal
+    /// deadline or a second Ctrl-C.
+    #[test]
+    fn iteration_ends_on_a_cancel_rather_than_parking() {
+        let signals = Signals::new();
+        // A sender that is never written to and never closed: iteration has
+        // nothing to return and no end-of-stream to end on.
+        let (_sender, recv) = bounded::<ExecLogEntry>(4);
+        let iter = ExecLogIter::new(signals.clone(), None);
+        iter.bind(recv).unwrap();
+
+        signals.force();
+        assert!(signals.should_unwind(), "the run should now be unwinding");
+
+        Heap::temp(|heap| {
+            assert!(
+                unsafe { iter.iter_next(0, heap) }.is_none(),
+                "a cancelled run must end the iteration instead of parking in it",
+            );
+        });
+
+        // Ending also released the subscriber, which is what frees a producer
+        // already parked on it.
+        let state = iter.state.lock().unwrap();
+        assert!(
+            matches!(*state, ExecLogIterState::Done),
+            "a cancelled iteration should leave the handle Done, got {state:?}",
+        );
+    }
+
     #[test]
     fn a_handle_binds_to_one_build_only() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);
         let (_s2, r2) = bounded::<ExecLogEntry>(4);
-        let iter = ExecLogIter::new(None);
+        let iter = ExecLogIter::new(Signals::new(), None);
         iter.bind(r1).unwrap();
         let err = iter
             .bind(r2)
@@ -614,6 +674,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Pins the AXL shape of `ExecLogEntry.Output`'s oneof, which the resolver in
+    /// `@aspect//private/lib/execlog.axl` reads to build a spawn's identity: an
+    /// output is either an id into the entry table (`type(...) == "int"`) or the
+    /// raw path Bazel recorded when it could not resolve one (`"string"`).
+    ///
+    /// Worth a test of its own because getting it wrong degrades silently rather
+    /// than failing: `_spawn_key` would fall back to `label!mnemonic` for every
+    /// spawn, colliding siblings, and `outputs()` would come back empty. The
+    /// entry here is a real decoded proto rather than a hand-built struct, so a
+    /// change in how starbuf represents a scalar oneof breaks this test instead
+    /// of the resolver.
+    #[test]
+    fn a_decoded_spawn_exposes_its_outputs_as_ints_or_raw_strings() {
+        use prost::Message;
+
+        let entry = ExecLogEntry {
+            id: 9,
+            r#type: Some(exec_log_entry::Type::Spawn(exec_log_entry::Spawn {
+                target_label: "//pkg:target".to_string(),
+                mnemonic: "Genrule".to_string(),
+                outputs: vec![
+                    exec_log_entry::Output {
+                        r#type: Some(exec_log_entry::output::Type::OutputId(5)),
+                    },
+                    exec_log_entry::Output {
+                        r#type: Some(exec_log_entry::output::Type::InvalidOutputPath(
+                            "gen/missing.txt".to_string(),
+                        )),
+                    },
+                ],
+                ..Default::default()
+            })),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.binpb");
+        std::fs::write(&path, entry.encode_length_delimited_to_vec()).unwrap();
+
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.build.execution_log.ExecLogEntry().parse_from_delimited(
+        ctx.std.fs.open({path:?}),
+    )
+    seen = []
+    for entry in entries:
+        if type(entry.type) != "spawn":
+            continue
+        for output in entry.type.outputs:
+            seen.append((type(output.type), output.type))
+    if seen != [("int", 5), ("string", "gen/missing.txt")]:
+        return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            path = path.to_str().unwrap(),
+        ))
+        .run_task(0)
+        .expect("run_task");
+
+        assert_eq!(
+            exit,
+            Some(0),
+            "an output id should reach AXL as an int and an unresolved path as a string",
+        );
     }
 
     #[test]

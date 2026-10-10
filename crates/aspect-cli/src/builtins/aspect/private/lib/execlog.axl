@@ -55,11 +55,12 @@ SYMLINK_ENTRY_SET = "symlink_entry_set"
 # `["spawn"]` — the spawn alone carries no paths.
 RESOLVER_KINDS = [FILE, DIRECTORY, UNRESOLVED_SYMLINK, INPUT_SET, RUNFILES_TREE, SPAWN]
 
-# Upper bound on ids visited while flattening one input set, when the caller
-# gives no budget of its own. A set cannot reach more ids than the log has
-# entries, and a resolver fed in order knows how many it has seen, so this only
-# applies to a caller flattening against maps it built by hand (tests) or one
-# that wants a tighter cap than "the whole log".
+# Upper bound on distinct ids visited while flattening one input set, when the
+# caller gives no budget of its own. `_flatten` queues each id at most once, so
+# a set cannot need more iterations than the log has entries, and a resolver fed
+# in order knows how many it has seen. This default only applies to a caller
+# flattening against maps it built by hand (tests) or one that wants a tighter
+# cap than "the whole log".
 DEFAULT_FLATTEN_BUDGET = 1000000
 
 Fingerprint = record(
@@ -97,9 +98,18 @@ def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) 
 
     Iterative rather than recursive: input sets nest arbitrarily deep in a large
     repo, and a blown evaluation stack part-way through a log is a worse failure
-    than a slow one. `seen` makes a cycle (or, far more often, a set reachable by
-    several paths) terminate and be counted once. `budget` bounds the walk at
-    more ids than any one set can reach, so a malformed log cannot spin.
+    than a slow one.
+
+    `seen` marks an id as *queued*, not as visited, and nothing is queued twice.
+    That is what makes `budget` a true bound rather than an optimistic one: the
+    loop runs at most once per distinct reachable id, so a budget of "ids written
+    to the log so far" cannot be exhausted by a graph the log actually contains.
+    Deduplicating at pop time instead would spend an iteration per *edge* — a
+    depset referenced by two parents, which is routine rather than exotic, would
+    burn two — and the walk could hit the budget and return a truncated input
+    list. Truncation here is silent and poisons `inputs_hash`, so the action
+    looks changed (or unchanged) for no reason. Cycles terminate for the same
+    reason duplicates do.
 
     `root_id == 0` is Bazel's "no set", not set number zero: it means the spawn
     has no inputs, and resolves to the empty list.
@@ -107,7 +117,7 @@ def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) 
     if root_id == 0:
         return []
 
-    seen = {}
+    seen = {root_id: True}
     stack = [root_id]
     out = []
 
@@ -115,16 +125,17 @@ def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) 
         if not stack:
             break
         current = stack.pop()
-        if current in seen:
-            continue
-        seen[current] = True
 
         if current in sets:
             direct, transitive = sets[current]
             for child in direct:
-                stack.append(child)
+                if child not in seen:
+                    seen[child] = True
+                    stack.append(child)
             for child in transitive:
-                stack.append(child)
+                if child not in seen:
+                    seen[child] = True
+                    stack.append(child)
             continue
 
         path = paths.get(current)
@@ -200,8 +211,9 @@ def _resolver() -> struct:
     """A stateful id table fed one entry at a time. See the module docstring.
 
     The returned struct's methods close over three dicts and an entry counter;
-    the counter doubles as the flatten budget, since a set cannot reach more ids
-    than have been written before it.
+    the counter doubles as the flatten budget, since a set cannot reach more
+    distinct ids than have been written before it and `_flatten` visits each
+    reachable id once.
     """
     paths = {}
     digests = {}

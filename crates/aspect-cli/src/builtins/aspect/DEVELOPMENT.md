@@ -722,6 +722,8 @@ def config(ctx: ConfigContext):
 
 **A hook cannot slow Bazel down.** In production Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails it, so a slow consumer parks the CLI's reader thread, not Bazel. The cost of an expensive hook is paid at the end of the build, in `close` and the `join()` inside `wait()`, never as a stalled action graph. A fully cached build logs nothing at all — Bazel does not record actions it did not run, and local action-cache hits are not logged either.
 
+**Draining is a safe point.** `close` blocks, but through the run's cancellation state, so a cancelled run ends the iteration instead of parking in it. That matters because `close` sits immediately before `build.wait()`, the task's one other cancellation-aware wait: the log's end-of-stream signal is the Bazel *daemon* closing the file, which an interrupted invocation need not make happen promptly.
+
 ### URL publication API
 
 The artifact uploader publishes URLs via the [Pattern 2](#pattern-2-feature-owned--callable-trait) wrapper API:
@@ -830,6 +832,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         for handler in bazel_trait.build_event:
             handler(ctx, event)
         bzl.exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
+        #                                   # (tasks on the bazel.build(ctx) handle
+        #                                   #  get this inside sp.on_event instead)
         if process_event(data, event, bb_root):
             task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data)
 

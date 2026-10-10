@@ -5,7 +5,9 @@ Three things here can be wrong in a way nothing else would notice:
   * the kinds union — too narrow and a hook silently stops seeing the entries it
     asked for, which is the exact failure the filter exists to make impossible;
   * `exact` — too eager and hooks receive kinds they did not ask for, too shy and
-    every entry pays for a `type()` call it did not need;
+    every entry pays for a `type()` call it did not need. The trap is that one
+    unfiltered hook makes the union "every kind", which looks like "nobody
+    filters" and is not;
   * `open` with no hooks registered — it must return a *falsy* sink list, because
     `ctx.bazel.build(execution_log = [])` means "stream on with no consumer", not
     "off". Getting that wrong turns on the execution log for every build in the
@@ -37,6 +39,15 @@ def _handle(hooks, exact):
     """The shape `_fire` reads off `open`'s result, without a build behind it."""
     return struct(sinks = [], entries = None, hooks = hooks, exact = exact)
 
+# A stand-in entry for the dispatch tests. `_fire` reads the kind as
+# `type(entry.type)`, and a struct cannot impersonate a real payload's AXL type,
+# so the payload here is one whose `type()` is a name a test can also write in
+# `kinds`. `_ENTRY_KIND` is read back off the fixture rather than hard-coded, so
+# a test asserts on the same string the dispatch computes — what is under test is
+# the routing, not the name.
+_ENTRY = struct(type = "stand-in payload")
+_ENTRY_KIND = type(_ENTRY.type)
+
 def _test_union_of_one_hook(_ctx):
     hook = _recorder([], "a", kinds = ["spawn"])
     _eq("single hook", bzl.exec_log.testonly_union_kinds([hook]), ["spawn"])
@@ -54,7 +65,11 @@ def _test_union_merges_and_sorts(_ctx):
 
 def _test_one_unfiltered_hook_widens_the_union_to_everything(_ctx):
     """`kinds = []` means "every kind". Narrowing the stream to another hook's
-    list would starve it, so None has to win."""
+    list would starve it, so None has to win.
+
+    This fixture is also the one that breaks `_is_exact`; it is carried through
+    all three helpers in
+    `_test_mixed_hooks_compose_from_union_through_exact_into_fire`."""
     hooks = [_recorder([], "a", kinds = ["spawn"]), _recorder([], "b")]
     _eq("None wins", bzl.exec_log.testonly_union_kinds(hooks), None)
 
@@ -65,9 +80,11 @@ def _test_one_unfiltered_hook_widens_the_union_to_everything(_ctx):
 def _test_no_hooks_means_no_filter(_ctx):
     _eq("empty", bzl.exec_log.testonly_union_kinds([]), None)
 
-def _test_exact_when_the_union_is_every_kind(_ctx):
-    """Nothing was filtered out, so there is nothing to re-check in AXL."""
-    _eq("no filter", bzl.exec_log.testonly_is_exact([_recorder([], "a")], None), True)
+def _test_exact_when_no_hook_filters(_ctx):
+    """Every hook is unfiltered, so nothing was filtered out and there is nothing
+    to re-check in AXL. Contrast the mixed case below."""
+    hooks = [_recorder([], "a"), _recorder([], "b")]
+    _eq("no filter", bzl.exec_log.testonly_is_exact(hooks, None), True)
 
 def _test_exact_when_every_hook_asked_for_the_same_kinds(_ctx):
     hooks = [
@@ -85,6 +102,71 @@ def _test_not_exact_when_hooks_disagree(_ctx):
     ]
     kinds = bzl.exec_log.testonly_union_kinds(hooks)
     _eq("disagreement", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
+
+def _test_not_exact_when_one_hook_is_unfiltered_beside_a_narrow_one(_ctx):
+    """The case `kinds == None` makes easy to get wrong: one unfiltered hook is
+    enough for the union to be "every kind", but the narrow hook beside it still
+    asked for a subset. Treating None as "nobody filters" would hand that hook
+    every file and input-set entry in the build unchecked."""
+    hooks = [_recorder([], "auditor"), _recorder([], "spawns", kinds = ["spawn"])]
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    _eq("union is every kind", kinds, None)
+    _eq("but the narrow hook needs the re-check", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
+
+def _test_fire_routes_by_kind_when_hooks_disagree(ctx):
+    """The `exact = False` branch, the one the mixed case routes into: an
+    unfiltered hook fires, a hook that asked for this kind fires, a hook that
+    asked for another kind does not."""
+    seen = []
+    hooks = [
+        _recorder(seen, "auditor"),  # kinds = [] → all
+        _recorder(seen, "matching", kinds = [_ENTRY_KIND]),
+        _recorder(seen, "other", kinds = ["a kind this entry is not"]),
+    ]
+    bzl.exec_log.testonly_fire(ctx, _handle(hooks, False), _ENTRY)
+    _eq(
+        "unfiltered and matching fire, in order; the third is filtered out",
+        [name for name, _ in seen],
+        ["auditor", "matching"],
+    )
+
+def _test_mixed_hooks_compose_from_union_through_exact_into_fire(ctx):
+    """The three helpers on one set of hooks, threaded the way `open` and `_fire`
+    thread them — `exact` comes from `_is_exact`, not from the test.
+
+    This composition is what was missing: every helper had its own test, and the
+    fixture that breaks `_is_exact` already existed in the union test above
+    without ever reaching `_is_exact`. Checking each stage in isolation cannot
+    catch a stage that reads another's output wrongly."""
+    seen = []
+    hooks = [_recorder(seen, "auditor"), _recorder(seen, "narrow", kinds = ["spawn"])]
+
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    exact = bzl.exec_log.testonly_is_exact(hooks, kinds)
+    _eq("one unfiltered hook widens the union to every kind", kinds, None)
+    _eq("so the narrow hook still needs the re-check", exact, False)
+
+    bzl.exec_log.testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
+    _eq("the narrow hook is not handed a kind it never asked for", [n for n, _ in seen], ["auditor"])
+
+def _test_agreeing_hooks_compose_onto_the_fast_path(ctx):
+    """The other half of the composition: hooks that agree are filtered exactly
+    by the runtime, so `exact` is True and every hook sees every delivered
+    entry with no per-entry `type()` call."""
+    seen = []
+    hooks = [
+        _recorder(seen, "first", kinds = ["spawn", "file"]),
+        _recorder(seen, "second", kinds = ["file", "spawn"]),
+    ]
+
+    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    exact = bzl.exec_log.testonly_is_exact(hooks, kinds)
+    _eq("union is what both asked for", kinds, ["file", "spawn"])
+    _eq("nothing left to re-check", exact, True)
+
+    # Delivered under the fast path, so the entry's own kind is never consulted.
+    bzl.exec_log.testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
+    _eq("both fire, in order", [n for n, _ in seen], ["first", "second"])
 
 def _test_fire_delivers_to_every_hook_in_registration_order(ctx):
     seen = []
@@ -164,9 +246,13 @@ _UNIT_TESTS = [
     _test_union_merges_and_sorts,
     _test_one_unfiltered_hook_widens_the_union_to_everything,
     _test_no_hooks_means_no_filter,
-    _test_exact_when_the_union_is_every_kind,
+    _test_exact_when_no_hook_filters,
     _test_exact_when_every_hook_asked_for_the_same_kinds,
     _test_not_exact_when_hooks_disagree,
+    _test_not_exact_when_one_hook_is_unfiltered_beside_a_narrow_one,
+    _test_fire_routes_by_kind_when_hooks_disagree,
+    _test_mixed_hooks_compose_from_union_through_exact_into_fire,
+    _test_agreeing_hooks_compose_onto_the_fast_path,
     _test_fire_delivers_to_every_hook_in_registration_order,
     _test_fire_with_no_hooks_is_a_noop,
     _test_wants_filters_a_narrow_hook,

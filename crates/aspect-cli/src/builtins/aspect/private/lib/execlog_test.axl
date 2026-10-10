@@ -114,6 +114,35 @@ def _test_flatten_respects_its_budget(_ctx):
     if len(got) >= 3:
         fail("budget of 2 should not have resolved every member: got %r" % got)
 
+def _test_flatten_spends_its_budget_on_distinct_ids_not_edges(_ctx):
+    """The budget the resolver passes is "entries written so far", so it is only
+    a real bound if the walk costs one iteration per distinct id. Deduplicating
+    at pop time instead spends one per *edge*, and a shared depset — two parents
+    naming one child set — then overruns a budget sized to the graph.
+
+    This is the shape that makes it visible: 6 distinct ids, 8 edges. A budget of
+    exactly 6 must still resolve every file, because truncation here is silent
+    and would poison the action-key fingerprint rather than fail."""
+    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
+    digests = {1: "aaa", 2: "bbb", 3: "ccc"}
+
+    # 30 ─┬─> 20 ─┬─> 10 ─┬─> 1
+    #     │       │       └─> 2
+    #     │       └─> 11 ──┬─> 10   (shared: 10 has two parents)
+    #     └─> 11           └─> 3
+    sets = {
+        10: ([1, 2], []),
+        11: ([3], [10]),
+        20: ([], [10, 11]),
+        30: ([], [20, 11]),
+    }
+
+    _eq(
+        "every file resolved on a budget of exactly the distinct id count",
+        execlog.testonly_flatten(sets, paths, digests, 30, 6),
+        ["a.txt@aaa", "b.txt@bbb", "c.txt@ccc"],
+    )
+
 def _test_flatten_tolerates_a_missing_digest(_ctx):
     """Bazel omits the digest for an empty file."""
     _eq(
@@ -300,6 +329,7 @@ _UNIT_TESTS = [
     _test_flatten_counts_a_shared_set_once,
     _test_flatten_drops_unresolvable_ids,
     _test_flatten_respects_its_budget,
+    _test_flatten_spends_its_budget_on_distinct_ids_not_edges,
     _test_flatten_tolerates_a_missing_digest,
     _test_record_indexes_each_kind,
     _test_record_makes_a_runfiles_tree_resolve_as_a_set,
