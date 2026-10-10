@@ -267,7 +267,20 @@ impl ExecLogStream {
                 // Bazel exited without ever writing an execution log — a rejected
                 // command line, say. An empty stream, not a failure: the build's own
                 // exit code is the thing the caller wants to see.
+                //
+                // It is said out loud, though. Bazel creates the file as soon as it
+                // starts a build, whether or not any action runs, so reaching this
+                // means the invocation ended before the log appeared — a client or
+                // daemon that died, or a path Bazel was never actually given. Left
+                // quiet, that is indistinguishable from a build whose actions were
+                // all cached: every hook fires zero times and the build passes.
                 Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+                    crate::errln!(
+                        "WARNING: bazel produced no execution log at {} ({err}). Any \
+                         `exec_log_event` hook and any execution-log sink saw nothing \
+                         for this invocation.",
+                        path.display(),
+                    );
                     sender.close()?;
                     return Ok(());
                 }

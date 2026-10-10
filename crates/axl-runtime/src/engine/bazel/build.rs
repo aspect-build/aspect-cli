@@ -933,7 +933,15 @@ impl Build {
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info(&signals)?;
+        // Asked with the same startup flags the build below will use, because
+        // that is what decides which server answers. Bazel kills a running
+        // server whose startup options differ from the ones it is handed, so a
+        // pid read without them is the pid of a server the build then replaces —
+        // and `pid` is the execution log's nominated holder. Dead, the reader
+        // takes a log that does not exist yet as a log that never will and ends
+        // the stream clean and empty: every `exec_log_event` hook fires zero
+        // times, every sink writes nothing, and the build passes.
+        let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",

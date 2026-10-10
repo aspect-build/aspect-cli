@@ -475,6 +475,8 @@ events = bazel.build_events.iterator(
 
 The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 
+**Which invocation is this?** A `bazel_trait.build_event` hook (like an `exec_log_event` hook, and for the same reason) can fire for several Bazel invocations of one task: `aspect delivery` drives Bazel three times, a retried `build` up to three. The event itself names no invocation, so read it off the task — `ctx.task.current_phase().name` is `build`, `deliver`, `lint`, `populate`, `build_retry_2`, … because a task opens its phase before it spawns Bazel, and `ctx.task.name` names the task for a hook more than one task registered. See [Execution log hooks](#execution-log-hooks) for the full list and the one case the phase name cannot separate.
+
 ---
 
 ## Per-kind result libraries
@@ -729,6 +731,18 @@ def config(ctx: ConfigContext):
 **`entry.id` does not identify a spawn.** Bazel numbers only the entries something else refers to by id, so every `spawn` arrives with `id = 0`. Name or deduplicate one with the resolver's `spawn_key(spawn)` — its primary output path — not with the id.
 
 **Hooks fire during the build only when the task has a drain loop to pump from.** The tasks with a `sleep_iter` tick loop (`lint`, `format`, `gazelle`, `warming`, `delivery`, `run`) call `pump` every tick. `build` and `test` pump from `bazel/invocation.axl`'s `on_event`, whose loop exists only when something created a BES event iterator — an `exec_log_event` hook does not, deliberately: a BEP FIFO and a parsed event stream are a real cost to impose on a feature that reads no build events. With no iterator every hook fires in `close` instead, still before `wait()` and still with every entry. The contract is completeness, not timeliness.
+
+**Which invocation is this?** A task can drive Bazel more than once — `aspect delivery` does it three times (phases 1 and 3 dispatch; the phase-2 checksum re-run deliberately does not, see [`exec_log_wiring.rs`](../exec_log_wiring.rs)), and a retry loop opens a fresh handle per attempt — and an entry carries nothing identifying which invocation produced it. The hook's `TaskContext` does:
+
+```python
+def _on_entry(ctx, entry):
+    phase = ctx.task.current_phase()
+    where = phase.name if phase else ""     # "build" / "deliver" / "lint" / ...
+```
+
+A task opens its phase *before* it spawns Bazel, so the phase is set for every entry a hook receives, whether it arrived from `pump` or from `close`. The names in the tree today: `build` (`build`, `format`, `gazelle`, `run`, delivery phase 1), `test`, `lint`, `populate` (`ci warming`), `deliver` (delivery phase 3), plus `build_retry_<n>` / `test_retry_<n>` on an attempt after the first — so retries are distinguishable too. `ctx.task.name` is the other half, for a hook several tasks registered. [`tests/exec_log_event.rs`](../../../tests/exec_log_event.rs) asserts the name a hook actually read at every call site.
+
+Two invocations under one *single* phase would not be distinguishable, and `sink_invocation_id` cannot substitute — it is `None` unless a gRPC BES sink exists. No built-in task is shaped that way today, and closing the gap is additive: a per-invocation identifier would be a new accessor, not a changed `on_entry` signature.
 
 **`spawn.metrics` is thinner than it looks.** `input_files` and `input_bytes` are documented in `spawn.proto` as "0 if unavailable", and unavailable in practice means *locally executed* — only the cache and remote-execution paths populate them. So on a cold build, the one where input counts are most interesting, they read 0 throughout. Count from the input-set graph instead (`len(res.inputs(spawn))`), which is why the resolver exists.
 

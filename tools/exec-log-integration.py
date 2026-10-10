@@ -24,6 +24,20 @@ import subprocess
 import tempfile
 import time
 
+# A CI image's `/etc/bazel.bazelrc` or a developer's `~/.bazelrc` can add a disk
+# cache, a remote cache or a BES backend, any of which changes which actions
+# execute and so what the execution log holds. Bazel rejects both flags in an rc
+# file, so they go on the command line — as startup flags for `aspect`, which
+# forwards them, and bare for a direct `bazel` call.
+#
+# Passing them is also how this job covers a bug it found: the CLI reads the
+# Bazel server pid that nominates the execution log's holder, and Bazel kills a
+# server whose startup options differ from the ones it is given. Read without
+# these flags, that pid is the pid of a server the build replaces, and the log
+# comes back silently empty.
+STARTUP = ["--nosystem_rc", "--nohome_rc"]
+ASPECT_STARTUP = [f"--bazel-startup-flag={f}" for f in STARTUP]
+
 # A spawn whose primary output could not be resolved falls back to
 # `<label>!<mnemonic>`, which collides with its siblings. Every spawn in a
 # healthy log resolves, so the marker's absence is the assertion.
@@ -111,6 +125,12 @@ load("@aspect//traits.axl", "BazelTrait", "ExecLogHook")
 
 _REPORT_DIR = "{report_dir}"
 
+# Bazel writes this itself: with no `--execution_log_compact_file` already on the
+# command line, the CLI lends a `compact_file` sink's path to Bazel rather than
+# minting a temp one, so the file is Bazel's own output byte for byte. It is what
+# lets the assertions tell "Bazel logged nothing" from "we read nothing".
+_BAZEL_LOG = "{bazel_log}"
+
 # Per-spawn input lists are only there to be read by a failing assertion; the
 # count beside them is what the assertions use.
 _MAX_INPUTS = 64
@@ -174,6 +194,7 @@ def config(ctx: ConfigContext):
         c.std.fs.create(path).write(json.encode(doc, indent = 2) + "\\n")
 
     t = ctx.traits[BazelTrait]
+    t.execution_log_sinks.append(bazel.execution_log.compact_file(path = _BAZEL_LOG))
     t.exec_log_event.append(ExecLogHook(on_entry = _resolve, kinds = execlog.RESOLVER_KINDS))
     t.exec_log_event.append(ExecLogHook(on_entry = _count_spawns, kinds = [SPAWN]))
     t.build_end.append(_report)
@@ -181,8 +202,14 @@ def config(ctx: ConfigContext):
 
 
 def scaffold(root: Path, report_dir: Path, bazel_version: str, output_base: Path):
-    """Write the fixture workspace. Local execution only, and a BES backend
-    explicitly cleared so a developer's own rc cannot steer the run."""
+    """Write the fixture workspace.
+
+    The JVM heap is left at Bazel's own default: a cap tuned for another fixture
+    is a way to have the server die and be restarted mid-build, which this test
+    would then read as an empty log. `--nosystem_rc` / `--nohome_rc` cannot be
+    set here — Bazel rejects them in an rc file — so they go on each command
+    line; see `STARTUP`.
+    """
     (root / "MODULE.bazel").write_text('module(name = "execlog_fixture")\n')
     (root / "MODULE.aspect").write_text("")
     (root / ".bazelversion").write_text(bazel_version + "\n")
@@ -192,21 +219,35 @@ def scaffold(root: Path, report_dir: Path, bazel_version: str, output_base: Path
         (root / name).write_text(name + " v1\n")
     (root / ".aspect").mkdir()
     (root / ".aspect/config.axl").write_text(
-        CONFIG_AXL.format(report_dir=report_dir)
+        CONFIG_AXL.format(report_dir=report_dir, bazel_log=root / "bazel-wrote-this.zst")
     )
     (root / ".bazelrc").write_text(
         f"startup --output_base={output_base}\n"
-        "startup --host_jvm_args=-Xmx512m\n"
         "common --lockfile_mode=off\n"
         "build --bes_backend=\n"
         "build --spawn_strategy=local\n"
     )
 
 
-def report(report_dir: Path, task_name: str) -> dict:
+# A compact log holding no entries is still a valid zstd frame, and Bazel writes
+# one for a build that ran no actions. Measured at 66 bytes; the bound is
+# deliberately loose because it is only used to tell an empty log from a full one.
+EMPTY_LOG_CEILING = 256
+
+
+def report(report_dir: Path, workspace: Path, task_name: str) -> dict:
+    """The hooks' record for `task_name`, with Bazel's own log size beside it.
+
+    `bazel_log_bytes` is what makes a zero-entry failure name its own cause: the
+    hooks and that file read the same bytes from the same path, so a full log
+    beside an empty hook is the CLI's reader losing entries, and an empty one is
+    Bazel never having written them.
+    """
     path = report_dir / f"{task_name}.json"
+    log = workspace / "bazel-wrote-this.zst"
     assert path.exists(), f"the exec_log_event hooks never reported to {path}"
     doc = json.loads(path.read_text())
+    doc["bazel_log_bytes"] = log.stat().st_size if log.exists() else None
     path.unlink()
     return doc
 
@@ -217,7 +258,32 @@ def spawns_by_mnemonic(doc: dict, mnemonic: str) -> list:
 
 def check_shared(doc: dict, label: str):
     """The invariants that hold for any real log, whatever produced it."""
-    assert doc["observed"] > 0, f"{label}: the hook received no entries at all"
+    wrote = doc["bazel_log_bytes"]
+    if doc["observed"] == 0:
+        # Zero entries is the failure this whole job exists to catch, so say which
+        # side lost them rather than leaving the next reader to bisect a matrix.
+        if wrote is None:
+            raise AssertionError(
+                f"{label}: the hook received no entries, and bazel wrote no "
+                f"execution log either. Bazel creates the file as soon as it starts "
+                f"a build, so this is an invocation that never got that far — or one "
+                f"that was never given the flag."
+            )
+        if wrote > EMPTY_LOG_CEILING:
+            raise AssertionError(
+                f"{label}: bazel wrote a {wrote}-byte execution log and the hook "
+                f"received none of it. The CLI's reader lost this log — not a Bazel "
+                f"difference. Check the WARNING line in the build output."
+            )
+        raise AssertionError(
+            f"{label}: the hook received no entries, and bazel's own log is "
+            f"{wrote} bytes — an empty frame, so bazel logged no actions for this "
+            f"build. Something made every action a cache hit or skipped execution."
+        )
+    assert wrote is None or wrote > EMPTY_LOG_CEILING, (
+        f"{label}: the hook received {doc['observed']} entries but bazel's own log "
+        f"is only {wrote} bytes; the two read the same path and must agree"
+    )
     assert doc["ids"]["out_of_order"] == 0, (
         f"{label}: entry ids must advance; a repeat or a reorder means the reader "
         f"delivered two builds' logs, or one of them twice: {doc['ids']}"
@@ -287,6 +353,10 @@ def main():
         env["BAZEL_REAL"] = bazel
         env["USE_BAZEL_VERSION"] = args.bazel_version
         timings = {}
+        # Kept so an assertion about what the hooks saw can show the build that
+        # produced it; a `check_shared` failure otherwise says nothing about the
+        # invocation, which is most of the evidence.
+        last_output = {}
 
         def run(name, command, expected=0):
             before = time.monotonic()
@@ -294,19 +364,28 @@ def main():
                 command, cwd=workspace, env=env, text=True, capture_output=True, timeout=600
             )
             timings[name] = round(time.monotonic() - before, 3)
+            last_output[name] = result.stdout + result.stderr
+            last_output["latest"] = f"--- {name} ---\n" + last_output[name]
             print(f"{name}: exit={result.returncode}, seconds={timings[name]}", flush=True)
             assert result.returncode == expected, result.stdout + result.stderr
             return result
 
         try:
             version = run("bazel_version", [bazel, "--version"])
+            # Recorded, not just asserted: a run reported against the wrong
+            # version is a verification that did not happen.
+            print(
+                f"requested={args.bazel_version} resolved={version.stdout.strip()!r} "
+                f"bazel={bazel}",
+                flush=True,
+            )
             assert version.stdout.strip() == f"bazel {args.bazel_version}", (
                 version.stdout + version.stderr
             )
 
             # 1. A cold build: every action runs, so every action is logged.
-            run("build", [aspect, "build", "--task:name=cold-build", "--", "//..."])
-            cold = report(reports, "cold-build")
+            run("build", [aspect, "build", "--task:name=cold-build", *ASPECT_STARTUP, "--", "//..."])
+            cold = report(reports, workspace, "cold-build")
             check_shared(cold, "cold build")
 
             combine = spawns_by_mnemonic(cold, "FixtureCombine")
@@ -333,8 +412,8 @@ def main():
             #    runfiles_tree entry in the log, and a spawn names the tree
             #    rather than the set inside it — so the resolver has to treat the
             #    tree as a set or every runfile drops out of the action key.
-            run("test", [aspect, "test", "--task:name=test-run", "--", "//..."])
-            tested = report(reports, "test-run")
+            run("test", [aspect, "test", "--task:name=test-run", *ASPECT_STARTUP, "--", "//..."])
+            tested = report(reports, workspace, "test-run")
             check_shared(tested, "test run")
             assert tested["kinds"].get("runfiles_tree", 0) > 0, (
                 f"the test run logged no runfiles tree: {tested['kinds']}"
@@ -352,8 +431,8 @@ def main():
             #    inputs fingerprint must move with the digest it depends on —
             #    the resolver's whole purpose.
             (workspace / "first.in").write_text("first.in v2\n")
-            run("rebuild", [aspect, "build", "--task:name=warm-build", "--", "//..."])
-            warm = report(reports, "warm-build")
+            run("rebuild", [aspect, "build", "--task:name=warm-build", *ASPECT_STARTUP, "--", "//..."])
+            warm = report(reports, workspace, "warm-build")
             check_shared(warm, "rebuild")
             rebuilt = {s["key"]: s for s in warm["spawns"]}
             before = {s["key"]: s for s in cold["spawns"]}
@@ -382,9 +461,12 @@ def main():
                 ),
                 flush=True,
             )
+        except AssertionError:
+            print(last_output.get("latest", "(no build ran)"), flush=True)
+            raise
         finally:
             subprocess.run(
-                [bazel, f"--output_base={output_base}", "shutdown"],
+                [bazel, *STARTUP, f"--output_base={output_base}", "shutdown"],
                 cwd=workspace,
                 env=env,
                 capture_output=True,

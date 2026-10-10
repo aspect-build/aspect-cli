@@ -36,6 +36,29 @@ join a thread that is waiting for us. `build.wait()` releases any handle still
 bound for exactly this reason — a task that skips `close` loses entries instead
 of hanging — but losing entries is not the contract, so call `close`.
 
+## One task, several invocations
+
+`open` is called once per Bazel invocation, so a task that drives Bazel more
+than once dispatches to the same hook more than once — `aspect delivery` wires
+phases 1 and 3 (its phase-2 checksum re-run deliberately carries no handle; the
+reason is recorded in `crates/aspect-cli/src/builtins/exec_log_wiring.rs`), and
+a retry loop opens a fresh handle per attempt. An entry carries nothing
+identifying which of those produced it.
+
+`ctx.task.current_phase().name` is what does. A task opens its phase before it
+spawns Bazel, which puts the whole window these three verbs cover — `open`,
+every `pump`, and `close` — inside that phase: a hook reads `build` under
+delivery's phase 1 and `deliver` under its phase 3, `lint` under `lint`,
+`populate` under `ci warming`, and `build_retry_<n>` / `test_retry_<n>` on an
+attempt after the first. `ExecLogHook` in `./trait.axl` documents it from the
+hook's side; `crates/aspect-cli/tests/exec_log_event.rs` asserts the name a hook
+actually read at every call site, including that it is never unset.
+
+The one case a phase name cannot separate is two invocations under a single
+phase. No task does that today — every retry transitions — and the gap is
+additive to close: a per-invocation identifier would arrive as a new accessor,
+never as a changed `on_entry` signature.
+
 ## Back-pressure
 
 A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
