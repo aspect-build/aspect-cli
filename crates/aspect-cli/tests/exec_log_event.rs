@@ -3,8 +3,8 @@
 //!
 //! The hook's lifecycle is three calls a task has to make in the right places —
 //! `open` before the spawn, `pump` in the drain loop, `close` before `wait()`
-//! (see `builtins/aspect/bazel/exec_log.axl`) — hand-written at nine call sites
-//! across seven files, two of them (`run.axl`, `delivery.axl`) wiring more than
+//! (see `builtins/aspect/bazel/exec_log.axl`) — hand-written at ten call sites
+//! across eight files, two of them (`run.axl`, `delivery.axl`) wiring more than
 //! one. Each one fails *quietly*: a missing `open` leaves the log off, a missing
 //! `pump` means hooks only fire at the end of the build, and a missing `close` or
 //! one moved after `wait()` loses entries. Nothing about the AXL unit tests,
@@ -30,7 +30,9 @@
 //!     is in, and it is live-task state no unit test can produce. `delivery`
 //!     contributes a case per wired phase (`build`, `deliver`), and
 //!     `a_hook_tells_one_invocation_of_a_task_from_the_next` pins two
-//!     invocations apart inside one task.
+//!     invocations apart inside one task. `cache diff` is the exception and
+//!     asserts `<none>`: it opens no phase at all, so a hook has nothing there
+//!     to name its one invocation with.
 //!
 //! The retry case covers the third seam: a hook registered by a `build_start`
 //! hook must still see attempt 0's entries (the ordering bug `open`-before-
@@ -38,9 +40,10 @@
 //! own, since a handle binds to one build.
 //!
 //! Whether a task *succeeds* is beside the point and deliberately not asserted:
-//! basil builds nothing, so `run`, `lint`, `format`, `gazelle` and `delivery`
-//! all fail once they look for an output. They fail after their Bazel
-//! invocation, which is the part under test.
+//! basil builds nothing, so `run`, `lint`, `format`, `gazelle`, `delivery` and
+//! `cache diff` all fail once they look for an output or for a log only a real
+//! Bazel writes. They fail after their Bazel invocation, which is the part under
+//! test.
 
 mod common;
 
@@ -581,6 +584,48 @@ fn the_delivery_release_build_dispatches_every_entry() {
         None,
         false,
         "deliver",
+    );
+}
+
+/// `cache_diff.axl`'s `--mode=precise` pre-pass — the tenth wired call site, and
+/// the only one that has to get past a loading-only selection pass to be reached
+/// at all (hence the scenario's `json_bep_tests`).
+///
+/// It is also the one site with no `pump`: it asks for no event stream, so it has
+/// no drain loop to put one in and every entry arrives from `close`. The absent
+/// handshake is what records that, and it matches the `pumps: 0` the DEVIATIONS
+/// row in `builtins/exec_log_wiring.rs` carries. `cache diff` opens no task
+/// phase either, which makes it the one site where `ctx.task.current_phase()`
+/// cannot name the invocation — worth pinning rather than leaving to be
+/// discovered.
+///
+/// The probe passes after the pre-pass need a `--remote_grpc_log` no fake Bazel
+/// writes, so the task fails after the part under test, exactly as `delivery`
+/// does.
+#[test]
+fn the_cache_diff_precise_pre_pass_dispatches_every_entry() {
+    let case = Case::new(
+        "cache_diff_precise",
+        Fixture::default(),
+        Some("build --remote_cache=grpc://127.0.0.1:1\ntest --remote_cache=grpc://127.0.0.1:1\n"),
+    );
+    let report = case.run(&["cache", "diff", "--mode=precise", "--", "//..."]);
+    assert_complete("cache diff --mode=precise", &report, 1);
+    assert_eq!(
+        report.phases,
+        vec!["<none>".to_string()],
+        "`cache diff` opens no phase, so this is the one wired site where a hook \
+         cannot name the invocation from `ctx.task.current_phase()`",
+    );
+    assert_eq!(
+        report.handshake, None,
+        "the pre-pass asks for no event stream, so there is no drain loop to pump \
+         from and the whole log must come from `exec_log.close`",
+    );
+    assert!(
+        report.task.starts_with("diff-"),
+        "the hook should be able to name the task it fired for; got {:?}",
+        report.task,
     );
 }
 

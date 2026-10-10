@@ -25,6 +25,10 @@
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
 //!
+//!     When `--build_event_json_file <path>` is present, a scenario with
+//!     `json_bep_tests` writes the loading-only test selection that
+//!     `aspect cache diff` establishes its scope from — see [`write_json_bep`].
+//!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
 //! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
@@ -129,6 +133,19 @@ fn run_build(args: &[String]) {
         Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
         _ => {}
     };
+
+    // Only the invocation that asked for a JSON log gets one, which is how a
+    // scenario can answer a task's loading-only selection pass without also
+    // speaking for the spawns that follow it.
+    if let Some(path) = find_flag_value(args, "--build_event_json_file")
+        && !s.json_bep_tests.is_empty()
+    {
+        let exit_code = match s.exit {
+            ExitBehavior::Code(c) => c,
+            ExitBehavior::Signal(_) => 0,
+        };
+        write_json_bep(&path, s.json_bep_tests, exit_code);
+    }
 
     // Before the BES write, which blocks on a FIFO until the reader opens it.
     // Bazel writes the execution log as it executes, i.e. during the build, and
@@ -237,6 +254,14 @@ struct Scenario {
     /// publishes it before BES, where a consumer can read it during the build;
     /// non-zero puts it out of reach of anything but an end-of-build drain.
     execlog_delay: Duration,
+    /// Test labels to report through `--build_event_json_file`, when the runtime
+    /// asked for one. Empty writes no JSON log at all.
+    ///
+    /// `aspect cache diff` establishes its scope from a loading-only `test
+    /// --noanalyze` invocation and reads the *JSON* event log for it, not the
+    /// binary stream — so a scenario that has to get past that selection names
+    /// the labels it comes back with. See [`write_json_bep`].
+    json_bep_tests: &'static [&'static str],
 }
 
 /// A clean single-attempt run with no pauses and no execution log — so each
@@ -249,8 +274,43 @@ impl Default for Scenario {
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
             execlog_delay: Duration::ZERO,
+            json_bep_tests: &[],
         }
     }
+}
+
+/// Write the loading-only test selection `aspect cache diff` reads out of
+/// `--build_event_json_file`.
+///
+/// `cache_selection.axl` accepts the selection only when the log is exactly the
+/// shape a successful `test --noanalyze` leaves: one `expanded` event whose
+/// children are the configured targets, one `NO_ANALYZE` `aborted` event per
+/// target — analysis is what the flag prevented — and one `finished` event
+/// carrying this invocation's own exit code, with `lastMessage` on it and nowhere
+/// else. Anything short of that is a truncated log and is rejected, so there is
+/// no partial form worth emitting.
+fn write_json_bep(path: &str, tests: &[&str], exit_code: i32) {
+    let mut out = String::new();
+    let children: Vec<String> = tests
+        .iter()
+        .map(|label| format!(r#"{{"targetConfigured":{{"label":"{label}"}}}}"#))
+        .collect();
+    out.push_str(&format!(
+        r#"{{"id":{{"pattern":{{"pattern":["//..."]}}}},"children":[{}],"expanded":{{}}}}"#,
+        children.join(","),
+    ));
+    out.push('\n');
+    for label in tests {
+        out.push_str(&format!(
+            r#"{{"id":{{"targetConfigured":{{"label":"{label}"}}}},"aborted":{{"reason":"NO_ANALYZE"}}}}"#,
+        ));
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        r#"{{"id":{{"buildFinished":{{}}}},"finished":{{"exitCode":{{"code":{exit_code}}}}},"lastMessage":true}}"#,
+    ));
+    out.push('\n');
+    fs::write(path, out).unwrap_or_else(|e| panic!("basil: writing JSON BEP to {path:?}: {e}"));
 }
 
 fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
@@ -467,6 +527,19 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(37, true)]],
             exit: ExitBehavior::Code(37),
             execlog_entries: 3000,
+            ..Default::default()
+        },
+
+        // `aspect cache diff --mode=precise`: three invocations, of which only
+        // the precise pre-pass executes actions and so is the only one wired to
+        // `exec_log_event`. Reaching it means getting past the loading-only
+        // selection pass first, which is what `json_bep_tests` answers; the log
+        // here is the pre-pass's own. The probe passes that follow need a
+        // `--remote_grpc_log` no fake Bazel produces, so the task fails after
+        // the part under test, as it does for `delivery`.
+        "cache_diff_precise" => Scenario {
+            execlog_entries: 3000,
+            json_bep_tests: &["//fixture:runs"],
             ..Default::default()
         },
 
