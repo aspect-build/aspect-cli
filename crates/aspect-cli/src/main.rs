@@ -184,7 +184,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
             // Phase 1: discover tasks and features.
-            let script_failures = mpe.eval(&scripts, &root_mod, &modules);
+            let script_failures = mpe
+                .eval(&scripts, &root_mod, &modules)
+                .map_err(anyhow::Error::from)?;
 
             // Phase 2: run config files.
             let config_entries: Vec<(&Path, &Mod)> = configs
@@ -400,14 +402,27 @@ impl std::fmt::Display for ConfigError {
 /// defines — `version` and `help`, plus Clap's own `--help` / `--version` and
 /// a bare `aspect` — run anyway. Every failure is printed as a warning naming
 /// its file first, so the user still learns about the typo and keeps a CLI to
-/// work with; `help` then lists the built-ins and whichever user tasks did
-/// load. Every other command fails on the first failure exactly as before:
-/// the missing thing may be the definition of the task being run, and
+/// work with. Every other command fails on the first failure exactly as
+/// before: the missing thing may be the definition of the task being run, and
 /// building against a config that half-applied would be worse than stopping.
+///
+/// A degraded `help` lists the built-ins plus the user tasks that did load.
+/// It is a best effort, not a guarantee of runnability: phase 2 mutates the
+/// shared heap as it goes, so a config that added a task with
+/// `ctx.tasks.add(...)` and then failed leaves that task in the listing even
+/// though running it would hit this same refusal.
+///
+/// Not held here, and so still fatal to every command: a `MODULE.aspect` that
+/// does not parse, and a task-name conflict, both of which are settled before
+/// these lists exist.
 ///
 /// `describe` and `feature` fail too, deliberately. They render the resolved
 /// AXL surface itself, and a caller reading `aspect describe --output=json`
 /// must not be handed a list that quietly lost entries.
+///
+/// A [`axl_runtime::TaskExit`] never reaches these lists — an author's
+/// `ctx.std.process.exit(...)` gate, or a Ctrl-C, ends the run on every
+/// command. [`MultiPhaseEval::eval`] raises those instead of recording them.
 struct Unloadable {
     /// Phase 1: task and feature scripts.
     scripts: Vec<AxlFileFailure>,
@@ -420,23 +435,44 @@ impl Unloadable {
         self.scripts.is_empty() && self.configs.is_empty()
     }
 
-    /// Report every failure on stderr, each behind a `warning:` line naming
-    /// the file and what its absence costs. Silence here would be worse than
-    /// the old hard failure — the point is that the user still sees the typo.
+    /// Report the failures on stderr, each behind a `warning:` line naming the
+    /// file and what its absence costs. Silence here would be worse than the
+    /// old hard failure — the point is that the user still sees the typo.
+    ///
+    /// A config that failed while a script was also missing is summarised in
+    /// one line rather than given a warning of its own, because that is
+    /// almost always what it is: `ctx.tasks["x"]` for an `x` whose file never
+    /// loaded. Printing its diagnostic as a second, equal-looking warning
+    /// would point the user at a file that is very likely fine. The same
+    /// reasoning orders [`Self::into_error`] and skips the trait check in
+    /// [`MultiPhaseEval::execute_configs`].
     fn warn(&self) {
-        let scripts = self.scripts.iter().map(|f| {
-            (
-                f,
-                "could not be loaded; the tasks it defines are unavailable",
-            )
-        });
-        let configs = self
-            .configs
-            .iter()
-            .map(|f| (f, "did not finish; the settings it applies are incomplete"));
-        for (failure, consequence) in scripts.chain(configs) {
-            errln!("warning: {} {}", failure.path.display(), consequence);
+        for failure in &self.scripts {
+            errln!(
+                "warning: {} could not be loaded; the tasks it defines are unavailable",
+                failure.path.display()
+            );
             errln!("{}", strip_error_prefix(&failure.error.to_string()));
+        }
+
+        if self.scripts.is_empty() {
+            for failure in &self.configs {
+                errln!(
+                    "warning: {} failed; the settings it applies are missing or incomplete",
+                    failure.path.display()
+                );
+                errln!("{}", strip_error_prefix(&failure.error.to_string()));
+            }
+        } else if !self.configs.is_empty() {
+            let paths: Vec<String> = self
+                .configs
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect();
+            errln!(
+                "warning: {} then failed too, most likely because of the above — fix that first",
+                paths.join(", ")
+            );
         }
     }
 
@@ -806,5 +842,67 @@ mod config_error_tests {
     #[test]
     fn arguments_after_a_double_dash_are_not_ours() {
         assert!(!wants_json_output(args(&["build", "--", "--output=json"])));
+    }
+}
+
+#[cfg(test)]
+mod degrade_policy_tests {
+    use super::{is_display_only, runs_without_tasks, strip_error_prefix};
+    use clap::error::ErrorKind;
+
+    /// Starlark's own `error: ` title is dropped so the caller supplies the
+    /// only one; anything else is left exactly as it came.
+    #[test]
+    fn only_a_leading_error_prefix_is_dropped() {
+        assert_eq!(
+            strip_error_prefix("error: Parse error: x"),
+            "Parse error: x"
+        );
+        assert_eq!(strip_error_prefix("Parse error: x"), "Parse error: x");
+        assert_eq!(strip_error_prefix(""), "");
+        // Not at the start, so not ours to touch.
+        assert_eq!(
+            strip_error_prefix("Traceback:\n  error: inner"),
+            "Traceback:\n  error: inner"
+        );
+    }
+
+    /// The commands that report the CLI's own identity, and nothing else.
+    #[test]
+    fn only_version_and_help_run_without_tasks() {
+        assert!(runs_without_tasks(Some("version")));
+        assert!(runs_without_tasks(Some("help")));
+        for other in ["build", "test", "describe", "feature", "gc"] {
+            assert!(!runs_without_tasks(Some(other)), "{other} must not degrade");
+        }
+        assert!(!runs_without_tasks(None));
+    }
+
+    /// Clap stopping to render help or a version is not Clap rejecting the
+    /// command line, and only the former may run against a workspace that did
+    /// not fully load.
+    #[test]
+    fn display_only_covers_help_version_and_a_bare_invocation() {
+        for kind in [
+            ErrorKind::DisplayHelp,
+            ErrorKind::DisplayVersion,
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        ] {
+            assert!(
+                is_display_only(&clap::Error::raw(kind, "x")),
+                "{kind:?} renders help rather than failing"
+            );
+        }
+        for kind in [
+            ErrorKind::InvalidSubcommand,
+            ErrorKind::UnknownArgument,
+            ErrorKind::MissingRequiredArgument,
+            ErrorKind::InvalidValue,
+        ] {
+            assert!(
+                !is_display_only(&clap::Error::raw(kind, "x")),
+                "{kind:?} is a rejection, not a help screen"
+            );
+        }
     }
 }

@@ -35,7 +35,10 @@ use crate::module::Mod;
 /// Turn the first file `MultiPhaseEval` could not load into the test's error.
 ///
 /// The phases are deliberately tolerant for the CLI's sake; a test snippet
-/// that does not load has nothing left to assert, so here it is fatal.
+/// that does not load has nothing left to assert, so here it is fatal. A
+/// snippet that failed would fail its test either way — `run_task` would hit
+/// "task index out of range" on the empty task map — but with the load error
+/// in hand rather than that one, the test says what actually went wrong.
 fn raise_first(failures: Vec<AxlFileFailure>) -> anyhow::Result<()> {
     match failures.into_iter().next() {
         Some(failure) => Err(anyhow::Error::from(failure.error)),
@@ -241,7 +244,10 @@ impl EvalBuilder {
             loader.env.signals = signals.clone();
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
-            raise_first(mpe.eval(&scripts, &root_mod, &modules))?;
+            raise_first(
+                mpe.eval(&scripts, &root_mod, &modules)
+                    .map_err(anyhow::Error::from)?,
+            )?;
             if !self.features.is_empty() || self.config.is_some() {
                 let config_path = tmp.path().join("config.axl");
                 let mut configs: Vec<(&std::path::Path, &Mod)> = vec![];

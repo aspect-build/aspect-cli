@@ -41,17 +41,54 @@ def config(ctx):
     ctx.tasks["no-such-task"].args.anything = 1
 "#;
 
+/// A `config.axl` whose author chose to end the run — a repo-level gate, the
+/// shape of "this checkout needs a newer CLI than you have".
+const EXITING_CONFIG: &str = r#"
+def config(ctx):
+    ctx.std.process.exit(3, "this repo requires a newer aspect CLI")
+"#;
+
+/// A script that defines `mytask` and *then* fails to parse, so a config
+/// referring to `mytask` fails as a consequence rather than on its own.
+const UNPARSABLE_SCRIPT_DEFINING_MYTASK: &str = r#"
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+mytask = task(summary = "mine", implementation = _impl)
+
+this is not valid starlark(
+"#;
+
+/// A `config.axl` that is correct in itself: it only configures `mytask`.
+const CONFIG_NEEDING_MYTASK: &str = r#"
+def config(ctx):
+    ctx.tasks["mytask"].args.something = "true"
+"#;
+
 /// Run `aspect <args>` in a scratch workspace whose `.aspect/` holds `files`,
 /// each a `(name, contents)` pair.
 fn run_in_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
+    let rooted: Vec<(String, &str)> = files
+        .iter()
+        .map(|(name, contents)| (format!(".aspect/{name}"), *contents))
+        .collect();
+    let rooted: Vec<(&str, &str)> = rooted.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+    run_in_rooted_workspace(&rooted, args)
+}
+
+/// [`run_in_workspace`] with the paths taken from the workspace root instead,
+/// for a fixture that needs a `MODULE.aspect` or a file under `.aspect/lib/`.
+fn run_in_rooted_workspace(files: &[(&str, &str)], args: &[&str]) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     let home = dir.path().join("home");
     std::fs::create_dir(&home).expect("home");
     std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
-    let aspect = dir.path().join(".aspect");
-    std::fs::create_dir(&aspect).expect(".aspect");
-    for (name, contents) in files {
-        std::fs::write(aspect.join(name), contents).expect("writing a fixture");
+    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+    for (path, contents) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("a fixture path has a parent"))
+            .expect("fixture parent");
+        std::fs::write(&path, contents).expect("writing a fixture");
     }
     let output = Command::new(aspect_cli())
         .args(args)
@@ -257,4 +294,191 @@ fn the_fixture_workspace_is_where_the_test_thinks_it_is() {
         named.is_absolute() && named.ends_with(".aspect/policy.axl"),
         "expected an absolute path to the fixture, got {named:?}"
     );
+}
+
+/// An author's `ctx.std.process.exit(code, message)` is a decision, not a file
+/// that would not load, so it must end every command with that code and
+/// message — a gate saying "you need a newer CLI" matters most on the very
+/// command someone runs to check their version. And per the contract in
+/// `axl-runtime/src/eval/exit.rs`, no traceback without `ASPECT_DEBUG`.
+#[test]
+fn a_deliberate_exit_from_a_config_ends_every_command() {
+    for args in [
+        vec!["version"],
+        vec!["help"],
+        vec!["--help"],
+        vec!["goodtask"],
+    ] {
+        let output = run_in_workspace(
+            &[("config.axl", EXITING_CONFIG), ("good.axl", GOOD_SCRIPT)],
+            &args,
+        );
+        let stderr = stderr(&output);
+        let what = args.join(" ");
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "`aspect {what}` must exit with the author's code\n--- stderr ---\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ERROR: this repo requires a newer aspect CLI"),
+            "`aspect {what}` must print the author's message:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("Traceback"),
+            "`aspect {what}` must not print a traceback:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("warning:"),
+            "a deliberate exit is not a load failure to warn about:\n{stderr}"
+        );
+    }
+}
+
+/// Phase 2 now runs even when phase 1 could not load a script, so a config
+/// that merely refers to a task from the broken file fails too. That second
+/// failure is derived, and must not read as an equal, independent problem
+/// pointing at a file that is perfectly fine.
+#[test]
+fn a_config_failure_after_a_script_failure_is_marked_as_derived() {
+    let output = run_in_workspace(
+        &[
+            ("policy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+            ("config.axl", CONFIG_NEEDING_MYTASK),
+        ],
+        &["version"],
+    );
+    assert_degraded(&output, "policy.axl");
+    let stderr = stderr(&output);
+
+    assert!(
+        stderr.contains("Parse error"),
+        "the script's own diagnostic is the one to act on:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("config.axl then failed too"),
+        "the derived config failure must say it is derived:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no task found"),
+        "the derived config diagnostic must not be printed as its own warning:\n{stderr}"
+    );
+    // One real warning for the script; the config gets the summary line, not
+    // a second `warning: <file> failed` of equal weight.
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .count(),
+        1,
+        "expected exactly one load warning:\n{stderr}"
+    );
+}
+
+/// Every broken script is named, and scripts are reported before configs so
+/// the cause precedes the consequence.
+#[test]
+fn every_broken_script_is_reported_before_any_config() {
+    let output = run_in_workspace(
+        &[
+            ("aaa.axl", UNPARSABLE_SCRIPT),
+            ("zzz.axl", UNPARSABLE_SCRIPT),
+            ("config.axl", CONFIG_NEEDING_MYTASK),
+        ],
+        &["version"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stderr = stderr(&output);
+    for named in ["aaa.axl", "zzz.axl", "config.axl"] {
+        assert!(
+            stderr.contains(named),
+            "expected {named} named in:\n{stderr}"
+        );
+    }
+    let last_script = ["aaa.axl", "zzz.axl"]
+        .iter()
+        .map(|f| stderr.find(f).expect("script named"))
+        .max()
+        .expect("two scripts");
+    let config = stderr
+        .find("config.axl then failed too")
+        .expect("the derived line");
+    assert!(
+        last_script < config,
+        "scripts must be reported before the config they broke:\n{stderr}"
+    );
+}
+
+/// `use_task(path, "good", "notatask")` names one symbol that exists and one
+/// that does not. Registration is all-or-nothing, so neither lands: a `help`
+/// that warned the file is unavailable must not then list a task out of it,
+/// which `aspect <task>` would refuse to run.
+#[test]
+fn a_partial_use_task_registers_none_of_its_tasks() {
+    const PAIR: &str = r#"
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+firsttask = task(summary = "the first of a pair.", implementation = _impl)
+"#;
+    let files = [
+        (
+            "MODULE.aspect",
+            "use_task(\".aspect/lib/pair.axl\", \"firsttask\", \"notatask\")\n",
+        ),
+        (".aspect/version.axl", "version(\"0.0.0-dev\")\n"),
+        (".aspect/lib/pair.axl", PAIR),
+    ];
+
+    let help = run_in_rooted_workspace(&files, &["help"]);
+    assert_degraded(&help, "pair.axl");
+    assert!(
+        !stdout(&help).contains("firsttask"),
+        "a file reported unavailable must contribute no tasks:\n{}",
+        stdout(&help)
+    );
+
+    let run = run_in_rooted_workspace(&files, &["firsttask"]);
+    assert_failed_on_axl(&run, "notatask");
+}
+
+/// The short spellings go through the same Clap path as `--help`/`--version`.
+#[test]
+fn short_help_and_version_flags_survive_an_unparsable_script() {
+    for flag in ["-h", "-v"] {
+        let output = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &[flag]);
+        assert_degraded(&output, "policy.axl");
+        assert!(
+            !stdout(&output).trim().is_empty(),
+            "`aspect {flag}` must still print something"
+        );
+    }
+}
+
+/// A task's own `--help`, and a group named without a leaf, print help and run
+/// nothing, so they degrade like the root help does. The group keeps Clap's
+/// "no command" exit code; what matters is that it is not the AXL failure's.
+#[test]
+fn a_tasks_own_help_survives_an_unparsable_script() {
+    let task_help = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &["build", "--help"]);
+    assert_degraded(&task_help, "policy.axl");
+    assert!(
+        stdout(&task_help).contains("Build Bazel targets"),
+        "expected `build`'s own help:\n{}",
+        stdout(&task_help)
+    );
+
+    let group = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &["auth"]);
+    assert_eq!(
+        group.status.code(),
+        Some(2),
+        "--- stderr ---\n{}",
+        stderr(&group)
+    );
+    assert!(
+        stderr(&group).contains("warning:"),
+        "expected the warning alongside the group help:\n{}",
+        stderr(&group)
+    );
+    assert_one_error_prefix(&stderr(&group));
 }
