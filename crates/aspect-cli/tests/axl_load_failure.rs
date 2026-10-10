@@ -488,8 +488,9 @@ fn a_config_failure_after_a_script_failure_is_marked_as_derived() {
         "the script's own diagnostic is the one to act on:\n{stderr}"
     );
     assert!(
-        stderr.contains("config.axl then failed too"),
-        "the derived config failure must say it is derived:\n{stderr}"
+        stderr.contains("config.axl then failed too, most likely because of")
+            && stderr.contains("policy.axl — fix that first"),
+        "the derived config failure must say it is derived, and name what of:\n{stderr}"
     );
     assert!(
         !stderr.contains("no task found"),
