@@ -444,6 +444,21 @@ def main():
                 "a test spawn's inputs must include what its runfiles tree holds: "
                 f"{[s['inputs'] for s in runners]}"
             )
+            # The kind count alone only proves the entry was delivered. A
+            # `symlink_entry_set` line is `<name>@<target path>`, and the target is
+            # resolved from the id table at observe time, degrading to `""` for an id
+            # a partial log never carried — so every lookup could fail and the kind
+            # count would not move. A `renamed/` line with a non-empty right-hand
+            # side is the resolution itself.
+            assert any(
+                i.startswith("renamed/") and i.rpartition("@")[2]
+                for s in runners
+                for i in s["inputs"]
+            ), (
+                "no `renamed/` runfile resolved to a target path, so the resolver's "
+                "observe-time id lookup degraded to \"\" for every symlink entry: "
+                f"{[s['inputs'] for s in runners]}"
+            )
 
             # 3. Change one source. The action that reads it re-runs, and its
             #    inputs fingerprint must move with the digest it depends on —
