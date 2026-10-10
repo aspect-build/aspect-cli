@@ -9,11 +9,26 @@ wrong fails quietly, so none of them live at the call sites:
                      registered. The handle has to exist *before* the spawn: it
                      is what tells the runtime an every-entry consumer is
                      subscribed, which is what makes the stream lossless.
-  `pump(ctx, h)`     optional, inside the task's existing BES tick loop. Fires
-                     hooks on whatever has arrived, without blocking, so a hook
-                     that reports progress reports it during the build.
+  `pump(ctx, h)`     optional, inside the task's existing drain loop. Fires
+                     hooks on whatever has arrived, without blocking.
   `close(ctx, h)`    after the task's own drain loop and **before** `build.wait()`.
                      Drains to the end of the stream and fires the rest.
+
+## Progressive dispatch needs a drain loop that runs
+
+`pump` is where a hook hears about an entry *during* the build, and it only
+fires as often as the task's loop calls it. The tasks with a `sleep_iter` tick
+loop (`lint`, `format`, `gazelle`, `warming`, `delivery`, `run`) call it on every
+tick regardless of what Bazel is doing. `bazel/invocation.axl` — `build` and
+`test` — instead pumps from `on_event`, so its loop runs only when a BES event
+iterator exists, and an `exec_log_event` hook does not by itself create one
+(deliberately: a BEP FIFO and a parsed event stream are a real cost to impose on
+a feature that does not read build events).
+
+With no event iterator, every hook fires in `close` instead, still before
+`wait()` and still with every entry. So the guarantee is completeness, not
+timeliness: a hook that only aggregates sees no difference, a hook that reports
+progress may report all of it at the end of the build.
 
 Why `close` must precede `wait()`: a bound handle is a subscriber the producer
 blocks for, and `wait()` joins the producer. Calling it the other way round would
@@ -30,9 +45,19 @@ thread on a full 1000-entry channel; Bazel keeps writing to the file regardless.
 So the cost of an expensive hook is paid at the end of the build, in `close` and
 in the `join()` inside `wait()`, and never as a stalled action graph.
 
-The channel is a broadcast: every subscriber receives every entry. Hooks are
-therefore an *additional* consumer alongside a `File` sink and
-`build.execution_logs()`, not a competitor for entries.
+The channel is a broadcast: every subscriber receives every entry, so a hook is
+an *additional* consumer alongside a `File` or `CompactFile` sink rather than a
+competitor for entries. `build.execution_logs()` is the exception — it takes the
+stream's own subscriber rather than cloning one, so it errors when anything else
+is already reading, a registered hook included.
+
+## `entry.id` does not identify a spawn
+
+Bazel numbers only the entries something else refers to by id — files, input
+sets, runfiles trees. A `spawn` is referred to by nothing, so it arrives with
+`id = 0`, as every spawn in the log does. Use the resolver's `spawn_key(spawn)`
+(its primary output path) to name or deduplicate one;
+`@aspect//private/lib/execlog.axl` has it.
 
 What this does not fix is volume. One entry per spawn plus one per file,
 directory, input set and runfiles tree is 10k-50k entries on a medium build, and

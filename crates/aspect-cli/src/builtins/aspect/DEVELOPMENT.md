@@ -93,15 +93,19 @@ setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
   └─ hc_trait.health_check                        # Workflows env table / server health check
 bazel_trait.build_start
   └─ Workflows prints `--- :bazel: Running bazel <task> [<task-name>] <targets>`
-events = bazel.build_events.iterator()           # create handle BEFORE the spawn
-ctx.bazel.build(..., build_events = [events])    # runtime subscribes pre-spawn
+xl = bzl.exec_log.open(bazel_trait)              # after build_start, before the spawn
+events = bazel.build_events.iterator(tick_ms=…)  # create handle BEFORE the spawn
+ctx.bazel.build(..., build_events = [events], execution_log = xl.sinks or False)
 data["sink_invocation_id"] = build.sink_invocation_id
 lifecycle.task_update(running)                   # link surfaces in the annotation
 bb_root = usable_bb_clientd_root(ctx.std)     # once per task: maps log URIs to paths
-for event in events:
-    bazel_trait.build_event(ctx, event)          # ArtifactUpload records testlog paths
-    if process_event(data, event, bb_root):
-        lifecycle.task_update(running)           # streamed metadata + targets
+for event in events:                             # `None` on a quiet tick_ms tick
+    bzl.exec_log.pump(ctx, xl)                   # exec_log_event hooks, every tick
+    if event != None:
+        bazel_trait.build_event(ctx, event)      # ArtifactUpload records testlog paths
+        if process_event(data, event, bb_root):
+            lifecycle.task_update(running)       # streamed metadata + targets
+bzl.exec_log.close(ctx, xl)                      # the rest of the log; before wait()
 build_status = build.wait()
 bazel_trait.build_end(ctx, build_status.code)    # ArtifactUpload uploads
 ... task-specific work (run formatter, parse SARIF, etc.) ...
@@ -447,11 +451,15 @@ BES events reach AXL through a broadcaster (see [`crates/axl-runtime/src/engine/
 Tasks that need to consume events do so via an explicit iterator handle:
 
 ```python
-events = bazel.build_events.iterator()
+events = bazel.build_events.iterator(tick_ms = 250)
 build = ctx.bazel.build(..., build_events = [events])
 for event in events:
+    if event == None:   # a quiet tick, not an event
+        continue
     ...
 ```
+
+**Pass `tick_ms`.** Without it the iterator blocks in a bare `recv()` until the next event arrives or the stream closes, and a blocked `recv()` answers nothing — not a Ctrl+C, not a CI cancel, not a heartbeat that keeps the elapsed timer moving. A task whose loop must stay responsive while BES is quiet (every task that drives a build: Bazel can spend minutes in analysis or on one slow action without emitting anything) passes `tick_ms` and gets `None` for every quiet tick, so the loop body runs on the task's own cadence. The loop still ends when the stream closes; a cancel also surfaces as a `None`, which is why the decision to leave belongs to the loop.
 
 The handle is created *before* `ctx.bazel.build(...)` and passed in via `build_events=[...]`. The runtime subscribes the receiver inside `Build::spawn`, before bazel opens the BEP FIFO — so the early burst (`build_started`, `target_completed`, `named_set_of_files`) is buffered for the consumer regardless of when iteration actually starts. The race window present with the old lazy `build.build_events()` is closed by construction: you can't pass a handle that doesn't exist yet, and once passed it's already subscribed.
 
@@ -718,6 +726,10 @@ def config(ctx: ConfigContext):
 
 **A raw entry is not usable on its own.** Entries reference each other by id: a spawn says `input_set_id = 42`, and only a `file` entry carries a digest. [private/lib/execlog.axl](private/lib/execlog.axl) has the resolver that turns ids back into paths, digests, spawn keys and action-key fingerprints. Resolution needs the id-carrying kinds, so a hook that resolves must ask for `execlog.RESOLVER_KINDS`, not just `["spawn"]`.
 
+**`entry.id` does not identify a spawn.** Bazel numbers only the entries something else refers to by id, so every `spawn` arrives with `id = 0`. Name or deduplicate one with the resolver's `spawn_key(spawn)` — its primary output path — not with the id.
+
+**Hooks fire during the build only when the task has a drain loop to pump from.** The tasks with a `sleep_iter` tick loop (`lint`, `format`, `gazelle`, `warming`, `delivery`, `run`) call `pump` every tick. `build` and `test` pump from `bazel/invocation.axl`'s `on_event`, whose loop exists only when something created a BES event iterator — an `exec_log_event` hook does not, deliberately: a BEP FIFO and a parsed event stream are a real cost to impose on a feature that reads no build events. With no iterator every hook fires in `close` instead, still before `wait()` and still with every entry. The contract is completeness, not timeliness.
+
 **`spawn.metrics` is thinner than it looks.** `input_files` and `input_bytes` are documented in `spawn.proto` as "0 if unavailable", and unavailable in practice means *locally executed* — only the cache and remote-execution paths populate them. So on a cold build, the one where input counts are most interesting, they read 0 throughout. Count from the input-set graph instead (`len(res.inputs(spawn))`), which is why the resolver exists.
 
 **Registering a hook makes the stream lossless.** Without one, the reader uses `try_send` and drops entries a consumer has fallen behind on — that is what `build.execution_logs()` reads, and it drops in practice, not just in principle, because the reader decodes a file already on disk and outruns any AXL loop. A registered hook switches the reader to blocking sends, so a hook sees every entry of the kinds it asked for. `execution_log.iterator()` is the only form with that guarantee; prefer it to `build.execution_logs()` whenever a missing entry would make an answer wrong rather than imprecise.
@@ -803,7 +815,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #    `Build::spawn` returns) so BES events reach the Aspect backend and
     #    the "Aspect Workflows" link resolves to a real invocation. The iter
     #    handle subscribes pre-spawn — no late-subscribe race.
-    events = bazel.build_events.iterator()
+    #    `tick_ms` is what keeps the drain loop below answering signals while
+    #    BES is quiet: a no-tick iterator blocks in `recv()` until bazel emits
+    #    something, and nothing — a Ctrl+C, a CI cancel, a heartbeat — gets a
+    #    turn until it does.
+    events = bazel.build_events.iterator(tick_ms = 250)
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
     # 3. Fire build_start hooks BEFORE spawning Bazel. The `Workflows`
@@ -830,14 +846,20 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data,
                 phase = Phase(name = "build", description = "Build targets", emoji = "🔨"))
 
-    # 5. Drain the event iterator. Per event: bazel_trait.build_event hooks
+    # 5. Drain the event iterator. A `tick_ms` iterator yields `None` on a quiet
+    #    tick, so the loop body is the task's clock as well as its event handler:
+    #    pump the execution log first, because a quiet BES stream says nothing
+    #    about the log — bazel can be writing actions while BEP has nothing to
+    #    report — then, for a real event, the bazel_trait.build_event hooks
     #    (ArtifactUpload records testlog paths) + process_event to populate the
     #    bazel state and stream metadata into the live annotation.
     bb_root = usable_bb_clientd_root(ctx.std)
     for event in events:
+        bzl.exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
+        if event == None:
+            continue
         for handler in bazel_trait.build_event:
             handler(ctx, event)
-        bzl.exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
         if process_event(data, event, bb_root):
             task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data)
 
@@ -955,7 +977,7 @@ When writing a new task, feature, or library, sanity-check:
 
 **Task lifecycle / BES streaming**
 
-- [ ] If the task iterates BES events, create the iterator handle with `bazel.build_events.iterator()` *before* calling `ctx.bazel.build(...)`, and include it in the `build_events=[...]` list. The runtime subscribes it pre-spawn; the race is closed by construction.
+- [ ] If the task iterates BES events, create the iterator handle with `bazel.build_events.iterator(tick_ms = …)` *before* calling `ctx.bazel.build(...)`, and include it in the `build_events=[...]` list. The runtime subscribes it pre-spawn; the race is closed by construction. Omitting `tick_ms` makes the drain loop block in `recv()` and stop answering signals whenever BES goes quiet.
 - [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` after `ctx.bazel.build` returns, then emit a running `task_update` so the Aspect Workflows link surfaces live.
 - [ ] Call `setup_phase(ctx, lifecycle, subject, kind, data, hc_trait, bazel_trait, ...)` as the FIRST thing in `_impl` — it emits the Setup phase mark (the first `task_update`, which inits the status surfaces and renders their first body from `kind` + `data`), resolves Bazel flags, and runs `health_check` (a failed check concludes the surface and fails the task).
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).

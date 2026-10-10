@@ -1059,6 +1059,30 @@ impl Build {
             None
         };
 
+        // A log at the reserved path from an *earlier* run has to go before Bazel
+        // starts, because `galvanize::StreamingFile::open` polls only for the
+        // path's existence. Left in place the reader opens the stale file
+        // immediately, races Bazel's truncation of it and loses: it delivers the
+        // previous build's entries — spawns that never ran, inputs that no longer
+        // exist — and misses this build's.
+        //
+        // Rare while every reader got a fresh UUID temp path; routine now that a
+        // path already on the command line is reused, which on a Workflows runner
+        // or an Aspect-wired deployment is one fixed path per build. Removing it
+        // is what makes the existence poll mean "wait for *this* build's log";
+        // Bazel creates the file itself, so there is nothing to put back.
+        if let Some(path) = &execlog_path {
+            if let Err(err) = std::fs::remove_file(path) {
+                if err.kind() != io::ErrorKind::NotFound {
+                    errln!(
+                        "WARNING: could not clear the previous execution log at {}: {err}. \
+                         Entries from an earlier build may be reported as this one's.",
+                        path.display(),
+                    );
+                }
+            }
+        }
+
         cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
         cmd.args(targets);
 
@@ -1250,8 +1274,9 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    // Creates an iterable `ExecutionLogIterator` type.
-    // Every call to this function will return a new iterator.
+    // Creates an iterable `ExecutionLogIterator` type. Takes the stream's one
+    // subscriber rather than cloning it, so it can be called only once and only
+    // when nothing else reads the log — see the error below.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let mut execlog_stream = build.execlog_stream.borrow_mut();
@@ -1267,13 +1292,14 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             .take_initial_subscriber()
             .ok_or(anyhow::anyhow!(
                 "this build's execution log already has a consumer: either \
-             `execution_logs()` was called twice, or the build was configured with a \
-             decoded `execution_log.file(...)` sink or an `execution_log.iterator()` \
-             handle. A second subscriber cannot be added — nothing would drain it, and \
-             an undrained subscriber stalls the log for every other consumer. Pass an \
-             `execution_log.iterator()` handle in `execution_log=[...]` and iterate \
-             that: it can be combined with sinks, and it is the only form guaranteed \
-             not to drop entries."
+                 `execution_logs()` was called twice, or the build was configured \
+                 with a decoded `execution_log.file(...)` sink or an \
+                 `execution_log.iterator()` handle. A second subscriber cannot be \
+                 added — nothing would drain it, and an undrained subscriber stalls \
+                 the log for every other consumer. Pass an \
+                 `execution_log.iterator()` handle in `execution_log=[...]` and \
+                 iterate that: it can be combined with sinks, and it is the only \
+                 form guaranteed not to drop entries."
             ))?;
         Ok(ExecutionLogIterator::new(recv))
     }
@@ -1666,6 +1692,310 @@ Test = task(implementation = _impl)
             asked.exists(),
             "bazel must still write the log where the deployment asked, at {}",
             asked.display(),
+        );
+    }
+
+    /// `--execution_log_compact_file=` clears the flag rather than naming a
+    /// file, so it is not a path to reuse.
+    ///
+    /// An rc file setting the flag for a config and a command line clearing it
+    /// is an ordinary way to reach this. Read back as `Some("")` the reader
+    /// tails `""`, which cannot exist, and reports a clean end of stream — every
+    /// hook fires zero times and the build passes.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_execution_log_flag_is_not_a_reusable_path() {
+        let script = r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file="],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = 0
+    for _ in entries:
+        seen += 1
+    status = build.wait()
+    if not status.success: return 1
+    # Zero means the empty value was taken for a path and tailed.
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        let exit = with_daemon_stand_in(|| crate::test::eval(script).with_fake_bazel().run_task(0));
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "a cleared flag must leave this call owning the log, not tailing \"\"",
+        );
+    }
+
+    /// A relative `--execution_log_compact_file` is Bazel's to resolve, and
+    /// Bazel resolves it against the cwd `Build::spawn` gives it.
+    ///
+    /// Used verbatim, the reader tails `<cli-cwd>/<path>` while Bazel writes
+    /// `<directory>/<path>` — nothing to read, and a clean empty stream again.
+    /// `format` and `gazelle` both pass a `directory` and both consume the log.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_execution_log_flag_resolves_against_the_spawn_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        directory = {dir:?},
+        flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file=relative.zstd"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = 0
+    for _ in entries:
+        seen += 1
+    status = build.wait()
+    if not status.success: return 1
+    # Zero means the reader tailed the path relative to the CLI's own cwd.
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            dir = dir.path().to_str().unwrap(),
+        );
+
+        let exit =
+            with_daemon_stand_in(|| crate::test::eval(&script).with_fake_bazel().run_task(0));
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "the reader must tail the path bazel resolved it to",
+        );
+        assert!(
+            dir.path().join("relative.zstd").exists(),
+            "bazel writes a relative path under its own cwd",
+        );
+    }
+
+    /// Write a compact execution log of `count` entries numbered from `first`,
+    /// standing in for the one an earlier build left at a reused path.
+    ///
+    /// The format is the real one: a zstd frame over varint-length-prefixed
+    /// `ExecLogEntry`s, which is what `ExecLogStream` decodes. Ids far from the
+    /// ones basil writes are what let a test say *which* build's log it got.
+    #[cfg(unix)]
+    fn seed_execution_log(path: &std::path::Path, first: u32, count: u32) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).expect("create the stale log");
+        let mut encoder = zstd::Encoder::new(file, 0).expect("zstd encoder");
+        for id in first..first + count {
+            let entry = ExecLogEntry {
+                id,
+                r#type: Some(axl_proto::tools::protos::exec_log_entry::Type::File(
+                    axl_proto::tools::protos::exec_log_entry::File {
+                        path: format!("stale/f{id}.txt"),
+                        digest: None,
+                    },
+                )),
+            };
+            encoder
+                .write_all(&entry.encode_length_delimited_to_vec())
+                .expect("write the stale log");
+        }
+        encoder.finish().expect("finish the zstd frame");
+    }
+
+    /// A log left at the reserved path by an earlier build is not this build's.
+    ///
+    /// `StreamingFile::open` polls for the path to exist, so a stale file is
+    /// opened at once and read to its end while Bazel truncates and rewrites the
+    /// path underneath — the reader keeps the old inode. The consumer is then
+    /// handed the previous run's entries: spawns that never ran, inputs that are
+    /// gone, and a `kinds = ["spawn"]` hook told about actions this build did not
+    /// execute. Nothing reports an error; the build passes.
+    ///
+    /// The stale ids are 90001-upwards so the assertion names the build the
+    /// entries came from rather than counting them. `execlog_after_bes` publishes
+    /// this build's log two seconds after the event stream closes, which puts the
+    /// reader's open firmly in the window where only the stale file exists — the
+    /// race, made one-sided.
+    ///
+    /// A path reused across builds is the normal case this reaches: a Workflows
+    /// runner or an Aspect-wired deployment names one, and the CLI now tails that
+    /// path rather than minting a fresh one.
+    #[cfg(unix)]
+    #[test]
+    fn a_log_left_by_an_earlier_build_is_not_delivered_as_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("reused-across-builds.zstd");
+        seed_execution_log(&asked, 90_001, 7);
+
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_after_bes", "--execution_log_compact_file={asked}"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = 0
+    highest = 0
+    for entry in entries:
+        seen += 1
+        if entry.id > highest:
+            highest = entry.id
+    status = build.wait()
+    if not status.success: return 1
+    # Any id from the seeded run means the reader opened the previous log.
+    if highest > 3000: return 2
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        );
+
+        // The timeout catches a reader parked on the stale inode rather than
+        // bounding a healthy run, which takes a little over two seconds.
+        let result = with_daemon_stand_in(move || {
+            crate::test::with_timeout(std::time::Duration::from_secs(120), move || {
+                crate::test::eval(&script).with_fake_bazel().run_task(0)
+            })
+        });
+        match result {
+            None => panic!("timed out: the reader never reached this build's log"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "the consumer must receive this build's log, not the one already \
+                 at the path",
+            ),
+        }
+    }
+
+    /// `build.execution_logs()` takes the stream's one subscriber rather than
+    /// cloning it, so a second consumer is refused rather than silently capping
+    /// the log for everyone.
+    ///
+    /// The documented breaking change of this API: a build configured with a
+    /// decoded sink or an `execution_log.iterator()` handle — which is what any
+    /// `exec_log_event` hook adds — can no longer also call this.
+    #[cfg(unix)]
+    #[test]
+    fn execution_logs_is_refused_beside_an_iterator_handle() {
+        let script = r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    build.execution_logs()
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        let err = with_daemon_stand_in(|| {
+            crate::test::eval(script)
+                .with_fake_bazel()
+                .run_task(0)
+                .expect_err("a second consumer must be refused")
+        });
+        let err = err.to_string();
+        assert!(
+            err.contains("already has a consumer") && err.contains("execution_log.iterator()"),
+            "the refusal should name the replacement: {err}",
+        );
+    }
+
+    /// The same refusal for two calls on a build with no other consumer: the
+    /// first took the subscriber, so there is none left to hand out.
+    #[cfg(unix)]
+    #[test]
+    fn execution_logs_is_refused_a_second_time() {
+        let script = r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = True,
+        stderr = None,
+    )
+    first = build.execution_logs()
+    second = build.execution_logs()
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        let err = with_daemon_stand_in(|| {
+            crate::test::eval(script)
+                .with_fake_bazel()
+                .run_task(0)
+                .expect_err("the second call must be refused")
+        });
+        assert!(
+            err.to_string().contains("already has a consumer"),
+            "unexpected error: {err}",
+        );
+    }
+
+    /// Binding several handles is all-or-nothing.
+    ///
+    /// A bound handle is a subscriber the producer blocks for, so one left
+    /// behind by a half-finished bind would park the reader on a consumer that
+    /// is never coming. `execution_log = [h, h]` is the AXL shape that reaches
+    /// this: `UnpackValue` clones share one state, so the second bind sees the
+    /// first's.
+    ///
+    /// `release` and a drained handle both end in `Done`, so a later `bind` fails
+    /// either way — the rollback is only visible as the handle no longer holding
+    /// its subscriber.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_execlog_bind_releases_the_handles_already_bound() {
+        use super::super::stream::execlog::ExecLogStream;
+
+        // A reaped pid for the log's nominated holder, so the reader thread
+        // takes the missing file as "no log is coming" and exits instead of
+        // waiting out the test.
+        let mut gone = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn a process to reap");
+        let reaped = gone.id();
+        gone.wait().expect("reap it");
+
+        let dir = tempfile::tempdir().unwrap();
+        let stream = ExecLogStream::spawn_with_file(
+            dir.path().join("never-written.zstd"),
+            reaped,
+            reaped,
+            vec![],
+            true,
+        )
+        .expect("spawn the reader");
+
+        let signals = crate::engine::cancellation::Signals::new();
+        let already = super::ExecLogIter::new(signals.clone(), None);
+        already
+            .bind(stream.receiver().expect("a subscriber to clone"))
+            .expect("the first bind should succeed");
+        let fresh = super::ExecLogIter::new(signals, None);
+
+        let err = super::bind_execlog_iters(&stream, &[fresh.clone(), already])
+            .expect_err("binding an already-bound handle must fail");
+        assert!(
+            err.to_string().contains("already bound"),
+            "unexpected error: {err}",
+        );
+        assert!(
+            !fresh.is_live(),
+            "the handle bound before the failure must be released, or the log \
+             reader blocks on a consumer that will never read",
         );
     }
 

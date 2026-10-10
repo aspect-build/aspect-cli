@@ -162,17 +162,24 @@ fn run_build(args: &[String]) {
 /// Finds `--name <value>` or `--name=<value>` in argv. The runtime emits both
 /// forms (`--build_event_binary_file <path>` for paths, `--scenario=foo` for
 /// user-supplied flags), so handling both keeps us tolerant.
+///
+/// Last occurrence wins, as Bazel resolves a single-valued flag given more than
+/// once. That is not a detail here: a caller clearing
+/// `--execution_log_compact_file=` and the CLI appending its own is exactly the
+/// shape the reuse logic has to get right, and a first-wins fake would answer
+/// the opposite of the thing under test.
 fn find_flag_value(args: &[String], name: &str) -> Option<String> {
     let prefix = format!("{name}=");
+    let mut found = None;
     for (i, a) in args.iter().enumerate() {
         if a == name {
-            return args.get(i + 1).cloned();
-        }
-        if let Some(v) = a.strip_prefix(&prefix) {
-            return Some(v.to_string());
+            // A bare `--name` immediately before another flag names no value.
+            found = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned();
+        } else if let Some(v) = a.strip_prefix(&prefix) {
+            found = Some(v.to_string());
         }
     }
-    None
+    found
 }
 
 /// How basil terminates after writing the BES event stream. `Code(n)`
@@ -209,6 +216,20 @@ struct Scenario {
     /// publishes it before BES, where a consumer can read it during the build;
     /// non-zero puts it out of reach of anything but an end-of-build drain.
     execlog_delay: Duration,
+}
+
+/// A clean single-attempt run with no pauses and no execution log — so each
+/// scenario below names only the fields that make it the case it is.
+impl Default for Scenario {
+    fn default() -> Self {
+        Self {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
+            execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
+        }
+    }
 }
 
 fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
@@ -280,7 +301,6 @@ fn await_pump_handshake(file: &str) {
 /// The entries are `file` records, which is the cheapest kind to synthesize and
 /// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
 /// a test can assert it received a contiguous `1..=count` and catch a prefix.
-/// Write `count` file entries as one zstd frame of length-delimited protos.
 ///
 /// Built under a sibling `.partial` name and renamed into place, so the path
 /// appears atomically. A real Bazel daemon holds the log open while it writes, so
@@ -326,10 +346,7 @@ fn scenario(name: &str) -> Scenario {
         // and yields zero events.
         "success" => Scenario {
             open_delay: Duration::from_millis(50),
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Code(0),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -341,11 +358,8 @@ fn scenario(name: &str) -> Scenario {
         // through to a graceful close once it observes the writer pid is
         // dead, so this scenario must terminate the AXL build promptly.
         "cache_evicted_no_retry" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
-            exit: ExitBehavior::Code(0),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -353,14 +367,11 @@ fn scenario(name: &str) -> Scenario {
         // real reconnect-after-eviction shape and exercises the
         // `expecting_retry` swallow-BrokenPipe-and-keep-reading path.
         "cache_evicted_with_retry" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![
                 vec![build_started(), build_finished(39, false)],
                 vec![build_started(), build_finished(0, true)],
             ],
-            exit: ExitBehavior::Code(0),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // Like `success`, but basil exits with code 2 (a genuine Bazel
@@ -368,11 +379,9 @@ fn scenario(name: &str) -> Scenario {
         // regression test: even when the sink reports terminal failure,
         // wait() must surface code 2 rather than the synthetic 36.
         "nonzero_exit" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(2, true)]],
             exit: ExitBehavior::Code(2),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
@@ -380,11 +389,9 @@ fn scenario(name: &str) -> Scenario {
         // a writer that cannot come, which is what `spawn_open_watchdog`
         // exists to break out of.
         "rejects_command_line" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![],
             exit: ExitBehavior::Code(2),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // Like `success`, but basil is killed by SIGKILL after the event
@@ -393,13 +400,10 @@ fn scenario(name: &str) -> Scenario {
         // exit-code mapping — fail_at_end must not collapse `None` into
         // the synthetic 36.
         "signal_killed_sigkill" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
             // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
             // libc dep for a single constant.
             exit: ExitBehavior::Signal(9),
-            execlog_entries: 0,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // A clean run that also writes a compact execution log longer than the
@@ -411,10 +415,8 @@ fn scenario(name: &str) -> Scenario {
         // after the spawn is not racing the BES burst.
         "execlog_beyond_capacity" => Scenario {
             open_delay: Duration::from_millis(50),
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Code(0),
             execlog_entries: 3000,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         // The same log, published only after the event stream has closed. A
@@ -428,11 +430,9 @@ fn scenario(name: &str) -> Scenario {
         // scheduling. Bazel is slower than this to finish a build after its last
         // build event in practice.
         "execlog_after_bes" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Code(0),
             execlog_entries: 3000,
             execlog_delay: Duration::from_secs(2),
+            ..Default::default()
         },
 
         // A log of the same shape, on an invocation Bazel fails with
@@ -446,7 +446,7 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(37, true)]],
             exit: ExitBehavior::Code(37),
             execlog_entries: 3000,
-            execlog_delay: Duration::ZERO,
+            ..Default::default()
         },
 
         other => {

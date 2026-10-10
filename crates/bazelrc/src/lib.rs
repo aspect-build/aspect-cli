@@ -827,7 +827,7 @@ fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
 /// with `-` is never taken as a value (that is the next flag, and `--name` was
 /// passed bare).
 ///
-/// Shared by the rc options path ([`flag_value_list`]) and by callers holding a
+/// Shared by the rc options path (`flag_value_list`) and by callers holding a
 /// plain command line ([`last_flag_value`]), so both read a flag the way Bazel
 /// does.
 pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
@@ -855,8 +855,8 @@ pub fn last_flag_value(args: &[String], name: &str) -> Option<String> {
     flag_values_in(&tokens, name).pop()
 }
 
-/// All values of a repeatable `--name` option among `opts`, in order. Matches
-/// `--name=VALUE` and the two-token `--name VALUE` form (value is the next token).
+/// All values of a repeatable `--name` option among `opts`, in order, by the
+/// rules [`flag_values_in`] documents.
 fn flag_value_list(opts: &[RcOption], name: &str) -> Vec<String> {
     let tokens: Vec<&str> = opts.iter().map(|opt| opt.value.as_str()).collect();
     flag_values_in(&tokens, name)

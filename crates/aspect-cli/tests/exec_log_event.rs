@@ -64,25 +64,41 @@ struct Report {
     handshake: Option<String>,
 }
 
-/// The `.aspect/config.axl` every case runs under: one `exec_log_event` hook
-/// that checks each entry's `id` against the next one expected, and republishes
-/// a one-line report whenever a whole log has arrived.
+/// How a case's fixture config differs from the default one.
+#[derive(Clone, Copy, Default)]
+struct Fixture {
+    /// Register the hook from a `build_start` hook instead of at config time,
+    /// which is the shape the attempt-0 ordering bug needed: `open` has to read
+    /// the trait after `build_start`, not before.
+    late: bool,
+    /// Clear the trait's `build_event` hooks from `build_start`, leaving
+    /// `bazel/invocation.axl` with no BES event iterator to loop over.
+    no_bes: bool,
+}
+
+/// The `.aspect/config.axl` a case runs under: one `exec_log_event` hook that
+/// checks each entry's `id` against the next one expected, and republishes a
+/// one-line report whenever a whole log has arrived.
 ///
 /// The report is written from the hook rather than from `build_end`, because
 /// `run --watch` never reaches a `build_end` and the point is to cover it too.
 /// Writing it per completed log (rather than per entry) keeps 3000 dispatches
 /// from becoming 3000 file writes.
-///
-/// `late` registers the hook from a `build_start` hook instead of at config
-/// time, which is the shape the attempt-0 ordering bug needed: `open` has to
-/// read the trait after `build_start`, not before.
-fn fixture(report: &Path, handshake: &Path, scenario: &str, late: bool) -> String {
-    let register = if late {
+fn fixture(report: &Path, handshake: &Path, scenario: &str, f: Fixture) -> String {
+    let mut setup = String::new();
+    if f.no_bes {
+        // Runs before `_do_spawn` reads `bool(trait.build_event)`, which is what
+        // decides whether there is an event iterator at all. Something always
+        // registers one in practice — the Artifact Upload feature does,
+        // unconditionally — so this is how a task with no BES consumer is reached.
+        setup.push_str("    t.build_start.append(lambda _ctx: t.build_event.clear())\n");
+    }
+    setup.push_str(if f.late {
         // `build_start` fires on attempt 0 only, so this appends exactly once.
-        r#"    t.build_start.append(lambda _ctx: t.exec_log_event.append(_hook()))"#
+        "    t.build_start.append(lambda _ctx: t.exec_log_event.append(_hook()))\n"
     } else {
-        r#"    t.exec_log_event.append(_hook())"#
-    };
+        "    t.exec_log_event.append(_hook())\n"
+    });
     format!(
         r#""""Test fixture: record every execution log entry the task dispatches."""
 
@@ -109,14 +125,13 @@ def config(ctx: ConfigContext):
         return ExecLogHook(on_entry = _on_entry)
 
     t = ctx.traits[BazelTrait]
-{register}
-    t.extra_flags.append("--scenario={scenario}")
+{setup}    t.extra_flags.append("--scenario={scenario}")
 "#,
         block = BLOCK,
         report = report.display(),
         handshake = handshake.display(),
         scenario = scenario,
-        register = register,
+        setup = setup,
     )
 }
 
@@ -206,7 +221,7 @@ impl Drop for Case {
 }
 
 impl Case {
-    fn new(scenario: &str, late: bool, bazelrc: Option<&str>) -> Self {
+    fn new(scenario: &str, f: Fixture, bazelrc: Option<&str>) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
         std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
@@ -217,12 +232,7 @@ impl Case {
         std::fs::create_dir(root.join(".aspect")).expect(".aspect");
         std::fs::write(
             root.join(".aspect/config.axl"),
-            fixture(
-                &root.join("report.txt"),
-                &root.join("pumped"),
-                scenario,
-                late,
-            ),
+            fixture(&root.join("report.txt"), &root.join("pumped"), scenario, f),
         )
         .expect("config.axl");
 
@@ -346,7 +356,7 @@ fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool) {
         }
     };
 
-    let pumped = Case::new("execlog_beyond_capacity", false, bazelrc);
+    let pumped = Case::new("execlog_beyond_capacity", Fixture::default(), bazelrc);
     let report = drive(&pumped);
     assert_complete(name, &report, 1);
     assert_eq!(
@@ -356,7 +366,7 @@ fn assert_site(name: &str, args: &[&str], bazelrc: Option<&str>, watch: bool) {
          what calling `exec_log.pump` in the task's drain loop does",
     );
 
-    let drained = Case::new("execlog_after_bes", false, bazelrc);
+    let drained = Case::new("execlog_after_bes", Fixture::default(), bazelrc);
     assert_complete(name, &drive(&drained), 1);
 }
 
@@ -431,6 +441,39 @@ fn the_delivery_task_dispatches_every_entry() {
     );
 }
 
+/// With no BES event stream, every entry still arrives — at the end of the
+/// build rather than during it.
+///
+/// `bazel/invocation.axl` pumps from `on_event`, so its loop runs only when
+/// there is an event iterator to loop over, and an `exec_log_event` hook does
+/// not create one. Today something always does (the Artifact Upload feature
+/// registers a `build_event` hook unconditionally, which is why every case above
+/// reports `pumped`), but that is a coincidence of the default feature set, not
+/// a guarantee this hook can rely on — so the contract is completeness, not
+/// timeliness, and this pins the half that has to hold either way.
+///
+/// basil writes no event file at all here, so there is no handshake to record:
+/// `None` is the assertion that the task had no event loop, and the 3000 entries
+/// beside it are what `close` carried on its own.
+#[test]
+fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
+    let case = Case::new(
+        "execlog_beyond_capacity",
+        Fixture {
+            no_bes: true,
+            ..Fixture::default()
+        },
+        None,
+    );
+    let report = case.run(&["build", "//..."]);
+    assert_complete("build with no BES stream", &report, 1);
+    assert_eq!(
+        report.handshake, None,
+        "with no event stream there is no drain loop to pump from, so the whole \
+         log must come from `exec_log.close`",
+    );
+}
+
 /// Retries, the seam `_test_open_is_fresh_per_call` covers only in the unit.
 ///
 /// The hook is registered by a `build_start` hook, which fires on attempt 0
@@ -440,7 +483,14 @@ fn the_delivery_task_dispatches_every_entry() {
 /// which a reused handle could not deliver: it is bound to the first build.
 #[test]
 fn every_retry_attempt_dispatches_its_own_log_to_a_build_start_hook() {
-    let case = Case::new("execlog_retryable_failure", true, None);
+    let case = Case::new(
+        "execlog_retryable_failure",
+        Fixture {
+            late: true,
+            ..Fixture::default()
+        },
+        None,
+    );
     let report = case.run(&["build", "--bazel-retry-attempts=2", "//..."]);
     assert_complete("build --bazel-retry-attempts=2", &report, 2);
     assert_eq!(

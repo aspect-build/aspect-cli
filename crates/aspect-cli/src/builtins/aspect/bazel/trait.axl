@@ -83,6 +83,11 @@ def default_retry(code: int) -> bool:
 # refers to other entries by id — a spawn names `input_set_id`, not paths — so
 # `@aspect//private/lib/execlog.axl` carries the resolver that turns those ids
 # back into paths and digests.
+#
+# `entry.id` is not an identifier for every entry. Bazel numbers only the
+# entries something else refers to by id, so a `spawn` arrives with `id = 0` —
+# every spawn in the log does. A hook that needs to name or deduplicate a spawn
+# uses the resolver's `spawn_key(spawn)`, which is its primary output path.
 ExecLogHook = record(
     on_entry = field(typing.Callable[[TaskContext, typing.Any], None]),
     kinds = field(list[str], default = []),

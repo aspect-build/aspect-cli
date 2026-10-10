@@ -266,6 +266,16 @@ impl ExecLogIter {
         *self.state.lock().unwrap() = ExecLogIterState::Done;
     }
 
+    /// Whether this handle still holds a subscriber.
+    ///
+    /// For the all-or-nothing bind in `build::bind_execlog_iters`, whose
+    /// rollback nothing else can observe: `release` and a drained handle both
+    /// end in `Done`, so a later `bind` fails whether or not the rollback ran.
+    #[cfg(test)]
+    pub fn is_live(&self) -> bool {
+        matches!(*self.state.lock().unwrap(), ExecLogIterState::Live { .. })
+    }
+
     fn wants(&self, entry: &ExecLogEntry) -> bool {
         match self.kinds.as_ref() {
             Some(kinds) => entry_kind_in(entry, kinds),
