@@ -259,7 +259,7 @@ impl EvalBuilder {
                     std::fs::write(&config_path, code)?;
                     configs.push((&config_path, &root_mod));
                 }
-                raise_first(mpe.execute_configs(&configs).map_err(anyhow::Error::from)?)?;
+                raise_first(mpe.execute_configs(&configs))?;
                 mpe.execute_features_with_args(|_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }

@@ -116,6 +116,40 @@ fn task_label_for(
     }
 }
 
+/// What a startup phase was loading an AXL file for, and so what its failure
+/// costs. Carried on [`AxlFileFailure`] because the phase is the only thing
+/// that knows: the file itself looks the same whichever way it was reached.
+///
+/// The wording shown to the user is the caller's — `aspect-cli`'s `main` turns
+/// a role into the clause its `warning:` line ends with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxlFileRole {
+    /// A discovered `.aspect/*.axl` script, or a `use_task(...)` reference.
+    /// Either way only tasks are registered out of it.
+    Tasks,
+    /// A `use_feature(...)` reference.
+    Feature,
+    /// One file reached both ways, so its absence costs both.
+    TasksAndFeature,
+    /// A `config.axl`.
+    Config,
+}
+
+impl AxlFileRole {
+    /// The role of a file reached two ways, both of which its failure costs.
+    ///
+    /// Only a `MODULE.aspect` reaches one file twice, by naming the same path
+    /// in a `use_task` and a `use_feature`, so the two roles merged are always
+    /// those two: each phase records only its own roles, into its own list.
+    fn merged(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::TasksAndFeature
+        }
+    }
+}
+
 /// An AXL file that failed during startup evaluation, recorded instead of
 /// raised.
 ///
@@ -130,6 +164,8 @@ fn task_label_for(
 pub struct AxlFileFailure {
     /// Absolute path of the `.axl` file that failed.
     pub path: PathBuf,
+    /// What the file was being loaded for when it failed.
+    pub role: AxlFileRole,
     pub error: EvalError,
 }
 
@@ -189,7 +225,8 @@ impl<'v> ModuleEnv<'v> {
 /// Phases 1 and 2 report an unloadable file as an [`AxlFileFailure`] rather
 /// than stopping, so one bad `.aspect/*.axl` costs only what that file
 /// defines; every later phase still fails outright. Phase 2 therefore runs
-/// even when Phase 1 recorded a failure, which it did not before.
+/// even when Phase 1 recorded a failure — the tolerance is per file, not per
+/// phase.
 pub struct MultiPhaseEval<'v, 'l> {
     env: &'l ModuleEnv<'v>,
     loader: &'l AxlLoader<'l>,
@@ -279,7 +316,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // Evaluate auto-discovered AXL scripts (axl_sources in repo root)
         for path in scripts {
             if let Err(error) = self.eval_script_tasks(root_mod, path) {
-                self.record(&mut out, path, error);
+                self.record(&mut out, path, AxlFileRole::Tasks, error);
             }
         }
 
@@ -287,13 +324,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         for mode in modules.iter().chain(vec![root_mod]) {
             for (abs_path, (label, symbols)) in mode.tasks.iter() {
                 if let Err(error) = self.eval_used_tasks(mode, abs_path, label, symbols) {
-                    self.record(&mut out, abs_path, error);
+                    self.record(&mut out, abs_path, AxlFileRole::Tasks, error);
                 }
             }
 
             for (abs_path, symbol) in mode.features.iter() {
                 if let Err(error) = self.eval_used_feature(mode, abs_path, symbol) {
-                    self.record(&mut out, abs_path, error);
+                    self.record(&mut out, abs_path, AxlFileRole::Feature, error);
                 }
             }
         }
@@ -303,7 +340,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Record one file's failure: an error that [`Self::ends_the_run`] goes to
     /// [`PhaseFailures::ended`], first one winning, and anything else onto the
-    /// file list.
+    /// file list under the `role` it was being loaded for.
+    ///
+    /// The file list holds one entry per path and diagnostic, not one per
+    /// reference. A `MODULE.aspect` may name the same file twice — `use_task`
+    /// and `use_feature` on one path — and a file that does not parse fails
+    /// identically each time; the user needs to hear that once, with both
+    /// roles folded into what its absence costs. A *different* diagnostic for
+    /// the same path is a second thing to fix and is kept.
     ///
     /// Returns whether an ending error has now been seen, which is Phase 2's
     /// cue to stop. The two phases answer that differently on purpose. Phase 1
@@ -314,12 +358,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// a `ctx` and can write files and send requests, and running more of them
     /// after an author's `exit()` would be doing the work that exit exists to
     /// prevent.
-    fn record(&self, out: &mut PhaseFailures, path: &Path, error: EvalError) -> bool {
+    fn record(
+        &self,
+        out: &mut PhaseFailures,
+        path: &Path,
+        role: AxlFileRole,
+        error: EvalError,
+    ) -> bool {
         if self.ends_the_run(&error) {
             out.ended.get_or_insert(error);
+        } else if let Some(seen) = out
+            .files
+            .iter_mut()
+            .find(|f| f.path == path && f.error.to_string() == error.to_string())
+        {
+            seen.role = seen.role.merged(role);
         } else {
             out.files.push(AxlFileFailure {
                 path: path.to_path_buf(),
+                role,
                 error,
             });
         }
@@ -511,29 +568,28 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// As in Phase 1, a config that fails is recorded in
     /// [`PhaseFailures::files`] and the remaining ones still run, so a typo in
     /// one `config.axl` leaves the CLI usable enough to find it; one that
-    /// [`Self::ends_the_run`] stops the phase as [`PhaseFailures::ended`].
-    /// `Err` is for a failure no single file owns — the trait type check
-    /// below, which is skipped once any config failed, because it judges the
-    /// state all configs were supposed to produce and would report the gap
-    /// rather than the typo that caused it.
+    /// [`Self::ends_the_run`] stops the phase as [`PhaseFailures::ended`]. So
+    /// does the trait type check at the end, which is the one failure no
+    /// single file owns — it judges the state all configs together were
+    /// supposed to produce. It is skipped once any config failed, because it
+    /// would then report the gap rather than the typo that caused it.
     ///
-    /// Note what Phase 1's tolerance changed here: this phase now runs even
-    /// when Phase 1 could not load every script, where before a Phase 1 error
-    /// stopped the CLI outright. Three consequences. A config is evaluated
+    /// Because the tolerance is per file, this phase runs even when Phase 1
+    /// could not load every script. Three consequences. A config is evaluated
     /// against a task map that may be missing entries, so its own failure is
     /// often just that — `ctx.tasks["x"]` for an `x` whose file never loaded —
     /// and a caller should treat a config failure accompanying a script
     /// failure as derived from it rather than as a second, independent
     /// problem. Mutations a config made before failing stay on the shared
     /// heap, this phase's whole purpose being to mutate it. And a config's
-    /// side effects — a file it writes, a request it sends — now happen in a
-    /// workspace whose scripts did not all load, which before this change
-    /// they never did.
+    /// side effects — a file it writes, a request it sends — can happen in a
+    /// workspace whose scripts did not all load.
+    ///
+    /// The policy a CLI builds on top of all this — which commands may run
+    /// against a workspace that did not fully load, and what each failure is
+    /// reported as — lives in `docs/design.md`, "When a file does not load".
     #[tracing::instrument(name = "execute.configs", skip_all)]
-    pub fn execute_configs(
-        &mut self,
-        configs: &[(&Path, &'l Mod)],
-    ) -> Result<PhaseFailures, EvalError> {
+    pub fn execute_configs(&mut self, configs: &[(&Path, &'l Mod)]) -> PhaseFailures {
         let heap = self.heap();
 
         // Register trait types from all tasks into a TraitMap; instances are created lazily
@@ -570,13 +626,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             if let Err(error) = self.run_config(scope, config_path, context_value) {
                 // Stop only once an ending error has been seen. An ordinary
                 // failure is recorded and the remaining configs still run.
-                if self.record(&mut out, config_path, error) {
+                if self.record(&mut out, config_path, AxlFileRole::Config, error) {
                     break;
                 }
             }
         }
         if !out.is_empty() {
-            return Ok(out);
+            return out;
         }
 
         // Assignment to a trait field is type-checked as it happens, but a list
@@ -593,10 +649,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .flat_map(|instance| instance.type_mismatches())
             .collect();
         if !mismatches.is_empty() {
-            return Err(EvalError::TraitTypeMismatch(mismatches));
+            out.ended = Some(EvalError::TraitTypeMismatch(mismatches));
         }
 
-        Ok(PhaseFailures::default())
+        out
     }
 
     /// Call one config file's `config(ctx)`. One unit of Phase 2's per-file
@@ -1697,7 +1753,6 @@ def config(ctx):
                     (proj_config.as_path(), &root_mod),
                     (user_config.as_path(), &user_mod),
                 ])
-                .unwrap()
                 .is_empty()
             );
 

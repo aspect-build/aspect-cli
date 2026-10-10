@@ -43,9 +43,19 @@ use thiserror::Error;
 
 const TASK_ID_KEY: &str = "@@@$'__AXL_TASK_ID__'$@@@";
 /// `aspect feature [<name>]`: routed to the feature-help renderer in `main`.
-const FEATURE_COMMAND: &str = "feature";
+pub const FEATURE_COMMAND: &str = "feature";
 /// `aspect describe`: routed to the machine-readable surface dump in `main`.
-const DESCRIBE_COMMAND: &str = "describe";
+pub const DESCRIBE_COMMAND: &str = "describe";
+/// `aspect version`: routed to the version printer in `main`.
+pub const VERSION_COMMAND: &str = "version";
+/// `aspect help`: routed to the root-help renderer in `main`.
+pub const HELP_COMMAND: &str = "help";
+/// The commands that report the CLI's own identity rather than anything AXL
+/// defines, which is what lets them run against a workspace that did not fully
+/// load (see `Unloadable` in `main.rs`). The hidden subcommands registered for
+/// them below and the arms `main` routes them through both read this list, so
+/// the three cannot drift apart.
+pub const IDENTITY_COMMANDS: &[&str] = &[VERSION_COMMAND, HELP_COMMAND];
 /// Top-level command names `main` intercepts before task parsing; a top-level
 /// task of any of these kinds would be unreachable, so it is rejected at build
 /// time (see `Tree::insert`). Reachable when nested under a group.
@@ -181,9 +191,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
                             .help("Output format."),
                     ),
             )
-            .subcommand(Command::new("version").about("Print version").hide(true))
             .subcommand(
-                Command::new("help")
+                Command::new(VERSION_COMMAND)
+                    .about("Print version")
+                    .hide(true),
+            )
+            .subcommand(
+                Command::new(HELP_COMMAND)
                     .about("Print this message or the help of the given subcommand(s)")
                     .hide(true),
             )

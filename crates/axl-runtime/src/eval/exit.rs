@@ -68,14 +68,6 @@ impl TaskExit {
         match err {
             EvalError::StarlarkError(e) => Self::from_starlark(e, signals),
             EvalError::UnknownError(e) => Self::from_anyhow(e, signals),
-            // No startup phase builds this variant today, but a cancelled
-            // wait carries its exit inside an `io::Error`, so if one ever
-            // reaches here it must still be recognized as an exit rather
-            // than read as a file that failed to load.
-            EvalError::IOError(e) => e
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<TaskExit>())
-                .cloned(),
             _ => None,
         }
     }

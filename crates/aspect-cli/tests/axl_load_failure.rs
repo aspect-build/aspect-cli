@@ -3,14 +3,19 @@
 //!
 //! The CLI's whole surface is defined in AXL, so a single unparsable file used
 //! to fail every command — `aspect help`, the way out, included. The policy
-//! these tests pin (see `Unloadable` in `main.rs`): `version` and `help` run
+//! these tests pin (stated in `docs/design.md`, "When a file does not load",
+//! and carried out by `Unloadable` in `main.rs`): `version` and `help` run
 //! anyway and report the failure as a warning, while anything that dispatches
 //! a task still fails on it. Both halves matter. A silently swallowed syntax
 //! error would be worse than the hard failure it replaced, so every degraded
-//! run is checked for the diagnostic as well as the exit code.
+//! run is checked for the diagnostic as well as the exit code — and a command
+//! that *does* fail is checked for the files it did not raise, since dropping
+//! those would make what the user hears about depend on `read_dir` order.
 //!
-//! Also pinned here: the diagnostic carries exactly one `error:` prefix.
-//! Starlark renders its own, and the CLI used to add a second.
+//! Also pinned here: each warning names what that particular file's absence
+//! costs, a `use_feature` file defining no tasks; one file named twice is
+//! reported once; and the diagnostic carries exactly one `error:` prefix,
+//! Starlark rendering its own and the CLI having once added a second.
 //!
 //! Every run gets a throwaway `$HOME` so the developer's own
 //! `~/.aspect/config.axl` cannot join the run and change what is reported.
@@ -71,7 +76,9 @@ struct Fixture<'a> {
     /// `(path, contents)` pairs, relative to the workspace root. Written in
     /// the order given, which is also the order `read_dir` reports them in on
     /// the filesystems we test on — see
-    /// `a_file_failure_recorded_before_a_gate_is_still_reported`.
+    /// `a_file_failure_recorded_before_a_gate_is_still_reported`. `home/` is
+    /// the run's throwaway `$HOME`, so a fixture that needs a user-global
+    /// `~/.aspect/config.axl` writes `home/.aspect/config.axl`.
     files: &'a [(&'a str, &'a str)],
     /// Directory to run from, relative to the workspace root. The CLI searches
     /// `.aspect` from the aspect root down to the cwd, so a nested config is
@@ -394,10 +401,10 @@ fn a_deliberate_exit_from_a_config_ends_every_command() {
     }
 }
 
-/// Phase 2 now runs even when phase 1 could not load a script, so a config
-/// that merely refers to a task from the broken file fails too. That second
-/// failure is derived, and must not read as an equal, independent problem
-/// pointing at a file that is perfectly fine.
+/// The tolerance is per file, not per phase, so phase 2 runs even when phase 1
+/// could not load a script and a config that merely refers to a task from the
+/// broken file fails too. That second failure is derived, and must not read as
+/// an equal, independent problem pointing at a file that is perfectly fine.
 #[test]
 fn a_config_failure_after_a_script_failure_is_marked_as_derived() {
     let output = run_in_workspace(
@@ -738,4 +745,254 @@ two = task(kind = "dup", summary = "two.", implementation = _impl)
         );
         assert_one_error_prefix(&stderr);
     }
+}
+
+/// A command that cannot run degraded still reports *every* file that failed,
+/// not just the one it raises. Scripts are discovered with `read_dir`, so
+/// dropping the rest would make the diagnostics a user sees depend on
+/// directory order — two typos, and which one you hear about is luck.
+///
+/// Both refusal paths are covered: a built-in that parses fine and would
+/// dispatch, and an unknown subcommand, which Clap rejects against a surface
+/// built from a workspace that did not fully load.
+#[test]
+fn every_broken_script_is_reported_even_when_the_command_cannot_run() {
+    for args in [vec!["build", "//..."], vec!["notacommand"]] {
+        let output = run_in_workspace(
+            &[
+                ("aaa.axl", UNPARSABLE_SCRIPT),
+                ("zzz.axl", UNPARSABLE_SCRIPT),
+            ],
+            &args,
+        );
+        let stderr = stderr(&output);
+        let what = args.join(" ");
+        assert_eq!(
+            output_code(&output),
+            1,
+            "`aspect {what}`\n--- stderr ---\n{stderr}"
+        );
+        for named in ["aaa.axl", "zzz.axl"] {
+            assert!(
+                stderr.contains(named),
+                "`aspect {what}` must name {named} too:\n{stderr}"
+            );
+        }
+        // One is raised as the run's error, the rest come as warnings — so
+        // the raised one is not also warned about, and nothing is lost.
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+                .count(),
+            1,
+            "`aspect {what}`: one raised, one warned:\n{stderr}"
+        );
+        assert_one_error_prefix(&stderr);
+    }
+}
+
+/// A `use_feature` file defines no tasks, so saying its tasks went missing
+/// would send the user looking for something that was never there. What it
+/// actually costs is the feature and the flags that feature adds to every task
+/// subcommand.
+#[test]
+fn a_broken_feature_file_is_reported_as_a_feature() {
+    let files = [
+        (
+            "MODULE.aspect",
+            "use_feature(\".aspect/lib/feat.axl\", \"afeature\")\n",
+        ),
+        (".aspect/version.axl", "version(\"0.0.0-dev\")\n"),
+        (".aspect/lib/feat.axl", UNPARSABLE_SCRIPT),
+    ];
+    let output = run_in_rooted_workspace(&files, &["help"]);
+    assert_degraded(&output, "feat.axl");
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("the feature it defines is unavailable"),
+        "a broken feature file must be reported as a feature:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("the tasks it defines"),
+        "it defines no tasks:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("flags it adds to every task"),
+        "a lost feature takes its flags with it:\n{stderr}"
+    );
+}
+
+/// A `MODULE.aspect` may name one file twice — `use_task` and `use_feature` on
+/// the same path. It fails identically each time, so the user hears about it
+/// once, with both roles folded into what its absence costs.
+#[test]
+fn a_file_referenced_twice_is_reported_once() {
+    let files = [
+        (
+            "MODULE.aspect",
+            "use_task(\".aspect/lib/both.axl\", \"atask\")\n\
+             use_feature(\".aspect/lib/both.axl\", \"afeature\")\n",
+        ),
+        (".aspect/version.axl", "version(\"0.0.0-dev\")\n"),
+        (".aspect/lib/both.axl", UNPARSABLE_SCRIPT),
+    ];
+    let output = run_in_rooted_workspace(&files, &["help"]);
+    assert_degraded(&output, "both.axl");
+    let stderr = stderr(&output);
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains("could not be loaded"))
+            .count(),
+        1,
+        "one file, one warning:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("Parse error").count(),
+        1,
+        "and its diagnostic printed once:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("the tasks and the feature it defines are unavailable"),
+        "both roles must be named:\n{stderr}"
+    );
+}
+
+/// A `MODULE.aspect` is read before either tolerant phase, so one that does
+/// not parse is fatal to every command — and there is nothing recorded yet to
+/// warn about, the broken script beside it never having been reached.
+#[test]
+fn an_unparsable_module_aspect_is_fatal_and_warns_about_nothing() {
+    for args in [vec!["help"], vec!["version"], vec!["build", "//..."]] {
+        let output = run_in_rooted_workspace(
+            &[
+                ("MODULE.aspect", UNPARSABLE_SCRIPT),
+                (".aspect/broken.axl", UNPARSABLE_SCRIPT),
+            ],
+            &args,
+        );
+        let stderr = stderr(&output);
+        let what = args.join(" ");
+        assert_eq!(
+            output_code(&output),
+            1,
+            "`aspect {what}`\n--- stderr ---\n{stderr}"
+        );
+        assert!(
+            stderr.contains("MODULE.aspect") && stderr.contains("Parse error"),
+            "`aspect {what}` must report the MODULE.aspect:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("warning:"),
+            "nothing had been loaded yet, so there is nothing to warn about:\n{stderr}"
+        );
+        assert_one_error_prefix(&stderr);
+    }
+}
+
+/// A trait field a config left holding the wrong type is judged once every
+/// config has run, so it is settled outside the per-file tolerance and fails
+/// every command — and like every other raise path it reports what did not
+/// load on its way out.
+#[test]
+fn a_trait_type_mismatch_still_reports_what_did_not_load() {
+    const DECLARES_A_TRAIT: &str = r#"
+MyTrait = trait(scores = attr(list[int], default = []))
+
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+traittask = task(summary = "Uses a trait.", traits = [MyTrait], implementation = _impl)
+"#;
+    // Assignment is type-checked as it happens; a list mutated in place is
+    // not, which is why the check runs once at the end of phase 2.
+    const APPENDS_THE_WRONG_TYPE: &str = r#"
+load("./traits.axl", "MyTrait")
+
+def config(ctx):
+    ctx.traits[MyTrait].scores.append("not an int")
+"#;
+    let output = run_in_workspace(
+        &[
+            ("broken.axl", UNPARSABLE_SCRIPT),
+            ("traits.axl", DECLARES_A_TRAIT),
+            ("config.axl", APPENDS_THE_WRONG_TYPE),
+        ],
+        &["help"],
+    );
+    let stderr = stderr(&output);
+    assert_eq!(output_code(&output), 1, "--- stderr ---\n{stderr}");
+    assert!(
+        stderr.contains("broken.axl") && stderr.contains("Parse error"),
+        "the typo must survive the mismatch:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("expected type `list[int]`"),
+        "and the mismatch is still what ends the run:\n{stderr}"
+    );
+    assert_one_error_prefix(&stderr);
+}
+
+/// The caveat on a degraded `help`: phase 2 mutates the shared heap as it
+/// goes, so a task a config registered before failing is still in the listing,
+/// even though running it hits the same refusal every other task does. Best
+/// effort, not a promise of runnability.
+#[test]
+fn a_task_a_failed_config_added_stays_in_the_degraded_help() {
+    const DEFINES_THE_GHOST: &str = r#"
+def _impl(ctx: TaskContext) -> int:
+    return 0
+
+ghosttask = task(summary = "Added by a config that then failed.", implementation = _impl)
+"#;
+    const ADDS_IT_THEN_FAILS: &str = r#"
+load("./lib/ghost.axl", "ghosttask")
+
+def config(ctx):
+    ctx.tasks.add(ghosttask)
+    ctx.tasks["no-such-task"].args.anything = 1
+"#;
+    // Under `lib/`, so phase 1 does not discover it and the config's
+    // `ctx.tasks.add` is what puts it on the surface.
+    let files = [
+        (".aspect/lib/ghost.axl", DEFINES_THE_GHOST),
+        (".aspect/config.axl", ADDS_IT_THEN_FAILS),
+    ];
+
+    let help = run_in_rooted_workspace(&files, &["help"]);
+    assert_degraded(&help, "config.axl");
+    assert!(
+        stdout(&help).contains("ghosttask"),
+        "the ghost is listed — the mutation happened before the failure:\n{}",
+        stdout(&help)
+    );
+
+    let run = run_in_rooted_workspace(&files, &["ghosttask"]);
+    assert_failed_on_axl(&run, "no task found");
+}
+
+/// `~/.aspect/config.axl` evaluates in its own module scope, which is a
+/// separate path through phase 2. It is tolerated and reported like any other
+/// config — the user who broke their own global config needs `aspect help`
+/// just as much, and in every repo they walk into.
+#[test]
+fn a_broken_user_global_config_is_reported_like_any_other() {
+    // `home/` is the throwaway `$HOME` every fixture run gets.
+    const BROKEN_USER_CONFIG: &str = r#"
+def config(ctx):
+    ctx.tasks["no-such-user-task"].args.x = 1
+"#;
+    let files = [("home/.aspect/config.axl", BROKEN_USER_CONFIG)];
+
+    let degraded = run_in_rooted_workspace(&files, &["version"]);
+    assert_degraded(&degraded, "home/.aspect/config.axl");
+    assert!(
+        stderr(&degraded).contains("no-such-user-task"),
+        "the global config's own error must be visible:\n{}",
+        stderr(&degraded)
+    );
+
+    let dispatched = run_in_rooted_workspace(&files, &["build", "//..."]);
+    assert_failed_on_axl(&dispatched, "no-such-user-task");
 }
