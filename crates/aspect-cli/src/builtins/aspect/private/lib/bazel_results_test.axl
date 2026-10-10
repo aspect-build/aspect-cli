@@ -431,6 +431,21 @@ def _make_results_aborted_nokeep_going():
     r["bazel"]["failed_actions"] = []
     return r
 
+def _make_results_aborted_in_loading():
+    """Ctrl-C before anything is analysed. Nothing reaches `target_completed`,
+    so no `Aborted` payload lands in an arm that records detail and the reason
+    and description stay empty — the exit code is the only abort signal. Pins
+    the bare notice (no " — <reason>" rider); see
+    `_test_interrupt_during_loading_aborts_with_no_detail`."""
+    r = _make_results_aborted()
+    r["bazel"]["invocation_id"] = "abort777-4567-89ab-cdef-012345678901"
+    r["bazel"]["abort_reason"] = ""
+    r["bazel"]["abort_description"] = ""
+    r["bazel"]["failed_actions"] = []
+    r["bazel"]["actions_total"] = 0
+    r["bazel"]["targets_total"] = 0
+    return r
+
 def _make_results_large():
     """Large build: many targets and tests (tests the trim cascade in render_check_output)."""
     r = init_data()
@@ -603,6 +618,7 @@ def _scenarios():
         ("5. aborted · GitHub", _make_results_aborted(), "aborted", "//...", False, "github", None, ""),
         ("5b. aborted · GitLab", _make_results_aborted(), "aborted", "//...", False, "gitlab", None, ""),
         ("5c. aborted-nokeep_going · GitHub", _make_results_aborted_nokeep_going(), "aborted", "//...", False, "github", None, ""),
+        ("5d. aborted-in-loading · GitHub", _make_results_aborted_in_loading(), "aborted", "//...", False, "github", None, ""),
         ("6. large · Buildkite", _make_results_large(), "failed", "//...", False, "buildkite", None, ""),
         ("7. all-passed · GitLab", _make_results_passed(), "passed", "//...", True, "gitlab", None, ""),
         ("8. all-passed · CircleCI", _make_results_passed(), "passed", "//...", True, "circleci", None, ""),
@@ -1687,6 +1703,9 @@ _EXIT_CODE_CASES = [
 
 # Every `Aborted.AbortReason` in build_event_stream.proto, snake_case as an AXL
 # enum read yields it. None of them may decide the verdict on its own.
+# `_test_abort_reasons_match_the_proto` ties this list back to the generated
+# proto, so a Bazel release that adds a reason fails here instead of leaving
+# the new reason unexercised.
 _ABORT_REASONS = [
     "unknown",
     "user_interrupted",
@@ -1701,6 +1720,23 @@ _ABORT_REASONS = [
     "incomplete",
     "out_of_memory",
 ]
+
+def _test_abort_reasons_match_the_proto(ctx):
+    """`_ABORT_REASONS` is hand-written, so tie it to the generated proto:
+    `dir()` on the `AbortReason` members namespace yields the real variant set
+    (SCREAMING proto names) straight out of `build_event_stream.proto`.
+
+    The lowercase of a proto name is the snake_case form a field read yields,
+    because every variant here is plain words with no acronym or digit —
+    `_test_interrupt_exit_code_aborts_the_build` pins the actual read
+    (`"user_interrupted"`) so the mapping is not taken on faith.
+
+    Without this, a Bazel release that adds a 13th reason would leave
+    `_test_abort_reason_never_decides_the_verdict` green while never
+    exercising the new reason."""
+    proto_reasons = [name.lower() for name in dir(bazel.build.build_event.aborted.AbortReason)]
+    _eq("reason set matches the proto", sorted(_ABORT_REASONS), sorted(proto_reasons))
+    _eq("no reason listed twice", len(_ABORT_REASONS), len(proto_reasons))
 
 def _test_interrupt_exit_code_aborts_the_build(ctx):
     """`--keep_going` Ctrl-C, verified against Bazel 9.3.0: Aborted(
@@ -1818,6 +1854,24 @@ def _test_per_label_abort_root_causes_still_read_failed(ctx):
             pick_status("build", data, had_failure = True, terminal = True),
             "failed",
         )
+
+def _test_interrupt_during_loading_aborts_with_no_detail(ctx):
+    """Ctrl-C before anything is analysed: nothing has reached
+    `target_completed`, so the only `Aborted` payloads ride `pattern_expanded`
+    — an id with no `process_event` arm — and no detail is recorded. The exit
+    code still decides, so the verdict is `aborted` with an empty reason, and
+    the notice renders bare (no " — <reason>" rider). Snapshotted as scenario
+    "5d" so the bare form is pinned rather than merely well-formed."""
+    data = _data_after([
+        _abort_event("pattern_expanded", "user_interrupted", id = struct(pattern = ["//..."])),
+        _finished_event(exit_codes.INTERRUPTED),
+    ])
+    _eq("aborted on the exit code alone", data["bazel"]["aborted"], True)
+    _eq("no reason recorded", data["bazel"]["abort_reason"], "")
+    _eq("no description recorded", data["bazel"]["abort_description"], "")
+    _eq("nothing counted as skipped", data["bazel"]["skipped_targets_total"], 0)
+    _eq("status is aborted", pick_status("build", data, had_failure = False, terminal = True), "aborted")
+    _eq("title reports the abort", compute_invocation_state(data, "aborted"), "Invocation disconnected")
 
 def _test_aborted_is_not_a_build_event_id_kind(ctx):
     """`BuildEventId` has no `aborted` variant, so `event.kind` never reads
@@ -2325,7 +2379,9 @@ _UNIT_TESTS = [
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
     _test_repro_targets_dedups_fallback_input,
+    _test_abort_reasons_match_the_proto,
     _test_interrupt_exit_code_aborts_the_build,
+    _test_interrupt_during_loading_aborts_with_no_detail,
     _test_nokeep_going_interrupt_aborts_despite_an_incomplete_reason,
     _test_ordinary_nokeep_going_failure_is_not_an_abort,
     _test_only_the_interrupt_exit_code_aborts_the_build,
