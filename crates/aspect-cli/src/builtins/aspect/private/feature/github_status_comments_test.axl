@@ -1881,8 +1881,7 @@ def _check_identical_command_merges_across_kinds(ctx):
     _eq("no doubled space from the empty kind", "####  (" in body, False)
 
 def _check_body_has_no_start_date(ctx):
-    """The built-in body carries no start-time line; the footer's "Last updated"
-    is the timestamp a reader wants, and this one never changed."""
+    """The built-in body carries no start-time line."""
     entries = [{
         "kind": "build",
         "name": "build-task",
@@ -1902,6 +1901,44 @@ def _check_body_has_no_start_date(ctx):
     )
     _eq("no start-date line", "📅" in body, False)
     _eq("the passed-in value is not rendered", "2026-01-01 00:00:00 UTC" in body, False)
+
+def _check_footer(ctx):
+    """The built-in body ends on the one install + attribution line, and takes
+    neither the publish time nor the API quota line."""
+    _eq("body takes no timestamp", "last_updated_at" in DEFAULT_BODY_TEMPLATE, False)
+    _eq("body takes no API quota", "api_usage" in DEFAULT_BODY_TEMPLATE, False)
+
+    entries = [{
+        "kind": "lint",
+        "name": "lint-task",
+        "job": "ci",
+        "status": "failed",
+        "elapsed_ms": 1000,
+        "fix_commands": rehydrate_commands([
+            {"command": "aspect lint --fix -- //...", "description": "", "slug": "lint-fix"},
+        ]),
+        "repro_commands": rehydrate_commands([
+            {"command": "aspect lint -- //...", "description": "", "slug": "lint-repro"},
+        ]),
+    }]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 46,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    version = ctx.std.env.aspect_cli_version()
+    footer = ("<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install)" +
+              " · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli)" +
+              (" (v%s)" % version if version else "") + "</sub>")
+    _eq("body ends on the footer", body.endswith("\n---\n\n" + footer + "\n"), True)
+    _eq("fix command rendered", "aspect lint --fix -- //..." in body, True)
+    _eq("repro command rendered", "\naspect lint -- //...\n" in body, True)
+    _eq("install page named once", body.count("[aspect.build/docs/cli/install]"), 1)
 
 def _test_impl(ctx):
     _eq(
@@ -1959,6 +1996,7 @@ def _test_impl(ctx):
     _check_no_fix_for_a_passing_task(ctx)
     _check_identical_command_merges_across_kinds(ctx)
     _check_body_has_no_start_date(ctx)
+    _check_footer(ctx)
 
     scenarios = [
         (

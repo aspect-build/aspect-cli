@@ -61,7 +61,7 @@ the hidden items per contributing task.
 Body-template variables:
     marker         \342\200\224 HTML comment identifying this comment across PATCHes.
     started_at     \342\200\224 Earliest sibling-task start time, UTC. Not in the
-                     built-in body, which carries "Last updated" in the footer.
+                     built-in body.
     status_badges  \342\200\224 {badge_key -> label}.
     entries        \342\200\224 per-task entry dicts, alphabetical by (job, kind, name).
                      `entry.kind` is the task kind (the command); `entry.name`
@@ -71,7 +71,9 @@ Body-template variables:
     build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
     tip_rows       \342\200\224 decorated tips.
     *_overflow_note \342\200\224 "N more not shown" line for each capped section.
-    cli_version / last_updated_at / api_usage \342\200\224 footer material.
+    cli_version    \342\200\224 footer attribution.
+    last_updated_at / api_usage \342\200\224 publish time and GitHub API quota line.
+                     Not in the built-in body; there for an overriding one.
 """
 
 load("@std//base64.axl", "base64")
@@ -103,7 +105,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
+load("../private/lib/repro_commands.axl", "dedup_and_attribute", "rehydrate_commands")
 load("../private/lib/result_text.axl", "severity_for_status")
 load("../private/lib/template_presets.axl", "template_presets")
 load(
@@ -249,7 +251,6 @@ Reproduce with:
 {% if fix_overflow_note %}
 {{ fix_overflow_note }}
 {% endif %}
-""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% if repro_rows %}
 ## Reproduce
@@ -263,13 +264,11 @@ Reproduce with:
 {% if repro_overflow_note %}
 {{ repro_overflow_note }}
 {% endif %}
-""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% endif %}
 ---
 
-{% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
-{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %} &nbsp;|&nbsp; [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install) · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>
 """
 
 # ─── Status → badge ───────────────────────────────────────────────────────────
