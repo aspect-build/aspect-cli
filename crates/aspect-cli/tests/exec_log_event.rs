@@ -55,6 +55,10 @@ use std::time::{Duration, Instant};
 /// `execlog_entries`. Each attempt numbers its own log from 1.
 const BLOCK: u32 = 3000;
 
+/// Filename, under a case's directory, of the `compact_file` sink
+/// [`Fixture::trait_sink`] registers.
+const TRAIT_SINK: &str = "trait-sink.binpb.zst";
+
 /// Bound on a single `aspect` invocation. Generous: it is here to turn a hang
 /// (a `close` that waits on a producer joined by `wait()`) into a failure, not
 /// to bound a healthy run, which takes under two seconds.
@@ -89,6 +93,10 @@ struct Fixture {
     /// Clear the trait's `build_event` hooks from `build_start`, leaving
     /// `bazel/invocation.axl` with no BES event iterator to loop over.
     no_bes: bool,
+    /// Register a `compact_file` sink on `BazelTrait.execution_log_sinks`, at
+    /// [`TRAIT_SINK`] under the case's directory. Whether that file exists
+    /// afterwards records which invocations Bazel was told to write it for.
+    trait_sink: bool,
 }
 
 /// The `.aspect/config.axl` a case runs under: one `exec_log_event` hook that
@@ -106,6 +114,13 @@ struct Fixture {
 /// the only one carrying a live task.
 fn fixture(report: &Path, handshake: &Path, scenario: &str, f: Fixture) -> String {
     let mut setup = String::new();
+    if f.trait_sink {
+        let path = report.with_file_name(TRAIT_SINK);
+        setup.push_str(&format!(
+            "    t.execution_log_sinks.append(bazel.execution_log.compact_file(path = {:?}))\n",
+            path.display().to_string(),
+        ));
+    }
     if f.no_bes {
         // Runs before `_do_spawn` reads `bool(trait.build_event)`, which is what
         // decides whether there is an event iterator at all. Something always
@@ -240,6 +255,9 @@ fn base_env() -> HashMap<String, String> {
 struct Case {
     dir: tempfile::TempDir,
     daemon: Child,
+    /// The pid handed to basil as the log's nominated holder. The live stand-in
+    /// unless a test replaced it to model a server that went away.
+    holder: Option<u32>,
 }
 
 impl Drop for Case {
@@ -269,7 +287,28 @@ impl Case {
             .arg("600")
             .spawn()
             .expect("spawning the daemon stand-in");
-        Self { dir, daemon }
+        Self {
+            dir,
+            daemon,
+            holder: None,
+        }
+    }
+
+    /// Nominate a reaped pid as the execution log's holder, modelling the server
+    /// that Bazel killed out from under the reader.
+    ///
+    /// The reader asks that pid whether more bytes are coming; dead, it reads a
+    /// log that has not appeared yet as one that never will. basil still writes
+    /// its log and still exits 0, so this is the one combination that is worth a
+    /// warning: a successful build with nothing delivered.
+    fn with_dead_holder(mut self) -> Self {
+        let mut gone = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawning a process to reap");
+        self.holder = Some(gone.id());
+        gone.wait().expect("reaping it");
+        self
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -280,13 +319,24 @@ impl Case {
             .env_clear()
             .envs(base_env())
             .env("BAZEL_REAL", basil_bin())
-            .env("BASIL_SERVER_PID", self.daemon.id().to_string())
+            .env(
+                "BASIL_SERVER_PID",
+                self.holder.unwrap_or_else(|| self.daemon.id()).to_string(),
+            )
             .env("BASIL_EXECLOG_PUMP_HANDSHAKE", root.join("pumped"))
             .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
+    }
+
+    /// Run to completion and hand back the process output, for a case whose
+    /// subject is what the CLI said rather than what the hook received.
+    fn raw(&self, args: &[&str]) -> std::process::Output {
+        self.command(args)
+            .output()
+            .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")))
     }
 
     /// Run to completion and report what the hook saw.
@@ -597,6 +647,109 @@ fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
         report.handshake, None,
         "with no event stream there is no drain loop to pump from, so the whole \
          log must come from `exec_log.close`",
+    );
+}
+
+/// The one shape worth warning about: bazel succeeded and produced no log.
+///
+/// That is what a nominated holder which died out from under the reader looks
+/// like — every hook fires zero times, every sink writes nothing, and without the
+/// warning the build is indistinguishable from one whose actions were all cached.
+#[test]
+fn a_successful_build_that_produced_no_log_warns() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None).with_dead_holder();
+    let out = case.raw(&["build", "//..."]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the build itself should still succeed\n{stderr}",
+    );
+    assert!(
+        stderr.contains("wrote no execution log"),
+        "a successful build that delivered no entries must say so:\n{stderr}",
+    );
+}
+
+/// And the shape that must stay quiet: a failed invocation.
+///
+/// Bazel writes the compact log only once a command gets past target-pattern
+/// parsing and package loading, so a mistyped target or an unparseable BUILD file
+/// leaves none — nonzero exit, nothing wrong with the CLI, and Bazel has already
+/// printed the reason. Warning there put a line about a temp path the user cannot
+/// act on *after* bazel's own error, reading as though the CLI had broken.
+#[test]
+fn a_failed_build_without_a_log_stays_quiet() {
+    let case = Case::new("rejects_command_line", Fixture::default(), None);
+    let out = case.raw(&["build", "//..."]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "this scenario models bazel rejecting the command line\n{stderr}",
+    );
+    assert!(
+        !stderr.contains("wrote no execution log"),
+        "a failed invocation writes no log by design; warning about it crowds out \
+         bazel's own error:\n{stderr}",
+    );
+}
+
+/// Delivery's phase 3 dispatches to hooks without writing the trait's file
+/// sinks.
+///
+/// Those two things travel together everywhere else — `exec_log.open` returns
+/// the trait's sinks *and* the hook handle in one list — and delivery is the one
+/// task where handing phase 3 both is a bug. It fires `build_end` straight after
+/// phase 2, ~200 lines before phase 3 spawns, and the artifact uploader's
+/// `build_end` uploads the execution log it asked for and then deletes it,
+/// precisely because a leftover file leaks its highest-risk artifact: action
+/// command lines and environment variables, unredacted. Phase 3 writing the
+/// trait's sinks therefore re-created a path that had just been uploaded and
+/// deleted, leaving the file on disk with nothing left to claim it.
+///
+/// What this asserts is the absence of that file after a run that reached phase
+/// 3, with the hook's own 3000 entries beside it as proof phase 3 really ran —
+/// so it fails if phase 3 is ever handed `xl.sinks` again.
+///
+/// It drives phase 3 alone, because phase 1 and phase 3 in one invocation is not
+/// reachable here: phase 3 is gated behind phases 1+2 succeeding, and phase 2
+/// needs a real remote cache and a real `--remote_grpc_log`, neither of which a
+/// fake Bazel can produce. The invariant does not depend on phase 1 having run —
+/// the upload-and-delete happens in `build_end` either way.
+#[test]
+fn the_delivery_release_build_does_not_write_the_traits_sinks() {
+    let case = Case::new(
+        "execlog_beyond_capacity",
+        Fixture {
+            trait_sink: true,
+            ..Fixture::default()
+        },
+        None,
+    );
+    let report = case.run(&[
+        "delivery",
+        "--mode=always",
+        "--dry-run=build",
+        "--track-state=false",
+        "--commit-sha=0000000000000000000000000000000000000000",
+        "//fixture:target",
+    ]);
+    assert_complete("delivery phase 3", &report, 1);
+    assert_eq!(
+        report.phases,
+        vec!["deliver".to_string()],
+        "this case is meant to reach phase 3 and nothing else",
+    );
+
+    let sink = case.dir.path().join(TRAIT_SINK);
+    assert!(
+        !sink.exists(),
+        "phase 3 wrote the trait's execution-log sink at {}. Delivery uploads and \
+         deletes that file in `build_end`, which has already run by then, so the \
+         re-created file is left behind unclaimed — and it holds action command \
+         lines and environment variables.",
+        sink.display(),
     );
 }
 

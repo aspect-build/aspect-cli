@@ -126,12 +126,14 @@ Which hooks fire where:
   per invocation. A hook it registers is therefore picked up by every phase.
 ² Phase 3's BES stream feeds the run tracker, which turns `target_completed`
   into a dispatch; the trait's own `build_event` hooks are not on it.
-³ Deliberate, and the only Bazel spawn in the built-in tree that could log
-  something and is left unhooked: phase 2 is a cache lookup over phase 1's warm
-  analysis, so its entries are duplicates of phase 1's plus `DeliveryHash`
-  probes that stand for no real work. The reason is recorded with the
-  structural test in `crates/aspect-cli/src/builtins/exec_log_wiring.rs`
-  and at the spawn site itself.
+³ Deliberate: phase 2 is a cache lookup over phase 1's warm analysis, so its
+  entries are duplicates of phase 1's plus `DeliveryHash` probes that stand for
+  no real work. It is the only unhooked spawn in the built-in tree that runs an
+  ordinary build — the rest execute nothing at all, denied by
+  `--experimental_remote_require_cached` or prevented by `--noanalyze`. The
+  reason is recorded with the structural test in
+  `crates/aspect-cli/src/builtins/exec_log_wiring.rs` and at the spawn site
+  itself.
 ⁴ Once, with the aggregate exit code, after phases 1+2 both return.
 ⁵ Only when phases 1/2 were skipped and phase 3 is the task's only build.
 
@@ -785,11 +787,13 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.name)
 
     # No `exec_log.open` here, deliberately — the one spawn in the built-in tree
-    # that could produce an execution log and is left without an `exec_log_event`
-    # handle anyway (recorded, with this reason, in
-    # `builtins/exec_log_wiring.rs`; the other handle-less spawns are
-    # `--noanalyze` probes that log nothing at all). Phase 2 is a lookup, not a
-    # build: it reuses phase 1's warm analysis and runs under
+    # that runs an ordinary build and is left without an `exec_log_event` handle
+    # anyway (recorded, with this reason, in `builtins/exec_log_wiring.rs`; the
+    # other handle-less spawns execute nothing at all, denied by
+    # `--experimental_remote_require_cached` in `cache_diff.axl`'s probe passes
+    # or prevented by `--noanalyze` in `cache_selection.axl`).
+    #
+    # Phase 2 is a lookup, not a build: it reuses phase 1's warm analysis and runs under
     # `--experimental_remote_require_cached`, so every spawn it would log is
     # either a cache probe for an action phase 1 already logged, or a
     # `DeliveryHash` probe that exists only to make Bazel compute an action key
@@ -1647,31 +1651,41 @@ def _delivery_impl(ctx):
         _t_download = time.monotonic()
         phase3_events = bazel.build_events.iterator()
 
-        # The trait's execution_log_sinks plus any exec_log_event handle. Unlike
-        # phase 1 this adds no file sink of its own: nothing reads a phase-3 log
-        # back, and `_EXECLOG_PATH` belongs to phase 1, whose file is still being
-        # read for the `remote_cacheable` check. `or False` is load-bearing — an
-        # empty list means "stream on with no consumer", so a run with no hook
-        # and no trait sink must pass False to keep the stream off entirely.
+        # The `exec_log_event` handle ONLY — deliberately not `xl.sinks`, which
+        # would also hand phase 3 the trait's file sinks.
+        #
+        # Those sinks are written by Bazel and consumed by this task's `build_end`
+        # hooks, which have already run: delivery fires them straight after phase 2
+        # (see the `bazel_trait.build_end` loop above), roughly 200 lines before
+        # this spawn. The artifact uploader's `build_end` uploads the execution log
+        # it asked for and then deletes it, precisely because "a leftover file just
+        # leaks a potentially-sensitive artifact" — its own highest-risk category,
+        # action command lines and environment variables, with no on-disk
+        # redaction. Passing the trait's sinks here would have Bazel re-create that
+        # path after the upload-and-delete, leaving the file on disk with nothing
+        # left to claim it.
+        #
+        # So the trait's sinks stay phase-1 only, as they were before phase 3 was
+        # wired at all, and what phase 3 adds is the hook dispatch. A single fixed
+        # path cannot hold two invocations' logs anyway; a caller that wants
+        # phase 3's log on disk has to key the path on the phase, and nothing in
+        # tree reads a phase-3 log back.
+        #
+        # `or False` on the list is load-bearing: an empty list means "stream on
+        # with no consumer", so a run with no hook registered must pass False to
+        # keep the stream off entirely.
         #
         # Phase 3 makes one attempt, so one handle; `build_start` fired ahead of
         # the task's first invocation, which is what a hook registered there
         # needs — `open` has to read the trait after it, never before.
-        #
-        # The trait's sinks now see phase 3 as well as phase 1, which is the
-        # semantics every other task has (`run` passes them to both of its
-        # builds, and each retry attempt re-writes them). For a sink at a fixed
-        # path — `--upload-exec-log`, off by default, is the one in-tree case —
-        # that means the last invocation wins, so delivery uploads phase 3's log
-        # rather than phase 1's. A single path cannot hold both; a task that
-        # wants per-invocation logs has to key the path on the phase.
         xl = bzl.exec_log.open(bazel_trait)
+        phase3_execution_log = [xl.entries] if xl.entries != None else False
         build = ctx.bazel.build(
             flags = phase3_flags,
             rc = phase3_rc,
             aspects = run_tracker.aspects,
             build_events = [phase3_events],
-            execution_log = xl.sinks or False,
+            execution_log = phase3_execution_log,
             stdout = None,
             stderr = ctx.std.fs.create(phase3_log_path),
             announce_version = announce_version,
