@@ -726,10 +726,15 @@ fn event_kind_in(event: &BuildEvent, kinds: &HashSet<i32>) -> bool {
 /// comparison never matched.
 ///
 /// `legacy_aliases` are the other spellings `kinds=` has always accepted —
-/// the BEP `payload` oneof field name (`action`, `completed`, …) and, where
-/// it differs, the `event.kind` string (`action_completed`,
-/// `target_completed`, …). They are a public AXL surface that third-party
-/// `.aspect/*.axl` passes, so they stay accepted.
+/// the BEP `payload` oneof field name (`action`, `completed`, …), the
+/// `event.kind` string where it differs (`action_completed`,
+/// `target_completed`, …), and `named_set`, which is neither: it is the
+/// `BuildEventId` oneof *field* name, accepted from before the others and kept
+/// for that reason alone. They are a public AXL surface that third-party
+/// `.aspect/*.axl` passes, so they stay accepted — frozen by
+/// `the_spellings_accepted_before_the_payload_names_still_resolve`, which holds
+/// its own literal list because a test derived from this table cannot notice a
+/// row losing an alias.
 const EVENT_KINDS: &[(i32, &str, &[&str])] = &[
     (3, "progress", &[]),
     (4, "aborted", &[]),
@@ -779,8 +784,17 @@ fn event_kind_help() -> String {
 
 /// Resolve one `kinds=` list element to a payload tag. Accepts the payload's
 /// `type(event.payload)` name, any legacy alias, or the raw tag integer.
+///
+/// A tag no row claims is rejected rather than passed through: these integers
+/// are this runtime's own numbering, not BEP field numbers, so an unclaimed one
+/// can only ever match nothing. Silently filtering to the empty set is the
+/// failure mode worth refusing — and an older docstring did call them proto
+/// field numbers, so someone may hold a number from that reading.
 pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
     if let Some(n) = value.unpack_i32() {
+        if !EVENT_KINDS.iter().any(|(tag, _, _)| *tag == n) {
+            anyhow::bail!("unknown build_event payload tag {n}; {}", event_kind_help());
+        }
         return Ok(n);
     }
     if let Some(s) = value.unpack_str() {
@@ -793,7 +807,7 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
     }
     anyhow::bail!(
         "kinds entry must be a build event payload name or its payload tag; got \
-         {}. To name a payload, {}",
+         {}. {}",
         value.get_type(),
         event_kind_help(),
     )
@@ -1490,8 +1504,85 @@ mod tests {
 
         #[test]
         fn a_raw_tag_number_passes_through() {
+            let (action_tag, ..) = EVENT_KINDS
+                .iter()
+                .find(|(_, name, _)| *name == "action_executed")
+                .expect("action_executed must be in the table");
             Heap::temp(|heap| {
-                assert_eq!(parse_event_kind(heap.alloc(8i32)).unwrap(), 8);
+                assert_eq!(
+                    parse_event_kind(heap.alloc(*action_tag)).unwrap(),
+                    *action_tag
+                );
+            });
+        }
+
+        #[test]
+        fn a_tag_no_row_claims_is_rejected() {
+            Heap::temp(|heap| {
+                let err = parse_event_kind(heap.alloc(999i32))
+                    .expect_err("a tag outside the table must be rejected")
+                    .to_string();
+                assert!(err.contains("999"), "unexpected error: {err}");
+            });
+        }
+
+        /// Every spelling `kinds=` accepted before the payload names were added,
+        /// frozen with the tag it resolved to.
+        ///
+        /// Deliberately a literal rather than a walk of `EVENT_KINDS`: a test
+        /// derived from the table cannot notice a row losing an alias, it just
+        /// iterates one fewer time. Nothing in-tree passes these through
+        /// `parse_event_kind` either — `RESULTS_KINDS` is locked by its own AXL
+        /// drift test and `process_event` is fed synthetic events — so without
+        /// this list a cleanup that drops a "redundant" alias keeps every test
+        /// green and makes `aspect build --live` fail at runtime on an unknown
+        /// kind, because `build.axl` passes `results.KINDS` to `kinds=`.
+        #[test]
+        fn the_spellings_accepted_before_the_payload_names_still_resolve() {
+            const FROZEN: &[(&str, i32)] = &[
+                ("aborted", 4),
+                ("action", 8),
+                ("action_completed", 8),
+                ("build_finished", 11),
+                ("build_metadata", 24),
+                ("build_metrics", 22),
+                ("build_started", 5),
+                ("build_tool_logs", 21),
+                ("completed", 9),
+                ("configuration", 19),
+                ("configured", 7),
+                ("convenience_symlinks_identified", 27),
+                ("exec_request", 28),
+                ("expanded", 6),
+                ("fetch", 17),
+                ("finished", 11),
+                ("named_set", 15),
+                ("named_set_of_files", 15),
+                ("options_parsed", 14),
+                ("pattern_expanded", 6),
+                ("progress", 3),
+                ("started", 5),
+                ("structured_command_line", 13),
+                ("target_completed", 9),
+                ("target_configured", 7),
+                ("target_summary", 26),
+                ("test_result", 10),
+                ("test_summary", 20),
+                ("unstructured_command_line", 12),
+                ("workspace_config", 25),
+                ("workspace_info", 25),
+                ("workspace_status", 16),
+            ];
+            Heap::temp(|heap| {
+                for (name, tag) in FROZEN {
+                    let v = heap.alloc_str(name).to_value();
+                    let got = parse_event_kind(v)
+                        .unwrap_or_else(|e| panic!("`{name}` no longer resolves: {e}"));
+                    assert_eq!(
+                        got, *tag,
+                        "`{name}` resolved to {got}, was {tag} — a public spelling changed meaning",
+                    );
+                }
             });
         }
 

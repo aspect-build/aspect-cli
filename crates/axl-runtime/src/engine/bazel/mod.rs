@@ -1318,9 +1318,9 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// iteration time.
     ///
     /// A kind is named the way `type(event.payload)` reports it, so the same
-    /// literal reads a filter and a payload test. `build.rs`'s `EVENT_KINDS`
-    /// is the full list, including the older `event.kind`-shaped aliases
-    /// (`action_completed`, `target_completed`, …) that stay accepted.
+    /// literal reads a filter and a payload test. The older `event.kind`-shaped
+    /// spellings (`action_completed`, `target_completed`, …) stay accepted; a
+    /// mistyped kind is an error naming every spelling there is.
     #[starlark(as_type = build::BuildEventIter)]
     fn iterator<'v>(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<

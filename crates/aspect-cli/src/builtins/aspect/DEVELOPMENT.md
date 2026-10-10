@@ -484,10 +484,15 @@ made this a trap:
 | `event.kind` — `BuildEventId` variant | `action_completed` |
 | the BEP `payload` oneof field name | `action` |
 
-`kinds=` accepts all three for every kind, so `event.kind`-shaped filters like
-`"action_completed"` and `"target_completed"` keep working — `RESULTS_KINDS` in
-`private/lib/bazel_results.axl` is written that way, matching the `event.kind`
-switch in `process_event`. `EVENT_KINDS` in
+`kinds=` accepts all three spellings of every *payload*, so `event.kind`-shaped
+filters like `"action_completed"` and `"target_completed"` keep working —
+`RESULTS_KINDS` in `private/lib/bazel_results.axl` is written that way, to match
+the `event.kind` switch in `process_event` (its `"aborted"` entry is the
+exception: that is a payload name, because `BuildEventId` has no `aborted`
+variant — Bazel attaches an `Aborted` payload to the id of whatever was
+aborted). What is *not* filterable is the four `event.kind` values that name an
+event carrying no payload of its own — `pattern_skipped`, `unconfigured_label`,
+`configured_label` and `unknown`; naming one is an error. `EVENT_KINDS` in
 [`crates/axl-runtime/src/engine/bazel/build.rs`](../../../../axl-runtime/src/engine/bazel/build.rs)
 is the authoritative table and a mistyped kind lists every accepted spelling.
 
