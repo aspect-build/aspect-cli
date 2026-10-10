@@ -2534,6 +2534,14 @@ def _redact_args(args, allow_env):
     """Apply _redact_arg to each element of a list."""
     return [_redact_arg(a, allow_env) for a in args]
 
+def redact_flags(args, metadata = None):
+    """Redact a raw flag list (e.g. `rc.expand(...)`) for terminal output.
+
+    ALLOW_ENV is resolved from `metadata` (`--build_metadata` dict), defaulting
+    when unset.
+    """
+    return _redact_args(args or [], _allow_env_patterns(metadata))
+
 # Chars safe to leave unquoted in a shell token; anything else triggers quoting.
 _SHELL_SAFE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=./:@,+%"
 

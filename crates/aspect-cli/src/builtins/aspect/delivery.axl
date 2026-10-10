@@ -192,7 +192,7 @@ load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "usable_bb_clientd_root", bazel_init_data = "init_data")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
@@ -1354,7 +1354,7 @@ def _delivery_impl(ctx):
         _emit_final(ph, exit_code = 1)
         fail(msg)
 
-    _print_header(color, dd, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
+    _print_header(color, dd, ci_host, commit_sha, prefix, prefix_source, build_url, redact_flags(rc.expand(command = "build")), targets, forced_targets, mode, dry_run, track_state)
 
     # `rc=` opts into the runinfo aspect so the deliverables spawned in phase 3
     # replay their `args` attribute + env the way `bazel run` does. The aspect
