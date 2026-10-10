@@ -46,7 +46,7 @@ pub enum ExecLogStreamError {
 /// only crowd it out.
 ///
 /// The outcome reaches a caller only through `join()`, and `Build` joins the
-/// stream from `wait()` alone — there is no `Drop` path and `wait_timeout` does
+/// stream from `wait()` alone — there is no `Drop` path and `try_wait` does
 /// not join — so a task that never calls `wait()` never learns it, and no warning
 /// is printed. Every wired site calls `wait()`, so this is a note about where the
 /// verdict lives rather than a gap.

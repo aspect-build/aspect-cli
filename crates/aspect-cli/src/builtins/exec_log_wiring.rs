@@ -143,9 +143,9 @@ const DEVIATIONS: &[Wiring] = &[
         opens: 0,
         pumps: 0,
         why: "a `--noanalyze` probe: it prevents analysis and every build and \
-              test action, so Bazel executes nothing. It still writes a log — an \
-              empty zstd frame, 28 bytes on Bazel 7 and 66 on 8 and 9 — but there \
-              are no entries in it to dispatch",
+              test action, so Bazel executes nothing. It also passes no \
+              `execution_log`, so Bazel is never asked for a log and writes \
+              none — there is nothing to dispatch",
     },
     Wiring {
         path: "bazel/invocation_test.axl",
