@@ -215,9 +215,21 @@ fn write_scenario(path: &str, scenario: &Scenario) {
 /// The entries are `file` records, which is the cheapest kind to synthesize and
 /// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
 /// a test can assert it received a contiguous `1..=count` and catch a prefix.
+/// Write `count` file entries as one zstd frame of length-delimited protos.
+///
+/// Built under a sibling `.partial` name and renamed into place, so the path
+/// appears atomically. A real Bazel daemon holds the log open while it writes, so
+/// a reader that reaches the current end of file is told to wait; here the writer
+/// is this short-lived process and the nominated holder is the daemon stand-in,
+/// which never opens it. A reader arriving between `create` and the last write
+/// would therefore see an empty file, be told the holder has closed it, and fail
+/// to read even a zstd header — yielding zero entries perhaps half the time. The
+/// rename means a reader sees either no file yet (and keeps polling, since this
+/// process is alive) or the whole thing.
 fn write_execlog(path: &str, count: u32) {
-    let file = fs::File::create(path)
-        .unwrap_or_else(|e| panic!("basil: creating execlog path {path:?}: {e}"));
+    let partial = format!("{path}.partial");
+    let file = fs::File::create(&partial)
+        .unwrap_or_else(|e| panic!("basil: creating execlog path {partial:?}: {e}"));
     let mut encoder = zstd::Encoder::new(file, 0).expect("basil: zstd encoder");
     for id in 1..=count {
         let entry = ExecLogEntry {
@@ -233,6 +245,9 @@ fn write_execlog(path: &str, count: u32) {
     }
     let mut file = encoder.finish().expect("basil: finishing zstd frame");
     file.flush().expect("basil: flushing execlog");
+    drop(file);
+    fs::rename(&partial, path)
+        .unwrap_or_else(|e| panic!("basil: publishing execlog to {path:?}: {e}"));
 }
 
 /// Resolve a scenario by name. Each scenario documents the behavior or bug

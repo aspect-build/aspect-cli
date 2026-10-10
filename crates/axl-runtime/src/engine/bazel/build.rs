@@ -2,6 +2,7 @@ use crate::errln;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
@@ -51,6 +52,11 @@ use super::stream::Subscriber;
 use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
 use super::stream::{BuildEventEnvelope, BuildEventStream};
+
+/// The Bazel flag naming where the compact execution log is written. Read off the
+/// command line to detect an already-requested log, and added when this call is
+/// the one requesting it.
+const EXECUTION_LOG_COMPACT_FILE: &str = "--execution_log_compact_file";
 
 /// Subscribe each `execution_log.iterator()` handle to `stream`.
 ///
@@ -940,6 +946,14 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
+        // Read before `flags` is moved into the command: a deployment wired to an
+        // Aspect BES backend, a Workflows runner, or a generated bazelrc already
+        // asks Bazel for the compact log, and the backend reads the file at that
+        // path. Adding a second `--execution_log_compact_file` below would win on
+        // last-write-wins and silently repoint Bazel away from it.
+        let injected_execlog_path =
+            bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE).map(PathBuf::from);
+
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg(verb);
@@ -1005,16 +1019,26 @@ impl Build {
         // reader is started after it — once the client pid exists (see the BES
         // reader below for the same split, and why).
         let execlog_path = if execution_logs {
-            // If there is a CompactFile sink, let Bazel write directly to its path
-            // so no separate temp file or tee step is needed for that copy.
-            let direct_path = if compact_paths.is_empty() {
-                None
-            } else {
-                Some(std::path::PathBuf::from(compact_paths.remove(0)))
-            };
-            let out = ExecLogStream::reserve_path(direct_path);
-            cmd.arg("--execution_log_compact_file").arg(&out);
-            Some(out)
+            match injected_execlog_path {
+                // Something already named the path and put the flag on the command
+                // line. Tail that file and leave the flag alone; every CompactFile
+                // sink is served by the tee rather than by Bazel writing directly,
+                // so each still gets its copy.
+                Some(out) => Some(out),
+                // Nothing asked yet, so this call owns the flag. A CompactFile sink
+                // lends its path, letting Bazel write straight to the caller's
+                // destination with no temp file or tee step for that copy.
+                None => {
+                    let direct_path = if compact_paths.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(compact_paths.remove(0)))
+                    };
+                    let out = ExecLogStream::reserve_path(direct_path);
+                    cmd.arg(EXECUTION_LOG_COMPACT_FILE).arg(&out);
+                    Some(out)
+                }
+            }
         } else {
             None
         };
@@ -1580,6 +1604,53 @@ Test = task(implementation = _impl)
             assert_eq!(entry.id, count, "the sink should hold a contiguous run");
         }
         assert_eq!(count, 3000, "the decoded file sink should be complete");
+    }
+
+    /// A deployment wired to an Aspect BES backend, a Workflows runner and a
+    /// generated bazelrc each put `--execution_log_compact_file` on the command
+    /// line themselves, and the backend reads the file at *that* path. Adding a
+    /// second one wins on last-write-wins and silently repoints Bazel, so the
+    /// consumer tails a path nothing writes and the backend's file never appears.
+    #[test]
+    fn an_already_requested_execution_log_is_reused_not_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("deployment-asked-for-this.zstd");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file={asked}"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = 0
+    for entry in entries:
+        seen += 1
+    status = build.wait()
+    if not status.success: return 1
+    # Zero means the flag was added a second time: bazel wrote the path above
+    # and the reader tailed a freshly minted temp file instead.
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        );
+
+        let exit =
+            with_daemon_stand_in(move || crate::test::eval(&script).with_fake_bazel().run_task(0));
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "the reader must tail the path already on the command line",
+        );
+        assert!(
+            asked.exists(),
+            "bazel must still write the log where the deployment asked, at {}",
+            asked.display(),
+        );
     }
 
     /// Iter handle subscribed pre-spawn receives every event from a clean
