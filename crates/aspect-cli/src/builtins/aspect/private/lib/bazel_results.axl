@@ -1102,10 +1102,9 @@ def process_event(data, event, bb_root):
         # invocation as ABORTED_STATE ("Invocation disconnected") on
         # BazelExitCode.INTERRUPTED, and everything else non-zero — including
         # OOM (33) and a remote-environment failure (32) — as FAILED_TO_BUILD.
-        # Keying off the exit code rather than an `Aborted` payload's reason
-        # is also the only signal that survives `--nokeep_going`: Bazel merges
-        # a Ctrl-C there down to Aborted(INCOMPLETE), the same reason an
-        # ordinary failing build emits, while the exit code is 8 either way.
+        # An `Aborted` payload's reason cannot stand in for it: under
+        # `--nokeep_going` Bazel merges a Ctrl-C down to Aborted(INCOMPLETE),
+        # what an ordinary red build emits, while the exit code is 8 either way.
         payload = event.payload
         if payload:
             finish_ms = bes_get(payload, "finish_time_millis", 0) or 0
@@ -4996,7 +4995,6 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 # entry below is still required, or the filter would drop every `Aborted`
 # payload and the skipped-target tally would go to zero; but no `kind ==
 # "aborted"` arm can ever match, which is why a dead one sat here for so long.
-# So an entry here need not have a switch arm of its own.
 RESULTS_KINDS = [
     "build_started",
     "structured_command_line",

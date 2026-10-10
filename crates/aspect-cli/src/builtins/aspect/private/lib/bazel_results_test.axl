@@ -597,8 +597,8 @@ def _scenarios():
         # Status and data agree: `pick_status` returns "aborted" exactly when
         # the data says so, so a `failed` status over aborted data is a pairing
         # no build can reach. These snapshot the 🔥 icon, the "Aborted" label,
-        # the terminal verb and the abort notice for the status this PR makes
-        # reachable. GitLab gets a twin because `aborted` is the one status
+        # the terminal verb and the abort notice of an aborted build. GitLab
+        # gets a twin because `aborted` is the one status
         # whose GL commit_status state (`canceled`) differs from `failed`.
         ("5. aborted · GitHub", _make_results_aborted(), "aborted", "//...", False, "github", None, ""),
         ("5b. aborted · GitLab", _make_results_aborted(), "aborted", "//...", False, "gitlab", None, ""),
@@ -1822,9 +1822,9 @@ def _test_per_label_abort_root_causes_still_read_failed(ctx):
 def _test_aborted_is_not_a_build_event_id_kind(ctx):
     """`BuildEventId` has no `aborted` variant, so `event.kind` never reads
     "aborted" in real BEP — only the synthetic events of
-    `_test_results_kinds_all_processed` ever did. The dead `elif kind ==
-    "aborted"` arm this suite replaced is why the status was unreachable for so
-    long; nothing may key off that string again."""
+    `_test_results_kinds_all_processed` ever do. Nothing may key the abort
+    verdict off that string: an `elif kind == "aborted"` arm cannot match, so
+    it would be dead on arrival the way the released one was."""
     data = init_data()
     process_event(data, struct(kind = "aborted", id = struct(), payload = struct(reason = "user_interrupted")), None)
     _eq("kind='aborted' is not what makes an abort", data["bazel"]["aborted"], False)
@@ -1889,10 +1889,10 @@ def _test_build_started_clears_an_abort_from_a_prior_attempt(ctx):
     _eq("retry is not aborted", pick_status("build", data, had_failure = False, terminal = False), "running")
 
 def _test_pick_status_ranks_aborted_above_every_other_verdict(ctx):
-    """Ordering inside `pick_status`, live for the first time now that the flag
-    is reachable: an aborted build reports "aborted" even when a failure or a
-    flake was already recorded, matching `compute_invocation_state`'s fixed
-    Aborted label."""
+    """Ordering inside `pick_status`: an aborted build reports "aborted" even
+    when a failure or a flake was already recorded, matching
+    `compute_invocation_state`, which returns the Aborted label regardless of
+    which other buckets are populated."""
     data = init_data()
     _eq("clean + terminal", pick_status("build", data, had_failure = False, terminal = True), "passed")
     _eq("failure + terminal", pick_status("build", data, had_failure = True, terminal = True), "failed")

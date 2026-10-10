@@ -368,11 +368,9 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        # `run` has no `_pick_status` of its own, but it renders through the
-        # shared `bazel_results` kind, whose title comes from
-        # `compute_invocation_state` — and that returns the Aborted label as
-        # soon as the flag is set. Reporting `failed` here would pair a ❌
-        # `failed` check with an "Invocation disconnected" title.
+        # `run` has no `_pick_status`; it renders through `bazel_results`,
+        # whose title comes from `compute_invocation_state` and reads
+        # "Invocation disconnected" as soon as the flag is set.
         verdict = "aborted" if data["bazel"]["aborted"] else "failed"
         return _conclude(verdict, build_status.code, conclusion(verdict, data))
 
