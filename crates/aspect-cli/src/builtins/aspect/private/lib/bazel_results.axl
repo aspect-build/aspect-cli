@@ -48,12 +48,11 @@ never copied into a Starlark value here. When no snippet is rendered, the
 surface still shows the failing label + action mnemonics + the CI link.
 """
 
-load("@std//time.axl", "time")
-
 # `exit_codes` is defined in `bazel/trait.axl` and imported from there rather
 # than through the `@aspect//bazel.axl` facade, whose `bazel` export would
 # shadow the builtin `bazel` global for anything added to this file later.
 load("@aspect//bazel/trait.axl", "exit_codes")
+load("@std//time.axl", "time")
 load("./ci.axl", "detect_ci_host", "resolve_build_url")
 load(
     "./environment.axl",
@@ -1113,6 +1112,7 @@ def process_event(data, event, bb_root):
             if finish_ms > 0:
                 data["finish_time_ms"] = finish_ms
             exit_code = bes_get(payload, "exit_code", None)
+
             # ExitCode.code is a plain int32, so SUCCESS reads 0 via proto3's
             # omitted-default; the whole `exit_code` message is optional.
             if bes_get(exit_code, "code", 0) == exit_codes.INTERRUPTED:
