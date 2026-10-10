@@ -16,9 +16,10 @@ must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so th
 
 load(
     "@aspect//bazel/flags.axl",
+    "testonly_apply_plan",
     "testonly_config_names",
     "testonly_flags_delta",
-    "testonly_scope_injected",
+    "testonly_plan_sections",
     "testonly_unscoped_injected",
     _announce = "announce",
     _core_args = "core_args",
