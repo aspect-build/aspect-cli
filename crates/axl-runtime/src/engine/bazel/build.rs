@@ -816,7 +816,8 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
     // the wrong-type arm below and tell an int it is not a tag.
     if value.get_type() == "int" {
         anyhow::bail!(
-            "build_event payload tag out of range: {value}; {}",
+            "build_event payload tag out of range: {value} does not fit a 32-bit \
+             int; {}",
             event_kind_help()
         );
     }
@@ -1541,7 +1542,7 @@ mod tests {
                     .to_string();
                 assert!(
                     err.contains("out of range"),
-                    "should name the range, not the type: {err}"
+                    "should say it is out of range, not report a type error: {err}"
                 );
                 assert!(
                     !err.contains("got int"),
