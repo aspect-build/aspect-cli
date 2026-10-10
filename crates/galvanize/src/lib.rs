@@ -253,6 +253,13 @@ pub struct StreamingFile {
     path: PathBuf,
     inner: File,
     holder_pid: u32,
+    /// Test-only hook, run once the holder is found to have closed the file and
+    /// before the re-read that follows. The bug the re-read exists for lives in
+    /// exactly that window — the writer finishing and closing between our empty
+    /// read and the question about it — and a test cannot otherwise land a write
+    /// there, because the window is only as wide as one procfs walk.
+    #[cfg(test)]
+    on_holder_closed: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl StreamingFile {
@@ -285,23 +292,51 @@ impl StreamingFile {
             path,
             inner,
             holder_pid,
+            #[cfg(test)]
+            on_holder_closed: None,
         })
+    }
+
+    /// Run `f` inside the window described on [`Self::on_holder_closed`].
+    #[cfg(test)]
+    fn with_holder_closed_hook(mut self, f: Box<dyn FnMut() + Send>) -> Self {
+        self.on_holder_closed = Some(f);
+        self
     }
 }
 
 impl Read for StreamingFile {
+    /// `Ok(0)` means "at the current end of the file, try again later"; a
+    /// `BrokenPipe` error means the stream is genuinely over. Callers that
+    /// cannot tolerate `Ok(0)` (e.g. a zstd `Decoder`) should wrap this in a
+    /// blocking retry adapter.
+    ///
+    /// Telling those two apart takes a *second* read, not just a liveness
+    /// question. The writer can close the file between our read and the check,
+    /// having written in that window exactly the bytes we are about to declare
+    /// nonexistent — and that is the common case rather than a corner: Bazel
+    /// creates the compact execution log empty, holds it open for the whole
+    /// build, writes it in one go at the end and closes it. A reader that
+    /// reaches EOF while the file is still empty and asks only "is it still
+    /// open?" gets "no" and reports a clean, complete, *empty* stream.
+    ///
+    /// Reading again after the negative answer settles it: once the holder has
+    /// closed the file nothing more can be written to it, so one more read sees
+    /// everything there is. Bytes mean the stream continues; a second empty read
+    /// means it is over.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.inner.read(buf) {
-            // Ok(0): at the current end of the file. If the writer still has it open,
-            // return Ok(0) to signal "no data yet, try again later". If the writer
-            // has closed the file, the stream is done — signal BrokenPipe.
-            // Callers that cannot tolerate Ok(0) (e.g. a zstd Decoder) should wrap
-            // this in a blocking retry adapter.
             Ok(0) => {
                 if is_path_open_for_pid(&self.path, self.holder_pid)? {
-                    Ok(0)
-                } else {
-                    Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream"))
+                    return Ok(0);
+                }
+                #[cfg(test)]
+                if let Some(hook) = self.on_holder_closed.as_mut() {
+                    hook();
+                }
+                match self.inner.read(buf)? {
+                    0 => Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream")),
+                    n => Ok(n),
                 }
             }
             other => other,
@@ -473,6 +508,51 @@ mod tests {
             .expect("the file exists; a dead invocation must not hide it");
         let mut buf = [0u8; 7];
         f.read_exact(&mut buf).expect("read the payload");
+        assert_eq!(&buf, b"payload");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Bytes written between our empty read and the holder letting go are ours.
+    ///
+    /// This is the shape Bazel's compact execution log actually has: created
+    /// empty, held open for the whole build, written in one go at the end and
+    /// closed. A reader can therefore reach EOF on an empty file, and by the time
+    /// it asks "does the holder still have this open?" the answer is no *and* the
+    /// whole log is on disk. Taking that answer for end-of-stream reports a
+    /// complete, clean, empty stream — every `exec_log_event` hook fires zero
+    /// times, every sink writes nothing, and no error is raised anywhere.
+    ///
+    /// The window is only as wide as one procfs walk, so the write is injected
+    /// into it through `on_holder_closed` rather than raced for. Without the
+    /// re-read this reads zero bytes.
+    #[test]
+    fn bytes_written_just_before_the_holder_closed_are_not_lost() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-test-{}-written-at-close",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::File::create(&path).expect("create the file empty");
+
+        // A reaped holder, so the liveness question always answers "closed" —
+        // which is the state the real writer reaches the instant it finishes.
+        let mut holder = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn the holder stand-in");
+        let holder_pid = holder.id();
+        holder.wait().expect("reap the holder stand-in");
+
+        let write_to = path.clone();
+        let mut f = StreamingFile::open(path.clone(), holder_pid, std::process::id())
+            .expect("the file exists")
+            .with_holder_closed_hook(Box::new(move || {
+                std::fs::write(&write_to, b"payload").expect("write in the window");
+            }));
+
+        let mut buf = [0u8; 7];
+        f.read_exact(&mut buf)
+            .expect("the log was on disk before the holder closed, so it is readable");
         assert_eq!(&buf, b"payload");
         let _ = std::fs::remove_file(&path);
     }
