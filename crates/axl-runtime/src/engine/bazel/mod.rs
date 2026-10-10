@@ -125,6 +125,32 @@ fn partition_build_events(
     }
 }
 
+/// Split the `execution_log=` argument into "is the stream enabled", the sinks
+/// and the iterator handles. Mirrors `partition_build_events`: `True` enables the
+/// stream with no AXL-side consumer, and a list enables it and names its consumers.
+fn partition_execution_log(
+    arg: Either<bool, UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>>,
+) -> (
+    bool,
+    Vec<sink::execlog::ExecLogSink>,
+    Vec<iter::ExecLogIter>,
+) {
+    match arg {
+        Either::Left(b) => (b, vec![], vec![]),
+        Either::Right(items) => {
+            let mut sinks = vec![];
+            let mut iters = vec![];
+            for item in items.items {
+                match item {
+                    Either::Left(s) => sinks.push(s),
+                    Either::Right(i) => iters.push(i),
+                }
+            }
+            (true, sinks, iters)
+        }
+    }
+}
+
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Plain flags are always included; conditional flags are
 /// included only when [`constraint_matches`] holds for `version`.
@@ -541,6 +567,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
     ///   entries in-process.
     ///
+    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. Unlike
+    ///   `build.execution_logs()`, a handle is visible before Bazel starts, which is what
+    ///   lets the producer choose its lossless send path — a handle receives every entry,
+    ///   where `build.execution_logs()` drops entries a slow consumer could not keep up
+    ///   with. `kinds=` filters by entry kind in Rust, before anything is turned into a
+    ///   Starlark value. A handle must be drained before `wait()`, which releases any
+    ///   still-bound handle so an undrained one cannot hang the build.
+    ///
     /// **Examples**
     ///
     /// ```python
@@ -571,7 +605,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<sink::execlog::ExecLogSink>,
+            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -593,10 +627,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
-        let execution_log = match execution_log {
-            Either::Left(b) => (b, vec![]),
-            Either::Right(sinks) => (true, sinks.items),
-        };
+        let execution_log = partition_execution_log(execution_log);
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
@@ -673,6 +704,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
     ///   entries in-process.
     ///
+    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. Unlike
+    ///   `build.execution_logs()`, a handle is visible before Bazel starts, which is what
+    ///   lets the producer choose its lossless send path — a handle receives every entry,
+    ///   where `build.execution_logs()` drops entries a slow consumer could not keep up
+    ///   with. `kinds=` filters by entry kind in Rust, before anything is turned into a
+    ///   Starlark value. A handle must be drained before `wait()`, which releases any
+    ///   still-bound handle so an undrained one cannot hang the build.
+    ///
     /// **Examples**
     ///
     /// ```python
@@ -701,7 +740,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<sink::execlog::ExecLogSink>,
+            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -723,10 +762,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
-        let execution_log = match execution_log {
-            Either::Left(b) => (b, vec![]),
-            Either::Right(sinks) => (true, sinks.items),
-        };
+        let execution_log = partition_execution_log(execution_log);
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
@@ -1366,10 +1402,79 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         Ok(sink::execlog::ExecLogSink::File { path })
     }
 
+    /// Write this build's compact execution log, byte for byte as Bazel's
+    /// `--execution_log_compact_file` would.
+    ///
+    /// One path holds one log. A task that retries its Bazel invocation spawns
+    /// a build per attempt, and each writes this path afresh, so what is left
+    /// when the task ends is the last attempt's log rather than all of them.
+    /// Name a path per attempt if every attempt's log has to survive.
     fn compact_file(
         #[starlark(require = named)] path: String,
     ) -> anyhow::Result<sink::execlog::ExecLogSink> {
         Ok(sink::execlog::ExecLogSink::CompactFile { path })
+    }
+
+    /// Create a handle iterating this build's decoded execution log. Pass it in
+    /// `execution_log=[...]` and then `for entry in handle:`.
+    ///
+    /// Prefer this over `build.execution_logs()` whenever missing an entry would be
+    /// wrong rather than merely unfortunate. A handle exists before Bazel is spawned,
+    /// so the runtime knows an every-entry consumer is subscribed and blocks rather
+    /// than dropping; `build.execution_logs()` is handed out after the spawn, by
+    /// which time the producer has already chosen to drop entries a slow consumer
+    /// cannot keep up with.
+    ///
+    /// Optional `kinds=` filters by `ExecLogEntry.type` variant — the same names
+    /// `type(entry.type)` returns — before the entry becomes a Starlark value. This
+    /// is worth reaching for: a log holds one entry per spawn *plus* one per file,
+    /// directory, input set and runfiles tree, so `kinds = ["spawn"]` is commonly a
+    /// few percent of the stream.
+    ///
+    /// The handle must be drained before `build.wait()`, which releases any still-bound
+    /// handle so a task that forgets cannot hang. Because Bazel writes the log to a
+    /// regular file that the CLI tails, a slow consumer never slows Bazel down — it
+    /// only lengthens the wait at the end of the build.
+    ///
+    /// Iterating blocks, but stays a safe point: a cancelled run ends the iteration
+    /// rather than parking in it, so the task's body still reaches its next blocking
+    /// call and the signal deadline is still effective.
+    ///
+    /// ```python
+    /// entries = bazel.execution_log.iterator(kinds = ["spawn"])
+    /// build = ctx.bazel.build("//...", execution_log = [entries])
+    /// for entry in entries:
+    ///     print(entry.type.target_label, entry.type.mnemonic)
+    /// status = build.wait()
+    /// ```
+    #[starlark(as_type = iter::ExecLogIter)]
+    fn iterator<'v>(
+        #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
+            UnpackList<values::Value>,
+        >,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<iter::ExecLogIter> {
+        let kinds = match kinds {
+            NoneOr::None => None,
+            NoneOr::Other(list) => {
+                if list.items.is_empty() {
+                    anyhow::bail!(
+                        "kinds=[] is not valid; omit `kinds` to receive every entry kind"
+                    );
+                }
+                let mut set = std::collections::HashSet::new();
+                for item in &list.items {
+                    set.insert(iter::execlog::parse_entry_kind(*item)?);
+                }
+                Some(set)
+            }
+        };
+        // The run's signals travel with the handle, so blocking iteration over it
+        // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
+        Ok(iter::ExecLogIter::new(
+            Env::from_eval(eval)?.signals.clone(),
+            kinds,
+        ))
     }
 }
 
@@ -1388,6 +1493,7 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_execlog_types(globals: &mut GlobalsBuilder) {
+    const ExecLogIter: StarlarkValueAsType<iter::ExecLogIter> = StarlarkValueAsType::new();
     const ExecLogSink: StarlarkValueAsType<sink::execlog::ExecLogSink> = StarlarkValueAsType::new();
 }
 

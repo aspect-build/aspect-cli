@@ -161,9 +161,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
+    xl = bzl.exec_log.open(bazel_trait)
+
     build = ctx.bazel.build(
         flags = ["--nobuild"] + endpoint_auth_flags,
         build_events = build_events,
+        execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,
         *targets
@@ -187,6 +190,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
+        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -206,6 +210,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if events.done:
             break
 
+    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()

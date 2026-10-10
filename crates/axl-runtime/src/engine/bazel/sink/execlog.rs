@@ -8,7 +8,6 @@ use derive_more::Display;
 use fibre::RecvError;
 use fibre::spmc::Receiver;
 use prost::Message;
-use starlark::StarlarkResultExt;
 use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::starlark_value;
@@ -37,11 +36,13 @@ impl<'v> values::StarlarkValue<'v> for ExecLogSink {}
 impl<'v> UnpackValue<'v> for ExecLogSink {
     type Error = anyhow::Error;
 
+    // `Ok(None)` (not `Err`) on type mismatch so Either's UnpackValue can fall
+    // through to the next branch — `execution_log=` takes a list of
+    // `ExecLogSink | ExecLogIter`, and an `Err` here would reject every iterator
+    // handle before the iterator branch was ever tried. Same reasoning, and the
+    // same shape, as `BuildEventSink`.
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let value = value
-            .downcast_ref_err::<ExecLogSink>()
-            .into_anyhow_result()?;
-        Ok(Some(value.clone()))
+        Ok(value.downcast_ref::<ExecLogSink>().cloned())
     }
 }
 

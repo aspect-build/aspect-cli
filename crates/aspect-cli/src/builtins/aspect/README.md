@@ -20,6 +20,7 @@ Every task:
 - emits **`task_update`** events through its lifecycle — the *first* (the `🔧 Setup` phase mark from `setup_phase`) drives surface init (GitHub check run + BK annotation) and carries the `subject`; middle ones live-render BES progress; the *last* (`final=True`) concludes the surfaces. There is a single lifecycle hook; the first and last updates carry the start/complete intent,
 - captures the gRPC sink's invocation UUID into `results["sink_invocation_id"]` immediately after `ctx.bazel.build(...)` returns so the **Aspect Workflows** link surfaces in the live annotation rather than only on completion,
 - runs `bazel_trait.build_start` / `bazel_trait.build_event` / `bazel_trait.build_end` hooks so features (artifact upload, BK section markers) fire,
+- wires the compact execution log through `bzl.exec_log` so `bazel_trait.exec_log_event` hooks see every action Bazel ran — see [Execution log hooks](DEVELOPMENT.md#execution-log-hooks),
 - runs `hc_trait.health_check` hooks inside `setup_phase` so the runner-environment / health-check BK sections render before the build.
 
 ---

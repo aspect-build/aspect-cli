@@ -1,6 +1,7 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
+load("@aspect//bazel/exec_log_test.axl", "exec_log_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
@@ -35,6 +36,7 @@ load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
 load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
+load("@aspect//private/lib/execlog_test.axl", "execlog_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
@@ -408,6 +410,11 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-changedetector
     ctx.tasks.add(changedetector_tests)
 
+    # private/lib/execlog.axl: compact-log id resolution — input-set flattening,
+    # runfiles trees, cycles, spawn keys and action-key fingerprints.
+    # Run with: aspect dev test-execlog
+    ctx.tasks.add(execlog_tests)
+
     # Incremental Build Protocol message and capability compatibility.
     # Run with: aspect dev test-incremental-build-protocol
     ctx.tasks.add(incremental_build_protocol_tests)
@@ -548,6 +555,11 @@ def config(ctx: ConfigContext):
     # target_patterns (when the `targets` default is suppressed).
     # Run with: aspect dev test-bazel-invocation
     ctx.tasks.add(invocation_tests)
+
+    # bazel/exec_log.axl: the exec_log_event kinds union, the `exact` fast path,
+    # and that no registered hook leaves the execution log off.
+    # Run with: aspect dev test-bazel-exec-log
+    ctx.tasks.add(exec_log_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth
