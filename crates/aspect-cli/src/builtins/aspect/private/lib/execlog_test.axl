@@ -4,7 +4,9 @@ Everything here is a pure function of its inputs, which is the whole reason the
 resolver's dispatch is split into `_record(kind, ...)`: a real `ExecLogEntry`
 payload can only come from a Bazel build, but the id bookkeeping that makes a
 spawn readable is exactly what a wrong answer would come from, so it is tested
-against hand-built payloads instead.
+against hand-built payloads instead. Each payload helper below mirrors one
+`ExecLogEntry` variant as `crates/axl-proto/descriptor.bin` declares it; a field
+missing from a helper is a field the resolver cannot be reading.
 
 What is *not* covered here is the end-to-end path — a real log, read live, with
 hooks firing — which needs a build. `bazel/exec_log_test.axl` covers the
@@ -22,6 +24,43 @@ def _eq(label, got, want):
 
 def _file(path, digest = None):
     return struct(path = path, digest = struct(hash = digest) if digest != None else None)
+
+def _dir(path, files = []):
+    """One `ExecLogEntry.Directory`: the tree artifact's exec path, plus a `File`
+    per member whose own path is relative to the directory."""
+    return struct(path = path, files = files)
+
+def _symlink(path, target_path):
+    """One `ExecLogEntry.UnresolvedSymlink`."""
+    return struct(path = path, target_path = target_path)
+
+def _input_set(input_ids = [], transitive_set_ids = []):
+    """One `ExecLogEntry.InputSet`."""
+    return struct(input_ids = input_ids, transitive_set_ids = transitive_set_ids)
+
+def _symlink_entry_set(direct_entries = {}, transitive_set_ids = []):
+    """One `ExecLogEntry.SymlinkEntrySet`: `direct_entries` is a proto map from
+    runfiles-relative name to the id of the artifact mounted there."""
+    return struct(direct_entries = direct_entries, transitive_set_ids = transitive_set_ids)
+
+def _runfiles_tree(
+        path,
+        input_set_id = 0,
+        symlinks_id = 0,
+        root_symlinks_id = 0,
+        empty_files = [],
+        repo_mapping_manifest = None,
+        legacy_external_runfiles = False):
+    """One `ExecLogEntry.RunfilesTree`. An unset id field reads as 0."""
+    return struct(
+        path = path,
+        input_set_id = input_set_id,
+        symlinks_id = symlinks_id,
+        root_symlinks_id = root_symlinks_id,
+        empty_files = empty_files,
+        repo_mapping_manifest = repo_mapping_manifest,
+        legacy_external_runfiles = legacy_external_runfiles,
+    )
 
 def _output(value):
     """One `ExecLogEntry.Output`: its oneof is either an output id (int) or the
@@ -52,94 +91,107 @@ def _spawn(
         cache_hit = cache_hit,
     )
 
-_BUDGET = execlog.DEFAULT_FLATTEN_BUDGET
+def _tables(sets = None, paths = None, digests = None, inline = None):
+    """Id tables filled in by hand, for the walk tests: the entries a real
+    `_record` would have written, without the payloads to write them from."""
+    tables = execlog.testonly_tables()
+    tables.sets.update(sets or {})
+    tables.paths.update(paths or {})
+    tables.digests.update(digests or {})
+    tables.inline.update(inline or {})
+    return tables
 
 def _test_flatten_resolves_direct_and_transitive_members(_ctx):
     """A set's members are ids; nested sets have to be walked, or every input
     reached through one silently drops out of the key."""
-    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
-    digests = {1: "aaa", 2: "bbb", 3: "ccc"}
-    sets = {10: ([1, 2], []), 11: ([3], [10])}
+    tables = _tables(
+        sets = {10: ([1, 2], []), 11: ([3], [10])},
+        paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"},
+        digests = {1: "aaa", 2: "bbb", 3: "ccc"},
+    )
 
     _eq(
         "direct members",
-        execlog.testonly_flatten(sets, paths, digests, 10, _BUDGET),
+        execlog.testonly_flatten(tables, 10),
         ["a.txt@aaa", "b.txt@bbb"],
     )
     _eq(
         "transitive members included",
-        execlog.testonly_flatten(sets, paths, digests, 11, _BUDGET),
+        execlog.testonly_flatten(tables, 11),
         ["a.txt@aaa", "b.txt@bbb", "c.txt@ccc"],
     )
 
 def _test_flatten_of_no_set_is_empty(_ctx):
     """Bazel writes `input_set_id = 0` for "no inputs", which is not set 0."""
-    _eq("id zero", execlog.testonly_flatten({0: ([1], [])}, {1: "a"}, {}, 0, _BUDGET), [])
+    _eq("id zero", execlog.testonly_flatten(_tables(sets = {0: ([1], [])}, paths = {1: "a"}), 0), [])
 
 def _test_flatten_terminates_on_a_cycle(_ctx):
     """A set reachable from itself must be counted once and stop, not spin until
-    the budget runs out — and must still report the files it reached."""
-    paths = {1: "a.txt"}
-    sets = {10: ([1], [11]), 11: ([], [10])}
-    _eq(
-        "cycle visited once",
-        execlog.testonly_flatten(sets, paths, {1: "aaa"}, 10, _BUDGET),
-        ["a.txt@aaa"],
-    )
+    the bound runs out — and must still report the files it reached."""
+    tables = _tables(sets = {10: ([1], [11]), 11: ([], [10])}, paths = {1: "a.txt"}, digests = {1: "aaa"})
+    _eq("cycle visited once", execlog.testonly_flatten(tables, 10), ["a.txt@aaa"])
 
 def _test_flatten_counts_a_shared_set_once(_ctx):
     """The common case the `seen` set is really for: a diamond, where one set is
     reachable by two routes."""
-    paths = {1: "a.txt"}
-    sets = {10: ([1], []), 11: ([], [10]), 12: ([], [10]), 13: ([], [11, 12])}
-    _eq(
-        "diamond",
-        execlog.testonly_flatten(sets, paths, {1: "aaa"}, 13, _BUDGET),
-        ["a.txt@aaa"],
+    tables = _tables(
+        sets = {10: ([1], []), 11: ([], [10]), 12: ([], [10]), 13: ([], [11, 12])},
+        paths = {1: "a.txt"},
+        digests = {1: "aaa"},
     )
+    _eq("diamond", execlog.testonly_flatten(tables, 13), ["a.txt@aaa"])
 
 def _test_flatten_drops_unresolvable_ids(_ctx):
     """An id with no entry behind it is dropped rather than guessed at: a
     partially read log should give a partial answer, not a wrong one."""
-    _eq(
-        "unknown id",
-        execlog.testonly_flatten({10: ([1, 99], [])}, {1: "a.txt"}, {1: "aaa"}, 10, _BUDGET),
-        ["a.txt@aaa"],
+    tables = _tables(sets = {10: ([1, 99], [])}, paths = {1: "a.txt"}, digests = {1: "aaa"})
+    _eq("unknown id", execlog.testonly_flatten(tables, 10), ["a.txt@aaa"])
+
+def _test_flatten_ignores_ids_no_entry_was_written_for(_ctx):
+    """Unresolvable ids must cost the walk nothing, not just resolve to nothing.
+
+    A resolver fed a narrow `kinds=` list still meets those ids as set members:
+    `kinds = ["spawn", "input_set", "file"]` — the natural choice for a hook that
+    only wants file inputs — gets every directory, symlink and runfiles-tree id
+    an input set names without ever receiving the entries behind them. If they
+    were walked they would crowd out the files that *are* resolvable, and the
+    input list would come back truncated with nothing to say so.
+    """
+    unknown = [100 + i for i in range(50)]
+    tables = _tables(
+        sets = {10: ([1] + unknown + [2], [])},
+        paths = {1: "a.txt", 2: "b.txt"},
+        digests = {1: "aaa", 2: "bbb"},
     )
+    _eq("every resolvable file survives", execlog.testonly_flatten(tables, 10), ["a.txt@aaa", "b.txt@bbb"])
 
-def _test_flatten_respects_its_budget(_ctx):
-    """The budget is a hard stop, so a malformed log cannot hang a build."""
-    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
-    got = execlog.testonly_flatten({10: ([1, 2, 3], [])}, paths, {}, 10, 2)
-    if len(got) >= 3:
-        fail("budget of 2 should not have resolved every member: got %r" % got)
+def _test_flatten_walks_each_distinct_id_once_not_each_edge(_ctx):
+    """The walk is bounded by how many ids the tables hold, so it has to cost one
+    iteration per distinct id. One that cost an iteration per *edge* would overrun
+    that bound on any shared depset — two parents naming one child set, which is
+    routine — and `_flatten` fails rather than returning a truncated list.
 
-def _test_flatten_spends_its_budget_on_distinct_ids_not_edges(_ctx):
-    """The budget the resolver passes is "entries written so far", so it is only a
-    real bound if the walk costs one iteration per distinct id. A walk that spent
-    one per *edge* would overrun it on any shared depset — two parents naming one
-    child set, which is routine.
-
-    This is the shape that makes it visible: 6 distinct ids, 8 edges. A budget of
-    exactly 6 must still resolve every file, because truncation here is silent and
-    would poison the action-key fingerprint rather than fail."""
-    paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"}
-    digests = {1: "aaa", 2: "bbb", 3: "ccc"}
+    This is the shape that makes it visible: 7 distinct ids, 8 edges, 7 table
+    entries."""
 
     # 30 ─┬─> 20 ─┬─> 10 ─┬─> 1
     #     │       │       └─> 2
     #     │       └─> 11 ──┬─> 10   (shared: 10 has two parents)
     #     └─> 11           └─> 3
-    sets = {
-        10: ([1, 2], []),
-        11: ([3], [10]),
-        20: ([], [10, 11]),
-        30: ([], [20, 11]),
-    }
+    tables = _tables(
+        sets = {
+            10: ([1, 2], []),
+            11: ([3], [10]),
+            20: ([], [10, 11]),
+            30: ([], [20, 11]),
+        },
+        paths = {1: "a.txt", 2: "b.txt", 3: "c.txt"},
+        digests = {1: "aaa", 2: "bbb", 3: "ccc"},
+    )
 
     _eq(
-        "every file resolved on a budget of exactly the distinct id count",
-        execlog.testonly_flatten(sets, paths, digests, 30, 6),
+        "every file resolved",
+        execlog.testonly_flatten(tables, 30),
         ["a.txt@aaa", "b.txt@bbb", "c.txt@ccc"],
     )
 
@@ -147,63 +199,238 @@ def _test_flatten_tolerates_a_missing_digest(_ctx):
     """Bazel omits the digest for an empty file."""
     _eq(
         "empty digest",
-        execlog.testonly_flatten({10: ([1], [])}, {1: "empty.txt"}, {}, 10, _BUDGET),
+        execlog.testonly_flatten(_tables(sets = {10: ([1], [])}, paths = {1: "empty.txt"}), 10),
         ["empty.txt@"],
     )
 
 def _test_record_indexes_each_kind(_ctx):
-    """`observe`'s whole content: which kinds contribute paths, digests and sets."""
-    paths, digests, sets = {}, {}, {}
+    """`observe`'s whole content: which kinds contribute paths, digests, sets and
+    inline contents."""
+    tables = execlog.testonly_tables()
 
-    execlog.testonly_record("file", 1, _file("a.txt", "aaa"), paths, digests, sets)
-    execlog.testonly_record("directory", 2, _file("d"), paths, digests, sets)
-    execlog.testonly_record("unresolved_symlink", 3, _file("link"), paths, digests, sets)
+    execlog.testonly_record("file", 1, _file("a.txt", "aaa"), tables)
+    execlog.testonly_record("directory", 2, _dir("d", [_file("x", "xxx")]), tables)
+    execlog.testonly_record("unresolved_symlink", 3, _symlink("link", "../target"), tables)
+    execlog.testonly_record("input_set", 10, _input_set([1, 2], [11]), tables)
+    execlog.testonly_record("spawn", 20, _spawn(), tables)
+
+    _eq("file path", tables.paths[1], "a.txt")
+    _eq("file digest", tables.digests[1], "aaa")
+    _eq("directory path", tables.paths[2], "d")
+    _eq("a directory carries its members", tables.inline[2], ["d@", "d/x@xxx"])
+    _eq("symlink path", tables.paths[3], "link")
+    _eq("a symlink carries its target", tables.inline[3], ["link@../target"])
+    _eq("input set members", tables.sets[10], ([1, 2], [11]))
+    _eq("a file has no inline contents", 1 in tables.inline, False)
+    _eq("a spawn contributes no id", 20 in tables.paths, False)
+    _eq("a spawn is not a set", 20 in tables.sets, False)
+
+def _test_record_expands_a_directory_into_its_files(_ctx):
+    """A tree artifact's per-file digests live on the `directory` entry itself —
+    `Directory { path, repeated File files }` — and nowhere else in the log.
+    Indexing only the path leaves the tree resolving to `out/tree@`, which is the
+    same answer whatever the tree contains."""
+    tables = execlog.testonly_tables()
     execlog.testonly_record(
-        "input_set",
-        10,
-        struct(input_ids = [1, 2], transitive_set_ids = [11]),
-        paths,
-        digests,
-        sets,
+        "directory",
+        2,
+        _dir("out/tree", [_file("a.txt", "aaa"), _file("sub/b.txt", "bbb")]),
+        tables,
     )
-    execlog.testonly_record("spawn", 20, _spawn(), paths, digests, sets)
 
-    _eq("file path", paths[1], "a.txt")
-    _eq("file digest", digests[1], "aaa")
-    _eq("directory path", paths[2], "d")
-    _eq("symlink path", paths[3], "link")
-    _eq("input set members", sets[10], ([1, 2], [11]))
-    _eq("a directory carries no digest", 2 in digests, False)
-    _eq("a spawn contributes no id", 20 in paths, False)
-    _eq("a spawn is not a set", 20 in sets, False)
+    _eq("the tree is still addressable by path", tables.paths[2], "out/tree")
+    _eq(
+        "the tree resolves to itself and its members",
+        execlog.testonly_flatten(tables, 2),
+        ["out/tree/a.txt@aaa", "out/tree/sub/b.txt@bbb", "out/tree@"],
+    )
+
+def _test_fingerprint_moves_when_a_tree_artifacts_contents_change(_ctx):
+    """Two builds whose tree-artifact contents differ are two different actions.
+    Nothing but `Directory.files` can tell them apart."""
+
+    def tables_with(member_digest):
+        tables = execlog.testonly_tables()
+        execlog.testonly_record("directory", 1, _dir("out/tree", [_file("a.txt", member_digest)]), tables)
+        execlog.testonly_record("input_set", 10, _input_set([1]), tables)
+        return tables
+
+    spawn = _spawn(input_set_id = 10)
+    before = execlog.testonly_fingerprint(spawn, tables_with("aaa"))
+    after = execlog.testonly_fingerprint(spawn, tables_with("bbb"))
+
+    if before.inputs_hash == after.inputs_hash:
+        fail("a changed tree-artifact member must move inputs_hash")
+    if before.overall == after.overall:
+        fail("a changed tree-artifact member must move the overall key")
+
+def _test_record_keeps_an_unresolved_symlinks_target(_ctx):
+    """`UnresolvedSymlink { path, target_path }`: the target is the symlink's
+    content, so dropping it makes a retargeted symlink invisible."""
+    tables = execlog.testonly_tables()
+    execlog.testonly_record("unresolved_symlink", 3, _symlink("bazel-out/link", "../real.txt"), tables)
+
+    _eq("the symlink is still addressable by path", tables.paths[3], "bazel-out/link")
+    _eq(
+        "the symlink resolves to its target",
+        execlog.testonly_flatten(tables, 3),
+        ["bazel-out/link@../real.txt"],
+    )
+
+def _test_fingerprint_moves_when_a_symlink_is_retargeted(_ctx):
+    """Same path, different target, same digestless entry — the only dimension
+    that can move is `target_path`."""
+
+    def tables_with(target):
+        tables = execlog.testonly_tables()
+        execlog.testonly_record("unresolved_symlink", 1, _symlink("bazel-out/link", target), tables)
+        execlog.testonly_record("input_set", 10, _input_set([1]), tables)
+        return tables
+
+    spawn = _spawn(input_set_id = 10)
+    before = execlog.testonly_fingerprint(spawn, tables_with("../a.txt"))
+    after = execlog.testonly_fingerprint(spawn, tables_with("../b.txt"))
+
+    if before.inputs_hash == after.inputs_hash:
+        fail("a retargeted symlink must move inputs_hash")
+    if before.overall == after.overall:
+        fail("a retargeted symlink must move the overall key")
+
+def _test_record_resolves_a_symlink_entry_set(_ctx):
+    """A `symlink_entry_set` is a set of (runfiles-relative name → artifact id)
+    pairs plus nested sets. Both halves matter: the artifact feeds the key
+    through its own id, the name because the same file mounted somewhere else is
+    a different runfiles tree."""
+    tables = execlog.testonly_tables()
+    execlog.testonly_record("file", 1, _file("bazel-out/bin/app.py", "aaa"), tables)
+    execlog.testonly_record("symlink_entry_set", 30, _symlink_entry_set({"ws/app.py": 1}), tables)
+
+    _eq("the entry targets are the set's members", tables.sets[30], ([1], []))
+    _eq(
+        "name and target both reach the key",
+        execlog.testonly_flatten(tables, 30),
+        ["bazel-out/bin/app.py@aaa", "ws/app.py@bazel-out/bin/app.py"],
+    )
+
+def _test_record_resolves_a_runfiles_trees_symlinks(_ctx):
+    """`RunfilesTree.symlinks_id` and `.root_symlinks_id` name `symlink_entry_set`
+    entries. A spawn names only the tree, so a tree that resolves to its
+    `input_set_id` alone drops every symlinked runfile out of the action key."""
+    tables = execlog.testonly_tables()
+    execlog.testonly_record("file", 1, _file("bazel-out/bin/app.py", "aaa"), tables)
+    execlog.testonly_record("file", 2, _file("bazel-out/bin/data.txt", "ddd"), tables)
+    execlog.testonly_record("input_set", 10, _input_set([1]), tables)
+    execlog.testonly_record("symlink_entry_set", 30, _symlink_entry_set({"extra/data.txt": 2}), tables)
+    execlog.testonly_record(
+        "runfiles_tree",
+        40,
+        _runfiles_tree("bazel-out/bin/app.runfiles", input_set_id = 10, symlinks_id = 30),
+        tables,
+    )
+
+    _eq(
+        "the input set and the symlink set both resolve",
+        execlog.testonly_flatten(tables, 40),
+        [
+            "bazel-out/bin/app.py@aaa",
+            "bazel-out/bin/app.runfiles@legacy_external_runfiles=False",
+            "bazel-out/bin/data.txt@ddd",
+            "extra/data.txt@bazel-out/bin/data.txt",
+        ],
+    )
+
+def _test_record_keeps_runfiles_tree_metadata(_ctx):
+    """The parts of a runfiles tree that are neither ids nor members:
+    `empty_files`, `repo_mapping_manifest` and `legacy_external_runfiles`, which
+    moves where external repositories are mounted without changing a member."""
+    tables = execlog.testonly_tables()
+    execlog.testonly_record(
+        "runfiles_tree",
+        40,
+        _runfiles_tree(
+            "app.runfiles",
+            empty_files = ["ws/__init__.py"],
+            repo_mapping_manifest = _file("bazel-out/bin/app.repo_mapping", "rrr"),
+            legacy_external_runfiles = True,
+        ),
+        tables,
+    )
+
+    _eq(
+        "every non-member dimension reaches the key",
+        execlog.testonly_flatten(tables, 40),
+        [
+            "app.runfiles/ws/__init__.py@",
+            "app.runfiles@legacy_external_runfiles=True",
+            "bazel-out/bin/app.repo_mapping@rrr",
+        ],
+    )
 
 def _test_record_makes_a_runfiles_tree_resolve_as_a_set(_ctx):
     """A spawn names the runfiles tree, not the input set inside it. If the tree
     does not also resolve as a set, every runfile drops out of the action key."""
-    paths, digests, sets = {}, {}, {}
-    execlog.testonly_record("file", 1, _file("app.py", "aaa"), paths, digests, sets)
-    execlog.testonly_record(
-        "input_set",
-        10,
-        struct(input_ids = [1], transitive_set_ids = []),
-        paths,
-        digests,
-        sets,
-    )
-    execlog.testonly_record(
-        "runfiles_tree",
-        20,
-        struct(path = "app.runfiles", input_set_id = 10),
-        paths,
-        digests,
-        sets,
+    tables = execlog.testonly_tables()
+    execlog.testonly_record("file", 1, _file("app.py", "aaa"), tables)
+    execlog.testonly_record("input_set", 10, _input_set([1]), tables)
+    execlog.testonly_record("runfiles_tree", 20, _runfiles_tree("app.runfiles", input_set_id = 10), tables)
+
+    _eq("tree has a path", tables.paths[20], "app.runfiles")
+    _eq(
+        "tree resolves to itself and its contents",
+        execlog.testonly_flatten(tables, 20),
+        ["app.py@aaa", "app.runfiles@legacy_external_runfiles=False"],
     )
 
-    _eq("tree has a path", paths[20], "app.runfiles")
+def _test_record_reads_a_real_payload(_ctx):
+    """The one test with real protos behind it, and so the only one that can
+    check what the hand-built payloads above cannot: that `_record`'s kind
+    constants are the names `type()` actually returns, and that every field it
+    reads exists under the name it reads it by.
+
+    `ExecLogEntry` itself cannot be built from AXL — its payload is a oneof — so
+    the kind comes off the payload, which is where `observe` gets it too. Nor can
+    a `symlink_entry_set`'s `direct_entries` be populated from AXL (a proto map
+    is read-only here), so this covers the accessor and the empty case, and
+    `_test_record_resolves_a_symlink_entry_set` covers the contents.
+    """
+    el = bazel.build.execution_log
+    pb = el.exec_log_entry
+    tables = execlog.testonly_tables()
+
+    def record(entry_id, payload):
+        execlog.testonly_record(type(payload), entry_id, payload, tables)
+
+    record(1, pb.File(path = "bazel-out/bin/a.txt", digest = el.Digest(hash = "aaa")))
+    record(2, pb.File(path = "bazel-out/bin/empty.txt"))
+    record(3, pb.Directory(path = "out/tree", files = [pb.File(path = "m.txt", digest = el.Digest(hash = "mmm"))]))
+    record(4, pb.UnresolvedSymlink(path = "bazel-out/bin/link", target_path = "../real.txt"))
+    record(10, pb.InputSet(input_ids = [1, 2, 3, 4], transitive_set_ids = []))
+    record(20, pb.RunfilesTree(
+        path = "app.runfiles",
+        input_set_id = 10,
+        empty_files = ["ws/__init__.py"],
+        repo_mapping_manifest = pb.File(path = "app.repo_mapping", digest = el.Digest(hash = "rrr")),
+        legacy_external_runfiles = True,
+    ))
+    record(30, pb.SymlinkEntrySet(transitive_set_ids = [20]))
+
+    _eq("an omitted digest reads as the empty one", tables.digests[2], "")
+    _eq("an unset id field is not a member", tables.sets[20], ([], [10]))
+    _eq("an empty entry map contributes no names", tables.inline[30], [])
+
     _eq(
-        "tree resolves to its contents",
-        execlog.testonly_flatten(sets, paths, digests, 20, _BUDGET),
-        ["app.py@aaa"],
+        "every kind resolves, through two containers and a runfiles tree",
+        execlog.testonly_flatten(tables, 30),
+        [
+            "app.repo_mapping@rrr",
+            "app.runfiles/ws/__init__.py@",
+            "app.runfiles@legacy_external_runfiles=True",
+            "bazel-out/bin/a.txt@aaa",
+            "bazel-out/bin/empty.txt@",
+            "bazel-out/bin/link@../real.txt",
+            "out/tree/m.txt@mmm",
+            "out/tree@",
+        ],
     )
 
 def _test_spawn_key_prefers_the_resolved_primary_output(_ctx):
@@ -240,8 +467,8 @@ def _test_fingerprint_separates_the_key_dimensions(_ctx):
     sets = {10: ([1], [])}
     spawn = _spawn(outputs = [_output(5)], input_set_id = 10)
 
-    before = execlog.testonly_fingerprint(spawn, sets, paths, {1: "aaa"}, _BUDGET)
-    after = execlog.testonly_fingerprint(spawn, sets, paths, {1: "bbb"}, _BUDGET)
+    before = execlog.testonly_fingerprint(spawn, _tables(sets = sets, paths = paths, digests = {1: "aaa"}))
+    after = execlog.testonly_fingerprint(spawn, _tables(sets = sets, paths = paths, digests = {1: "bbb"}))
 
     _eq("same action, same key", before.key, after.key)
     _eq("args unchanged", before.args_hash, after.args_hash)
@@ -263,30 +490,21 @@ def _test_fingerprint_is_order_insensitive_for_env_and_inputs(_ctx):
 
     one = execlog.testonly_fingerprint(
         _spawn(env = env_a, input_set_id = 10),
-        {10: ([1, 2], [])},
-        paths,
-        digests,
-        _BUDGET,
+        _tables(sets = {10: ([1, 2], [])}, paths = paths, digests = digests),
     )
     two = execlog.testonly_fingerprint(
         _spawn(env = env_b, input_set_id = 10),
-        {10: ([2, 1], [])},
-        paths,
-        digests,
-        _BUDGET,
+        _tables(sets = {10: ([2, 1], [])}, paths = paths, digests = digests),
     )
     _eq("env order", one.env_hash, two.env_hash)
     _eq("input order", one.inputs_hash, two.inputs_hash)
     _eq("overall", one.overall, two.overall)
 
 def _test_fingerprint_reads_platform_properties(_ctx):
-    plain = execlog.testonly_fingerprint(_spawn(), {}, {}, {}, _BUDGET)
+    plain = execlog.testonly_fingerprint(_spawn(), execlog.testonly_tables())
     with_platform = execlog.testonly_fingerprint(
         _spawn(platform = struct(properties = [struct(name = "OSFamily", value = "Linux")])),
-        {},
-        {},
-        {},
-        _BUDGET,
+        execlog.testonly_tables(),
     )
     if plain.platform_hash == with_platform.platform_hash:
         fail("platform properties must reach the key")
@@ -303,7 +521,8 @@ def _test_hash_is_unambiguous_across_part_boundaries(_ctx):
     )
 
 def _test_as_map_splits_on_the_last_at(_ctx):
-    """A path may contain `@` (an external repo root, say); a digest may not."""
+    """A path may contain `@` (an external repo root, say); the content after it
+    may not."""
     _eq(
         "path with @",
         execlog.as_map(["external/rules_foo@1.2.3/src/a.txt@aaa"]),
@@ -321,6 +540,7 @@ def _test_resolver_indexes_as_it_goes(_ctx):
     res.observe(struct(id = 1, type = None))
     _eq("a payload-less entry still advances the count", res.entries(), 1)
     _eq("nothing to resolve", res.path_of(1), None)
+    _eq("a spawn with no inputs resolves to nothing", res.inputs(_spawn()), [])
 
 _UNIT_TESTS = [
     _test_flatten_resolves_direct_and_transitive_members,
@@ -328,11 +548,19 @@ _UNIT_TESTS = [
     _test_flatten_terminates_on_a_cycle,
     _test_flatten_counts_a_shared_set_once,
     _test_flatten_drops_unresolvable_ids,
-    _test_flatten_respects_its_budget,
-    _test_flatten_spends_its_budget_on_distinct_ids_not_edges,
+    _test_flatten_ignores_ids_no_entry_was_written_for,
+    _test_flatten_walks_each_distinct_id_once_not_each_edge,
     _test_flatten_tolerates_a_missing_digest,
     _test_record_indexes_each_kind,
+    _test_record_expands_a_directory_into_its_files,
+    _test_fingerprint_moves_when_a_tree_artifacts_contents_change,
+    _test_record_keeps_an_unresolved_symlinks_target,
+    _test_fingerprint_moves_when_a_symlink_is_retargeted,
+    _test_record_resolves_a_symlink_entry_set,
+    _test_record_resolves_a_runfiles_trees_symlinks,
+    _test_record_keeps_runfiles_tree_metadata,
     _test_record_makes_a_runfiles_tree_resolve_as_a_set,
+    _test_record_reads_a_real_payload,
     _test_spawn_key_prefers_the_resolved_primary_output,
     _test_spawn_key_uses_a_raw_path_when_bazel_could_not_resolve_one,
     _test_spawn_key_skips_outputs_it_cannot_resolve,

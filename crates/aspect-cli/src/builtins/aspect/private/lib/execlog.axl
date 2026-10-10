@@ -7,8 +7,8 @@ actually feeds Bazel's action key. So a hook handed one `spawn` entry knows the
 label and the mnemonic and nothing about what went into it.
 
 `resolver()` closes that gap for a consumer reading the log in order — which is
-every `BazelTrait.exec_log_event` hook. Feed it every entry; it keeps the three
-small id-keyed maps that make resolution possible and answers questions about
+every `BazelTrait.exec_log_event` hook. Feed it every entry; it keeps the four
+small id-keyed tables that make resolution possible and answers questions about
 the spawns:
 
     res = execlog.resolver()
@@ -17,16 +17,19 @@ the spawns:
         if type(entry.type) == "spawn":
             print(res.spawn_key(entry.type), res.inputs(entry.type))
 
-`observe` is cheap — a couple of dict writes for a file, nothing for most kinds.
-Resolution is not, so it only happens when asked: flattening every input set in
-a 20 MB log expands to gigabytes, and the whole point of keeping the maps is to
-be able to flatten the handful of spawns a caller cares about instead. A hook
-that calls `inputs()` on every spawn of a large build should expect to pay for
-it.
+`observe` is cheap: a couple of table writes for a file or an input set. The
+kinds that carry their contents *inline* rather than by id — a `directory`
+carries a `File` per tree member, a `runfiles_tree` carries its empty files —
+render those contents as they are observed, which is work proportional to the
+one entry and still nothing like a flatten. Resolution is the expensive half, so
+it only happens when asked: flattening every input set in a 20 MB log expands to
+gigabytes, and the whole point of keeping the tables is to be able to flatten the
+handful of spawns a caller cares about instead. A hook that calls `inputs()` on
+every spawn of a large build should expect to pay for it.
 
 Ordering is what makes the streaming form correct: Bazel writes an entry before
 anything references it, so by the time a spawn arrives every id it names is
-already in the maps. A caller that reads a log out of order (or reads only part
+already in the tables. A caller that reads a log out of order (or reads only part
 of one) gets partial answers rather than wrong ones — an unresolvable id is
 dropped, not guessed at.
 
@@ -52,16 +55,10 @@ SYMLINK_ENTRY_SET = "symlink_entry_set"
 
 # The kinds a resolver has to see for `inputs`/`tools` to be complete. A hook
 # that wants resolution must ask the runtime for at least these, not just
-# `["spawn"]` — the spawn alone carries no paths.
-RESOLVER_KINDS = [FILE, DIRECTORY, UNRESOLVED_SYMLINK, INPUT_SET, RUNFILES_TREE, SPAWN]
-
-# Upper bound on distinct ids visited while flattening one input set, when the
-# caller gives no budget of its own. `_flatten` queues each id at most once, so
-# a set cannot need more iterations than the log has entries, and a resolver fed
-# in order knows how many it has seen. This default only applies to a caller
-# flattening against maps it built by hand (tests) or one that wants a tighter
-# cap than "the whole log".
-DEFAULT_FLATTEN_BUDGET = 1000000
+# `["spawn"]` — the spawn alone carries no paths. `symlink_entry_set` is in the
+# list because a `runfiles_tree` reaches its symlinks through one; a narrower
+# list resolves to fewer inputs, never to wrong ones.
+RESOLVER_KINDS = [FILE, DIRECTORY, UNRESOLVED_SYMLINK, INPUT_SET, SYMLINK_ENTRY_SET, RUNFILES_TREE, SPAWN]
 
 Fingerprint = record(
     key = field(str),
@@ -93,20 +90,57 @@ def _digest_of(payload) -> str:
     d = getattr(payload, "digest", None)
     return d.hash if d != None else ""
 
-def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) -> list:
-    """Resolve an input set id to a sorted list of `path@digest` strings.
+def _tables() -> struct:
+    """The four id-keyed tables resolution reads, all empty.
+
+    - `paths`: every id that names a path — a file, a tree artifact, a symlink,
+      a runfiles tree. What makes an id addressable, so a spawn output or a
+      `path_of()` can be answered.
+    - `digests`: the content digest of a `file` id, and only of a `file` id.
+    - `sets`: `id → (direct ids, transitive set ids)` for an id that reaches
+      other ids — an `input_set`, a `symlink_entry_set`, a `runfiles_tree`.
+    - `inline`: `id → ["path@content", ...]` for an id whose contents live on
+      the entry itself rather than behind further ids. Rendered once, when the
+      entry is observed, because the alternative is retaining the payload.
+
+    An id can appear in several: a `runfiles_tree` is a path, a set of ids and a
+    few inline lines at once.
+    """
+    return struct(paths = {}, digests = {}, sets = {}, inline = {})
+
+def _queue(tables: struct, seen: dict, stack: list, ids: list) -> None:
+    """Queue every id in `ids` that resolves against a table and is not queued.
+
+    Filtering here rather than at pop time is what makes the table sizes a
+    sufficient bound on the walk: an id no entry was ever written for — routine
+    for a resolver fed a narrow `kinds=` list, which still sees set membership
+    for kinds it never receives — costs nothing instead of an iteration.
+    """
+    for entry_id in ids:
+        if entry_id not in seen and (entry_id in tables.sets or entry_id in tables.paths or entry_id in tables.inline):
+            seen[entry_id] = True
+            stack.append(entry_id)
+
+def _flatten(tables: struct, root_id: int) -> list:
+    """Resolve an input set id to a sorted list of `path@content` strings.
+
+    One line per thing that feeds the action key, with the content of each thing
+    after the `@`: a file's digest, a symlink's target path, a runfiles tree's
+    layout flag, `""` for an empty file. A container contributes its own line
+    *and* its contents, so a tree artifact lists both `out/tree@` and
+    `out/tree/<member>@<digest>`, and nothing an action depends on is left to be
+    inferred from a path alone.
 
     Iterative rather than recursive: input sets nest arbitrarily deep in a large
     repo, and a blown evaluation stack part-way through a log is a worse failure
     than a slow one.
 
-    `seen` marks an id as *queued*, not as visited, and nothing is queued twice.
-    That is what makes `budget` a true bound: the loop runs at most once per
-    distinct reachable id, so a budget of "ids written to the log so far" cannot
-    be exhausted by a graph the log actually contains. Deduplicating at pop time
-    would instead cost an iteration per *edge*, which a depset with two parents
-    exceeds, and the walk could hit the budget and return a truncated input list —
-    silent, and enough to poison `inputs_hash`. Cycles terminate for the same
+    Termination and completeness both come from `seen`, which marks an id as
+    *queued*: nothing is queued twice, and `_queue` only queues ids a table can
+    answer for, so the walk pops at most once per distinct id the tables hold.
+    That is what makes the table sizes a bound the walk cannot reach — the loop
+    is a `while` in Starlark's clothing, not a cap, and truncating an input list
+    is not among the things that can happen here. Cycles terminate for the same
     reason duplicates do.
 
     `root_id == 0` is Bazel's "no set", not set number zero: it means the spawn
@@ -119,26 +153,28 @@ def _flatten(sets: dict, paths: dict, digests: dict, root_id: int, budget: int) 
     stack = [root_id]
     out = []
 
-    for _ in range(budget):
+    for _ in range(1 + len(tables.sets) + len(tables.paths) + len(tables.inline)):
         if not stack:
             break
         current = stack.pop()
 
-        if current in sets:
-            direct, transitive = sets[current]
-            for child in direct:
-                if child not in seen:
-                    seen[child] = True
-                    stack.append(child)
-            for child in transitive:
-                if child not in seen:
-                    seen[child] = True
-                    stack.append(child)
+        children = tables.sets.get(current)
+        if children != None:
+            direct, transitive = children
+            _queue(tables, seen, stack, direct)
+            _queue(tables, seen, stack, transitive)
+
+        lines = tables.inline.get(current)
+        if lines != None:
+            out.extend(lines)
             continue
 
-        path = paths.get(current)
+        path = tables.paths.get(current)
         if path != None:
-            out.append(path + "@" + digests.get(current, ""))
+            out.append(path + "@" + tables.digests.get(current, ""))
+
+    if stack:
+        fail("execlog: flattening input set %d left %d id(s) unwalked, so the table bound is wrong; this is a bug in execlog.axl" % (root_id, len(stack)))
 
     return sorted(out)
 
@@ -170,7 +206,7 @@ def _platform_properties(spawn) -> list:
         return []
     return sorted([p.name + "=" + p.value for p in platform.properties])
 
-def _fingerprint(spawn, sets: dict, paths: dict, digests: dict, budget: int) -> Fingerprint:
+def _fingerprint(spawn, tables: struct) -> Fingerprint:
     """Hash each dimension of the action key separately, then the whole.
 
     Separately because the per-dimension hashes are what let a reader say *why*
@@ -178,12 +214,12 @@ def _fingerprint(spawn, sets: dict, paths: dict, digests: dict, budget: int) -> 
     """
     args_hash = _hash(spawn.args)
     env_hash = _hash(sorted([v.name + "=" + v.value for v in spawn.env_vars]))
-    inputs_hash = _hash(_flatten(sets, paths, digests, spawn.input_set_id, budget))
-    tools_hash = _hash(_flatten(sets, paths, digests, spawn.tool_set_id, budget))
+    inputs_hash = _hash(_flatten(tables, spawn.input_set_id))
+    tools_hash = _hash(_flatten(tables, spawn.tool_set_id))
     platform_hash = _hash(_platform_properties(spawn))
 
     return Fingerprint(
-        key = _spawn_key(spawn, paths),
+        key = _spawn_key(spawn, tables.paths),
         label = spawn.target_label,
         mnemonic = spawn.mnemonic,
         runner = spawn.runner,
@@ -198,7 +234,7 @@ def _fingerprint(spawn, sets: dict, paths: dict, digests: dict, budget: int) -> 
 
 def _as_map(flattened: list) -> dict:
     """`["a@dig", ...]` → `{"a": "dig", ...}`. Splits on the last `@` because a
-    path may contain one and a digest may not."""
+    path may contain one and the content after it may not."""
     out = {}
     for item in flattened:
         path, _, digest = item.rpartition("@")
@@ -208,58 +244,130 @@ def _as_map(flattened: list) -> dict:
 def _resolver() -> struct:
     """A stateful id table fed one entry at a time. See the module docstring.
 
-    The returned struct's methods close over three dicts and an entry counter;
-    the counter doubles as the flatten budget, since a set cannot reach more
-    distinct ids than have been written before it and `_flatten` visits each
-    reachable id once.
+    The returned struct's methods close over one set of `_tables()` and an entry
+    counter, which is reported by `entries()` and is not otherwise load-bearing.
     """
-    paths = {}
-    digests = {}
-    sets = {}
+    tables = _tables()
     count = [0]
 
     def observe(entry) -> None:
-        """Record whatever this entry contributes to the id table. Call for
-        every entry, of every kind: the kinds that contribute nothing still
-        advance the budget."""
+        """Record whatever this entry contributes to the id tables. Call for
+        every entry, of every kind."""
         count[0] += 1
         payload = entry.type
         if payload == None:
             return
-        _record(type(payload), entry.id, payload, paths, digests, sets)
+        _record(type(payload), entry.id, payload, tables)
+
+    def flatten(set_id: int) -> list:
+        """Resolve one set id to its sorted `path@content` lines.
+
+        A container resolves to its own line plus its contents, so a
+        `runfiles_tree` id answers with every runfile it mounts and not just
+        with the path it is mounted at. See `_flatten`.
+        """
+        return _flatten(tables, set_id)
+
+    def inputs(spawn) -> list:
+        """This spawn's inputs as sorted `path@content` lines — one per file,
+        per tree-artifact member, per runfiles entry and per symlink that feeds
+        the action key, each with the content that makes it identifiable after
+        the `@`. A tree artifact and a runfiles tree contribute a line for
+        themselves as well as one per member. See `_flatten`."""
+        return _flatten(tables, spawn.input_set_id)
+
+    def tools(spawn) -> list:
+        """This spawn's tool inputs, in the same form as `inputs`."""
+        return _flatten(tables, spawn.tool_set_id)
 
     return struct(
         observe = observe,
         entries = lambda: count[0],
-        path_of = lambda entry_id: paths.get(entry_id),
-        digest_of = lambda entry_id: digests.get(entry_id),
-        spawn_key = lambda spawn: _spawn_key(spawn, paths),
-        flatten = lambda set_id: _flatten(sets, paths, digests, set_id, count[0] + 1),
-        inputs = lambda spawn: _flatten(sets, paths, digests, spawn.input_set_id, count[0] + 1),
-        tools = lambda spawn: _flatten(sets, paths, digests, spawn.tool_set_id, count[0] + 1),
-        outputs = lambda spawn: _outputs(spawn, paths),
-        fingerprint = lambda spawn: _fingerprint(spawn, sets, paths, digests, count[0] + 1),
+        path_of = lambda entry_id: tables.paths.get(entry_id),
+        digest_of = lambda entry_id: tables.digests.get(entry_id),
+        spawn_key = lambda spawn: _spawn_key(spawn, tables.paths),
+        flatten = flatten,
+        inputs = inputs,
+        tools = tools,
+        outputs = lambda spawn: _outputs(spawn, tables.paths),
+        fingerprint = lambda spawn: _fingerprint(spawn, tables),
     )
 
-def _record(kind: str, entry_id: int, payload, paths: dict, digests: dict, sets: dict) -> None:
-    """Index whatever one entry contributes to the id table.
+def _directory_lines(payload) -> list:
+    """A tree artifact's own line, then one per member.
+
+    `ExecLogEntry.Directory` carries a `File` per member — path relative to the
+    directory, plus the digest — rather than a member id, so these are the only
+    place a tree artifact's contents appear in the log. Prefixing each with the
+    directory's own path is what Bazel's own reconstruction of the expanded log
+    does.
+    """
+    lines = [payload.path + "@"]
+    for member in payload.files:
+        lines.append(payload.path + "/" + member.path + "@" + _digest_of(member))
+    return lines
+
+def _runfiles_lines(payload) -> list:
+    """Everything a `runfiles_tree` carries that is not reachable by id.
+
+    Its own line carries `legacy_external_runfiles`, the one piece of the tree's
+    identity that is neither a member nor a path: it decides where external
+    repositories are mounted, so two builds that disagree about it have
+    different runfiles trees built from identical members.
+    """
+    lines = [payload.path + "@legacy_external_runfiles=" + str(payload.legacy_external_runfiles)]
+    for name in payload.empty_files:
+        lines.append(payload.path + "/" + name + "@")
+    manifest = payload.repo_mapping_manifest
+    if manifest != None:
+        lines.append(manifest.path + "@" + _digest_of(manifest))
+    return lines
+
+def _symlink_entry_lines(payload, paths: dict) -> list:
+    """One `name@target path` line per direct entry of a `symlink_entry_set`.
+
+    The entries are a map from runfiles-relative name to artifact id, and the
+    name is half of what the set contributes: the same file mounted under a
+    different name is a different runfiles tree. Resolving the id here, rather
+    than when the set is flattened, is the one place this module reads a path at
+    observe time — safe for the same reason the whole streaming form is, since
+    Bazel writes an entry before anything references it, and degrading to `""`
+    for an id a partial log never carried.
+    """
+    return [name + "@" + paths.get(target_id, "") for (name, target_id) in payload.direct_entries.items()]
+
+def _nonzero(ids: list) -> list:
+    """`ids` without Bazel's `0`, which is the absence of a set rather than set
+    number zero — an unset `symlinks_id` reads as 0."""
+    return [entry_id for entry_id in ids if entry_id != 0]
+
+def _record(kind: str, entry_id: int, payload, tables: struct) -> None:
+    """Index whatever one entry contributes to the id tables.
 
     Takes `kind` as a string rather than reading it off `payload`, so it can be
     exercised without a real proto. Kinds absent here contribute no ids —
     `spawn`, `invocation` and `symlink_action` are read by callers rather than
     resolved against."""
     if kind == FILE:
-        paths[entry_id] = payload.path
-        digests[entry_id] = _digest_of(payload)
-    elif kind == DIRECTORY or kind == UNRESOLVED_SYMLINK:
-        paths[entry_id] = payload.path
+        tables.paths[entry_id] = payload.path
+        tables.digests[entry_id] = _digest_of(payload)
+    elif kind == DIRECTORY:
+        tables.paths[entry_id] = payload.path
+        tables.inline[entry_id] = _directory_lines(payload)
+    elif kind == UNRESOLVED_SYMLINK:
+        tables.paths[entry_id] = payload.path
+        tables.inline[entry_id] = [payload.path + "@" + payload.target_path]
     elif kind == INPUT_SET:
-        sets[entry_id] = (payload.input_ids, payload.transitive_set_ids)
+        tables.sets[entry_id] = (payload.input_ids, payload.transitive_set_ids)
+    elif kind == SYMLINK_ENTRY_SET:
+        tables.sets[entry_id] = (sorted(payload.direct_entries.values()), payload.transitive_set_ids)
+        tables.inline[entry_id] = sorted(_symlink_entry_lines(payload, tables.paths))
     elif kind == RUNFILES_TREE:
-        # A spawn names the tree, not the set inside it, so the tree has to
+        # A spawn names the tree, not the sets inside it, so the tree has to
         # resolve as if it were a set or every runfile drops out of the key.
-        paths[entry_id] = payload.path
-        sets[entry_id] = ([], [payload.input_set_id])
+        tables.paths[entry_id] = payload.path
+        tables.sets[entry_id] = ([], _nonzero([payload.input_set_id, payload.symlinks_id, payload.root_symlinks_id]))
+        tables.inline[entry_id] = _runfiles_lines(payload)
 
 def _outputs(spawn, paths: dict) -> list:
     """Every output path this spawn declared, resolved where possible.
@@ -283,7 +391,7 @@ execlog = struct(
     as_map = _as_map,
     Fingerprint = Fingerprint,
     RESOLVER_KINDS = RESOLVER_KINDS,
-    DEFAULT_FLATTEN_BUDGET = DEFAULT_FLATTEN_BUDGET,
+    testonly_tables = _tables,
     testonly_flatten = _flatten,
     testonly_record = _record,
     testonly_fingerprint = _fingerprint,
