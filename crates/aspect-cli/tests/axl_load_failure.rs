@@ -14,8 +14,10 @@
 //!
 //! Also pinned here: each warning names what that particular file's absence
 //! costs, a `use_feature` file defining no tasks; one file named twice is
-//! reported once; and the diagnostic carries exactly one `error:` prefix,
-//! Starlark rendering its own and the CLI having once added a second.
+//! reported once; the diagnostic carries exactly one `error:` prefix, Starlark
+//! rendering its own and the CLI having once added a second; and the
+//! `MODULE.aspect` read before the tolerance begins names itself when it
+//! cannot be read at all.
 //!
 //! Every run gets a throwaway `$HOME` so the developer's own
 //! `~/.aspect/config.axl` cannot join the run and change what is reported.
@@ -23,6 +25,7 @@
 mod common;
 
 use common::aspect_cli;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -86,6 +89,10 @@ struct Fixture<'a> {
     cwd: &'a str,
     /// Whether to set `ASPECT_DEBUG`, which every other case clears.
     debug: bool,
+    /// Paths, relative to the workspace root, to `chmod 000` once written.
+    /// Failing the *read* of a file whose contents are fine is its own error
+    /// path, separate from every parse and eval failure here.
+    unreadable: &'a [&'a str],
 }
 
 impl<'a> Fixture<'a> {
@@ -94,6 +101,7 @@ impl<'a> Fixture<'a> {
             files,
             cwd: ".",
             debug: false,
+            unreadable: &[],
         }
     }
 
@@ -111,6 +119,14 @@ impl<'a> Fixture<'a> {
             std::fs::create_dir_all(path.parent().expect("a fixture path has a parent"))
                 .expect("fixture parent");
             std::fs::write(&path, contents).expect("writing a fixture");
+        }
+        for path in self.unreadable {
+            let path = dir.path().join(path);
+            let mut perms = std::fs::metadata(&path)
+                .expect("a path to chmod")
+                .permissions();
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&path, perms).expect("chmod 000");
         }
         let cwd = dir.path().join(self.cwd);
         std::fs::create_dir_all(&cwd).expect("cwd");
@@ -940,6 +956,29 @@ fn a_file_referenced_twice_is_reported_once() {
         stderr.contains("the tasks and the feature it defines are unavailable"),
         "both roles must be named:\n{stderr}"
     );
+}
+
+/// A `MODULE.aspect` that cannot be *read* is fatal the same way, and must
+/// still say which file it was: it is the one file opened before the tolerance
+/// begins, so nothing else on stderr names it.
+#[test]
+fn an_unreadable_module_aspect_names_itself() {
+    for args in [vec!["help"], vec!["version"], vec!["build", "//..."]] {
+        let mut fixture = Fixture::new(&[
+            ("MODULE.aspect", "aspect(name = \"unreadable\")\n"),
+            (".aspect/version.axl", "version(\"0.0.0-dev\")\n"),
+        ]);
+        fixture.unreadable = &["MODULE.aspect"];
+        let output = fixture.run(&args).0;
+        let stderr = stderr(&output);
+        let what = args.join(" ");
+        assert_eq!(output_code(&output), 1, "`aspect {what}`:\n{stderr}");
+        assert!(
+            stderr.contains("MODULE.aspect:") && stderr.contains("Permission denied"),
+            "`aspect {what}` must name the file it could not read:\n{stderr}"
+        );
+        assert_no_doubled_error_prefix(&stderr);
+    }
 }
 
 /// A `MODULE.aspect` is read before either tolerant phase, so one that does
