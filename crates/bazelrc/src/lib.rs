@@ -299,48 +299,60 @@ impl BazelRC {
 
     /// Return all options applicable to `command`, respecting Bazel's command inheritance.
     ///
-    /// Order: RC-file `always` + `common` + ancestor commands (general → specific) +
-    /// `<command>` + CLI-provided flags.
+    /// Order: every section this command reads — `always` + `common` + ancestor commands
+    /// (general → specific) + `<command>` — first from the rc files, then again from the
+    /// caller-supplied flags.
     ///
-    /// CLI-provided flags (those passed via the `flags` parameter to `BazelRC::new`, stored as
-    /// `always` with source `"<command line>"`) are placed **last** so that any `--config=`
+    /// Caller-supplied flags (those passed via the `flags` parameter to `BazelRC::new`, carrying
+    /// the synthetic source `"<command line>"`) are placed **last** so that any `--config=`
     /// flags they carry expand after all RC-file flags.  This matches Bazel's own semantics
-    /// where command-line flags override `.bazelrc` defaults under last-write-wins.
+    /// where command-line flags override `.bazelrc` defaults under last-write-wins. A caller
+    /// flag that named a section (`("--jobs=8", "", "build")`) is placed last the same way, so
+    /// scoping a flag to the commands that accept it never costs it its precedence over the
+    /// rc files.
+    ///
+    /// Within the caller block the order is the section order, not the order the caller listed
+    /// them in — the same rule Bazel applies to rc entries, where `build --foo` wins over
+    /// `common --foo` whichever line came first. So a scoped caller flag beats an unscoped one
+    /// on a build-like command; `--bazel-flags:omit` is how a user drops an injected flag
+    /// rather than shadowing it.
+    ///
+    /// One exception to "caller flags win": a caller flag that names the `common` section
+    /// itself. `resolve_for_command` renders a `common`-section option as
+    /// `--default_override=0:common=…`, which Bazel applies ahead of everything on the command
+    /// line, so such a flag loses to a literal rc-file `build` entry despite being emitted
+    /// after it here. Nothing in-tree does that — callers name a command section or leave the
+    /// flag unscoped (`always`) — and the same rendering is why `options_for("always")`
+    /// out-ranks `options_for("common")` in practice.
     ///
     /// For example, `options_for("test")` returns:
-    ///   `always` (rc-file) + `common` + `build` + `test` + `always` (cli)
+    ///   `always` + `common` + `build` + `test` (rc-file) + `always` + `build` + `test` (caller)
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
-        // CLI-provided flags live in the "always" bucket but with source "<command line>".
-        // We separate them so they can be appended last. A merged BazelRC can carry more than
-        // one "<command line>" source (one per merged input), so match on the path rather than a
-        // single index; the "always" bucket preserves insertion order, so a merged overlay's CLI
-        // flags follow the base's and win under last-write-wins.
+        // A merged BazelRC can carry more than one "<command line>" source (one per merged
+        // input), so match on the path rather than a single index; each bucket preserves
+        // insertion order, so a merged overlay's caller flags follow the base's and win under
+        // last-write-wins.
         let is_cli = |o: &RcOption| {
             self.sources
                 .get(o.source_index)
                 .is_some_and(|p| p.as_path() == std::path::Path::new("<command line>"))
         };
 
+        // The sections `command` reads, in the order Bazel applies them. Not deduplicated:
+        // `options_for("common")` repeats the `common` bucket, which last-write-wins makes
+        // harmless and which keeps a `common`-rendered rc (see `aspect setup bazelrc`)
+        // resolving exactly as it did.
+        let mut sections = vec!["always", "common"];
+        sections.extend(command_ancestors(command));
+        sections.push(command);
+
         let mut result = Vec::new();
-        // RC-file always flags first (not from the synthetic CLI source)
-        if let Some(opts) = self.options.get("always") {
-            result.extend(opts.iter().filter(|o| !is_cli(o)));
-        }
-        // common, then ancestor commands, then the command itself
-        if let Some(opts) = self.options.get("common") {
-            result.extend(opts.iter());
-        }
-        for ancestor in command_ancestors(command) {
-            if let Some(opts) = self.options.get(*ancestor) {
-                result.extend(opts.iter());
+        for caller_pass in [false, true] {
+            for section in &sections {
+                if let Some(opts) = self.options.get(*section) {
+                    result.extend(opts.iter().filter(|o| is_cli(o) == caller_pass));
+                }
             }
-        }
-        if let Some(opts) = self.options.get(command) {
-            result.extend(opts.iter());
-        }
-        // CLI-provided flags last — they must override all RC-file flags
-        if let Some(opts) = self.options.get("always") {
-            result.extend(opts.iter().filter(|o| is_cli(o)));
         }
         result
     }
@@ -1923,15 +1935,70 @@ build --build-flag
         };
         let rc = BazelRC::blank(&[scoped, unscoped]);
         let values = |command: &str| -> Vec<String> { rc.resolve_for_command(command).unwrap().1 };
+        // Section order, not list order: the `always` entry first, then the `build` one.
         assert_eq!(
             values("test"),
             vec![
-                "--execution_log_compact_file=/tmp/exec.log",
-                "--remote_timeout=3600"
+                "--remote_timeout=3600",
+                "--execution_log_compact_file=/tmp/exec.log"
             ]
         );
         assert_eq!(values("query"), vec!["--remote_timeout=3600"]);
         assert_eq!(values("build").len(), 2);
+    }
+
+    #[test]
+    fn scoped_caller_flag_still_overrides_the_rc_files() {
+        // A caller flag that names a section must stay *after* every rc-file option, the way
+        // an unscoped one does: scoping it to the commands that accept it is about which
+        // commands see it, not about losing to a `.bazelrc` default. The regression this
+        // guards: placing it in its section's slot put it ahead of the rc-file `always` and
+        // `common` entries and of the caller's own unscoped flags.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            r#"
+common --jobs=1
+build --jobs=2
+"#,
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(
+            root,
+            ISOLATE,
+            &[
+                RcOption {
+                    value: "--jobs=3".to_owned(),
+                    command: "build".to_owned(),
+                    ..RcOption::default()
+                },
+                RcOption {
+                    value: "--keep_going".to_owned(),
+                    ..RcOption::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        // Last wins, so the caller's `--jobs=3` trailing both rc-file sections is what
+        // `--jobs` resolves to for a build.
+        assert_eq!(
+            rc.resolve_for_command("build").unwrap().1,
+            vec![
+                "--default_override=0:common=--jobs=1",
+                "--jobs=2",
+                "--keep_going",
+                "--jobs=3"
+            ],
+            "rc-file sections first, then the caller's: unscoped, then build-scoped"
+        );
+        assert_eq!(
+            rc.resolve_for_command("query").unwrap().1,
+            vec!["--default_override=0:common=--jobs=1", "--keep_going"],
+            "query reads neither the rc-file nor the caller's build section"
+        );
     }
 
     #[test]

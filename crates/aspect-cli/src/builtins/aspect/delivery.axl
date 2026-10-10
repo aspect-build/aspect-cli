@@ -1306,8 +1306,19 @@ def _delivery_impl(ctx):
 
         # The query runs off the active run command, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
-        # external repos the way the build does — e.g. an rc-set
-        # `--noenable_bzlmod` is honored — without a separate flag dance.
+        # external repos the way the build does — an rc-set `--noenable_bzlmod`
+        # is honored, and so is an injected `--repo_env` or `--registry`, which
+        # `bazel/flags.axl` deliberately leaves unscoped for exactly this
+        # reason: the set of targets this query returns is the set the build
+        # builds, so the two must agree on what the external repos are.
+        #
+        # It does NOT follow that everything a `query` rejects is filtered out.
+        # What features inject into the rc's `build` section does not reach here
+        # — that is what keeps a `--flaky_test_attempts` from killing the query
+        # — but a user-typed `--bazel-flag`, a passthrough flag and
+        # `trait.base_flags` are all unscoped and still arrive, so a build-only
+        # option typed on the command line reaches this query and Bazel will
+        # reject it. That is the user's own flag doing what they asked.
         targets = [t.name for t in ctx.bazel.query(
             query_expr,
             rc = rc,
