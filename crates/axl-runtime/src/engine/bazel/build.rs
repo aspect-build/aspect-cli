@@ -1050,16 +1050,10 @@ impl Build {
         // reader is started after it — once the client pid exists (see the BES
         // reader below for the same split, and why).
         let execlog_path = if execution_logs {
-            match injected_execlog_path {
+            let out = match injected_execlog_path {
                 // Something already named the path and put the flag on the command
-                // line. Tail that file and leave the flag alone; every CompactFile
-                // sink is served by the tee rather than by Bazel writing directly,
-                // so each still gets its copy — except one naming this very file,
-                // which Bazel is already writing and the tee would truncate under it.
-                Some(out) => {
-                    compact_paths.retain(|path| std::path::Path::new(path) != out);
-                    Some(out)
-                }
+                // line. Tail that file and leave the flag alone.
+                Some(out) => out,
                 // Nothing asked yet, so this call owns the flag. A CompactFile sink
                 // lends its path, letting Bazel write straight to the caller's
                 // destination with no temp file or tee step for that copy.
@@ -1071,9 +1065,18 @@ impl Build {
                     };
                     let out = ExecLogStream::reserve_path(direct_path);
                     cmd.arg(EXECUTION_LOG_COMPACT_FILE).arg(&out);
-                    Some(out)
+                    out
                 }
-            }
+            };
+
+            // Every remaining CompactFile sink is served by the tee rather than by
+            // Bazel writing directly, so each still gets its copy — except one
+            // naming the very file Bazel is writing, whose `File::create` would
+            // truncate it mid-build. Both arms can hold one: a sink's path can
+            // already be on the command line, and two sinks can name one path, in
+            // which case the first lent it to Bazel above.
+            compact_paths.retain(|path| std::path::Path::new(path) != out);
+            Some(out)
         } else {
             None
         };
@@ -1085,11 +1088,12 @@ impl Build {
         // previous build's entries — spawns that never ran, inputs that no longer
         // exist — and misses this build's.
         //
-        // Rare while every reader got a fresh UUID temp path; routine now that a
-        // path already on the command line is reused, which on a Workflows runner
-        // or an Aspect-wired deployment is one fixed path per build. Removing it
-        // is what makes the existence poll mean "wait for *this* build's log";
-        // Bazel creates the file itself, so there is nothing to put back.
+        // The exposure is in reused paths: a `CompactFile` sink's path and one
+        // already on the command line are both fixed per build, so on a Workflows
+        // runner or an Aspect-wired deployment every build finds the last one's
+        // log waiting. Removing it is what makes the existence poll mean "wait for
+        // *this* build's log"; Bazel creates the file itself, so there is nothing
+        // to put back.
         if let Some(path) = &execlog_path {
             if let Err(err) = std::fs::remove_file(path) {
                 if err.kind() != io::ErrorKind::NotFound {
@@ -1725,6 +1729,84 @@ Test = task(implementation = _impl)
             "bazel must still write the log where the deployment asked, at {}",
             asked.display(),
         );
+    }
+
+    /// No `CompactFile` sink may name the file Bazel is writing.
+    ///
+    /// One sink's path is lent to Bazel so it writes the caller's destination
+    /// directly; every other is served by the reader thread's `MultiTeeReader`,
+    /// which `File::create`s its path. A sink naming the path Bazel was handed
+    /// therefore truncates the log out from under it — and out from under the
+    /// reader, which has already opened the file and now sees it stop producing
+    /// bytes while the nominated holder is still alive.
+    ///
+    /// Two sinks with one path is the shape that reaches it here; a config
+    /// appending a path the artifacts feature already appended is how it arrives
+    /// in practice. The timeout is because the symptom is a stalled reader rather
+    /// than a wrong answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_compact_sink_never_names_the_file_bazel_is_writing() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink_path = dir.path().join("compact.zstd");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [
+            entries,
+            bazel.execution_log.compact_file(path = {sink:?}),
+            bazel.execution_log.compact_file(path = {sink:?}),
+        ],
+        stderr = None,
+    )
+    seen = 0
+    for entry in entries:
+        seen += 1
+        if entry.id != seen:
+            return 2  # a gap: the log was truncated under the reader
+    status = build.wait()
+    if not status.success: return 1
+    if seen != 3000: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            sink = sink_path.to_str().unwrap(),
+        );
+
+        let result = with_daemon_stand_in(move || {
+            crate::test::with_timeout(Duration::from_secs(60), move || {
+                crate::test::eval(&script).with_fake_bazel().run_task(0)
+            })
+        });
+
+        match result {
+            None => panic!("timed out: the tee truncated the log the reader was tailing"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "two sinks naming one path must still deliver all 3000 entries",
+            ),
+        }
+
+        // And the file itself is whole: Bazel's own copy, not one the tee
+        // re-created empty beside it.
+        let raw = std::fs::read(&sink_path).expect("bazel should have written the compact log");
+        let decoded = zstd::decode_all(raw.as_slice()).expect("a complete zstd frame");
+        let mut buf = decoded.as_slice();
+        let mut count = 0;
+        while !buf.is_empty() {
+            let entry = ExecLogEntry::decode_length_delimited(&mut buf)
+                .expect("the log should hold whole entries");
+            count += 1;
+            assert_eq!(entry.id, count, "the log should hold a contiguous run");
+        }
+        assert_eq!(count, 3000, "the compact log on disk should be complete");
     }
 
     /// `--execution_log_compact_file=` clears the flag rather than naming a
