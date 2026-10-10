@@ -50,9 +50,11 @@ spawns Bazel, which puts the whole window these three verbs cover — `open`,
 every `pump`, and `close` — inside that phase: a hook reads `build` under
 delivery's phase 1 and `deliver` under its phase 3, `lint` under `lint`,
 `populate` under `ci warming`, and `build_retry_<n>` / `test_retry_<n>` on an
-attempt after the first. `ExecLogHook` in `./trait.axl` documents it from the
-hook's side; `crates/aspect-cli/tests/exec_log_event.rs` asserts the name a hook
-actually read at every call site, including that it is never unset.
+attempt after the first. `cache diff` is the exception: it opens no phase at
+all, so a hook there reads `None` and has nothing to name its one invocation
+with. `ExecLogHook` in `./trait.axl` documents it from the hook's side;
+`crates/aspect-cli/tests/exec_log_event.rs` asserts the name a hook actually
+read at every call site, that exception included.
 
 The one case a phase name cannot separate is two invocations under a single
 phase. No task does that today — every retry transitions — and the gap is

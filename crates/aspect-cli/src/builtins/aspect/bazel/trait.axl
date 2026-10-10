@@ -99,12 +99,15 @@ def default_retry(code: int) -> bool:
 #         phase = ctx.task.current_phase()
 #         where = phase.name if phase else ""
 #
-# A task opens its phase before it spawns Bazel, so the phase is set by the time
-# any entry reaches a hook — `tests/exec_log_event.rs` asserts the name a hook
-# read at every call site in the tree, which is the only place a live task can
-# prove it. The names a hook sees today: `build` (`build`, `format`, `gazelle`,
-# `run`, delivery phase 1), `test`, `lint`, `populate` (`ci warming`), `deliver`
-# (delivery phase 3). A retry opens a phase of its own, so attempt n>0 reads
+# A task that opens a phase opens it before it spawns Bazel, so the phase is set
+# by the time any entry reaches a hook — hence the guard above rather than a bare
+# `.name`, because `cache diff` opens none and hands a hook `None`.
+# `tests/exec_log_event.rs` asserts the name a hook read at every call site in
+# the tree, which is the only place a live task can prove it. The names a hook
+# sees today: `build` (`build`, `format`, `gazelle`, `run`, delivery phase 1),
+# `test`, `lint`, `populate` (`ci warming`), `deliver`
+# (delivery phase 3), and nothing at all under `cache diff`.
+# A retry opens a phase of its own, so attempt n>0 reads
 # `build_retry_<n+1>` / `test_retry_<n+1>` and retries are distinguishable too.
 # `ctx.task.name` is the other half of the answer, for a hook that more than one
 # task registered.
