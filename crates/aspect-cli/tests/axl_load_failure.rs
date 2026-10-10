@@ -237,7 +237,9 @@ fn assert_failed_on_axl(output: &Output, needle: &str) {
 /// diagnostic the traceback is part of rather than being a second failure, so
 /// lines inside a traceback block do not count. (The CLI prefixes the
 /// traceback’s first line, which leaves two `error:` lines on stderr for the
-/// one failure — pre-existing, and not what this checks.)
+/// one failure — pre-existing, and not what this checks.) A block is taken to
+/// end at the next blank line, which is how Starlark’s renderer ends one
+/// rather than anything the CLI promises.
 fn assert_no_doubled_error_prefix(stderr: &str) {
     assert!(
         !stderr.contains("error: error:"),
