@@ -9,6 +9,24 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
+load("./private/lib/watch.axl", "watch")
+
+def _run_build(bz, rs):
+    """Run one complete Bazel build, including configured retry attempts."""
+    w = None
+    for i in bz.attempts:  # `i` is the single source of truth for the attempt index
+        rs.attempt(i, prior = w)
+        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
+        rs.invocation(sp)
+        for event in sp.events:  # BuildEvent | None (None = quiet-tick heartbeat)
+            bz.on_event(event)
+            rs.process(event)
+        w = sp.wait()  # bazel_attempt_end hooks
+        if w.success or not bz.should_retry(sp, w):
+            break
+
+    bz.finish(w)  # BES summary + build_end + code coercion
+    return w
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # High-level invocation handle: resolves targets, the flag → rc pipeline,
@@ -28,25 +46,30 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Surface init + health checks (rc already active); also seeds the resolved
     # BES facts the Aspect Web UI link is keyed on.
     rs.setup(bz.targets, bz.rc, bz.bazel_streams_bes, bz.results_url)
+    ws = watch.new(ctx, rc = bz.rc) if ctx.args.watch else None
     bz.start()  # --cancel
 
-    w = None
-    for i in bz.attempts:  # `i` is the single source of truth for the attempt index
-        rs.attempt(i, prior = w)
-        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
-        rs.invocation(sp)
-        for event in sp.events:  # BuildEvent | None (None = quiet-tick heartbeat)
-            bz.on_event(event)
-            rs.process(event)
-        w = sp.wait()  # bazel_attempt_end hooks
-        if w.success or not bz.should_retry(sp, w):
-            break
+    def run_cycle():
+        w = _run_build(bz, rs)
+        return rs.conclude(w, bz.targets, final = not ctx.args.watch)
 
-    bz.finish(w)  # BES summary + build_end + code coercion
-    return rs.conclude(w, bz.targets)
+    conclusion = run_cycle()
+    if not ctx.args.watch:
+        return conclusion
+
+    def rerun():
+        rs.reset()
+        run_cycle()
+
+    return watch.loop(ws, rerun)
 
 build = task(
-    args = bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args(),
+    args = {
+        "watch": args.boolean(
+            default = False,
+            description = "Stay running after the first build, watching the workspace and rebuilding all requested targets after each settled batch of changes. Stop with Ctrl-C.",
+        ),
+    } | bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args(),
     show_task_options = True,
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [
