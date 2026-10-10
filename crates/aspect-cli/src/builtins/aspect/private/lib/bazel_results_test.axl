@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
+load("./bazel_results.axl", "BUILD_ABORT_REASONS", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -1590,9 +1590,13 @@ def _test_results_kinds_locked(ctx):
     _eq("RESULTS_KINDS set", sorted(RESULTS_KINDS), expected)
 
 def _test_results_kinds_all_processed(ctx):
-    """Every kind in `RESULTS_KINDS` drives a real `process_event` branch — feed
-    a minimal event of each and confirm it's handled without error (missing
-    payload fields are tolerated via `bes_get`)."""
+    """Feed a minimal event of each `RESULTS_KINDS` entry and confirm it is
+    handled without error (missing payload fields are tolerated via `bes_get`).
+
+    A smoke test only. These events are synthetic: `kind` is set from the
+    filter's own name, and for `"aborted"` no such `event.kind` exists in real
+    BEP at all (see `_test_aborted_is_not_a_build_event_id_kind`), so passing
+    here is NOT evidence that a kind is really consumed."""
     for kind in RESULTS_KINDS:
         event = struct(
             kind = kind,
@@ -1604,6 +1608,142 @@ def _test_results_kinds_all_processed(ctx):
         result = process_event(init_data(), event, None)
         if result != True and result != False:
             fail("process_event(%s) returned non-bool: %r" % (kind, result))
+
+def _abort_event(kind, reason, id = None, description = ""):
+    """A real-BEP-shaped aborted event: an `Aborted` payload (`reason` +
+    `description`) carried by the id of whatever was aborted. `kind` is that
+    id's name — `target_completed`, `pattern_expanded`, … — because
+    `BuildEventId` has no `aborted` variant."""
+    return struct(
+        kind = kind,
+        id = id if id != None else struct(label = "//pkg:t", configuration = struct(id = "c1")),
+        payload = struct(reason = reason, description = description),
+    )
+
+def _aborted_flag_after(event):
+    data = init_data()
+    process_event(data, event, None)
+    return data["bazel"]["aborted"]
+
+# Every `Aborted.AbortReason` in build_event_stream.proto, and whether it means
+# the INVOCATION was cut short (True) or is per-target / deliberate (False).
+_ABORT_REASON_CASES = [
+    ("user_interrupted", True),
+    ("time_out", True),
+    ("remote_environment_failure", True),
+    ("internal", True),
+    ("out_of_memory", True),
+    ("unknown", False),
+    ("no_analyze", False),
+    ("no_build", False),
+    ("loading_failure", False),
+    ("analysis_failure", False),
+    ("skipped", False),
+    ("incomplete", False),
+]
+
+def _test_abort_payload_under_target_completed_flips_the_build(ctx):
+    """Ctrl-C mid-build: bazel hangs Aborted(USER_INTERRUPTED) off the
+    `target_completed` id of each in-flight target. The build-level flag must
+    follow, and the per-target tally must survive the added probe."""
+    data = init_data()
+    interesting = process_event(
+        data,
+        _abort_event("target_completed", "user_interrupted", description = "Build interrupted by user"),
+        None,
+    )
+    _eq("build flagged aborted", data["bazel"]["aborted"], True)
+    _eq("reason recorded", data["bazel"]["abort_reason"], "user_interrupted")
+    _eq("description recorded", data["bazel"]["abort_description"], "Build interrupted by user")
+    _eq("warrants a status update", interesting, True)
+    _eq("per-target tally untouched", data["bazel"]["skipped_targets_total"], 1)
+    _eq("status is aborted", pick_status("build", data, had_failure = True, terminal = True), "aborted")
+    _eq("title reports the abort", compute_invocation_state(data, "aborted"), "Invocation disconnected")
+
+def _test_abort_payload_under_pattern_expanded_flips_the_build(ctx):
+    """`pattern_expanded` has no `process_event` arm at all, so a probe placed
+    inside the kind switch would never see an Aborted payload riding on it."""
+    data = init_data()
+    interesting = process_event(
+        data,
+        _abort_event("pattern_expanded", "time_out", id = struct(pattern = ["//..."])),
+        None,
+    )
+    _eq("build flagged aborted", data["bazel"]["aborted"], True)
+    _eq("reason recorded", data["bazel"]["abort_reason"], "time_out")
+    _eq("warrants a status update", interesting, True)
+
+def _test_aborted_is_not_a_build_event_id_kind(ctx):
+    """`BuildEventId` has no `aborted` variant, so `event.kind` never reads
+    "aborted" in real BEP — only the synthetic events of
+    `_test_results_kinds_all_processed` ever did. Nothing may key off that
+    string: a bare `kind = "aborted"` event with no `Aborted` payload is not an
+    abort, while the same payload under a real id is one."""
+    data = init_data()
+    process_event(data, struct(kind = "aborted", id = struct(), payload = struct()), None)
+    _eq("bare kind='aborted' is not an abort", data["bazel"]["aborted"], False)
+    _eq("no reason invented", data["bazel"]["abort_reason"], "")
+    _eq(
+        "the payload, not the kind, is what counts",
+        _aborted_flag_after(_abort_event("target_completed", "user_interrupted")),
+        True,
+    )
+
+def _test_only_invocation_wide_abort_reasons_flip_the_build(ctx):
+    """`Aborted` is also how bazel reports skipped targets, `--nobuild`, and the
+    per-label root cause of an ordinary build failure. Only the reasons that
+    mean the invocation itself stopped may reach the `"aborted"` status."""
+    for (reason, want) in _ABORT_REASON_CASES:
+        _eq(
+            "reason %r flips the build flag" % reason,
+            _aborted_flag_after(_abort_event("target_completed", reason)),
+            want,
+        )
+    _eq(
+        "BUILD_ABORT_REASONS agrees with the table",
+        sorted(BUILD_ABORT_REASONS),
+        sorted([r for (r, want) in _ABORT_REASON_CASES if want]),
+    )
+
+def _test_skipped_target_counts_as_skipped_and_not_as_an_abort(ctx):
+    """A skipped target (incompatible constraints, `--build_tag_filters`) is an
+    `Aborted` payload on a build that exits 0. It belongs in the skipped bucket
+    and must leave the invocation green."""
+    data = init_data()
+    process_event(data, _abort_event("target_completed", "skipped"), None)
+    _eq("counted as skipped", data["bazel"]["skipped_targets_total"], 1)
+    _eq("kept with its reason", data["bazel"]["skipped_targets"][0]["reason"], "skipped")
+    _eq("build not aborted", data["bazel"]["aborted"], False)
+    _eq("still passes", pick_status("build", data, had_failure = False, terminal = True), "passed")
+
+def _test_per_label_abort_root_causes_still_read_failed(ctx):
+    """A missing input file / visibility error is reported as an `Aborted`
+    payload under `unconfigured_label` / `configured_label` — ids that carry
+    nothing else. Those are build failures; relabelling them "aborted" would
+    change the verdict on every such red build."""
+    for (kind, reason) in [("unconfigured_label", "loading_failure"), ("configured_label", "analysis_failure")]:
+        data = init_data()
+        process_event(data, _abort_event(kind, reason, id = struct(label = "//pkg:missing")), None)
+        _eq("%s does not abort the build" % kind, data["bazel"]["aborted"], False)
+        _eq("%s still reads failed" % kind, pick_status("build", data, had_failure = True, terminal = True), "failed")
+
+def _test_pick_status_ranks_aborted_above_every_other_verdict(ctx):
+    """Ordering inside `pick_status`, live for the first time now that the flag
+    is reachable: an aborted build reports "aborted" even when a failure or a
+    flake was already recorded, matching `compute_invocation_state`'s fixed
+    Aborted label."""
+    data = init_data()
+    _eq("clean + terminal", pick_status("build", data, had_failure = False, terminal = True), "passed")
+    _eq("failure + terminal", pick_status("build", data, had_failure = True, terminal = True), "failed")
+    _eq("failure mid-stream", pick_status("build", data, had_failure = True, terminal = False), "failing")
+
+    data["bazel"]["aborted"] = True
+    _eq("abort outranks failed", pick_status("build", data, had_failure = True, terminal = True), "aborted")
+    _eq("abort outranks failing", pick_status("build", data, had_failure = True, terminal = False), "aborted")
+    _eq("abort outranks running", pick_status("build", data, had_failure = False, terminal = False), "aborted")
+
+    data["bazel"]["flaky_test_total"] = 2
+    _eq("abort outranks warning", pick_status("test", data, had_failure = False, terminal = True), "aborted")
 
 def _test_strip_url_creds_keeps_user_when_split(ctx):
     _eq(
@@ -2024,6 +2164,13 @@ _UNIT_TESTS = [
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
     _test_repro_targets_dedups_fallback_input,
+    _test_abort_payload_under_target_completed_flips_the_build,
+    _test_abort_payload_under_pattern_expanded_flips_the_build,
+    _test_aborted_is_not_a_build_event_id_kind,
+    _test_only_invocation_wide_abort_reasons_flip_the_build,
+    _test_skipped_target_counts_as_skipped_and_not_as_an_abort,
+    _test_per_label_abort_root_causes_still_read_failed,
+    _test_pick_status_ranks_aborted_above_every_other_verdict,
     _test_strip_url_creds_keeps_user_when_split,
     _test_strip_url_creds_redacts_bare_userinfo,
     _test_strip_url_creds_leaves_urls_without_userinfo,
