@@ -47,7 +47,8 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    execution_log = list(bazel_trait.execution_log_sinks)
+    xl = bzl.exec_log.open(bazel_trait)
+    execution_log = list(xl.sinks)
     if execution_log_path != None:
         execution_log.append(bazel.execution_log.file(path = execution_log_path))
 
@@ -63,6 +64,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
 
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -74,6 +76,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
         if events.done:
             break
 
+    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()
@@ -338,9 +341,11 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
+    xl = bzl.exec_log.open(bazel_trait)
     build = ctx.bazel.build(
         target,
         build_events = build_events,
+        execution_log = xl.sinks or False,
         flags = r.flags + endpoint_auth_flags,
         aspects = r.aspects,
         announce_version = announce_version,
@@ -349,6 +354,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -360,6 +366,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         if events.done:
             break
 
+    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()

@@ -99,7 +99,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         sp = bz.spawn(i, events = results.KINDS if rs.live else False)
         rs.invocation(sp)
         for event in sp.events:
-            bz.on_event(event)
+            sp.on_event(event)  # build_event + exec_log_event hooks
             rs.process(event)
         w = sp.wait()
         if w.success or not bz.should_retry(sp, w):

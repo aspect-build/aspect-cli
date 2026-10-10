@@ -822,24 +822,44 @@ fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
         && flag.version_condition == value.version_condition
 }
 
-/// All values of a repeatable `--name` option among `opts`, in order. Matches
-/// `--name=VALUE` and the two-token `--name VALUE` form (value is the next token).
-fn flag_value_list(opts: &[RcOption], name: &str) -> Vec<String> {
+/// All values of a repeatable `--name` flag among `tokens`, in order. Matches
+/// `--name=VALUE` and the two-token `--name VALUE` form, where a token starting
+/// with `-` is never taken as a value (that is the next flag, and `--name` was
+/// passed bare).
+///
+/// Shared by the rc options path (`flag_value_list`) and by callers holding a
+/// plain command line ([`last_flag_value`]), so both read a flag the way Bazel
+/// does.
+pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
     let eq_prefix = format!("{name}=");
     let mut values = Vec::new();
-    for (i, opt) in opts.iter().enumerate() {
-        let v = opt.value.as_str();
-        if let Some(rest) = v.strip_prefix(&eq_prefix) {
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(rest) = token.strip_prefix(&eq_prefix) {
             values.push(rest.to_string());
-        } else if v == name {
-            if let Some(next) = opts.get(i + 1) {
-                if !next.value.starts_with('-') {
-                    values.push(next.value.clone());
+        } else if *token == name {
+            if let Some(next) = tokens.get(i + 1) {
+                if !next.starts_with('-') {
+                    values.push((*next).to_string());
                 }
             }
         }
     }
     values
+}
+
+/// The effective value of a single-valued `--name` on a command line, or `None`
+/// if unset. Last occurrence wins, which is how Bazel resolves a flag given more
+/// than once.
+pub fn last_flag_value(args: &[String], name: &str) -> Option<String> {
+    let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    flag_values_in(&tokens, name).pop()
+}
+
+/// All values of a repeatable `--name` option among `opts`, in order, by the
+/// rules [`flag_values_in`] documents.
+fn flag_value_list(opts: &[RcOption], name: &str) -> Vec<String> {
+    let tokens: Vec<&str> = opts.iter().map(|opt| opt.value.as_str()).collect();
+    flag_values_in(&tokens, name)
 }
 
 /// Tri-state of a boolean `--name` option: `Some(true)` for `--name` /
@@ -1098,6 +1118,48 @@ mod runcommand_tests {
         // A bare `--foo` followed by another flag yields no value.
         let o = opts(&["--remote_cache", "--jobs=4"]);
         assert!(flag_value_list(&o, "--remote_cache").is_empty());
+    }
+
+    /// `last_flag_value` reads a command line rather than rc options, for a
+    /// caller deciding whether a flag has already been asked for.
+    #[test]
+    fn last_flag_value_reads_a_command_line() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        assert_eq!(
+            last_flag_value(
+                &args(&["--jobs=4", "--remote_cache=grpc://x"]),
+                "--remote_cache"
+            ),
+            Some("grpc://x".to_string()),
+        );
+        assert_eq!(
+            last_flag_value(&args(&["--remote_cache", "grpc://x"]), "--remote_cache"),
+            Some("grpc://x".to_string()),
+            "the two-token form is the same flag",
+        );
+        assert_eq!(
+            last_flag_value(
+                &args(&["--remote_cache=grpc://first", "--remote_cache=grpc://last"]),
+                "--remote_cache",
+            ),
+            Some("grpc://last".to_string()),
+            "bazel takes the last of a repeated single-valued flag, so this must too",
+        );
+        assert_eq!(
+            last_flag_value(&args(&["--remote_cache", "--jobs=4"]), "--remote_cache"),
+            None,
+            "a bare flag before another flag names no value",
+        );
+        assert_eq!(
+            last_flag_value(&args(&["--jobs=4"]), "--remote_cache"),
+            None,
+        );
+        assert_eq!(
+            last_flag_value(&args(&["--remote_cache_header=x"]), "--remote_cache"),
+            None,
+            "a longer flag sharing the prefix is a different flag",
+        );
     }
 
     #[test]

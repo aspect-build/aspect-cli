@@ -6,6 +6,7 @@ files can load the full trait set with a single import:
 
     load("@aspect//traits.axl",
          "BazelTrait",
+         "ExecLogHook",
          "Phases",
          "DeliveryTrait",
          "DeliveryState",
@@ -41,7 +42,7 @@ instead — it carries `append` / `list` / `by_kind` / `by_label` /
 into the task's trait list).
 """
 
-load("@aspect//bazel.axl", _BazelTrait = "BazelTrait")
+load("@aspect//bazel.axl", _BazelTrait = "BazelTrait", _ExecLogHook = "ExecLogHook")
 load("@aspect//delivery.axl", _DeliveryTrait = "DeliveryTrait")
 load("@aspect//lint.axl", _LintTrait = "LintTrait")
 load("./private/lib/delivery_state.axl", _DeliveryState = "DeliveryState")
@@ -72,6 +73,7 @@ load("./private/lib/worktrees_trait.axl", _Worktrees = "Worktrees")
 BazelTrait = _BazelTrait
 DeliveryState = _DeliveryState
 DeliveryTrait = _DeliveryTrait
+ExecLogHook = _ExecLogHook
 HealthCheckTrait = _HealthCheckTrait
 LintTrait = _LintTrait
 REPRO_FIX_ACCEPT = _REPRO_FIX_ACCEPT

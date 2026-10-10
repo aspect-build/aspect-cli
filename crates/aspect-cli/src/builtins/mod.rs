@@ -155,6 +155,10 @@ fn evict_stale_dir(final_dir: &Path) {
     let _ = fs::remove_dir_all(&trash);
 }
 
+/// Source-level assertions on the built-in tree's `exec_log_event` wiring.
+#[cfg(test)]
+mod exec_log_wiring;
+
 #[cfg(test)]
 mod tests {
     use super::*;

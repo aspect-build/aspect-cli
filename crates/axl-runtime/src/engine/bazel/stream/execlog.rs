@@ -1,5 +1,5 @@
 use axl_proto::tools::protos::ExecLogEntry;
-use fibre::spmc::{Receiver, bounded};
+use fibre::spmc::{Receiver, Sender, bounded};
 use fibre::{CloseError, SendError, TrySendError};
 use prost::Message;
 use std::fmt::Debug;
@@ -27,6 +27,51 @@ pub enum ExecLogStreamError {
     Close(#[from] CloseError),
 }
 
+/// What the reader thread found at the execution log's path.
+///
+/// Bazel creates the compact log once a command gets past target-pattern parsing
+/// and package loading — including for a build that runs no actions at all, which
+/// still leaves an empty zstd frame (28 bytes on Bazel 7, 66 on 8 and 9). A
+/// pattern that resolves and matches nothing (`//...` in an empty workspace,
+/// `//pkg:all`) is one of those: it exits 0 and writes the empty frame. Bazel does
+/// *not* create one for a pattern that does not resolve — no such package or
+/// target — an unparseable BUILD file or a rejected flag, and every one of those
+/// exits nonzero.
+///
+/// So the absence of a log is only remarkable on an invocation that *succeeded*,
+/// and that is the one the caller is asked to warn about: a successful build whose
+/// log never appeared is the shape a dead nominated holder produces, where every
+/// hook fires zero times and nothing says so. On a failed build the absence is
+/// ordinary and Bazel has already printed the reason, so a warning there would
+/// only crowd it out.
+///
+/// The outcome reaches a caller only through `join()`, and `Build` joins the
+/// stream from `wait()` alone — there is no `Drop` path and `wait_timeout` does
+/// not join — so a task that never calls `wait()` never learns it, and no warning
+/// is printed. Every wired site calls `wait()`, so this is a note about where the
+/// verdict lives rather than a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderOutcome {
+    /// The log appeared and was read to the end of the stream.
+    Read,
+    /// The invocation ended before the log appeared.
+    NeverAppeared,
+}
+
+/// Decoded entries buffered between the reader thread and its subscribers.
+///
+/// A broadcast ring: the producer may not lap its slowest subscriber, so this is
+/// also how far ahead of the slowest consumer the reader may get before it either
+/// blocks or starts dropping, depending on [`ExecLogStream::spawn`]'s `lossless`.
+const CHANNEL_CAPACITY: usize = 1000;
+
+/// [`CHANNEL_CAPACITY`], for tests that assert on behaviour at the boundary
+/// rather than restating the number.
+#[cfg(test)]
+pub fn channel_capacity() -> usize {
+    CHANNEL_CAPACITY
+}
+
 /// Wraps a `Read` source, blocking on empty reads until real data arrives.
 ///
 /// Some `Read` implementations (e.g. [`galvanize::StreamingFile`]) return `Ok(0)` to signal
@@ -49,15 +94,40 @@ impl<R: Read> Read for RetryRead<R> {
     }
 }
 
+/// Hand one decoded entry to the stream's subscribers, by whichever strategy
+/// `lossless` selects (see [`ExecLogStream::spawn`]).
+///
+/// Returns whether any subscriber remains. `false` means every one is gone — the
+/// file-sink threads finished and `build.wait()` released the iterator handles —
+/// so the caller can drain the rest of the bytes without paying to decode them.
+/// On the blocking path that is also why a closed channel is not an error: there
+/// is nobody left to miss the remaining entries, and failing here would fail an
+/// otherwise good build.
+fn forward(sender: &Sender<ExecLogEntry>, entry: ExecLogEntry, lossless: bool) -> bool {
+    if lossless {
+        return sender.send(entry).is_ok();
+    }
+    match sender.try_send(entry) {
+        // Full: the consumer is behind and the entry is dropped by design.
+        Ok(()) | Err(TrySendError::Sent(_)) | Err(TrySendError::Full(_)) => true,
+        Err(TrySendError::Closed(_)) => false,
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecLogStream {
-    handle: JoinHandle<Result<(), ExecLogStreamError>>,
-    // Holds the initial subscriber clone. Kept as Option so join() can drop it
-    // before the thread finishes. In fibre's SPMC broadcast ring buffer every
-    // Receiver clone is an independent subscriber whose tail the sender must not
-    // lap; an unconsumed clone prevents the Closed signal that tells the producer
-    // to stop decoding. Dropping it first means the sender sees Closed on the
-    // first try_send when no external subscribers exist, skipping all decoding.
+    handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
+    /// The one subscriber the stream starts with, and the only thing a further
+    /// subscriber can be cloned from — so once it is gone, nothing can join.
+    ///
+    /// Nobody reads it, which is why it is an `Option` to be given away or
+    /// dropped as soon as the real consumers are wired: in fibre's broadcast ring
+    /// the producer may not lap its slowest subscriber, and an unread one is a
+    /// tail stuck at entry zero. Left in place it caps every other consumer at
+    /// [`CHANNEL_CAPACITY`] — blocking the producer there, or silently dropping
+    /// past it. Gone with no consumer in its place, the first send reports
+    /// `Closed` and the reader skips decoding entirely, which is what `join()`
+    /// relies on.
     recv: Option<Receiver<ExecLogEntry>>,
     /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
     file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
@@ -80,10 +150,10 @@ impl ExecLogStream {
     pub fn spawn_with_pipe(
         pid: u32,
         compact_sink_paths: Vec<String>,
-        has_file_sinks: bool,
+        lossless: bool,
     ) -> io::Result<(PathBuf, Self)> {
         let out = env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()));
-        let stream = Self::spawn(out.clone(), pid, compact_sink_paths, has_file_sinks)?;
+        let stream = Self::spawn(out.clone(), pid, compact_sink_paths, lossless)?;
         Ok((out, stream))
     }
 
@@ -91,17 +161,20 @@ impl ExecLogStream {
     ///
     /// ## Send strategy
     ///
-    /// `has_file_sinks` controls how decoded entries are sent to the channel:
+    /// `lossless` controls how decoded entries are sent to the channel:
     ///
-    /// - `true` — blocking [`Sender::send`]. File-sink threads must receive every entry
-    ///   to produce a complete output file, so the producer waits for the channel to drain
-    ///   rather than dropping entries. The build may slow under sustained I/O pressure, but
-    ///   it will not deadlock because the sink threads are always consuming.
+    /// - `true` — blocking [`Sender::send`]: every subscriber sees every entry. Set
+    ///   when one of them requires that — a decoded `File` sink, which would otherwise
+    ///   write an incomplete file, or an [`ExecLogIter`](super::super::iter::ExecLogIter)
+    ///   handle backing `BazelTrait.exec_log_event` hooks, which would otherwise miss
+    ///   entries with nothing to say so. The reader waits for the slowest subscriber;
+    ///   `build.wait()` releases the handles before joining it, so a consumer that
+    ///   stops reading cannot hold the reader forever.
     ///
-    /// - `false` — non-blocking [`Sender::try_send`]. Used when the only consumer is the
-    ///   optional `execution_logs()` iterator. A full channel means the caller is not
-    ///   consuming fast enough; entries are dropped rather than stalling the build.
-    ///   Once all receiver clones are gone (`Closed`), decoding is skipped entirely.
+    /// - `false` — non-blocking [`Sender::try_send`]: entries past
+    ///   [`CHANNEL_CAPACITY`] ahead of the slowest subscriber are dropped rather than
+    ///   stalling the reader. The strategy for `execution_logs()`, which is handed out
+    ///   after the spawn and so cannot be counted here.
     ///
     /// `CompactFile` sinks are unaffected by this flag — raw bytes are always tee'd
     /// by `MultiTeeReader` before decoding.
@@ -109,9 +182,9 @@ impl ExecLogStream {
         path: PathBuf,
         pid: u32,
         compact_sink_paths: Vec<String>,
-        has_file_sinks: bool,
+        lossless: bool,
     ) -> io::Result<Self> {
-        let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
+        let (mut sender, recv) = bounded::<ExecLogEntry>(CHANNEL_CAPACITY);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
@@ -129,8 +202,6 @@ impl ExecLogStream {
             };
             let mut out_raw = Decoder::new(out_raw)?;
 
-            // Only used in the try_send path (no file sinks).
-            // Set to false when try_send returns Closed, skipping future decodes.
             let mut has_readers = true;
 
             let mut read = || -> Result<(), ExecLogStreamError> {
@@ -142,18 +213,9 @@ impl ExecLogStream {
 
                 out_raw.read_exact(&mut buf[0..size])?;
 
-                if has_file_sinks {
+                if has_readers {
                     let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    sender.send(entry)?;
-                } else if has_readers {
-                    let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    match sender.try_send(entry) {
-                        Ok(()) | Err(TrySendError::Sent(_)) => {}
-                        // Channel full: iterator consumer is slow, drop entry.
-                        Err(TrySendError::Full(_)) => {}
-                        // No receivers left: skip decoding for remaining entries.
-                        Err(TrySendError::Closed(_)) => has_readers = false,
-                    }
+                    has_readers = forward(&sender, entry, lossless);
                 }
 
                 Ok(())
@@ -166,7 +228,7 @@ impl ExecLogStream {
                     Err(ExecLogStreamError::IO(err)) if err.kind() == io::ErrorKind::BrokenPipe => {
                         sender.close()?;
                         out_raw.get_mut().get_mut().flush()?;
-                        return Ok(());
+                        return Ok(ReaderOutcome::Read);
                     }
                     Err(err) => return Err(err),
                 }
@@ -211,14 +273,20 @@ impl ExecLogStream {
     ///
     /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
     /// written before the reader opens are still there to be read.
+    ///
+    /// `lossless` picks the send strategy, as described on [`spawn`](Self::spawn).
+    /// This is the production path, and the regular file is why `true` is affordable
+    /// here: Bazel writes the file and this thread tails it, so a slow consumer
+    /// parks *this* thread and never Bazel. Back-pressure therefore shows up as a
+    /// longer `join()` at the end of the build, not as a slower build.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
         client_pid: u32,
         compact_sink_paths: Vec<String>,
-        has_file_sinks: bool,
+        lossless: bool,
     ) -> io::Result<Self> {
-        let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
+        let (mut sender, recv) = bounded::<ExecLogEntry>(CHANNEL_CAPACITY);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
@@ -227,12 +295,16 @@ impl ExecLogStream {
             let out_raw = match galvanize::StreamingFile::open(path.clone(), server_pid, client_pid)
             {
                 Ok(f) => f,
-                // Bazel exited without ever writing an execution log — a rejected
-                // command line, say. An empty stream, not a failure: the build's own
-                // exit code is the thing the caller wants to see.
+                // Bazel exited without ever writing an execution log. An empty
+                // stream, not a failure: the build's own exit code is the thing the
+                // caller wants to see.
+                //
+                // Whether that is worth saying out loud depends on the exit code,
+                // which this thread does not have — so it reports the fact and
+                // `join()`'s caller decides. See [`ReaderOutcome::NeverAppeared`].
                 Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
                     sender.close()?;
-                    return Ok(());
+                    return Ok(ReaderOutcome::NeverAppeared);
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -248,7 +320,6 @@ impl ExecLogStream {
             let out_raw = RetryRead { inner: out_raw };
             let mut out_raw = Decoder::new(out_raw)?;
 
-            // Only used in the try_send path (no file sinks).
             let mut has_readers = true;
 
             let mut read = || -> Result<(), ExecLogStreamError> {
@@ -259,18 +330,9 @@ impl ExecLogStream {
 
                 out_raw.read_exact(&mut buf[0..size])?;
 
-                if has_file_sinks {
+                if has_readers {
                     let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    sender.send(entry)?;
-                } else if has_readers {
-                    let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    match sender.try_send(entry) {
-                        Ok(()) | Err(TrySendError::Sent(_)) => {}
-                        // Channel full: iterator consumer is slow, drop entry.
-                        Err(TrySendError::Full(_)) => {}
-                        // No receivers left: skip decoding for remaining entries.
-                        Err(TrySendError::Closed(_)) => has_readers = false,
-                    }
+                    has_readers = forward(&sender, entry, lossless);
                 }
 
                 Ok(())
@@ -283,7 +345,7 @@ impl ExecLogStream {
                     Err(ExecLogStreamError::IO(err)) if err.kind() == io::ErrorKind::BrokenPipe => {
                         sender.close()?;
                         out_raw.get_mut().get_mut().inner.flush()?;
-                        return Ok(());
+                        return Ok(ReaderOutcome::Read);
                     }
                     Err(err) => return Err(err),
                 }
@@ -297,11 +359,26 @@ impl ExecLogStream {
         })
     }
 
-    pub fn receiver(&self) -> Receiver<ExecLogEntry> {
-        self.recv
-            .as_ref()
-            .expect("receiver() called after join()")
-            .clone()
+    /// A further subscriber to the decoded stream, cloned from the stream's own.
+    /// `None` once that one has been given away or dropped
+    /// ([`take_initial_subscriber`](Self::take_initial_subscriber), `join()`).
+    ///
+    /// Only for a consumer that will actually drain it — see the `recv` field.
+    pub fn receiver(&self) -> Option<Receiver<ExecLogEntry>> {
+        self.recv.as_ref().cloned()
+    }
+
+    /// Give the stream's own subscriber away, leaving it with none.
+    ///
+    /// Two callers, both with the same requirement — that the stream not keep an
+    /// unread subscriber once the real consumers are wired (see the `recv`
+    /// field). `build.execution_logs()` takes it *as* its consumer, so the one
+    /// subscriber is the one being drained; `Build::spawn` drops the value, once
+    /// the sinks and iterator handles have cloned what they need.
+    ///
+    /// `None` means it has already gone, so no further consumer can be added.
+    pub fn take_initial_subscriber(&mut self) -> Option<Receiver<ExecLogEntry>> {
+        self.recv.take()
     }
 
     /// Take ownership of a decoded-file sink worker thread. Its lifecycle is
@@ -311,13 +388,14 @@ impl ExecLogStream {
         self.file_sink_handles.push(handle);
     }
 
-    /// Wait for the execlog stream to finish.
+    /// Join the reader and every file sink, reporting what the reader found at
+    /// the log's path. See [`ReaderOutcome`] for what a caller does with it.
     ///
-    /// Drops the struct's `recv` clone so that if no external subscriber exists
-    /// the first `try_send` returns `Closed` and remaining bytes are drained
-    /// without proto decoding. Then waits for the reader thread and every
-    /// attached file-sink writer, surfacing the first write error if any.
-    pub fn join(mut self) -> Result<(), ExecLogStreamError> {
+    /// Releases the stream's own subscriber if it still holds one, so that with no
+    /// consumer left the reader stops decoding and drains. Then waits for the
+    /// reader thread and every attached file-sink writer, surfacing the first
+    /// write error if any.
+    pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
         self.recv.take();
         let reader_result = self.handle.join().expect("join error");
         for h in self.file_sink_handles {
@@ -334,5 +412,50 @@ impl ExecLogStream {
             }
         }
         reader_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: u32) -> ExecLogEntry {
+        ExecLogEntry { id, r#type: None }
+    }
+
+    /// Why the stream must not keep an unread subscriber once real ones exist.
+    ///
+    /// In fibre's broadcast ring each subscriber has its own tail and the producer
+    /// may not lap the slowest. One that nobody reads sits at entry zero forever,
+    /// so the ring reads as full from the producer's side however diligently every
+    /// other subscriber drains — capping them all at the capacity. Blocking sends
+    /// then park and lossy ones drop, neither of which the consumer can see.
+    #[test]
+    fn an_unread_subscriber_clone_stops_the_producer_once_the_ring_fills() {
+        // A small ring: the behaviour is in the tails, not the size.
+        const CAPACITY: u32 = 4;
+        let (sender, kept) = bounded::<ExecLogEntry>(CAPACITY as usize);
+        let drained = kept.clone();
+
+        for i in 0..CAPACITY {
+            sender.try_send(entry(i)).expect("the ring has room");
+        }
+        for i in 0..CAPACITY {
+            assert_eq!(drained.recv().expect("an entry").id, i);
+        }
+
+        // `drained` is caught up, but `kept` never read anything, so from the
+        // producer's side the ring is still full.
+        assert!(
+            matches!(sender.try_send(entry(99)), Err(TrySendError::Full(_))),
+            "an unread clone should hold the ring full even though every other \
+             subscriber is caught up",
+        );
+
+        drop(kept);
+        sender
+            .try_send(entry(99))
+            .expect("dropping the unread clone must free the ring");
+        assert_eq!(drained.recv().expect("an entry").id, 99);
     }
 }

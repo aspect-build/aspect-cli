@@ -15,6 +15,20 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
+//!     When `--execution_log_compact_file <path>` is also present, a scenario
+//!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there,
+//!     in the real format: one zstd frame over varint-length-prefixed messages,
+//!     written as a regular file the way Bazel writes it. Entry counts above the
+//!     decoded channel's 1000-entry capacity are the point — truncation past the
+//!     capacity is invisible without a log longer than it.
+//!
+//!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
+//!     [`await_pump_handshake`].
+//!
+//!     When `--build_event_json_file <path>` is present, a scenario with
+//!     `json_bep_tests` writes the loading-only test selection that
+//!     `aspect cache diff` establishes its scope from — see [`write_json_bep`].
+//!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
 //! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
@@ -32,10 +46,12 @@ use axl_proto::build_event_stream::{
     build_event_id::{ActionCompletedId, BuildFinishedId, BuildStartedId, Id, NamedSetOfFilesId},
     build_finished::ExitCode,
 };
+use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
 use prost::Message;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    record_argv(&args);
     // First non-flag arg is the verb (e.g. "info", "build"). Flags before it
     // (like bazel startup flags) are tolerated and ignored — we don't model
     // bazel's real flag positioning rules.
@@ -56,6 +72,26 @@ fn main() {
             eprintln!("basil: unsupported verb: {other}");
             process::exit(2);
         }
+    }
+}
+
+/// Append this invocation's argv to `BASIL_ARGV_LOG`, one line per invocation,
+/// when a test asked for it.
+///
+/// The CLI runs `bazel info server_pid` before `bazel build` and nominates that
+/// pid as the execution log's holder. Bazel kills a running server whose startup
+/// options differ from the ones it is handed, so the two invocations have to
+/// agree or the pid belongs to a server the build replaces — and the only place
+/// that agreement is visible is the argv each one received.
+///
+/// Appends rather than truncates, because one build is several invocations, and
+/// a reader is expected to pick out the lines it cares about.
+fn record_argv(args: &[String]) {
+    let Ok(path) = env::var("BASIL_ARGV_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all((args.join(" ") + "\n").as_bytes());
     }
 }
 
@@ -88,12 +124,54 @@ fn run_info(args: &[String]) {
 
 fn run_build(args: &[String]) {
     let bes_path = find_flag_value(args, "--build_event_binary_file");
+    let execlog_path = find_flag_value(args, "--execution_log_compact_file");
     let scenario_name =
         find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
 
+    let log = || match &execlog_path {
+        Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
+        _ => {}
+    };
+
+    // Only the invocation that asked for a JSON log gets one, which is how a
+    // scenario can answer a task's loading-only selection pass without also
+    // speaking for the spawns that follow it.
+    if let Some(path) = find_flag_value(args, "--build_event_json_file")
+        && !s.json_bep_tests.is_empty()
+    {
+        let exit_code = match s.exit {
+            ExitBehavior::Code(c) => c,
+            ExitBehavior::Signal(_) => 0,
+        };
+        write_json_bep(&path, s.json_bep_tests, exit_code);
+    }
+
+    // Before the BES write, which blocks on a FIFO until the reader opens it.
+    // Bazel writes the execution log as it executes, i.e. during the build, and
+    // the reader tails it; writing it first here is the closest a one-shot fake
+    // gets to that, and it means the entries are already on disk while the AXL
+    // side is draining BES.
+    if s.execlog_delay.is_zero() {
+        log();
+    }
+
+    // The handshake needs a log the consumer can read before the event stream
+    // ends — meaningless without a log at all, and unsatisfiable for a scenario
+    // that deliberately publishes one afterwards.
+    let handshake = if s.execlog_entries > 0 && s.execlog_delay.is_zero() {
+        env::var("BASIL_EXECLOG_PUMP_HANDSHAKE").ok()
+    } else {
+        None
+    };
+
     if let Some(path) = bes_path {
-        write_scenario(&path, &s);
+        write_scenario(&path, &s, handshake.as_deref());
+    }
+
+    if !s.execlog_delay.is_zero() {
+        thread::sleep(s.execlog_delay);
+        log();
     }
 
     match s.exit {
@@ -122,17 +200,24 @@ fn run_build(args: &[String]) {
 /// Finds `--name <value>` or `--name=<value>` in argv. The runtime emits both
 /// forms (`--build_event_binary_file <path>` for paths, `--scenario=foo` for
 /// user-supplied flags), so handling both keeps us tolerant.
+///
+/// Last occurrence wins, as Bazel resolves a single-valued flag given more than
+/// once. That is not a detail here: a caller clearing
+/// `--execution_log_compact_file=` and the CLI appending its own is exactly the
+/// shape the reuse logic has to get right, and a first-wins fake would answer
+/// the opposite of the thing under test.
 fn find_flag_value(args: &[String], name: &str) -> Option<String> {
     let prefix = format!("{name}=");
+    let mut found = None;
     for (i, a) in args.iter().enumerate() {
         if a == name {
-            return args.get(i + 1).cloned();
-        }
-        if let Some(v) = a.strip_prefix(&prefix) {
-            return Some(v.to_string());
+            // A bare `--name` immediately before another flag names no value.
+            found = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned();
+        } else if let Some(v) = a.strip_prefix(&prefix) {
+            found = Some(v.to_string());
         }
     }
-    None
+    found
 }
 
 /// How basil terminates after writing the BES event stream. `Code(n)`
@@ -161,10 +246,76 @@ struct Scenario {
     open_delay: Duration,
     attempts: Vec<Vec<BuildEvent>>,
     exit: ExitBehavior,
+    /// How many `ExecLogEntry` messages to write to
+    /// `--execution_log_compact_file`, when the runtime asked for one. Zero
+    /// writes no log at all, which is what a build that ran no actions does.
+    execlog_entries: u32,
+    /// How long after the event stream closes to publish that log. Zero
+    /// publishes it before BES, where a consumer can read it during the build;
+    /// non-zero puts it out of reach of anything but an end-of-build drain.
+    execlog_delay: Duration,
+    /// Test labels to report through `--build_event_json_file`, when the runtime
+    /// asked for one. Empty writes no JSON log at all.
+    ///
+    /// `aspect cache diff` establishes its scope from a loading-only `test
+    /// --noanalyze` invocation and reads the *JSON* event log for it, not the
+    /// binary stream — so a scenario that has to get past that selection names
+    /// the labels it comes back with. See [`write_json_bep`].
+    json_bep_tests: &'static [&'static str],
 }
 
-fn write_scenario(path: &str, scenario: &Scenario) {
-    for events in &scenario.attempts {
+/// A clean single-attempt run with no pauses and no execution log — so each
+/// scenario below names only the fields that make it the case it is.
+impl Default for Scenario {
+    fn default() -> Self {
+        Self {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
+            execlog_entries: 0,
+            execlog_delay: Duration::ZERO,
+            json_bep_tests: &[],
+        }
+    }
+}
+
+/// Write the loading-only test selection `aspect cache diff` reads out of
+/// `--build_event_json_file`.
+///
+/// `cache_selection.axl` accepts the selection only when the log is exactly the
+/// shape a successful `test --noanalyze` leaves: one `expanded` event whose
+/// children are the configured targets, one `NO_ANALYZE` `aborted` event per
+/// target — analysis is what the flag prevented — and one `finished` event
+/// carrying this invocation's own exit code, with `lastMessage` on it and nowhere
+/// else. Anything short of that is a truncated log and is rejected, so there is
+/// no partial form worth emitting.
+fn write_json_bep(path: &str, tests: &[&str], exit_code: i32) {
+    let mut out = String::new();
+    let children: Vec<String> = tests
+        .iter()
+        .map(|label| format!(r#"{{"targetConfigured":{{"label":"{label}"}}}}"#))
+        .collect();
+    out.push_str(&format!(
+        r#"{{"id":{{"pattern":{{"pattern":["//..."]}}}},"children":[{}],"expanded":{{}}}}"#,
+        children.join(","),
+    ));
+    out.push('\n');
+    for label in tests {
+        out.push_str(&format!(
+            r#"{{"id":{{"targetConfigured":{{"label":"{label}"}}}},"aborted":{{"reason":"NO_ANALYZE"}}}}"#,
+        ));
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        r#"{{"id":{{"buildFinished":{{}}}},"finished":{{"exitCode":{{"code":{exit_code}}}}},"lastMessage":true}}"#,
+    ));
+    out.push('\n');
+    fs::write(path, out).unwrap_or_else(|e| panic!("basil: writing JSON BEP to {path:?}: {e}"));
+}
+
+fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
+    let last_attempt = scenario.attempts.len().saturating_sub(1);
+    for (attempt, events) in scenario.attempts.iter().enumerate() {
         // One open/write/close per attempt: the read side observes a writer
         // appear, drain bytes, and disappear — same as Bazel reopening the
         // BEP file on each retry.
@@ -175,7 +326,14 @@ fn write_scenario(path: &str, scenario: &Scenario) {
         if !scenario.open_delay.is_zero() {
             thread::sleep(scenario.open_delay);
         }
-        for ev in events {
+        for (i, ev) in events.iter().enumerate() {
+            // Holding back the last event of the last attempt is what keeps the
+            // consumer's drain loop alive for the handshake.
+            if let Some(file) = handshake {
+                if attempt == last_attempt && i + 1 == events.len() {
+                    await_pump_handshake(file);
+                }
+            }
             let mut buf = Vec::new();
             ev.encode_length_delimited(&mut buf)
                 .expect("basil: encode BuildEvent");
@@ -183,6 +341,79 @@ fn write_scenario(path: &str, scenario: &Scenario) {
                 .unwrap_or_else(|e| panic!("basil: writing to BES path: {e}"));
         }
     }
+}
+
+/// How long [`await_pump_handshake`] waits for the consumer. Long enough that a
+/// loaded machine cannot time out a working handshake, short enough that a
+/// broken one reports rather than hangs out the test runner's own limit.
+const PUMP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Wait for `file` to appear, then record whether it did in `{file}.status`.
+///
+/// Set `BASIL_EXECLOG_PUMP_HANDSHAKE=<file>` and have the consumer create
+/// `<file>` the first time an execution log entry reaches it. basil then holds
+/// back the final build event until that happens, which makes "the consumer
+/// dispatched an entry *during* the build" an observable fact rather than a
+/// race: the only way the consumer can see an entry before the event stream
+/// ends is from inside its own drain loop.
+///
+/// `{file}.status` holds `pumped` or `timeout`, so the absence of a mid-build
+/// dispatch is a specific assertion failure instead of a test-wide hang. A
+/// consumer that only drains after the stream closes cannot write `<file>`
+/// until basil gives up, which is exactly what `timeout` records.
+fn await_pump_handshake(file: &str) {
+    let deadline = std::time::Instant::now() + PUMP_HANDSHAKE_TIMEOUT;
+    let mut status = "timeout";
+    while std::time::Instant::now() < deadline {
+        if fs::metadata(file).is_ok() {
+            status = "pumped";
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let path = format!("{file}.status");
+    fs::write(&path, format!("{status}\n"))
+        .unwrap_or_else(|e| panic!("basil: writing handshake status {path:?}: {e}"));
+}
+
+/// Write `count` `ExecLogEntry` messages to `path` in the compact execution log
+/// format: one zstd frame over varint-length-prefixed protobufs.
+///
+/// The entries are `file` records, which is the cheapest kind to synthesize and
+/// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
+/// a test can assert it received a contiguous `1..=count` and catch a prefix.
+///
+/// Built under a sibling `.partial` name and renamed into place, so the path
+/// appears atomically. A real Bazel daemon holds the log open while it writes, so
+/// a reader that reaches the current end of file is told to wait; here the writer
+/// is this short-lived process and the nominated holder is the daemon stand-in,
+/// which never opens it. A reader arriving between `create` and the last write
+/// would therefore see an empty file, be told the holder has closed it, and fail
+/// to read even a zstd header — yielding zero entries perhaps half the time. The
+/// rename means a reader sees either no file yet (and keeps polling, since this
+/// process is alive) or the whole thing.
+fn write_execlog(path: &str, count: u32) {
+    let partial = format!("{path}.partial");
+    let file = fs::File::create(&partial)
+        .unwrap_or_else(|e| panic!("basil: creating execlog path {partial:?}: {e}"));
+    let mut encoder = zstd::Encoder::new(file, 0).expect("basil: zstd encoder");
+    for id in 1..=count {
+        let entry = ExecLogEntry {
+            id,
+            r#type: Some(exec_log_entry::Type::File(exec_log_entry::File {
+                path: format!("basil/f{id}.txt"),
+                digest: None,
+            })),
+        };
+        encoder
+            .write_all(&entry.encode_length_delimited_to_vec())
+            .unwrap_or_else(|e| panic!("basil: writing execlog: {e}"));
+    }
+    let mut file = encoder.finish().expect("basil: finishing zstd frame");
+    file.flush().expect("basil: flushing execlog");
+    drop(file);
+    fs::rename(&partial, path)
+        .unwrap_or_else(|e| panic!("basil: publishing execlog to {path:?}: {e}"));
 }
 
 /// Resolve a scenario by name. Each scenario documents the behavior or bug
@@ -196,8 +427,7 @@ fn scenario(name: &str) -> Scenario {
         // and yields zero events.
         "success" => Scenario {
             open_delay: Duration::from_millis(50),
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Code(0),
+            ..Default::default()
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -209,9 +439,8 @@ fn scenario(name: &str) -> Scenario {
         // through to a graceful close once it observes the writer pid is
         // dead, so this scenario must terminate the AXL build promptly.
         "cache_evicted_no_retry" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
-            exit: ExitBehavior::Code(0),
+            ..Default::default()
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -219,12 +448,11 @@ fn scenario(name: &str) -> Scenario {
         // real reconnect-after-eviction shape and exercises the
         // `expecting_retry` swallow-BrokenPipe-and-keep-reading path.
         "cache_evicted_with_retry" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![
                 vec![build_started(), build_finished(39, false)],
                 vec![build_started(), build_finished(0, true)],
             ],
-            exit: ExitBehavior::Code(0),
+            ..Default::default()
         },
 
         // Like `success`, but basil exits with code 2 (a genuine Bazel
@@ -232,9 +460,9 @@ fn scenario(name: &str) -> Scenario {
         // regression test: even when the sink reports terminal failure,
         // wait() must surface code 2 rather than the synthetic 36.
         "nonzero_exit" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(2, true)]],
             exit: ExitBehavior::Code(2),
+            ..Default::default()
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
@@ -242,9 +470,9 @@ fn scenario(name: &str) -> Scenario {
         // a writer that cannot come, which is what `spawn_open_watchdog`
         // exists to break out of.
         "rejects_command_line" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![],
             exit: ExitBehavior::Code(2),
+            ..Default::default()
         },
 
         // Like `success`, but basil is killed by SIGKILL after the event
@@ -253,11 +481,66 @@ fn scenario(name: &str) -> Scenario {
         // exit-code mapping — fail_at_end must not collapse `None` into
         // the synthetic 36.
         "signal_killed_sigkill" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
             // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
             // libc dep for a single constant.
             exit: ExitBehavior::Signal(9),
+            ..Default::default()
+        },
+
+        // A clean run that also writes a compact execution log longer than the
+        // decoded channel's capacity. A shorter log cannot tell a stream that
+        // delivers everything apart from one that silently stops at the capacity;
+        // 3000 is comfortably past it and still a fraction of a second to write.
+        //
+        // 50ms open_delay as in `success`, so an AXL iterator that subscribes
+        // after the spawn is not racing the BES burst.
+        "execlog_beyond_capacity" => Scenario {
+            open_delay: Duration::from_millis(50),
+            execlog_entries: 3000,
+            ..Default::default()
+        },
+
+        // The same log, published only after the event stream has closed. A
+        // task's drain loop ends with that stream, so nothing it does can read
+        // this log — only the end-of-build drain (`exec_log.close`, before
+        // `wait()`) can, which is what makes a missing or misplaced drain
+        // visible as an empty hook rather than as a coin flip.
+        //
+        // Two seconds is an order of magnitude more than the 250ms tick a task
+        // takes to notice the stream ended, so the ordering does not depend on
+        // scheduling. Bazel is slower than this to finish a build after its last
+        // build event in practice.
+        "execlog_after_bes" => Scenario {
+            execlog_entries: 3000,
+            execlog_delay: Duration::from_secs(2),
+            ..Default::default()
+        },
+
+        // A log of the same shape, on an invocation Bazel fails with
+        // BLAZE_INTERNAL_ERROR (37) — which `BazelTrait.build_retry` retries by
+        // default, so a task driving this runs its whole spawn → drain → wait
+        // cycle once per attempt. Each attempt writes its own log, numbered from
+        // 1 again, so a consumer that receives `1..=3000` twice has proved that
+        // every attempt got a live handle of its own.
+        "execlog_retryable_failure" => Scenario {
+            open_delay: Duration::from_millis(50),
+            attempts: vec![vec![build_started(), build_finished(37, true)]],
+            exit: ExitBehavior::Code(37),
+            execlog_entries: 3000,
+            ..Default::default()
+        },
+
+        // `aspect cache diff --mode=precise`: three invocations, of which only
+        // the precise pre-pass executes actions and so is the only one wired to
+        // `exec_log_event`. Reaching it means getting past the loading-only
+        // selection pass first, which is what `json_bep_tests` answers; the log
+        // here is the pre-pass's own. The probe passes that follow need a
+        // `--remote_grpc_log` no fake Bazel produces, so the task fails after
+        // the part under test, as it does for `delivery`.
+        "cache_diff_precise" => Scenario {
+            execlog_entries: 3000,
+            json_bep_tests: &["//fixture:runs"],
+            ..Default::default()
         },
 
         // An `ActionExecuted` — the payload whose accepted `kinds=` spelling
@@ -276,6 +559,7 @@ fn scenario(name: &str) -> Scenario {
                 build_finished(0, true),
             ]],
             exit: ExitBehavior::Code(0),
+            ..Default::default()
         },
 
         other => {

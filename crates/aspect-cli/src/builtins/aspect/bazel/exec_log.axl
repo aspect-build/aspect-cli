@@ -1,0 +1,238 @@
+"""The one place `BazelTrait.exec_log_event` hooks are wired up and fired.
+
+Every task that drives Bazel needs the same three steps, and getting any of them
+wrong fails quietly, so none of them live at the call sites:
+
+  `open(trait)`      before the spawn. Returns the `execution_log=` list to pass
+                     to `ctx.bazel.build` / `.test` — the trait's own sinks, plus
+                     one `bazel.execution_log.iterator()` handle when a hook is
+                     registered. The handle has to exist *before* the spawn: it
+                     is what tells the runtime an every-entry consumer is
+                     subscribed, which is what makes the stream lossless.
+  `pump(ctx, h)`     optional, inside the task's existing drain loop. Fires
+                     hooks on whatever has arrived, without blocking.
+  `close(ctx, h)`    after the task's own drain loop and **before** `build.wait()`.
+                     Drains to the end of the stream and fires the rest.
+
+## Progressive dispatch needs a drain loop that runs
+
+`pump` is where a hook hears about an entry *during* the build, and it only
+fires as often as the task's loop calls it. The tasks with a `sleep_iter` tick
+loop (`lint`, `format`, `gazelle`, `warming`, `delivery`, `run`) call it on every
+tick regardless of what Bazel is doing. `bazel/invocation.axl` — `build` and
+`test` — instead pumps from `on_event`, so its loop runs only when a BES event
+iterator exists, and an `exec_log_event` hook does not by itself create one
+(deliberately: a BEP FIFO and a parsed event stream are a real cost to impose on
+a feature that does not read build events).
+
+With no event iterator, every hook fires in `close` instead, still before
+`wait()` and still with every entry. So the guarantee is completeness, not
+timeliness: a hook that only aggregates sees no difference, a hook that reports
+progress may report all of it at the end of the build.
+
+Why `close` must precede `wait()`: a bound handle is a subscriber the producer
+blocks for, and `wait()` joins the producer. Calling it the other way round would
+join a thread that is waiting for us. `build.wait()` releases any handle still
+bound for exactly this reason — a task that skips `close` loses entries instead
+of hanging — but losing entries is not the contract, so call `close`.
+
+## One task, several invocations
+
+`open` is called once per Bazel invocation, so a task that drives Bazel more
+than once dispatches to the same hook more than once — `aspect delivery` wires
+phases 1 and 3 (its phase-2 checksum re-run deliberately carries no handle; the
+reason is recorded in `crates/aspect-cli/src/builtins/exec_log_wiring.rs`), and
+a retry loop opens a fresh handle per attempt. An entry carries nothing
+identifying which of those produced it.
+
+`ctx.task.current_phase().name` is what does. A task opens its phase before it
+spawns Bazel, which puts the whole window these three verbs cover — `open`,
+every `pump`, and `close` — inside that phase: a hook reads `build` under
+delivery's phase 1 and `deliver` under its phase 3, `lint` under `lint`,
+`populate` under `ci warming`, and `build_retry_<n>` / `test_retry_<n>` on an
+attempt after the first. `cache diff` is the exception: it opens no phase at
+all, so a hook there reads `None` and has nothing to name its one invocation
+with. `ExecLogHook` in `./trait.axl` documents it from the hook's side;
+`crates/aspect-cli/tests/exec_log_event.rs` asserts the name a hook actually
+read at every call site, that exception included.
+
+The one case a phase name cannot separate is two invocations under a single
+phase. No task does that today — every retry transitions — and the gap is
+additive to close: a per-invocation identifier would arrive as a new accessor,
+never as a changed `on_entry` signature.
+
+A second invocation must also not re-write the trait's *file* sinks. Those are
+written by Bazel and read by the task's `build_end` hooks, and the artifact
+uploader's `build_end` both uploads the execution log and deletes it — a leftover
+file leaks its highest-risk artifact, action command lines and environment
+variables, with no on-disk redaction. So an invocation that spawns Bazel after
+`build_end` has run passes `[.entries]` rather than `.sinks`: the hook dispatch
+without the file. Exactly one invocation per run gets `.sinks`, and which one
+that is can depend on the run — `aspect delivery` fires `build_end` after phase 2
+when phases 1/2 run and after phase 3 when they are skipped, so phase 3 decides
+from `phase_1_2_runs` rather than once and for all. A single fixed path could not
+hold two invocations' logs anyway; a caller that wants a second invocation's log
+on disk has to key the path on the phase.
+
+## Back-pressure
+
+A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
+Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails
+it (`ExecLogStream::spawn_with_file`). A slow consumer parks the CLI's reader
+thread on a full 1000-entry channel; Bazel keeps writing to the file regardless.
+So the cost of an expensive hook is paid at the end of the build, in `close` and
+in the `join()` inside `wait()`, and never as a stalled action graph.
+
+The channel is a broadcast: every subscriber receives every entry, so a hook is
+an *additional* consumer alongside a `File` or `CompactFile` sink rather than a
+competitor for entries. `build.execution_logs()` is the exception — it takes the
+stream's own subscriber rather than cloning one, so it errors when anything else
+is already reading, a registered hook included.
+
+## `entry.id` does not identify a spawn
+
+Bazel numbers only the entries something else refers to by id — files, input
+sets, runfiles trees. A `spawn` is referred to by nothing, so it arrives with
+`id = 0`, as every spawn in the log does. Use the resolver's `spawn_key(spawn)`
+(its primary output path) to name or deduplicate one;
+`@aspect//private/lib/execlog.axl` has it.
+
+What this does not fix is volume. One entry per spawn plus one per file,
+directory, input set and runfiles tree is 10k-50k entries on a medium build, and
+a Starlark call per entry is real money — hence `ExecLogHook.kinds`, which is
+applied in Rust before an entry becomes a Starlark value. `kinds = ["spawn"]` is
+commonly a few percent of the stream.
+"""
+
+load("@aspect//bazel/trait.axl", "BazelTrait", "ExecLogHook")
+
+# Entries dispatched per `pump` call. Bounds one non-blocking visit so a burst
+# cannot monopolize a tick loop that also has BES events and a progress line to
+# get to; whatever is left is picked up on the next tick, or by `close`.
+_PUMP_BUDGET = 10000
+
+def _wanted_kinds(hook: ExecLogHook) -> list[str]:
+    """One hook's kinds, deduplicated and sorted, so two hooks that asked for the
+    same set compare equal however each spelled it."""
+    return sorted({kind: True for kind in hook.kinds})
+
+def _union_kinds(hooks: list[ExecLogHook]) -> list[str] | None:
+    """The kinds the runtime must deliver: the union of what every hook asked
+    for, or None for "every kind".
+
+    None is deliberately infectious. A hook with `kinds = []` reads all kinds, so
+    narrowing the stream on another hook's behalf would silently starve it — the
+    failure mode this whole module exists to avoid. No hooks at all is also None,
+    because `kinds = []` is not a value the runtime accepts and an empty union
+    must never reach it."""
+    out = {}
+    for hook in hooks:
+        if not hook.kinds:
+            return None
+        for kind in hook.kinds:
+            out[kind] = True
+    return sorted(out) if out else None
+
+def _is_exact(hooks: list[ExecLogHook], kinds: list[str] | None) -> bool:
+    """Whether the runtime's filter is already exactly right for every hook, so
+    dispatch can skip re-checking each entry's kind in AXL.
+
+    True when no hook filters, so every entry is wanted by everyone; or when every
+    hook asked for the same set, which is then the set the runtime was given.
+    False when hooks disagree, because the union is wider than the narrowest hook
+    asked for and delivering it unchecked would hand that hook kinds it never
+    asked for — an unfiltered auditor beside a `kinds = ["spawn"]` hook is the
+    common shape, and `_union_kinds` reports None for it."""
+    if kinds == None:
+        return all([not hook.kinds for hook in hooks])
+    for hook in hooks:
+        if _wanted_kinds(hook) != kinds:
+            return False
+    return True
+
+def _open(bazel_trait: BazelTrait) -> struct:
+    """Resolve this invocation's execution-log wiring. See the module docstring.
+
+    `.sinks` goes straight to `execution_log =`; it is already the trait's
+    `execution_log_sinks` plus the hook handle, so a caller passes it instead of
+    building that list itself. Falsy when nothing wants the log at all, which is
+    what `ctx.bazel.build` needs to skip the stream entirely (an empty list means
+    "stream on with no consumer") — hence `xl.sinks or False` at the call sites.
+
+    `.entries` is the handle on its own, `None` when no hook is registered. Only a
+    task spawning Bazel a second time after its `build_end` hooks have run passes
+    `[.entries]` instead of `.sinks`, to dispatch without re-writing the trait's
+    file sinks; see "One task, several invocations" above. It is never both —
+    `.sinks` already holds the handle, and binding one twice is an error.
+
+    Call once per Bazel invocation, after the `build_start` hooks: a handle binds
+    to a single build, and `build_start` can itself register an `exec_log_event`
+    subscription."""
+    hooks = list(bazel_trait.exec_log_event)
+    sinks = list(bazel_trait.execution_log_sinks)
+    if not hooks:
+        return struct(sinks = sinks, entries = None, hooks = [], exact = True)
+
+    kinds = _union_kinds(hooks)
+    entries = bazel.execution_log.iterator() if kinds == None else bazel.execution_log.iterator(kinds = kinds)
+    return struct(
+        sinks = sinks + [entries],
+        entries = entries,
+        hooks = hooks,
+        exact = _is_exact(hooks, kinds),
+    )
+
+def _wants(hook: ExecLogHook, kind: str) -> bool:
+    """Whether `hook` asked for entries of `kind`. `kinds = []` means all."""
+    return not hook.kinds or kind in hook.kinds
+
+def _fire(ctx: TaskContext, h: struct, entry) -> None:
+    """Hand one entry to every hook that asked for its kind."""
+    if h.exact:
+        for hook in h.hooks:
+            hook.on_entry(ctx, entry)
+        return
+
+    # Hooks disagree about kinds, so the runtime's union over-delivers for some
+    # of them. One `type()` per entry, not one per hook.
+    kind = type(entry.type)
+    for hook in h.hooks:
+        if _wants(hook, kind):
+            hook.on_entry(ctx, entry)
+
+def _pump(ctx: TaskContext, h: struct) -> int:
+    """Dispatch what has already arrived and return how many entries that was.
+    Never blocks. Safe to call any number of times, including when no hook is
+    registered."""
+    if h.entries == None:
+        return 0
+    seen = 0
+    for _ in range(_PUMP_BUDGET):
+        entry = h.entries.try_pop()
+        if entry == None:
+            break
+        _fire(ctx, h, entry)
+        seen += 1
+    return seen
+
+def _close(ctx: TaskContext, h: struct) -> None:
+    """Drain to the end of the stream, dispatching as entries arrive. Blocks
+    until Bazel closes the log, so this belongs after the task's own drain loop
+    and before `build.wait()` — see the module docstring for why that order is
+    not interchangeable."""
+    if h.entries == None:
+        return
+    for entry in h.entries:
+        _fire(ctx, h, entry)
+
+exec_log = struct(
+    open = _open,
+    pump = _pump,
+    close = _close,
+    Hook = ExecLogHook,
+    testonly_union_kinds = _union_kinds,
+    testonly_is_exact = _is_exact,
+    testonly_fire = _fire,
+    testonly_wants = _wants,
+    testonly_wanted_kinds = _wanted_kinds,
+)
