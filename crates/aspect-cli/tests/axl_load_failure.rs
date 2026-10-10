@@ -25,6 +25,7 @@
 mod common;
 
 use common::aspect_cli;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -91,7 +92,9 @@ struct Fixture<'a> {
     debug: bool,
     /// Paths, relative to the workspace root, to `chmod 000` once written.
     /// Failing the *read* of a file whose contents are fine is its own error
-    /// path, separate from every parse and eval failure here.
+    /// path, separate from every parse and eval failure here. Unix only, and
+    /// no obstacle to root, so a fixture using it needs an unprivileged run —
+    /// which is what the hosted CI runners give us.
     unreadable: &'a [&'a str],
 }
 
@@ -120,6 +123,7 @@ impl<'a> Fixture<'a> {
                 .expect("fixture parent");
             std::fs::write(&path, contents).expect("writing a fixture");
         }
+        #[cfg(unix)]
         for path in self.unreadable {
             let path = dir.path().join(path);
             let mut perms = std::fs::metadata(&path)
@@ -337,6 +341,8 @@ fn clap_rendered_help_survives_an_unparsable_script() {
 
     // A bare `aspect <group>` with no leaf is the same Clap error, one level
     // down: `arg_required_else_help` renders the group’s own help.
+    // A sample of the built-in groups, not the whole set: these are AXL
+    // `group()` values and the list is not derived from them.
     for group in ["auth", "worktree", "setup"] {
         let output = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &[group]);
         let stderr = stderr(&output);
@@ -1051,6 +1057,7 @@ fn a_file_referenced_twice_is_reported_once() {
 /// still say which file it was: it is the one file opened before the tolerance
 /// begins, so nothing else on stderr names it.
 #[test]
+#[cfg(unix)]
 fn an_unreadable_module_aspect_names_itself() {
     for args in [vec!["help"], vec!["version"], vec!["build", "//..."]] {
         let mut fixture = Fixture::new(&[
