@@ -80,6 +80,7 @@ load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "phases")
 load("../lib/repro_commands.axl", "rehydrate_commands")
+load("../lib/template_presets.axl", "template_presets")
 load("../lib/tips.axl", "tips")
 
 def _eq(label, got, want):
@@ -1903,6 +1904,48 @@ def _check_body_has_no_start_date(ctx):
     _eq("no start-date line", "📅" in body, False)
     _eq("the passed-in value is not rendered", "2026-01-01 00:00:00 UTC" in body, False)
 
+def _check_default_preset_footer(ctx):
+    """The `default` preset's body ends on the one attribution line; the
+    timestamp and API quota stay on the built-in body `full` falls through to."""
+    preset_body = template_presets.templates("default")["body"]
+    _eq("default body takes no timestamp", "last_updated_at" in preset_body, False)
+    _eq("default body takes no API quota", "api_usage" in preset_body, False)
+    _eq("full keeps the built-in body", template_presets.templates("full").get("body"), None)
+    _eq("built-in body keeps the timestamp", "last_updated_at" in DEFAULT_BODY_TEMPLATE, True)
+    _eq("built-in body keeps the API quota", "api_usage" in DEFAULT_BODY_TEMPLATE, True)
+
+    entries = [{
+        "kind": "lint",
+        "name": "lint-task",
+        "job": "ci",
+        "status": "failed",
+        "elapsed_ms": 1000,
+        "fix_commands": rehydrate_commands([
+            {"command": "aspect lint --fix -- //...", "description": "", "slug": "lint-fix"},
+        ]),
+        "repro_commands": rehydrate_commands([
+            {"command": "aspect lint -- //...", "description": "", "slug": "lint-repro"},
+        ]),
+    }]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 46,
+        prepared,
+        "",
+        preset_body,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    version = ctx.std.env.aspect_cli_version()
+    footer = ("<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install)" +
+              " · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli)" +
+              (" (v%s)" % version if version else "") + "</sub>")
+    _eq("body ends on the footer", body.endswith("\n---\n\n" + footer + "\n"), True)
+    _eq("fix command rendered", "aspect lint --fix -- //..." in body, True)
+    _eq("repro command rendered", "\naspect lint -- //...\n" in body, True)
+    _eq("install page named once", body.count("[aspect.build/docs/cli/install]"), 1)
+
 def _test_impl(ctx):
     _eq(
         "status-comment base roles are prs.write only (job-link role gated to GHA)",
@@ -1959,6 +2002,7 @@ def _test_impl(ctx):
     _check_no_fix_for_a_passing_task(ctx)
     _check_identical_command_merges_across_kinds(ctx)
     _check_body_has_no_start_date(ctx)
+    _check_default_preset_footer(ctx)
 
     scenarios = [
         (
