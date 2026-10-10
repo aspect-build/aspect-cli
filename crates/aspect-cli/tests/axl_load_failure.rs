@@ -541,6 +541,94 @@ fn a_derived_config_names_its_cause_when_the_command_cannot_run() {
     );
 }
 
+/// Which of several broken scripts the summary blames, on a command that
+/// cannot run: the one raised as the run’s `error:`. That is the one printed
+/// *below* the summary, so it is the one a reference to "the above" would
+/// miss, and pointing the user at a different file than the error they are
+/// looking at would be worse than vague.
+///
+/// Two files hold the same broken script, and which of them `read_dir` hands
+/// over first — and so which is raised — is not the test’s to assume: it
+/// reads the blamed path out of the summary and checks that the diagnostic
+/// below names that same file, with the other script’s warning above.
+#[test]
+fn the_summary_blames_the_script_the_run_raises() {
+    let output = run_in_workspace(
+        &[
+            ("apolicy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+            ("zpolicy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+            ("config.axl", CONFIG_NEEDING_MYTASK),
+        ],
+        &["build", "//..."],
+    );
+    assert_failed_on_axl(&output, "Parse error");
+    let stderr = stderr(&output);
+
+    let summary = stderr
+        .lines()
+        .find(|line| line.contains("then failed too, most likely because of"))
+        .unwrap_or_else(|| panic!("expected a derived-config summary in:\n{stderr}"));
+    let blamed = summary
+        .split_once("most likely because of ")
+        .and_then(|(_, tail)| tail.strip_suffix(" — fix that first"))
+        .unwrap_or_else(|| panic!("the summary must name one file: {summary:?}"));
+    let (above, below) = stderr
+        .split_once(summary)
+        .expect("the summary line came out of this stderr");
+
+    assert!(
+        below.contains(blamed),
+        "the summary blames {blamed}, which must be the file the error below names:\n{stderr}"
+    );
+    let unraised = ["apolicy.axl", "zpolicy.axl"]
+        .into_iter()
+        .find(|name| !blamed.ends_with(name))
+        .expect("one of the two scripts is not the blamed one");
+    assert!(
+        above.contains(unraised) && !below.contains(unraised),
+        "the script that was not raised belongs above, as a warning of its own:\n{stderr}"
+    );
+}
+
+/// With several scripts broken and none of them raised, no cause is named.
+/// Which one the config needed is not something the CLI knows, so naming one
+/// would be publishing `read_dir`’s order as a finding — and every one of
+/// them is above, which is what the summary points at instead.
+#[test]
+fn a_derived_config_points_at_the_failures_above_when_several_scripts_failed() {
+    let output = run_in_workspace(
+        &[
+            ("policy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+            ("other.axl", UNPARSABLE_SCRIPT),
+            ("config.axl", CONFIG_NEEDING_MYTASK),
+        ],
+        &["version"],
+    );
+    assert_degraded(&output, "policy.axl");
+    let stderr = stderr(&output);
+
+    assert!(
+        stderr.contains(
+            "config.axl then failed too, most likely because of the failures above — fix those \
+             first"
+        ),
+        "the summary must point at the failures above, plural:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("fix that first"),
+        "no single script may be blamed when several failed:\n{stderr}"
+    );
+    // Both scripts are above the summary, each with its own warning.
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
+            .count(),
+        2,
+        "expected a load warning per broken script:\n{stderr}"
+    );
+}
+
 /// Every broken script is named, and scripts are reported before configs so
 /// the cause precedes the consequence.
 #[test]

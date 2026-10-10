@@ -417,8 +417,7 @@ impl std::fmt::Display for ConfigError {
 ///   for one of the recorded failures raised as the run's error — so a typo
 ///   does not vanish behind whatever ended the run.
 /// * Scripts come before configs, and a config that failed alongside a script
-///   is summarised rather than given a warning of its own, a config failure
-///   accompanying a script failure almost always being derived from it.
+///   is summarised as derived from it rather than given a warning of its own.
 #[derive(Default)]
 struct Unloadable {
     /// Phase 1: task and feature scripts.
@@ -441,52 +440,63 @@ impl Unloadable {
         err
     }
 
-    /// Report the failures on stderr, each behind a `warning:` line naming the
-    /// file and what its absence costs. Silence here would be worse than the
-    /// old hard failure — the point is that the user still sees the typo.
+    /// Report the failures on stderr for a run that carries on: a `warning:`
+    /// line per script naming the file and what its absence costs, and any
+    /// config that failed alongside them summarised rather than warned about
+    /// separately. This is [`Self::warn_blaming`] with no raised failure, so
+    /// the summary blames a script only when exactly one of them failed.
+    ///
+    /// Silence here would be worse than the old hard failure — the point is
+    /// that the user still sees the typo.
     fn warn(&self) {
         self.warn_blaming(None);
     }
 
     /// [`Self::warn`], plus the script failure [`Self::into_error`] has taken
-    /// off `scripts` to raise as the run’s error. That failure is still the
-    /// likeliest cause of any config failure, so it is named as the cause even
-    /// though it is no longer on the list.
+    /// off `scripts` to raise as the run’s error.
     ///
-    /// A derived config is summarised in one line naming the script it is
-    /// blamed on rather than given a warning of its own, because that is
-    /// almost always what it is: `ctx.tasks["x"]` for an `x` whose file never
-    /// loaded. Printing its diagnostic as a second, equal-looking warning
-    /// would point the user at a file that is very likely fine. The cause is
-    /// named rather than referred to as "the above", which it is not when the
-    /// raised failure is printed below as the run’s `error:`. The same
-    /// reasoning orders [`Self::into_error`] and skips the trait check in
-    /// [`MultiPhaseEval::execute_configs`]. `ASPECT_DEBUG` prints the
-    /// suppressed diagnostic anyway, for the case where the guess is wrong
-    /// and the config really did have its own problem.
+    /// Which script the derived-config summary blames: `raised` if there is
+    /// one, it being off the list but still the likeliest cause; otherwise the
+    /// only script that failed, if exactly one did. With several script
+    /// failures and none raised, the summary points at them as a group —
+    /// naming one of them would be repeating whatever order `read_dir`
+    /// happened to use. A named cause is preferred to "the above" because a
+    /// raised failure is not above: it prints below as the run’s `error:`.
+    /// `ASPECT_DEBUG` prints the suppressed config diagnostic anyway, for the
+    /// case where the guess is wrong and the config really did have its own
+    /// problem.
     fn warn_blaming(&self, raised: Option<&AxlFileFailure>) {
         for failure in &self.scripts {
             Self::warn_one(failure);
         }
 
-        let Some(cause) = raised.or_else(|| self.scripts.first()) else {
+        // Nothing failed that a config could be derived from, so each config
+        // owns its failure.
+        if raised.is_none() && self.scripts.is_empty() {
             for failure in &self.configs {
                 Self::warn_one(failure);
             }
             return;
-        };
+        }
         if self.configs.is_empty() {
             return;
         }
+        let cause = raised.or(match self.scripts.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        });
+        let blame = match cause {
+            Some(failure) => format!("{} — fix that first", failure.path.display()),
+            None => "the failures above — fix those first".to_owned(),
+        };
         let paths: Vec<String> = self
             .configs
             .iter()
             .map(|f| f.path.display().to_string())
             .collect();
         errln!(
-            "warning: {} then failed too, most likely because of {} — fix that first",
+            "warning: {} then failed too, most likely because of {blame}",
             paths.join(", "),
-            cause.path.display()
         );
         for failure in &self.configs {
             TaskExit::debug_traceback(&format_args!(
