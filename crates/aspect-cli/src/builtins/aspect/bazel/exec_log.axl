@@ -59,6 +59,19 @@ phase. No task does that today — every retry transitions — and the gap is
 additive to close: a per-invocation identifier would arrive as a new accessor,
 never as a changed `on_entry` signature.
 
+A second invocation must also not re-write the trait's *file* sinks. Those are
+written by Bazel and read by the task's `build_end` hooks, and the artifact
+uploader's `build_end` both uploads the execution log and deletes it — a leftover
+file leaks its highest-risk artifact, action command lines and environment
+variables, with no on-disk redaction. So an invocation that spawns Bazel after
+`build_end` has run passes `[.entries]` rather than `.sinks`: the hook dispatch
+without the file. Exactly one invocation per run gets `.sinks`, and which one
+that is can depend on the run — `aspect delivery` fires `build_end` after phase 2
+when phases 1/2 run and after phase 3 when they are skipped, so phase 3 decides
+from `phase_1_2_runs` rather than once and for all. A single fixed path could not
+hold two invocations' logs anyway; a caller that wants a second invocation's log
+on disk has to key the path on the phase.
+
 ## Back-pressure
 
 A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
@@ -142,7 +155,13 @@ def _open(bazel_trait: BazelTrait) -> struct:
     `execution_log_sinks` plus the hook handle, so a caller passes it instead of
     building that list itself. Falsy when nothing wants the log at all, which is
     what `ctx.bazel.build` needs to skip the stream entirely (an empty list means
-    "stream on with no consumer").
+    "stream on with no consumer") — hence `xl.sinks or False` at the call sites.
+
+    `.entries` is the handle on its own, `None` when no hook is registered. Only a
+    task spawning Bazel a second time after its `build_end` hooks have run passes
+    `[.entries]` instead of `.sinks`, to dispatch without re-writing the trait's
+    file sinks; see "One task, several invocations" above. It is never both —
+    `.sinks` already holds the handle, and binding one twice is an error.
 
     Call once per Bazel invocation, after the `build_start` hooks: a handle binds
     to a single build, and `build_start` can itself register an `exec_log_event`

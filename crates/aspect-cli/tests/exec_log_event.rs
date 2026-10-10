@@ -695,30 +695,28 @@ fn a_failed_build_without_a_log_stays_quiet() {
     );
 }
 
-/// Delivery's phase 3 dispatches to hooks without writing the trait's file
-/// sinks.
+/// The trait's execution-log file sinks are written by whichever delivery build
+/// `build_end` then reads them from — and phase 3 is that build when phases 1
+/// and 2 are skipped.
 ///
-/// Those two things travel together everywhere else — `exec_log.open` returns
-/// the trait's sinks *and* the hook handle in one list — and delivery is the one
-/// task where handing phase 3 both is a bug. It fires `build_end` straight after
-/// phase 2, ~200 lines before phase 3 spawns, and the artifact uploader's
+/// Sinks and hook handle travel together everywhere else (`exec_log.open`
+/// returns both in one list), and delivery is the task where a build that spawns
+/// *after* `build_end` must not be handed the sinks: the artifact uploader's
 /// `build_end` uploads the execution log it asked for and then deletes it,
-/// precisely because a leftover file leaks its highest-risk artifact: action
-/// command lines and environment variables, unredacted. Phase 3 writing the
-/// trait's sinks therefore re-created a path that had just been uploaded and
-/// deleted, leaving the file on disk with nothing left to claim it.
+/// precisely because a leftover file leaks its highest-risk artifact — action
+/// command lines and environment variables, unredacted — so re-creating that
+/// path leaves a file behind with nothing left to claim it.
 ///
-/// What this asserts is the absence of that file after a run that reached phase
-/// 3, with the hook's own 3000 entries beside it as proof phase 3 really ran —
-/// so it fails if phase 3 is ever handed `xl.sinks` again.
-///
-/// It drives phase 3 alone, because phase 1 and phase 3 in one invocation is not
-/// reachable here: phase 3 is gated behind phases 1+2 succeeding, and phase 2
-/// needs a real remote cache and a real `--remote_grpc_log`, neither of which a
-/// fake Bazel can produce. The invariant does not depend on phase 1 having run —
-/// the upload-and-delete happens in `build_end` either way.
+/// Which build that is depends on the run, which is why phase 3 reads
+/// `phase_1_2_runs` rather than deciding once. `--mode=always --dry-run=build
+/// --track-state=false` with no remote cache is the combination that drops
+/// phases 1 and 2 (see the matrix in `delivery.axl`) while `=build` keeps the
+/// delivery build, so phase 3 is the only build here and delivery fires
+/// `build_end` *after* its `wait()`. The sinks are therefore phase 3's to write,
+/// and withholding them is what made `--upload-exec-log` under exactly this
+/// invocation upload nothing at all, silently.
 #[test]
-fn the_delivery_release_build_does_not_write_the_traits_sinks() {
+fn the_delivery_release_build_writes_the_traits_sinks_when_it_is_the_only_build() {
     let case = Case::new(
         "execlog_beyond_capacity",
         Fixture {
@@ -739,16 +737,60 @@ fn the_delivery_release_build_does_not_write_the_traits_sinks() {
     assert_eq!(
         report.phases,
         vec!["deliver".to_string()],
-        "this case is meant to reach phase 3 and nothing else",
+        "this case is meant to reach phase 3 and nothing else, which is what makes \
+         phase 3 the build `build_end` reads the trait's sinks from",
     );
 
     let sink = case.dir.path().join(TRAIT_SINK);
     assert!(
-        !sink.exists(),
-        "phase 3 wrote the trait's execution-log sink at {}. Delivery uploads and \
-         deletes that file in `build_end`, which has already run by then, so the \
-         re-created file is left behind unclaimed — and it holds action command \
-         lines and environment variables.",
+        sink.exists(),
+        "phase 3 is this run's only Bazel invocation, so nothing else can have \
+         written the trait's execution-log sink at {} — and `build_end`, which is \
+         where `--upload-exec-log` uploads it from, has not run yet.",
+        sink.display(),
+    );
+}
+
+/// The other branch of the same condition: with phases 1 and 2 running, phase 1
+/// writes the trait's sinks and phase 3 must not write them again.
+///
+/// A remote cache is all it takes to keep `phase_1_2_runs` true under the same
+/// flags, so phase 1 runs and its entries arrive under `build`. Phase 3 is not
+/// reached here and cannot be: it is gated behind phase 2 succeeding, and phase 2
+/// needs a real remote cache and a real `--remote_grpc_log`, neither of which a
+/// fake Bazel produces. So what this pins is the reachable half — the sink on
+/// disk is phase 1's, written before the `build_end` that consumes it — while
+/// the case above pins the arm phase 3 takes when phase 1 never ran.
+#[test]
+fn the_delivery_phase_1_build_writes_the_traits_sinks() {
+    let case = Case::new(
+        "execlog_beyond_capacity",
+        Fixture {
+            trait_sink: true,
+            ..Fixture::default()
+        },
+        Some("build --remote_cache=grpc://127.0.0.1:1\n"),
+    );
+    let report = case.run(&[
+        "delivery",
+        "--mode=always",
+        "--dry-run=build",
+        "--track-state=false",
+        "--commit-sha=0000000000000000000000000000000000000000",
+        "//fixture:target",
+    ]);
+    assert_complete("delivery phase 1", &report, 1);
+    assert_eq!(
+        report.phases,
+        vec!["build".to_string()],
+        "a remote cache keeps phases 1/2 in the run, so these entries are phase 1's",
+    );
+
+    let sink = case.dir.path().join(TRAIT_SINK);
+    assert!(
+        sink.exists(),
+        "phase 1 must write the trait's execution-log sink at {}; it is the build \
+         whose log `build_end` uploads when phases 1/2 run.",
         sink.display(),
     );
 }

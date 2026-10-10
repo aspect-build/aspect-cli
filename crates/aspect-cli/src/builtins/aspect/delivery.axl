@@ -633,8 +633,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         # spawn.proto), the same blind spot aquery has; accepted.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.name)
 
-        # The trait's execution_log_sinks plus any exec_log_event handle; per
-        # attempt, since a handle binds to one build.
+        # Per attempt, since a handle binds to one build.
         xl = bzl.exec_log.open(bazel_trait)
         phase1_execlog_sinks = xl.sinks + [bazel.execution_log.file(path = phase1_execlog_path)]
 
@@ -1651,35 +1650,21 @@ def _delivery_impl(ctx):
         _t_download = time.monotonic()
         phase3_events = bazel.build_events.iterator()
 
-        # The `exec_log_event` handle ONLY — deliberately not `xl.sinks`, which
-        # would also hand phase 3 the trait's file sinks.
-        #
-        # Those sinks are written by Bazel and consumed by this task's `build_end`
-        # hooks, which have already run: delivery fires them straight after phase 2
-        # (see the `bazel_trait.build_end` loop above), roughly 200 lines before
-        # this spawn. The artifact uploader's `build_end` uploads the execution log
-        # it asked for and then deletes it, precisely because "a leftover file just
-        # leaks a potentially-sensitive artifact" — its own highest-risk category,
-        # action command lines and environment variables, with no on-disk
-        # redaction. Passing the trait's sinks here would have Bazel re-create that
-        # path after the upload-and-delete, leaving the file on disk with nothing
-        # left to claim it.
-        #
-        # So the trait's sinks stay phase-1 only, as they were before phase 3 was
-        # wired at all, and what phase 3 adds is the hook dispatch. A single fixed
-        # path cannot hold two invocations' logs anyway; a caller that wants
-        # phase 3's log on disk has to key the path on the phase, and nothing in
-        # tree reads a phase-3 log back.
-        #
-        # `or False` on the list is load-bearing: an empty list means "stream on
-        # with no consumer", so a run with no hook registered must pass False to
-        # keep the stream off entirely.
+        # Phase 3 takes the trait's file sinks only when it is this task's *only*
+        # Bazel invocation. With phases 1/2 behind it, phase 1 already wrote them
+        # and `build_end` has already consumed them — see "One task, several
+        # invocations" in `bazel/exec_log.axl` for what re-writing them costs.
+        # `or False` keeps the stream off entirely when nothing wants it: an empty
+        # list means "stream on with no consumer".
         #
         # Phase 3 makes one attempt, so one handle; `build_start` fired ahead of
         # the task's first invocation, which is what a hook registered there
         # needs — `open` has to read the trait after it, never before.
         xl = bzl.exec_log.open(bazel_trait)
-        phase3_execution_log = [xl.entries] if xl.entries != None else False
+        if phase_1_2_runs:
+            phase3_execution_log = [xl.entries] if xl.entries != None else False
+        else:
+            phase3_execution_log = xl.sinks or False
         build = ctx.bazel.build(
             flags = phase3_flags,
             rc = phase3_rc,
