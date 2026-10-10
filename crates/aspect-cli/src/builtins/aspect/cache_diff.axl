@@ -242,23 +242,36 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
 
     return entries
 
-def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, color: bool, timing: dict) -> bool:
+def _build_missing_non_test(ctx: TaskContext, bazel_trait, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, color: bool, timing: dict) -> bool:
     """precise pre-pass: execute + upload the missing non-test actions on the
     default (incremental) output base. Bazel output hidden; surfaced + False
-    returned on a hard build failure (a real broken target, not a cache miss)."""
+    returned on a hard build failure (a real broken target, not a cache miss).
+
+    The one spawn in this file that executes actions — the probe passes either
+    side of it run under `--experimental_remote_require_cached`, which denies
+    anything not already cached — so it is also the only one that produces an
+    execution log worth dispatching. `exec_log_event` hooks therefore fire here.
+
+    There is no `pump`: this spawn has no event stream and no drain loop to put
+    one in, so every hook fires from `close`, before `wait()`. That is the
+    documented fallback rather than a gap — see `@aspect//bazel/exec_log.axl`."""
     err_path = "/tmp/aspect-cache-diff-build-{}.log".format(ctx.task.name)
     _t = time.monotonic()
     pattern_file = rc.flag_value("--target_pattern_file", command = "test")
     pattern_flags = ["--target_pattern_file=" + pattern_file] if pattern_file else []
-    status = ctx.bazel.build(
+    xl = bzl.exec_log.open(bazel_trait)
+    build = ctx.bazel.build(
         rc = rc,
         flags = endpoint_auth_flags + pattern_flags + ["--remote_upload_local_results", "--keep_going"],
+        execution_log = xl.sinks or False,
         stdout = None,
         stderr = ctx.std.fs.create(err_path),
         announce_version = announce_version,
         announce_command = announce_command,
         *patterns
-    ).wait()
+    )
+    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+    status = build.wait()
     timing["build"] = time.monotonic() - _t
     if status.code != 0:
         _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(status.code))
@@ -394,7 +407,7 @@ def _impl(ctx: TaskContext) -> int:
     _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.BOLD, color))
 
     if mode == "precise":
-        if not _build_missing_non_test(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, color, timing):
+        if not _build_missing_non_test(ctx, bazel_trait, patterns, rc, endpoint_auth_flags, announce_version, announce_command, color, timing):
             return 1
 
     # Anchor for the probe's invalidate pass: any in-scope target whose build

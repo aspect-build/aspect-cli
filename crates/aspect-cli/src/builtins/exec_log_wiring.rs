@@ -11,8 +11,8 @@
 //! tasks that drive Bazel more than once are exactly the ones where a missing
 //! handle hides: a hook watching `aspect delivery` hears about three
 //! invocations, and a per-file rule is satisfied by the first. A spawn that
-//! deliberately carries no handle is named in `EXEMPT` (the whole file cannot
-//! produce a log) or `PARTIALLY_WIRED` (some sites are wired and some are not),
+//! deliberately carries no handle is named in `DEVIATIONS`, which records that
+//! file's whole shape — spawn sites, handles, pumps — beside the reason,
 //! with the reason — these two tables are where that decision is recorded, and
 //! a stale entry fails rather than lingering.
 //!
@@ -70,56 +70,75 @@ fn handle_waits(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Files whose every Bazel spawn goes unwired, and why.
+/// One file whose wiring is not the default shape, recorded in full.
 ///
-/// Add to this only for an invocation that cannot produce an execution log —
-/// not for one whose wiring has not been written yet. A file that wires some of
-/// its spawns and not others belongs in `PARTIALLY_WIRED` instead.
-const EXEMPT: &[(&str, &str)] = &[
-    (
-        "cache_diff.axl",
-        "probe invocations: --noanalyze / --nobuild, so Bazel runs no actions and \
-         logs nothing",
-    ),
-    (
-        "private/lib/cache_selection.axl",
-        "a --noanalyze probe, as above",
-    ),
-    (
-        "bazel/invocation_test.axl",
-        "a test fixture driving ctx.bazel.build directly, not a task",
-    ),
+/// Every count is asserted, so a file listed here cannot quietly grow another
+/// spawn site or lose a handle: `sites` catches a new invocation, `opens` and
+/// `pumps` catch one that stopped dispatching. An earlier version recorded only
+/// `opens`, which meant a fourth unwired `ctx.bazel.build(` in `delivery.axl`
+/// changed nothing it checked — the two files most likely to grow an invocation
+/// were exactly where the check stopped working.
+struct Wiring {
+    path: &'static str,
+    /// Real `ctx.bazel.build(` / `.test(` call sites in the file.
+    sites: usize,
+    /// `exec_log.open` calls. Fewer than `sites` means some invocation
+    /// dispatches nothing, which `why` has to justify.
+    opens: usize,
+    /// `exec_log.pump` calls. Fewer than `opens` means a handle is drained only
+    /// at the end of its build — correct for a spawn with no event loop to pump
+    /// from, and a timeliness difference rather than a lost entry.
+    pumps: usize,
+    why: &'static str,
+}
+
+/// The default: one handle per spawn site, pumped and closed once each. A file
+/// absent from [`DEVIATIONS`] is held to it.
+///
+/// Add a row only for an invocation that cannot or should not carry a handle —
+/// never for one whose wiring has not been written yet. The reason is the
+/// record, so write one that will still answer the question in a year.
+const DEVIATIONS: &[Wiring] = &[
+    Wiring {
+        path: "bazel/invocation.axl",
+        sites: 2,
+        opens: 1,
+        pumps: 1,
+        why: "`ctx.bazel.test` and `ctx.bazel.build` are the two arms of one               branch — the handle is opened above it, per attempt, and whichever               arm runs gets it",
+    },
+    Wiring {
+        path: "cache_diff.axl",
+        sites: 3,
+        opens: 1,
+        pumps: 0,
+        why: "two of the three spawns are the probe's invalidate and observe               passes, which run under `--experimental_remote_require_cached`: it               denies anything not already cached, so nothing executes and there               is nothing to log. The third, `--mode=precise`'s pre-pass, does               execute and upload actions and is wired. It pumps nothing because               it asks for no event stream and so has no drain loop to pump from,               which leaves every hook firing from `close`",
+    },
+    Wiring {
+        path: "delivery.axl",
+        sites: 3,
+        opens: 2,
+        pumps: 2,
+        why: "phase 2, the checksum re-run, has no handle on purpose: it is a               cache lookup over phase 1's warm analysis under               `--experimental_remote_require_cached`, so every spawn it would log               is either a probe for an action phase 1 already logged or a               `DeliveryHash` probe that stands for no work the user asked for. A               hook auditing spawns would double-count the first and have to learn               to ignore the second. The trait's `build_event` hooks are withheld               from that phase for the same reason, and the two streams describe               the same thing",
+    },
+    Wiring {
+        path: "private/lib/cache_selection.axl",
+        sites: 1,
+        opens: 0,
+        pumps: 0,
+        why: "a `--noanalyze` probe: it prevents analysis and every build and               test action, so Bazel runs nothing and logs nothing",
+    },
+    Wiring {
+        path: "bazel/invocation_test.axl",
+        sites: 1,
+        opens: 0,
+        pumps: 0,
+        why: "a test fixture driving ctx.bazel.build directly, not a task",
+    },
 ];
 
-/// Files that spawn Bazel more often than they open a handle, as
-/// `(path, opens, why the difference is correct)`.
-///
-/// Every other file gets one `exec_log.open` per spawn site, which is what makes
-/// a newly added invocation that forgot the wiring a failure rather than a hook
-/// that silently stops hearing about a build. A file listed here has been looked
-/// at; the reason is the record, so write one that will still answer the
-/// question in a year. An entry whose `opens` has caught up with its spawn count
-/// is stale and fails too.
-const PARTIALLY_WIRED: &[(&str, usize, &str)] = &[
-    (
-        "bazel/invocation.axl",
-        1,
-        "`ctx.bazel.test` and `ctx.bazel.build` are the two arms of one branch — \
-         the handle is opened above it, per attempt, and whichever arm runs gets it",
-    ),
-    (
-        "delivery.axl",
-        2,
-        "phase 2, the checksum re-run, has no handle on purpose: it is a cache \
-         lookup over phase 1's warm analysis under \
-         `--experimental_remote_require_cached`, so every spawn it would log is \
-         either a probe for an action phase 1 already logged or a `DeliveryHash` \
-         probe that stands for no work the user asked for. A hook auditing spawns \
-         would double-count the first and have to learn to ignore the second. The \
-         trait's `build_event` hooks are withheld from that phase for the same \
-         reason, and the two streams describe the same thing",
-    ),
-];
+fn deviation(path: &str) -> Option<&'static Wiring> {
+    DEVIATIONS.iter().find(|w| w.path == path)
+}
 
 /// Every `.axl` in the built-in tree, as `(path, source)`.
 fn sources() -> Vec<(String, &'static str)> {
@@ -143,85 +162,83 @@ fn sources() -> Vec<(String, &'static str)> {
     out
 }
 
-/// Nothing spawns Bazel without wiring the hook, except by name and with a
-/// reason.
-#[test]
-fn every_task_that_spawns_bazel_wires_exec_log_event() {
-    for (path, source) in sources() {
-        if spawn_lines(source).is_empty() {
-            continue;
-        }
-        if let Some((_, why)) = EXEMPT.iter().find(|(name, _)| *name == path) {
-            assert!(
-                calls(source, "open").is_empty(),
-                "{path} is exempt from the exec_log_event wiring ({why}), but wires it \
-                 anyway — drop the exemption",
-            );
-            continue;
-        }
-        assert!(
-            !calls(source, "open").is_empty(),
-            "{path} spawns Bazel but never calls `exec_log.open`, so no \
-             `BazelTrait.exec_log_event` hook can fire for it. Wire it as \
-             `builtins/aspect/bazel/exec_log.axl` documents (open before the spawn, \
-             pump in the drain loop, close before wait()), or add the file to EXEMPT \
-             in {} with the reason it cannot produce an execution log.",
-            file!(),
-        );
-    }
-}
-
-/// Every spawn site has a handle of its own, or a reason in `PARTIALLY_WIRED`.
+/// Every spawn site opens a handle, unless the file says otherwise in full.
 ///
-/// `every_task_that_spawns_bazel_wires_exec_log_event` is per *file*, so a file
-/// that drives Bazel several times passes on one wired call site — which is how
-/// `delivery.axl` passed while two of its three phases dispatched nothing. This
-/// counts sites instead, so the second and third invocation of a multi-phase
-/// task are decisions somebody made rather than call sites nobody looked at.
+/// Per *site*, not per file: a file that drives Bazel several times would
+/// otherwise pass on one wired call site, which is how `delivery.axl` passed
+/// while two of its three phases dispatched nothing. Counting sites makes the
+/// second and third invocation of a multi-phase task decisions somebody made
+/// rather than call sites nobody looked at.
 #[test]
-fn every_spawn_site_opens_a_handle_or_is_named() {
+fn every_spawn_site_opens_a_handle_or_is_recorded() {
     for (path, source) in sources() {
         let sites = spawn_lines(source).len();
-        if sites == 0 || EXEMPT.iter().any(|(name, _)| *name == path) {
+        if sites == 0 {
             continue;
         }
         let opens = calls(source, "open").len();
-        let Some((_, expected, why)) = PARTIALLY_WIRED.iter().find(|(name, ..)| *name == path)
-        else {
+        let Some(w) = deviation(&path) else {
             assert_eq!(
                 opens,
                 sites,
                 "{path} spawns Bazel at {sites} site(s) but opens {opens} \
-                 `exec_log_event` handle(s), so some invocation dispatches nothing. Wire \
-                 it as `builtins/aspect/bazel/exec_log.axl` documents (open before the \
-                 spawn, pump in the drain loop, close before wait()), or name the file in \
-                 PARTIALLY_WIRED in {} with the reason that spawn cannot or should not \
-                 carry a handle.",
+                 `exec_log_event` handle(s), so some invocation dispatches nothing. \
+                 Wire it as `builtins/aspect/bazel/exec_log.axl` documents (open \
+                 before the spawn, pump in the drain loop, close before wait()), or \
+                 add a DEVIATIONS row in {} recording this file's shape and why that \
+                 spawn cannot carry a handle.",
                 file!(),
             );
             continue;
         };
-        assert!(
-            *expected < sites,
-            "{path} is listed in PARTIALLY_WIRED ({why}), but now opens a handle at \
-             every one of its {sites} spawn site(s) — drop the entry",
+        assert_eq!(
+            sites, w.sites,
+            "{path} now has {sites} Bazel spawn site(s); DEVIATIONS records {}. A new \
+             invocation needs its own handle, or the row needs updating together with \
+             its reason ({}).",
+            w.sites, w.why,
         );
         assert_eq!(
-            opens, *expected,
-            "{path} is listed in PARTIALLY_WIRED as opening {expected} handle(s) \
-             ({why}); it opens {opens}. Update the entry's count and its reason \
-             together, or wire the remaining site(s).",
+            opens, w.opens,
+            "{path} opens {opens} `exec_log_event` handle(s); DEVIATIONS records {} \
+             ({}). Update the row and its reason together, or wire the remaining \
+             site(s).",
+            w.opens, w.why,
+        );
+        assert!(
+            w.opens < w.sites || w.pumps < w.opens,
+            "{path} is in DEVIATIONS but now matches the default shape — drop the row",
         );
     }
 }
 
-/// Each opened handle is also pumped and drained.
+/// Every table row still describes a file that exists.
 ///
-/// A missing `pump` costs a hook every entry until the end of the build; a
-/// missing `close` costs it whatever had not arrived by then. Both leave the
-/// task working, which is why they are counted here rather than noticed.
+/// A row for a renamed or deleted file is an exemption nothing enforces and a
+/// reason nobody can check, and it would silently excuse a *new* file that
+/// happened to take the old path.
 #[test]
-fn every_opened_handle_is_pumped_and_closed() {
+fn every_recorded_deviation_matches_a_real_file() {
+    let paths: Vec<String> = sources().into_iter().map(|(path, _)| path).collect();
+    for w in DEVIATIONS {
+        assert!(
+            paths.iter().any(|p| p == w.path),
+            "DEVIATIONS names {}, which is not in the built-in tree — the file was \
+             renamed or removed, so drop or re-point the row",
+            w.path,
+        );
+    }
+}
+
+/// Each opened handle is drained, and pumped as often as the file says.
+///
+/// `close` is not optional: without it a hook loses whatever had not arrived by
+/// the end of the build. `pump` is, because a spawn with no event stream has no
+/// drain loop to put one in — every hook then fires from `close`, which costs
+/// timeliness and no entries. Both leave the task working, which is why they are
+/// counted here rather than noticed.
+#[test]
+fn every_opened_handle_is_closed_and_pumped_as_recorded() {
     for (path, source) in sources() {
         let opens = calls(source, "open").len();
         if opens == 0 {
@@ -231,15 +248,19 @@ fn every_opened_handle_is_pumped_and_closed() {
             continue; // defines or unit-tests the verbs rather than using them
         }
         assert_eq!(
-            calls(source, "pump").len(),
-            opens,
-            "{path}: one `exec_log.pump` per `exec_log.open`, in that invocation's \
-             own drain loop",
-        );
-        assert_eq!(
             calls(source, "close").len(),
             opens,
-            "{path}: one `exec_log.close` per `exec_log.open`",
+            "{path}: one `exec_log.close` per `exec_log.open` — a handle that is \
+             never drained loses every entry still in flight when `wait()` releases it",
+        );
+        let expected_pumps = deviation(&path).map_or(opens, |w| w.pumps);
+        assert_eq!(
+            calls(source, "pump").len(),
+            expected_pumps,
+            "{path}: expected {expected_pumps} `exec_log.pump` call(s){}. Pump in the \
+             invocation's own drain loop, or record the difference in DEVIATIONS in {}.",
+            deviation(&path).map_or(String::new(), |w| format!(" ({})", w.why)),
+            file!(),
         );
     }
 }
