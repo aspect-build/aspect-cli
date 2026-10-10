@@ -6,9 +6,9 @@ wrong fails quietly, so none of them live at the call sites:
   `open(trait)`      before the spawn. Returns the `execution_log=` list to pass
                      to `ctx.bazel.build` / `.test` — the trait's own sinks, plus
                      one `bazel.execution_log.iterator()` handle when a hook is
-                     registered. The handle has to exist *before* the spawn: it
-                     is what tells the runtime an every-entry consumer is
-                     subscribed, which is what makes the stream lossless.
+                     registered. The handle has to exist *before* the spawn:
+                     `execution_log = [...]` is the only thing that subscribes
+                     one, so a handle made later never binds.
   `pump(ctx, h)`     optional, inside the task's existing drain loop. Fires
                      hooks on whatever has arrived, without blocking.
   `close(ctx, h)`    after the task's own drain loop and **before** `build.wait()`.

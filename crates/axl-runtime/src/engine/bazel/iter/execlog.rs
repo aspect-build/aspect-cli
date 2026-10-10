@@ -1,14 +1,16 @@
 //! The two AXL-facing views of a build's decoded execution log.
 //!
-//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and
-//! handed out after the spawn, too late for the reader to know a consumer exists
-//! — so it reads the lossy stream and may miss entries it fell behind on.
+//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and handed
+//! out after the spawn. It takes the stream's *own* subscriber, which is in the
+//! ring from the moment the stream spawns, so the reader blocks for it like any
+//! other consumer and the iteration is complete.
 //!
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
-//! before the spawn and passed in `execution_log = [...]`. Being visible at spawn
-//! time is what makes it lossless, and its `kinds=` filter is applied here in
-//! Rust so a consumer that only wants spawns does not pay a Starlark allocation
-//! per file in the build.
+//! before the spawn and passed in `execution_log = [...]`. Both forms are
+//! complete; what the handle adds is its `kinds=` filter, applied here in Rust so
+//! a consumer that only wants spawns does not pay a Starlark allocation per file
+//! in the build, and a subscriber of its own, so it can sit beside a decoded
+//! `file()` sink where `build.execution_logs()` cannot.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -201,12 +203,12 @@ enum ExecLogIterState {
 /// one build's decoded execution log, created before the spawn and passed in
 /// `execution_log = [...]`.
 ///
-/// Why a handle rather than `build.execution_logs()`: the decision the runtime
-/// has to make before Bazel starts is whether entries may be dropped. A
-/// consumer that appears only after the spawn cannot be counted, so the
-/// producer would already have chosen the lossy path. Passing the handle in is
-/// what lets `Build::spawn` see the consumer in time (see `lossless` on
-/// [`ExecLogStream::spawn_with_file`]).
+/// Why a handle rather than `build.execution_logs()`: cost and composition, not
+/// completeness. Both forms receive every entry — the producer blocks for
+/// whatever subscribers it has (see `lossless` on
+/// [`ExecLogStream::spawn_with_file`]). A handle clones a subscriber of its own,
+/// so it combines with sinks where `execution_logs()` takes the stream's one and
+/// only, and it filters in Rust, below.
 ///
 /// `kinds` filters by payload tag in Rust, before the entry is turned into a
 /// Starlark value. That matters more here than it does for build events: a log

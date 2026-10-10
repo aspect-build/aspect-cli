@@ -98,11 +98,12 @@ impl<R: Read> Read for RetryRead<R> {
 /// `lossless` selects (see [`ExecLogStream::spawn`]).
 ///
 /// Returns whether any subscriber remains. `false` means every one is gone — the
-/// file-sink threads finished and `build.wait()` released the iterator handles —
-/// so the caller can drain the rest of the bytes without paying to decode them.
-/// On the blocking path that is also why a closed channel is not an error: there
-/// is nobody left to miss the remaining entries, and failing here would fail an
-/// otherwise good build.
+/// file-sink threads finished, and `build.wait()` released the iterator handles
+/// and then, in `join()`, the stream's own subscriber — so the caller can drain
+/// the rest of the bytes without paying to decode them. On the blocking path that
+/// is also why a closed channel is not an error: there is nobody left to miss the
+/// remaining entries, and failing here would fail an otherwise good build. It is
+/// what ends a reader parked against a subscriber nobody drained.
 fn forward(sender: &Sender<ExecLogEntry>, entry: ExecLogEntry, lossless: bool) -> bool {
     if lossless {
         return sender.send(entry).is_ok();
@@ -120,14 +121,18 @@ pub struct ExecLogStream {
     /// The one subscriber the stream starts with, and the only thing a further
     /// subscriber can be cloned from — so once it is gone, nothing can join.
     ///
-    /// Nobody reads it, which is why it is an `Option` to be given away or
-    /// dropped as soon as the real consumers are wired: in fibre's broadcast ring
-    /// the producer may not lap its slowest subscriber, and an unread one is a
-    /// tail stuck at entry zero. Left in place it caps every other consumer at
-    /// [`CHANNEL_CAPACITY`] — blocking the producer there, or silently dropping
-    /// past it. Gone with no consumer in its place, the first send reports
-    /// `Closed` and the reader skips decoding entirely, which is what `join()`
-    /// relies on.
+    /// It is an `Option` because it has to be given away or dropped as soon as
+    /// other consumers are wired: in fibre's broadcast ring the producer may not
+    /// lap its slowest subscriber, and one nobody reads is a tail stuck at entry
+    /// zero. Left in place beside others it caps them all at
+    /// [`CHANNEL_CAPACITY`], blocking the producer there. Gone with no consumer
+    /// in its place, the first send reports `Closed` and the reader skips decoding
+    /// entirely, which is what `join()` relies on.
+    ///
+    /// A stream that named no consumer keeps it instead, because it is what
+    /// `build.execution_logs()` takes — and then it is read, not unread, so it
+    /// caps nothing. Until that call it holds the producer at the capacity, which
+    /// is bounded by `join()` releasing it.
     recv: Option<Receiver<ExecLogEntry>>,
     /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
     file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
@@ -163,18 +168,22 @@ impl ExecLogStream {
     ///
     /// `lossless` controls how decoded entries are sent to the channel:
     ///
-    /// - `true` — blocking [`Sender::send`]: every subscriber sees every entry. Set
-    ///   when one of them requires that — a decoded `File` sink, which would otherwise
-    ///   write an incomplete file, or an [`ExecLogIter`](super::super::iter::ExecLogIter)
-    ///   handle backing `BazelTrait.exec_log_event` hooks, which would otherwise miss
+    /// - `true` — blocking [`Sender::send`]: every subscriber sees every entry. What
+    ///   every decoded consumer needs — a `File` sink, which would otherwise write an
+    ///   incomplete file; an [`ExecLogIter`](super::super::iter::ExecLogIter) handle
+    ///   backing `BazelTrait.exec_log_event` hooks; and the stream's own subscriber,
+    ///   which `build.execution_logs()` takes — each of which would otherwise miss
     ///   entries with nothing to say so. The reader waits for the slowest subscriber;
-    ///   `build.wait()` releases the handles before joining it, so a consumer that
-    ///   stops reading cannot hold the reader forever.
+    ///   `build.wait()` releases the handles, and then the stream's own subscriber,
+    ///   before joining it, so a consumer that stops reading cannot hold the reader
+    ///   forever.
     ///
     /// - `false` — non-blocking [`Sender::try_send`]: entries past
     ///   [`CHANNEL_CAPACITY`] ahead of the slowest subscriber are dropped rather than
-    ///   stalling the reader. The strategy for `execution_logs()`, which is handed out
-    ///   after the spawn and so cannot be counted here.
+    ///   stalling the reader. For a source where stalling the reader would reach
+    ///   Bazel, which is the FIFO [`spawn_with_pipe`](Self::spawn_with_pipe) opens.
+    ///   The regular-file path never asks for it — see
+    ///   [`spawn_with_file`](Self::spawn_with_file).
     ///
     /// `CompactFile` sinks are unaffected by this flag — raw bytes are always tee'd
     /// by `MultiTeeReader` before decoding.
@@ -275,10 +284,11 @@ impl ExecLogStream {
     /// written before the reader opens are still there to be read.
     ///
     /// `lossless` picks the send strategy, as described on [`spawn`](Self::spawn).
-    /// This is the production path, and the regular file is why `true` is affordable
-    /// here: Bazel writes the file and this thread tails it, so a slow consumer
-    /// parks *this* thread and never Bazel. Back-pressure therefore shows up as a
-    /// longer `join()` at the end of the build, not as a slower build.
+    /// This is the production path and it always passes `true`; the regular file is
+    /// what makes that affordable, because Bazel writes the file and this thread
+    /// tails it, so a slow consumer parks *this* thread and never Bazel.
+    /// Back-pressure therefore shows up as a longer `join()` at the end of the
+    /// build, not as a slower build.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
