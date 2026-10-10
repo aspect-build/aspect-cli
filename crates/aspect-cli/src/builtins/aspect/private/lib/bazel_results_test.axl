@@ -8,7 +8,8 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
+load("@aspect//bazel/trait.axl", "exit_codes")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -400,7 +401,10 @@ def _make_results_skipped_over_cap():
     return r
 
 def _make_results_aborted():
-    """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
+    """Ctrl-C under `--keep_going`: Bazel exits 8 (INTERRUPTED) and reports
+    Aborted(USER_INTERRUPTED) with an empty description for each in-flight
+    target. Field values are exactly what Bazel 9.3.0 emits — the reason is the
+    snake_case enum read, and the description really is empty."""
     r = init_data()
     r["bazel"]["invocation_id"] = "abort123-4567-89ab-cdef-012345678901"
     r["bazel"]["build_command"] = "build"
@@ -410,9 +414,36 @@ def _make_results_aborted():
     r["bazel"]["actions_total"] = 42
     r["bazel"]["targets_total"] = 20
     r["bazel"]["aborted"] = True
-    r["bazel"]["abort_reason"] = "user_interrupt"
-    r["bazel"]["abort_description"] = "Build interrupted by user"
+    r["bazel"]["abort_reason"] = "user_interrupted"
+    r["bazel"]["abort_description"] = ""
     r["bazel"]["metadata"] = {"BRANCH": "main", "COMMIT_SHA": "aabbccdd11223344"}
+    return r
+
+def _make_results_aborted_nokeep_going():
+    """Ctrl-C under `--nokeep_going`: Bazel still exits 8, but merges the
+    interrupt into Aborted(INCOMPLETE) and names it only in the description.
+    Verbatim from a Bazel 9.3.0 capture — this is the shape no reason-driven
+    trigger can tell apart from an ordinary red build."""
+    r = _make_results_aborted()
+    r["bazel"]["invocation_id"] = "abort999-4567-89ab-cdef-012345678901"
+    r["bazel"]["abort_reason"] = "incomplete"
+    r["bazel"]["abort_description"] = "Multiple abort reasons reported: [USER_INTERRUPTED, INCOMPLETE]"
+    r["bazel"]["failed_actions"] = []
+    return r
+
+def _make_results_aborted_in_loading():
+    """Ctrl-C before anything is analysed. Nothing reaches `target_completed`,
+    so no `Aborted` payload lands in an arm that records detail and the reason
+    and description stay empty — the exit code is the only abort signal.
+    Renders the bare notice (no " — <reason>" rider); the state it stands for
+    is asserted in `_test_interrupt_during_loading_aborts_with_no_detail`."""
+    r = _make_results_aborted()
+    r["bazel"]["invocation_id"] = "abort777-4567-89ab-cdef-012345678901"
+    r["bazel"]["abort_reason"] = ""
+    r["bazel"]["abort_description"] = ""
+    r["bazel"]["failed_actions"] = []
+    r["bazel"]["actions_total"] = 0
+    r["bazel"]["targets_total"] = 0
     return r
 
 def _make_results_large():
@@ -578,7 +609,16 @@ def _scenarios():
         ("2. failed · Buildkite", _make_results_failed(), "failed", "//...", True, "buildkite", None, ""),
         ("3. flaky · CircleCI", _make_results_flaky(), "passed", "//...", True, "circleci", None, ""),
         ("4. failing-live · GitLab", _make_results_failing_live(), "failing", "//...", False, "gitlab", None, ""),
-        ("5. aborted · GitHub", _make_results_aborted(), "failed", "//...", False, "github", None, ""),
+        # Status and data agree: `pick_status` returns "aborted" exactly when
+        # the data says so, so a `failed` status over aborted data is a pairing
+        # no build can reach. These snapshot the 🔥 icon, the "Aborted" label,
+        # the terminal verb and the abort notice of an aborted build. GitLab
+        # gets a twin because `aborted` is the one status
+        # whose GL commit_status state (`canceled`) differs from `failed`.
+        ("5. aborted · GitHub", _make_results_aborted(), "aborted", "//...", False, "github", None, ""),
+        ("5b. aborted · GitLab", _make_results_aborted(), "aborted", "//...", False, "gitlab", None, ""),
+        ("5c. aborted-nokeep_going · GitHub", _make_results_aborted_nokeep_going(), "aborted", "//...", False, "github", None, ""),
+        ("5d. aborted-in-loading · GitHub", _make_results_aborted_in_loading(), "aborted", "//...", False, "github", None, ""),
         ("6. large · Buildkite", _make_results_large(), "failed", "//...", False, "buildkite", None, ""),
         ("7. all-passed · GitLab", _make_results_passed(), "passed", "//...", True, "gitlab", None, ""),
         ("8. all-passed · CircleCI", _make_results_passed(), "passed", "//...", True, "circleci", None, ""),
@@ -888,7 +928,7 @@ def _test_bes_get_returns_default_for_missing_field(ctx):
     `cached_locally` / `test_action_output` fields. `bes_get` must return
     the supplied default instead of raising AttributeError — that's the
     contract the BES-event readers rely on."""
-    aborted_payload = struct(reason = "USER_INTERRUPTED")
+    aborted_payload = struct(reason = "user_interrupted")
     _eq("bes_get missing → default", bes_get(aborted_payload, "status", ""), "")
     _eq("bes_get missing → typed default", bes_get(aborted_payload, "cached_locally", False), False)
     _eq("bes_get missing → list default", bes_get(aborted_payload, "test_action_output", None), None)
@@ -1219,7 +1259,7 @@ def _test_repro_targets_dedups_fallback_input(ctx):
     )
 
 def _test_status_maps_cover_every_terminal_status(ctx):
-    """Every status `_pick_status` / the lifecycle can emit at terminal must
+    """Every status `pick_status` / the lifecycle can emit at terminal must
     have an explicit icon AND label. A missing key falls back to 🔄/"Running"
     in `build_invocation_rows`, which strands a finished task's status row on
     "Running" (the delivery-ends-with-warning bug)."""
@@ -1566,10 +1606,14 @@ def _test_try_template_engines_return_ok_text_tuple(ctx):
     _eq("jinja2 undefined call not ok", jj_ok, False)
 
 def _test_results_kinds_locked(ctx):
-    """`RESULTS_KINDS` is the passed to the results event iterator as its `kinds=`
-    filter, so it MUST list every kind `process_event` consumes. Lock the set so
-    a new `process_event` branch (or a stray edit) can't silently drop events —
-    if you add/remove a consumed kind, update both `process_event` and this list."""
+    """`RESULTS_KINDS` is passed to the results event iterator as its `kinds=`
+    filter, so it MUST list every PAYLOAD type `process_event` needs. Lock the
+    set so a stray edit can't silently drop events.
+
+    These are payload type names, not `event.kind` values — see the comment on
+    `RESULTS_KINDS`. `"aborted"` is the case that makes the difference visible:
+    it is required here, because dropping it would starve the skipped-target
+    tally, yet no `event.kind` ever reads `"aborted"`."""
     expected = [
         "aborted",
         "action_completed",
@@ -1590,9 +1634,14 @@ def _test_results_kinds_locked(ctx):
     _eq("RESULTS_KINDS set", sorted(RESULTS_KINDS), expected)
 
 def _test_results_kinds_all_processed(ctx):
-    """Every kind in `RESULTS_KINDS` drives a real `process_event` branch — feed
-    a minimal event of each and confirm it's handled without error (missing
-    payload fields are tolerated via `bes_get`)."""
+    """Feed a minimal event of each `RESULTS_KINDS` entry and confirm it is
+    handled without error (missing payload fields are tolerated via `bes_get`).
+
+    A smoke test only. These events are synthetic: `kind` is set from the
+    filter's own name, which conflates the two vocabularies on purpose to prove
+    nothing crashes. Passing here is NOT evidence that a kind is consumed — for
+    `"aborted"` no such `event.kind` exists in real BEP at all (see
+    `_test_aborted_is_not_a_build_event_id_kind`)."""
     for kind in RESULTS_KINDS:
         event = struct(
             kind = kind,
@@ -1604,6 +1653,313 @@ def _test_results_kinds_all_processed(ctx):
         result = process_event(init_data(), event, None)
         if result != True and result != False:
             fail("process_event(%s) returned non-bool: %r" % (kind, result))
+
+def _abort_event(kind, reason, id = None, description = ""):
+    """A real-BEP-shaped aborted event: an `Aborted` payload (`reason` +
+    `description`) carried by the id of whatever was aborted. `kind` is that
+    id's name — `target_completed`, `pattern_expanded`, … — because
+    `BuildEventId` has no `aborted` variant."""
+    return struct(
+        kind = kind,
+        id = id if id != None else struct(label = "//pkg:t", configuration = struct(id = "c1")),
+        payload = struct(reason = reason, description = description),
+    )
+
+def _finished_event(code):
+    """A `build_finished` event carrying Bazel's exit code, the signal the
+    abort verdict is drawn from. `code = 0` is spelled as proto3 spells it:
+    SUCCESS omits the field, leaving the int32 at its default."""
+    exit_code = struct(name = "SUCCESS") if code == 0 else struct(name = "N", code = code)
+    return struct(
+        kind = "build_finished",
+        id = struct(),
+        payload = struct(finish_time_millis = 1700000000000, exit_code = exit_code),
+    )
+
+def _data_after(events):
+    data = init_data()
+    for event in events:
+        process_event(data, event, None)
+    return data
+
+# Bazel exit codes a build can finish on, and whether each means the invocation
+# was ABORTED. Mirrors the Aspect Web UI's `useInvocationBucket`: only
+# INTERRUPTED buckets as ABORTED_STATE, everything else non-zero — including
+# OOM and a lost remote environment — buckets as FAILED_TO_BUILD.
+_EXIT_CODE_CASES = [
+    (exit_codes.SUCCESS, False),
+    (exit_codes.BUILD_FAILURE, False),
+    (exit_codes.COMMAND_LINE_ERROR, False),
+    (exit_codes.TESTS_FAILED, False),
+    (exit_codes.NO_TESTS_FOUND, False),
+    (exit_codes.RUN_FAILURE, False),
+    (exit_codes.ANALYSIS_FAILURE, False),
+    (exit_codes.INTERRUPTED, True),
+    (exit_codes.REMOTE_ENVIRONMENTAL_ERROR, False),
+    (exit_codes.OOM_ERROR, False),
+    (exit_codes.BLAZE_INTERNAL_ERROR, False),
+    (exit_codes.EXTERNAL_DEPS_ERROR, False),
+]
+
+# Every `Aborted.AbortReason` in build_event_stream.proto, snake_case as an AXL
+# enum read yields it. None of them may decide the verdict on its own.
+# `_test_abort_reasons_match_the_proto` ties this list back to the generated
+# proto, so a Bazel release that adds a reason fails here instead of leaving
+# the new reason unexercised.
+_ABORT_REASONS = [
+    "unknown",
+    "user_interrupted",
+    "no_analyze",
+    "no_build",
+    "time_out",
+    "remote_environment_failure",
+    "internal",
+    "loading_failure",
+    "analysis_failure",
+    "skipped",
+    "incomplete",
+    "out_of_memory",
+]
+
+def _test_abort_reasons_match_the_proto(ctx):
+    """`_ABORT_REASONS` is hand-written, so tie it to the generated proto:
+    `dir()` on the `AbortReason` members namespace yields the real variant set
+    (SCREAMING proto names) straight out of `build_event_stream.proto`.
+
+    The lowercase of a proto name is the snake_case form a field read yields,
+    because every variant here is plain words with no acronym or digit —
+    `_test_interrupt_exit_code_aborts_the_build` pins the actual read
+    (`"user_interrupted"`) so the mapping is not taken on faith.
+
+    Without this, a Bazel release that adds a 13th reason would leave
+    `_test_abort_reason_never_decides_the_verdict` green while never
+    exercising the new reason."""
+    proto_reasons = [name.lower() for name in dir(bazel.build.build_event.aborted.AbortReason)]
+    _eq("reason set matches the proto", sorted(_ABORT_REASONS), sorted(proto_reasons))
+    _eq("no reason listed twice", len(_ABORT_REASONS), len(proto_reasons))
+
+def _test_interrupt_exit_code_aborts_the_build(ctx):
+    """`--keep_going` Ctrl-C, verified against Bazel 9.3.0: Aborted(
+    USER_INTERRUPTED) under each in-flight `target_completed` id, then
+    BuildFinished(INTERRUPTED, 8)."""
+    data = init_data()
+    reason_interesting = process_event(
+        data,
+        _abort_event("target_completed", "user_interrupted"),
+        None,
+    )
+    _eq("a reason alone does not abort the build", data["bazel"]["aborted"], False)
+    _eq("the reason is recorded as detail", data["bazel"]["abort_reason"], "user_interrupted")
+    _eq("the per-target tally still fires", reason_interesting, True)
+
+    finish_interesting = process_event(data, _finished_event(exit_codes.INTERRUPTED), None)
+    _eq("the exit code aborts the build", data["bazel"]["aborted"], True)
+    _eq("warrants a status update", finish_interesting, True)
+    _eq("status is aborted", pick_status("build", data, had_failure = True, terminal = True), "aborted")
+    _eq("title reports the abort", compute_invocation_state(data, "aborted"), "Invocation disconnected")
+    _eq("finish time still captured", data["finish_time_ms"], 1700000000000)
+
+def _test_nokeep_going_interrupt_aborts_despite_an_incomplete_reason(ctx):
+    """The case a reason-driven trigger cannot see. Under `--nokeep_going`
+    Bazel merges a Ctrl-C down to Aborted(INCOMPLETE) — the same reason an
+    ordinary failing build emits — and only names the interrupt in the
+    description. Verified against Bazel 9.3.0; the exit code is 8 either way."""
+    data = _data_after([
+        _abort_event(
+            "target_completed",
+            "incomplete",
+            description = "Multiple abort reasons reported: [USER_INTERRUPTED, INCOMPLETE]",
+        ),
+        _finished_event(exit_codes.INTERRUPTED),
+    ])
+    _eq("aborted on the exit code", data["bazel"]["aborted"], True)
+    _eq("status is aborted", pick_status("build", data, had_failure = True, terminal = True), "aborted")
+    _eq("reason surfaced as detail", data["bazel"]["abort_reason"], "incomplete")
+    _eq(
+        "description surfaced as detail",
+        data["bazel"]["abort_description"],
+        "Multiple abort reasons reported: [USER_INTERRUPTED, INCOMPLETE]",
+    )
+
+def _test_ordinary_nokeep_going_failure_is_not_an_abort(ctx):
+    """Same Aborted(INCOMPLETE) shape as the interrupt above, but with an empty
+    description and exit 1 — an ordinary red build. It must keep reading
+    `failed`, which is what makes the exit code and not the reason the trigger."""
+    data = _data_after([
+        _abort_event("target_completed", "incomplete"),
+        _finished_event(exit_codes.BUILD_FAILURE),
+    ])
+    _eq("not aborted", data["bazel"]["aborted"], False)
+    _eq("still reads failed", pick_status("build", data, had_failure = True, terminal = True), "failed")
+    _eq("title reads as a build failure", compute_invocation_state(data, "failed"), "Failed to build")
+
+def _test_only_the_interrupt_exit_code_aborts_the_build(ctx):
+    """Parity with the Aspect Web UI, which is the point of keying off the exit
+    code: OOM (33) and a lost remote environment (32) are build FAILURES in the
+    UI, so the CLI must not relabel them "Invocation disconnected"."""
+    for (code, want) in _EXIT_CODE_CASES:
+        data = _data_after([_finished_event(code)])
+        _eq("exit %d aborts the build" % code, data["bazel"]["aborted"], want)
+
+    # A missing `exit_code` message reads as the proto default, not as an abort.
+    data = init_data()
+    process_event(data, struct(kind = "build_finished", id = struct(), payload = struct()), None)
+    _eq("no exit_code message is not an abort", data["bazel"]["aborted"], False)
+
+def _test_abort_reason_never_decides_the_verdict(ctx):
+    """No `Aborted.AbortReason` sets the build-level flag by itself. Bazel
+    reports skipped targets, `--nobuild`, and the per-label root cause of an
+    ordinary failure through the very same payload."""
+    for reason in _ABORT_REASONS:
+        data = _data_after([_abort_event("target_completed", reason)])
+        _eq("reason %r leaves the flag alone" % reason, data["bazel"]["aborted"], False)
+
+def _test_nobuild_abort_reason_leaves_the_build_green(ctx):
+    """`--nobuild` emits Aborted(NO_BUILD) on a build that exits 0. Verified
+    against Bazel 9.3.0. Nothing about it is a failure or an abort."""
+    data = _data_after([
+        _abort_event("target_completed", "no_build"),
+        _finished_event(exit_codes.SUCCESS),
+    ])
+    _eq("build not aborted", data["bazel"]["aborted"], False)
+    _eq("still passes", pick_status("build", data, had_failure = False, terminal = True), "passed")
+
+def _test_skipped_target_counts_as_skipped_and_not_as_an_abort(ctx):
+    """A skipped target (incompatible constraints, `--build_tag_filters`) is an
+    `Aborted` payload on a build that exits 0. It belongs in the skipped bucket
+    and must leave the invocation green."""
+    data = _data_after([
+        _abort_event("target_completed", "skipped"),
+        _finished_event(exit_codes.SUCCESS),
+    ])
+    _eq("counted as skipped", data["bazel"]["skipped_targets_total"], 1)
+    _eq("kept with its reason", data["bazel"]["skipped_targets"][0]["reason"], "skipped")
+    _eq("build not aborted", data["bazel"]["aborted"], False)
+    _eq("still passes", pick_status("build", data, had_failure = False, terminal = True), "passed")
+
+def _test_per_label_abort_root_causes_still_read_failed(ctx):
+    """A bad target pattern / missing package is reported as an `Aborted`
+    payload under the `pattern_expanded` id, which has no `process_event` arm
+    at all. Verified against Bazel 9.3.0: both exit 1. Those are build
+    failures, and relabelling them would change the verdict on every such red
+    build."""
+    for reason in ["loading_failure", "incomplete"]:
+        data = _data_after([
+            _abort_event("pattern_expanded", reason, id = struct(pattern = ["//..."])),
+            _finished_event(exit_codes.BUILD_FAILURE),
+        ])
+        _eq("%s does not abort the build" % reason, data["bazel"]["aborted"], False)
+        _eq(
+            "%s still reads failed" % reason,
+            pick_status("build", data, had_failure = True, terminal = True),
+            "failed",
+        )
+
+def _test_interrupt_during_loading_aborts_with_no_detail(ctx):
+    """Ctrl-C before anything is analysed: nothing has reached
+    `target_completed`, so the only `Aborted` payloads ride `pattern_expanded`
+    — an id with no `process_event` arm — and no detail is recorded. The exit
+    code still decides, so the verdict is `aborted` with an empty reason, and
+    the notice renders bare (no " — <reason>" rider). The empty reason is
+    asserted here; scenario "5d" renders the resulting notice so the bare form
+    is visible in the snapshot output."""
+    data = _data_after([
+        _abort_event("pattern_expanded", "user_interrupted", id = struct(pattern = ["//..."])),
+        _finished_event(exit_codes.INTERRUPTED),
+    ])
+    _eq("aborted on the exit code alone", data["bazel"]["aborted"], True)
+    _eq("no reason recorded", data["bazel"]["abort_reason"], "")
+    _eq("no description recorded", data["bazel"]["abort_description"], "")
+    _eq("nothing counted as skipped", data["bazel"]["skipped_targets_total"], 0)
+    _eq("status is aborted", pick_status("build", data, had_failure = False, terminal = True), "aborted")
+    _eq("title reports the abort", compute_invocation_state(data, "aborted"), "Invocation disconnected")
+
+def _test_aborted_is_not_a_build_event_id_kind(ctx):
+    """`BuildEventId` has no `aborted` variant, so `event.kind` never reads
+    "aborted" in real BEP — only the synthetic events of
+    `_test_results_kinds_all_processed` ever do. Nothing may key the abort
+    verdict off that string: an `elif kind == "aborted"` arm cannot match, so
+    it would be dead on arrival the way the released one was."""
+    data = init_data()
+    process_event(data, struct(kind = "aborted", id = struct(), payload = struct(reason = "user_interrupted")), None)
+    _eq("kind='aborted' is not what makes an abort", data["bazel"]["aborted"], False)
+    _eq("and it is not where the reason comes from", data["bazel"]["abort_reason"], "")
+
+def _test_a_successful_target_leaves_the_abort_state_clean(ctx):
+    """The happy path must be untouched by the abort plumbing: an ordinary
+    successful `target_completed` carries `success`, not `reason`, so it must
+    not land in the skipped tally or record any abort detail."""
+    data = init_data()
+    process_event(
+        data,
+        struct(
+            kind = "target_completed",
+            id = struct(label = "//pkg:t", configuration = struct(id = "c1")),
+            payload = struct(success = True),
+        ),
+        None,
+    )
+    process_event(data, _finished_event(exit_codes.SUCCESS), None)
+    _eq("not aborted", data["bazel"]["aborted"], False)
+    _eq("no reason recorded", data["bazel"]["abort_reason"], "")
+    _eq("no description recorded", data["bazel"]["abort_description"], "")
+    _eq("nothing counted as skipped", data["bazel"]["skipped_targets_total"], 0)
+    _eq("one target counted", data["bazel"]["targets_total"], 1)
+    _eq("passes", pick_status("build", data, had_failure = False, terminal = True), "passed")
+
+def _test_abort_detail_is_last_writer_wins(ctx):
+    """On an interrupt every in-flight target emits its own `Aborted` payload,
+    so the detail keys are written N times. Last writer wins — by decision, so
+    a reordering shows up here rather than silently changing the notice."""
+    data = _data_after([
+        _abort_event("target_completed", "user_interrupted", description = "first"),
+        _abort_event("target_completed", "incomplete", description = "second"),
+    ])
+    _eq("last reason kept", data["bazel"]["abort_reason"], "incomplete")
+    _eq("last description kept", data["bazel"]["abort_description"], "second")
+    _eq("every one counted as skipped", data["bazel"]["skipped_targets_total"], 2)
+
+def _test_build_started_clears_an_abort_from_a_prior_attempt(ctx):
+    """The retry loop reuses one `data` across attempts. `build_started` resets
+    the stream, so an attempt that was interrupted must not leave the next
+    attempt reading "aborted"."""
+    data = _data_after([
+        _abort_event("target_completed", "user_interrupted"),
+        _finished_event(exit_codes.INTERRUPTED),
+    ])
+    _eq("first attempt aborted", data["bazel"]["aborted"], True)
+
+    process_event(
+        data,
+        struct(
+            kind = "build_started",
+            id = struct(),
+            payload = struct(uuid = "retry-1", command = "build", start_time_millis = 1700000001000),
+        ),
+        None,
+    )
+    _eq("retry clears the flag", data["bazel"]["aborted"], False)
+    _eq("retry clears the reason", data["bazel"]["abort_reason"], "")
+    _eq("retry clears the description", data["bazel"]["abort_description"], "")
+    _eq("retry is not aborted", pick_status("build", data, had_failure = False, terminal = False), "running")
+
+def _test_pick_status_ranks_aborted_above_every_other_verdict(ctx):
+    """Ordering inside `pick_status`: an aborted build reports "aborted" even
+    when a failure or a flake was already recorded, matching
+    `compute_invocation_state`, which returns the Aborted label regardless of
+    which other buckets are populated."""
+    data = init_data()
+    _eq("clean + terminal", pick_status("build", data, had_failure = False, terminal = True), "passed")
+    _eq("failure + terminal", pick_status("build", data, had_failure = True, terminal = True), "failed")
+    _eq("failure mid-stream", pick_status("build", data, had_failure = True, terminal = False), "failing")
+
+    data["bazel"]["aborted"] = True
+    _eq("abort outranks failed", pick_status("build", data, had_failure = True, terminal = True), "aborted")
+    _eq("abort outranks failing", pick_status("build", data, had_failure = True, terminal = False), "aborted")
+    _eq("abort outranks running", pick_status("build", data, had_failure = False, terminal = False), "aborted")
+
+    data["bazel"]["flaky_test_total"] = 2
+    _eq("abort outranks warning", pick_status("test", data, had_failure = False, terminal = True), "aborted")
 
 def _test_strip_url_creds_keeps_user_when_split(ctx):
     _eq(
@@ -2024,6 +2380,21 @@ _UNIT_TESTS = [
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
     _test_repro_targets_dedups_fallback_input,
+    _test_abort_reasons_match_the_proto,
+    _test_interrupt_exit_code_aborts_the_build,
+    _test_interrupt_during_loading_aborts_with_no_detail,
+    _test_nokeep_going_interrupt_aborts_despite_an_incomplete_reason,
+    _test_ordinary_nokeep_going_failure_is_not_an_abort,
+    _test_only_the_interrupt_exit_code_aborts_the_build,
+    _test_abort_reason_never_decides_the_verdict,
+    _test_nobuild_abort_reason_leaves_the_build_green,
+    _test_skipped_target_counts_as_skipped_and_not_as_an_abort,
+    _test_per_label_abort_root_causes_still_read_failed,
+    _test_aborted_is_not_a_build_event_id_kind,
+    _test_a_successful_target_leaves_the_abort_state_clean,
+    _test_abort_detail_is_last_writer_wins,
+    _test_build_started_clears_an_abort_from_a_prior_attempt,
+    _test_pick_status_ranks_aborted_above_every_other_verdict,
     _test_strip_url_creds_keeps_user_when_split,
     _test_strip_url_creds_redacts_bare_userinfo,
     _test_strip_url_creds_leaves_urls_without_userinfo,

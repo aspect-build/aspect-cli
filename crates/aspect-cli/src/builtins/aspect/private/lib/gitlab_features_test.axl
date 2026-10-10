@@ -10,7 +10,11 @@ What's GL-specific and tested below:
   * `state_for(status, final)` — Aspect task status → GitLab
     commit_status state mapping (warning→skipped, aborted→canceled,
     etc). This mapping is the only place where GL semantics diverge
-    from GH's check-runs conclusion model.
+    from GH's check-runs conclusion model: GitHub folds `aborted` into
+    the same `failure` conclusion as `failed`, GitLab does not. An
+    interrupted build therefore posts `canceled` here where it posts
+    `failure` on GitHub, so the BES-data → state chain is pinned below
+    and not just the mapping in isolation.
   * `truncate_description(text)` — GitLab's 255-char cap on the
     `description` field. Must collapse newlines, ellipsize, and pass
     short input through unchanged.
@@ -22,8 +26,10 @@ Run with:
   aspect dev test-gitlab-features
 """
 
+load("@aspect//bazel/trait.axl", "exit_codes")
 load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
 load("@aspect//feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
+load("./bazel_results.axl", "init_data", "pick_status", "process_event")
 
 def _eq(label, got, want):
     if got != want:
@@ -47,6 +53,41 @@ def _test_impl(ctx):
     _eq("state_for / terminal warning", state_for("warning", True), "skipped")
     _eq("state_for / terminal failed", state_for("failed", True), "failed")
     _eq("state_for / terminal aborted", state_for("aborted", True), "canceled")
+
+    # An interrupted build, end to end: Bazel's INTERRUPTED exit code in the
+    # BES stream → `pick_status` → the GitLab state actually posted. GitLab is
+    # the one host where an interrupt and a failure post different states, so
+    # pin the whole chain and not just the mapping. `canceled` is still not
+    # `success`, so "pipelines must succeed" keeps blocking either way.
+    interrupted = init_data()
+    process_event(
+        interrupted,
+        struct(
+            kind = "build_finished",
+            id = struct(),
+            payload = struct(exit_code = struct(name = "INTERRUPTED", code = exit_codes.INTERRUPTED)),
+        ),
+        None,
+    )
+    status = pick_status("build", interrupted, had_failure = True, terminal = True)
+    _eq("interrupted BES data picks the aborted status", status, "aborted")
+    _eq("interrupted build posts canceled, not failed", state_for(status, True), "canceled")
+
+    # The ordinary red build it must stay distinguishable from: same stream
+    # shape, exit 1.
+    red = init_data()
+    process_event(
+        red,
+        struct(
+            kind = "build_finished",
+            id = struct(),
+            payload = struct(exit_code = struct(name = "BUILD_FAILURE", code = exit_codes.BUILD_FAILURE)),
+        ),
+        None,
+    )
+    red_status = pick_status("build", red, had_failure = True, terminal = True)
+    _eq("a failing build still picks failed", red_status, "failed")
+    _eq("a failing build still posts failed", state_for(red_status, True), "failed")
 
     # Unknown status returns None (caller skips); covers any future
     # status string we haven't mapped yet.

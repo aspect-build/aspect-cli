@@ -17,7 +17,7 @@ Event kinds consumed:
   "test_result"              — records each attempt's run/shard/attempt, status, test.log + test.xml paths and duration
   "test_summary"             — buckets tests into failed / flaky / passed; tracks duration; settles the snippet's log path
   "build_metrics"            — captures action/target/package counts and timing
-  "aborted"                  — captures build abort reason and description
+  "build_finished"           — captures the finish time, and the exit code that decides whether the build was aborted
 
 Payload fields used:
   BuildStarted.uuid, .build_tool_version, .command, .start_time_millis
@@ -35,7 +35,8 @@ Payload fields used:
   BuildMetrics.target_metrics.targets_configured
   BuildMetrics.package_metrics.packages_loaded
   BuildMetrics.cumulative_metrics.{num_analyses, num_builds}
-  Aborted.abort_reason, .description
+  BuildFinished.finish_time_millis, .exit_code.code
+  Aborted.reason, .description — detail text only; the exit code decides the verdict
   event.id.label       — target label for all event types
 
 stderr CONTENTS are deliberately not held on the Starlark heap: BES can inline
@@ -47,6 +48,10 @@ never copied into a Starlark value here. When no snippet is rendered, the
 surface still shows the failing label + action mnemonics + the CI link.
 """
 
+# `exit_codes` is defined in `bazel/trait.axl` and imported from there rather
+# than through the `@aspect//bazel.axl` facade, whose `bazel` export would
+# shadow the builtin `bazel` global for anything added to this file later.
+load("@aspect//bazel/trait.axl", "exit_codes")
 load("@std//time.axl", "time")
 load("./ci.axl", "detect_ci_host", "resolve_build_url")
 load(
@@ -610,15 +615,25 @@ def init_data():
                 "cmd_line": [],
             },
 
-            # From the aborted event.
+            # `aborted` comes from BuildFinished's exit code (see the
+            # `build_finished` arm of `process_event`). The reason/description
+            # are detail text for the rendered notice, taken from the last
+            # `Aborted` payload seen; they never decide the verdict, so they
+            # may be populated on a build that is not aborted (a skipped
+            # target is an `Aborted` payload too) and the templates gate on
+            # `aborted` alone.
             "aborted": False,
-            "abort_reason": "",  # snake_case proto enum, e.g. "interrupted"
+            "abort_reason": "",  # snake_case proto enum, e.g. "user_interrupted"
             "abort_description": "",
         },
     }
 
 def process_event(data, event, bb_root):
     """Update data in-place from a single build event.
+
+    Whether the build was ABORTED is decided by Bazel's exit code, read off
+    `BuildFinished.exit_code.code` in the `build_finished` arm — never from an
+    `Aborted` payload's reason. See that arm for why.
 
     All field access goes through bes_get() (guards AttributeError on schema
     mismatch). Missing-field warnings go through `trace` (ASPECT_DEBUG / OTel only).
@@ -807,11 +822,20 @@ def process_event(data, event, bb_root):
 
         target_kind = data["bazel"]["target_kinds"].get(label, "") if label else ""
 
-        # Skipped targets arrive as target_completed with an Aborted payload
-        # (has `reason`+`description`; TargetComplete has `success`). Presence
-        # of `reason` is the cleanest payload-shape probe.
+        # A target that did not build arrives as target_completed carrying an
+        # Aborted payload (`reason`+`description`) where TargetComplete would
+        # have `success`. Every reason goes in the skipped tally, because
+        # `_compute_bucket_counts` subtracts it from targets_total and omitting
+        # one would count the target as successfully built.
         abort_reason = bes_get(payload, "reason", None)
         if abort_reason != None:
+            # Detail text for the abort notice, which renders only once the
+            # exit code says the build was aborted. Last writer wins: an
+            # interrupt emits one of these per in-flight target, and the last
+            # is as close to the abort as the first.
+            data["bazel"]["abort_reason"] = abort_reason
+            data["bazel"]["abort_description"] = bes_get(payload, "description", "") or ""
+
             data["bazel"]["skipped_targets_total"] += 1
             if len(data["bazel"]["skipped_targets"]) < MAX_BUILT_TARGETS:
                 data["bazel"]["skipped_targets"].append({
@@ -1073,11 +1097,26 @@ def process_event(data, event, bb_root):
         return True
 
     elif kind == "build_finished":
+        # `exit_code == INTERRUPTED` is the whole abort rule, and it is the
+        # rule the Aspect Web UI applies: `useInvocationBucket` buckets an
+        # invocation as ABORTED_STATE ("Invocation disconnected") on
+        # BazelExitCode.INTERRUPTED, and everything else non-zero — including
+        # OOM (33) and a remote-environment failure (32) — as FAILED_TO_BUILD.
+        # An `Aborted` payload's reason cannot stand in for it: under
+        # `--nokeep_going` Bazel merges a Ctrl-C down to Aborted(INCOMPLETE),
+        # what an ordinary red build emits, while the exit code is 8 either way.
         payload = event.payload
         if payload:
             finish_ms = bes_get(payload, "finish_time_millis", 0) or 0
             if finish_ms > 0:
                 data["finish_time_ms"] = finish_ms
+            exit_code = bes_get(payload, "exit_code", None)
+
+            # ExitCode.code is a plain int32, so SUCCESS reads 0 via proto3's
+            # omitted-default; the whole `exit_code` message is optional.
+            if bes_get(exit_code, "code", 0) == exit_codes.INTERRUPTED:
+                data["bazel"]["aborted"] = True
+                return True
         return False
 
     elif kind == "configuration":
@@ -1120,16 +1159,6 @@ def process_event(data, event, bb_root):
     elif kind == "workspace_config":
         data["bazel"]["local_exec_root"] = bes_get(event.payload, "local_exec_root", "") or ""
         return False
-
-    elif kind == "aborted":
-        data["bazel"]["aborted"] = True
-        payload = event.payload
-        if payload:
-            # Proto fields are `reason`/`description`; data-dict key stays
-            # `abort_reason` to avoid renaming the template variable.
-            data["bazel"]["abort_reason"] = bes_get(payload, "reason", "") or ""
-            data["bazel"]["abort_description"] = bes_get(payload, "description", "") or ""
-        return True
 
     return False
 
@@ -4957,8 +4986,15 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 # BES event kinds `process_event` consumes. Passed as `kinds=` to the results
 # iterator so the send-side filter drops the noisy unconsumed kinds (`progress`,
 # `named_set_of_files`, …) before they are cloned into this subscriber's buffer.
-# MUST stay in sync with the `process_event` switch — `bazel_results_test.axl`
-# has a drift test asserting both directions.
+#
+# TWO VOCABULARIES: these are `BuildEvent.payload` type names, while the switch
+# in `process_event` reads `event.kind`, the `BuildEventId.id` variant name.
+# They mostly coincide, but `"aborted"` has no `BuildEventId` variant at all —
+# Bazel hangs an `Aborted` payload off the id of whatever was aborted, so
+# `event.kind` reads `target_completed`, `pattern_expanded`, … instead. The
+# entry below is still required, or the filter would drop every `Aborted`
+# payload and the skipped-target tally would go to zero; but no `kind ==
+# "aborted"` arm can ever match, which is why a dead one sat here for so long.
 RESULTS_KINDS = [
     "build_started",
     "structured_command_line",
@@ -4980,7 +5016,15 @@ RESULTS_KINDS = [
 def _pick_status(command, data, had_failure, terminal):
     """Lifecycle status from accumulated BES counters. `command` is
     "build"/"test"; `had_failure` folds failed actions/tests. Aborted wins;
-    a flaky-only test outcome flips to `warning`."""
+    a flaky-only test outcome flips to `warning`.
+
+    Aborted outranking `failed` is deliberate. The flag is only set when Bazel
+    exited INTERRUPTED, where whatever failure was already recorded is a
+    consequence of the interrupt and "the build never finished" is the
+    actionable fact. It also keeps the status consistent with
+    `compute_invocation_state`, which returns the Aborted title label
+    regardless of which other buckets are populated.
+    """
     if data.get("bazel", {}).get("aborted"):
         return "aborted"
     if had_failure:
@@ -4988,6 +5032,10 @@ def _pick_status(command, data, had_failure, terminal):
     if command == "test" and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
         return "warning"
     return "passed" if terminal else "running"
+
+def pick_status(command, data, had_failure, terminal):
+    """Public test hook; see `_pick_status`."""
+    return _pick_status(command, data, had_failure, terminal)
 
 def _passed_text(command, bz):
     if command == "test":
