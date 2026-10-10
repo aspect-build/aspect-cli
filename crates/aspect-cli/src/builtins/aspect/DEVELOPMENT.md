@@ -461,9 +461,45 @@ Optional `kinds=` filter narrows the stream at iteration time:
 
 ```python
 events = bazel.build_events.iterator(
-    kinds = [build_event.TargetCompleted, "named_set_of_files"],
+    kinds = ["action_executed", "named_set_of_files"],
 )
 ```
+
+A kind is named the way `type(event.payload)` reports it — the payload message
+name — so one literal reads both the filter and the payload test:
+
+```python
+events = bazel.build_events.iterator(kinds = ["action_executed"])
+...
+if type(event.payload) == "action_executed":
+    ...
+```
+
+Beware the three naming spaces BEP hands AXL for the same event, which is what
+made this a trap:
+
+| what you read | an `ActionExecuted` event reports |
+| --- | --- |
+| `type(event.payload)` — payload message name | `action_executed` |
+| `event.kind` — `BuildEventId` variant | `action_completed` |
+| the BEP `payload` oneof field name | `action` |
+
+`kinds=` accepts all three spellings of every *payload*, so `event.kind`-shaped
+filters like `"action_completed"` and `"target_completed"` keep working —
+`RESULTS_KINDS` in `private/lib/bazel_results.axl` is written that way, to match
+the `event.kind` switch in `process_event` (its `"aborted"` entry is the
+exception: that is a payload name, because `BuildEventId` has no `aborted`
+variant — Bazel attaches an `Aborted` payload to the id of whatever was
+aborted). What is *not* filterable is the four `event.kind` values that name an
+event carrying no payload of its own — `pattern_skipped`, `unconfigured_label`,
+`configured_label` and `unknown`; naming one is an error. `EVENT_KINDS` in
+[`crates/axl-runtime/src/engine/bazel/build.rs`](../../../../axl-runtime/src/engine/bazel/build.rs)
+is the authoritative table and a mistyped kind lists every accepted spelling.
+
+Note that bazel only publishes `ActionExecuted` for *successful* actions when
+`--build_event_publish_all_actions` is set; without it, only failed actions
+produce one, so an `action_executed` filter on a green build legitimately
+yields nothing.
 
 The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 

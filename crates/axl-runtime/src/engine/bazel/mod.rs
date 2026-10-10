@@ -1314,8 +1314,13 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
     /// Create a handle iterating this build's BES stream. Pass it in
     /// `build_events=[...]` and then `for event in iter:`. Optional
-    /// `kinds=[build_event.TargetCompleted, "named_set_of_files", ...]`
-    /// filters at iteration time.
+    /// `kinds=["action_executed", "named_set_of_files", ...]` filters at
+    /// iteration time.
+    ///
+    /// A kind is named the way `type(event.payload)` reports it, so the same
+    /// literal reads a filter and a payload test. The older `event.kind`-shaped
+    /// spellings (`action_completed`, `target_completed`, …) stay accepted; a
+    /// mistyped kind is an error naming every spelling there is.
     #[starlark(as_type = build::BuildEventIter)]
     fn iterator<'v>(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
@@ -1334,7 +1339,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 }
                 let mut set = std::collections::HashSet::new();
                 for item in &list.items {
-                    set.insert(parse_event_kind(*item)?);
+                    set.insert(build::parse_event_kind(*item)?);
                 }
                 Some(set)
             }
@@ -1350,48 +1355,6 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             tick_ms,
         ))
     }
-}
-
-fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
-    if let Some(n) = value.unpack_i32() {
-        return Ok(n);
-    }
-    if let Some(s) = value.unpack_str() {
-        return match s {
-            "progress" => Ok(3),
-            "aborted" => Ok(4),
-            "started" | "build_started" => Ok(5),
-            "expanded" | "pattern_expanded" => Ok(6),
-            "configured" | "target_configured" => Ok(7),
-            "action" | "action_completed" => Ok(8),
-            "completed" | "target_completed" => Ok(9),
-            "test_result" => Ok(10),
-            "finished" | "build_finished" => Ok(11),
-            "unstructured_command_line" => Ok(12),
-            "structured_command_line" => Ok(13),
-            "options_parsed" => Ok(14),
-            "named_set_of_files" | "named_set" => Ok(15),
-            "workspace_status" => Ok(16),
-            "fetch" => Ok(17),
-            "configuration" => Ok(19),
-            "test_summary" => Ok(20),
-            "build_tool_logs" => Ok(21),
-            "build_metrics" => Ok(22),
-            "build_metadata" => Ok(24),
-            "workspace_info" | "workspace_config" => Ok(25),
-            "target_summary" => Ok(26),
-            "convenience_symlinks_identified" => Ok(27),
-            "exec_request" => Ok(28),
-            other => anyhow::bail!(
-                "unknown build_event kind '{other}'; pass a `bazel.build.build_event.*` \
-                 constant or one of the documented string aliases",
-            ),
-        };
-    }
-    anyhow::bail!(
-        "kinds entry must be a `bazel.build.build_event.*` constant or a string alias; got {}",
-        value.get_type()
-    )
 }
 
 #[starlark_module]

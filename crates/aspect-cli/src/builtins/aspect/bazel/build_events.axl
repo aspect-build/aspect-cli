@@ -30,7 +30,10 @@ def build_events_iterator(kinds = None, tick_ms = None):
 
     Exposed here because this file already binds the builtin `bazel` global,
     while `bazel.axl` cannot (its own exported `bazel` namespace shadows the
-    builtin). `kinds` is a list of event-kind aliases (or None for every kind);
+    builtin). `kinds` is a list of payload names — the string `type(event.payload)`
+    reports — or None for every kind. The older spellings (`action_completed`,
+    `action`, …) are still accepted, and a mistyped kind is an error naming
+    every one there is.
     `tick_ms` (when set) makes `for event in iter` yield `None` on a quiet tick
     so callers get a heartbeat without a separate sleep loop. One iterator per
     invocation — the runtime rejects rebinding a used handle."""

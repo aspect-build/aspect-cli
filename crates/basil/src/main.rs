@@ -27,9 +27,9 @@ use std::thread;
 use std::time::Duration;
 
 use axl_proto::build_event_stream::{
-    BuildEvent, BuildEventId, BuildFinished, BuildStarted,
+    ActionExecuted, BuildEvent, BuildEventId, BuildFinished, BuildStarted, NamedSetOfFiles,
     build_event::Payload,
-    build_event_id::{BuildFinishedId, BuildStartedId, Id},
+    build_event_id::{ActionCompletedId, BuildFinishedId, BuildStartedId, Id, NamedSetOfFilesId},
     build_finished::ExitCode,
 };
 use prost::Message;
@@ -260,6 +260,24 @@ fn scenario(name: &str) -> Scenario {
             exit: ExitBehavior::Signal(9),
         },
 
+        // An `ActionExecuted` — the payload whose accepted `kinds=` spelling
+        // used to disagree with `type(event.payload)` — beside a
+        // `NamedSetOfFiles` whose spellings always agreed, so a filter can be
+        // asserted to deliver exactly the kind it names and nothing else.
+        // Real bazel only publishes `ActionExecuted` for successful actions
+        // under `--build_event_publish_all_actions`, which is part of why the
+        // mismatch was hard to see in a live build.
+        "action_and_named_set" => Scenario {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![
+                build_started(),
+                action_executed(),
+                named_set_of_files(),
+                build_finished(0, true),
+            ]],
+            exit: ExitBehavior::Code(0),
+        },
+
         other => {
             eprintln!("basil: unknown scenario {other:?}");
             process::exit(2);
@@ -277,6 +295,39 @@ fn build_started() -> BuildEvent {
         }),
         last_message: false,
         payload: Some(Payload::Started(BuildStarted::default())),
+        ..Default::default()
+    }
+}
+
+/// An `ActionExecuted` payload carried on an `action_completed` id — the
+/// shape that makes `type(event.payload)` and `event.kind` disagree.
+fn action_executed() -> BuildEvent {
+    BuildEvent {
+        id: Some(BuildEventId {
+            id: Some(Id::ActionCompleted(ActionCompletedId {
+                label: "//pkg:target".to_string(),
+                ..Default::default()
+            })),
+        }),
+        last_message: false,
+        payload: Some(Payload::Action(ActionExecuted {
+            success: true,
+            r#type: "Genrule".to_string(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+fn named_set_of_files() -> BuildEvent {
+    BuildEvent {
+        id: Some(BuildEventId {
+            id: Some(Id::NamedSet(NamedSetOfFilesId {
+                id: "0".to_string(),
+            })),
+        }),
+        last_message: false,
+        payload: Some(Payload::NamedSetOfFiles(NamedSetOfFiles::default())),
         ..Default::default()
     }
 }
