@@ -1535,9 +1535,10 @@ mod runcommand_tests {
         );
     }
 
-    /// A `{section}:{config}` payload belongs to that config, not to its base section:
-    /// Bazel keys the bucket on the qualified name and only reads it back when the config
-    /// is active. (Probed: 9.0.1 ignores `common:ci` without `--config=ci`, applies it with.)
+    /// A `{section}:{config}` payload belongs to that config, not to its base section: Bazel
+    /// keys the option on the qualified name and applies it only while the config is active.
+    /// Reading it as `common` would resurrect the bug this reader exists to fix — a flag seen
+    /// as set that Bazel ignores. (Probed: 9.0.1 ignores `common:ci` without `--config=ci`.)
     #[test]
     fn last_flag_value_does_not_read_a_config_qualified_scope_as_its_base_section() {
         assert_eq!(
@@ -2072,8 +2073,7 @@ import {}
         // For `test --config=ci` Bazel expands always:ci → common:ci → build:ci → test:ci
         // (last wins). The announce must list the same-named config sections in that order,
         // not alphabetically (which would put always:ci and build:ci ahead of common:ci and
-        // misrepresent the override order). `always:ci` is included because `always` is the
-        // one rank nothing else in this file exercises.
+        // misrepresent the override order).
         let root = Path::new("/work/repo");
         let rc = rc_with(
             &[&root.join(".bazelrc")],
