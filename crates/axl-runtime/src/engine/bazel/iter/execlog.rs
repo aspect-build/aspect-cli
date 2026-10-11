@@ -566,29 +566,39 @@ mod tests {
 
     /// Blocking iteration must stay a safe point: with no end-of-stream in sight,
     /// a cancelled run has to end the loop rather than wait in it.
+    ///
+    /// Timed out because the regression is a park, not a wrong answer: the
+    /// channel below is never written to and never closed, so an `iter_next` that
+    /// missed the cancel waits forever and reports nothing.
     #[test]
     fn iteration_ends_on_a_cancel_rather_than_parking() {
-        let signals = Signals::new();
-        // A sender that is never written to and never closed: iteration has
-        // nothing to return and no end-of-stream to end on.
-        let (_sender, recv) = bounded::<ExecLogEntry>(4);
-        let iter = ExecLogIter::new(signals.clone(), None);
-        iter.bind(recv).unwrap();
+        let outcome = crate::test::with_timeout(std::time::Duration::from_secs(10), || {
+            let signals = Signals::new();
+            // A sender that is never written to and never closed: iteration has
+            // nothing to return and no end-of-stream to end on.
+            let (_sender, recv) = bounded::<ExecLogEntry>(4);
+            let iter = ExecLogIter::new(signals.clone(), None);
+            iter.bind(recv).unwrap();
 
-        signals.force();
-        assert!(signals.should_unwind(), "the run should now be unwinding");
+            signals.force();
+            assert!(signals.should_unwind(), "the run should now be unwinding");
 
-        Heap::temp(|heap| {
-            assert!(
-                unsafe { iter.iter_next(0, heap) }.is_none(),
-                "a cancelled run must end the iteration instead of parking in it",
-            );
+            let ended = Heap::temp(|heap| unsafe { iter.iter_next(0, heap) }.is_none());
+            // Ending also releases the subscriber, which is what frees a producer
+            // already parked on it.
+            (ended, iter.sub.is_done())
         });
-
-        // Ending also released the subscriber, which is what frees a producer
-        // already parked on it.
+        let Some((ended, unsubscribed)) = outcome else {
+            panic!(
+                "timed out: a cancelled run parked in `iter_next` instead of ending the iteration"
+            )
+        };
         assert!(
-            iter.sub.is_done(),
+            ended,
+            "a cancelled run must end the iteration instead of parking in it",
+        );
+        assert!(
+            unsubscribed,
             "a cancelled iteration should leave the handle unsubscribed",
         );
     }
@@ -613,12 +623,9 @@ mod tests {
     }
 
     /// The AXL-visible half of [`Subscription`]'s on-loan guarantee: a handle
-    /// mid-read is still a bound handle, so `bind` refuses it.
-    ///
-    /// Unreachable through AXL — Starlark is single-threaded, so a task cannot
-    /// reach `ctx.bazel.build` while parked inside `iter_next` — but the refusal
-    /// is this type's contract rather than the evaluator's, so it is asserted
-    /// here as well as on the subscription.
+    /// mid-read is still a bound handle, so `bind` refuses it. See
+    /// `subscription::State::Reading` for what conflating the two would cost,
+    /// and why this is asserted though AXL cannot reach it.
     #[test]
     fn a_handle_mid_read_cannot_be_rebound() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);

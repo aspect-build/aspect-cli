@@ -34,6 +34,13 @@ enum State {
     /// mid-read would succeed against a subscription that already has a receiver,
     /// and the completing read would then decline to put its own back — one
     /// handle claiming two builds, and a subscriber leaked into `Done`.
+    ///
+    /// Unreachable from AXL, which is single-threaded: a task cannot call
+    /// `ctx.bazel.build` while parked inside `iter_next`. Asserted anyway — by
+    /// `a_bind_is_refused_while_a_read_is_in_flight` here and
+    /// `a_handle_mid_read_cannot_be_rebound` on the handle — because the
+    /// guarantee belongs to these types rather than to the evaluator that
+    /// happens to make it unreachable.
     Reading,
     /// Unsubscribed: drained, released by `build.wait()`, or ended by a cancel.
     Done,
@@ -231,18 +238,8 @@ mod tests {
     }
 
     /// A read in flight must not look like a subscription waiting to be bound.
-    ///
-    /// This is what [`State::Reading`] is for. With the pre-bind state doing
-    /// double duty as the on-loan marker, the `bind` below would succeed against
-    /// a subscription that already holds a receiver, and the completing read
-    /// would then find the state no longer `Reading` and drop its own — one
-    /// handle bound to two builds, and a subscriber the producer still blocks for
-    /// leaked away.
-    ///
-    /// Unreachable from AXL today, which is single-threaded: a task cannot call
-    /// `ctx.bazel.build` while parked inside `iter_next`. Asserted anyway because
-    /// the guarantee belongs to this type rather than to the evaluator that
-    /// happens to make it unreachable.
+    /// See [`State::Reading`] for what conflating the two would cost, and why
+    /// this is asserted though AXL cannot reach it.
     #[test]
     fn a_bind_is_refused_while_a_read_is_in_flight() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);
@@ -304,17 +301,32 @@ mod tests {
 
     /// A cancelled run ends a blocking read rather than parking in it, and
     /// unsubscribes on the way out.
+    ///
+    /// Timed out because the regression is a park, not a wrong answer: the
+    /// channel below is never written to and never closed, so a read that missed
+    /// the cancel waits forever and reports nothing.
     #[test]
     fn a_cancel_ends_a_blocking_read() {
-        let signals = Signals::new();
-        // Never written to and never closed: there is nothing to return and no
-        // end-of-stream to end on.
-        let (_sender, recv) = bounded::<ExecLogEntry>(4);
-        let sub = Subscription::live(recv);
+        let outcome = crate::test::with_timeout(std::time::Duration::from_secs(10), || {
+            let signals = Signals::new();
+            // Never written to and never closed: there is nothing to return and no
+            // end-of-stream to end on.
+            let (_sender, recv) = bounded::<ExecLogEntry>(4);
+            let sub = Subscription::live(recv);
 
-        signals.force();
-        assert!(sub.recv_blocking(&signals, |_| true).is_none());
-        assert!(sub.is_done(), "a cancelled read should unsubscribe");
+            signals.force();
+            (
+                sub.recv_blocking(&signals, |_| true).is_none(),
+                sub.is_done(),
+            )
+        });
+        let Some((ended, unsubscribed)) = outcome else {
+            panic!(
+                "timed out: a cancelled run parked in `recv_blocking` instead of ending the read"
+            )
+        };
+        assert!(ended, "a cancelled read should return nothing");
+        assert!(unsubscribed, "a cancelled read should unsubscribe");
     }
 
     /// `is_drained` is what `done` reports, so it has to mean "the stream ended
