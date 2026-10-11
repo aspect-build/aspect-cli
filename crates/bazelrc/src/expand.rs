@@ -126,16 +126,11 @@ impl Expander<'_> {
             return Err(BazelRcError::ConfigCycle { cycle });
         }
 
-        // Every applicable command level contributes, in inheritance order:
-        // always:{config}, common:{config}, parent:{config}..., command:{config}.
+        // Every section the command reads contributes its `{section}:{config}` block.
         // Not first-match-wins, so `build:opt` and `test:opt` both apply to
         // `bazel test --config=opt`.
         let mut config_opts: Vec<RcOption> = Vec::new();
-        for prefix in ["always", "common"]
-            .into_iter()
-            .chain(crate::command_ancestors(self.command).iter().copied())
-            .chain(std::iter::once(self.command))
-        {
+        for prefix in crate::sections_for(self.command) {
             config_opts.extend(
                 self.rc
                     .raw_options(&format!("{prefix}:{config_name}"))
