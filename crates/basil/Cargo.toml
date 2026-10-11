@@ -15,5 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 axl-proto = { path = "../axl-proto" }
+bazelrc = { path = "../bazelrc" }
 prost = "0.14.1"
 zstd = "0.13.3"

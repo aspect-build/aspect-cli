@@ -1105,24 +1105,25 @@ impl Build {
         let targets: Vec<String> = targets.into_iter().collect();
 
         // Read before `flags` is moved into the command: a deployment wired to an
-        // Aspect BES backend, a Workflows runner, or a generated bazelrc already
-        // asks Bazel for the compact log, and the backend reads the file at that
-        // path. Adding a second `--execution_log_compact_file` below would win on
-        // last-write-wins and silently repoint Bazel away from it.
+        // Aspect BES backend, a Workflows runner, or a `.bazelrc` already asks Bazel
+        // for the compact log, and whoever asked reads the file at that path. Adding a
+        // second `--execution_log_compact_file` below would win — a literal flag
+        // outranks rc content — and silently repoint Bazel away from it.
         //
         // An empty value clears the flag rather than naming a file, so it is not a
         // request; treating it as a path would have the reader tail "" and report a
         // clean empty stream. A relative value is joined to the spawn's directory,
         // because that is what Bazel resolves it against while the reader runs from
         // the CLI's own cwd.
-        let injected_execlog_path = bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE)
-            .filter(|path| !path.is_empty())
-            .map(|path| match &directory {
-                Some(dir) if std::path::Path::new(&path).is_relative() => {
-                    std::path::Path::new(dir).join(path)
-                }
-                _ => PathBuf::from(path),
-            });
+        let injected_execlog_path =
+            bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE, verb)
+                .filter(|path| !path.is_empty())
+                .map(|path| match &directory {
+                    Some(dir) if std::path::Path::new(&path).is_relative() => {
+                        std::path::Path::new(dir).join(path)
+                    }
+                    _ => PathBuf::from(path),
+                });
 
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);

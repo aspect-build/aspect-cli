@@ -62,6 +62,18 @@ const BLOCK: u32 = 3000;
 /// [`Fixture::trait_sink`] registers.
 const TRAIT_SINK: &str = "trait-sink.binpb.zst";
 
+/// Placeholder a case's `.bazelrc` can use for its own workspace root, which does
+/// not exist until [`Case::new`] creates it.
+const CASE_DIR: &str = "{case_dir}";
+
+/// Filename, under a case's directory, of the execution log a case's `.bazelrc`
+/// asks Bazel for.
+const RC_LOG: &str = "rc-log.binpb.zst";
+
+/// Filename, under a case's directory, of basil's argv record — every invocation
+/// the CLI made, one line each. What the CLI asked Bazel for is only legible here.
+const ARGV_LOG: &str = "argv.log";
+
 /// Bound on a single `aspect` invocation. Generous: it is here to turn a hang
 /// (a `close` that waits on a producer joined by `wait()`) into a failure, not
 /// to bound a healthy run, which takes under two seconds.
@@ -278,6 +290,7 @@ impl Case {
         std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
         std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
         if let Some(rc) = bazelrc {
+            let rc = rc.replace(CASE_DIR, &root.display().to_string());
             std::fs::write(root.join(".bazelrc"), rc).expect(".bazelrc");
         }
         std::fs::create_dir(root.join(".aspect")).expect(".aspect");
@@ -328,6 +341,7 @@ impl Case {
                 self.holder.unwrap_or_else(|| self.daemon.id()).to_string(),
             )
             .env("BASIL_EXECLOG_PUMP_HANDSHAKE", root.join("pumped"))
+            .env("BASIL_ARGV_LOG", root.join(ARGV_LOG))
             .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -411,6 +425,43 @@ impl Case {
                 .ok()
                 .map(|s| s.trim().to_string()),
         }
+    }
+
+    /// The argv of the case's `bazel build`/`bazel test` invocation, split into
+    /// tokens. Panics if the CLI never got that far.
+    fn bazel_argv(&self) -> Vec<String> {
+        let log = self.dir.path().join(ARGV_LOG);
+        let text = std::fs::read_to_string(&log)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", log.display()));
+        text.lines()
+            .map(|line| line.split(' ').map(str::to_string).collect::<Vec<String>>())
+            .find(|argv| argv.iter().any(|a| a == "build" || a == "test"))
+            .unwrap_or_else(|| panic!("no bazel build/test invocation in {text:?}"))
+    }
+
+    /// Every execution-log path the Bazel command line names, in order, counting
+    /// both forms the CLI renders rc content in: a literal flag, and the
+    /// `--default_override=0:common=…` it wraps a `common`-section entry in.
+    ///
+    /// Collected together on purpose — the point of the `common` case is that the
+    /// two forms are one request, so a test that could see only literals would be
+    /// blind to exactly the bug.
+    fn execution_log_paths(&self) -> Vec<String> {
+        let argv = self.bazel_argv();
+        let mut paths = Vec::new();
+        for (i, token) in argv.iter().enumerate() {
+            let payload = token
+                .strip_prefix("--default_override=")
+                .and_then(|body| body.split_once('='))
+                .map(|(_section, option)| option)
+                .unwrap_or(token.as_str());
+            if let Some(path) = payload.strip_prefix("--execution_log_compact_file=") {
+                paths.push(path.to_string());
+            } else if payload == "--execution_log_compact_file" {
+                paths.push(argv.get(i + 1).cloned().unwrap_or_default());
+            }
+        }
+        paths
     }
 }
 
@@ -694,6 +745,41 @@ fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
         "with no event stream there is no drain loop to pump from, so the whole \
          log must come from `exec_log.close`",
     );
+}
+
+/// An execution log path set in the user's own `.bazelrc` is the path Bazel writes
+/// and the path the CLI reads — whichever section it was written in.
+///
+/// Running Bazel with `--ignore_all_rc_files` means the CLI restates rc content
+/// itself, in a form that depends on the section: `always` and `build` entries pass
+/// through as literal flags, while a `common` one is wrapped in
+/// `--default_override=0:common=…`, because it applies to commands that would reject
+/// the flag literally. All three sections are asserted together because sameness is
+/// the claim — exactly one request reaches Bazel, at the path the rc file named, and
+/// the hook still gets every entry. A second request would mean the CLI missed this
+/// one and repointed Bazel at a temp path of its own, leaving the user's file
+/// uncreated.
+#[test]
+fn an_rc_set_execution_log_path_is_the_one_used() {
+    for section in ["always", "common", "build"] {
+        let rc = format!("{section} --execution_log_compact_file={CASE_DIR}/{RC_LOG}\n");
+        let case = Case::new("execlog_beyond_capacity", Fixture::default(), Some(&rc));
+        let report = case.run(&["build", "//..."]);
+        let want = case.dir.path().join(RC_LOG);
+
+        assert_eq!(
+            case.execution_log_paths(),
+            vec![want.display().to_string()],
+            "`{section}`: the rc file's path should be the only execution log Bazel is \
+             asked for; a second one means the CLI did not see this one",
+        );
+        assert_complete(&format!("`{section}`-scoped rc log"), &report, 1);
+        assert!(
+            std::fs::metadata(&want).is_ok_and(|m| m.len() > 0),
+            "`{section}`: the log should be at the path the rc file named, {}",
+            want.display(),
+        );
+    }
 }
 
 /// The one shape worth warning about: bazel succeeded and produced no log.

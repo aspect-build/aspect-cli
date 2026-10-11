@@ -888,7 +888,15 @@ def profile_flags(rc, command: str, default_path: str, working_directory: str):
     A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
     another feature such as Workflows — is kept, and its path is the one
     uploaded; a relative one resolves against `working_directory`, as Bazel
-    resolves it. Only when none is set is `--profile=default_path` added."""
+    resolves it. Only when none is set is `--profile=default_path` added.
+
+    `rc.flag_value` reads the option model, which covers `common` by name, so a
+    `common`-scoped `--profile` is seen. One pair it answers differently from the
+    command line the rc renders to: an `always` entry that `common` also sets
+    reads as the `common` path here while Bazel writes the `always` one, so the
+    upload would look for a file that does not exist. Pinned in `bazelrc`'s
+    `the_two_readers_diverge_on_an_always_section_flag`; nothing in-tree writes
+    that pair."""
     path = rc.flag_value("--profile", command = command)
     if not path:
         return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])

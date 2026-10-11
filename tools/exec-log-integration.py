@@ -13,6 +13,12 @@ resolver in `builtins/aspect/private/lib/execlog.axl` (input-set flattening,
 runfiles trees, spawn keys, action fingerprints) and the `kinds` filter had only
 ever been exercised against data shaped by the fake. This builds a workspace that
 produces each of those entry kinds for real and asserts on what the hook received.
+
+The fake also cannot show whether the CLI reads an `--execution_log_compact_file`
+somebody else already asked for: it and the CLI share `bazelrc::last_flag_value`,
+so they agree by construction. Only real Bazel can say that a path the CLI read is
+a path Bazel honours, so the last leg puts the flag in a `common` rc section and
+asserts on the file Bazel wrote there.
 """
 
 import argparse
@@ -218,6 +224,10 @@ def scaffold(root: Path, report_dir: Path, bazel_version: str, output_base: Path
     would then read as an empty log. `--nosystem_rc` / `--nohome_rc` cannot be
     set here — Bazel rejects them in an rc file — so they go on each command
     line; see `STARTUP`.
+
+    The `.bazelrc` written here deliberately does *not* ask for an execution log,
+    so the first legs cover the CLI owning the flag. The `rc_scoped` leg appends
+    that line to cover the other branch.
     """
     (root / "MODULE.bazel").write_text('module(name = "execlog_fixture")\n')
     (root / "MODULE.aspect").write_text("")
@@ -478,6 +488,57 @@ def main():
                 "fingerprint is identical — the resolver is not reading digests"
             )
 
+            # 4. The `.bazelrc` asks for the compact log itself, in a `common`
+            #    section. The CLI has to read that path back out of the command
+            #    line it renders the rc to — where a `common` option appears as a
+            #    `--default_override`, not as a literal flag — and tail that file
+            #    instead of adding its own `--execution_log_compact_file`. A
+            #    literal flag outranks rc content, so an injected one wins and
+            #    silently repoints Bazel away from the file whoever wrote that rc
+            #    line is waiting on.
+            #
+            #    The hooks going green is *not* the assertion: they tail whichever
+            #    path the CLI picked, so they stay green either way. The rc-named
+            #    file holding a real log is the assertion, and only Bazel can
+            #    answer it — the basil fake reads argv through the same
+            #    `bazelrc::last_flag_value` the CLI does, so the two agree even
+            #    when both are wrong.
+            rc_log = workspace / "rc-asked-for-this.zst"
+            bazelrc = workspace / ".bazelrc"
+            baseline_rc = bazelrc.read_text()
+            bazelrc.write_text(
+                baseline_rc + f"common --execution_log_compact_file={rc_log}\n"
+            )
+            try:
+                # Something has to execute, or Bazel logs an empty frame.
+                (workspace / "second.in").write_text("second.in v2\n")
+                run(
+                    "rc_scoped",
+                    [aspect, "build", "--task:name=rc-scoped", *ASPECT_STARTUP, "--", "//..."],
+                )
+                rc_scoped = report(reports, workspace, "rc-scoped")
+                check_shared(rc_scoped, "rc-scoped execution log")
+            finally:
+                bazelrc.write_text(baseline_rc)
+
+            assert rc_log.exists(), (
+                "the `.bazelrc` asked bazel for the compact log at "
+                f"{rc_log}, and bazel wrote nothing there. The CLI did not see the "
+                "`common`-scoped flag and added its own, which outranks rc content."
+            )
+            rc_bytes = rc_log.stat().st_size
+            assert rc_bytes > EMPTY_LOG_CEILING, (
+                f"bazel wrote only {rc_bytes} bytes to the rc-named log {rc_log} — "
+                "an empty frame, so the build it belongs to ran no actions"
+            )
+            # Bazel wrote the rc-named path directly, so the task's own
+            # CompactFile sink had to be served by the tee rather than by bazel.
+            sink_log = workspace / "bazel-wrote-this.zst"
+            assert sink_log.exists() and sink_log.stat().st_size > EMPTY_LOG_CEILING, (
+                "the task's CompactFile sink got no copy of a log bazel wrote "
+                f"elsewhere: {sink_log}"
+            )
+
             print(
                 json.dumps(
                     {
@@ -487,6 +548,8 @@ def main():
                         "cold_kinds": cold["kinds"],
                         "test_kinds": tested["kinds"],
                         "inputs_fingerprints_moved": moved,
+                        "rc_scoped_entries": rc_scoped["observed"],
+                        "rc_scoped_log_bytes": rc_bytes,
                     },
                     indent=2,
                 ),

@@ -8,6 +8,8 @@ rust_library(
     ],
     visibility = [
         "//crates/axl-runtime:__pkg__",
+        # basil, the fake bazel, resolves flags the way the CLI decides them.
+        "//crates/basil:__pkg__",
     ],
     deps = [
         "@crates//:allocative",

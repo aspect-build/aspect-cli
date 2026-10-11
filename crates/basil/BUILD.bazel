@@ -10,6 +10,7 @@ rust_binary(
     ],
     deps = [
         "//crates/axl-proto",
+        "//crates/bazelrc",
         "@crates//:prost",
         "@crates//:zstd",
     ],
