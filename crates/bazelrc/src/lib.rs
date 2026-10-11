@@ -831,11 +831,11 @@ impl<'a> DefaultOverride<'a> {
 /// `RcOption`) is folded into the canonical `--flag=value` form for its single
 /// `--default_override=0:common=--flag=value` entry. Bazel parses each override value as one
 /// option token and does not re-split it on whitespace, so a space-joined `--flag value`
-/// payload is rejected as a single unrecognized option. Two consecutive payloads would in
-/// fact pair, since Bazel buckets payloads by section and parses each bucket as a token list,
-/// but only within one section: a value that lands in another bucket leaves the bare flag an
+/// payload is rejected as a single unrecognized option. Two payloads of one section *do* pair,
+/// because Bazel buckets payloads by section and parses each bucket as its own token list —
+/// but only within a section: a value that lands in another bucket leaves the bare flag an
 /// `Expected value after --flag` error. The fold makes the emitted form independent of that
-/// bucketing. (Behaviour checked against Bazel 9.0.1.) Regular flags need no such fold — they
+/// bucketing. (Probed against Bazel 9.0.1 and 9.3.0.) Regular flags need no such fold — they
 /// pass through as adjacent argv tokens, which Bazel pairs natively.
 ///
 /// Accepted trade-off: a bare token following a boolean flag is folded as if it were the flag's
@@ -938,8 +938,14 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// token list, ignoring whatever else sits between them on the command line. So a two-token
 /// `--name value` pair forms only between payloads of the same section, and a bare `--name`
 /// payload whose value was written under a different section names nothing — to Bazel that
-/// shape is a parse error, not a value. Sections are scanned in the order Bazel applies them,
-/// so the last one to name the flag wins.
+/// shape is a parse error (`Expected value after --name`), not a value. Sections are scanned
+/// in the order Bazel applies them, so the last one to name the flag wins. (Probed against
+/// Bazel 9.0.1 and 9.3.0.)
+///
+/// None of this is a live path: [`partition_expand_all`] folds a two-token option into
+/// `--flag=value` before rendering, so the CLI never emits a split pair. It matters because
+/// this function is `pub` and is the single authority on "has this flag been requested?", so
+/// it must not read a value out of a shape Bazel would reject.
 pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<String> {
     let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Some(literal) = flag_values_in(&tokens, name).pop() {
