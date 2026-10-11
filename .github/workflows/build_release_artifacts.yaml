@@ -15,7 +15,7 @@ on:
         type: string
         default: ''
       release:
-        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the slower standard runner.'
+        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the 16-core runner.'
         required: false
         type: boolean
         default: false
@@ -30,7 +30,11 @@ permissions:
 jobs:
   build:
     name: Build MacOS and Linux release artifacts
-    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-latest' }}
+    # Sized by memory: each fat-LTO aspect-cli link peaks near 8 GB and eight
+    # of them (4 platforms x stripped and debug) become runnable together once
+    # their dependencies are cache hits. The 16 GB standard runner dies under
+    # four at a time; BAZEL_JOBS keeps the 64 GB one to six.
+    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-22.04-16core' }}
     timeout-minutes: 120
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
@@ -41,17 +45,48 @@ jobs:
       # `bazel`-only bootstrap (and would fail outright on a clean
       # runner where aspect isn't installed yet).
       ASPECT_WRAPPER_SKIP: "1"
+      BAZEL_JOBS: ${{ inputs.release && 'auto' || '6' }}
+      # "true" or "false", never the value: gates the Aspect Cloud steps so a
+      # run without the secret still builds, just without a remote cache.
+      ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN != '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
+      # The stable launcher installed here only authenticates the Aspect Cloud
+      # cache. A released CLI cannot load this commit's .aspect config, so the
+      # login and the rc generation that setup-aspect would run in the checkout
+      # are skipped; the two steps below do both from outside it, as
+      # .aspect/bootstrap.sh does for the CI pre-build.
       - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
-          aspect-api-token: ${{ secrets.ASPECT_OSS_API_TOKEN }}
-          disk-cache: ${{ github.workflow }}
+          bazelrc-generate: false
           repository-cache: ${{ github.workflow }}
+      - name: Log in to Aspect Cloud
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        working-directory: ${{ runner.temp }}
+        env:
+          TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+        run: printf '%s' "$TOKEN" | aspect auth login --with-api-token
+      - name: Point Bazel at the Aspect Cloud cache
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        # Spells out --config=aspect-cloud's endpoints rather than naming it:
+        # its `aspect` credential helper would run in the workspace, so Bazel
+        # gets a wrapper that runs it from outside the checkout instead.
+        run: |
+          helper_dir="$(mktemp -d)"
+          printf '#!/bin/sh\ncd "%s" && exec "%s" "$@"\n' "${helper_dir}" "$(command -v aspect)" >"${helper_dir}/credential-helper"
+          chmod +x "${helper_dir}/credential-helper"
+          cat >>"${HOME}/.bazelrc" <<EOF
+          common --config=aspect-common --config=aspect-cache --config=aspect-bes
+          common --remote_cache=grpcs://cache.aspect.build
+          common --bes_backend=grpcs://bes.aspect.build
+          common --bes_results_url=https://app.aspect.build/i/
+          common --credential_helper=cache.aspect.build=${helper_dir}/credential-helper
+          common --credential_helper=bes.aspect.build=${helper_dir}/credential-helper
+          EOF
       - name: Build release artifacts
         # `release.sh` (genrule output of //bazel/release:release.bzl) cps
         # bazel-out paths directly without declaring the binaries / .sha256
@@ -75,7 +110,7 @@ jobs:
         # stamped crate to recompile on the next `bazel run`.
         run: |
           mkdir -p "${RUNNER_TEMP}/upload_root/assets"
-          bazel build --config=release --config=ci --remote_download_outputs=toplevel \
+          bazel build --config=release --config=ci --remote_download_outputs=toplevel --jobs="${BAZEL_JOBS}" \
             //crates/aspect-launcher:bins \
             //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
