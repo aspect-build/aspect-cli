@@ -6,7 +6,6 @@ use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, io};
 use std::{
     io::Read,
@@ -53,79 +52,71 @@ impl BuildEventEnvelope {
     }
 }
 
-/// How often to re-check for a writer on the FIFO — while the watchdog waits
-/// for the invocation to end, and in the gap between retry attempts. Short
-/// enough to be invisible next to a build, long enough not to spin.
+/// How long to wait between polls of a file Bazel has not written to yet.
+/// Short enough to be invisible next to a build, long enough not to spin.
 const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// How many times [`spawn_open_watchdog`] offers to release an open that has
-/// not parked yet, before concluding it never will. At
-/// [`WRITER_POLL_INTERVAL`] apiece this spans about two seconds, far longer
-/// than the microseconds between spawning the watchdog and the open it guards.
-const WRITER_RELEASE_OFFERS: u32 = 200;
-
-/// Retries temporary FIFO EOFs below the length-delimited framing.
+/// Turns "nothing written yet" into a blocking read, below the
+/// length-delimited framing.
 ///
-/// A writer may reconnect part-way through a record. The invocation PID bounds
-/// the wait because the Bazel server can outlive the command.
+/// [`galvanize::StreamingFile`] returns `Ok(0)` for "at the current end of the
+/// file, try again later", which the framing above cannot tell from a short
+/// read. The invocation's pid bounds the wait: the Bazel server outlives the
+/// command, so only the client can say no more bytes are coming.
 struct PendingWriterReader {
-    inner: galvanize::Pipe,
+    inner: galvanize::StreamingFile,
     writer_pid: u32,
 }
 
+impl PendingWriterReader {
+    /// Wait for Bazel to reopen the file for its next attempt and resume at the
+    /// start of it. `Ok(false)` when the invocation ended instead.
+    fn await_next_attempt(&mut self) -> io::Result<bool> {
+        let writer_pid = self.writer_pid;
+        self.inner
+            .await_restart(move || !galvanize::is_pid_alive(writer_pid))
+    }
+}
+
 impl Read for PendingWriterReader {
+    /// Ends the stream only once the invocation is over, not merely because
+    /// the holder has no the file open at this instant.
+    ///
+    /// Those are different questions for an event file, and the gap between
+    /// them is where every attempt boundary lives: bazel closes the file
+    /// between attempts, and before its first event it has not opened the file
+    /// at all. The FIFO this replaced could not tell them apart either — its
+    /// `open` blocked for a writer, which is the same patience by another
+    /// mechanism. Treating "closed right now" as the end loses the retry, and
+    /// on a daemon that opens the file a moment after the path is minted it
+    /// loses the whole build.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // `Read` requires an empty buffer to return immediately.
         if buf.is_empty() {
             return Ok(0);
         }
         loop {
-            match self.inner.read(buf)? {
-                0 => {
-                    if !galvanize::is_pid_alive(self.writer_pid) {
-                        return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
-                    }
-                    thread::sleep(WRITER_POLL_INTERVAL);
-                }
-                n => return Ok(n),
+            let read = match self.inner.read(buf) {
+                // The holder has closed the file with nothing in it. Before
+                // this attempt's first byte that is "not opened yet" — bazel
+                // mints the path long before its daemon writes to it — so wait
+                // rather than call an unstarted stream a finished one.
+                //
+                // After a byte has been read it is the end of an attempt, and
+                // the loop above has to see it: that is where a retry is told
+                // from the end of the build.
+                Err(e) if e.kind() == ErrorKind::BrokenPipe && self.inner.position() == 0 => 0,
+                other => other?,
+            };
+            if read > 0 {
+                return Ok(read);
             }
-        }
-    }
-}
-
-/// Release a reader parked in `Pipe::open` on `path` once `writer_pid` — the
-/// invocation expected to write there — is gone.
-///
-/// Bazel can reject a command line and exit without ever opening the BEP file,
-/// leaving its daemon behind to look like a writer still on its way, and a
-/// FIFO's blocking open would then park for the life of the process. Guessing
-/// wrong is cheap: a FIFO ends only once every writer has closed, so a poke
-/// landing beside a writer bazel did open is invisible to the reader.
-///
-/// The returned flag retires the watchdog; the caller sets it once its own
-/// open has returned, so a reader that got its writer honestly is left alone.
-fn spawn_open_watchdog(path: PathBuf, writer_pid: u32) -> Arc<AtomicBool> {
-    let opened = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&opened);
-    thread::spawn(move || {
-        let mut offers = 0;
-        while !flag.load(Ordering::Relaxed) {
-            // `poke_writer` only lands while a reader is actually parked, which
-            // may still be moments away when the invocation is already over —
-            // so keep offering rather than giving up on the first miss.
-            if !galvanize::is_pid_alive(writer_pid) {
-                if let Ok(true) = galvanize::Pipe::poke_writer(&path) {
-                    return;
-                }
-                offers += 1;
-                if offers >= WRITER_RELEASE_OFFERS {
-                    return;
-                }
+            if !galvanize::is_pid_alive(self.writer_pid) {
+                return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
             }
             thread::sleep(WRITER_POLL_INTERVAL);
         }
-    });
-    opened
+    }
 }
 
 #[derive(Debug)]
@@ -136,31 +127,29 @@ pub struct BuildEventStream {
 }
 
 impl BuildEventStream {
-    /// Mint a temp FIFO path and create the inode, returning the path so
-    /// the caller can pass it to bazel as `--build_event_binary_file`
-    /// before spawning. Pair with `spawn` once the caller has the bazel
-    /// child pid in hand.
+    /// Mint the path bazel will write `--build_event_binary_file` to, for the
+    /// caller to pass on the command line before spawning. Nothing is created
+    /// on disk — bazel writes a regular file, so there is no inode to reserve.
+    /// Pair with `spawn` once the caller has the bazel child pid in hand.
     pub fn reserve_path() -> io::Result<PathBuf> {
-        let out = env::temp_dir().join(format!("build-event-out-{}.bin", uuid::Uuid::new_v4()));
-        galvanize::Pipe::mkfifo(&out)?;
-        Ok(out)
+        Ok(env::temp_dir().join(format!("build-event-out-{}.bin", uuid::Uuid::new_v4())))
     }
 
     /// Spawn the BES reader thread.
     ///
-    /// `server_pid` goes to galvanize for its `IfOpenForPid` retry policy
-    /// (it's the pid that *holds the FIFO write end open during an
-    /// attempt*; for real bazel that's the server/daemon pid).
+    /// `server_pid` is the process that holds the event file open while it
+    /// writes — for real bazel the server/daemon — so it answers "are more
+    /// bytes coming?" and "has the next attempt opened the file?".
     ///
     /// `writer_pid` is the per-invocation pid whose death means no more bytes
     /// are coming — for real bazel the spawned client process
     /// (`Command::spawn().id()`). It answers both "will a writer ever arrive?"
-    /// (see [`spawn_open_watchdog`]) and "is another attempt coming?" (the
+    /// (the file never appearing) and "is another attempt coming?" (the
     /// `BrokenPipe` branch in the read loop). Neither question can be put to
     /// `server_pid`, since the daemon outlives the invocation and so always
     /// looks like a writer still on its way.
     ///
-    /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
+    /// Each `(path, signal)` pair gets the raw event bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
     /// sink handle's `wait()`.
     pub fn spawn(
@@ -215,21 +204,23 @@ impl BuildEventStream {
                     return Err(BuildEventStreamError::IO(e));
                 }
             };
-            // mkfifo is idempotent (tolerates EEXIST), so this works whether
-            // the caller pre-created the FIFO via `reserve_path` (production)
-            // or not (unit tests). Before the watchdog, which has nothing to
-            // poke until the inode exists.
-            galvanize::Pipe::mkfifo(&path)?;
-
-            let opened = spawn_open_watchdog(path.clone(), writer_pid);
-            let mut reader = PendingWriterReader {
-                inner: galvanize::Pipe::open(
-                    path,
-                    galvanize::RetryPolicy::IfOpenForPid(server_pid),
-                )?,
-                writer_pid,
-            };
-            opened.store(true, Ordering::Relaxed);
+            // A regular file bazel writes and this thread tails. `open` polls
+            // for the file to appear and gives up once neither pid can still
+            // create it; a bazel that rejected its command line never writes
+            // one, which is an empty stream rather than a failure.
+            let inner =
+                match galvanize::StreamingFile::open_restartable(path, server_pid, writer_pid) {
+                    Ok(f) => f,
+                    Err(err) if err.kind() == ErrorKind::BrokenPipe => {
+                        return finish(&mut raw_out);
+                    }
+                    Err(err) => {
+                        signal_all(Err(format!("failed to open the build event file: {err}")));
+                        broadcaster.close();
+                        return Err(BuildEventStreamError::IO(err));
+                    }
+                };
+            let mut reader = PendingWriterReader { inner, writer_pid };
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // Initial size for reading a varint
@@ -282,7 +273,7 @@ impl BuildEventStream {
 
             // Set when BuildFinished arrives with REMOTE_CACHE_EVICTED (code 39).
             // While true, a BrokenPipe (attempt N's writer closing) is swallowed
-            // so the FIFO read end stays open for the retry writer to reconnect.
+            // so the reader waits for the retry's stream instead of finishing.
             // Cleared when the next BuildStarted arrives, meaning the retry has
             // connected and normal EOF handling resumes.
             let mut expecting_retry = false;
@@ -348,24 +339,27 @@ impl BuildEventStream {
                             // gone, no retry is coming — close gracefully
                             // instead of spinning.
                             //
-                            // Pid liveness rather than `is_path_open_for_pid`:
-                            // Bazel closes the BEP file at the end of every
-                            // attempt and reopens it for the next
-                            // (FileTransport.SequentialWriter.close()), so
-                            // during that gap the writer is alive with no
-                            // writer attached to the FIFO. Reading that as "no
-                            // retry coming" would drop attempt 2's events.
-                            if !galvanize::is_pid_alive(writer_pid) {
-                                return finish(&mut raw_out);
+                            // Bazel closes the event file at the end of every
+                            // attempt and reopens it for the next with
+                            // O_TRUNC (FileTransport.SequentialWriter.close()),
+                            // so the next attempt's bytes land at offset zero
+                            // of the same path. Resume there rather than at the
+                            // offset this attempt ended on, which would read
+                            // from the middle of attempt N+1's first message.
+                            //
+                            // The wait ends on its own if the invocation dies
+                            // without retrying — #1060, where a
+                            // REMOTE_CACHE_EVICTED BuildFinished is the last
+                            // message rather than the prelude to another go.
+                            match reader.await_next_attempt() {
+                                Ok(true) => continue,
+                                Ok(false) => return finish(&mut raw_out),
+                                Err(e) => {
+                                    signal_all(Err(format!("BES restart failed: {e}")));
+                                    broadcaster.close();
+                                    return Err(BuildEventStreamError::IO(e));
+                                }
                             }
-                            // Writer is alive; Bazel is between attempts.
-                            // With no writer attached, read() on the FIFO
-                            // returns 0 immediately, so looping without
-                            // backoff creates a hot CPU spin until the next
-                            // writer opens the pipe. Sleep briefly to yield
-                            // the CPU between polls.
-                            std::thread::sleep(WRITER_POLL_INTERVAL);
-                            continue;
                         }
                         return finish(&mut raw_out);
                     }
@@ -422,7 +416,6 @@ impl BuildEventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::OpenOptions;
 
     use std::time::Duration;
 
@@ -478,13 +471,12 @@ mod tests {
         // promptly.
         let lag = std::env::var("ASPECT_BES_BENCH_LAG").unwrap_or_default();
 
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let pid = std::process::id();
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let grpc_sub = stream.subscribe();
         let axl_sub = stream.subscribe();
         let tracing_sub = stream.subscribe();
-        wait_for_fifo(&path);
 
         // Mirrors the gRPC sink: every event is re-encoded into a publish
         // request, and every request is retained until the server acks it.
@@ -533,7 +525,7 @@ mod tests {
         let start = std::time::Instant::now();
         let writer = std::thread::spawn(move || {
             let mut src = std::io::BufReader::new(std::fs::File::open(&input).unwrap());
-            let mut fifo = OpenOptions::new().write(true).open(&path).unwrap();
+            let mut fifo = File::create(&path).unwrap();
             std::io::copy(&mut src, &mut fifo).unwrap()
         });
 
@@ -561,30 +553,50 @@ mod tests {
         }
     }
 
-    fn temp_fifo_path() -> PathBuf {
-        std::env::temp_dir().join(format!("test-bes-{}.fifo", uuid::Uuid::new_v4()))
+    fn temp_bep_path() -> PathBuf {
+        std::env::temp_dir().join(format!("test-bes-{}.bin", uuid::Uuid::new_v4()))
     }
 
-    /// Poll until the FIFO inode appears at `path`. The BES thread mkfifos the
-    /// path lazily inside `BuildEventStream::spawn`, so test threads that open
-    /// the writer side have to wait for the inode before `OpenOptions::open`.
-    fn wait_for_fifo(path: &PathBuf) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !path.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "FIFO was not created within 5s: {}",
-                path.display()
-            );
-            std::thread::sleep(Duration::from_millis(5));
+    /// A child process that writes one attempt per `segment`, holding the file
+    /// open for the length of each and closing it in between — bazel's
+    /// `FileTransport`, in a shell.
+    ///
+    /// It has to be a separate process. `is_path_open_for_pid` is how the
+    /// reader decides whether more bytes are coming, and a reader asking that
+    /// question about its own process always sees its own descriptor and
+    /// answers yes. The returned child's pid is the holder.
+    fn spawn_attempt_writer(path: &PathBuf, segments: &[Vec<u8>]) -> std::process::Child {
+        let mut script = String::new();
+        for (i, seg) in segments.iter().enumerate() {
+            let part = std::env::temp_dir().join(format!(
+                "test-bes-seg-{}-{}.bin",
+                uuid::Uuid::new_v4(),
+                i
+            ));
+            std::fs::write(&part, seg).expect("stage segment");
+            // `exec 3> path` truncates and is held by the shell itself, so the
+            // shell is the holder; `exec 3>&-` ends the attempt.
+            script.push_str(&format!(
+                "sleep 0.2; exec 3> {p}; cat {s} >&3; sleep 0.4; exec 3>&-; ",
+                p = path.display(),
+                s = part.display()
+            ));
         }
+        // Outlive the last attempt so the invocation still looks alive while the
+        // reader drains it.
+        script.push_str("sleep 30");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .expect("spawn attempt writer")
     }
 
     /// Spawn a long-lived `sleep` subprocess and return its pid.
     ///
-    /// We need a live, external pid for `RetryPolicy::IfOpenForPid` that does NOT
-    /// hold the FIFO open.  Using our own pid would cause `is_path_open_for_pid`
-    /// to return `true` (we own the read end), preventing BrokenPipe from firing.
+    /// Stands in for the bazel client: a live invocation pid, so the reader
+    /// keeps waiting for more attempts. The *holder* pid is this test process,
+    /// which is what actually has the event file open.
     fn spawn_pid_holder() -> std::process::Child {
         std::process::Command::new("sleep")
             .arg("60")
@@ -609,33 +621,6 @@ mod tests {
     // No writer ever arrives: Bazel exited before opening the BEP file
     // -------------------------------------------------------------------------
 
-    /// The watchdog usually starts while the invocation is still alive, but
-    /// nothing guarantees it: an invocation already over when the watchdog
-    /// starts means the first poke arrives before there is any reader to
-    /// release. Poking is only effective against a parked reader, so the
-    /// watchdog has to keep offering — one attempt would strand this reader.
-    #[test]
-    fn the_watchdog_waits_for_a_reader_that_has_not_parked_yet() {
-        let released = crate::test::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            galvanize::Pipe::mkfifo(&path).expect("mkfifo");
-
-            // Dead from the outset, so the watchdog starts poking immediately —
-            // well before the open below exists to be released.
-            let opened = spawn_open_watchdog(path.clone(), dead_pid());
-            std::thread::sleep(Duration::from_millis(100));
-
-            let reader = galvanize::Pipe::open(path, galvanize::RetryPolicy::Never);
-            opened.store(true, Ordering::Relaxed);
-            reader.is_ok()
-        });
-        assert_eq!(
-            released,
-            Some(true),
-            "the watchdog must keep offering until the reader is there to release"
-        );
-    }
-
     /// Bazel can exit before it ever opens the BEP file — an unrecognized flag,
     /// a bad startup option — leaving a live daemon that still looks like a
     /// writer on its way. The stream has to end, empty, rather than wait on a
@@ -643,7 +628,7 @@ mod tests {
     #[test]
     fn a_writer_that_never_opens_ends_the_stream() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
+            let path = temp_bep_path();
             // Server alive (daemons outlive the invocation), invocation gone.
             let mut holder = spawn_pid_holder();
             let mut stream =
@@ -667,20 +652,19 @@ mod tests {
     /// event of a real build is lost.
     #[test]
     fn a_writer_that_opens_late_still_delivers_its_events() {
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
 
         let path_w = path.clone();
         let writer = std::thread::spawn(move || {
             // Many poll intervals' worth of "no writer", so the reader cannot
             // pass this test by racing to its first read.
             std::thread::sleep(Duration::from_millis(300));
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            let mut f = File::create(&path_w).unwrap();
             f.write_all(&encode_event(&make_event(true))).unwrap();
         });
 
@@ -703,17 +687,16 @@ mod tests {
 
     #[test]
     fn test_complete_stream_delivers_all_events() {
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
 
         let path_w = path.clone();
         let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            let mut f = File::create(&path_w).unwrap();
             f.write_all(&encode_event(&make_event(false))).unwrap();
             f.write_all(&encode_event(&make_event(false))).unwrap();
             f.write_all(&encode_event(&make_event(true))).unwrap();
@@ -731,23 +714,22 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // BrokenPipe: Bazel closes the FIFO before sending last_message
+    // End of file: Bazel closes the event file before sending last_message
     // (e.g. Bazel process killed, SIGTERM, or a transient-error attempt ending)
     // -------------------------------------------------------------------------
 
     #[test]
     fn test_broken_pipe_ends_stream_gracefully() {
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
 
         let path_w = path.clone();
         let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            let mut f = File::create(&path_w).unwrap();
             f.write_all(&encode_event(&make_event(false))).unwrap();
             // Closing `f` here without last_message triggers BrokenPipe on the read side.
         });
@@ -765,36 +747,37 @@ mod tests {
     // -------------------------------------------------------------------------
     // Writer reconnect
     //
-    // Force reconnect gaps to surface as `Ok(0)`: this process owns the FIFO's
+    // Force idle gaps to surface as `Ok(0)`: this process owns the file's
     // read end, while a separate live PID represents the Bazel invocation.
     // -------------------------------------------------------------------------
 
     /// Keeps the stream open when a writer reconnects between records.
     #[test]
-    fn a_writer_reconnecting_between_records_keeps_the_stream_open() {
+    fn an_idle_gap_between_records_keeps_the_stream_open() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
+            let path = temp_bep_path();
             let mut holder = spawn_pid_holder();
 
             let mut stream =
                 BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
                     .unwrap();
             let sub = stream.subscribe();
-            wait_for_fifo(&path);
 
             let path_w = path.clone();
             let _writer = std::thread::spawn(move || {
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                let mut f = File::create(&path_w).unwrap();
                 f.write_all(&encode_event(&make_event(false))).unwrap();
-                drop(f);
-                // Keep the writer disconnected for several polling intervals.
+                f.flush().unwrap();
+                // A long pause with the file open and no new bytes: the reader
+                // is at the end of the file and must wait rather than call it
+                // the end of the stream.
                 std::thread::sleep(Duration::from_millis(200));
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
                 f.write_all(&encode_event(&make_event(true))).unwrap();
+                f.flush().unwrap();
             });
 
-            // Do not join: if the reader exits, the reconnect blocks in `open`,
-            // and the outer timeout must report the failure.
+            // Do not join the writer: if the reader exits early the assertion
+            // below is what should report it, not a hang in the writer.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
             let _ = holder.kill();
@@ -803,38 +786,37 @@ mod tests {
         assert_eq!(
             outcome,
             Some((Ok(()), 2)),
-            "the gap between attempts must not end the stream"
+            "a pause with the file still open must not end the stream"
         );
     }
 
-    /// Preserves framing when a writer reconnects part-way through a record.
+    /// Preserves framing when bazel flushes part-way through a record.
     #[test]
-    fn a_record_split_across_a_writer_reconnect_is_not_desynced() {
+    fn a_record_written_in_two_parts_is_not_desynced() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
+            let path = temp_bep_path();
             let mut holder = spawn_pid_holder();
 
             let mut stream =
                 BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
                     .unwrap();
             let sub = stream.subscribe();
-            wait_for_fifo(&path);
 
             let path_w = path.clone();
             let _writer = std::thread::spawn(move || {
                 let record = encode_event(&make_event(true));
-                // Reconnect before the final byte so the gap occurs inside the record.
+                // Stop one byte short so the pause lands inside the record.
                 let split = record.len() - 1;
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                let mut f = File::create(&path_w).unwrap();
                 f.write_all(&record[..split]).unwrap();
-                drop(f);
+                f.flush().unwrap();
                 std::thread::sleep(Duration::from_millis(200));
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
                 f.write_all(&record[split..]).unwrap();
+                f.flush().unwrap();
             });
 
-            // Do not join: if the reader exits, the reconnect blocks in `open`,
-            // and the outer timeout must report the failure.
+            // Do not join the writer: if the reader exits early the assertion
+            // below is what should report it, not a hang in the writer.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
             let _ = holder.kill();
@@ -857,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_file_sink_captures_raw_bytes() {
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let sink_path =
             std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
         let mut holder = spawn_pid_holder();
@@ -873,7 +855,6 @@ mod tests {
             )],
         )
         .unwrap();
-        wait_for_fifo(&path);
 
         let events_to_send = vec![make_event(false), make_event(true)];
         let raw_bytes: Vec<u8> = events_to_send.iter().flat_map(encode_event).collect();
@@ -881,7 +862,7 @@ mod tests {
         let path_w = path.clone();
         let raw_clone = raw_bytes.clone();
         let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            let mut f = File::create(&path_w).unwrap();
             f.write_all(&raw_clone).unwrap();
         });
 
@@ -901,67 +882,63 @@ mod tests {
     // Transient error retry (documents current behavior)
     //
     // When Bazel retries after REMOTE_CACHE_EVICTED it reopens the same BEP
-    // path.  With our FIFO-based design the sequence is:
+    // path. With the event file the sequence is:
     //
-    //   Attempt 1: Bazel opens FIFO → writes → closes
-    //              → our thread sees BrokenPipe → closes broadcaster → exits
-    //   Attempt 2: Bazel tries to open FIFO again for writing
-    //              → BLOCKS: the read end was closed when our thread exited,
-    //                so there is no reader; the open(O_WRONLY) never returns.
+    //   Attempt 1: bazel creates the file → writes → closes
+    //              → the reader sees the end of it, is not expecting a retry,
+    //                closes the broadcaster and exits
+    //   Attempt 2: bazel truncates and writes again — but nothing is reading
     //
-    // Net effect: only attempt 1's events are visible to subscribers.
-    // Attempt 2 cannot deliver any events through the closed stream.
+    // Net effect: only attempt 1's events are visible to subscribers. Unlike a
+    // FIFO, the write itself still succeeds; what guarantees attempt 2 is not
+    // delivered is that the reader has already finished, so that is what this
+    // asserts.
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_transient_retry_cannot_reconnect_after_stream_closed() {
-        let path = temp_fifo_path();
+    fn a_late_attempt_after_the_stream_closed_delivers_nothing() {
+        let path = temp_bep_path();
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
 
-        // Attempt 1 — writer closes without last_message (transient error).
+        // Attempt 1 — the writer closes without last_message and without the
+        // REMOTE_CACHE_EVICTED verdict, so no retry is expected.
         {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+            let mut f = File::create(&path).unwrap();
             f.write_all(&encode_event(&make_event(false))).unwrap();
-            // `f` drops here → all writers gone → BrokenPipe in stream thread.
+            f.flush().unwrap();
         }
 
         stream.join().unwrap();
         let _ = holder.kill();
 
-        // Only attempt 1's single event was received.
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         assert_eq!(events.len(), 1, "only attempt 1 events should be visible");
 
-        // Attempt 2 — try to open the write end with O_NONBLOCK.
-        // Because the stream thread exited and closed the read end, POSIX
-        // requires O_WRONLY|O_NONBLOCK on a FIFO with no reader to return
-        // ENXIO immediately.  This confirms the read end is gone without
-        // leaving a dangling blocked thread.
-        use nix::libc;
-        use std::os::unix::fs::OpenOptionsExt;
-        let result = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path);
-        assert!(result.is_err(), "attempt 2 open should fail (no reader)");
-        assert_eq!(
-            result.unwrap_err().raw_os_error(),
-            Some(libc::ENXIO),
-            "expected ENXIO (no reader on FIFO)"
+        // Attempt 2 lands in the file after the reader has gone. The write
+        // succeeds — it is an ordinary file — and reaches nobody.
+        {
+            let mut f = File::create(&path).unwrap();
+            f.write_all(&encode_event(&make_event(true))).unwrap();
+            f.flush().unwrap();
+        }
+        assert!(
+            sub.recv().is_err(),
+            "a closed stream delivers nothing from a later attempt"
         );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     // -------------------------------------------------------------------------
     // Desired behavior: transient error retry delivers events from both attempts
     //
     // Bazel REMOTE_CACHE_EVICTED retry sequence (from transient_error.md):
-    //   Attempt 1: open FIFO → write BuildStarted + BuildFinished(FAILED) → close
-    //   Attempt 2: open FIFO → write BuildStarted + BuildFinished(SUCCESS) → close
+    //   Attempt 1: create file → write BuildStarted + BuildFinished(FAILED) → close
+    //   Attempt 2: truncate file → write BuildStarted + BuildFinished(SUCCESS) → close
     //
     // The subscriber should see all 4 events in order across both attempts.
     //
@@ -969,7 +946,7 @@ mod tests {
     // BrokenPipe (attempt 1 close), closing the read end.  Attempt 2's
     // open(O_WRONLY) then blocks indefinitely waiting for a reader.
     //
-    // To make this pass the stream would need to keep the FIFO read end open
+    // To make this pass the stream would need to keep reading the file
     // (or reopen it) after BrokenPipe so that the retry writer can connect.
     // -------------------------------------------------------------------------
 
@@ -1002,34 +979,23 @@ mod tests {
 
     #[test]
     fn test_transient_retry_delivers_events_from_both_attempts() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
+        let path = temp_bep_path();
+        // Attempt 1 ends on REMOTE_CACHE_EVICTED; attempt 2 truncates the file
+        // and writes a fresh stream over it, which the reader must resume at
+        // offset zero rather than where attempt 1 left off.
+        let mut attempt1 = encode_event(&make_build_started());
+        attempt1.extend_from_slice(&encode_event(&make_build_finished(39, false)));
+        let mut attempt2 = encode_event(&make_build_started());
+        attempt2.extend_from_slice(&encode_event(&make_build_finished(0, true)));
 
+        let mut writer = spawn_attempt_writer(&path, &[attempt1, attempt2]);
+        let pid = writer.id();
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        // Attempt 1: BuildStarted + BuildFinished(REMOTE_CACHE_EVICTED=39), then
-        // the writer closes.  The stream should swallow the BrokenPipe and wait.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(39, false)))
-                .unwrap();
-        }
-
-        // Attempt 2: Bazel retries.  Because the stream kept the FIFO read end
-        // open, this open(O_WRONLY) pairs with it immediately.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(0, true)))
-                .unwrap();
-        }
 
         stream.join().unwrap();
-        let _ = holder.kill();
+        let _ = writer.kill();
+        let _ = writer.wait();
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
 
@@ -1056,32 +1022,22 @@ mod tests {
     /// expected; it should stay open and deliver attempt 2's events normally.
     #[test]
     fn test_transient_retry_with_last_message_on_evicted_event() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
+        let path = temp_bep_path();
+        // Attempt 1's BuildFinished carries both REMOTE_CACHE_EVICTED and
+        // last_message=true; the stream must not close on that last_message.
+        let mut attempt1 = encode_event(&make_build_started());
+        attempt1.extend_from_slice(&encode_event(&make_build_finished(39, true)));
+        let mut attempt2 = encode_event(&make_build_started());
+        attempt2.extend_from_slice(&encode_event(&make_build_finished(0, true)));
 
+        let mut writer = spawn_attempt_writer(&path, &[attempt1, attempt2]);
+        let pid = writer.id();
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        // Attempt 1: BuildFinished carries both REMOTE_CACHE_EVICTED and last_message=true.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(39, true)))
-                .unwrap();
-        }
-
-        // Attempt 2: normal successful stream.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(0, true)))
-                .unwrap();
-        }
 
         stream.join().unwrap();
-        let _ = holder.kill();
+        let _ = writer.kill();
+        let _ = writer.wait();
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         // Receiving all 4 events proves the stream did not terminate when it saw
@@ -1112,11 +1068,14 @@ mod tests {
     }
 
     fn run_retry_sink_test(last_message_on_evicted: bool) -> Vec<u8> {
-        let path = temp_fifo_path();
+        let path = temp_bep_path();
         let sink_path =
             std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
+        let mut writer = spawn_attempt_writer(
+            &path,
+            &[attempt1_raw(last_message_on_evicted), attempt2_raw()],
+        );
+        let pid = writer.id();
 
         let mut stream = BuildEventStream::spawn(
             path.clone(),
@@ -1128,19 +1087,10 @@ mod tests {
             )],
         )
         .unwrap();
-        wait_for_fifo(&path);
-
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&attempt1_raw(last_message_on_evicted)).unwrap();
-        }
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&attempt2_raw()).unwrap();
-        }
 
         stream.join().unwrap();
-        let _ = holder.kill();
+        let _ = writer.kill();
+        let _ = writer.wait();
 
         let written = std::fs::read(&sink_path).unwrap();
         let _ = std::fs::remove_file(&sink_path);

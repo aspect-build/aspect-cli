@@ -579,8 +579,8 @@ impl BuildEventIter {
         }
     }
 
-    /// Subscribe the iterator's receiver. Must run before bazel opens the
-    /// BEP FIFO so the early burst is buffered. The `kinds=` filter is
+    /// Subscribe the iterator's receiver. Must run before the reader reaches
+    /// bazel's first events so the early burst is buffered. The `kinds=` filter is
     /// installed here as a send-side predicate, so the reader thread drops
     /// unwanted kinds before they ever enter this iterator's buffer.
     fn bind(&self, stream: &BuildEventStream) -> anyhow::Result<()> {
@@ -1082,13 +1082,13 @@ impl Build {
         // the stream clean and empty: every `exec_log_event` hook fires zero
         // times, every sink writes nothing, and the build passes.
         //
-        // Only the execution log was ever exposed to that. The BES and workspace
-        // readers take this pid too, but they read a FIFO: `Pipe::open` blocks for
-        // a *writer* rather than for a pid, and the pid is consulted only on an
-        // empty read, which on a blocking FIFO cannot happen until every writer
-        // has closed — by which point "not open" is the right answer whether the
-        // pid is alive or dead. Everything they decide is keyed on the client pid
-        // anyway. A regular file has no kernel primitive for "wait for a writer",
+        // The workspace reader takes this pid too, but it reads a FIFO:
+        // `Pipe::open` blocks for a *writer* rather than for a pid, and the pid
+        // is consulted only on an empty read, which on a blocking FIFO cannot
+        // happen until every writer has closed — by which point "not open" is
+        // the right answer whether the pid is alive or dead. The BES reader
+        // reads a regular file and so shares the execution log's exposure here.
+        // A regular file has no kernel primitive for "wait for a writer",
         // so galvanize substitutes pid liveness, and that substitution is what made
         // a stale pid matter here and nowhere else.
         let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
@@ -1148,10 +1148,10 @@ impl Build {
             }
         }
 
-        // Reserve the BES FIFO inode now (before `cmd.spawn()`) so bazel can
-        // find the path when it opens the BEP file. The reader-side thread
-        // is started later — once we have the spawned child's pid in hand
-        // for the per-invocation liveness check.
+        // Mint the BEP path now (before `cmd.spawn()`) so bazel has somewhere
+        // to write. Nothing is created on disk: bazel writes a regular file.
+        // The reader-side thread is started later — once we have the spawned
+        // child's pid in hand for the per-invocation liveness check.
         //
         // Bazel's default action publishing (failed actions only) is all any
         // consumer of the stream reads; per-action data comes from the
@@ -1300,10 +1300,10 @@ impl Build {
             None => None,
         };
 
-        // Bind subscribers BEFORE the BES reader unblocks. The reader is
-        // currently parked in `Pipe::open` waiting for bazel's JVM startup
-        // to open the FIFO write end, so subscriptions registered here
-        // win the warm-daemon race against the early event burst.
+        // Bind subscribers BEFORE the BES reader delivers anything. The reader
+        // is currently polling for an event file that bazel does not create
+        // until its JVM is up, so subscriptions registered here win the
+        // warm-daemon race against the early event burst.
         if !iters.is_empty() {
             let stream = build_event_stream.as_ref().ok_or_else(|| {
                 io::Error::other(

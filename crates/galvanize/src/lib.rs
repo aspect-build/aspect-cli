@@ -361,7 +361,20 @@ impl StreamingFile {
             "await_restart on a file opened without open_restartable"
         );
         loop {
+            // The holder having the file open again is the signal, and it is
+            // the one that lasts: an attempt holds its file open for as long as
+            // the attempt runs.
             if is_path_open_for_pid(&self.path, self.holder_pid)? {
+                self.inner.seek(SeekFrom::Start(0))?;
+                self.pos = 0;
+                return Ok(true);
+            }
+            // Belt and braces, for an attempt short enough to have opened and
+            // closed the file between two polls: a file shorter than where the
+            // last attempt ended can only be a new one. It does not catch a
+            // longer attempt missed the same way, which is why it is the
+            // fallback and not the signal.
+            if self.inner.metadata()?.len() < self.pos {
                 self.inner.seek(SeekFrom::Start(0))?;
                 self.pos = 0;
                 return Ok(true);
