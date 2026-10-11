@@ -276,7 +276,12 @@ impl ModEvaluator {
         let mut r#mod = Mod::new(self.root_dir.to_path_buf(), name, root);
 
         if module_boundary_path.exists() {
-            let contents = fs::read_to_string(module_boundary_path)?;
+            // One flat message, as in `AxlLoader::eval_module_inner`: a
+            // `.with_context()` would reach the user as a separate "Caused
+            // by:" paragraph, `UnknownError` being transparent and anyhow's
+            // Debug rendering what the CLI prints.
+            let contents = fs::read_to_string(module_boundary_path)
+                .map_err(|e| anyhow::anyhow!("{}: {}", module_boundary_path.display(), e))?;
             let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
             Module::with_temp_heap(|module| {
                 let mut eval = Evaluator::new(&module);

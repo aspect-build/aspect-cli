@@ -65,7 +65,7 @@ use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
 use axl_runtime::ci::on_recognized_ci;
-use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
@@ -183,9 +183,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
+            // What the two phases could not load, and what that costs the
+            // command the user typed — see `Unloadable` for the policy it
+            // implements. Past the degraded-run decision below there is
+            // nothing left unreported, so the raises after it are ordinary.
+            let mut unloadable = Unloadable::default();
+
             // Phase 1: discover tasks and features.
-            mpe.eval(&scripts, &root_mod, &modules)
-                .map_err(anyhow::Error::from)?;
+            let phase1 = mpe.eval(&scripts, &root_mod, &modules);
+            unloadable.scripts = phase1.files;
+            if let Some(error) = phase1.ended {
+                return Err(unloadable.reporting(error.into()));
+            }
 
             // Phase 2: run config files.
             let config_entries: Vec<(&Path, &Mod)> = configs
@@ -197,8 +206,13 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         .map(|(path, r#mod)| (path.as_path(), r#mod)),
                 )
                 .collect();
-            mpe.execute_configs(&config_entries)
-                .map_err(|err| anyhow::Error::from(err).context(ConfigError))?;
+            let phase2 = mpe.execute_configs(&config_entries);
+            unloadable.configs = phase2.files;
+            if let Some(error) = phase2.ended {
+                return Err(unloadable
+                    .reporting(anyhow::Error::from(error))
+                    .context(ConfigError));
+            }
 
             // Build the CLI surface from current eval state.
             let cmd = Cmd {
@@ -207,7 +221,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 aspect_root: &aspect_root,
                 modules: &modules,
             };
-            let mut root_cmd = cmd.build(&cli_version)?;
+            // A name conflict or a reserved name is judged here, on the
+            // finished surface, so it is one of the raise paths that has to
+            // report what did not load on its way out.
+            let mut root_cmd = cmd
+                .build(&cli_version)
+                .map_err(|err| unloadable.reporting(err.into()))?;
             // Finalize the surface (this is what injects `--help`) so routing
             // sees every flag Clap knows, then let the selected task collect the
             // flags Clap would reject — see `Cmd::route_unrecognized_flags`.
@@ -220,30 +239,55 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let matches = match root_cmd.try_get_matches_from_mut(argv) {
                 Ok(m) => m,
                 Err(err) => {
+                    // `--help`, `--version` and a bare `aspect` all land here:
+                    // Clap renders them itself rather than failing, and none
+                    // needs a task definition, so they still run degraded.
+                    if is_display_only(&err) {
+                        unloadable.warn();
+                        err.print().ok();
+                        return Ok(ExitCode::from(err.exit_code() as u8));
+                    }
+                    // Any other parse error was judged against a surface built
+                    // from a workspace that did not fully load, so the command
+                    // the user typed may be one of the tasks that went missing.
+                    // The load failure explains that; Clap's does not.
+                    if let Some(err) = unloadable.into_error() {
+                        return Err(err);
+                    }
                     err.print().ok();
                     return Ok(ExitCode::from(err.exit_code() as u8));
                 }
             };
 
+            // Everything past here either reports the CLI's own surface or
+            // dispatches a task; see `Unloadable` for which may run degraded.
+            if !unloadable.is_empty() {
+                if runs_without_tasks(matches.subcommand_name()) {
+                    unloadable.warn();
+                } else if let Some(err) = unloadable.into_error() {
+                    return Err(err);
+                }
+            }
+
             match matches.subcommand_name() {
-                Some("version") => {
+                Some(cmd::VERSION_COMMAND) => {
                     outln!("{}", cargo_pkg_display_version());
                     return Ok(ExitCode::SUCCESS);
                 }
-                Some("help") => {
+                Some(cmd::HELP_COMMAND) => {
                     cmd_for_help.print_help()?;
                     return Ok(ExitCode::SUCCESS);
                 }
-                Some("describe") => {
+                Some(cmd::DESCRIBE_COMMAND) => {
                     let task = matches
-                        .subcommand_matches("describe")
+                        .subcommand_matches(cmd::DESCRIBE_COMMAND)
                         .and_then(|m| m.get_one::<String>("task"))
                         .map(String::as_str);
                     return Ok(cmd.print_describe(&cli_version, task));
                 }
-                Some("feature") => {
+                Some(cmd::FEATURE_COMMAND) => {
                     let name = matches
-                        .subcommand_matches("feature")
+                        .subcommand_matches(cmd::FEATURE_COMMAND)
                         .and_then(|m| m.get_one::<String>("name"))
                         .map(String::as_str);
                     return Ok(cmd.print_feature_help(&cli_version, name));
@@ -354,6 +398,205 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
+/// AXL that failed during startup, held rather than raised.
+///
+/// The whole CLI surface — the task list, their flags, the features — is
+/// defined in AXL, so one `.aspect/*.axl` file that does not parse used to
+/// fail every command: the `aspect help` the user needs to find the typo and
+/// the `aspect version` they run to check their setup included. Phases 1 and 2
+/// carry on past an unloadable file ([`MultiPhaseEval::eval`],
+/// [`MultiPhaseEval::execute_configs`]) and hand what failed to this type.
+///
+/// `docs/design.md`, "When a file does not load", states the policy: which
+/// commands run degraded, what each failure is reported as, and the four
+/// things settled outside the tolerant phases that still fail everything.
+/// This type is the mechanism, and holds two invariants the policy depends on:
+///
+/// * Nothing recorded is ever dropped silently. Both ways out of here report
+///   first — [`Self::reporting`] for an error of its own, [`Self::into_error`]
+///   for one of the recorded failures raised as the run's error — so a typo
+///   does not vanish behind whatever ended the run.
+/// * Scripts come before configs, and a config that failed alongside a script
+///   is summarised as derived from it rather than given a warning of its own.
+#[derive(Default)]
+struct Unloadable {
+    /// Phase 1: task and feature scripts.
+    scripts: Vec<AxlFileFailure>,
+    /// Phase 2: `config.axl` files.
+    configs: Vec<AxlFileFailure>,
+}
+
+impl Unloadable {
+    fn is_empty(&self) -> bool {
+        self.scripts.is_empty() && self.configs.is_empty()
+    }
+
+    /// `err`, after reporting everything recorded. The one way to raise an
+    /// error of its own out of startup: holding the two together is what makes
+    /// "every raise path reports first" a single place rather than a rule each
+    /// `return Err` has to remember.
+    fn reporting(&self, err: anyhow::Error) -> anyhow::Error {
+        self.warn();
+        err
+    }
+
+    /// Report the failures on stderr for a run that carries on: a `warning:`
+    /// line per script naming the file and what its absence costs, and any
+    /// config that failed alongside them summarised rather than warned about
+    /// separately. This is [`Self::warn_blaming`] with no raised failure, so
+    /// the summary blames a script only when exactly one of them failed.
+    ///
+    /// Silence here would be worse than the old hard failure — the point is
+    /// that the user still sees the typo.
+    fn warn(&self) {
+        self.warn_blaming(None);
+    }
+
+    /// [`Self::warn`], plus the script failure [`Self::into_error`] has taken
+    /// off `scripts` to raise as the run’s error.
+    ///
+    /// Which script the derived-config summary blames: `raised` if there is
+    /// one, it being off the list but still the likeliest cause; otherwise the
+    /// only script that failed, if exactly one did. With several script
+    /// failures and none raised, the summary points at them as a group —
+    /// naming one of them would be repeating whatever order `read_dir`
+    /// happened to use. A named cause is preferred to "the above" because a
+    /// raised failure is not above: it prints below as the run’s `error:`.
+    /// `ASPECT_DEBUG` prints the suppressed config diagnostic anyway, for the
+    /// case where the guess is wrong and the config really did have its own
+    /// problem.
+    fn warn_blaming(&self, raised: Option<&AxlFileFailure>) {
+        for failure in &self.scripts {
+            Self::warn_one(failure);
+        }
+
+        // Nothing failed that a config could be derived from, so each config
+        // owns its failure.
+        if raised.is_none() && self.scripts.is_empty() {
+            for failure in &self.configs {
+                Self::warn_one(failure);
+            }
+            return;
+        }
+        if self.configs.is_empty() {
+            return;
+        }
+        let cause = raised.or(match self.scripts.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        });
+        let blame = match cause {
+            Some(failure) => format!("{} — fix that first", failure.path.display()),
+            None => "the failures above — fix those first".to_owned(),
+        };
+        let paths: Vec<String> = self
+            .configs
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        errln!(
+            "warning: {} then failed too, most likely because of {blame}",
+            paths.join(", "),
+        );
+        for failure in &self.configs {
+            TaskExit::debug_traceback(&format_args!(
+                "{}",
+                strip_error_prefix(&failure.error.to_string())
+            ));
+        }
+    }
+
+    /// One `warning:` line naming the file and what its failure costs,
+    /// followed by the file's own diagnostic.
+    fn warn_one(failure: &AxlFileFailure) {
+        errln!(
+            "warning: {} failed; {}",
+            failure.path.display(),
+            cost_of_losing(failure.role)
+        );
+        errln!("{}", strip_error_prefix(&failure.error.to_string()));
+    }
+
+    /// The run's failure, for a command that cannot proceed without the AXL
+    /// that did not load. Scripts are raised ahead of configs, a config error
+    /// typically being a consequence of a task that never loaded. A phase-2
+    /// failure keeps the [`ConfigError`] marker so `main` still renders the
+    /// `--output=json` document for it.
+    ///
+    /// Everything *else* recorded is reported on the way out, so a second
+    /// broken file is not lost to whichever one `read_dir` happened to hand
+    /// over first. The raised failure is left out of that reporting: `main`
+    /// prints it as the run's `error:`, and warning about it as well would
+    /// print the same diagnostic twice.
+    fn into_error(&mut self) -> Option<anyhow::Error> {
+        if !self.scripts.is_empty() {
+            let failure = self.scripts.remove(0);
+            self.warn_blaming(Some(&failure));
+            return Some(anyhow::Error::from(failure.error));
+        }
+        if self.configs.is_empty() {
+            return None;
+        }
+        let failure = self.configs.remove(0);
+        self.warn_blaming(None);
+        Some(anyhow::Error::from(failure.error).context(ConfigError))
+    }
+}
+
+/// What the user loses with an AXL file that did not load, as the clause its
+/// `warning:` line ends with. Derived from the role the phase was loading it
+/// for: a `use_feature` file defines no tasks, and the flags its feature adds
+/// to every task subcommand go missing with it.
+///
+/// The clause says only what was lost. How the file broke is not something the
+/// role knows — a `use_task` naming a missing symbol fails a file that parses
+/// perfectly — so [`Unloadable::warn_one`] supplies the verb.
+fn cost_of_losing(role: AxlFileRole) -> &'static str {
+    match role {
+        AxlFileRole::Tasks => "the tasks it defines are unavailable",
+        AxlFileRole::Feature => {
+            "the feature it defines is unavailable, along with the flags it adds to every task"
+        }
+        AxlFileRole::TasksAndFeature => {
+            "the tasks and the feature it defines are unavailable, along with the flags that \
+             feature adds to every task"
+        }
+        AxlFileRole::Config => "the settings it applies are missing or incomplete",
+    }
+}
+
+/// Whether `subcommand` reports the CLI's own identity rather than anything
+/// AXL defines, and so may run against a workspace that did not fully load.
+fn runs_without_tasks(subcommand: Option<&str>) -> bool {
+    subcommand.is_some_and(|name| cmd::IDENTITY_COMMANDS.contains(&name))
+}
+
+/// Whether Clap stopped to render help or the version rather than to reject
+/// the command line. `DisplayHelpOnMissingArgumentOrSubcommand` covers both a
+/// bare `aspect` and `aspect <group>` with no leaf, each of which prints that
+/// level's help under `arg_required_else_help`.
+fn is_display_only(err: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    )
+}
+
+/// Drop the `error: ` a Starlark diagnostic renders for itself, so a caller
+/// can put the message behind exactly one prefix of its own. Without this the
+/// CLI printed `error: error: Parse error: …` for every AXL failure.
+///
+/// Every leading repetition goes, not just one: each layer that rendered the
+/// error added a prefix, and the number of them is a property of how deeply
+/// the phases wrapped it rather than anything a caller can predict. Stripping
+/// once would leave the doubled form this exists to fix.
+fn strip_error_prefix(message: &str) -> &str {
+    message.trim_start_matches("error: ")
+}
+
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
 /// `--`. Read from the raw arguments because a config error stops the CLI
 /// before they are parsed.
@@ -378,7 +621,7 @@ fn main() -> ExitCode {
         return match credential_helper::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                errln!("error: {err:?}");
+                errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
                 ExitCode::FAILURE
             }
         };
@@ -400,20 +643,20 @@ fn main() -> ExitCode {
             // reading `--output=json` otherwise gets nothing to parse.
             if err.downcast_ref::<ConfigError>().is_some() {
                 let message = format!("{:#}", err.root_cause());
-                errln!("error: {}", message.trim_start_matches("error: "));
+                errln!("error: {}", strip_error_prefix(&message));
                 if wants_json_output(std::env::args().skip(1)) {
                     outln!(
                         "{}",
                         serde_json::json!({
                             "schema_version": 1,
                             "error": "config_error",
-                            "message": message.trim_start_matches("error: "),
+                            "message": strip_error_prefix(&message),
                         })
                     );
                 }
                 return ExitCode::FAILURE;
             }
-            errln!("error: {err:?}");
+            errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
             ExitCode::FAILURE
         }
     }
@@ -678,5 +921,73 @@ mod config_error_tests {
     #[test]
     fn arguments_after_a_double_dash_are_not_ours() {
         assert!(!wants_json_output(args(&["build", "--", "--output=json"])));
+    }
+}
+
+#[cfg(test)]
+mod degrade_policy_tests {
+    use super::{is_display_only, runs_without_tasks, strip_error_prefix};
+    use clap::error::ErrorKind;
+
+    /// Starlark's own `error: ` title is dropped so the caller supplies the
+    /// only one; anything else is left exactly as it came.
+    #[test]
+    fn only_leading_error_prefixes_are_dropped() {
+        assert_eq!(
+            strip_error_prefix("error: Parse error: x"),
+            "Parse error: x"
+        );
+        assert_eq!(strip_error_prefix("Parse error: x"), "Parse error: x");
+        assert_eq!(strip_error_prefix(""), "");
+        // The shape the CLI actually printed before this existed: two layers
+        // each rendered their own prefix, so both have to go.
+        assert_eq!(
+            strip_error_prefix("error: error: Parse error: x"),
+            "Parse error: x"
+        );
+        // Not at the start, so not ours to touch.
+        assert_eq!(
+            strip_error_prefix("Traceback:\n  error: inner"),
+            "Traceback:\n  error: inner"
+        );
+    }
+
+    /// The commands that report the CLI's own identity, and nothing else.
+    #[test]
+    fn only_version_and_help_run_without_tasks() {
+        assert!(runs_without_tasks(Some("version")));
+        assert!(runs_without_tasks(Some("help")));
+        for other in ["build", "test", "describe", "feature", "gc"] {
+            assert!(!runs_without_tasks(Some(other)), "{other} must not degrade");
+        }
+        assert!(!runs_without_tasks(None));
+    }
+
+    /// Clap stopping to render help or a version is not Clap rejecting the
+    /// command line, and only the former may run against a workspace that did
+    /// not fully load.
+    #[test]
+    fn display_only_covers_help_version_and_a_bare_invocation() {
+        for kind in [
+            ErrorKind::DisplayHelp,
+            ErrorKind::DisplayVersion,
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        ] {
+            assert!(
+                is_display_only(&clap::Error::raw(kind, "x")),
+                "{kind:?} renders help rather than failing"
+            );
+        }
+        for kind in [
+            ErrorKind::InvalidSubcommand,
+            ErrorKind::UnknownArgument,
+            ErrorKind::MissingRequiredArgument,
+            ErrorKind::InvalidValue,
+        ] {
+            assert!(
+                !is_display_only(&clap::Error::raw(kind, "x")),
+                "{kind:?} is a rejection, not a help screen"
+            );
+        }
     }
 }

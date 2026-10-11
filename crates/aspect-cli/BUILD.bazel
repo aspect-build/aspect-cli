@@ -105,6 +105,19 @@ rust_test(
 )
 
 rust_test(
+    name = "axl_load_failure_test",
+    srcs = ["tests/axl_load_failure.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/axl_load_failure.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "auth_status_test",
     srcs = ["tests/auth_status.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/auth_status.rs",
