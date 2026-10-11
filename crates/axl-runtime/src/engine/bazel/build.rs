@@ -1,4 +1,5 @@
 use crate::errln;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -997,6 +998,23 @@ pub struct Build {
     #[allocative(skip)]
     execlog_iters: Vec<ExecLogIter>,
 
+    /// The `build.execution_logs()` iterator, once that call has handed out the
+    /// stream's own subscriber. Held for exactly the reason `execlog_iters` is,
+    /// and it is the only way to reach that subscriber: `execution_logs()` takes
+    /// the receiver out of the stream, so `ExecLogStream::join()`'s own release
+    /// valve no longer owns it. Without a clone here, an iteration the task
+    /// abandoned — or claimed and never ran — parks the reader past the end of
+    /// the build.
+    #[allocative(skip)]
+    execution_logs_iter: RefCell<Option<ExecutionLogIterator>>,
+
+    /// Set by `wait()`, which takes `execlog_stream`. Without it a later
+    /// `execution_logs()` cannot tell "this build has no execution log" from
+    /// "its stream has already been joined", and would tell a caller who did
+    /// pass `execution_log` to pass it.
+    #[allocative(skip)]
+    execlog_joined: Cell<bool>,
+
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -1261,13 +1279,13 @@ impl Build {
         // Same two-pid split for the execution log: the daemon writes the file, but
         // only the client can say the invocation is over and none is coming.
         //
-        // The producer always blocks rather than dropping, because a decoded stream
-        // always has exactly one consumer that must see every entry: a decoded
-        // `File` sink or an `iterator()` handle named here, or else the stream's own
-        // subscriber, which is what a later `build.execution_logs()` takes. Blocking
-        // cannot reach Bazel — Bazel writes the log to a regular file and this
-        // process tails it — so a consumer slower than the decoder lengthens the
-        // `join()` inside `wait()` and nothing else.
+        // The producer blocks rather than dropping, because a decoded stream always
+        // has at least one consumer that must see every entry: the decoded `File`
+        // sinks and `iterator()` handles named here, or else the stream's own
+        // subscriber, which is what a later `build.execution_logs()` takes.
+        // Blocking cannot reach Bazel — Bazel writes the log to a regular file and
+        // this process tails it — so a consumer slower than the decoder lengthens
+        // the `join()` inside `wait()` and nothing else.
         let named_consumers = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
         let mut execlog_stream = match execlog_path {
             Some(p) => Some(ExecLogStream::spawn_with_file(
@@ -1275,7 +1293,6 @@ impl Build {
                 pid,
                 child.id(),
                 compact_paths,
-                true, // lossless; see above
             )?),
             None => None,
         };
@@ -1360,13 +1377,13 @@ impl Build {
 
         // Every named consumer has cloned what it needs, so the stream must not go
         // on holding an unread subscriber of its own — see `ExecLogStream::recv`.
-        // The exception is a stream no consumer was named for, whose subscriber is
-        // what a later `build.execution_logs()` takes: that one is read rather than
-        // unread, so leaving it in place caps nothing.
-        if named_consumers {
-            if let Some(stream) = execlog_stream.as_mut() {
-                stream.take_initial_subscriber();
-            }
+        //
+        // A stream no consumer was named for keeps its subscriber, because
+        // `build.execution_logs()` may still claim it. Until something drains it
+        // the producer sits at the channel capacity; `join()` releasing it is what
+        // bounds that.
+        if named_consumers && let Some(stream) = execlog_stream.as_mut() {
+            stream.take_initial_subscriber();
         }
         // The tracing sink only emits via `tracing::event!` and never fails;
         // detach its JoinHandle so `build.wait()` stays bazel-only.
@@ -1381,6 +1398,8 @@ impl Build {
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
             execlog_iters,
+            execution_logs_iter: RefCell::new(None),
+            execlog_joined: Cell::new(false),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1422,15 +1441,31 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    // Creates an iterable `ExecutionLogIterator` type. Takes the stream's one
-    // subscriber rather than cloning it, so it can be called only once and only
-    // when nothing else reads the log — see the error below.
+    /// An iterable over this build's decoded execution log.
+    ///
+    /// Takes the stream's one subscriber rather than cloning it, so it can be
+    /// called only once and only when nothing else reads the log — see the
+    /// refusal below. The iterator is also registered on the build, so `wait()`
+    /// releases the subscriber whether or not the task drained it.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let mut execlog_stream = build.execlog_stream.borrow_mut();
-        let execlog_stream = execlog_stream.as_mut().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `execution_log = true` in order to receive execution log events."
-        ))?;
+        let execlog_stream = execlog_stream.as_mut().ok_or_else(|| {
+            if build.execlog_joined.get() {
+                anyhow::anyhow!(
+                    "this build's execution log was already joined by `build.wait()`, \
+                     which ends the stream. Call `build.execution_logs()` and iterate \
+                     it before `wait()`, or pass an `execution_log.iterator()` handle \
+                     in `execution_log=[...]`, which `wait()` also releases but which \
+                     can be created before the build and drained as it runs."
+                )
+            } else {
+                anyhow::anyhow!(
+                    "call `ctx.bazel.build` with `execution_log = true` in order to \
+                     receive execution log events."
+                )
+            }
+        })?;
 
         // Take the stream's subscriber rather than clone it. Cloning leaves the
         // original in place with nobody reading it, which pins the broadcast
@@ -1442,15 +1477,17 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 "this build's execution log already has a consumer: either \
                  `execution_logs()` was called twice, or the build was configured \
                  with a decoded `execution_log.file(...)` sink or an \
-                 `execution_log.iterator()` handle. A second subscriber cannot be \
-                 added — nothing would drain it, and an undrained subscriber stalls \
-                 the log for every other consumer. Pass an \
-                 `execution_log.iterator()` handle in `execution_log=[...]` and \
-                 iterate that instead: it clones a subscriber of its own, so it can \
-                 be combined with sinks, and its `kinds=` filter runs in Rust before \
-                 an entry becomes a Starlark value."
+                 `execution_log.iterator()` handle, which clone the subscriber and \
+                 leave the stream with none. Either way there is nothing left to \
+                 hand out. Pass an `execution_log.iterator()` handle in \
+                 `execution_log=[...]` and iterate that instead: it clones a \
+                 subscriber of its own, so it can be combined with sinks, and its \
+                 `kinds=` filter runs in Rust before an entry becomes a Starlark \
+                 value."
             ))?;
-        Ok(ExecutionLogIterator::new(recv))
+        let iter = ExecutionLogIterator::new(recv);
+        build.execution_logs_iter.replace(Some(iter.clone()));
+        Ok(iter)
     }
 
     // Creates an iterable `WorkspaceEventIterator` type.
@@ -1521,20 +1558,17 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// Block until the Bazel invocation finishes and return a `BuildStatus`.
     ///
-    /// `execution_logs()` has to be iterated **before** `wait()`, not merely
-    /// preferably: the join below starts by releasing the stream's own subscriber
-    /// — the one `execution_logs()` hands out — so a call afterwards has nothing
-    /// to subscribe to and fails. The producer blocks for that subscriber for as
-    /// long as it exists, which is what makes the iteration complete; releasing it
-    /// is what lets a build nobody iterated end.
+    /// Every decoded execution-log consumer belongs **before** this call, not
+    /// merely preferably. `wait()` releases each one — the `execution_logs()`
+    /// iterator and every still-bound `execution_log.iterator()` handle — and
+    /// then takes the stream, so a consumer stops yielding from here on, anything
+    /// it had not been drained of is gone, and a later `execution_logs()` finds
+    /// no stream and says so.
     ///
-    /// The same applies, more sharply, to an `execution_log.iterator()` handle:
-    /// `wait()` releases every handle still bound to this build before joining
-    /// the log's producer, so a handle stops yielding from here on and anything
-    /// it had not been drained of is gone. That is deliberate — a bound handle is
-    /// a subscriber the producer blocks for, so a handle nobody drained would
-    /// otherwise park the producer and hang this `wait()` — but it does mean the
-    /// drain belongs *before* the call, not after.
+    /// That is deliberate: each of those is a subscriber the producer blocks for,
+    /// which is what makes the iteration complete, and releasing them is the only
+    /// thing that lets a build nobody drained end. The drain therefore belongs
+    /// before the call, not after.
     ///
     /// `build_events()` remains usable after `wait()` for replaying historical
     /// events, because the build event stream retains its buffer.
@@ -1572,13 +1606,20 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
-        // Release any iterator handle still bound. A bound handle forces the
-        // producer's blocking sends, so one the task never drained would park the
-        // reader thread on a full channel and hang the join below. The AXL side
-        // drains before calling `wait()` (see `bazel/exec_log.axl`); this is the
-        // net under a task that does not, trading dropped entries for a build
-        // that ends.
+        // Release every decoded consumer still holding a subscriber. The producer
+        // blocks for each, so one the task never drained would park the reader
+        // thread on a full channel and hang the join below. The AXL side drains
+        // before calling `wait()` (see `bazel/exec_log.axl`); this is the net
+        // under a task that does not, trading dropped entries for a build that
+        // ends.
+        //
+        // `ExecLogStream::join()` releases the stream's own subscriber, but only
+        // while the stream still owns it — `execution_logs()` takes it, so that
+        // iterator has to be released here.
         for iter in &build.execlog_iters {
+            iter.release();
+        }
+        if let Some(iter) = build.execution_logs_iter.take() {
             iter.release();
         }
 
@@ -1590,6 +1631,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // never reaches the phase that creates one, and bazel has already said so)
         // and an anomaly on a successful one. See `ReaderOutcome`.
         let execlog_stream = build.execlog_stream.take();
+        build.execlog_joined.set(true);
         if let Some(execlog_stream) = execlog_stream {
             match execlog_stream.join() {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() => {
@@ -2439,7 +2481,6 @@ Test = task(implementation = _impl)
             reaped,
             reaped,
             vec![],
-            true,
         )
         .expect("spawn the reader");
 

@@ -5,6 +5,12 @@
 //! ring from the moment the stream spawns, so the reader blocks for it like any
 //! other consumer and the iteration is complete.
 //!
+//! Both types hold a subscriber the producer blocks for, so both must be
+//! releasable from outside: `build.wait()` releases every one still held before
+//! joining the reader, which is what bounds a consumer that stopped reading. The
+//! two therefore share one lifecycle shape — `Live` owning the receiver, `Done`
+//! having dropped it — and `Build` holds a clone of each so it can do that.
+//!
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
 //! before the spawn and passed in `execution_log = [...]`. Both forms are
 //! complete; what the handle adds is its `kinds=` filter, applied here in Rust so
@@ -12,7 +18,6 @@
 //! in the build, and a subscriber of its own, so it can sit beside a decoded
 //! `file()` sink where `build.execution_logs()` cannot.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -46,17 +51,73 @@ use fibre::spmc::Receiver;
 use crate::engine::cancellation::Signals;
 use crate::engine::children::{Recv, recv_cancellable};
 
-#[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
+/// Lifecycle of an [`ExecutionLogIterator`], mirroring [`ExecLogIterState`]
+/// minus the pre-bind state: this iterator is handed its subscriber at
+/// construction, so it starts `Live`.
+#[derive(Debug)]
+enum ExecutionLogIteratorState {
+    /// On loan to an in-flight blocking read, so a `release` can land meanwhile.
+    Reading,
+    /// Holds the stream's own subscriber; iteration reads from it.
+    Live { recv: Receiver<ExecLogEntry> },
+    /// Drained, or released by `build.wait()`.
+    Done,
+}
+
+/// The `build.execution_logs()` iterator: the stream's own subscriber, handed to
+/// AXL as an iterable.
+///
+/// `Clone`, and the state behind an `Arc`, for one reason: `Build` keeps a clone
+/// so `wait()` can [`release`](Self::release) the subscriber before joining the
+/// reader. Without that the producer parks against a receiver this value owns —
+/// and which `ExecLogStream::join()` can no longer reach, having given it away —
+/// so an iteration the task abandoned, or never started, hangs `wait()`.
+#[derive(Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
 #[display("<execlog_iterator>")]
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
-    recv: RefCell<Receiver<ExecLogEntry>>,
+    state: Arc<Mutex<ExecutionLogIteratorState>>,
 }
 
 impl ExecutionLogIterator {
     pub fn new(recv: Receiver<ExecLogEntry>) -> Self {
         Self {
-            recv: RefCell::new(recv),
+            state: Arc::new(Mutex::new(ExecutionLogIteratorState::Live { recv })),
+        }
+    }
+
+    /// Unsubscribe, dropping any entries still buffered. Idempotent.
+    ///
+    /// `build.wait()` calls this before joining the stream, for the same reason
+    /// it releases every [`ExecLogIter`]: the subscriber this holds is one the
+    /// producer blocks for, so an iteration that stopped early — or never
+    /// started — would otherwise park the reader on a consumer that is not
+    /// coming. The stream cannot do it itself; `execution_logs()` took the
+    /// receiver out of it.
+    pub fn release(&self) {
+        *self.state.lock().unwrap() = ExecutionLogIteratorState::Done;
+    }
+
+    /// Borrow the receiver for a read, leaving `Reading` behind.
+    ///
+    /// Taken out from under the lock so a parked read does not hold it, which is
+    /// what lets `release()` run while a drain is in progress.
+    fn take_for_read(&self) -> Option<Receiver<ExecLogEntry>> {
+        let mut state = self.state.lock().unwrap();
+        match std::mem::replace(&mut *state, ExecutionLogIteratorState::Reading) {
+            ExecutionLogIteratorState::Live { recv } => Some(recv),
+            other => {
+                *state = other;
+                None
+            }
+        }
+    }
+
+    /// Put the receiver back, unless a `release()` landed while we were reading.
+    fn finish_read(&self, recv: Receiver<ExecLogEntry>) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, ExecutionLogIteratorState::Reading) {
+            *state = ExecutionLogIteratorState::Live { recv };
         }
     }
 }
@@ -69,26 +130,41 @@ impl<'v> AllocValue<'v> for ExecutionLogIterator {
 
 #[starlark_module]
 pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
-    /// Returns `ExecLogEntry` if event buffer is not empty.
-    /// Maximum `1000` events is buffered at once.
+    /// Non-blocking pop of the next entry, or `None` when nothing is buffered
+    /// yet. The producer runs up to the channel capacity ahead and then waits
+    /// for this subscriber, so polling slowly costs time rather than entries.
     fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<ExecLogEntry>> {
         let this = this
             .downcast_ref_err::<ExecutionLogIterator>()
             .into_anyhow_result()?;
-        match this.recv.borrow_mut().try_recv() {
+        let mut state = this.state.lock().unwrap();
+        let recv = match &*state {
+            ExecutionLogIteratorState::Live { recv } => recv,
+            _ => return Ok(NoneOr::None),
+        };
+        match recv.try_recv() {
             Ok(it) => Ok(NoneOr::Other(it)),
             Err(TryRecvError::Empty) => Ok(NoneOr::None),
-            Err(TryRecvError::Disconnected) => Ok(NoneOr::None),
+            Err(TryRecvError::Disconnected) => {
+                *state = ExecutionLogIteratorState::Done;
+                Ok(NoneOr::None)
+            }
         }
     }
 
-    /// Returns `True` if stream is complete and all the events are received via `for`
-    /// or calling `try_pop` repeatedly.
+    /// Returns `True` once the stream has ended and every entry has been
+    /// received via `for` or repeated `try_pop`, or the subscriber has been
+    /// released (`build.wait()`).
     fn done<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let this = this
             .downcast_ref_err::<ExecutionLogIterator>()
             .into_anyhow_result()?;
-        Ok(this.recv.borrow().is_closed())
+        Ok(match &*this.state.lock().unwrap() {
+            ExecutionLogIteratorState::Live { recv } => recv.is_closed(),
+            // `Reading` is only observable from another thread, which AXL has
+            // none of; either way nothing more will arrive here.
+            _ => true,
+        })
     }
 }
 
@@ -114,15 +190,26 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
+    /// Blocks until the next entry or the stream's end. A cancelled run does not
+    /// end the iterator: the client is being stopped, and the stream closes with
+    /// it.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        // Blocks until the next entry or the stream's end. A cancelled run
-        // does not end the iterator: the client is being stopped, and the
-        // stream closes with it.
-        match self.recv.borrow_mut().recv() {
-            Ok(ev) => Some(ev.alloc_value(heap)),
-            Err(RecvError::Disconnected) => None,
+        let recv = self.take_for_read()?;
+        match recv.recv() {
+            Ok(ev) => {
+                self.finish_read(recv);
+                Some(ev.alloc_value(heap))
+            }
+            Err(RecvError::Disconnected) => {
+                *self.state.lock().unwrap() = ExecutionLogIteratorState::Done;
+                None
+            }
         }
     }
+
+    /// Leaving a `for` loop is not unsubscribing: `try_pop` and a second loop
+    /// still work afterwards, and `build.wait()` is what releases the
+    /// subscriber. See [`ExecutionLogIterator::release`].
     unsafe fn iter_stop(&self) {}
 }
 
@@ -186,9 +273,8 @@ pub fn parse_entry_kind(value: values::Value) -> anyhow::Result<i32> {
     )
 }
 
-/// Lifecycle of an [`ExecLogIter`]. `Live` owns the subscriber clone whose
-/// existence forces the producer's blocking-send path, so leaving this state is
-/// what releases the producer.
+/// Lifecycle of an [`ExecLogIter`]. `Live` owns a subscriber clone the producer
+/// blocks for, so leaving this state is what releases the producer.
 #[derive(Debug)]
 enum ExecLogIterState {
     /// Created but not yet passed to a build.
@@ -205,10 +291,11 @@ enum ExecLogIterState {
 ///
 /// Why a handle rather than `build.execution_logs()`: cost and composition, not
 /// completeness. Both forms receive every entry — the producer blocks for
-/// whatever subscribers it has (see `lossless` on
-/// [`ExecLogStream::spawn_with_file`]). A handle clones a subscriber of its own,
-/// so it combines with sinks where `execution_logs()` takes the stream's one and
-/// only, and it filters in Rust, below.
+/// whatever subscribers it has, see
+/// [`ExecLogStream::spawn_with_file`](super::super::stream::ExecLogStream::spawn_with_file).
+/// A handle clones a subscriber of its own, so it combines with sinks where
+/// `execution_logs()` takes the stream's one and only, and it filters in Rust,
+/// below.
 ///
 /// `kinds` filters by payload tag in Rust, before the entry is turned into a
 /// Starlark value. That matters more here than it does for build events: a log
@@ -260,8 +347,8 @@ impl ExecLogIter {
     /// Unsubscribe, dropping any entries still buffered.
     ///
     /// `build.wait()` calls this before joining the stream, which is what bounds
-    /// a task that never drained its handle: a bound subscriber makes the sends
-    /// blocking, so the reader would otherwise wait on a consumer that is not
+    /// a task that never drained its handle: the producer blocks for every
+    /// subscriber, so the reader would otherwise wait on a consumer that is not
     /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
     /// nothing to it.
     pub fn release(&self) {
