@@ -13,7 +13,7 @@
 //!     length-delimited `BuildEvent` protobufs into the BES path according
 //!     to the named scenario. Each "attempt" is one open/write/close cycle
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
-//!     reconnect-after-eviction behavior on a FIFO.
+//!     reconnect-after-eviction behavior.
 //!
 //!     When `--execution_log_compact_file <path>` is also present, a scenario
 //!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there, in
@@ -109,7 +109,7 @@ fn run_info(args: &[String]) {
     // Honors BASIL_SERVER_PID so tests can pin the reported pid to a holder
     // process (e.g. `sleep 60`) that outlives basil's own short-lived info
     // invocation. Required for galvanize's IfOpenForPid retry loop to keep
-    // the FIFO read end open across the lifetime of the test.
+    // the event file open across the lifetime of the test.
     let pid: u32 = env::var("BASIL_SERVER_PID")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -216,7 +216,7 @@ enum ExitBehavior {
 }
 
 /// One full BES interaction. Each attempt is one open/write/close cycle on
-/// the FIFO. `open_delay` sleeps after the FIFO open and before any writes —
+/// the event file. `open_delay` sleeps after creating it and before any writes —
 /// only set this on scenarios whose tests assert on what the AXL iterator
 /// received. `build.build_events()` subscribes after `Build::spawn` returns
 /// (the broadcaster doesn't replay history; see
@@ -465,9 +465,9 @@ fn scenario(name: &str) -> Scenario {
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
-        // opened the BEP file, so no attempts at all. The read side waits on
-        // a writer that cannot come, which is what `spawn_open_watchdog`
-        // exists to break out of.
+        // created the BEP file, so no attempts at all. The read side is
+        // waiting for a file that will never appear, and ends when the
+        // invocation does.
         "rejects_command_line" => Scenario {
             attempts: vec![],
             exit: ExitBehavior::Code(2),

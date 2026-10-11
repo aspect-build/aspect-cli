@@ -249,6 +249,7 @@ impl Read for Pipe {
 /// the daemon that writes the file and `invocation_pid` is the client that ran the
 /// command; the daemon outlives the invocation by design, so only the client can
 /// answer "is this over?".
+
 /// How often a restartable file re-checks that it is still reading the same
 /// stream. Short next to the gap between bazel's attempts, long next to the
 /// per-byte reads a length-delimited decoder makes.
@@ -262,7 +263,7 @@ pub struct StreamingFile {
     /// whether reads watch for the file being replaced under them. Off by
     /// default: a writer that only ever appends has no second stream.
     restartable: bool,
-    /// When the file's length was last compared against `pos`.
+    /// When the file's length was last compared against what has been read.
     last_truncation_check: std::time::Instant,
     /// Set when a read found the file shorter than it had already been.
     /// Cleared by [`take_truncated`](Self::take_truncated).
@@ -341,12 +342,15 @@ impl StreamingFile {
     /// fresh stream into it, as Bazel does when it retries an invocation in
     /// place rather than moving to a new path.
     ///
-    /// This only arms [`await_restart`](Self::await_restart); it changes no
-    /// read. Detecting the truncation from the reader alone does not work: the
-    /// new stream overtakes the old one's length almost immediately, so a
-    /// shorter-file check has to win a race it usually loses, and losing it
-    /// means resuming at an offset in the middle of a message. The caller knows
-    /// from the stream's own contents when an attempt has ended, and says so.
+    /// Arms two things: [`await_restart`](Self::await_restart), and the
+    /// replacement check reads make against the file's length.
+    ///
+    /// The check is a backstop, not the signal. The new stream overtakes the
+    /// old one's length almost immediately, so a length comparison has to win
+    /// a race it often loses; what the caller actually steers by is the
+    /// attempt boundary in the stream's own contents, which it knows and this
+    /// does not. The check exists for the reader that falls so far behind that
+    /// a replacement reaches it before that boundary does.
     pub fn open_restartable(
         path: PathBuf,
         holder_pid: u32,
@@ -414,15 +418,24 @@ impl StreamingFile {
             return Ok(false);
         }
         self.last_truncation_check = std::time::Instant::now();
-        let len = self.inner.metadata()?.len();
-        // Against the high-water mark rather than against `pos`: a reader that
-        // has fallen behind holds an offset well short of what the previous
-        // stream reached, and a replacement is only shorter than *that*.
-        if len < self.high_water {
+        // An `fstat` on an open fd, on a local temp file. A failure here says
+        // nothing about whether the stream was replaced, and must not be the
+        // thing that fails an otherwise good build.
+        let len = match self.inner.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(false),
+        };
+        // Against whichever is greater of what has been read and what the file
+        // has been seen to hold. Neither alone is enough: a reader that has
+        // fallen behind holds an offset short of what the previous stream
+        // reached, and a reader keeping up runs past a high-water mark that is
+        // only sampled once an interval.
+        let reached = self.pos.max(self.high_water);
+        if len < reached {
             self.high_water = len;
             return Ok(true);
         }
-        self.high_water = len;
+        self.high_water = reached.max(len);
         Ok(false)
     }
 
@@ -522,6 +535,26 @@ impl Read for StreamingFile {
         }
         match self.inner.read(buf) {
             Ok(0) => {
+                // A restartable file's holder pid is not trustworthy enough
+                // to end a stream on its own. It came from `bazel info
+                // server_pid` before the build, and the daemon it named may
+                // have been replaced since — by differing startup options, a
+                // concurrent `bazel clean`, an OOM kill. "That pid does not
+                // have this file open" is then true and means nothing, and
+                // every gap between events would end the stream.
+                //
+                // Getting this wrong is worse than the open-time gate it
+                // replaces: an empty stream is conspicuous, and one cut short
+                // at the first gap between events looks complete. So report
+                // "nothing right now" and leave the end of the stream to
+                // whoever owns the invocation.
+                //
+                // A file opened with `open`, not `open_restartable`, keeps the
+                // old contract: there the holder is the process the caller
+                // nominated and its exit is the end.
+                if self.restartable && !is_pid_alive(self.holder_pid) {
+                    return Ok(0);
+                }
                 if is_path_open_for_pid(&self.path, self.holder_pid)? {
                     // At the end of the file with the holder still on it. The
                     // cheapest moment to look for a replacement, and the one a

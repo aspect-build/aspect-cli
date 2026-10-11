@@ -151,7 +151,7 @@ impl ExecLogStream {
     /// which busy-polls for file existence at open time and retries reads while Bazel
     /// holds the file open. It self-terminates when Bazel closes the file.
     ///
-    /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
+    /// A regular file loses nothing by starting late: bytes
     /// written before the reader opens are still there to be read.
     ///
     /// ## Send strategy

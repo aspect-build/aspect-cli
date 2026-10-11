@@ -52,13 +52,18 @@ impl BuildEventEnvelope {
     }
 }
 
-/// Largest length prefix this reader will honour. Bazel's own event file is
-/// framed in `BuildEvent` messages far smaller than this; a prefix beyond it
-/// is a desynced stream rather than a real record, and the varint reader will
-/// return up to a 64-bit value, so without a bound the length goes straight
-/// into a `Vec::resize` and aborts the process on the allocation. Reported as
-/// a stream error instead.
-const MAX_EVENT_BYTES: usize = 512 * 1024 * 1024;
+/// Largest length prefix this reader will honour. A `BuildEvent` is orders of
+/// magnitude smaller; a prefix beyond this is a desynced stream rather than a
+/// record, and the varint reader will return up to a 64-bit value, so without
+/// a bound the length goes straight into a `Vec::resize` and aborts the
+/// process on the allocation.
+///
+/// Sized to bite early rather than to be generous. The cap bounds the
+/// allocation but not what follows it: a prefix under the cap is still read
+/// through to the end, and bytes that were never a record never arrive, so
+/// the reader waits out the rest of the invocation. A smaller cap turns more
+/// of that into an immediate, legible error.
+const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// How long to wait between polls of a file Bazel has not written to yet.
 /// Short enough to be invisible next to a build, long enough not to spin.
@@ -111,6 +116,11 @@ impl Read for PendingWriterReader {
             return Ok(0);
         }
         loop {
+            // Sampled before the read, not after: a byte written between the
+            // read returning nothing and the question being asked would
+            // otherwise be declared never to have existed. `StreamingFile::open`
+            // orders its own liveness check this way for the same reason.
+            let invocation_over = !galvanize::is_pid_alive(self.writer_pid);
             let read = match self.inner.read(buf) {
                 // The holder has closed the file with nothing in it. Before
                 // this attempt's first byte that is "not opened yet" — bazel
@@ -120,13 +130,19 @@ impl Read for PendingWriterReader {
                 // After a byte has been read it is the end of an attempt, and
                 // the loop above has to see it: that is where a retry is told
                 // from the end of the build.
-                Err(e) if e.kind() == ErrorKind::BrokenPipe && self.inner.position() == 0 => 0,
+                // Swallowed, so the replacement it may have latched is
+                // consumed here too — left set, it would be read as the answer
+                // to some later, unrelated end of stream.
+                Err(e) if e.kind() == ErrorKind::BrokenPipe && self.inner.position() == 0 => {
+                    self.inner.take_truncated();
+                    0
+                }
                 other => other?,
             };
             if read > 0 {
                 return Ok(read);
             }
-            if !galvanize::is_pid_alive(self.writer_pid) {
+            if invocation_over {
                 return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
             }
             thread::sleep(WRITER_POLL_INTERVAL);
@@ -306,7 +322,10 @@ impl BuildEventStream {
                         Ok(Arc::new(BuildEventEnvelope { event, encoded }))
                     };
 
-                // Set when BuildFinished arrives with REMOTE_CACHE_EVICTED (code 39).
+                // Set by either of two things: a BuildFinished carrying
+                // REMOTE_CACHE_EVICTED (code 39), or the event file being replaced
+                // under the reader, which is proof of a next attempt whatever the
+                // events said.
                 // While true, a BrokenPipe (attempt N's writer closing) is swallowed
                 // so the reader waits for the retry's stream instead of finishing.
                 // Cleared when the next BuildStarted arrives, meaning the retry has
@@ -574,8 +593,8 @@ mod tests {
         let start = std::time::Instant::now();
         let writer = std::thread::spawn(move || {
             let mut src = std::io::BufReader::new(std::fs::File::open(&input).unwrap());
-            let mut fifo = File::create(&path).unwrap();
-            std::io::copy(&mut src, &mut fifo).unwrap()
+            let mut sink = File::create(&path).unwrap();
+            std::io::copy(&mut src, &mut sink).unwrap()
         });
 
         let bytes = writer.join().unwrap();
@@ -714,13 +733,24 @@ mod tests {
             BuildEventStream::spawn(path.clone(), dead_pid(), invocation_pid, vec![]).unwrap();
         let sub = stream.subscribe();
 
-        {
-            let mut f = File::create(&path).unwrap();
+        // A gap between the events, which every real build has — bazel writes
+        // them over the length of the build. The reader reaches the end of the
+        // file partway through, and with a dead holder pid it has no honest
+        // way to tell "this attempt is over" from "nothing yet". It must wait.
+        //
+        // Without this gap the test passes whatever the reader does, because
+        // the only end-of-file it ever sees is before the first byte.
+        let path_w = path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut f = File::create(&path_w).unwrap();
             f.write_all(&encode_event(&make_event(false))).unwrap();
+            f.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
             f.write_all(&encode_event(&make_event(true))).unwrap();
             f.flush().unwrap();
-        }
+        });
 
+        writer.join().unwrap();
         stream.join().unwrap();
         let _ = invocation.kill();
 
@@ -728,9 +758,41 @@ mod tests {
         assert_eq!(
             events.len(),
             2,
-            "a dead daemon pid must not swallow the build's events"
+            "a dead daemon pid must not cut the stream short at a gap between events"
         );
         assert!(events[1].event.last_message);
+    }
+
+    /// A length prefix beyond the cap is reported rather than allocated. Only
+    /// reachable from a desynced stream, which is exactly when the number is
+    /// not a length — so handing it to `Vec::resize` aborts the process on the
+    /// allocation instead of failing the build with something readable.
+    #[test]
+    fn an_absurd_length_prefix_is_a_stream_error_not_an_allocation() {
+        let path = temp_bep_path();
+        let mut invocation = spawn_pid_holder();
+        let pid = invocation.id();
+
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
+        let _sub = stream.subscribe();
+
+        {
+            // A varint well past MAX_EVENT_BYTES: 0xFF×4 then 0x7F is ~2^35.
+            let mut f = File::create(&path).unwrap();
+            f.write_all(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]).unwrap();
+            f.flush().unwrap();
+        }
+
+        let err = stream
+            .join()
+            .expect_err("an absurd prefix must fail the stream");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds") && msg.contains("maximum"),
+            "the error should name the cap, got: {msg}"
+        );
+        let _ = invocation.kill();
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The event file holds bazel's command line as bazel received it, before
@@ -803,23 +865,23 @@ mod tests {
     #[test]
     fn test_complete_stream_delivers_all_events() {
         let path = temp_bep_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
+
+        // The holder is the process that writes the file, as bazel's daemon
+        // is. A `sleep` that never opens it would answer "not open" at every
+        // gap between events, and the reader would end the stream at the first
+        // one it happened to reach.
+        let mut attempt = encode_event(&make_event(false));
+        attempt.extend_from_slice(&encode_event(&make_event(false)));
+        attempt.extend_from_slice(&encode_event(&make_event(true)));
+        let mut writer = spawn_attempt_writer(&path, &[attempt]);
+        let pid = writer.id();
 
         let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
 
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = File::create(&path_w).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            f.write_all(&encode_event(&make_event(true))).unwrap();
-        });
-
-        writer.join().unwrap();
         stream.join().unwrap();
-        let _ = holder.kill();
+        let _ = writer.kill();
+        let _ = writer.wait();
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
         assert_eq!(events.len(), 3);
