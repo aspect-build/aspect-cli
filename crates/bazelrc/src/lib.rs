@@ -831,7 +831,7 @@ impl<'a> DefaultOverride<'a> {
 fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
     let mut chunks: Vec<Vec<(&str, &str)>> = Vec::new();
     let mut open_index = None;
-    for over in tokens.iter().filter_map(|token| DefaultOverride::parse(token)) {
+    for over in tokens.iter().copied().filter_map(DefaultOverride::parse) {
         if open_index != Some(over.index) {
             open_index = Some(over.index);
             chunks.push(Vec::new());
