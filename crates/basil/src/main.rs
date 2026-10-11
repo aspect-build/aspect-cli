@@ -15,7 +15,9 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
-//!     When `--execution_log_compact_file <path>` is also present, a scenario
+//!     When `--execution_log_compact_file <path>` is also present — literally, or
+//!     restated as a `--default_override` the way the CLI hands Bazel a
+//!     `common`-section rc entry — a scenario
 //!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there,
 //!     in the real format: one zstd frame over varint-length-prefixed messages,
 //!     written as a regular file the way Bazel writes it. Entry counts above the
@@ -63,7 +65,7 @@ fn main() {
 
     match verb {
         "info" => run_info(&args),
-        "build" | "test" => run_build(&args),
+        "build" | "test" => run_build(&args, verb),
         "" => {
             eprintln!("basil: no verb given");
             process::exit(2);
@@ -122,11 +124,11 @@ fn run_info(args: &[String]) {
     }
 }
 
-fn run_build(args: &[String]) {
-    let bes_path = find_flag_value(args, "--build_event_binary_file");
-    let execlog_path = find_flag_value(args, "--execution_log_compact_file");
+fn run_build(args: &[String], verb: &str) {
+    let bes_path = find_flag_value(args, "--build_event_binary_file", verb);
+    let execlog_path = find_flag_value(args, "--execution_log_compact_file", verb);
     let scenario_name =
-        find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
+        find_flag_value(args, "--scenario", verb).unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
 
     let log = || match &execlog_path {
@@ -137,7 +139,7 @@ fn run_build(args: &[String]) {
     // Only the invocation that asked for a JSON log gets one, which is how a
     // scenario can answer a task's loading-only selection pass without also
     // speaking for the spawns that follow it.
-    if let Some(path) = find_flag_value(args, "--build_event_json_file")
+    if let Some(path) = find_flag_value(args, "--build_event_json_file", verb)
         && !s.json_bep_tests.is_empty()
     {
         let exit_code = match s.exit {
@@ -197,27 +199,17 @@ fn run_build(args: &[String]) {
     }
 }
 
-/// Finds `--name <value>` or `--name=<value>` in argv. The runtime emits both
-/// forms (`--build_event_binary_file <path>` for paths, `--scenario=foo` for
-/// user-supplied flags), so handling both keeps us tolerant.
+/// Resolves `--name` on `args` the way Bazel would for `verb`: `--name <value>` and
+/// `--name=<value>`, last occurrence winning, and a `--default_override=0:common=--name=…`
+/// restating rc content outranked by any literal occurrence.
 ///
-/// Last occurrence wins, as Bazel resolves a single-valued flag given more than
-/// once. That is not a detail here: a caller clearing
-/// `--execution_log_compact_file=` and the CLI appending its own is exactly the
-/// shape the reuse logic has to get right, and a first-wins fake would answer
-/// the opposite of the thing under test.
-fn find_flag_value(args: &[String], name: &str) -> Option<String> {
-    let prefix = format!("{name}=");
-    let mut found = None;
-    for (i, a) in args.iter().enumerate() {
-        if a == name {
-            // A bare `--name` immediately before another flag names no value.
-            found = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned();
-        } else if let Some(v) = a.strip_prefix(&prefix) {
-            found = Some(v.to_string());
-        }
-    }
-    found
+/// Delegates to `bazelrc`, the same resolution the CLI decides with. Getting it right
+/// matters twice over: a caller clearing `--execution_log_compact_file=` and the CLI
+/// appending its own is the shape the reuse logic has to handle, and a fake blind to
+/// overrides would write no log at all for a `common`-scoped path — reporting a missing
+/// feature as a missing log.
+fn find_flag_value(args: &[String], name: &str, verb: &str) -> Option<String> {
+    bazelrc::last_flag_value(args, name, verb)
 }
 
 /// How basil terminates after writing the BES event stream. `Code(n)`

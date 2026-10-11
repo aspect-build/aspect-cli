@@ -767,9 +767,63 @@ impl BazelRC {
     }
 }
 
+/// Bazel's `--default_override=<rc index>:<command>=<option>` token: one rc-file option,
+/// restated on the command line under the section it was written in.
+///
+/// It is how a `common`-section option survives `--ignore_all_rc_files`, which the CLI always
+/// passes: a literal `--option` on the command line would be rejected by any command that
+/// does not accept it, whereas Bazel applies an override only to the commands its section
+/// covers. Bazel also parses overrides at rc priority — ahead of everything literal on the
+/// command line — so an override never outranks a flag the user or a task passed directly.
+///
+/// One type for both directions: [`partition_expand_all`] renders these and
+/// [`last_flag_value`] reads them back, so the wire form is written down once.
+struct DefaultOverride<'a> {
+    /// The section the option is scoped to, e.g. `common`. Carries no `:config` qualifier:
+    /// `expand_configs` has already decided which config sections apply.
+    command: &'a str,
+    /// The option, in the single-token `--flag=value` form Bazel requires here.
+    option: &'a str,
+}
+
+impl fmt::Display for DefaultOverride<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Index 0: the CLI reports every rc file it read as one synthetic source.
+        write!(
+            f,
+            "{}0:{}={}",
+            DefaultOverride::PREFIX,
+            self.command,
+            self.option
+        )
+    }
+}
+
+impl<'a> DefaultOverride<'a> {
+    const PREFIX: &'static str = "--default_override=";
+
+    /// Read back a token [`Display`](fmt::Display) wrote, or `None` for any other token.
+    /// The rc index is parsed but not kept — nothing downstream distinguishes rc sources.
+    fn parse(token: &'a str) -> Option<Self> {
+        let body = token.strip_prefix(Self::PREFIX)?;
+        let (index, scoped) = body.split_once(':')?;
+        index.parse::<u32>().ok()?;
+        let (command, option) = scoped.split_once('=')?;
+        (!command.is_empty() && !option.is_empty()).then_some(Self { command, option })
+    }
+
+    /// Whether Bazel would apply this override to `command`, by the same section
+    /// inheritance [`BazelRC::options_for`] follows.
+    fn applies_to(&self, command: &str) -> bool {
+        matches!(self.command, "always" | "common")
+            || self.command == command
+            || command_ancestors(command).contains(&self.command)
+    }
+}
+
 /// Split an expanded option list into `(default_override_flags, regular_flags)`.
 ///
-/// `common`-section options become `--default_override=0:common=<value>` strings, returned first
+/// `common`-section options become [`DefaultOverride`] tokens, returned first
 /// so they precede user flags and lose to them under last-write-wins. Each entry keeps its
 /// `version_condition` so version-gated options aren't silently promoted to unconditional.
 ///
@@ -807,7 +861,11 @@ fn partition_expand_all(
                 }
             }
             overrides.push((
-                format!("--default_override=0:common={value}"),
+                DefaultOverride {
+                    command: "common",
+                    option: &value,
+                }
+                .to_string(),
                 opt.version_condition.clone(),
             ));
         } else {
@@ -839,9 +897,9 @@ fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
 /// with `-` is never taken as a value (that is the next flag, and `--name` was
 /// passed bare).
 ///
-/// Shared by the rc options path (`flag_value_list`) and by callers holding a
-/// plain command line ([`last_flag_value`]), so both read a flag the way Bazel
-/// does.
+/// Shared by the rc options path (`flag_value_list`) and by the command-line one
+/// ([`last_flag_value`], which also feeds it `--default_override` payloads), so
+/// every caller reads a flag the way Bazel does.
 pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
     let eq_prefix = format!("{name}=");
     let mut values = Vec::new();
@@ -859,12 +917,30 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
     values
 }
 
-/// The effective value of a single-valued `--name` on a command line, or `None`
-/// if unset. Last occurrence wins, which is how Bazel resolves a flag given more
-/// than once.
-pub fn last_flag_value(args: &[String], name: &str) -> Option<String> {
+/// The effective value of a single-valued `--name` on a rendered Bazel command line for
+/// `command`, or `None` if unset.
+///
+/// Reads both forms the CLI renders rc content in, because it runs Bazel with
+/// `--ignore_all_rc_files` and restates that content itself: a literal token, and a
+/// [`DefaultOverride`] carrying an option from a section — `common` — that cannot be passed
+/// literally. Reading only literals makes a `common`-scoped flag invisible, so a caller asking
+/// "has this been requested already?" adds its own and silently outranks the user's.
+///
+/// A literal occurrence beats an override whatever the textual order, because Bazel parses
+/// override payloads at rc priority and the command line after them. Among equals the last
+/// occurrence wins, which is how Bazel resolves a flag given more than once.
+pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<String> {
     let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
-    flag_values_in(&tokens, name).pop()
+    if let Some(literal) = flag_values_in(&tokens, name).pop() {
+        return Some(literal);
+    }
+    let payloads: Vec<&str> = tokens
+        .iter()
+        .filter_map(|token| DefaultOverride::parse(token))
+        .filter(|over| over.applies_to(command))
+        .map(|over| over.option)
+        .collect();
+    flag_values_in(&payloads, name).pop()
 }
 
 /// All values of a repeatable `--name` option among `opts`, in order, by the
@@ -1132,21 +1208,28 @@ mod runcommand_tests {
         assert!(flag_value_list(&o, "--remote_cache").is_empty());
     }
 
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
     /// `last_flag_value` reads a command line rather than rc options, for a
     /// caller deciding whether a flag has already been asked for.
     #[test]
     fn last_flag_value_reads_a_command_line() {
-        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
-
         assert_eq!(
             last_flag_value(
                 &args(&["--jobs=4", "--remote_cache=grpc://x"]),
-                "--remote_cache"
+                "--remote_cache",
+                "build",
             ),
             Some("grpc://x".to_string()),
         );
         assert_eq!(
-            last_flag_value(&args(&["--remote_cache", "grpc://x"]), "--remote_cache"),
+            last_flag_value(
+                &args(&["--remote_cache", "grpc://x"]),
+                "--remote_cache",
+                "build",
+            ),
             Some("grpc://x".to_string()),
             "the two-token form is the same flag",
         );
@@ -1154,24 +1237,159 @@ mod runcommand_tests {
             last_flag_value(
                 &args(&["--remote_cache=grpc://first", "--remote_cache=grpc://last"]),
                 "--remote_cache",
+                "build",
             ),
             Some("grpc://last".to_string()),
             "bazel takes the last of a repeated single-valued flag, so this must too",
         );
         assert_eq!(
-            last_flag_value(&args(&["--remote_cache", "--jobs=4"]), "--remote_cache"),
+            last_flag_value(
+                &args(&["--remote_cache", "--jobs=4"]),
+                "--remote_cache",
+                "build",
+            ),
             None,
             "a bare flag before another flag names no value",
         );
         assert_eq!(
-            last_flag_value(&args(&["--jobs=4"]), "--remote_cache"),
+            last_flag_value(&args(&["--jobs=4"]), "--remote_cache", "build"),
             None,
         );
         assert_eq!(
-            last_flag_value(&args(&["--remote_cache_header=x"]), "--remote_cache"),
+            last_flag_value(
+                &args(&["--remote_cache_header=x"]),
+                "--remote_cache",
+                "build"
+            ),
             None,
             "a longer flag sharing the prefix is a different flag",
         );
+    }
+
+    /// The rendered form of a `common`-section rc entry is a request like any other:
+    /// Bazel honours it, so a caller asking "already set?" has to see it.
+    #[test]
+    fn last_flag_value_reads_a_common_scoped_rc_entry() {
+        assert_eq!(
+            last_flag_value(
+                &args(&["--default_override=0:common=--remote_cache=grpc://rc"]),
+                "--remote_cache",
+                "build",
+            ),
+            Some("grpc://rc".to_string()),
+        );
+        assert_eq!(
+            last_flag_value(
+                &args(&[
+                    "--default_override=0:common=--remote_cache=grpc://first",
+                    "--default_override=0:common=--remote_cache=grpc://last",
+                ]),
+                "--remote_cache",
+                "build",
+            ),
+            Some("grpc://last".to_string()),
+            "repeated overrides resolve like repeated flags",
+        );
+    }
+
+    /// An override is scoped to a section, so it answers only for the commands
+    /// Bazel would apply it to — `options_for`'s inheritance, read back.
+    #[test]
+    fn last_flag_value_honours_an_overrides_section() {
+        let line = args(&["--default_override=0:build=--remote_cache=grpc://rc"]);
+        assert_eq!(
+            last_flag_value(&line, "--remote_cache", "test"),
+            Some("grpc://rc".to_string()),
+            "`test` inherits the `build` section",
+        );
+        assert_eq!(
+            last_flag_value(&line, "--remote_cache", "query"),
+            None,
+            "`query` does not",
+        );
+    }
+
+    /// Bazel parses override payloads at rc priority and the command line after
+    /// them, so a literal flag wins however the two are ordered.
+    #[test]
+    fn last_flag_value_prefers_a_literal_flag_to_an_override() {
+        let override_first = args(&[
+            "--default_override=0:common=--remote_cache=grpc://rc",
+            "--remote_cache=grpc://literal",
+        ]);
+        let literal_first = args(&[
+            "--remote_cache=grpc://literal",
+            "--default_override=0:common=--remote_cache=grpc://rc",
+        ]);
+        for line in [override_first, literal_first] {
+            assert_eq!(
+                last_flag_value(&line, "--remote_cache", "build"),
+                Some("grpc://literal".to_string()),
+            );
+        }
+    }
+
+    /// The payload is matched as an option, not as text: an override carrying a
+    /// different flag whose name merely contains the one asked about is not a hit.
+    #[test]
+    fn last_flag_value_does_not_match_an_override_payload_loosely() {
+        assert_eq!(
+            last_flag_value(
+                &args(&["--default_override=0:common=--my_remote_cache_thing=grpc://x"]),
+                "--remote_cache",
+                "build",
+            ),
+            None,
+        );
+        assert_eq!(
+            last_flag_value(
+                &args(&["--default_override=0:common=--remote_cache_header=x"]),
+                "--remote_cache",
+                "build",
+            ),
+            None,
+        );
+    }
+
+    /// Anything that is not a well-formed override is left to the literal pass —
+    /// including a flag of Bazel's own that starts the same way.
+    #[test]
+    fn default_override_parse_rejects_malformed_tokens() {
+        for token in [
+            "--default_override=common=--remote_cache=x", // no rc index
+            "--default_override=0:common",                // no payload
+            "--default_override=0:=--remote_cache=x",     // no section
+            "--default_override=x:common=--remote_cache=x", // non-numeric index
+            "--default_overrides=0:common=--remote_cache=x", // a different flag
+        ] {
+            assert!(
+                DefaultOverride::parse(token).is_none(),
+                "{token} should not parse as an override",
+            );
+            assert_eq!(
+                last_flag_value(&args(&[token]), "--remote_cache", "build"),
+                None,
+                "{token} should name no value",
+            );
+        }
+    }
+
+    /// Rendering and parsing are one definition of the wire form, so a rendered
+    /// override reads back as what it was built from.
+    #[test]
+    fn default_override_round_trips() {
+        let rendered = DefaultOverride {
+            command: "common",
+            option: "--remote_cache=grpc://x",
+        }
+        .to_string();
+        assert_eq!(
+            rendered,
+            "--default_override=0:common=--remote_cache=grpc://x"
+        );
+        let parsed = DefaultOverride::parse(&rendered).expect("parses");
+        assert_eq!(parsed.command, "common");
+        assert_eq!(parsed.option, "--remote_cache=grpc://x");
     }
 
     #[test]

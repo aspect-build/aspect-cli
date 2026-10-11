@@ -515,6 +515,7 @@ name = "basil"
 version = "0.0.0-dev"
 dependencies = [
  "axl-proto",
+ "bazelrc",
  "prost",
  "zstd",
 ]
