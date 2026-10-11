@@ -1948,6 +1948,38 @@ build:opt --compilation_mode=opt
         );
     }
 
+    /// The two readers of a resolved rc agree about a `common`-scoped flag.
+    ///
+    /// `rc.flag_value` asks the option model, where `common` is a section by name;
+    /// `last_flag_value` asks the command line the same rc renders to, where it is
+    /// a `--default_override`. A caller that reuses a path the run already asks for
+    /// has to get the same answer whichever it holds — they disagreeing is what let
+    /// the CLI add a second `--execution_log_compact_file` over the user's.
+    #[test]
+    fn both_readers_see_a_common_scoped_flag() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "common --execution_log_compact_file=/tmp/mine.zst\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let name = "--execution_log_compact_file";
+        let want = Some("/tmp/mine.zst".to_string());
+        assert_eq!(
+            flag_value_list(&rc.applicable_options("build", None).unwrap(), name).pop(),
+            want,
+            "the option model",
+        );
+        assert_eq!(
+            last_flag_value(&rc.resolve_for_command("build").unwrap().1, name, "build"),
+            want,
+            "the command line it renders to",
+        );
+    }
+
     #[test]
     fn info_resolves_its_own_command_flags() {
         // The startup flags suppress the on-disk rc, so the command flags are
