@@ -1174,14 +1174,17 @@ impl Build {
             None
         };
 
-        // Split execlog sinks: compact paths go to the tee reader inside the stream thread;
-        // decoded File sinks are spawned separately against the decoded receiver.
+        // Split execlog sinks into the two paths that serve them: compact paths go
+        // to the tee reader inside the stream thread, decoded paths to a writer
+        // thread each, cloning a subscriber of the decoded stream. Both halves are
+        // paths rather than sinks from here on, so neither loop below can be
+        // reached by the other's variant.
         let mut compact_paths: Vec<String> = vec![];
-        let mut decoded_sinks: Vec<ExecLogSink> = vec![];
+        let mut decoded_paths: Vec<String> = vec![];
         for sink in execlog_sinks {
-            match &sink {
-                ExecLogSink::CompactFile { path } => compact_paths.push(path.clone()),
-                ExecLogSink::File { .. } => decoded_sinks.push(sink),
+            match sink {
+                ExecLogSink::CompactFile { path } => compact_paths.push(path),
+                ExecLogSink::File { path } => decoded_paths.push(path),
             }
         }
 
@@ -1285,7 +1288,7 @@ impl Build {
         // consumer slower than the decoder only lengthens the `join()` inside
         // `wait()`. And that `wait()` releases every subscriber before joining, so
         // one nobody drains cannot park the reader past the end of the build.
-        let named_consumers = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
+        let named_consumers = !decoded_paths.is_empty() || !execlog_iters.is_empty();
         let mut execlog_stream = match execlog_path {
             Some(p) => Some(ExecLogStream::spawn_with_file(
                 p,
@@ -1350,13 +1353,11 @@ impl Build {
         // Decoded execlog file sinks belong to the execlog stream — joined
         // (and write errors propagated) inside `execlog_stream.join()`.
         if let Some(stream) = execlog_stream.as_mut() {
-            for sink in decoded_sinks {
-                if let ExecLogSink::File { path } = sink {
-                    let recv = stream.receiver().ok_or_else(|| {
-                        io::Error::other("execution log stream has no subscriber to clone")
-                    })?;
-                    stream.attach_file_sink(ExecLogSink::spawn_file(recv, path));
-                }
+            for path in decoded_paths {
+                let recv = stream.receiver().ok_or_else(|| {
+                    io::Error::other("execution log stream has no subscriber to clone")
+                })?;
+                stream.attach_file_sink(ExecLogSink::spawn_file(recv, path));
             }
         }
 
@@ -2045,6 +2046,101 @@ Test = task(implementation = _impl)
             .to_string(),
             "an undrained `iterator()` handle parked the reader past the end of the build",
             "an undrained handle must still end the build",
+        );
+    }
+
+    /// `drain()` mid-build on an `execution_log.iterator()` handle, the AXL-level
+    /// coverage of the handle's `drain()` and its `done` attribute.
+    ///
+    /// Three things in one script, because they only mean anything together:
+    /// leaving a `for` loop early does *not* unsubscribe (`done` stays false, so
+    /// a second loop could resume); `drain()` does, idempotently; and a drained
+    /// handle then yields nothing while the build still ends — the release frees
+    /// the producer parked at the channel capacity with most of the log left to
+    /// send. Timed out because that last part fails by parking.
+    #[cfg(unix)]
+    #[test]
+    fn a_drained_handle_stops_consuming_mid_build() {
+        use std::time::Duration;
+
+        run_execlog_task(
+            Duration::from_secs(60),
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = 0
+    for _ in entries:
+        seen += 1
+        if seen == 5:
+            break
+    if entries.done: return 2  # leaving a loop is not unsubscribing
+    entries.drain()
+    entries.drain()            # idempotent
+    if not entries.done: return 3
+    for _ in entries:
+        return 4               # a drained handle yields nothing
+    status = build.wait()
+    if not status.success: return 1
+    if seen != 5: return 5
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            .to_string(),
+            "a handle drained mid-build left the reader parked past the end of the build",
+            "a drained handle must unsubscribe, yield nothing more, and let the build end",
+        );
+    }
+
+    /// The same `drain()` on the `build.execution_logs()` iterator, which carries
+    /// it for the same reason a handle does.
+    ///
+    /// `done()` there is `is_drained` rather than "unsubscribed", so it reads true
+    /// after the release either way; what this pins is that the release happens —
+    /// the iteration ends and the build's `wait()` returns rather than joining a
+    /// reader still parked on this subscriber.
+    #[cfg(unix)]
+    #[test]
+    fn a_drained_execution_logs_iterator_stops_consuming_mid_build() {
+        use std::time::Duration;
+
+        run_execlog_task(
+            Duration::from_secs(60),
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = True,
+        stderr = None,
+    )
+    entries = build.execution_logs()
+    seen = 0
+    for _ in entries:
+        seen += 1
+        if seen == 5:
+            break
+    entries.drain()
+    entries.drain()            # idempotent
+    if not entries.done(): return 3
+    for _ in entries:
+        return 4               # a drained iterator yields nothing
+    status = build.wait()
+    if not status.success: return 1
+    if seen != 5: return 5
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            .to_string(),
+            "an `execution_logs()` iterator drained mid-build left the reader parked past \
+             the end of the build",
+            "a drained `execution_logs()` iterator must yield nothing more and let the \
+             build end",
         );
     }
 

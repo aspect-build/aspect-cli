@@ -114,6 +114,18 @@ pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
             .into_anyhow_result()?;
         Ok(this.sub.is_drained())
     }
+
+    /// Stop consuming: unsubscribe and drop whatever is buffered. Idempotent.
+    /// As on an [`ExecLogIter`] handle — a task that decides mid-build it no
+    /// longer wants entries releases the producer's blocking-send path rather
+    /// than holding the end-of-build join open until `wait()` does it.
+    fn drain<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let this = this
+            .downcast_ref_err::<ExecutionLogIterator>()
+            .into_anyhow_result()?;
+        this.release();
+        Ok(NoneType)
+    }
 }
 
 #[starlark_value(type = "ExecutionLogIterator")]
@@ -328,6 +340,10 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         Some(RES.methods())
     }
 
+    /// `done` here means "this handle no longer holds a subscriber" — released by
+    /// `drain()`, a cancel, or `build.wait()`. Narrower than
+    /// `ExecutionLogIterator.done()`, which answers "nothing more can arrive" and
+    /// is also true of a still-subscribed handle whose stream has closed.
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match attribute {
             "done" => Some(heap.alloc(self.sub.is_done())),
