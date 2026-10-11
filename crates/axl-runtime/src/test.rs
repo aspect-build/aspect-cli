@@ -372,9 +372,15 @@ pub fn install_basil() {
 }
 
 /// Run `f` on a worker thread; return `Some(result)` if it finished within
-/// `timeout`, `None` if it didn't. Used to fail-fast on regression tests
-/// that exercise potential hangs (the worker thread is leaked on timeout —
-/// fine for a test process that exits soon after).
+/// `timeout`, `None` if it didn't. Used to fail-fast on regression tests that
+/// exercise potential hangs.
+///
+/// On timeout the worker thread keeps running — Rust cannot cancel one — so a
+/// `None` leaves whatever `f` was doing in flight. A caller whose `f` depends on
+/// process-wide state (an env var, a helper process, a held lock) must not tear
+/// that state down on timeout: the still-running worker would then be the only
+/// thing observing it. Fail the whole test binary instead, as
+/// `build::tests::run_execlog_task` does.
 pub fn with_timeout<F, R>(timeout: Duration, f: F) -> Option<R>
 where
     F: FnOnce() -> R + Send + 'static,
