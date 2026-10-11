@@ -15,7 +15,7 @@ on:
         type: string
         default: ''
       release:
-        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the 16-core runner.'
+        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the 8-core runner.'
         required: false
         type: boolean
         default: false
@@ -33,8 +33,8 @@ jobs:
     # Sized by memory: each fat-LTO aspect-cli link peaks near 8 GB and eight
     # of them (4 platforms x stripped and debug) become runnable together once
     # their dependencies are cache hits. The 16 GB standard runner dies under
-    # four at a time; BAZEL_JOBS keeps the 64 GB one to six.
-    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-22.04-16core' }}
+    # four at a time. If the 32 GB one does too, cap the build with --jobs.
+    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-22.04-8core' }}
     timeout-minutes: 120
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
@@ -45,7 +45,6 @@ jobs:
       # `bazel`-only bootstrap (and would fail outright on a clean
       # runner where aspect isn't installed yet).
       ASPECT_WRAPPER_SKIP: "1"
-      BAZEL_JOBS: ${{ inputs.release && 'auto' || '6' }}
       # "true" or "false", never the value: gates the Aspect Cloud steps so a
       # run without the secret still builds, just without a remote cache.
       ASPECT_HAS_API_TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN != '' }}
@@ -110,7 +109,7 @@ jobs:
         # stamped crate to recompile on the next `bazel run`.
         run: |
           mkdir -p "${RUNNER_TEMP}/upload_root/assets"
-          bazel build --config=release --config=ci --remote_download_outputs=toplevel --jobs="${BAZEL_JOBS}" \
+          bazel build --config=release --config=ci --remote_download_outputs=toplevel \
             //crates/aspect-launcher:bins \
             //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
