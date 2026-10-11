@@ -454,39 +454,21 @@ impl BazelRC {
             result
         };
 
-        // Collect all config keys relevant to this command. Ancestor bases
-        // count too (e.g. `build:ci` applies to `test --config=ci`), matching
-        // the direct-section inheritance below and what Bazel applies.
-        //
-        // Base expansion order, per `expand::expand_args`:
-        //   always → common → ancestors(general→specific) → command
-        // `base_rank` maps each base to that position so two sections setting
-        // the same flag (e.g. `common:ci` then `build:ci`) are announced in the
-        // override order Bazel actually applies — not alphabetically, which
-        // would invert `build:ci` ahead of `common:ci`. Keys are then grouped
-        // by config name (alphabetical) for deterministic output.
-        let ancestors = command_ancestors(command);
-        let base_rank = |base: &str| -> usize {
-            match base {
-                "always" => 0,
-                "common" => 1,
-                _ if base == command => 2 + ancestors.len(),
-                _ => 2 + ancestors.iter().position(|a| *a == base).unwrap_or(0),
-            }
-        };
+        // Config keys (`<base>:<config>`) whose base is a section this command reads —
+        // ancestor bases included, e.g. `build:ci` applies to `test --config=ci`.
+        // `sections_for` is both the membership test and the rank: a base's position in it
+        // is the order `expand::expand_args` applies the sections in, so two sections
+        // setting the same flag (`common:ci` then `build:ci`) are announced in the override
+        // order Bazel applies rather than alphabetically, which would invert them. Keys are
+        // then grouped by config name (alphabetical) for deterministic output.
+        let sections = sections_for(command);
+        let base_rank = |base: &str| sections.iter().position(|section| *section == base);
         let mut config_keys: Vec<&String> = self
             .options
             .keys()
             .filter(|k| {
-                if let Some(base) = k.split(':').next() {
-                    k.contains(':')
-                        && (base == "always"
-                            || base == "common"
-                            || base == command
-                            || ancestors.contains(&base))
-                } else {
-                    false
-                }
+                k.split_once(':')
+                    .is_some_and(|(base, _)| base_rank(base).is_some())
             })
             .collect();
         config_keys.sort_by(|a, b| {
@@ -2051,26 +2033,29 @@ import {}
 
     #[test]
     fn announce_config_sections_follow_expansion_order() {
-        // For `test --config=ci` Bazel expands always:ci → common:ci →
-        // build:ci → test:ci (last wins). The announce must list the same-named
-        // config sections in that order, not alphabetically (which would put
-        // build:ci before common:ci and misrepresent the override order).
+        // For `test --config=ci` Bazel expands always:ci → common:ci → build:ci → test:ci
+        // (last wins). The announce must list the same-named config sections in that order,
+        // not alphabetically (which would put always:ci and build:ci ahead of common:ci and
+        // misrepresent the override order). The order comes from `sections_for`, so this
+        // also pins the one rank the earlier hand-rolled copy got away with inverting.
         let root = Path::new("/work/repo");
         let rc = rc_with(
             &[&root.join(".bazelrc")],
             &[
+                ("always:ci", 0, "--remote_cache=Z"),
                 ("common:ci", 0, "--remote_cache=A"),
                 ("build:ci", 0, "--remote_cache=B"),
                 ("test:ci", 0, "--remote_cache=C"),
             ],
         );
         let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        let always_at = out.find("always:ci").expect("always:ci shown");
         let common_at = out.find("common:ci").expect("common:ci shown");
         let build_at = out.find("build:ci").expect("build:ci shown");
         let test_at = out.find("test:ci").expect("test:ci shown");
         assert!(
-            common_at < build_at && build_at < test_at,
-            "config sections must follow expansion order common→build→test: {out}"
+            always_at < common_at && common_at < build_at && build_at < test_at,
+            "config sections must follow expansion order always→common→build→test: {out}"
         );
     }
 
@@ -2182,8 +2167,12 @@ build:opt --compilation_mode=opt
     /// Rendering an `always` section literally promotes it from rc priority to
     /// command-line priority, so on the command line the literal out-ranks the `common`
     /// override — the inverse of the `always`-then-`common` order the option model keeps,
-    /// as [`BazelRC::options_for`] documents. Pre-existing, and unreachable through caller
-    /// flags, which name a command section or go unscoped. Pinned so a change in the
+    /// as [`BazelRC::options_for`] documents. It is only this pair: `always`-vs-`build` and
+    /// `common`-vs-`build` both agree, because a `build` entry is a literal either way.
+    ///
+    /// Pre-existing, and unreachable through caller flags alone — an unscoped caller flag is
+    /// an `always` entry (`push_caller_flags`), but a caller reads before it writes, so it
+    /// cannot be the `always` entry that inverts its own answer. Pinned so a change in the
     /// rendering surfaces here rather than in a caller.
     #[test]
     fn the_two_readers_diverge_on_an_always_section_flag() {
