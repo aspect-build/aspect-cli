@@ -15,7 +15,7 @@ on:
         type: string
         default: ''
       release:
-        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the 8-core runner.'
+        description: 'Build on the 32-core runner. Set only for real releases; pre-releases take the 16-core runner.'
         required: false
         type: boolean
         default: false
@@ -32,9 +32,9 @@ jobs:
     name: Build MacOS and Linux release artifacts
     # Sized by memory: each fat-LTO aspect-cli link peaks near 8 GB and eight
     # of them (4 platforms x stripped and debug) become runnable together once
-    # their dependencies are cache hits. The 16 GB standard runner dies under
-    # four at a time. If the 32 GB one does too, cap the build with --jobs.
-    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-22.04-8core' }}
+    # their dependencies are cache hits. Runners with 16 GB and 32 GB are lost
+    # mid-link.
+    runs-on: ${{ inputs.release && 'ubuntu-22.04-32core' || 'ubuntu-22.04-16core' }}
     timeout-minutes: 120
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
