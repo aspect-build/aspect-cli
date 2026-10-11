@@ -2594,8 +2594,11 @@ Test = task(implementation = _impl)
     fn the_server_pid_is_read_with_the_builds_startup_flags() {
         let dir = tempfile::tempdir().unwrap();
         let argv_log = dir.path().join("argv.log");
-        // Distinctive enough that a concurrent basil appending to the same file
-        // cannot be mistaken for this test's invocations.
+        // `BASIL_ARGV_LOG` is process-wide, so any basil a concurrent test runs
+        // while it is set appends here too — including that test's own
+        // `info server_pid`. The marker is what tells this test's invocations
+        // apart, so the assertion looks for a marked `info` line rather than
+        // insisting every `info` line is marked.
         let marker = "--nosystem_rc";
         let script = format!(
             r#"
@@ -2632,18 +2635,19 @@ Test = task(implementation = _impl)
         );
 
         let recorded = std::fs::read_to_string(&argv_log).expect("basil should have logged argv");
-        let info: Vec<&str> = recorded
+        let info = recorded
             .lines()
-            .filter(|line| line.split_whitespace().any(|a| a == "info"))
-            .collect();
-        assert!(!info.is_empty(), "no `info` invocation in:\n{recorded}");
-        for line in info {
-            assert!(
-                line.contains(marker),
-                "`bazel info` ran without the build's startup flags, so the server pid \
-                 it reports is not the server that runs the build:\n  {line}",
-            );
-        }
+            .filter(|line| line.split_whitespace().any(|a| a == "info"));
+        assert!(
+            info.clone().next().is_some(),
+            "no `info` invocation at all in:\n{recorded}",
+        );
+        assert!(
+            info.clone().any(|line| line.contains(marker)),
+            "`bazel info` ran without the build's startup flags, so the server pid it \
+             reports is not the server that runs the build:\n{}",
+            info.map(|l| format!("  {l}\n")).collect::<String>(),
+        );
     }
 
     /// `build.execution_logs()` takes the stream's one subscriber rather than
