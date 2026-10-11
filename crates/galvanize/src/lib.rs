@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use nix::sys::stat::Mode;
@@ -253,6 +253,12 @@ pub struct StreamingFile {
     path: PathBuf,
     inner: File,
     holder_pid: u32,
+    /// Whether [`await_restart`](Self::await_restart) may be called. Off by
+    /// default: a writer that only ever appends has no second stream to wait for.
+    restartable: bool,
+    /// Bytes consumed from the current segment, so a caller can see where an
+    /// attempt ended. Reset by [`await_restart`](Self::await_restart).
+    pos: u64,
     /// Test-only hook, run exactly once — on the first read that finds the holder
     /// has closed the file, and before the re-read that follows. The bug the
     /// re-read exists for lives in exactly that window — the writer finishing and
@@ -297,9 +303,74 @@ impl StreamingFile {
             path,
             inner,
             holder_pid,
+            restartable: false,
+            pos: 0,
             #[cfg(test)]
             on_holder_closed: None,
         })
+    }
+
+    /// [`open`](Self::open) for a writer that may truncate this file and write a
+    /// fresh stream into it, as Bazel does when it retries an invocation in
+    /// place rather than moving to a new path.
+    ///
+    /// This only arms [`await_restart`](Self::await_restart); it changes no
+    /// read. Detecting the truncation from the reader alone does not work: the
+    /// new stream overtakes the old one's length almost immediately, so a
+    /// shorter-file check has to win a race it usually loses, and losing it
+    /// means resuming at an offset in the middle of a message. The caller knows
+    /// from the stream's own contents when an attempt has ended, and says so.
+    pub fn open_restartable(
+        path: PathBuf,
+        holder_pid: u32,
+        invocation_pid: u32,
+    ) -> io::Result<Self> {
+        let mut f = Self::open(path, holder_pid, invocation_pid)?;
+        f.restartable = true;
+        Ok(f)
+    }
+
+    /// Bytes consumed from the current segment.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// Whether this file was opened with
+    /// [`open_restartable`](Self::open_restartable).
+    pub fn is_restartable(&self) -> bool {
+        self.restartable
+    }
+
+    /// Wait for the writer to begin a new stream in this same file, then resume
+    /// from its start. For a caller that has read one attempt to its end and
+    /// expects another.
+    ///
+    /// The wait is for the writer to *reopen* the file, not for it to truncate.
+    /// Bazel closes its event file when an attempt ends and only reopens it —
+    /// with `O_TRUNC` — once the next attempt has an event to write, which is a
+    /// whole loading and analysis phase later. So "closed" is a state that lasts
+    /// long enough to observe, while "truncated and still empty" lasts as long
+    /// as it takes to write the first event.
+    ///
+    /// `give_up` is polled alongside, for the caller's own "no further attempt
+    /// is coming" answer — the invocation's pid dying, typically. Returns
+    /// whether a new stream was found; `false` means `give_up` ended the wait.
+    pub fn await_restart(&mut self, give_up: impl Fn() -> bool) -> io::Result<bool> {
+        debug_assert!(
+            self.restartable,
+            "await_restart on a file opened without open_restartable"
+        );
+        loop {
+            if is_path_open_for_pid(&self.path, self.holder_pid)? {
+                self.inner.seek(SeekFrom::Start(0))?;
+                self.pos = 0;
+                return Ok(true);
+            }
+            if give_up() {
+                return Ok(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// Run `f` inside the window described on [`Self::on_holder_closed`].
@@ -341,8 +412,15 @@ impl Read for StreamingFile {
                 }
                 match self.inner.read(buf)? {
                     0 => Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream")),
-                    n => Ok(n),
+                    n => {
+                        self.pos += n as u64;
+                        Ok(n)
+                    }
                 }
+            }
+            Ok(n) => {
+                self.pos += n as u64;
+                Ok(n)
             }
             other => other,
         }
@@ -352,6 +430,133 @@ impl Read for StreamingFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape Bazel presents when it retries in place: one stream, the file
+    /// closed, then a *longer* stream written over it from the start by the
+    /// same holder process.
+    ///
+    /// The second segment being longer is the whole point. It is why the reader
+    /// cannot find the truncation by watching the file's length — by the time
+    /// anyone looks the file is longer than it ever was — and why the restart
+    /// is driven by the caller instead.
+    ///
+    /// The holder is a child process, as it is in production: `is_path_open_for_pid`
+    /// asks whether *that* process has the file open, and a reader asking about
+    /// itself would always say yes.
+    #[test]
+    fn await_restart_resumes_at_the_start_of_the_next_stream() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-restart-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Attempt one: written and closed, so nothing holds it open.
+        std::fs::write(&path, vec![b'a'; 4096]).expect("write first segment");
+
+        // Attempt two, by a separate holder: wait, then truncate (`>`), write
+        // MORE than attempt one held, and keep the descriptor open.
+        let script = format!(
+            "sleep 0.4; exec 3> {p}; head -c 8192 /dev/zero | tr '\\0' 'b' >&3; sleep 5",
+            p = path.display()
+        );
+        let mut holder = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .expect("spawn holder");
+        let holder_pid = holder.id();
+
+        let mut f = StreamingFile::open_restartable(path.clone(), holder_pid, holder_pid)
+            .expect("open restartable");
+
+        let mut buf = vec![0u8; 8192];
+        let n = f.read(&mut buf).expect("read first segment");
+        assert_eq!(n, 4096, "the first attempt reads whole");
+        assert!(buf[..n].iter().all(|b| *b == b'a'));
+        assert_eq!(
+            f.position(),
+            4096,
+            "position tracks where the attempt ended"
+        );
+
+        let found = f
+            .await_restart(|| !is_pid_alive(holder_pid))
+            .expect("await restart");
+        assert!(found, "the holder reopening the file is the next stream");
+        assert_eq!(f.position(), 0, "the new stream is read from its start");
+
+        // Read until the new segment produces bytes; it is being written as we go.
+        let mut got = 0usize;
+        for _ in 0..500 {
+            match f.read(&mut buf) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(n) => {
+                    assert!(
+                        buf[..n].iter().all(|b| *b == b'b'),
+                        "after a restart the reader must be at the start of the new \
+                         stream, not at its old offset inside it"
+                    );
+                    got += n;
+                    if got >= 8192 {
+                        break;
+                    }
+                }
+                Err(e) => panic!("read after restart: {e}"),
+            }
+        }
+        assert_eq!(got, 8192, "the whole second attempt is readable");
+
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `give_up` is the caller's answer to "is another attempt coming?". With no
+    /// holder ever opening the file, it is the only way the wait ends.
+    #[test]
+    fn await_restart_gives_up_when_the_caller_says_so() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-restart-giveup-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"one attempt").expect("write");
+
+        // pid 1 is alive and does not hold this file, so the restart never arrives.
+        let mut f = StreamingFile::open_restartable(path.clone(), 1, 1).expect("open restartable");
+        let mut buf = vec![0u8; 64];
+        let _ = f.read(&mut buf).expect("read");
+
+        let found = f.await_restart(|| true).expect("await restart");
+        assert!(!found, "give_up ends the wait");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The default is unchanged, which is what keeps the execution log reader
+    /// behaving exactly as it did: a plain `open` is not restartable.
+    #[test]
+    fn plain_open_is_not_restartable() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-plain-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"hello").expect("write");
+
+        let me = std::process::id();
+        let mut f = StreamingFile::open(path.clone(), me, me).expect("open");
+        let mut buf = vec![0u8; 16];
+        let n = f.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], b"hello");
+        assert!(!f.is_restartable(), "a plain open is not restartable");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
