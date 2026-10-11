@@ -784,10 +784,17 @@ impl BazelRC {
 /// One type for both directions: [`partition_expand_all`] renders these and
 /// [`last_flag_value`] reads them back, so the wire form is written down once.
 struct DefaultOverride<'a> {
+    /// Which rc file the option came from, as an index into the `--bazelrc` list Bazel's
+    /// client reported. The CLI renders every file it read as one synthetic source, so it
+    /// always emits [`SOLE_SOURCE`](Self::SOLE_SOURCE); the field exists because the index
+    /// is what delimits a parse bucket (see [`override_chunks`]).
+    index: u32,
     /// The section the option is scoped to, e.g. `common`. Rendered without a `:config`
     /// qualifier — `expand_configs` has already decided which config sections apply. The
     /// invariant holds in that direction only: [`parse`](Self::parse) will read a qualified
-    /// section back out of foreign input, where it simply matches no section Bazel applies.
+    /// section back out of foreign input. It is ignored, and safely: `expand_configs`
+    /// consumes every `--config=` request, so no config is active on the command line Bazel
+    /// receives for a `{section}:{config}` override to key off.
     command: &'a str,
     /// The option, in the single-token `--flag=value` form Bazel requires here.
     option: &'a str,
@@ -795,11 +802,11 @@ struct DefaultOverride<'a> {
 
 impl fmt::Display for DefaultOverride<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Index 0: the CLI reports every rc file it read as one synthetic source.
         write!(
             f,
-            "{}0:{}={}",
+            "{}{}:{}={}",
             DefaultOverride::PREFIX,
+            self.index,
             self.command,
             self.option
         )
@@ -809,15 +816,49 @@ impl fmt::Display for DefaultOverride<'_> {
 impl<'a> DefaultOverride<'a> {
     const PREFIX: &'static str = "--default_override=";
 
+    /// The rc index the CLI renders under: it restates every rc file it read as one
+    /// synthetic source, so all of its payloads share a bucket.
+    const SOLE_SOURCE: u32 = 0;
+
     /// Read back a token [`Display`](fmt::Display) wrote, or `None` for any other token.
-    /// The rc index is parsed but not kept — nothing downstream distinguishes rc sources.
     fn parse(token: &'a str) -> Option<Self> {
         let body = token.strip_prefix(Self::PREFIX)?;
         let (index, scoped) = body.split_once(':')?;
-        index.parse::<u32>().ok()?;
+        let index = index.parse::<u32>().ok()?;
         let (command, option) = scoped.split_once('=')?;
-        (!command.is_empty() && !option.is_empty()).then_some(Self { command, option })
+        (!command.is_empty() && !option.is_empty()).then_some(Self {
+            index,
+            command,
+            option,
+        })
     }
+}
+
+/// The [`DefaultOverride`] payloads among `tokens`, split into the buckets Bazel parses them
+/// in: a maximal run of *consecutive* override tokens sharing one rc index. Each bucket is a
+/// list of `(section, option)` pairs in token order; non-override tokens are skipped and do
+/// not split a bucket.
+///
+/// Bazel tracks the rc file of the previous override token globally, not per section, and
+/// closes the bucket for *every* section as soon as it changes. So an index change anywhere
+/// in the stream splits a section's payloads, and a repeat of an earlier index opens a fresh
+/// bucket rather than rejoining that index's earlier one. Both matter: a bare `--flag` pairs
+/// with its value only inside one bucket, and either split leaves it the
+/// `Expected value after --flag` parse error Bazel reports. (Probed against Bazel 9.3.0.)
+fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
+    let mut chunks: Vec<Vec<(&str, &str)>> = Vec::new();
+    let mut open_index = None;
+    for over in tokens.iter().filter_map(|token| DefaultOverride::parse(token)) {
+        if open_index != Some(over.index) {
+            open_index = Some(over.index);
+            chunks.push(Vec::new());
+        }
+        chunks
+            .last_mut()
+            .expect("a chunk was just opened")
+            .push((over.command, over.option));
+    }
+    chunks
 }
 
 /// Split an expanded option list into `(default_override_flags, regular_flags)`.
@@ -831,12 +872,12 @@ impl<'a> DefaultOverride<'a> {
 /// `RcOption`) is folded into the canonical `--flag=value` form for its single
 /// `--default_override=0:common=--flag=value` entry. Bazel parses each override value as one
 /// option token and does not re-split it on whitespace, so a space-joined `--flag value`
-/// payload is rejected as a single unrecognized option. Two payloads of one section *do* pair,
-/// because Bazel buckets payloads by section and parses each bucket as its own token list —
-/// but only within a section: a value that lands in another bucket leaves the bare flag an
-/// `Expected value after --flag` error. The fold makes the emitted form independent of that
-/// bucketing. (Probed against Bazel 9.0.1 and 9.3.0.) Regular flags need no such fold — they
-/// pass through as adjacent argv tokens, which Bazel pairs natively.
+/// payload is rejected as a single unrecognized option. Two payloads *do* pair when they land
+/// in one parse bucket — a run of override tokens sharing an rc index, read a section at a
+/// time ([`override_chunks`]) — and leave the bare flag an `Expected value after --flag` error
+/// when they do not. The fold makes the emitted form independent of that bucketing. (Probed
+/// against Bazel 9.0.1 and 9.3.0.) Regular flags need no such fold — they pass through as
+/// adjacent argv tokens, which Bazel pairs natively.
 ///
 /// Accepted trade-off: a bare token following a boolean flag is folded as if it were the flag's
 /// value, even when it is really a non-option argument. Bazel's bazelrc supports non-option args
@@ -865,6 +906,7 @@ fn partition_expand_all(
             }
             overrides.push((
                 DefaultOverride {
+                    index: DefaultOverride::SOLE_SOURCE,
                     command: "common",
                     option: &value,
                 }
@@ -933,34 +975,37 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// override payloads at rc priority and the command line after them. Among equals the last
 /// occurrence wins, which is how Bazel resolves a flag given more than once.
 ///
-/// The payloads are read one section at a time rather than as a single stream, because that
-/// is how Bazel parses them: it buckets payloads by section and parses each bucket as its own
-/// token list, ignoring whatever else sits between them on the command line. So a two-token
-/// `--name value` pair forms only between payloads of the same section, and a bare `--name`
-/// payload whose value was written under a different section names nothing — to Bazel that
-/// shape is a parse error (`Expected value after --name`), not a value. Sections are scanned
-/// in the order Bazel applies them, so the last one to name the flag wins. (Probed against
-/// Bazel 9.0.1 and 9.3.0.)
+/// Override payloads are read one `(section, rc-index run)` bucket at a time rather than as a
+/// single stream, because that is how Bazel parses them — see [`override_chunks`] for the
+/// bucket boundary. So a two-token `--name value` pair forms only inside one bucket, and a
+/// bare `--name` payload whose value landed in another names nothing: to Bazel that shape is
+/// a parse error (`Expected value after --name`), not a value.
+///
+/// Between buckets, the section outranks everything: Bazel parses each section's payloads in
+/// turn, so a `build` payload beats a `common` one however the tokens are ordered, and only
+/// within one section does the later bucket win. (Probed against Bazel 9.0.1 and 9.3.0.)
 ///
 /// None of this is a live path: [`partition_expand_all`] folds a two-token option into
-/// `--flag=value` before rendering, so the CLI never emits a split pair. It matters because
-/// this function is `pub` and is the single authority on "has this flag been requested?", so
-/// it must not read a value out of a shape Bazel would reject.
+/// `--flag=value` before rendering, and emits a single rc index, so the CLI never splits a
+/// pair. It matters because this function is `pub` and is the single authority on "has this
+/// flag been requested?", so it must not read a value out of a shape Bazel would reject.
 pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<String> {
     let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Some(literal) = flag_values_in(&tokens, name).pop() {
         return Some(literal);
     }
+    let chunks = override_chunks(&tokens);
     let mut value = None;
     for section in sections_for(command) {
-        let payloads: Vec<&str> = tokens
-            .iter()
-            .filter_map(|token| DefaultOverride::parse(token))
-            .filter(|over| over.command == section)
-            .map(|over| over.option)
-            .collect();
-        if let Some(found) = flag_values_in(&payloads, name).pop() {
-            value = Some(found);
+        for chunk in &chunks {
+            let payloads: Vec<&str> = chunk
+                .iter()
+                .filter(|(scope, _)| *scope == section)
+                .map(|(_, option)| *option)
+                .collect();
+            if let Some(found) = flag_values_in(&payloads, name).pop() {
+                value = Some(found);
+            }
         }
     }
     value
@@ -1352,9 +1397,8 @@ mod runcommand_tests {
         }
     }
 
-    /// A payload names a value only inside its own section. Bazel buckets payloads by
-    /// section and parses each bucket on its own, so a bare flag in one section and a bare
-    /// value in another are two unrelated options — the bare flag is in fact an
+    /// A payload names a value only inside its own section: a bare flag in one section and a
+    /// bare value in another are two unrelated options, and the bare flag is in fact an
     /// `Expected value after …` error there, never a request for this path.
     #[test]
     fn last_flag_value_does_not_pair_payloads_across_sections() {
@@ -1369,8 +1413,9 @@ mod runcommand_tests {
         );
     }
 
-    /// Within one section the pair does form, whatever else sits between the two payloads
-    /// on the command line — the bucket is the section, not command-line adjacency.
+    /// Within one section and one rc index the pair does form, whatever else sits between the
+    /// two payloads on the command line — neither a foreign section at the same index nor a
+    /// non-override token splits the bucket.
     #[test]
     fn last_flag_value_pairs_payloads_within_one_section() {
         let line = args(&[
@@ -1383,6 +1428,96 @@ mod runcommand_tests {
         assert_eq!(
             last_flag_value(&line, "--execution_log_compact_file", "build"),
             Some("/tmp/mine".to_string()),
+        );
+    }
+
+    /// The rc index delimits the bucket as firmly as the section does: two payloads of one
+    /// section at different indices are parsed separately, so the bare flag takes no value.
+    #[test]
+    fn last_flag_value_does_not_pair_payloads_across_rc_indices() {
+        let line = args(&[
+            "--default_override=0:common=--execution_log_compact_file",
+            "--default_override=1:common=/tmp/leaked",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--execution_log_compact_file", "build"),
+            None,
+            "a bare payload must not take a value written under another rc index",
+        );
+    }
+
+    /// Nothing is special about index 0 — one index, whichever it is, is one bucket.
+    #[test]
+    fn last_flag_value_pairs_payloads_within_one_rc_index() {
+        let line = args(&[
+            "--default_override=1:common=--execution_log_compact_file",
+            "--default_override=1:common=/tmp/mine",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--execution_log_compact_file", "build"),
+            Some("/tmp/mine".to_string()),
+        );
+    }
+
+    /// Bazel closes the open bucket for *every* section when the rc index changes, so an
+    /// intervening payload of an unrelated section at another index splits a `common` pair
+    /// even though the two `common` payloads share an index. Grouping payloads by
+    /// `(section, index)` instead of by consecutive run would report `/tmp/mine` here, where
+    /// Bazel reports `Expected value after --execution_log_compact_file`.
+    #[test]
+    fn last_flag_value_splits_a_bucket_on_a_foreign_sections_rc_index() {
+        let line = args(&[
+            "--default_override=0:common=--execution_log_compact_file",
+            "--default_override=1:query=--jobs=8",
+            "--default_override=0:common=/tmp/mine",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--execution_log_compact_file", "build"),
+            None,
+            "an rc index change anywhere in the stream ends the bucket",
+        );
+    }
+
+    /// Two sections both naming the flag resolve the way Bazel applies them: the later
+    /// section wins, so a `build` payload out-ranks a `common` one. Written in reverse of
+    /// section order so it cannot pass on token order alone.
+    #[test]
+    fn last_flag_value_takes_the_last_section_to_name_the_flag() {
+        let line = args(&[
+            "--default_override=0:build=--remote_cache=grpc://build",
+            "--default_override=0:common=--remote_cache=grpc://common",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--remote_cache", "build"),
+            Some("grpc://build".to_string()),
+        );
+        assert_eq!(
+            last_flag_value(&line, "--remote_cache", "query"),
+            Some("grpc://common".to_string()),
+            "`query` does not read the `build` section",
+        );
+    }
+
+    /// Within one section, where no section order can decide it, the later bucket wins.
+    #[test]
+    fn last_flag_value_takes_the_last_bucket_of_one_section() {
+        let name = "--remote_cache";
+        let ascending = args(&[
+            "--default_override=0:common=--remote_cache=grpc://zero",
+            "--default_override=1:common=--remote_cache=grpc://one",
+        ]);
+        assert_eq!(
+            last_flag_value(&ascending, name, "build"),
+            Some("grpc://one".to_string()),
+        );
+        let descending = args(&[
+            "--default_override=1:common=--remote_cache=grpc://one",
+            "--default_override=0:common=--remote_cache=grpc://zero",
+        ]);
+        assert_eq!(
+            last_flag_value(&descending, name, "build"),
+            Some("grpc://zero".to_string()),
+            "the bucket order is the token order, not the index order",
         );
     }
 
@@ -1436,6 +1571,7 @@ mod runcommand_tests {
     #[test]
     fn default_override_round_trips() {
         let rendered = DefaultOverride {
+            index: DefaultOverride::SOLE_SOURCE,
             command: "common",
             option: "--remote_cache=grpc://x",
         }
@@ -1445,6 +1581,7 @@ mod runcommand_tests {
             "--default_override=0:common=--remote_cache=grpc://x"
         );
         let parsed = DefaultOverride::parse(&rendered).expect("parses");
+        assert_eq!(parsed.index, DefaultOverride::SOLE_SOURCE);
         assert_eq!(parsed.command, "common");
         assert_eq!(parsed.option, "--remote_cache=grpc://x");
     }
