@@ -67,7 +67,7 @@ steps:
       queue: aspect-default
     plugins:
       - aspect-build/setup-aspect#8de9aed254d0699baf201f66e2076fc8c09f42b9: ~ # v2026.38.2
-    timeout_in_minutes: 10
+    timeout_in_minutes: 40
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -291,7 +291,7 @@ steps:
       queue: aspect-default
     plugins:
       - aspect-build/setup-aspect#8de9aed254d0699baf201f66e2076fc8c09f42b9: ~ # v2026.38.2
-    timeout_in_minutes: 10
+    timeout_in_minutes: 20
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -307,7 +307,7 @@ steps:
       queue: aspect-default
     plugins:
       - aspect-build/setup-aspect#8de9aed254d0699baf201f66e2076fc8c09f42b9: ~ # v2026.38.2
-    timeout_in_minutes: 10
+    timeout_in_minutes: 20
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
