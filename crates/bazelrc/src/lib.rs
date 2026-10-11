@@ -1352,7 +1352,7 @@ mod runcommand_tests {
     }
 
     /// Anything that is not a well-formed override is left to the literal pass —
-    /// including a flag of Bazel's own that starts the same way.
+    /// including a different flag whose name starts the same way.
     #[test]
     fn default_override_parse_rejects_malformed_tokens() {
         for token in [
