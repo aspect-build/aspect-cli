@@ -17,6 +17,10 @@
 //! reader, which is what bounds a consumer that stopped reading. Hence one
 //! lifecycle shape for the two — `Live` owning the receiver, `Done` having
 //! dropped it, behind an `Arc` so `Build` can keep a clone and do that.
+//!
+//! Both block in `iter_next`, so both read through the run's cancellation state:
+//! a log's end-of-stream signal is the Bazel *daemon* closing the file, which an
+//! interrupted invocation need not make happen promptly.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,7 +49,6 @@ use starlark::values::starlark_value;
 use axl_proto::tools::protos::ExecLogEntry;
 use axl_proto::tools::protos::exec_log_entry;
 use derive_more::Display;
-use fibre::RecvError;
 use fibre::spmc::Receiver;
 
 use crate::engine::cancellation::Signals;
@@ -77,12 +80,17 @@ enum ExecutionLogIteratorState {
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
     state: Arc<Mutex<ExecutionLogIteratorState>>,
+    /// The run's cancellation state, so blocking iteration stays a safe point —
+    /// as for [`ExecLogIter::signals`]. See `iter_next`.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 impl ExecutionLogIterator {
-    pub fn new(recv: Receiver<ExecLogEntry>) -> Self {
+    pub fn new(signals: Arc<Signals>, recv: Receiver<ExecLogEntry>) -> Self {
         Self {
             state: Arc::new(Mutex::new(ExecutionLogIteratorState::Live { recv })),
+            signals,
         }
     }
 
@@ -190,26 +198,38 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
-    /// Blocks until the next entry or the stream's end. A cancelled run does not
-    /// end the iterator: the client is being stopped, and the stream closes with
-    /// it.
+    /// Blocks until the next entry or the end of the stream.
+    ///
+    /// Cancellation-aware, as every blocking builtin must be (see
+    /// `engine::cancellation`), and for the same reason as
+    /// [`ExecLogIter::iter_next`]: this drain sits on the critical path of a
+    /// bazel-driving task, and the end-of-stream signal is the Bazel *daemon*
+    /// closing the log file, which an interrupted invocation need not make happen
+    /// promptly. A cancel ends the iteration, which drops the subscriber and so
+    /// frees a reader blocked on it; the loop's next call raises the task's exit,
+    /// since an iterator cannot raise one itself.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         let recv = self.take_for_read()?;
-        match recv.recv() {
-            Ok(ev) => {
-                self.finish_read(recv);
-                Some(ev.alloc_value(heap))
-            }
-            Err(RecvError::Disconnected) => {
-                *self.state.lock().unwrap() = ExecutionLogIteratorState::Done;
-                None
+        loop {
+            match recv_cancellable(&self.signals, &recv, None) {
+                Recv::Item(entry) => {
+                    self.finish_read(recv);
+                    return Some(entry.alloc_value(heap));
+                }
+                Recv::Closed | Recv::Cancelled => {
+                    *self.state.lock().unwrap() = ExecutionLogIteratorState::Done;
+                    return None;
+                }
+                // No deadline to pass with `tick = None`.
+                Recv::Tick => continue,
             }
         }
     }
 
-    /// Leaving a `for` loop is not unsubscribing: `try_pop` and a second loop
-    /// still work afterwards, and `build.wait()` is what releases the
-    /// subscriber. See [`ExecutionLogIterator::release`].
+    /// Leaving a `for` loop is not unsubscribing: the subscriber stays live, so
+    /// `try_pop` and a second loop resume where the first stopped rather than
+    /// starting over. Only `build.wait()` releases it. See
+    /// [`ExecutionLogIterator::release`].
     unsafe fn iter_stop(&self) {}
 }
 
@@ -475,6 +495,10 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         }
     }
 
+    /// Leaving a `for` loop is not unsubscribing: the subscriber stays live, so
+    /// `try_pop` and a second loop resume where the first stopped rather than
+    /// starting over. Only `build.wait()` releases it. See
+    /// [`ExecLogIter::release`].
     unsafe fn iter_stop(&self) {}
 }
 

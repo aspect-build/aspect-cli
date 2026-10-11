@@ -1,5 +1,5 @@
 use axl_proto::tools::protos::ExecLogEntry;
-use fibre::spmc::{Receiver, Sender, bounded};
+use fibre::spmc::{Receiver, bounded};
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
@@ -96,20 +96,6 @@ impl<R: Read> Read for RetryRead<R> {
     }
 }
 
-/// Hand one decoded entry to the stream's subscribers, blocking until the
-/// slowest has room.
-///
-/// Returns whether any subscriber remains. `false` means every one is gone — the
-/// file-sink threads finished, and `build.wait()` released the AXL-side consumers
-/// and then, in `join()`, the stream's own subscriber — so the caller can drain
-/// the rest of the bytes without paying to decode them. That is also why a closed
-/// channel is not an error: there is nobody left to miss the remaining entries,
-/// and failing here would fail an otherwise good build. It is what ends a reader
-/// parked against a subscriber nobody drained.
-fn forward(sender: &Sender<ExecLogEntry>, entry: ExecLogEntry) -> bool {
-    sender.send(entry).is_ok()
-}
-
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
@@ -170,15 +156,22 @@ impl ExecLogStream {
     ///
     /// ## Send strategy
     ///
-    /// Entries are sent with the blocking [`Sender::send`], so every subscriber
-    /// sees every entry: a decoded `File` sink, which would otherwise write an
-    /// incomplete file; an [`ExecLogIter`](super::super::iter::ExecLogIter) handle
-    /// backing `BazelTrait.exec_log_event` hooks; and the stream's own subscriber,
-    /// which `build.execution_logs()` takes — each of which would otherwise miss
-    /// entries with nothing to say so. The reader waits for the slowest
-    /// subscriber; `build.wait()` releases the AXL-side consumers, and then the
-    /// stream's own, before joining it, so one that stops reading cannot hold the
-    /// reader forever.
+    /// Entries are sent with the blocking [`fibre::spmc::Sender::send`], so every
+    /// subscriber sees every entry: a decoded `File` sink, which would otherwise
+    /// write an incomplete file; an
+    /// [`ExecLogIter`](super::super::iter::ExecLogIter) handle backing
+    /// `BazelTrait.exec_log_event` hooks; and the stream's own subscriber, which
+    /// `build.execution_logs()` takes — each of which would otherwise miss entries
+    /// with nothing to say so. The reader waits for the slowest
+    /// subscriber; `build.wait()` releases the AXL-side consumers and then joins,
+    /// and `join()`'s first act is to release the stream's own — so one that stops
+    /// reading cannot hold the reader forever.
+    ///
+    /// A send that fails means every subscriber is gone, which is not an error:
+    /// there is nobody left to miss the remaining entries, and failing here would
+    /// fail an otherwise good build. The thread drains the rest of the bytes
+    /// without paying to decode them, and that failure is also what ends a reader
+    /// parked against a subscriber nobody drained.
     ///
     /// The regular file is what makes blocking affordable: Bazel writes the file
     /// and this thread tails it, so a slow consumer parks *this* thread and never
@@ -239,7 +232,7 @@ impl ExecLogStream {
 
                 if has_readers {
                     let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    has_readers = forward(&sender, entry);
+                    has_readers = sender.send(entry).is_ok();
                 }
 
                 Ok(())
@@ -337,7 +330,7 @@ mod tests {
     /// may not lap the slowest. One that nobody reads sits at entry zero forever,
     /// so the ring reads as full from the producer's side however diligently every
     /// other subscriber drains — capping them all at the capacity. Blocking sends
-    /// then park and lossy ones drop, neither of which the consumer can see.
+    /// then park, which the consumer cannot see.
     #[test]
     fn an_unread_subscriber_clone_stops_the_producer_once_the_ring_fills() {
         // A small ring: the behaviour is in the tails, not the size.

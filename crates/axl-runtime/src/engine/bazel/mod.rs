@@ -543,7 +543,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
-    /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
@@ -559,9 +558,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
-    ///
-    /// # Arguments
-    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    /// * `execution_log` - Enable Bazel execution log collection. Pass `True` to
     ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
     ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
     ///   to write the log to one or more files. A compact sink and the iterator can be
@@ -681,7 +678,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
-    /// * `execution_logs` - Enable the execution logs stream.
     /// * `stdout` - Per-fd config for the child's stdout. Not passed →
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
@@ -697,9 +693,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
-    ///
-    /// # Arguments
-    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    /// * `execution_log` - Enable Bazel execution log collection. Pass `True` to
     ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
     ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
     ///   to write the log to one or more files. A compact sink and the iterator can be
@@ -1398,6 +1392,24 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
+    /// Write this build's *decoded* execution log: every entry as a
+    /// length-delimited `ExecLogEntry` protobuf message, in the order Bazel
+    /// recorded them. Compare `compact_file`, which copies Bazel's own
+    /// zstd-compressed bytes.
+    ///
+    /// A decoded sink clones a subscriber of the decoded stream, which is why its
+    /// presence makes `build.execution_logs()` refuse: that call takes the
+    /// stream's *own* subscriber, and the clone leaves the stream without one.
+    /// Pass an `execution_log.iterator()` handle instead when one build needs
+    /// both a decoded sink and in-process iteration — a handle clones too, so the
+    /// two combine.
+    ///
+    /// The sink's writer is joined by `build.wait()`, so the file is complete and
+    /// a write error fails the build rather than leaving a truncated artifact.
+    ///
+    /// One path holds one log, as for `compact_file`: a task that retries its
+    /// Bazel invocation writes this path afresh per attempt, so what survives is
+    /// the last attempt's log.
     #[starlark(as_type = sink::execlog::ExecLogSink)]
     fn file(
         #[starlark(require = named)] path: String,

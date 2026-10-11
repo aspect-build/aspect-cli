@@ -1279,13 +1279,11 @@ impl Build {
         // Same two-pid split for the execution log: the daemon writes the file, but
         // only the client can say the invocation is over and none is coming.
         //
-        // The producer blocks rather than dropping, because a decoded stream always
-        // has at least one consumer that must see every entry: the decoded `File`
-        // sinks and `iterator()` handles named here, or else the stream's own
-        // subscriber, which is what a later `build.execution_logs()` takes.
-        // Blocking cannot reach Bazel — Bazel writes the log to a regular file and
-        // this process tails it — so a consumer slower than the decoder lengthens
-        // the `join()` inside `wait()` and nothing else.
+        // The producer blocks rather than dropping. Blocking cannot reach Bazel —
+        // Bazel writes the log to a regular file and this process tails it — so a
+        // consumer slower than the decoder only lengthens the `join()` inside
+        // `wait()`. And that `wait()` releases every subscriber before joining, so
+        // one nobody drains cannot park the reader past the end of the build.
         let named_consumers = !decoded_sinks.is_empty() || !execlog_iters.is_empty();
         let mut execlog_stream = match execlog_path {
             Some(p) => Some(ExecLogStream::spawn_with_file(
@@ -1491,7 +1489,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                  `kinds=` filter runs in Rust before an entry becomes a Starlark \
                  value."
             ))?;
-        let iter = ExecutionLogIterator::new(recv);
+        let iter = ExecutionLogIterator::new(build.signals.clone(), recv);
         build.execution_logs_iter.replace(Some(iter.clone()));
         Ok(iter)
     }
@@ -1678,6 +1676,16 @@ mod tests {
     /// and a failing one for others, i.e. flaky either way.
     static EXECLOG_BASIL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// How long the daemon stand-in lives.
+    ///
+    /// It has to outlast the longest timeout any test passes to
+    /// [`run_execlog_script`], because a timeout leaks the stand-in
+    /// ([`DaemonStandIn::leak`]) and the build that outran the timeout keeps
+    /// asking this pid whether more bytes are coming. A stand-in that died first
+    /// would answer "the writer is gone" to a build still writing.
+    #[cfg(unix)]
+    const STAND_IN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
+
     /// A live process standing in for the Bazel daemon, plus the lock that
     /// serializes the tests using one. Torn down on drop, so a panicking body
     /// cannot leave `BASIL_SERVER_PID` naming a process it killed.
@@ -1704,7 +1712,7 @@ mod tests {
         fn new() -> Self {
             let _serial = EXECLOG_BASIL.lock().unwrap_or_else(|e| e.into_inner());
             let daemon = std::process::Command::new("/bin/sleep")
-                .arg("60")
+                .arg(STAND_IN_LIFETIME.as_secs().to_string())
                 .spawn()
                 .expect("spawn the daemon stand-in");
             // SAFETY: process-wide env mutation, serialized against the other
@@ -1721,16 +1729,20 @@ mod tests {
             }
         }
 
-        /// Leave the stand-in running and `BASIL_SERVER_PID` naming it, for a
-        /// body that has not finished.
+        /// Leave the stand-in process running, for a body that has not finished.
         ///
         /// A timed-out `crate::test::with_timeout` leaves its worker thread inside
         /// a live build still asking this pid whether more bytes are coming.
-        /// Killing the process and unsetting the variable would answer "the writer
-        /// is gone" to a build that is still writing, and the next test would
-        /// re-set the variable underneath it — one hang becoming a run of
-        /// unrelated failures. Leaving both in place keeps that worker's answers
-        /// valid, and costs a `sleep` that exits on its own.
+        /// Killing the stand-in would answer "the writer is gone" to a build that
+        /// is still writing, turning one hang into a run of unrelated failures.
+        /// Dropping the `Child` without killing it keeps that worker's answers
+        /// valid and costs only a `sleep` that exits on its own.
+        ///
+        /// It does not hold `EXECLOG_BASIL` past this call: `self` drops here,
+        /// `Drop` early-returns on the missing child, and the guard is released —
+        /// so the next execlog test runs and re-points `BASIL_SERVER_PID` at its
+        /// own stand-in. Harmless, because the stranded worker captured the pid it
+        /// is asking about when its build spawned.
         fn leak(mut self) {
             self.daemon = None;
         }
@@ -1772,6 +1784,11 @@ mod tests {
         script: String,
         hang: &str,
     ) -> anyhow::Result<Option<u8>> {
+        assert!(
+            timeout < STAND_IN_LIFETIME,
+            "the daemon stand-in ({STAND_IN_LIFETIME:?}) must outlast a leaked \
+             test's timeout ({timeout:?}); see STAND_IN_LIFETIME",
+        );
         let stand_in = DaemonStandIn::new();
         let result = crate::test::with_timeout(timeout, move || {
             crate::test::eval(&script).with_fake_bazel().run_task(0)
@@ -1881,9 +1898,11 @@ Test = task(implementation = _impl)
     /// the build still ends — and because Bazel writes the log to a regular file
     /// that this process tails, the park never reached Bazel either.
     ///
-    /// This covers the half where the stream still *owns* its subscriber. The two
-    /// tests below cover the half where `execution_logs()` has taken it, which
-    /// `join()` cannot reach, so neither test sees the other's regression.
+    /// This covers the half where the stream still *owns* its subscriber, and so
+    /// `join()` releases it. The tests below cover the subscribers `join()` cannot
+    /// reach — the one `execution_logs()` took, and the clone an `iterator()`
+    /// handle holds — each of which `wait()` has to release itself, so no one of
+    /// these tests sees another's regression.
     ///
     /// The timeout is the whole assertion; a regression here is a hang.
     #[cfg(unix)]
@@ -1991,12 +2010,47 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// The same, for an `execution_log.iterator()` handle the task never drained.
+    ///
+    /// `wait()` releases every still-bound handle for the same reason it releases
+    /// the `execution_logs()` iterator: the producer blocks for each subscriber,
+    /// so one nobody drained parks the reader on a full ring and the join never
+    /// returns. Distinct from the two tests above, which cover the receiver
+    /// `execution_logs()` took — a handle's subscriber is a clone the stream never
+    /// owned, so neither release valve covers the other.
+    #[cfg(unix)]
+    #[test]
+    fn an_undrained_iterator_handle_does_not_hang_the_build() {
+        use std::time::Duration;
+
+        run_execlog_task(
+            Duration::from_secs(60),
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    status = build.wait()
+    if not status.success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            .to_string(),
+            "an undrained `iterator()` handle parked the reader past the end of the build",
+            "an undrained handle must still end the build",
+        );
+    }
+
     /// `execution_logs()` after `wait()` is refused, and says why.
     ///
-    /// `wait()` takes the stream, so there is nothing left to hand out — the
-    /// ordering this PR turns from a preference into a requirement. The refusal
-    /// has to name that ordering rather than fall through to "pass
-    /// `execution_log = true`", which is advice the caller has already taken.
+    /// `wait()` takes the stream, so there is nothing left to hand out. Iterating
+    /// before `wait()` is a requirement, not a preference, so the refusal has to
+    /// name that ordering rather than fall through to "pass `execution_log = true`",
+    /// which is advice the caller has already taken.
     #[cfg(unix)]
     #[test]
     fn execution_logs_after_wait_names_the_ordering() {
@@ -2034,9 +2088,8 @@ Test = task(implementation = _impl)
     ///
     /// The decoder reads a log already complete on disk, so it outruns any AXL
     /// loop; a loop that also does per-entry work falls more than a ring behind
-    /// within the first few hundred entries. That used to cost entries, by a
-    /// different amount every run. Now it costs only time: the producer parks
-    /// until the loop catches up.
+    /// within the first few hundred entries. That costs only time: the producer
+    /// parks until the loop catches up.
     ///
     /// The per-entry work is arithmetic rather than a sleep, so the cost scales
     /// with the machine instead of adding a fixed second to CI.
@@ -2122,8 +2175,8 @@ Test = task(implementation = _impl)
             sink = sink_path.to_str().unwrap(),
         );
 
-        // The timeout is here to catch the old deadlock, not to bound a healthy
-        // run, which finishes in well under a second.
+        // The timeout is here to catch a deadlock, not to bound a healthy run,
+        // which finishes in well under a second.
         run_execlog_task(
             Duration::from_secs(60),
             script,
@@ -2293,10 +2346,9 @@ Test = task(implementation = _impl)
 
     /// Two *distinct* compact sinks and no decoded consumer at all.
     ///
-    /// The configuration this change alters, and the one nothing else covers:
-    /// with no decoded sink and no handle, `named_consumers` is false, so the
-    /// stream keeps its own subscriber against a `build.execution_logs()` that
-    /// never comes. Nothing drains it, so the producer sits at the channel
+    /// The configuration nothing else here covers: with no decoded sink and no
+    /// handle, `named_consumers` is false, so the stream keeps its own subscriber
+    /// against a `build.execution_logs()` that never comes. Nothing drains it, so the producer sits at the channel
     /// capacity for the rest of the build and `join()` is what releases it.
     ///
     /// Compact sinks are tee'd from the raw bytes before decoding, so neither file
@@ -2604,12 +2656,17 @@ Test = task(implementation = _impl)
         // while it is set appends here too — including that test's own
         // `info server_pid`. The marker is what tells this test's invocations
         // apart, so the assertion looks for a marked `info` line rather than
-        // insisting every `info` line is marked.
-        let marker = "--nosystem_rc";
+        // insisting every `info` line is marked. It is minted per run because the
+        // failure is one-sided: a foreign line carrying the marker would pass this
+        // test without the build's startup flags having reached `info` at all.
+        let marker = format!(
+            "--host_jvm_args=-Daspect.argv_marker={}",
+            uuid::Uuid::new_v4()
+        );
         let script = format!(
             r#"
 def _impl(ctx):
-    rc = ctx.bazel.parse_rc(startup_flags = [{marker:?}], flags = [])
+    rc = ctx.bazel.parse_rc(startup_flags = ["--nosystem_rc", {marker:?}], flags = [])
     build = ctx.bazel.build(
         rc = rc,
         flags = ["--scenario=success"],
@@ -2649,7 +2706,7 @@ Test = task(implementation = _impl)
             "no `info` invocation at all in:\n{recorded}",
         );
         assert!(
-            info.clone().any(|line| line.contains(marker)),
+            info.clone().any(|line| line.contains(&marker)),
             "`bazel info` ran without the build's startup flags, so the server pid it \
              reports is not the server that runs the build:\n{}",
             info.map(|l| format!("  {l}\n")).collect::<String>(),
