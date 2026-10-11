@@ -1105,13 +1105,10 @@ impl Build {
         let targets: Vec<String> = targets.into_iter().collect();
 
         // Read before `flags` is moved into the command: a deployment wired to an
-        // Aspect BES backend, a Workflows runner, a user's own `.bazelrc` or a
-        // generated one already asks Bazel for the compact log, and whoever asked
-        // reads the file at that path. Adding a second
-        // `--execution_log_compact_file` below would win — a literal command-line
-        // flag outranks rc content — and silently repoint Bazel away from it.
-        // The verb lets `last_flag_value` scope the `--default_override` tokens
-        // the CLI restates `common` rc content as, the way Bazel scopes them.
+        // Aspect BES backend, a Workflows runner, or a `.bazelrc` already asks Bazel
+        // for the compact log, and whoever asked reads the file at that path. Adding a
+        // second `--execution_log_compact_file` below would win — a literal flag
+        // outranks rc content — and silently repoint Bazel away from it.
         //
         // An empty value clears the flag rather than naming a file, so it is not a
         // request; treating it as a path would have the reader tail "" and report a

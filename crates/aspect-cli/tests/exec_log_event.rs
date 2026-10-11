@@ -451,9 +451,9 @@ impl Case {
         let mut paths = Vec::new();
         for (i, token) in argv.iter().enumerate() {
             let payload = token
-                .split_once("--default_override=")
-                .and_then(|(_, body)| body.split_once('='))
-                .map(|(_, option)| option)
+                .strip_prefix("--default_override=")
+                .and_then(|body| body.split_once('='))
+                .map(|(_section, option)| option)
                 .unwrap_or(token.as_str());
             if let Some(path) = payload.strip_prefix("--execution_log_compact_file=") {
                 paths.push(path.to_string());
@@ -747,25 +747,21 @@ fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
     );
 }
 
-/// An execution log path set in the user's own `.bazelrc` is the path Bazel
-/// writes and the path the CLI reads — whichever section it was written in.
+/// An execution log path set in the user's own `.bazelrc` is the path Bazel writes
+/// and the path the CLI reads — whichever section it was written in.
 ///
-/// The CLI runs Bazel with `--ignore_all_rc_files` and restates rc content
-/// itself, and *how* it restates it depends on the section: a `build` entry
-/// passes through as a literal flag, while a `common` one — which applies to
-/// every command, so it cannot be passed literally to commands that reject it —
-/// is wrapped in `--default_override=0:common=…`. Reading only literals made the
-/// `common` form invisible, so the CLI added an
-/// `--execution_log_compact_file` of its own; a literal command-line flag
-/// outranks rc content, so Bazel wrote the CLI's temp path, the user's file was
-/// never created, and nothing said so.
-///
-/// Asserted on both sections together, because "the same" is the claim: one
-/// request reaches Bazel, at the path the rc file named, and the hook still gets
-/// every entry.
+/// Running Bazel with `--ignore_all_rc_files` means the CLI restates rc content
+/// itself, in a form that depends on the section: `always` and `build` entries pass
+/// through as literal flags, while a `common` one is wrapped in
+/// `--default_override=0:common=…`, because it applies to commands that would reject
+/// the flag literally. All three sections are asserted together because sameness is
+/// the claim — exactly one request reaches Bazel, at the path the rc file named, and
+/// the hook still gets every entry. A second request would mean the CLI missed this
+/// one and repointed Bazel at a temp path of its own, leaving the user's file
+/// uncreated.
 #[test]
 fn an_rc_set_execution_log_path_is_the_one_used() {
-    for section in ["common", "build"] {
+    for section in ["always", "common", "build"] {
         let rc = format!("{section} --execution_log_compact_file={CASE_DIR}/{RC_LOG}\n");
         let case = Case::new("execlog_beyond_capacity", Fixture::default(), Some(&rc));
         let report = case.run(&["build", "//..."]);

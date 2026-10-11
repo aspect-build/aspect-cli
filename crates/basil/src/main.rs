@@ -15,12 +15,10 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
-//!     When `--execution_log_compact_file <path>` is also present — literally,
-//!     or restated as the `--default_override` the CLI hands Bazel a
-//!     `common`-section rc entry as — a scenario with `execlog_entries` writes
-//!     that many `ExecLogEntry` protobufs there, in the real format: one zstd
-//!     frame over varint-length-prefixed messages, written as a regular file the
-//!     way Bazel writes it. Entry counts above the
+//!     When `--execution_log_compact_file <path>` is also present, a scenario
+//!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there, in
+//!     the real format: one zstd frame over varint-length-prefixed messages,
+//!     written as a regular file the way Bazel writes it. Entry counts above the
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
 //!     capacity is invisible without a log longer than it.
 //!
@@ -30,6 +28,16 @@
 //!     When `--build_event_json_file <path>` is present, a scenario with
 //!     `json_bep_tests` writes the loading-only test selection that
 //!     `aspect cache diff` establishes its scope from — see [`write_json_bep`].
+//!
+//! Flags are read with `bazelrc::last_flag_value` for the invocation's verb — the
+//! same resolver the CLI decides with, so the fake sees argv the way Bazel does:
+//! the `--flag=value` and `--flag value` forms alike, last occurrence winning, and
+//! the `--default_override=0:common=…` token the CLI restates a `common`-section rc
+//! entry as. Each of those matters to a test. A caller clearing
+//! `--execution_log_compact_file=` while the CLI appends its own is the shape the
+//! reuse logic has to get right, and a fake blind to `--default_override` would
+//! write no log at all for a `common`-scoped path — reporting a working feature as
+//! a missing log.
 //!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
@@ -125,10 +133,10 @@ fn run_info(args: &[String]) {
 }
 
 fn run_build(args: &[String], verb: &str) {
-    let bes_path = find_flag_value(args, "--build_event_binary_file", verb);
-    let execlog_path = find_flag_value(args, "--execution_log_compact_file", verb);
-    let scenario_name =
-        find_flag_value(args, "--scenario", verb).unwrap_or_else(|| "success".to_string());
+    let flag = |name: &str| bazelrc::last_flag_value(args, name, verb);
+    let bes_path = flag("--build_event_binary_file");
+    let execlog_path = flag("--execution_log_compact_file");
+    let scenario_name = flag("--scenario").unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
 
     let log = || match &execlog_path {
@@ -139,7 +147,7 @@ fn run_build(args: &[String], verb: &str) {
     // Only the invocation that asked for a JSON log gets one, which is how a
     // scenario can answer a task's loading-only selection pass without also
     // speaking for the spawns that follow it.
-    if let Some(path) = find_flag_value(args, "--build_event_json_file", verb)
+    if let Some(path) = flag("--build_event_json_file")
         && !s.json_bep_tests.is_empty()
     {
         let exit_code = match s.exit {
@@ -197,17 +205,6 @@ fn run_build(args: &[String], verb: &str) {
             process::exit(128 + sig);
         }
     }
-}
-
-/// Resolves `--name` on `args` for `verb` through `bazelrc` — the same resolution the
-/// CLI decides with, which is as close as a fake gets to Bazel's.
-///
-/// Both forms and their precedence matter here. A caller clearing
-/// `--execution_log_compact_file=` and the CLI appending its own is the shape the reuse
-/// logic has to handle, and a fake blind to `--default_override` would write no log at all
-/// for a `common`-scoped path, reporting a working feature as a missing log.
-fn find_flag_value(args: &[String], name: &str, verb: &str) -> Option<String> {
-    bazelrc::last_flag_value(args, name, verb)
 }
 
 /// How basil terminates after writing the BES event stream. `Code(n)`
