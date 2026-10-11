@@ -15,12 +15,12 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
-//!     When `--execution_log_compact_file <path>` is also present — literally, or
-//!     restated as a `--default_override` the way the CLI hands Bazel a
-//!     `common`-section rc entry — a scenario
-//!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there,
-//!     in the real format: one zstd frame over varint-length-prefixed messages,
-//!     written as a regular file the way Bazel writes it. Entry counts above the
+//!     When `--execution_log_compact_file <path>` is also present — literally,
+//!     or restated as the `--default_override` the CLI hands Bazel a
+//!     `common`-section rc entry as — a scenario with `execlog_entries` writes
+//!     that many `ExecLogEntry` protobufs there, in the real format: one zstd
+//!     frame over varint-length-prefixed messages, written as a regular file the
+//!     way Bazel writes it. Entry counts above the
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
 //!     capacity is invisible without a log longer than it.
 //!
@@ -199,15 +199,13 @@ fn run_build(args: &[String], verb: &str) {
     }
 }
 
-/// Resolves `--name` on `args` the way Bazel would for `verb`: `--name <value>` and
-/// `--name=<value>`, last occurrence winning, and a `--default_override=0:common=--name=…`
-/// restating rc content outranked by any literal occurrence.
+/// Resolves `--name` on `args` for `verb` through `bazelrc` — the same resolution the
+/// CLI decides with, which is as close as a fake gets to Bazel's.
 ///
-/// Delegates to `bazelrc`, the same resolution the CLI decides with. Getting it right
-/// matters twice over: a caller clearing `--execution_log_compact_file=` and the CLI
-/// appending its own is the shape the reuse logic has to handle, and a fake blind to
-/// overrides would write no log at all for a `common`-scoped path — reporting a missing
-/// feature as a missing log.
+/// Both forms and their precedence matter here. A caller clearing
+/// `--execution_log_compact_file=` and the CLI appending its own is the shape the reuse
+/// logic has to handle, and a fake blind to `--default_override` would write no log at all
+/// for a `common`-scoped path, reporting a working feature as a missing log.
 fn find_flag_value(args: &[String], name: &str, verb: &str) -> Option<String> {
     bazelrc::last_flag_value(args, name, verb)
 }

@@ -1110,8 +1110,8 @@ impl Build {
         // reads the file at that path. Adding a second
         // `--execution_log_compact_file` below would win — a literal command-line
         // flag outranks rc content — and silently repoint Bazel away from it.
-        // `last_flag_value` is given the verb so it can judge the rc content the
-        // CLI restates as `--default_override` the way Bazel scopes it.
+        // The verb lets `last_flag_value` scope the `--default_override` tokens
+        // the CLI restates `common` rc content as, the way Bazel scopes them.
         //
         // An empty value clears the flag rather than naming a file, so it is not a
         // request; treating it as a path would have the reader tail "" and report a

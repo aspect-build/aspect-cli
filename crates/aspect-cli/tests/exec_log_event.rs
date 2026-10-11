@@ -426,6 +426,7 @@ impl Case {
                 .map(|s| s.trim().to_string()),
         }
     }
+
     /// The argv of the case's `bazel build`/`bazel test` invocation, split into
     /// tokens. Panics if the CLI never got that far.
     fn bazel_argv(&self) -> Vec<String> {
@@ -773,7 +774,8 @@ fn an_rc_set_execution_log_path_is_the_one_used() {
         assert_eq!(
             case.execution_log_paths(),
             vec![want.display().to_string()],
-            "`{section}`: the rc file's path should be the only execution log Bazel is              asked for; a second one means the CLI did not see this one",
+            "`{section}`: the rc file's path should be the only execution log Bazel is \
+             asked for; a second one means the CLI did not see this one",
         );
         assert_complete(&format!("`{section}`-scoped rc log"), &report, 1);
         assert!(
