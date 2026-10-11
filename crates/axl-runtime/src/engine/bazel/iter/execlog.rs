@@ -1,22 +1,28 @@
 //! The two AXL-facing views of a build's decoded execution log.
 //!
-//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and
-//! handed out after the spawn, too late for the reader to know a consumer exists
-//! — so it reads the lossy stream and may miss entries it fell behind on.
+//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and handed
+//! out after the spawn. It takes the stream's *own* subscriber, which is in the
+//! ring from the moment the stream spawns, so the reader blocks for it like any
+//! other consumer and the iteration is complete.
 //!
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
-//! before the spawn and passed in `execution_log = [...]`. Being visible at spawn
-//! time is what makes it lossless, and its `kinds=` filter is applied here in
-//! Rust so a consumer that only wants spawns does not pay a Starlark allocation
-//! per file in the build.
+//! before the spawn and passed in `execution_log = [...]`. Both forms are
+//! complete; what the handle adds is its `kinds=` filter, applied here in Rust so
+//! a consumer that only wants spawns does not pay a Starlark allocation per file
+//! in the build, and a subscriber of its own, so it can sit beside a decoded
+//! `file()` sink where `build.execution_logs()` cannot.
+//!
+//! Both hold a subscriber the producer blocks for, so both have to be releasable
+//! from outside: `build.wait()` releases every one still held before joining the
+//! reader, which is what bounds a consumer that stopped reading. That lifecycle,
+//! and the cancellation-aware blocking read it wraps, live once in
+//! [`Subscription`] — what remains here is what the two views do *not* share:
+//! `kinds=` filtering and a deferred bind for the handle, nothing for the other.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use allocative::Allocative;
-use fibre::TryRecvError;
 use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -38,24 +44,46 @@ use starlark::values::starlark_value;
 use axl_proto::tools::protos::ExecLogEntry;
 use axl_proto::tools::protos::exec_log_entry;
 use derive_more::Display;
-use fibre::RecvError;
 use fibre::spmc::Receiver;
 
+use super::subscription::Subscription;
 use crate::engine::cancellation::Signals;
-use crate::engine::children::{Recv, recv_cancellable};
 
-#[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
+/// The `build.execution_logs()` iterator: the stream's own subscriber, handed to
+/// AXL as an iterable.
+///
+/// Nothing but a [`Subscription`] and the signals a blocking read needs — this
+/// view adds no filter and no deferred bind, so the shared lifecycle is the whole
+/// of it.
+#[derive(Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
 #[display("<execlog_iterator>")]
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
-    recv: RefCell<Receiver<ExecLogEntry>>,
+    sub: Subscription,
+    /// The run's cancellation state, so blocking iteration stays a safe point —
+    /// as for [`ExecLogIter::signals`]. See `iter_next`.
+    #[allocative(skip)]
+    signals: Arc<Signals>,
 }
 
 impl ExecutionLogIterator {
-    pub fn new(recv: Receiver<ExecLogEntry>) -> Self {
+    pub fn new(signals: Arc<Signals>, recv: Receiver<ExecLogEntry>) -> Self {
         Self {
-            recv: RefCell::new(recv),
+            sub: Subscription::live(recv),
+            signals,
         }
+    }
+
+    /// Unsubscribe, dropping any entries still buffered. Idempotent.
+    ///
+    /// `build.wait()` calls this before joining the stream, for the same reason
+    /// it releases every [`ExecLogIter`]: the subscriber this holds is one the
+    /// producer blocks for, so an iteration that stopped early — or never
+    /// started — would otherwise park the reader on a consumer that is not
+    /// coming. The stream cannot do it itself; `execution_logs()` took the
+    /// receiver out of it.
+    pub fn release(&self) {
+        self.sub.release();
     }
 }
 
@@ -67,26 +95,36 @@ impl<'v> AllocValue<'v> for ExecutionLogIterator {
 
 #[starlark_module]
 pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
-    /// Returns `ExecLogEntry` if event buffer is not empty.
-    /// Maximum `1000` events is buffered at once.
+    /// Non-blocking pop of the next entry, or `None` when nothing is buffered
+    /// yet. The producer runs up to the channel capacity ahead and then waits
+    /// for this subscriber, so polling slowly costs time rather than entries.
     fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<ExecLogEntry>> {
         let this = this
             .downcast_ref_err::<ExecutionLogIterator>()
             .into_anyhow_result()?;
-        match this.recv.borrow_mut().try_recv() {
-            Ok(it) => Ok(NoneOr::Other(it)),
-            Err(TryRecvError::Empty) => Ok(NoneOr::None),
-            Err(TryRecvError::Disconnected) => Ok(NoneOr::None),
-        }
+        Ok(NoneOr::from_option(this.sub.try_pop(|_| true)))
     }
 
-    /// Returns `True` if stream is complete and all the events are received via `for`
-    /// or calling `try_pop` repeatedly.
+    /// Returns `True` once the stream has ended and every entry has been
+    /// received via `for` or repeated `try_pop`, or the subscriber has been
+    /// released (`build.wait()`).
     fn done<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let this = this
             .downcast_ref_err::<ExecutionLogIterator>()
             .into_anyhow_result()?;
-        Ok(this.recv.borrow().is_closed())
+        Ok(this.sub.is_drained())
+    }
+
+    /// Stop consuming: unsubscribe and drop whatever is buffered. Idempotent.
+    /// As on an [`ExecLogIter`] handle — a task that decides mid-build it no
+    /// longer wants entries releases the producer's blocking-send path rather
+    /// than holding the end-of-build join open until `wait()` does it.
+    fn drain<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        let this = this
+            .downcast_ref_err::<ExecutionLogIterator>()
+            .into_anyhow_result()?;
+        this.release();
+        Ok(NoneType)
     }
 }
 
@@ -112,15 +150,19 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
+    /// Blocks until the next entry or the end of the stream. Unfiltered: every
+    /// entry yields. See [`Subscription::recv_blocking`] for why it is
+    /// cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        // Blocks until the next entry or the stream's end. A cancelled run
-        // does not end the iterator: the client is being stopped, and the
-        // stream closes with it.
-        match self.recv.borrow_mut().recv() {
-            Ok(ev) => Some(ev.alloc_value(heap)),
-            Err(RecvError::Disconnected) => None,
-        }
+        self.sub
+            .recv_blocking(&self.signals, |_| true)
+            .map(|entry| entry.alloc_value(heap))
     }
+
+    /// Leaving a `for` loop is not unsubscribing: the subscriber stays live, so
+    /// `try_pop` and a second loop resume where the first stopped rather than
+    /// starting over. Only `build.wait()` releases it. See
+    /// [`ExecutionLogIterator::release`].
     unsafe fn iter_stop(&self) {}
 }
 
@@ -184,29 +226,17 @@ pub fn parse_entry_kind(value: values::Value) -> anyhow::Result<i32> {
     )
 }
 
-/// Lifecycle of an [`ExecLogIter`]. `Live` owns the subscriber clone whose
-/// existence forces the producer's blocking-send path, so leaving this state is
-/// what releases the producer.
-#[derive(Debug)]
-enum ExecLogIterState {
-    /// Created but not yet passed to a build.
-    Pending,
-    /// `Build::spawn` subscribed us; iteration reads from `recv`.
-    Live { recv: Receiver<ExecLogEntry> },
-    /// Drained, explicitly dropped, or released by `build.wait()`.
-    Done,
-}
-
 /// A `bazel.execution_log.iterator()` handle: a kinds-filtered subscriber to
 /// one build's decoded execution log, created before the spawn and passed in
 /// `execution_log = [...]`.
 ///
-/// Why a handle rather than `build.execution_logs()`: the decision the runtime
-/// has to make before Bazel starts is whether entries may be dropped. A
-/// consumer that appears only after the spawn cannot be counted, so the
-/// producer would already have chosen the lossy path. Passing the handle in is
-/// what lets `Build::spawn` see the consumer in time (see `lossless` on
-/// [`ExecLogStream::spawn_with_file`]).
+/// Why a handle rather than `build.execution_logs()`: cost and composition, not
+/// completeness. Both forms receive every entry — the producer blocks for
+/// whatever subscribers it has, see
+/// [`ExecLogStream::spawn_with_file`](super::super::stream::ExecLogStream::spawn_with_file).
+/// A handle clones a subscriber of its own, so it combines with sinks where
+/// `execution_logs()` takes the stream's one and only, and it filters in Rust,
+/// below.
 ///
 /// `kinds` filters by payload tag in Rust, before the entry is turned into a
 /// Starlark value. That matters more here than it does for build events: a log
@@ -219,8 +249,10 @@ pub struct ExecLogIter {
     /// `None` means no filter — every entry yields.
     #[allocative(skip)]
     kinds: Option<Arc<HashSet<i32>>>,
+    /// Starts [`Subscription::pending`]: this handle exists before the build it
+    /// will be bound to.
     #[allocative(skip)]
-    state: Arc<Mutex<ExecLogIterState>>,
+    sub: Subscription,
     /// The run's cancellation state, carried from construction so blocking
     /// iteration stays a safe point. Without it a drain would park in a bare
     /// `recv()` and the AXL body would stop answering signals — see `iter_next`.
@@ -232,7 +264,7 @@ impl ExecLogIter {
     pub fn new(signals: Arc<Signals>, kinds: Option<HashSet<i32>>) -> Self {
         Self {
             kinds: kinds.map(Arc::new),
-            state: Arc::new(Mutex::new(ExecLogIterState::Pending)),
+            sub: Subscription::pending(),
             signals,
         }
     }
@@ -242,28 +274,24 @@ impl ExecLogIter {
     /// once, so a handle reused across two builds is an error rather than a
     /// stream silently attached to the wrong one.
     pub fn bind(&self, recv: Receiver<ExecLogEntry>) -> anyhow::Result<()> {
-        let mut state = self.state.lock().unwrap();
-        match *state {
-            ExecLogIterState::Pending => {
-                *state = ExecLogIterState::Live { recv };
-                Ok(())
-            }
-            _ => anyhow::bail!(
-                "this `bazel.execution_log.iterator()` handle was already bound to a build; \
-                 create a fresh one per build",
-            ),
+        if self.sub.bind(recv) {
+            return Ok(());
         }
+        anyhow::bail!(
+            "this `bazel.execution_log.iterator()` handle was already bound to a build; \
+             create a fresh one per build",
+        )
     }
 
     /// Unsubscribe, dropping any entries still buffered.
     ///
     /// `build.wait()` calls this before joining the stream, which is what bounds
-    /// a task that never drained its handle: a bound subscriber makes the sends
-    /// blocking, so the reader would otherwise wait on a consumer that is not
+    /// a task that never drained its handle: the producer blocks for every
+    /// subscriber, so the reader would otherwise wait on a consumer that is not
     /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
     /// nothing to it.
     pub fn release(&self) {
-        *self.state.lock().unwrap() = ExecLogIterState::Done;
+        self.sub.release();
     }
 
     /// Whether this handle still holds a subscriber.
@@ -273,7 +301,7 @@ impl ExecLogIter {
     /// end in `Done`, so a later `bind` fails whether or not the rollback ran.
     #[cfg(test)]
     pub fn is_live(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), ExecLogIterState::Live { .. })
+        self.sub.is_live()
     }
 
     fn wants(&self, entry: &ExecLogEntry) -> bool {
@@ -312,12 +340,13 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         Some(RES.methods())
     }
 
+    /// `done` here means "this handle no longer holds a subscriber" — released by
+    /// `drain()`, a cancel, or `build.wait()`. Narrower than
+    /// `ExecutionLogIterator.done()`, which answers "nothing more can arrive" and
+    /// is also true of a still-subscribed handle whose stream has closed.
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match attribute {
-            "done" => {
-                let state = self.state.lock().unwrap();
-                Some(heap.alloc(matches!(*state, ExecLogIterState::Done)))
-            }
+            "done" => Some(heap.alloc(self.sub.is_done())),
             _ => None,
         }
     }
@@ -335,57 +364,19 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
     }
 
     /// Blocks until the next entry this handle's `kinds=` filter wants, or the end
-    /// of the stream.
-    ///
-    /// Cancellation-aware, as every blocking builtin must be (see
-    /// `engine::cancellation`), and here that earns its keep: a drain sits on the
-    /// critical path of every bazel-driving task, right before the one other
-    /// cancellation-aware wait, and the end-of-stream signal is the Bazel *daemon*
-    /// closing the log file — which an interrupted invocation need not make happen
-    /// promptly. A cancel ends the iteration, which also drops the subscriber and
-    /// so frees a reader blocked on it; the loop's next call raises the task's
-    /// exit, since an iterator cannot raise one itself.
-    ///
-    /// Entries of other kinds are discarded rather than yielded as `None`: unlike
-    /// the BES iterator's quiet tick, a filtered-out entry carries nothing a
-    /// caller could act on, and a log is mostly filtered-out entries.
+    /// of the stream. Entries of other kinds are discarded rather than yielded as
+    /// `None`, unlike the BES iterator's quiet tick. See
+    /// [`Subscription::recv_blocking`] for why it is cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        // Taken out from under the lock so a parked wait does not hold it, which
-        // is what lets `release()` run while a drain is in progress.
-        let recv = {
-            let mut state = self.state.lock().unwrap();
-            match std::mem::replace(&mut *state, ExecLogIterState::Pending) {
-                ExecLogIterState::Live { recv } => recv,
-                other => {
-                    *state = other;
-                    return None;
-                }
-            }
-        };
-
-        loop {
-            match recv_cancellable(&self.signals, &recv, None) {
-                Recv::Item(entry) => {
-                    if !self.wants(&entry) {
-                        continue;
-                    }
-                    // A `release()` that landed while we were parked wins.
-                    let mut state = self.state.lock().unwrap();
-                    if matches!(*state, ExecLogIterState::Pending) {
-                        *state = ExecLogIterState::Live { recv };
-                    }
-                    return Some(entry.alloc_value(heap));
-                }
-                Recv::Closed | Recv::Cancelled => {
-                    *self.state.lock().unwrap() = ExecLogIterState::Done;
-                    return None;
-                }
-                // No deadline to pass with `tick = None`.
-                Recv::Tick => continue,
-            }
-        }
+        self.sub
+            .recv_blocking(&self.signals, |entry| self.wants(entry))
+            .map(|entry| entry.alloc_value(heap))
     }
 
+    /// Leaving a `for` loop is not unsubscribing: the subscriber stays live, so
+    /// `try_pop` and a second loop resume where the first stopped rather than
+    /// starting over. Only `build.wait()` releases it. See
+    /// [`ExecLogIter::release`].
     unsafe fn iter_stop(&self) {}
 }
 
@@ -398,25 +389,7 @@ pub(crate) fn exec_log_iter_methods(registry: &mut MethodsBuilder) {
         let iter = this
             .downcast_ref_err::<ExecLogIter>()
             .into_anyhow_result()?;
-        let mut state = iter.state.lock().unwrap();
-        let recv = match &*state {
-            ExecLogIterState::Live { recv } => recv,
-            _ => return Ok(NoneOr::None),
-        };
-        loop {
-            match recv.try_recv() {
-                Ok(entry) => {
-                    if iter.wants(&entry) {
-                        return Ok(NoneOr::Other(entry));
-                    }
-                }
-                Err(TryRecvError::Empty) => return Ok(NoneOr::None),
-                Err(TryRecvError::Disconnected) => {
-                    *state = ExecLogIterState::Done;
-                    return Ok(NoneOr::None);
-                }
-            }
-        }
+        Ok(NoneOr::from_option(iter.sub.try_pop(|e| iter.wants(e))))
     }
 
     /// Stop consuming: unsubscribe and drop whatever is buffered. Idempotent.
@@ -609,31 +582,40 @@ mod tests {
 
     /// Blocking iteration must stay a safe point: with no end-of-stream in sight,
     /// a cancelled run has to end the loop rather than wait in it.
+    ///
+    /// Timed out because the regression is a park, not a wrong answer: the
+    /// channel below is never written to and never closed, so an `iter_next` that
+    /// missed the cancel waits forever and reports nothing.
     #[test]
     fn iteration_ends_on_a_cancel_rather_than_parking() {
-        let signals = Signals::new();
-        // A sender that is never written to and never closed: iteration has
-        // nothing to return and no end-of-stream to end on.
-        let (_sender, recv) = bounded::<ExecLogEntry>(4);
-        let iter = ExecLogIter::new(signals.clone(), None);
-        iter.bind(recv).unwrap();
+        let outcome = crate::test::with_timeout(std::time::Duration::from_secs(10), || {
+            let signals = Signals::new();
+            // A sender that is never written to and never closed: iteration has
+            // nothing to return and no end-of-stream to end on.
+            let (_sender, recv) = bounded::<ExecLogEntry>(4);
+            let iter = ExecLogIter::new(signals.clone(), None);
+            iter.bind(recv).unwrap();
 
-        signals.force();
-        assert!(signals.should_unwind(), "the run should now be unwinding");
+            signals.force();
+            assert!(signals.should_unwind(), "the run should now be unwinding");
 
-        Heap::temp(|heap| {
-            assert!(
-                unsafe { iter.iter_next(0, heap) }.is_none(),
-                "a cancelled run must end the iteration instead of parking in it",
-            );
+            let ended = Heap::temp(|heap| unsafe { iter.iter_next(0, heap) }.is_none());
+            // Ending also releases the subscriber, which is what frees a producer
+            // already parked on it.
+            (ended, iter.sub.is_done())
         });
-
-        // Ending also released the subscriber, which is what frees a producer
-        // already parked on it.
-        let state = iter.state.lock().unwrap();
+        let Some((ended, unsubscribed)) = outcome else {
+            panic!(
+                "timed out: a cancelled run parked in `iter_next` instead of ending the iteration"
+            )
+        };
         assert!(
-            matches!(*state, ExecLogIterState::Done),
-            "a cancelled iteration should leave the handle Done, got {state:?}",
+            ended,
+            "a cancelled run must end the iteration instead of parking in it",
+        );
+        assert!(
+            unsubscribed,
+            "a cancelled iteration should leave the handle unsubscribed",
         );
     }
 
@@ -653,25 +635,29 @@ mod tests {
     /// `try_pop` through the Starlark method needs a heap; these tests only care
     /// about the filtering, so reach the same path without one.
     fn pop(iter: &ExecLogIter) -> Option<ExecLogEntry> {
-        let mut state = iter.state.lock().unwrap();
-        let recv = match &*state {
-            ExecLogIterState::Live { recv } => recv,
-            _ => return None,
-        };
-        loop {
-            match recv.try_recv() {
-                Ok(entry) => {
-                    if iter.wants(&entry) {
-                        return Some(entry);
-                    }
-                }
-                Err(TryRecvError::Empty) => return None,
-                Err(TryRecvError::Disconnected) => {
-                    *state = ExecLogIterState::Done;
-                    return None;
-                }
-            }
-        }
+        iter.sub.try_pop(|e| iter.wants(e))
+    }
+
+    /// The AXL-visible half of [`Subscription`]'s on-loan guarantee: a handle
+    /// mid-read is still a bound handle, so `bind` refuses it. See
+    /// `subscription::State::Reading` for what conflating the two would cost,
+    /// and why this is asserted though AXL cannot reach it.
+    #[test]
+    fn a_handle_mid_read_cannot_be_rebound() {
+        let (_s1, r1) = bounded::<ExecLogEntry>(4);
+        let (_s2, r2) = bounded::<ExecLogEntry>(4);
+        let iter = ExecLogIter::new(Signals::new(), None);
+        iter.bind(r1).unwrap();
+
+        let on_loan = iter.sub.take_for_read().expect("a bound handle lends out");
+        let err = iter
+            .bind(r2)
+            .expect_err("a bind mid-read must be refused")
+            .to_string();
+        assert!(err.contains("already bound"), "unexpected error: {err}");
+
+        iter.sub.finish_read(on_loan);
+        assert!(iter.is_live(), "the read should have put its receiver back");
     }
 
     /// Pins the AXL shape of `ExecLogEntry.Output`'s oneof, which the resolver in

@@ -6,9 +6,9 @@ wrong fails quietly, so none of them live at the call sites:
   `open(trait)`      before the spawn. Returns the `execution_log=` list to pass
                      to `ctx.bazel.build` / `.test` — the trait's own sinks, plus
                      one `bazel.execution_log.iterator()` handle when a hook is
-                     registered. The handle has to exist *before* the spawn: it
-                     is what tells the runtime an every-entry consumer is
-                     subscribed, which is what makes the stream lossless.
+                     registered. The handle has to exist *before* the spawn:
+                     `execution_log = [...]` is the only thing that subscribes
+                     one, so a handle made later never binds.
   `pump(ctx, h)`     optional, inside the task's existing drain loop. Fires
                      hooks on whatever has arrived, without blocking.
   `close(ctx, h)`    after the task's own drain loop and **before** `build.wait()`.
@@ -87,15 +87,17 @@ on the phase.
 A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
 Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails
 it (`ExecLogStream::spawn_with_file`). A slow consumer parks the CLI's reader
-thread on a full 1000-entry channel; Bazel keeps writing to the file regardless.
+thread on the decoded channel once it fills; Bazel keeps writing to the file
+regardless.
 So the cost of an expensive hook is paid at the end of the build, in `close` and
 in the `join()` inside `wait()`, and never as a stalled action graph.
 
 The channel is a broadcast: every subscriber receives every entry, so a hook is
 an *additional* consumer alongside a `File` or `CompactFile` sink rather than a
 competitor for entries. `build.execution_logs()` is the exception — it takes the
-stream's own subscriber rather than cloning one, so it errors when anything else
-is already reading, a registered hook included.
+stream's own subscriber rather than cloning one, and the stream's own is dropped
+once anything else has subscribed, so it errors beside any other decoded
+consumer, a registered hook included.
 
 ## `entry.id` does not identify a spawn
 

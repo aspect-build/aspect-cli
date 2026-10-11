@@ -782,9 +782,11 @@ Two invocations under one *single* phase would not be distinguishable, and `sink
 
 **`spawn.metrics` is thinner than it looks.** `input_files` and `input_bytes` are documented in `spawn.proto` as "0 if unavailable", and unavailable in practice means *locally executed* — only the cache and remote-execution paths populate them. So on a cold build, the one where input counts are most interesting, they read 0 throughout. Count from the input-set graph instead (`len(res.inputs(spawn))`), which is why the resolver exists.
 
-**Registering a hook makes the stream lossless.** Without one, the reader uses `try_send` and drops entries a consumer has fallen behind on — that is what `build.execution_logs()` reads, and it drops in practice, not just in principle, because the reader decodes a file already on disk and outruns any AXL loop. A registered hook switches the reader to blocking sends, so a hook sees every entry of the kinds it asked for. `execution_log.iterator()` is the only form with that guarantee; prefer it to `build.execution_logs()` whenever a missing entry would make an answer wrong rather than imprecise.
+**The stream is lossless.** The reader sends blocking, so every subscriber receives every entry — a hook, a decoded `file()` sink and `build.execution_logs()` alike. That blocking earns its keep: the reader decodes a file already complete on disk and outruns any AXL loop by a wide margin, so a consumer falls more than a buffer behind within the first few hundred entries, and a producer that dropped instead would drop by a different amount every run. Prefer `execution_log.iterator()` to `build.execution_logs()` all the same, for the cost rather than for completeness: its `kinds=` filter runs in Rust before an entry becomes a Starlark value, which on a 10k-50k-entry log is most of the work, and it clones a subscriber of its own so it can sit beside a sink.
 
-A sink and a handle can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast. `build.execution_logs()` cannot be combined with either: it would add a subscriber nothing drains, which caps the log for every other consumer, so it errors and names the replacement.
+A sink and a handle can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast. `build.execution_logs()` cannot be combined with a decoded consumer: it takes the stream's one subscriber rather than cloning it, and a decoded sink or handle clones that subscriber, after which the stream's own is dropped — so there is nothing left to hand out and it errors and names the replacement. A `compact_file` sink is not one of those — it is tee'd from the raw bytes before decoding — so it combines with `build.execution_logs()` freely.
+
+Every decoded consumer belongs before `build.wait()`, which releases each one and then joins the reader. That is what bounds a build whose log nobody drained: the producer blocks for its subscribers, so one left undrained would park the reader forever. A `build.execution_logs()` call after `wait()` finds no stream and says so.
 
 **A hook cannot slow Bazel down.** In production Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails it, so a slow consumer parks the CLI's reader thread, not Bazel. The cost of an expensive hook is paid at the end of the build, in `close` and the `join()` inside `wait()`, never as a stalled action graph. A fully cached build logs nothing at all — Bazel does not record actions it did not run, and local action-cache hits are not logged either.
 
@@ -881,7 +883,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # 3b. Execution-log wiring. `xl.sinks` is the trait's `execution_log_sinks`
     #     plus, when an `exec_log_event` hook is registered, the iterator handle
     #     that feeds it. Opened after `build_start` (which can register one) and
-    #     before the spawn (which is what makes the stream lossless), freshly per
+    #     before the spawn (the only thing that subscribes a handle), freshly per
     #     attempt since a handle is single-use. Tasks driving the
     #     `bazel.build(ctx)` handle get all of this from it instead.
     xl = bzl.exec_log.open(bazel_trait)
