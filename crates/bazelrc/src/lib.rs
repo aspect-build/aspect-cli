@@ -19,6 +19,19 @@ pub(crate) fn command_ancestors(command: &str) -> &'static [&'static str] {
     }
 }
 
+/// The rc sections `command` reads, in the order Bazel applies them: `always`, `common`,
+/// the ancestors general → specific, then `command` itself. Later sections win.
+///
+/// Not deduplicated: `sections_for("common")` repeats the `common` bucket, which
+/// last-write-wins makes harmless and which keeps a `common`-rendered rc (see
+/// `aspect setup bazelrc`) resolving exactly as it did.
+pub(crate) fn sections_for(command: &str) -> Vec<&str> {
+    let mut sections = vec!["always", "common"];
+    sections.extend(command_ancestors(command));
+    sections.push(command);
+    sections
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -338,14 +351,7 @@ impl BazelRC {
                 .is_some_and(|p| p.as_path() == std::path::Path::new("<command line>"))
         };
 
-        // The sections `command` reads, in the order Bazel applies them. Not deduplicated:
-        // `options_for("common")` repeats the `common` bucket, which last-write-wins makes
-        // harmless and which keeps a `common`-rendered rc (see `aspect setup bazelrc`)
-        // resolving exactly as it did.
-        let mut sections = vec!["always", "common"];
-        sections.extend(command_ancestors(command));
-        sections.push(command);
-
+        let sections = sections_for(command);
         let mut result = Vec::new();
         for caller_pass in [false, true] {
             for section in &sections {
@@ -501,9 +507,8 @@ impl BazelRC {
         // pulls ancestor flags into the spawn via `command_ancestors`, and
         // omitting them here made the announce understate the effective config
         // (e.g. a `build --disk_cache=…` flag missing from a `test` announce).
-        let mut direct_keys = vec!["startup", "always", "common"];
-        direct_keys.extend(command_ancestors(command));
-        direct_keys.push(command);
+        let mut direct_keys = vec!["startup"];
+        direct_keys.extend(sections_for(command));
         for (source_idx, source_path) in self.sources.iter().enumerate() {
             let is_client = source_path == Path::new("<command line>");
             let short = shorten(source_path);
@@ -779,8 +784,10 @@ impl BazelRC {
 /// One type for both directions: [`partition_expand_all`] renders these and
 /// [`last_flag_value`] reads them back, so the wire form is written down once.
 struct DefaultOverride<'a> {
-    /// The section the option is scoped to, e.g. `common`. Carries no `:config` qualifier:
-    /// `expand_configs` has already decided which config sections apply.
+    /// The section the option is scoped to, e.g. `common`. Rendered without a `:config`
+    /// qualifier — `expand_configs` has already decided which config sections apply. The
+    /// invariant holds in that direction only: [`parse`](Self::parse) will read a qualified
+    /// section back out of foreign input, where it simply matches no section Bazel applies.
     command: &'a str,
     /// The option, in the single-token `--flag=value` form Bazel requires here.
     option: &'a str,
@@ -811,28 +818,24 @@ impl<'a> DefaultOverride<'a> {
         let (command, option) = scoped.split_once('=')?;
         (!command.is_empty() && !option.is_empty()).then_some(Self { command, option })
     }
-
-    /// Whether Bazel would apply this override to `command`, by the same section
-    /// inheritance [`BazelRC::options_for`] follows.
-    fn applies_to(&self, command: &str) -> bool {
-        matches!(self.command, "always" | "common")
-            || self.command == command
-            || command_ancestors(command).contains(&self.command)
-    }
 }
 
 /// Split an expanded option list into `(default_override_flags, regular_flags)`.
 ///
-/// `common`-section options become [`DefaultOverride`] tokens, returned first
-/// so they precede user flags and lose to them under last-write-wins. Each entry keeps its
-/// `version_condition` so version-gated options aren't silently promoted to unconditional.
+/// `common`-section options become [`DefaultOverride`] tokens, returned first so they precede
+/// user flags, which Bazel applies after them either way: override payloads parse at rc
+/// priority and the command line after them. Each entry keeps its `version_condition` so
+/// version-gated options aren't silently promoted to unconditional.
 ///
 /// A two-token option (`--flag value`, parsed as a bare-flag `RcOption` followed by its value
 /// `RcOption`) is folded into the canonical `--flag=value` form for its single
 /// `--default_override=0:common=--flag=value` entry. Bazel parses each override value as one
-/// option token and does NOT re-split it on whitespace, so neither two separate overrides (the
-/// value strands as its own unrecognized option) nor a space-joined `--flag value` override
-/// (rejected as a single unrecognized option) works. Regular flags need no such fold — they
+/// option token and does not re-split it on whitespace, so a space-joined `--flag value`
+/// payload is rejected as a single unrecognized option. Two consecutive payloads would in
+/// fact pair, since Bazel buckets payloads by section and parses each bucket as a token list,
+/// but only within one section: a value that lands in another bucket leaves the bare flag an
+/// `Expected value after --flag` error. The fold makes the emitted form independent of that
+/// bucketing. (Behaviour checked against Bazel 9.0.1.) Regular flags need no such fold — they
 /// pass through as adjacent argv tokens, which Bazel pairs natively.
 ///
 /// Accepted trade-off: a bare token following a boolean flag is folded as if it were the flag's
@@ -929,18 +932,32 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// A literal occurrence beats an override whatever the textual order, because Bazel parses
 /// override payloads at rc priority and the command line after them. Among equals the last
 /// occurrence wins, which is how Bazel resolves a flag given more than once.
+///
+/// The payloads are read one section at a time rather than as a single stream, because that
+/// is how Bazel parses them: it buckets payloads by section and parses each bucket as its own
+/// token list, ignoring whatever else sits between them on the command line. So a two-token
+/// `--name value` pair forms only between payloads of the same section, and a bare `--name`
+/// payload whose value was written under a different section names nothing — to Bazel that
+/// shape is a parse error, not a value. Sections are scanned in the order Bazel applies them,
+/// so the last one to name the flag wins.
 pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<String> {
     let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Some(literal) = flag_values_in(&tokens, name).pop() {
         return Some(literal);
     }
-    let payloads: Vec<&str> = tokens
-        .iter()
-        .filter_map(|token| DefaultOverride::parse(token))
-        .filter(|over| over.applies_to(command))
-        .map(|over| over.option)
-        .collect();
-    flag_values_in(&payloads, name).pop()
+    let mut value = None;
+    for section in sections_for(command) {
+        let payloads: Vec<&str> = tokens
+            .iter()
+            .filter_map(|token| DefaultOverride::parse(token))
+            .filter(|over| over.command == section)
+            .map(|over| over.option)
+            .collect();
+        if let Some(found) = flag_values_in(&payloads, name).pop() {
+            value = Some(found);
+        }
+    }
+    value
 }
 
 /// All values of a repeatable `--name` option among `opts`, in order, by the
@@ -1327,6 +1344,40 @@ mod runcommand_tests {
                 Some("grpc://literal".to_string()),
             );
         }
+    }
+
+    /// A payload names a value only inside its own section. Bazel buckets payloads by
+    /// section and parses each bucket on its own, so a bare flag in one section and a bare
+    /// value in another are two unrelated options — the bare flag is in fact an
+    /// `Expected value after …` error there, never a request for this path.
+    #[test]
+    fn last_flag_value_does_not_pair_payloads_across_sections() {
+        let line = args(&[
+            "--default_override=0:common=--execution_log_compact_file",
+            "--default_override=0:build=/tmp/leaked",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--execution_log_compact_file", "build"),
+            None,
+            "a bare payload must not take a value written under another section",
+        );
+    }
+
+    /// Within one section the pair does form, whatever else sits between the two payloads
+    /// on the command line — the bucket is the section, not command-line adjacency.
+    #[test]
+    fn last_flag_value_pairs_payloads_within_one_section() {
+        let line = args(&[
+            "--default_override=0:common=--execution_log_compact_file",
+            "--default_override=0:query=zzz",
+            "build",
+            "//...",
+            "--default_override=0:common=/tmp/mine",
+        ]);
+        assert_eq!(
+            last_flag_value(&line, "--execution_log_compact_file", "build"),
+            Some("/tmp/mine".to_string()),
+        );
     }
 
     /// The payload is matched as an option, not as text: an override carrying a
@@ -1948,13 +1999,15 @@ build:opt --compilation_mode=opt
         );
     }
 
-    /// The two readers of a resolved rc agree about a `common`-scoped flag.
+    /// The two readers of a resolved rc agree about a `common`-section flag.
     ///
     /// `rc.flag_value` asks the option model, where `common` is a section by name;
     /// `last_flag_value` asks the command line the same rc renders to, where it is
-    /// a `--default_override`. A caller that reuses a path the run already asks for
-    /// has to get the same answer whichever it holds — they disagreeing is what let
-    /// the CLI add a second `--execution_log_compact_file` over the user's.
+    /// a `--default_override`. For a `common`-section flag — the shape that broke — a
+    /// caller that reuses a path the run already asks for has to get the same answer
+    /// whichever reader it holds, or it adds a second `--execution_log_compact_file`
+    /// over the user's. The readers are not interchangeable in general: see
+    /// `the_two_readers_diverge_on_an_always_section_flag`.
     #[test]
     fn both_readers_see_a_common_scoped_flag() {
         let dir = make_workspace();
@@ -1977,6 +2030,40 @@ build:opt --compilation_mode=opt
             last_flag_value(&rc.resolve_for_command("build").unwrap().1, name, "build"),
             want,
             "the command line it renders to",
+        );
+    }
+
+    /// Pinned divergence: an `always` entry that `common` also sets reads differently
+    /// from the two readers, and the rendering is why.
+    ///
+    /// Rendering an `always` section literally promotes it from rc priority to
+    /// command-line priority, so on the command line the literal out-ranks the `common`
+    /// override — the inverse of the `always`-then-`common` order the option model keeps,
+    /// as [`BazelRC::options_for`] documents. Pre-existing, and unreachable through caller
+    /// flags, which name a command section or go unscoped. Pinned so a change in the
+    /// rendering surfaces here rather than in a caller.
+    #[test]
+    fn the_two_readers_diverge_on_an_always_section_flag() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "always --execution_log_compact_file=/tmp/always\n\
+             common --execution_log_compact_file=/tmp/common\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let name = "--execution_log_compact_file";
+        assert_eq!(
+            flag_value_list(&rc.applicable_options("build", None).unwrap(), name).pop(),
+            Some("/tmp/common".to_string()),
+            "the option model applies `always` before `common`",
+        );
+        assert_eq!(
+            last_flag_value(&rc.resolve_for_command("build").unwrap().1, name, "build"),
+            Some("/tmp/always".to_string()),
+            "rendered, `always` is a literal flag and out-ranks the `common` override",
         );
     }
 
