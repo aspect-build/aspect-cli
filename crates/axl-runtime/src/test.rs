@@ -377,10 +377,11 @@ pub fn install_basil() {
 ///
 /// On timeout the worker thread keeps running — Rust cannot cancel one — so a
 /// `None` leaves whatever `f` was doing in flight. A caller whose `f` depends on
-/// process-wide state (an env var, a helper process, a held lock) must not tear
-/// that state down on timeout: the still-running worker would then be the only
-/// thing observing it. Fail the whole test binary instead, as
-/// `build::tests::run_execlog_task` does.
+/// process-wide state (an env var, a helper process) must leave that state in
+/// place on timeout rather than tear it down: the still-running worker is now
+/// the only thing observing it, and pulling it out from under that worker turns
+/// one timeout into a run of unrelated failures. See
+/// `build::tests::DaemonStandIn::leak`.
 pub fn with_timeout<F, R>(timeout: Duration, f: F) -> Option<R>
 where
     F: FnOnce() -> R + Send + 'static,

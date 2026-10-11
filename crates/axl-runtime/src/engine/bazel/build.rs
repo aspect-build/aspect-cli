@@ -1441,12 +1441,18 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    /// An iterable over this build's decoded execution log.
+    /// An iterable over every entry of this build's decoded execution log.
     ///
     /// Takes the stream's one subscriber rather than cloning it, so it can be
-    /// called only once and only when nothing else reads the log — see the
-    /// refusal below. The iterator is also registered on the build, so `wait()`
-    /// releases the subscriber whether or not the task drained it.
+    /// called once per build and only when nothing else decodes the log: a
+    /// decoded `execution_log.file(...)` sink or an `execution_log.iterator()`
+    /// handle is refused, with a message naming the replacement. A
+    /// `compact_file(...)` sink is not one of those and combines freely.
+    ///
+    /// Iterate it before `build.wait()`. The producer blocks for this
+    /// subscriber, which is what makes the iteration complete, and `wait()`
+    /// releases it — so a `wait()` first ends the stream, and a call afterwards
+    /// is refused.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let mut execlog_stream = build.execlog_stream.borrow_mut();

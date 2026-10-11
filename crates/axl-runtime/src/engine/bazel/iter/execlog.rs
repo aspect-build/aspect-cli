@@ -5,18 +5,18 @@
 //! ring from the moment the stream spawns, so the reader blocks for it like any
 //! other consumer and the iteration is complete.
 //!
-//! Both types hold a subscriber the producer blocks for, so both must be
-//! releasable from outside: `build.wait()` releases every one still held before
-//! joining the reader, which is what bounds a consumer that stopped reading. The
-//! two therefore share one lifecycle shape — `Live` owning the receiver, `Done`
-//! having dropped it — and `Build` holds a clone of each so it can do that.
-//!
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
 //! before the spawn and passed in `execution_log = [...]`. Both forms are
 //! complete; what the handle adds is its `kinds=` filter, applied here in Rust so
 //! a consumer that only wants spawns does not pay a Starlark allocation per file
 //! in the build, and a subscriber of its own, so it can sit beside a decoded
 //! `file()` sink where `build.execution_logs()` cannot.
+//!
+//! Both hold a subscriber the producer blocks for, so both have to be releasable
+//! from outside: `build.wait()` releases every one still held before joining the
+//! reader, which is what bounds a consumer that stopped reading. Hence one
+//! lifecycle shape for the two — `Live` owning the receiver, `Done` having
+//! dropped it, behind an `Arc` so `Build` can keep a clone and do that.
 
 use std::collections::HashSet;
 use std::sync::Arc;
