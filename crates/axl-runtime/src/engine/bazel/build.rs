@@ -994,7 +994,8 @@ pub struct Build {
     /// stream: each one is a subscriber the producer blocks for, so a task that
     /// never drained its handle would otherwise park the reader thread forever
     /// on a full channel. Holds no Starlark values — an `ExecLogIter` clone is
-    /// its filter plus an `Arc` to the shared bind state.
+    /// its `kinds=` filter, a `Subscription` (an `Arc` to the shared state), and
+    /// an `Arc<Signals>`.
     #[allocative(skip)]
     execlog_iters: Vec<ExecLogIter>,
 
@@ -1481,9 +1482,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 "this build's execution log already has a consumer: either \
                  `execution_logs()` was called twice, or the build was configured \
                  with a decoded `execution_log.file(...)` sink or an \
-                 `execution_log.iterator()` handle, which clone the subscriber and \
-                 leave the stream with none. Either way there is nothing left to \
-                 hand out. Pass an `execution_log.iterator()` handle in \
+                 `execution_log.iterator()` handle, each of which clones a \
+                 subscriber of its own, after which the stream's own is dropped. \
+                 Either way there is nothing left to hand out. Pass an \
+                 `execution_log.iterator()` handle in \
                  `execution_log=[...]` and iterate that instead: it clones a \
                  subscriber of its own, so it can be combined with sinks, and its \
                  `kinds=` filter runs in Rust before an entry becomes a Starlark \
@@ -1717,9 +1719,10 @@ mod tests {
                 .expect("spawn the daemon stand-in");
             // SAFETY: process-wide env mutation, serialized against the other
             // execlog-through-basil tests by `EXECLOG_BASIL`. A concurrent
-            // non-execlog bazel test reading this as its server pid gets a live
-            // process that holds none of its paths open — the same answer the dead
-            // pid it reads today produces.
+            // non-execlog bazel test reading this as its server pid gets the
+            // opposite answer from the reaped pid it reads today — `open` waits
+            // for the file instead of giving up on it — but no such test
+            // configures an execution log, so nothing consults the pid.
             unsafe {
                 std::env::set_var("BASIL_SERVER_PID", daemon.id().to_string());
             }
@@ -1893,10 +1896,10 @@ Test = task(implementation = _impl)
     /// This is the one behavioural cost of a blocking producer: with nobody
     /// draining, it parks at `CHANNEL_CAPACITY`. What unparks it is `wait()` ->
     /// `ExecLogStream::join()`, whose first act is to release the stream's own
-    /// subscriber; the blocked `send` then fails, `forward` reports no readers
-    /// left, and the reader drains the remaining bytes without decoding them. So
-    /// the build still ends — and because Bazel writes the log to a regular file
-    /// that this process tails, the park never reached Bazel either.
+    /// subscriber; the blocked `send` then fails, the reader records that no
+    /// subscriber is left, and drains the remaining bytes without decoding them.
+    /// So the build still ends — and because Bazel writes the log to a regular
+    /// file that this process tails, the park never reached Bazel either.
     ///
     /// This covers the half where the stream still *owns* its subscriber, and so
     /// `join()` releases it. The tests below cover the subscribers `join()` cannot
@@ -2348,8 +2351,9 @@ Test = task(implementation = _impl)
     ///
     /// The configuration nothing else here covers: with no decoded sink and no
     /// handle, `named_consumers` is false, so the stream keeps its own subscriber
-    /// against a `build.execution_logs()` that never comes. Nothing drains it, so the producer sits at the channel
-    /// capacity for the rest of the build and `join()` is what releases it.
+    /// against a `build.execution_logs()` that never comes. Nothing drains it, so
+    /// the producer sits at the channel capacity for the rest of the build and
+    /// `join()` is what releases it.
     ///
     /// Compact sinks are tee'd from the raw bytes before decoding, so neither file
     /// depends on that subscriber — which is the assertion: both are complete, and

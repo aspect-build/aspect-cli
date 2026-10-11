@@ -176,7 +176,10 @@ impl ExecLogStream {
     /// The regular file is what makes blocking affordable: Bazel writes the file
     /// and this thread tails it, so a slow consumer parks *this* thread and never
     /// Bazel. Back-pressure shows up as a longer `join()` at the end of the build,
-    /// not as a slower build.
+    /// not as a slower build. A regular file rather than a FIFO, deliberately:
+    /// Bazel checksums the compact log after writing it and cannot seek back on a
+    /// pipe, which stalls it mid-build and deadlocks against a BEP FIFO —
+    /// https://github.com/bazelbuild/bazel/issues/28800.
     ///
     /// `CompactFile` sinks are unaffected — raw bytes are tee'd by
     /// [`MultiTeeReader`] before decoding.

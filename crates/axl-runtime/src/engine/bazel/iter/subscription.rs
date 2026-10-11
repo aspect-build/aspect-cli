@@ -87,7 +87,10 @@ impl Subscription {
     /// `build.wait()` calls this on every subscription it handed out, because the
     /// subscriber each holds is one the producer blocks for. A read parked in
     /// [`recv_blocking`](Self::recv_blocking) does not hold the lock, so this
-    /// lands even mid-drain and the read then declines to re-subscribe.
+    /// lands even mid-drain and the read then declines to re-subscribe. It does
+    /// not unpark a producer waiting on an in-flight read, though: that read owns
+    /// the receiver for its whole duration, so the receiver itself drops only
+    /// when the read returns.
     pub fn release(&self) {
         *self.state.lock().unwrap() = State::Done;
     }

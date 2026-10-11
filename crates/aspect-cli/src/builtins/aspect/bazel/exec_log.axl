@@ -95,8 +95,9 @@ in the `join()` inside `wait()`, and never as a stalled action graph.
 The channel is a broadcast: every subscriber receives every entry, so a hook is
 an *additional* consumer alongside a `File` or `CompactFile` sink rather than a
 competitor for entries. `build.execution_logs()` is the exception — it takes the
-stream's own subscriber rather than cloning one, so it errors when anything else
-is already reading, a registered hook included.
+stream's own subscriber rather than cloning one, and the stream's own is dropped
+once anything else has subscribed, so it errors beside any other decoded
+consumer, a registered hook included.
 
 ## `entry.id` does not identify a spawn
 

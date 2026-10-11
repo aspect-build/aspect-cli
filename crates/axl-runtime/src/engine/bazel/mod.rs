@@ -1397,9 +1397,10 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// recorded them. Compare `compact_file`, which copies Bazel's own
     /// zstd-compressed bytes.
     ///
-    /// A decoded sink clones a subscriber of the decoded stream, which is why its
-    /// presence makes `build.execution_logs()` refuse: that call takes the
-    /// stream's *own* subscriber, and the clone leaves the stream without one.
+    /// A decoded sink clones a subscriber of its own, which is why its presence
+    /// makes `build.execution_logs()` refuse: that call takes the stream's *own*
+    /// subscriber, and the stream's own is dropped once a clone exists, so there
+    /// is nothing left to hand out.
     /// Pass an `execution_log.iterator()` handle instead when one build needs
     /// both a decoded sink and in-process iteration — a handle clones too, so the
     /// two combine.
