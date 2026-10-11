@@ -1487,10 +1487,9 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                  subscriber of its own, after which the stream's own is dropped. \
                  Either way there is nothing left to hand out. Pass an \
                  `execution_log.iterator()` handle in \
-                 `execution_log=[...]` and iterate that instead: it clones a \
-                 subscriber of its own, so it can be combined with sinks, and its \
-                 `kinds=` filter runs in Rust before an entry becomes a Starlark \
-                 value."
+                 `execution_log=[...]` and iterate that instead: a handle clones \
+                 too, so it can be combined with sinks, and its `kinds=` filter \
+                 runs in Rust before an entry becomes a Starlark value."
             ))?;
         let iter = ExecutionLogIterator::new(build.signals.clone(), recv);
         build.execution_logs_iter.replace(Some(iter.clone()));
