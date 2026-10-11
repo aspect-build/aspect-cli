@@ -768,8 +768,8 @@ impl BazelRC {
 struct DefaultOverride<'a> {
     /// Which rc file the option came from, as an index into the `--bazelrc` list Bazel's
     /// client reported. The CLI renders every file it read as one synthetic source, so it
-    /// always emits [`SOLE_SOURCE`](Self::SOLE_SOURCE); the field exists because the index
-    /// is what delimits a parse bucket (see [`override_chunks`]).
+    /// always emits [`SOLE_SOURCE`](Self::SOLE_SOURCE); the field exists because the file it
+    /// names is what delimits a parse bucket (see [`override_chunks`]).
     index: u32,
     /// The section the option is scoped to, e.g. `common`. Rendered without a `:config`
     /// qualifier — `expand_configs` has already decided which config sections apply. The
@@ -816,18 +816,26 @@ impl<'a> DefaultOverride<'a> {
     }
 }
 
-/// The [`DefaultOverride`] payloads among `tokens`, split into the buckets Bazel parses them
-/// in: a maximal run of *consecutive* override tokens sharing one rc index. Each bucket is a
-/// list of `(section, option)` pairs in token order; non-override tokens are skipped and do
-/// not split a bucket.
+/// The [`DefaultOverride`] payloads among `tokens`, grouped into maximal runs of
+/// *consecutive* override tokens sharing one rc index. Each bucket is a list of
+/// `(section, option)` pairs in token order; non-override tokens are skipped and do not
+/// split a bucket.
 ///
-/// Bazel tracks the rc file of the previous override token globally, not per section, and
-/// closes the bucket for *every* section as soon as it changes. So an index change anywhere
-/// in the stream splits a section's payloads, and a repeat of an earlier index opens a fresh
-/// bucket rather than rejoining that index's earlier one. Both matter: a bare `--flag` pairs
-/// with its value only inside one bucket, and either split leaves it the
-/// `Expected value after --flag` parse error Bazel reports. (Probed against Bazel 9.0.1
-/// and 9.3.0.)
+/// The buckets matter because a bare `--flag` pairs with its value only inside one, and a
+/// split leaves it the `Expected value after --flag` parse error Bazel reports. Bazel's own
+/// boundary is the rc *file* the index names: it tracks the file of the previous override
+/// token globally, not per section, and closes the bucket for *every* section as soon as it
+/// changes — so the split falls wherever the file changes, and a return to an earlier file
+/// opens a fresh bucket rather than rejoining that file's earlier one. (Probed against Bazel
+/// 9.0.1 and 9.3.0.)
+///
+/// The index stands in for the file here, which is exact for this crate's own output — one rc
+/// source, never a bogus index or section — but an approximation in general. Two
+/// `--rc_source` entries can name the same path at different indices, and Bazel discards an
+/// override whose index is out of range or whose section is not a command *before* it tests
+/// the boundary, so none of those three splits a bucket for Bazel; a foreign caller passing
+/// one gets a split where Bazel pairs. Telling them apart needs the `--rc_source` list and
+/// Bazel's set of valid commands, neither of which this function sees. (Probed on 9.0.1.)
 fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
     let mut chunks: Vec<Vec<(&str, &str)>> = Vec::new();
     let mut open_index = None;
@@ -958,11 +966,12 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// override payloads at rc priority and the command line after them. Among equals the last
 /// occurrence wins, which is how Bazel resolves a flag given more than once.
 ///
-/// Override payloads are read one `(section, rc-index run)` bucket at a time rather than as a
-/// single stream, because that is how Bazel parses them — see `override_chunks` for the
-/// bucket boundary. So a two-token `--name value` pair forms only inside one bucket, and a
-/// bare `--name` payload whose value landed in another names nothing: to Bazel that shape is
-/// a parse error (`Expected value after --name`), not a value.
+/// Override payloads are read one section at a time, and within a section one rc-index run at
+/// a time, rather than as a single stream, because that is how Bazel parses them — see
+/// `override_chunks` for the bucket boundary. So a two-token `--name value` pair forms only
+/// inside one bucket, and a bare `--name` payload whose value landed in another names
+/// nothing: to Bazel that shape is a parse error (`Expected value after --name`), not a
+/// value.
 ///
 /// Between buckets, the section outranks everything: Bazel parses each section's payloads in
 /// turn, so a `build` payload beats a `common` one however the tokens are ordered, and only
@@ -1526,6 +1535,21 @@ mod runcommand_tests {
         );
     }
 
+    /// A `{section}:{config}` payload belongs to that config, not to its base section:
+    /// Bazel keys the bucket on the qualified name and only reads it back when the config
+    /// is active. (Probed: 9.0.1 ignores `common:ci` without `--config=ci`, applies it with.)
+    #[test]
+    fn last_flag_value_does_not_read_a_config_qualified_scope_as_its_base_section() {
+        assert_eq!(
+            last_flag_value(
+                &args(&["--default_override=0:common:ci=--remote_cache=grpc://cfg"]),
+                "--remote_cache",
+                "build",
+            ),
+            None,
+        );
+    }
+
     /// Anything that is not a well-formed override is left to the literal pass —
     /// including a different flag whose name starts the same way.
     #[test]
@@ -1567,6 +1591,17 @@ mod runcommand_tests {
         assert_eq!(parsed.index, DefaultOverride::SOLE_SOURCE);
         assert_eq!(parsed.command, "common");
         assert_eq!(parsed.option, "--remote_cache=grpc://x");
+
+        // The index is part of the wire form, not a constant: `override_chunks`
+        // keys a bucket on it, so rendering must carry whatever it was given.
+        let other = DefaultOverride {
+            index: 1,
+            command: "common",
+            option: "--remote_cache=grpc://x",
+        }
+        .to_string();
+        assert_eq!(other, "--default_override=1:common=--remote_cache=grpc://x");
+        assert_eq!(DefaultOverride::parse(&other).expect("parses").index, 1);
     }
 
     #[test]
@@ -2037,8 +2072,8 @@ import {}
         // For `test --config=ci` Bazel expands always:ci → common:ci → build:ci → test:ci
         // (last wins). The announce must list the same-named config sections in that order,
         // not alphabetically (which would put always:ci and build:ci ahead of common:ci and
-        // misrepresent the override order). The order comes from `sections_for`, so this
-        // also pins the one rank the earlier hand-rolled copy got away with inverting.
+        // misrepresent the override order). `always:ci` is included because `always` is the
+        // one rank nothing else in this file exercises.
         let root = Path::new("/work/repo");
         let rc = rc_with(
             &[&root.join(".bazelrc")],
