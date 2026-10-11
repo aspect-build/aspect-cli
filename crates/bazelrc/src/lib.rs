@@ -826,7 +826,8 @@ impl<'a> DefaultOverride<'a> {
 /// in the stream splits a section's payloads, and a repeat of an earlier index opens a fresh
 /// bucket rather than rejoining that index's earlier one. Both matter: a bare `--flag` pairs
 /// with its value only inside one bucket, and either split leaves it the
-/// `Expected value after --flag` parse error Bazel reports. (Probed against Bazel 9.3.0.)
+/// `Expected value after --flag` parse error Bazel reports. (Probed against Bazel 9.0.1
+/// and 9.3.0.)
 fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
     let mut chunks: Vec<Vec<(&str, &str)>> = Vec::new();
     let mut open_index = None;
@@ -949,7 +950,7 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 ///
 /// Reads both forms the CLI renders rc content in, because it runs Bazel with
 /// `--ignore_all_rc_files` and restates that content itself: a literal token, and a
-/// [`DefaultOverride`] carrying an option from a section — `common` — that cannot be passed
+/// `DefaultOverride` carrying an option from a section — `common` — that cannot be passed
 /// literally. Reading only literals makes a `common`-scoped flag invisible, so a caller asking
 /// "has this been requested already?" adds its own and silently outranks the user's.
 ///
@@ -958,7 +959,7 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// occurrence wins, which is how Bazel resolves a flag given more than once.
 ///
 /// Override payloads are read one `(section, rc-index run)` bucket at a time rather than as a
-/// single stream, because that is how Bazel parses them — see [`override_chunks`] for the
+/// single stream, because that is how Bazel parses them — see `override_chunks` for the
 /// bucket boundary. So a two-token `--name value` pair forms only inside one bucket, and a
 /// bare `--name` payload whose value landed in another names nothing: to Bazel that shape is
 /// a parse error (`Expected value after --name`), not a value.
@@ -967,7 +968,7 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// turn, so a `build` payload beats a `common` one however the tokens are ordered, and only
 /// within one section does the later bucket win. (Probed against Bazel 9.0.1 and 9.3.0.)
 ///
-/// None of this is a live path: [`partition_expand_all`] folds a two-token option into
+/// None of this is a live path: `partition_expand_all` folds a two-token option into
 /// `--flag=value` before rendering, and emits a single rc index, so the CLI never splits a
 /// pair. It matters because this function is `pub` and is the single authority on "has this
 /// flag been requested?", so it must not read a value out of a shape Bazel would reject.

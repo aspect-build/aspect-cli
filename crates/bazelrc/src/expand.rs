@@ -68,7 +68,7 @@ fn config_request(args: &[RcOption], index: usize) -> Option<(&str, usize)> {
 
 /// Walk `args`, emitting non-config options in place and expanding config
 /// requests recursively where they appear — Bazel's in-place expansion
-/// semantics. See https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults.
+/// semantics. See <https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults>.
 ///
 /// The invariants of one expansion pass live on [`Expander`]; only the ancestor
 /// chain and the output accumulate as it recurses.
