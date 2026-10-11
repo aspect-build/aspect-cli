@@ -249,13 +249,27 @@ impl Read for Pipe {
 /// the daemon that writes the file and `invocation_pid` is the client that ran the
 /// command; the daemon outlives the invocation by design, so only the client can
 /// answer "is this over?".
+/// How often a restartable file re-checks that it is still reading the same
+/// stream. Short next to the gap between bazel's attempts, long next to the
+/// per-byte reads a length-delimited decoder makes.
+const TRUNCATION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 pub struct StreamingFile {
     path: PathBuf,
     inner: File,
     holder_pid: u32,
-    /// Whether [`await_restart`](Self::await_restart) may be called. Off by
-    /// default: a writer that only ever appends has no second stream to wait for.
+    /// Whether [`await_restart`](Self::await_restart) may be called, and
+    /// whether reads watch for the file being replaced under them. Off by
+    /// default: a writer that only ever appends has no second stream.
     restartable: bool,
+    /// When the file's length was last compared against `pos`.
+    last_truncation_check: std::time::Instant,
+    /// Set when a read found the file shorter than it had already been.
+    /// Cleared by [`take_truncated`](Self::take_truncated).
+    truncated: bool,
+    /// The greatest length this file has been observed to have. A length below
+    /// it can only mean the file was replaced.
+    high_water: u64,
     /// Bytes consumed from the current segment, so a caller can see where an
     /// attempt ended. Reset by [`await_restart`](Self::await_restart).
     pos: u64,
@@ -278,6 +292,15 @@ impl StreamingFile {
     /// Returns `BrokenPipe` if either pid dies before the file appears.
     /// Path is canonicalized after open for accurate fd matching.
     pub fn open(path: PathBuf, holder_pid: u32, invocation_pid: u32) -> io::Result<Self> {
+        Self::open_inner(path, holder_pid, invocation_pid, true)
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        holder_pid: u32,
+        invocation_pid: u32,
+        holder_must_live: bool,
+    ) -> io::Result<Self> {
         loop {
             if path.exists() {
                 break;
@@ -285,7 +308,8 @@ impl StreamingFile {
             // Sample liveness *before* the last existence check: a writer that
             // finished the file and exited in between must not be read as a
             // writer that never wrote one.
-            let over = !is_pid_alive(invocation_pid) || !is_pid_alive(holder_pid);
+            let over =
+                !is_pid_alive(invocation_pid) || (holder_must_live && !is_pid_alive(holder_pid));
             if path.exists() {
                 break;
             }
@@ -304,6 +328,9 @@ impl StreamingFile {
             inner,
             holder_pid,
             restartable: false,
+            last_truncation_check: std::time::Instant::now(),
+            truncated: false,
+            high_water: 0,
             pos: 0,
             #[cfg(test)]
             on_holder_closed: None,
@@ -325,7 +352,13 @@ impl StreamingFile {
         holder_pid: u32,
         invocation_pid: u32,
     ) -> io::Result<Self> {
-        let mut f = Self::open(path, holder_pid, invocation_pid)?;
+        // Only the invocation can answer "will a file ever appear?". The holder
+        // is the process that writes it — for bazel the daemon — and a dead
+        // daemon does not mean no file is coming: the client starts another
+        // one. Waiting on it here ends the stream, empty and successful, for a
+        // daemon that was replaced between the pid being read and the first
+        // event being written.
+        let mut f = Self::open_inner(path, holder_pid, invocation_pid, false)?;
         f.restartable = true;
         Ok(f)
     }
@@ -339,6 +372,58 @@ impl StreamingFile {
     /// [`open_restartable`](Self::open_restartable).
     pub fn is_restartable(&self) -> bool {
         self.restartable
+    }
+
+    /// Whether a read found the file replaced under it, and clears the flag.
+    /// Checked alongside the `BrokenPipe` such a read reports, to tell a
+    /// writer that started over from one that finished.
+    pub fn take_truncated(&mut self) -> bool {
+        std::mem::replace(&mut self.truncated, false)
+    }
+
+    /// Has the file been replaced under us since we last looked?
+    ///
+    /// A file shorter than what has already been consumed from it can only be a
+    /// new one. The check costs an `fstat`, and a caller reading a
+    /// length-delimited stream calls `read` once per byte of each length
+    /// prefix, so it is rate-limited rather than run on every read: the cost is
+    /// then one `fstat` per interval instead of per byte, and the exposure is
+    /// bounded to whatever the writer can produce within one interval.
+    ///
+    /// **This is a backstop, not a guarantee.** A replacement that grows past
+    /// the previous stream's length between two checks is invisible to it:
+    /// nothing in the file's metadata distinguishes "longer than it was" from
+    /// "a different, longer stream", since the writer truncates in place and
+    /// the inode never changes. What the reader actually steers by is the
+    /// attempt boundary in the data — it reads a stream to its end, sees the
+    /// verdict, and waits for the next writer. This only narrows the window
+    /// for a reader so far behind that a replacement reaches it before that
+    /// boundary does, and a stream that slips through it desynces loudly, on
+    /// the length prefix of the next record, rather than yielding plausible
+    /// wrong events.
+    fn check_replaced(&mut self) -> io::Result<bool> {
+        if !self.restartable {
+            return Ok(false);
+        }
+        // The first check is not rate limited: until the file's length has been
+        // looked at once there is no high-water mark to compare against, and a
+        // reader that only ever consumed a fraction of the stream would
+        // otherwise carry a mark of zero and never see a replacement.
+        if self.high_water != 0 && self.last_truncation_check.elapsed() < TRUNCATION_CHECK_INTERVAL
+        {
+            return Ok(false);
+        }
+        self.last_truncation_check = std::time::Instant::now();
+        let len = self.inner.metadata()?.len();
+        // Against the high-water mark rather than against `pos`: a reader that
+        // has fallen behind holds an offset well short of what the previous
+        // stream reached, and a replacement is only shorter than *that*.
+        if len < self.high_water {
+            self.high_water = len;
+            return Ok(true);
+        }
+        self.high_water = len;
+        Ok(false)
     }
 
     /// Wait for the writer to begin a new stream in this same file, then resume
@@ -367,6 +452,12 @@ impl StreamingFile {
             if is_path_open_for_pid(&self.path, self.holder_pid)? {
                 self.inner.seek(SeekFrom::Start(0))?;
                 self.pos = 0;
+                // A new stream is measured from scratch: the previous one's
+                // length says nothing about whether this one has been replaced,
+                // and carrying it over reads the new stream's own growth as a
+                // replacement.
+                self.high_water = 0;
+                self.truncated = false;
                 return Ok(true);
             }
             // Belt and braces, for an attempt short enough to have opened and
@@ -377,6 +468,12 @@ impl StreamingFile {
             if self.inner.metadata()?.len() < self.pos {
                 self.inner.seek(SeekFrom::Start(0))?;
                 self.pos = 0;
+                // A new stream is measured from scratch: the previous one's
+                // length says nothing about whether this one has been replaced,
+                // and carrying it over reads the new stream's own growth as a
+                // replacement.
+                self.high_water = 0;
+                self.truncated = false;
                 return Ok(true);
             }
             if give_up() {
@@ -414,9 +511,30 @@ impl Read for StreamingFile {
     /// everything there is. Bytes mean the stream continues; a second empty read
     /// means it is over.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Before the read: bytes from a stream that replaced the one we were
+        // reading must not be spliced onto it.
+        if self.check_replaced()? {
+            self.truncated = true;
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "the file was replaced while it was being read",
+            ));
+        }
         match self.inner.read(buf) {
             Ok(0) => {
                 if is_path_open_for_pid(&self.path, self.holder_pid)? {
+                    // At the end of the file with the holder still on it. The
+                    // cheapest moment to look for a replacement, and the one a
+                    // lagging reader reaches as it catches up.
+                    self.last_truncation_check =
+                        std::time::Instant::now() - TRUNCATION_CHECK_INTERVAL;
+                    if self.check_replaced()? {
+                        self.truncated = true;
+                        return Err(io::Error::new(
+                            ErrorKind::BrokenPipe,
+                            "the file was replaced while it was being read",
+                        ));
+                    }
                     return Ok(0);
                 }
                 #[cfg(test)]
@@ -523,6 +641,63 @@ mod tests {
 
         let _ = holder.kill();
         let _ = holder.wait();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A reader that has fallen behind must not splice the stream that replaced
+    /// the one it was reading onto the end of it.
+    ///
+    /// This is the case a reader cannot steer by the attempt boundary in the
+    /// data, because it never reaches that boundary: the writer replaces the
+    /// file while the reader is still partway through the previous stream, and
+    /// the replacement is longer than the offset the reader holds, so the next
+    /// read would succeed and return bytes from the middle of a message.
+    #[test]
+    fn a_lagging_reader_is_not_spliced_across_a_replacement() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-splice-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, vec![b'a'; 50_000]).expect("write first stream");
+
+        let me = std::process::id();
+        let mut f =
+            StreamingFile::open_restartable(path.clone(), me, me).expect("open restartable");
+
+        // Consume a fraction of it, as a reader behind a slow consumer would.
+        let mut buf = vec![0u8; 1024];
+        let n = f.read(&mut buf).expect("partial read");
+        assert_eq!(n, 1024);
+        assert!(buf.iter().all(|b| *b == b'a'));
+
+        // The writer starts over. Caught because the file is now shorter than
+        // the 50,000 bytes it had reached, even though it is still far longer
+        // than the 1,024 the reader had consumed — which is why the check is
+        // against the high-water mark and not against the read offset.
+        {
+            let mut w = File::create(&path).expect("replace");
+            w.write_all(&vec![b'b'; 20_000])
+                .expect("write second stream");
+            w.flush().expect("flush");
+        }
+
+        // The check is rate limited; a reader in a real stream reaches it
+        // within one interval of the replacement.
+        std::thread::sleep(TRUNCATION_CHECK_INTERVAL + std::time::Duration::from_millis(5));
+
+        let err = f
+            .read(&mut buf)
+            .expect_err("the replacement must be reported");
+        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
+        assert!(
+            f.take_truncated(),
+            "the error must be distinguishable from the end of a stream"
+        );
+        assert!(!f.take_truncated(), "take_truncated clears the flag");
+
         let _ = std::fs::remove_file(&path);
     }
 
