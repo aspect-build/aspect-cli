@@ -343,8 +343,9 @@ fn clap_rendered_help_survives_an_unparsable_script() {
 
     // A bare `aspect <group>` with no leaf is the same Clap error, one level
     // down: `arg_required_else_help` renders the group’s own help.
-    // A sample of the built-in groups, not the whole set: these are AXL
-    // `group()` values and the list is not derived from them.
+    // A sample of the built-in groups, which come from `group = [...]` on the
+    // built-in tasks; hard-coded rather than derived so the test does not
+    // track the shipped AXL.
     for group in ["auth", "worktree", "setup"] {
         let output = run_in_workspace(&[("policy.axl", UNPARSABLE_SCRIPT)], &[group]);
         let stderr = stderr(&output);
@@ -634,6 +635,68 @@ fn a_derived_config_points_at_the_failures_above_when_several_scripts_failed() {
             .count(),
         2,
         "expected a load warning per broken script:\n{stderr}"
+    );
+}
+
+/// Every config that failed is named, and all of them share the one summary
+/// line. They were all derived from the same broken script, so a `warning:`
+/// each would read as that many independent problems; dropping all but the
+/// first would instead leave a user editing a file the warning never
+/// mentioned.
+#[test]
+fn the_summary_names_every_config_that_failed() {
+    // The workspace's own config and the user-global one, which is why the
+    // paths are rooted rather than rebased under `.aspect/`: `home/` is the
+    // run's throwaway `$HOME`.
+    let files = [
+        (".aspect/apolicy.axl", UNPARSABLE_SCRIPT_DEFINING_MYTASK),
+        (".aspect/config.axl", CONFIG_NEEDING_MYTASK),
+        ("home/.aspect/config.axl", CONFIG_NEEDING_MYTASK),
+    ];
+    let output = run_in_rooted_workspace(&files, &["version"]);
+    assert_degraded(&output, "apolicy.axl");
+    let stderr = stderr(&output);
+
+    let summary = stderr
+        .lines()
+        .find(|line| line.contains("then failed too, most likely because of"))
+        .unwrap_or_else(|| panic!("expected a derived-config summary in:\n{stderr}"));
+    // The paths are absolute, so each is recognised by its tail — and the
+    // workspace config's tail is itself a suffix of the user-global one's,
+    // which is why the list is split on the join before anything is matched.
+    let listed: Vec<&str> = summary
+        .trim_start_matches("warning: ")
+        .split_once(" then failed too")
+        .map(|(paths, _)| paths.split(", ").collect())
+        .unwrap_or_else(|| panic!("the summary must list the configs: {summary:?}"));
+
+    assert_eq!(
+        listed.len(),
+        2,
+        "both failed configs belong in the one summary line: {summary:?}"
+    );
+    assert!(
+        listed[0].ends_with("/.aspect/config.axl")
+            && !listed[0].ends_with("home/.aspect/config.axl"),
+        "the workspace config is named first: {summary:?}"
+    );
+    assert!(
+        listed[1].ends_with("home/.aspect/config.axl"),
+        "the user-global config runs last among configs, and is reported last: \
+         {summary:?}"
+    );
+    assert!(
+        summary.ends_with("apolicy.axl — fix that first"),
+        "one script failed, so it is the cause both configs are blamed on: {summary:?}"
+    );
+    // One warning for the script, and none for either config.
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("warning:") && l.contains(" failed; "))
+            .count(),
+        1,
+        "expected exactly one load warning:\n{stderr}"
     );
 }
 

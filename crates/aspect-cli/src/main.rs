@@ -456,12 +456,15 @@ impl Unloadable {
     /// off `scripts` to raise as the run’s error.
     ///
     /// Which script the derived-config summary blames: `raised` if there is
-    /// one, it being off the list but still the likeliest cause; otherwise the
-    /// only script that failed, if exactly one did. With several script
-    /// failures and none raised, the summary points at them as a group —
-    /// naming one of them would be repeating whatever order `read_dir`
-    /// happened to use. A named cause is preferred to "the above" because a
-    /// raised failure is not above: it prints below as the run’s `error:`.
+    /// one — it is off the list, it is the one failure not printed above, and
+    /// it is the one blocking the run. With another script broken as well it
+    /// may not be the one the config actually needed, which is not something
+    /// the CLI can tell; "fix that first" holds either way. Otherwise the only
+    /// script that failed, if exactly one did. With several script failures
+    /// and none raised, the summary points at them as a group — naming one of
+    /// them would be repeating whatever order `read_dir` happened to use. A
+    /// named cause is preferred to "the above" because a raised failure is not
+    /// above: it prints below as the run’s `error:`.
     /// `ASPECT_DEBUG` prints the suppressed config diagnostic anyway, for the
     /// case where the guess is wrong and the config really did have its own
     /// problem.
