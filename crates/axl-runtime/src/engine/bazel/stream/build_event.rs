@@ -157,6 +157,21 @@ pub struct BuildEventStream {
     broadcaster: Option<Broadcaster<Arc<BuildEventEnvelope>>>,
 }
 
+/// Unlinks the event file when the reader thread leaves, however it leaves.
+///
+/// Bazel's event file holds the command line as bazel received it, before the
+/// reader redacts anything — remote headers, env passthrough, URL credentials.
+/// Leaving it behind would leave those at rest in a shared temp directory for
+/// the life of the machine, so the unlink has to survive a panic in the read
+/// loop and not just its `return` paths.
+struct EventFileGuard(PathBuf);
+
+impl Drop for EventFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl BuildEventStream {
     /// Mint the path bazel will write `--build_event_binary_file` to, for the
     /// caller to pass on the command line before spawning. Nothing is created
@@ -192,13 +207,7 @@ impl BuildEventStream {
         let main_broadcaster = Broadcaster::new();
         let thread_broadcaster = main_broadcaster.clone();
         let handle = thread::spawn(move || {
-            // Bazel's event file holds the command line as bazel received it,
-            // before this thread redacts anything — remote headers, env
-            // passthrough, URL credentials. It is ours to remove, and leaving
-            // it behind would leave those at rest in a shared temp directory
-            // for the life of the machine. Removed on every exit from the read
-            // loop, including the error ones.
-            let bep_path = path.clone();
+            let _event_file = EventFileGuard(path.clone());
             let outcome = (move || {
                 let broadcaster = thread_broadcaster;
                 let raw_file_sink_paths: Vec<String> =
@@ -436,7 +445,6 @@ impl BuildEventStream {
                     }
                 }
             })();
-            let _ = std::fs::remove_file(&bep_path);
             outcome
         });
 
@@ -819,6 +827,29 @@ mod tests {
         assert!(
             !path.exists(),
             "the raw event file must not be left behind: {}",
+            path.display()
+        );
+    }
+
+    /// The unlink is the only thing standing between a redacted stream and the
+    /// unredacted command line sitting in /tmp for the life of the machine, so
+    /// it has to hold when the read loop unwinds rather than returns.
+    #[test]
+    fn the_event_file_is_removed_even_if_the_reader_panics() {
+        let path = temp_bep_path();
+        File::create(&path).unwrap();
+        assert!(path.exists());
+
+        let p = path.clone();
+        let panicked = std::panic::catch_unwind(move || {
+            let _event_file = EventFileGuard(p);
+            panic!("the read loop fell over");
+        });
+
+        assert!(panicked.is_err(), "the test needs the panic to happen");
+        assert!(
+            !path.exists(),
+            "a panicking reader must still unlink the event file: {}",
             path.display()
         );
     }
