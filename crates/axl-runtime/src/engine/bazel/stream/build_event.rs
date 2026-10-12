@@ -69,16 +69,35 @@ const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 /// Short enough to be invisible next to a build, long enough not to spin.
 const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// How long the daemon may keep writing after the client has exited.
+///
+/// `--build_event_binary_file_upload_mode=fully_async` lets the command return
+/// before the file transport has drained its queue, so the tail of the stream —
+/// `BuildFinished` and `last_message` among it — can still be unwritten when
+/// the client dies. This bounds that patience: a daemon that holds the file
+/// open and writes nothing more must not hang the build.
+const POST_INVOCATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Turns "nothing written yet" into a blocking read, below the
 /// length-delimited framing.
 ///
 /// [`galvanize::StreamingFile`] returns `Ok(0)` for "at the current end of the
 /// file, try again later", which the framing above cannot tell from a short
-/// read. The invocation's pid bounds the wait: the Bazel server outlives the
-/// command, so only the client can say no more bytes are coming.
+/// read.
+///
+/// Two facts end the stream, and one is not enough. The client exiting says no
+/// *new* events will be produced; the daemon closing the file says none are
+/// still on their way to disk. Taking the client's death alone truncates the
+/// stream silently, because `Build::wait` reaps the client before it joins this
+/// reader and the daemon is still flushing. Taking the daemon's close alone
+/// hangs on a stale `server_pid`. So the stream ends when the invocation is
+/// over *and* the daemon is off the file — or when
+/// [`POST_INVOCATION_GRACE`] runs out, whichever comes first.
 struct PendingWriterReader {
     inner: galvanize::StreamingFile,
     writer_pid: u32,
+    /// When the invocation was first seen to be over; the grace runs from here.
+    invocation_ended_at: Option<std::time::Instant>,
 }
 
 impl PendingWriterReader {
@@ -95,6 +114,23 @@ impl PendingWriterReader {
     /// the events said: another attempt is demonstrably already writing.
     fn was_replaced(&mut self) -> bool {
         self.inner.take_truncated()
+    }
+
+    /// Called once the invocation's pid is gone and the file has no more bytes
+    /// in it. True when that really is the end rather than the daemon still
+    /// flushing — see [`PendingWriterReader`] for why both answers are needed.
+    ///
+    /// A stale `server_pid` reports no file open and so settles immediately,
+    /// which is the behaviour to want: the alternative is waiting out the grace
+    /// on every build whose daemon has since been replaced.
+    fn invocation_is_settled(&mut self) -> io::Result<bool> {
+        if !self.inner.holder_has_file()? {
+            return Ok(true);
+        }
+        let since = *self
+            .invocation_ended_at
+            .get_or_insert_with(std::time::Instant::now);
+        Ok(since.elapsed() >= POST_INVOCATION_GRACE)
     }
 }
 
@@ -142,7 +178,7 @@ impl Read for PendingWriterReader {
             if read > 0 {
                 return Ok(read);
             }
-            if invocation_over {
+            if invocation_over && self.invocation_is_settled()? {
                 return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
             }
             thread::sleep(WRITER_POLL_INTERVAL);
@@ -164,6 +200,11 @@ pub struct BuildEventStream {
 /// Leaving it behind would leave those at rest in a shared temp directory for
 /// the life of the machine, so the unlink has to survive a panic in the read
 /// loop and not just its `return` paths.
+///
+/// It covers the reader's lifetime and no longer. A bazel attempt that opens
+/// the path after the reader has finished recreates the file, and nothing here
+/// removes that one; closing it properly means unlinking again once the client
+/// has been reaped.
 struct EventFileGuard(PathBuf);
 
 impl Drop for EventFileGuard {
@@ -229,6 +270,21 @@ impl BuildEventStream {
                         Ok(MultiWriter { writers })
                     };
 
+                // Point the file sinks at fresh truncated files, so a retry's
+                // stream starts clean rather than appended to the attempt it
+                // replaced. Both ways a retry is detected need this.
+                //
+                // Order matters: flush first to empty the BufWriter, then open
+                // the new sinks (`File::create` truncates). The assignment
+                // drops the old MultiWriter, whose BufWriters are empty by
+                // then, so its drop-flush writes nothing after the truncation.
+                let reset_file_sinks =
+                    |raw_out: &mut MultiWriter<BufWriter<File>>| -> io::Result<()> {
+                        let _ = raw_out.flush();
+                        *raw_out = open_file_sinks(&raw_file_sink_paths)?;
+                        Ok(())
+                    };
+
                 // End the stream: cut subscribers loose, flush and signal the
                 // file sinks. Says nothing about whether the build succeeded —
                 // that is the caller's to read off bazel's exit code.
@@ -270,7 +326,11 @@ impl BuildEventStream {
                         return Err(BuildEventStreamError::IO(err));
                     }
                 };
-                let mut reader = PendingWriterReader { inner, writer_pid };
+                let mut reader = PendingWriterReader {
+                    inner,
+                    writer_pid,
+                    invocation_ended_at: None,
+                };
 
                 let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
                 // Initial size for reading a varint
@@ -356,27 +416,12 @@ impl BuildEventStream {
                                         .unwrap_or(false)
                                     {
                                         expecting_retry = true;
-                                        // Replace file sinks with fresh truncated files so
-                                        // the retry stream starts clean.
-                                        //
-                                        // Order matters: flush first to empty the BufWriter's
-                                        // internal buffer, then open new sinks (File::create
-                                        // truncates the file).  The assignment drops the old
-                                        // MultiWriter; since its BufWriters are now empty,
-                                        // the drop-flush is a no-op and no stale bytes are
-                                        // written after the truncation.
-                                        let _ = raw_out.flush();
-                                        match open_file_sinks(&raw_file_sink_paths) {
-                                            Ok(new_raw_out) => {
-                                                raw_out = new_raw_out;
-                                            }
-                                            Err(e) => {
-                                                signal_all(Err(format!(
-                                                    "failed to reopen file sink(s) for retry: {e}"
-                                                )));
-                                                broadcaster.close();
-                                                return Err(BuildEventStreamError::IO(e));
-                                            }
+                                        if let Err(e) = reset_file_sinks(&mut raw_out) {
+                                            signal_all(Err(format!(
+                                                "failed to reopen file sink(s) for retry: {e}"
+                                            )));
+                                            broadcaster.close();
+                                            return Err(BuildEventStreamError::IO(e));
                                         }
                                     }
                                 }
@@ -404,6 +449,16 @@ impl BuildEventStream {
                             // than splice the two streams together.
                             if reader.was_replaced() {
                                 expecting_retry = true;
+                                // Attempt N+1 is already at offset zero, so
+                                // whatever of attempt N reached the sinks is a
+                                // prefix of a stream nobody will finish.
+                                if let Err(e) = reset_file_sinks(&mut raw_out) {
+                                    signal_all(Err(format!(
+                                        "failed to reopen file sink(s) for retry: {e}"
+                                    )));
+                                    broadcaster.close();
+                                    return Err(BuildEventStreamError::IO(e));
+                                }
                             }
                             if expecting_retry {
                                 // aspect-build/aspect-cli#1060: a REMOTE_CACHE_EVICTED
@@ -668,6 +723,41 @@ mod tests {
             .expect("spawn attempt writer")
     }
 
+    /// A child process that writes `pieces` into one attempt, holding the file
+    /// open across a pause between each, then closing and lingering.
+    ///
+    /// The pause is the point: it puts the reader at the end of the file with
+    /// the holder still on it, which is the state a real build spends most of
+    /// its time in. It has to be a separate process for the same reason
+    /// [`spawn_attempt_writer`] does — a reader asking
+    /// `is_path_open_for_pid` about its own process always sees its own read
+    /// descriptor and answers yes, so a holder of `std::process::id()` makes
+    /// the question unaskable and the test vacuous.
+    ///
+    /// The returned child is both the holder and a live invocation pid.
+    fn spawn_gapped_writer(path: &PathBuf, pieces: &[Vec<u8>]) -> std::process::Child {
+        let mut script = format!("exec 3> {}; ", path.display());
+        for (i, piece) in pieces.iter().enumerate() {
+            let part = std::env::temp_dir().join(format!(
+                "test-bes-piece-{}-{}.bin",
+                uuid::Uuid::new_v4(),
+                i
+            ));
+            std::fs::write(&part, piece).expect("stage piece");
+            if i > 0 {
+                script.push_str("sleep 0.2; ");
+            }
+            script.push_str(&format!("cat {} >&3; ", part.display()));
+        }
+        // Close the file, then outlive the reader draining it.
+        script.push_str("exec 3>&-; sleep 30");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .expect("spawn gapped writer")
+    }
+
     /// Spawn a long-lived `sleep` subprocess and return its pid.
     ///
     /// Stands in for the bazel client: a live invocation pid, so the reader
@@ -831,6 +921,54 @@ mod tests {
         );
     }
 
+    /// The bazel client can return before the daemon has written the tail of the
+    /// event file — that is exactly what
+    /// `--build_event_binary_file_upload_mode=fully_async` asks for, and
+    /// `Build::wait` reaps the client before it joins this reader. The client's
+    /// death is not the end of the stream while the daemon still holds the file.
+    #[test]
+    fn the_client_exiting_does_not_cut_off_a_daemon_still_writing() {
+        let path = temp_bep_path();
+        let seg1 = std::env::temp_dir().join(format!("seg1-{}.bin", uuid::Uuid::new_v4()));
+        let seg2 = std::env::temp_dir().join(format!("seg2-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&seg1, encode_event(&make_event(false))).unwrap();
+        std::fs::write(&seg2, encode_event(&make_event(true))).unwrap();
+
+        // The daemon: writes event 1, holds the file open across the client's
+        // exit, then writes the last_message and closes.
+        let mut holder = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "exec 3> {p}; cat {a} >&3; sleep 1; cat {b} >&3; exec 3>&-; sleep 30",
+                p = path.display(),
+                a = seg1.display(),
+                b = seg2.display()
+            ))
+            .spawn()
+            .unwrap();
+
+        // The client: gone well before the daemon's tail write.
+        let mut client = std::process::Command::new("sleep").arg("0.3").spawn().unwrap();
+
+        let mut stream =
+            BuildEventStream::spawn(path, holder.id(), client.id(), vec![]).unwrap();
+        let sub = stream.subscribe();
+        stream.join().unwrap();
+        let _ = client.wait();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_file(&seg1);
+        let _ = std::fs::remove_file(&seg2);
+
+        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "the client exiting must not end a stream the daemon is still writing"
+        );
+        assert!(events[1].event.last_message);
+    }
+
     /// The unlink is the only thing standing between a redacted stream and the
     /// unredacted command line sitting in /tmp for the life of the machine, so
     /// it has to hold when the read loop unwinds rather than returns.
@@ -926,69 +1064,76 @@ mod tests {
     // (e.g. Bazel process killed, SIGTERM, or a transient-error attempt ending)
     // -------------------------------------------------------------------------
 
+    /// The holder closing the file is the end of the stream, even with the
+    /// invocation still alive and no `last_message` to say so.
+    ///
+    /// The holder is a real child that closes the file and then lingers, so the
+    /// close is the only thing that can end this. A nominated holder that never
+    /// had the file open would end the stream at the first EOF and assert the
+    /// same outcome without exercising anything, which is what this test used
+    /// to do; the elapsed-time assertion is what keeps it honest, since
+    /// ignoring the close turns this from a failure into a 30-second pass.
     #[test]
-    fn test_broken_pipe_ends_stream_gracefully() {
-        let path = temp_bep_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
+    fn the_holder_closing_the_file_ends_the_stream() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_bep_path();
+            let mut writer = spawn_gapped_writer(&path, &[encode_event(&make_event(false))]);
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
+            let mut stream =
+                BuildEventStream::spawn(path.clone(), writer.id(), writer.id(), vec![]).unwrap();
+            let sub = stream.subscribe();
 
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = File::create(&path_w).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            // Closing `f` here without last_message triggers BrokenPipe on the read side.
+            let started = std::time::Instant::now();
+            // BrokenPipe is a graceful end, so this must be Ok.
+            let joined = stream.join().map_err(|e| e.to_string());
+            let elapsed = started.elapsed();
+            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+            let _ = writer.kill();
+            let _ = writer.wait();
+            (
+                joined,
+                events.len(),
+                events.first().map(|e| e.event.last_message),
+                elapsed < Duration::from_secs(5),
+            )
         });
-
-        writer.join().unwrap();
-        // join() must return Ok — BrokenPipe is a graceful termination.
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(events.len(), 1);
-        assert!(!events[0].event.last_message);
+        assert_eq!(
+            outcome,
+            Some((Ok(()), 1, Some(false), true)),
+            "the holder closing the file must end the stream, promptly"
+        );
     }
 
     // -------------------------------------------------------------------------
-    // Writer reconnect
+    // Idle gaps within one attempt
     //
-    // Force idle gaps to surface as `Ok(0)`: this process owns the file's
-    // read end, while a separate live PID represents the Bazel invocation.
+    // A pause with the file still open is `Ok(0)` from the `StreamingFile`,
+    // which is indistinguishable from the end of the stream unless the reader
+    // asks who still holds the file. The holder is therefore a real child
+    // process in both of these.
     // -------------------------------------------------------------------------
 
-    /// Keeps the stream open when a writer reconnects between records.
+    /// Keeps the stream open across a pause between two records.
     #[test]
     fn an_idle_gap_between_records_keeps_the_stream_open() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
             let path = temp_bep_path();
-            let mut holder = spawn_pid_holder();
+            let mut writer = spawn_gapped_writer(
+                &path,
+                &[
+                    encode_event(&make_event(false)),
+                    encode_event(&make_event(true)),
+                ],
+            );
 
             let mut stream =
-                BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
-                    .unwrap();
+                BuildEventStream::spawn(path.clone(), writer.id(), writer.id(), vec![]).unwrap();
             let sub = stream.subscribe();
 
-            let path_w = path.clone();
-            let _writer = std::thread::spawn(move || {
-                let mut f = File::create(&path_w).unwrap();
-                f.write_all(&encode_event(&make_event(false))).unwrap();
-                f.flush().unwrap();
-                // A long pause with the file open and no new bytes: the reader
-                // is at the end of the file and must wait rather than call it
-                // the end of the stream.
-                std::thread::sleep(Duration::from_millis(200));
-                f.write_all(&encode_event(&make_event(true))).unwrap();
-                f.flush().unwrap();
-            });
-
-            // Do not join the writer: if the reader exits early the assertion
-            // below is what should report it, not a hang in the writer.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
+            let _ = writer.kill();
+            let _ = writer.wait();
             (joined, events.len())
         });
         assert_eq!(
@@ -1003,31 +1148,22 @@ mod tests {
     fn a_record_written_in_two_parts_is_not_desynced() {
         let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
             let path = temp_bep_path();
-            let mut holder = spawn_pid_holder();
+            let record = encode_event(&make_event(true));
+            // Stop one byte short so the pause lands inside the record.
+            let split = record.len() - 1;
+            let mut writer = spawn_gapped_writer(
+                &path,
+                &[record[..split].to_vec(), record[split..].to_vec()],
+            );
 
             let mut stream =
-                BuildEventStream::spawn(path.clone(), std::process::id(), holder.id(), vec![])
-                    .unwrap();
+                BuildEventStream::spawn(path.clone(), writer.id(), writer.id(), vec![]).unwrap();
             let sub = stream.subscribe();
 
-            let path_w = path.clone();
-            let _writer = std::thread::spawn(move || {
-                let record = encode_event(&make_event(true));
-                // Stop one byte short so the pause lands inside the record.
-                let split = record.len() - 1;
-                let mut f = File::create(&path_w).unwrap();
-                f.write_all(&record[..split]).unwrap();
-                f.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(200));
-                f.write_all(&record[split..]).unwrap();
-                f.flush().unwrap();
-            });
-
-            // Do not join the writer: if the reader exits early the assertion
-            // below is what should report it, not a hang in the writer.
             let joined = stream.join().map_err(|e| e.to_string());
             let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
+            let _ = writer.kill();
+            let _ = writer.wait();
             (
                 joined,
                 events.len(),
@@ -1037,7 +1173,7 @@ mod tests {
         assert_eq!(
             outcome,
             Some((Ok(()), 1, Some(true))),
-            "a record spanning a reconnect must be delivered whole"
+            "a record spanning a flush must be delivered whole"
         );
     }
 

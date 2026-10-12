@@ -378,6 +378,21 @@ impl StreamingFile {
         self.restartable
     }
 
+    /// Whether the holder has the file open at this instant.
+    ///
+    /// `Ok(0)` from [`read`](Self::read) means "no bytes right now", which on a
+    /// regular file is the normal state between two writes. A caller that ends
+    /// its stream on some other signal — the invocation exiting, say — needs
+    /// this to tell "caught up, more is coming" from "caught up, and that was
+    /// everything".
+    ///
+    /// A pid that is dead, or alive but no longer the process the caller meant,
+    /// answers `false`. Callers must treat that as "nothing more is coming"
+    /// rather than as patience, or a stale pid becomes an unbounded wait.
+    pub fn holder_has_file(&self) -> io::Result<bool> {
+        is_path_open_for_pid(&self.path, self.holder_pid)
+    }
+
     /// Whether a read found the file replaced under it, and clears the flag.
     /// Checked alongside the `BrokenPipe` such a read reports, to tell a
     /// writer that started over from one that finished.
@@ -552,13 +567,26 @@ impl Read for StreamingFile {
                 // A file opened with `open`, not `open_restartable`, keeps the
                 // old contract: there the holder is the process the caller
                 // nominated and its exit is the end.
-                if self.restartable && !is_pid_alive(self.holder_pid) {
-                    return Ok(0);
-                }
-                if is_path_open_for_pid(&self.path, self.holder_pid)? {
-                    // At the end of the file with the holder still on it. The
-                    // cheapest moment to look for a replacement, and the one a
-                    // lagging reader reaches as it catches up.
+                //
+                // Liveness is a proxy, and it leaves one case: a pid that is
+                // alive but is no longer the process the caller meant, because
+                // the slot was reused. That reads as a holder that simply does
+                // not have the file open, and the stream ends at the first gap
+                // between events. Callers that cannot afford a truncated stream
+                // must not rest on this alone — `PendingWriterReader` pairs it
+                // with the invocation's own liveness for that reason.
+                //
+                // Patience is also the answer while the holder does have the
+                // file open, so the two cases share what follows. Left as
+                // separate branches, the patient one skipped the forced
+                // replacement check below and fell back on the rate-limited
+                // one — the weaker of the two, in the case that needs the
+                // stronger.
+                let holder_gone_but_patient = self.restartable && !is_pid_alive(self.holder_pid);
+                if holder_gone_but_patient || is_path_open_for_pid(&self.path, self.holder_pid)? {
+                    // At the end of the file with more bytes still possible.
+                    // The cheapest moment to look for a replacement, and the
+                    // one a lagging reader reaches as it catches up.
                     self.last_truncation_check =
                         std::time::Instant::now() - TRUNCATION_CHECK_INTERVAL;
                     if self.check_replaced()? {

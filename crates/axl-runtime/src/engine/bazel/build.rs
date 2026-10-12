@@ -1086,11 +1086,15 @@ impl Build {
         // `Pipe::open` blocks for a *writer* rather than for a pid, and the pid
         // is consulted only on an empty read, which on a blocking FIFO cannot
         // happen until every writer has closed — by which point "not open" is
-        // the right answer whether the pid is alive or dead. The BES reader
-        // reads a regular file and so shares the execution log's exposure here.
-        // A regular file has no kernel primitive for "wait for a writer",
-        // so galvanize substitutes pid liveness, and that substitution is what made
-        // a stale pid matter here and nowhere else.
+        // the right answer whether the pid is alive or dead.
+        //
+        // The BES reader also reads a regular file, but it does *not* share the
+        // exposure: `StreamingFile::open_restartable` deliberately does not
+        // gate on holder liveness, and its read side treats a dead holder as
+        // "nothing right now" rather than as the end. A stale pid there costs
+        // patience, not events. The execution log is the caller still on
+        // `StreamingFile::open`, where a stale pid is the end of the stream, so
+        // this is the one place the pid has to be the right one.
         let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
 
         let span = tracing::info_span!(
@@ -3384,6 +3388,70 @@ Test = task(implementation = _impl)
                 let exit = r.expect("run_task");
                 assert_eq!(exit, Some(0));
             }
+        }
+    }
+
+    /// A multi-attempt build through the whole stack: `ctx.bazel.build` →
+    /// `Build::spawn`'s pid plumbing → `BuildEventStream` → the AXL iterator.
+    /// The `cache_evicted_with_retry` scenario had been defined in basil with
+    /// no consumer at all, so nothing covered this shape end to end.
+    ///
+    /// **What this does not cover.** Only attempt 1's two events reach the
+    /// iterator, and that is a limit of the fake bazel rather than the reader.
+    /// `await_restart` detects the next attempt by watching the *holder* reopen
+    /// the file, and basil can never be the holder: the pid the reader is given
+    /// comes from `bazel info server_pid`, which basil answers with either
+    /// `BASIL_SERVER_PID` (a `sleep` stand-in that never touches the event
+    /// file) or its own already-exited `info` pid. So the primary signal cannot
+    /// fire here, the weaker shorter-file fallback loses the race against two
+    /// attempts of near-identical length, and the stream ends when basil does.
+    ///
+    /// The retry mechanism itself is covered faithfully one layer down, by
+    /// `stream::build_event::tests::test_transient_retry_delivers_events_from_both_attempts`,
+    /// which uses a real child process as the holder and does see both
+    /// attempts. What *this* test pins is the half that one cannot: that a
+    /// build whose event file is truncated under the reader terminates
+    /// promptly, with bazel's own exit code, and without hanging — which is
+    /// what aspect-build/aspect-cli#1060 was.
+    ///
+    /// Making this see all four events needs basil to host the file in a
+    /// process that outlives one attempt and that `info` can name.
+    #[test]
+    fn a_cache_eviction_retry_terminates_cleanly_end_to_end() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=cache_evicted_with_retry"],
+        build_events = [iter],
+        stderr = None,
+    )
+    count = 0
+    for _ in iter:
+        count += 1
+    code = build.wait().code
+    if count < 2: return 1
+    if code != 0: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        match result {
+            None => panic!("timed out: a cache-eviction retry hung the BES reader"),
+            Some(r) => assert_eq!(
+                r.expect("run_task"),
+                Some(0),
+                "exit 1 = the iterator saw less than one whole attempt; \
+                 exit 2 = bazel's exit code was not surfaced"
+            ),
         }
     }
 
