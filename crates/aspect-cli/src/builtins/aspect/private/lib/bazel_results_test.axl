@@ -2122,6 +2122,31 @@ def _test_report_is_json_encodable(ctx):
     _eq("encodes to a non-empty string", len(encoded) > 0, True)
     _eq("round-trips", json.decode(encoded)["schema_version"], SCHEMA_VERSION)
 
+def _test_report_encodes_lint_comment_urls_without_mutating_data(ctx: TaskContext) -> None:
+    data = init_data()
+    data["lint"] = {
+        "comment_urls": {
+            ("src/a.py", 10): "https://github.com/org/repo/pull/1#discussion_r10",
+            ("src/a.py", 20): "https://github.com/org/repo/pull/1#discussion_r20",
+            ("src/b.py", 10): "https://github.com/org/repo/pull/1#discussion_r30",
+        },
+    }
+    report = json.decode(json.encode(build_report(data, "failed", command = "lint")))
+    _eq("lint comment URLs grouped by file and line", report["lint"]["comment_urls"], {
+        "src/a.py": {
+            "10": "https://github.com/org/repo/pull/1#discussion_r10",
+            "20": "https://github.com/org/repo/pull/1#discussion_r20",
+        },
+        "src/b.py": {
+            "10": "https://github.com/org/repo/pull/1#discussion_r30",
+        },
+    })
+    _eq("renderer comment URLs retain tuple keys", data["lint"]["comment_urls"], {
+        ("src/a.py", 10): "https://github.com/org/repo/pull/1#discussion_r10",
+        ("src/a.py", 20): "https://github.com/org/repo/pull/1#discussion_r20",
+        ("src/b.py", 10): "https://github.com/org/repo/pull/1#discussion_r30",
+    })
+
 def _test_report_carries_every_failure_uncapped(ctx):
     """The surfaces cap their failure lists; the report must not."""
     data = _make_multi_bucket_failure()
@@ -2412,6 +2437,7 @@ _UNIT_TESTS = [
     _test_cached_tests_sentence_partial,
     _test_cached_tests_sentence_empty_when_nothing_cached,
     _test_report_is_json_encodable,
+    _test_report_encodes_lint_comment_urls_without_mutating_data,
     _test_report_carries_every_failure_uncapped,
     _test_report_keeps_repro_target_correlation,
     _test_report_names_its_cache_derivations,
