@@ -230,14 +230,13 @@ impl Subscription for NotifySubscription {
     }
 
     fn drain(&mut self) {
-        // Dropping the old watcher stops its callback thread, providing a
-        // barrier after every native event already queued for delivery. Clear
-        // those events, then synchronously register a fresh watcher before
-        // returning so subsequent writes are observed.
+        // notify's inotify backend requests shutdown on drop without waiting
+        // for callbacks to stop. Give the new watcher separate event state so
+        // callbacks from the old watcher cannot add events after the drain.
         drop(self.watcher.take());
-        self.pending.lock().unwrap().clear();
-        self.new_dirs.lock().unwrap().clear();
-        self.error.lock().unwrap().take();
+        self.pending = Arc::new(Mutex::new(Pending::default()));
+        self.new_dirs = Arc::new(Mutex::new(Vec::new()));
+        self.error = Arc::new(Mutex::new(None));
         match create_watcher(&self.config, &self.pending, &self.error, &self.new_dirs) {
             Ok(watcher) => {
                 self.watcher = Some(watcher);
