@@ -1,0 +1,41 @@
+# Untested: the Bazel Rust build is broken on the author's machine. Under Bazel
+# the build script cannot download a release, so the server jar must be
+# supplied as an input (see crates/blazon/README.md); this target only wires
+# the pieces as far as a cargo_build_script with the spec as data.
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_library")
+
+cargo_build_script(
+    name = "buildx_bindings",
+    srcs = ["build.rs"],
+    data = ["bindings.toml"],
+    deps = ["//crates/blazon:blazon_lib"],
+)
+
+rust_library(
+    name = "buildx_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_name = "buildx",
+    deps = [
+        ":buildx_bindings",
+        "//crates/blazon:blazon_lib",
+        "//crates/blazon-rt",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:dirs",
+        "@crates//:jni",
+        "@crates//:libc",
+        "@crates//:md-5",
+        "@crates//:prost",
+        "@crates//:starlark",
+    ],
+)
+
+rust_binary(
+    name = "buildx",
+    srcs = ["src/main.rs"],
+    deps = [":buildx_lib"],
+)

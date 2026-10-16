@@ -1,0 +1,12 @@
+load("//bazel/rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "blazon-rt",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "blazon_rt",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:jni",
+        "@crates//:libloading",
+    ],
+)

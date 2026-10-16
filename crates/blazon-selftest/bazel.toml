@@ -1,0 +1,152 @@
+versions = ["9.0.1"]
+starlark = true
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.Label"
+members = ["parseCanonical"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkList"
+members = ["immutableCopyOf as copy_of"]
+
+[[class]]
+java = "net.starlark.java.eval.Dict"
+members = ["immutableCopyOf as copy_of"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.StructImpl"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.BazelRepositoryModule"
+starlark = false
+members = [
+    "<init>()",
+    "repositoryCache",
+    "repoEnvSupplier",
+    "nonstrictRepoEnvSupplier",
+    "registries?",
+    "moduleMirrors?",
+    "clock?",
+    "repositoryFetchFunction?",
+    "moduleFileFunction?",
+    "repoSpecFunction?",
+    "yankedVersionsFunction?",
+    "vendorCommand",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.cache.RepositoryCache"
+starlark = false
+members = ["<init>()", "setPath"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.HttpDownloader"
+starlark = false
+members = ["<init>(ILjava/time/Duration;IF)", "CLOCK"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.DownloadManager"
+starlark = false
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.MutableSupplier"
+starlark = false
+members = ["<init>()", "get", "set"]
+
+[[class]]
+java = "com.google.common.collect.ImmutableMap"
+starlark = false
+members = ["of() as empty", "of(Ljava/lang/Object;Ljava/lang/Object;) as of", "get?"]
+
+[[class]]
+java = "com.google.common.collect.ImmutableSet"
+members = ["of(Ljava/lang/Object;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.PathFragment"
+members = [
+    "create",
+    "@getPathString as path_string",
+    "@isAbsolute() as is_absolute",
+    "segmentCount",
+    "getParentDirectory?",
+    "getRelative(Ljava/lang/String;)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.Path"
+starlark = false
+members = ["getParentDirectory?", "getRelative(Ljava/lang/String;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.clock.Clock"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryFetchFunction"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.ModuleFileFunction"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.RepoSpecFunction"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.YankedVersionsFunction"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.commands.VendorCommand"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.cache.DownloadCache"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.Downloader"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.events.ExtendedEventHandler"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Target"
+members = ["@getVisibility as visibility"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Rule"
+members = ["@getLabel as label", "@getName as name", "@getRuleClass as rule_class", "getAttr(Ljava/lang/String;) as attr?"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.InputFile"
+members = ["@getLabel as label"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Package"
+members = ["@getTargets() as targets", "@getName as name"]
+
+[[class]]
+java = "net.starlark.java.eval.Starlark"
+starlark = true
+members = []
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkValue"
+starlark = true
+members = []

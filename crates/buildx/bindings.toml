@@ -1,0 +1,545 @@
+# Bazel server classes buildx calls. `build.rs` generates the bindings for
+# every version below into OUT_DIR; `blazon --spec bindings.toml --dump a.b.C`
+# prints a class's members for writing an entry.
+
+versions = ["9.0.1", "9.2.0"]
+starlark = true
+
+# Engine: runtime and workspace.
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.Bazel"
+members = ["BAZEL_MODULES", "BAZEL_SERVICES"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BlazeRuntime"
+members = [
+    "createBlazeModules",
+    "newRuntime",
+    "shutdown",
+    "getWorkspace",
+    "@getProductName",
+    "getQueryEnvironmentFactory",
+    "getQueryFunctions",
+    "getClock",
+    "getBlazeModules",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BlazeWorkspace"
+members = ["getSkyframeExecutor", "getWorkspace", "getOutputBase", "getBinTools"]
+
+# Package loading, driven on the SkyframeExecutor directly.
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.SkyframeExecutor"
+members = [
+    "getPackageManager",
+    "sync",
+    "injectExtraPrecomputedValues",
+    "notifyCommandComplete",
+    "getBuildFilesByPriority",
+    "getMainRepoMapping(Lcom/google/devtools/build/lib/events/ExtendedEventHandler;)",
+    "getQueryTransitivePackagePreloader",
+    "setEventBus",
+    "getEffectiveStarlarkSemantics",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.PathPackageLocator"
+members = ["create"]
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.PackageManager"
+members = ["getPackagePath"]
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.PackageProvider"
+members = ["getPackage(Lcom/google/devtools/build/lib/events/ExtendedEventHandler;Lcom/google/devtools/build/lib/cmdline/PackageIdentifier;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.QuiescingExecutorsImpl"
+members = ["forTesting"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.io.TimestampGranularityMonitor"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.common.options.OptionsParser"
+members = ["builder", "parse(Ljava/util/List;)", "getOptions"]
+
+[[class]]
+java = "com.google.devtools.common.options.OptionsParser$Builder"
+rust = "OptionsParserBuilder"
+members = ["optionsClasses(Ljava/lang/Iterable;)", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BlazeCommandUtils"
+members = ["getCommonOptions"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.Reporter"
+members = ["<init>(Lcom/google/common/eventbus/EventBus;)", "addHandler"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.PrintingEventHandler"
+members = ["<init>(Lcom/google/devtools/build/lib/util/io/OutErr;Ljava/util/Set;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.EventKind"
+members = ["ERRORS_AND_WARNINGS"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.io.OutErr"
+members = ["SYSTEM_OUT_ERR"]
+
+[[class]]
+java = "com.google.common.eventbus.EventBus"
+members = ["<init>()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.Path"
+members = ["asFragment", "getParentDirectory?", "getRelative(Ljava/lang/String;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.PathFragment"
+members = ["EMPTY_FRAGMENT", "create(Ljava/lang/String;)"]
+
+[[class]]
+java = "com.google.common.collect.ImmutableMap"
+members = ["of() as empty", "of(Ljava/lang/Object;Ljava/lang/Object;) as of", "copyOf(Ljava/util/Map;)", "get?"]
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.PackageIdentifier"
+members = ["parse"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.NullEventHandler"
+members = ["INSTANCE"]
+
+# Query: environment, parse, evaluate, collect on the heap.
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.QueryEnvironmentFactory"
+members = ["create"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.SkyframeExecutorWrappingWalkableGraph"
+members = ["of"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.TargetProviderForQueryEnvironment"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.SkyframeTargetPatternEvaluator"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.TargetPattern$Parser"
+rust = "TargetPatternParser"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.RepositoryName"
+members = ["MAIN"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.common.UniverseScope"
+members = ["EMPTY"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.common.CommonQueryOptions"
+members = ["toSettings", "getLabelPrinter"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.common.AbstractBlazeQueryEnvironment"
+members = ["evaluateQuery", "transformParsedQuery", "close"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryExpression"
+members = ["parse"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryUtil"
+members = ["newOrderedAggregateAllOutputFormatterCallback"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryUtil$AggregateAllCallback"
+rust = "AggregateAllCallback"
+members = ["getResult"]
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryEvalResult"
+members = ["getSuccess"]
+
+# Live access to Bazel's own Starlark values from the buildx script.
+
+[[class]]
+java = "net.starlark.java.eval.Starlark"
+members = ["NONE", "getattr", "call", "str", "repr", "dir", "len", "type", "truth", "toIterable"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkIndexable"
+members = ["getIndex"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkMembershipTestable"
+members = ["containsKey"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkThread"
+members = ["createTransient"]
+
+[[class]]
+java = "net.starlark.java.eval.Mutability"
+members = ["IMMUTABLE"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkSemantics"
+members = ["DEFAULT as default_semantics"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkInt"
+members = ["of(J)", "toBigInteger"]
+
+[[class]]
+java = "net.starlark.java.eval.StarlarkList"
+members = ["immutableCopyOf"]
+
+[[class]]
+java = "net.starlark.java.eval.Dict"
+members = ["immutableCopyOf"]
+
+# Opaque classes: they exist so that signatures above are typed. Standard
+# Java types (java.lang, java.util, java.io, java.math) are blazon_rt::java and
+# are not listed.
+
+[[class]]
+java = "com.google.common.collect.ImmutableList"
+members = []
+
+[[class]]
+java = "com.google.common.collect.ImmutableSet"
+members = []
+
+[[class]]
+java = "com.google.common.base.Predicate"
+members = []
+
+[[class]]
+java = "com.google.devtools.common.options.OptionsBase"
+members = []
+
+[[class]]
+java = "com.google.devtools.common.options.OptionsProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.OptionsSupplier"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BlazeModule"
+members = ["getPrecomputedValues", "afterCommand"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.PrecomputedValue$Injected"
+rust = "InjectedPrecomputedValue"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BlazeService"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.events.ExtendedEventHandler"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.events.EventHandler"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Target"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.CachingPackageLocator"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.LabelPrinter"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.BuildFileName"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.PackageOptions"
+members = ["packagePath"]
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.TargetProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.TargetPatternPreloader"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.concurrent.QuiescingExecutors"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.clock.Clock"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.WorkspaceInfoFromDiff"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.RepositoryMapping"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.skyframe.WalkableGraph"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.skyframe.WalkableGraph$WalkableGraphFactory"
+rust = "WalkableGraphFactory"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.common.QueryTransitivePackagePreloader"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryEnvironment"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryEnvironment$QueryFunction"
+rust = "QueryFunction"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryEnvironment$Setting"
+rust = "Setting"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.ThreadSafeOutputFormatterCallback"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.engine.QueryUtil$AggregateAllOutputFormatterCallback"
+rust = "AggregateAllOutputFormatterCallback"
+members = []
+
+[[class]]
+java = "net.starlark.java.eval.NoneType"
+members = []
+
+# BazelRepositoryModule's private state, which seeding a repository module
+# reads and replaces.
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.BazelRepositoryModule"
+members = [
+    "<init>()",
+    "DEFAULT_REGISTRIES",
+    "DEFAULT_MODULE_MIRRORS",
+    "repositoryCache",
+    "repoEnvSupplier",
+    "nonstrictRepoEnvSupplier",
+    "registries?",
+    "moduleMirrors?",
+    "clock?",
+    "repositoryFetchFunction?",
+    "moduleFileFunction?",
+    "repoSpecFunction?",
+    "yankedVersionsFunction?",
+    "singleExtensionEvalFunction?",
+    "vendorCommand",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.cache.RepositoryCache"
+members = ["<init>()", "setPath", "getDownloadCache", "getRepoContentsCache"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.HttpDownloader"
+members = ["<init>(ILjava/time/Duration;IF)", "CLOCK"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.DownloadManager"
+members = ["<init>", "setRetries", "setDisableDownload", "setDistdir"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.MutableSupplier"
+members = ["<init>()", "get", "set"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryFetchFunction"
+members = [
+    "setDownloadManager",
+    "setTimeoutScaling",
+    "setProcessWrapper nullable(0)",
+    "setSyscallCache",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.ModuleFileFunction"
+members = ["setDownloadManager"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.RepoSpecFunction"
+members = ["setDownloadManager"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.YankedVersionsFunction"
+members = ["setDownloadManager"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.commands.VendorCommand"
+members = ["setDownloadManager"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.cache.DownloadCache"
+members = ["setHardlink"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.Downloader"
+members = []
+
+# The Starlark surface of the examples: classes without @StarlarkBuiltin get
+# their Starlark members from these entries. `@name` is an attribute, any other
+# member a method under its Java name.
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Rule"
+members = [
+    "ALL_LABELS",
+    "@getLabel",
+    "@getName",
+    "@getRuleClass",
+    "@getTargetKind",
+    "getAttr(Ljava/lang/String;)",
+    "@getVisibility",
+    "@getRuleTags",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.InputFile"
+members = ["@getLabel", "@getTargetKind"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Package"
+members = ["@getName", "@getTargets()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.RuleVisibility"
+members = ["@getDeclaredLabels"]
+
+[[class]]
+java = "com.google.devtools.build.lib.cmdline.Label"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.RuleOrMacroInstance"
+members = ["@getLabel", "@getName", "getAttr(Ljava/lang/String;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.Packageoid"
+members = ["@getTargets()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.FileTarget"
+members = ["@getLabel"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.OutputFile"
+members = ["@getTargetKind"]
+
+[[class]]
+java = "com.google.devtools.build.lib.packages.PackageGroup"
+members = ["@getLabel", "@getTargetKind"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.SingleExtensionEvalFunction"
+members = [
+    "setDownloadManager",
+    "setTimeoutScaling",
+    "setProcessWrapper nullable(0)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.cache.LocalRepoContentsCache"
+members = ["isEnabled", "acquireSharedLock"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.SyscallCache"
+members = ["NO_CACHE"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.ProcessWrapper"
+members = ["<init> nullable(2)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.BinTools"
+members = ["getActionInput?", "getEmbeddedPath?"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionInput"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.downloader.DelegatingDownloader"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.RepositoryRemoteExecutor"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.RemoteRepoContentsCache"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.CommonCommandOptions"
+members = [
+    "useStrictRepoEnv",
+    "httpTimeoutScaling",
+    "httpConnectorAttempts",
+    "httpConnectorRetryMaxTimeout",
+    "httpMaxParallelDownloads",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions"
+members = [
+    "useHardlinks",
+    "disableDownload",
+    "repositoryDownloaderRetries",
+    "experimentalScaleTimeouts",
+    "repositoryCache?",
+    "lockfileMode",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.BazelLockFileModule"
+members = ["executor", "workspaceRoot", "outputBase", "optionsLockfileMode"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$LockfileMode"
+rust = "LockfileMode"
+members = []

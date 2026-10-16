@@ -1,0 +1,18 @@
+[package]
+name = "blazon-rt"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Runtime support for blazon-generated JVM bindings: hosting a JVM, typed globals, exception conversion, reflection and JDK helpers"
+
+[lib]
+doctest = false
+
+[dependencies]
+jni = "0.21"
+libloading = "0.8"

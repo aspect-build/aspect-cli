@@ -1,0 +1,92 @@
+versions = ["fixture"]
+starlark = true
+
+[[class]]
+java = "fx.Widget"
+members = [
+    "<init>() as new",
+    "<init>(Ljava/lang/Object;I) as with_count",
+    "<init>(Ljava/lang/String;) as from_hidden",
+    "of",
+    "put(Ljava/lang/Object;) as put_key nullable(0)",
+    "find?",
+    "first?",
+    "join",
+    "things",
+    "bytes",
+    "names",
+    "label",
+    "mixed",
+    "boxed",
+    "scale",
+    "inner",
+    "isReady",
+    "getWorkspace()",
+    "getWorkspace(Ljava/lang/String;) as workspace_in",
+    "setLimit",
+    "hidden",
+    "secretStatic",
+    "secret",
+    "count",
+    "PRIVATE_COUNT",
+    "MAX",
+    "NAME",
+]
+
+[[class]]
+java = "fx.Widget$Inner"
+rust = "WidgetInner"
+members = ["depth"]
+
+[[class]]
+java = "fx.Base"
+members = ["held()", ".held as held_field"]
+
+[[class]]
+java = "fx.Target"
+members = ["@getName as name", "getParentTarget?"]
+
+[[class]]
+java = "fx.Rule"
+members = [
+    "<init>(Ljava/lang/String;Ljava/lang/String;)",
+    "@getName as name",
+    "@getRuleClass as rule_class",
+    "@isTest as is_test",
+    "attributeCount",
+    "describe",
+]
+
+[[class]]
+java = "fx.Pkg"
+members = ["<init>()", "add", "getTargets"]
+
+[[class]]
+java = "fx.Top"
+members = ["@getTopValue as top_value"]
+
+[[class]]
+java = "fx.Mid"
+members = []
+
+[[class]]
+java = "fx.Marked"
+members = ["@getMark as mark"]
+
+[[class]]
+java = "fx.Leaf"
+members = [
+    "<init>()",
+    "@getLeafValue as leaf_value",
+    "getMark as mark_of_leaf",
+    ".hidden",
+    "protectedValue",
+]
+
+[[class]]
+java = "fx.Prims"
+members = [
+    "<init>()",
+    "flip", "inc", "sinc", "next", "twice", "big", "half", "scale",
+    "setTimeoutScaling", "all", "withDefaults",
+]

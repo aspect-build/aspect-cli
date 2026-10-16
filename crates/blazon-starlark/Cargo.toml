@@ -1,0 +1,22 @@
+[package]
+name = "blazon-starlark"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Runtime for blazon-generated Starlark types: Java to Starlark conversion, a per-process registry, and Starlark views of JDK collections"
+
+[lib]
+doctest = false
+
+[dependencies]
+allocative = "0.3.4"
+anyhow = "1"
+blazon-rt = { path = "../blazon-rt" }
+either = "1"
+jni = "0.21"
+starlark = "0.14.2"

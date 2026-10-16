@@ -1,0 +1,26 @@
+[package]
+name = "blazon-selftest"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Runs blazon-generated bindings and Starlark types against a JVM: the fixture jar, and Bazel's own classes when a release is cached"
+publish = false
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[dependencies]
+allocative = "0.3.4"
+blazon-rt = { path = "../blazon-rt" }
+blazon-starlark = { path = "../blazon-starlark" }
+jni = "0.21"
+starlark = "0.14.2"
+
+[build-dependencies]
+blazon = { path = "../blazon", default-features = false }

@@ -1,0 +1,16 @@
+# Untested: the Bazel Rust build is broken on the author's machine.
+load("//bazel/rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "blazon-starlark",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "blazon_starlark",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/blazon-rt",
+        "@crates//:allocative",
+        "@crates//:either",
+        "@crates//:jni",
+        "@crates//:starlark",
+    ],
+)

@@ -1,0 +1,35 @@
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_library")
+
+rust_library(
+    name = "blazon_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_name = "blazon",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:cafebabe",
+        "@crates//:dirs",
+        "@crates//:heck",
+        "@crates//:prettyplease",
+        "@crates//:proc-macro2",
+        "@crates//:quote",
+        "@crates//:reqwest",
+        "@crates//:serde",
+        "@crates//:syn",
+        "@crates//:toml",
+        "@crates//:zip",
+    ],
+)
+
+rust_binary(
+    name = "blazon",
+    srcs = ["src/main.rs"],
+    deps = [
+        ":blazon_lib",
+        "@crates//:anyhow",
+        "@crates//:clap",
+    ],
+)

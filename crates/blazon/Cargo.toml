@@ -1,0 +1,41 @@
+[package]
+name = "blazon"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Generates typed Rust bindings to Bazel's server classes from a release's A-server.jar, per Bazel version"
+
+[features]
+default = ["release", "cli"]
+# Fetching Bazel releases (`blazon::release`, `build_script`); off for a consumer that
+# supplies a server jar itself.
+release = ["dep:reqwest", "dep:dirs"]
+cli = ["release", "dep:clap"]
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "blazon"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+anyhow = "1"
+cafebabe = "0.9"
+clap = { version = "4", features = ["derive"], optional = true }
+dirs = { version = "6", optional = true }
+heck = "0.5"
+prettyplease = "0.2"
+proc-macro2 = "1"
+quote = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"], optional = true }
+serde = { version = "1", features = ["derive"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "clone-impls"] }
+toml = "0.8"
+zip = { version = "2", default-features = false, features = ["deflate"] }

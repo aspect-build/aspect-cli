@@ -1,0 +1,35 @@
+[package]
+name = "buildx"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "PoC: Bazel's engine hosted in-process, driven by a Starlark script without the command layer"
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "buildx"
+path = "src/main.rs"
+
+[dependencies]
+allocative = "0.3.4"
+anyhow = "1"
+blazon = { path = "../blazon" }
+blazon-rt = { path = "../blazon-rt" }
+blazon-starlark = { path = "../blazon-starlark" }
+either = "1"
+dirs = "6"
+libc = "0.2"
+md5 = { package = "md-5", version = "0.10" }
+jni = "0.21"
+starlark = "0.14.2"
+
+[build-dependencies]
+blazon = { path = "../blazon" }
