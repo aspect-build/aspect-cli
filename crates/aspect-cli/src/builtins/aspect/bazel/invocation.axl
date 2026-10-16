@@ -197,7 +197,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
 
     # `[]` would ENABLE BES with no consumer (the runtime treats an empty list as
     # "stream on"); collapse to False so a local build with no sinks/iterator runs
-    # with no BEP fifo at all.
+    # with no BEP file at all.
     be = ([iterator] if iterator else []) + list(inv.sinks)
     build_events = be if be else False
 

@@ -22,7 +22,7 @@ loop (`lint`, `format`, `gazelle`, `warming`, `delivery`, `run`) call it on ever
 tick regardless of what Bazel is doing. `bazel/invocation.axl` — `build` and
 `test` — instead pumps from `on_event`, so its loop runs only when a BES event
 iterator exists, and an `exec_log_event` hook does not by itself create one
-(deliberately: a BEP FIFO and a parsed event stream are a real cost to impose on
+(deliberately: a BEP file and a parsed event stream are a real cost to impose on
 a feature that does not read build events).
 
 With no event iterator, every hook fires in `close` instead, still before
@@ -84,7 +84,7 @@ on the phase.
 
 ## Back-pressure
 
-A hook cannot slow Bazel down. In production the CLI does not give Bazel a FIFO:
+A hook cannot slow Bazel down. In production the CLI does not give Bazel a pipe:
 Bazel writes `--execution_log_compact_file` as a regular file and the CLI tails
 it (`ExecLogStream::spawn_with_file`). A slow consumer parks the CLI's reader
 thread on the decoded channel once it fills; Bazel keeps writing to the file
