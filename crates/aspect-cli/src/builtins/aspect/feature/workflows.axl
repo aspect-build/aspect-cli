@@ -40,8 +40,10 @@ def _workflows_impl(ctx: FeatureContext):
         # On a Workflows runner, register the runner-environment table and the
         # Bazel server health check as `health_check` hooks. `setup_phase` runs
         # them inside the Setup phase; each prints its own BK section marker.
-        hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
-        hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))
+        if not ctx.args.skip_runner_metadata:
+            hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
+        if not ctx.args.skip_health_check:
+            hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
         # Detect + repair stranded sandbox state (bazelbuild/bazel#23880) after
         # every bazel attempt, stop retrying onto a sandbox we could not clean,
@@ -164,6 +166,28 @@ Workflows = feature(
                           "once per repo in config.axl via ctx.features[Workflows].args.remote_exec, " +
                           "or per task with --workflows:remote-exec. Vanilla `bazel` on the runner " +
                           "opts in with --config=aspect-exec from the rc `aspect setup bazelrc` writes.",
+        ),
+        "skip_runner_metadata": args.boolean(
+            default = False,
+            description = "Do not print the Workflows runner metadata table during this " +
+                          "task's Setup phase. For the second and later `aspect` tasks of a " +
+                          "CI step that already printed it: the table describes the runner, " +
+                          "not the task, so repeating it per task only lengthens the log. " +
+                          "`aspect ci runner-metadata` prints it on demand. Only takes " +
+                          "effect on Aspect Workflows runners; a no-op elsewhere. Set per " +
+                          "task with --workflows:skip-runner-metadata.",
+        ),
+        "skip_health_check": args.boolean(
+            default = False,
+            description = "Do not run the Workflows runner health check during this task's " +
+                          "Setup phase. The check waits for cache warming, probes and if " +
+                          "needed restarts the runner's Bazel server, and marks the runner " +
+                          "unhealthy on failure, so the first `aspect` task of a CI step " +
+                          "should keep it; set it on the later tasks of the same step, which " +
+                          "reuse the server that check just validated. `aspect ci " +
+                          "runner-health-check` runs it on demand. Only takes effect on " +
+                          "Aspect Workflows runners; a no-op elsewhere. Set per task with " +
+                          "--workflows:skip-health-check.",
         ),
         "runner_output_base_suffix": args.string(
             default = "",
