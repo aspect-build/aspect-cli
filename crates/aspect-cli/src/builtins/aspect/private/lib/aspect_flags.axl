@@ -80,8 +80,13 @@ CATALOG = [
         needs = "cache",
     ),
     _entry(
+        "--grpc_keepalive_time=30s",
+        "Ping a channel that has a call pending. Bazel sends no pings by default and then ignores --grpc_keepalive_timeout.",
+        needs = "channel",
+    ),
+    _entry(
         "--grpc_keepalive_timeout=30s",
-        "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it.",
+        "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it until the kernel abandons the connection (~15 minutes on Linux).",
         needs = "channel",
     ),
     _entry(
