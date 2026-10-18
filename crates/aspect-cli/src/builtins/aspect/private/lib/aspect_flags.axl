@@ -80,8 +80,8 @@ CATALOG = [
         needs = "cache",
     ),
     _entry(
-        "--grpc_keepalive_time=30s",
-        "Ping a channel that has a call pending. Bazel sends no pings by default and then ignores --grpc_keepalive_timeout.",
+        "--grpc_keepalive_time=330s",
+        "Ping a channel that has a call pending. Bazel sends no pings by default and then ignores --grpc_keepalive_timeout. Above 5 minutes because gRPC servers by default answer more frequent pings with a too_many_pings GOAWAY, which resets the connection.",
         needs = "channel",
     ),
     _entry(

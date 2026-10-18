@@ -57,7 +57,7 @@ _RUNNER_ONLY_FRAGMENTS = ["--repository_cache=", "--output_base=", "--output_use
 _CACHE_TUNING = ["--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
 _BES_ENRICHMENT = ["--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--legacy_important_outputs"]
 _INDEPENDENT = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks"]
-_CHANNEL = ["--grpc_keepalive_time=30s", "--grpc_keepalive_timeout=30s"]
+_CHANNEL = ["--grpc_keepalive_time=330s", "--grpc_keepalive_timeout=30s"]
 
 _WITH_BES = WorkflowsEnvironment(build_events = BuildEvents(backend = "grpcs://b"))
 
@@ -223,7 +223,7 @@ def _test_runner_executor_flags(_ctx):
     _has("executor", flags, "--remote_executor=grpc://e")
     _has("cache tuning via executor", flags, "--remote_accept_cached")
     _has("keepalive", flags, "--grpc_keepalive_timeout=30s")
-    _has("keepalive pings", flags, "--grpc_keepalive_time=30s")
+    _has("keepalive pings", flags, "--grpc_keepalive_time=330s")
     _eq("no executor → nothing", runner_executor_flags(WorkflowsEnvironment(runner = Runner())), [])
     _eq("endpoint alone", runner_executor_endpoint(exec_only), ["--remote_executor=grpc://e"])
     _eq("no endpoint", runner_executor_endpoint(WorkflowsEnvironment()), [])

@@ -12,11 +12,11 @@ common:aspect-common --experimental_repository_cache_hardlinks
 common:aspect-cache --remote_accept_cached
 common:aspect-cache --remote_timeout=3600
 common:aspect-cache --remote_retries=360
-common:aspect-cache --grpc_keepalive_time=30s
+common:aspect-cache --grpc_keepalive_time=330s
 common:aspect-cache --grpc_keepalive_timeout=30s
 
 # The BES backend (ASPECT_WORKFLOWS_BES_BACKEND where set) and its enrichment.
-common:aspect-bes --grpc_keepalive_time=30s
+common:aspect-bes --grpc_keepalive_time=330s
 common:aspect-bes --grpc_keepalive_timeout=30s
 common:aspect-bes --generate_json_trace_profile
 common:aspect-bes --noslim_profile
