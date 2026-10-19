@@ -1,4 +1,4 @@
-_BS = '\\'
+_BS = "\\"
 
 def _tokenize(s):
     tokens = []
