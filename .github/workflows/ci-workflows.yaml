@@ -351,6 +351,23 @@ jobs:
       - name: Scaffold preset
         run: |
           aspect init "$RUNNER_TEMP/proj" --task:name init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
+      # The template resolves ape 1.0.1 (bazel_env.bzl -> rules_coreutils), which
+      # fetches its cosmos binaries from cosmo.zip alone: the GitLab mirror ape's
+      # maintainers publish is commented out there and enabled only in ape 1.1.0.
+      # cosmo.zip is a single origin and goes down, failing the build at
+      # //tools:bazel_env. Try the mirror first; the sha256 pins hold, so it
+      # cannot substitute different bytes. The template's .bazelrc already loads
+      # bazel/downloader.cfg. Drop this once the template carries the rewrite or
+      # resolves ape >= 1.1.0.
+      - name: Mirror cosmo.zip downloads
+        if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
+        working-directory: ${{ runner.temp }}/proj
+        run: |
+          cat >> bazel/downloader.cfg <<'EOF'
+
+          rewrite cosmo\.zip/pub/cosmos/v/([^/]+)/bin/(.+) gitlab.arm.com/api/v4/projects/10212/packages/generic/cosmos.zip/$1/$2
+          rewrite cosmo\.zip/pub/cosmos/v/([^/]+)/bin/(.+) cosmo.zip/pub/cosmos/v/$1/bin/$2
+          EOF
       - name: Build generated workspace
         if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
         working-directory: ${{ runner.temp }}/proj

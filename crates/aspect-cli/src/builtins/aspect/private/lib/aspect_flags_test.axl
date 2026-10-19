@@ -1,8 +1,9 @@
 """Unit tests for `aspect_flags.axl`: which catalog flags each endpoint justifies
 (`independent_flags` / `endpoint_flags`), the `env_flags` / `runner_flags` /
 `runner_diagnostics_flags` compositions and the runner pieces the rc groups are
-assembled from, `apply_output_base_suffix`, and the opt-out (`omit_flags`,
-`protected_omissions`).
+assembled from, `apply_output_base_suffix`, the opt-out (`omit_flags`,
+`protected_omissions`), and how a task takes them (`add_task_flags`,
+`unset_flags`).
 
 Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
 assert the tuples carry the right constraints. Run with: aspect dev test-aspect-flags
@@ -12,6 +13,7 @@ load(
     "./aspect_flags.axl",
     "CATALOG",
     "PROTECTED_FLAGS",
+    "add_task_flags",
     "apply_output_base_suffix",
     "color_flags",
     "endpoint_flags",
@@ -33,6 +35,7 @@ load(
     "runner_repository_cache_flags",
     "runner_startup_flags",
     "unscoped",
+    "unset_flags",
     "workflows_cache_flags",
 )
 load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
@@ -57,7 +60,7 @@ _RUNNER_ONLY_FRAGMENTS = ["--repository_cache=", "--output_base=", "--output_use
 _CACHE_TUNING = ["--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
 _BES_ENRICHMENT = ["--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--legacy_important_outputs"]
 _INDEPENDENT = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks"]
-_CHANNEL = "--grpc_keepalive_timeout=30s"
+_CHANNEL = ["--grpc_keepalive_time=330s", "--grpc_keepalive_timeout=30s"]
 
 _WITH_BES = WorkflowsEnvironment(build_events = BuildEvents(backend = "grpcs://b"))
 
@@ -69,14 +72,14 @@ def _test_endpoint_flags_follow_endpoints(_ctx):
 
     # A cache brings its tuning and the channel keepalive, nothing BES-shaped.
     cache = endpoint_flags(cache = True, bes = False)
-    for want in _CACHE_TUNING + [_CHANNEL]:
+    for want in _CACHE_TUNING + _CHANNEL:
         _has("cache has " + want, cache, want)
     for absent in _BES_ENRICHMENT:
         _lacks("cache lacks " + absent, cache, absent)
 
     # BES brings the profile/BEP enrichment and the keepalive, no cache tuning.
     bes = endpoint_flags(cache = False, bes = True)
-    for want in _BES_ENRICHMENT + [_CHANNEL]:
+    for want in _BES_ENRICHMENT + _CHANNEL:
         _has("bes has " + want, bes, want)
     for absent in _CACHE_TUNING:
         _lacks("bes lacks " + absent, bes, absent)
@@ -84,7 +87,7 @@ def _test_endpoint_flags_follow_endpoints(_ctx):
 
     # An executor doubles as the cache, so it earns the cache tuning.
     exec_only = endpoint_flags(cache = False, bes = False, exec = True)
-    for want in _CACHE_TUNING + [_CHANNEL]:
+    for want in _CACHE_TUNING + _CHANNEL:
         _has("exec has " + want, exec_only, want)
 
     # Every catalog entry is reachable between the two groups.
@@ -223,9 +226,58 @@ def _test_runner_executor_flags(_ctx):
     _has("executor", flags, "--remote_executor=grpc://e")
     _has("cache tuning via executor", flags, "--remote_accept_cached")
     _has("keepalive", flags, "--grpc_keepalive_timeout=30s")
+    _has("keepalive pings", flags, "--grpc_keepalive_time=330s")
     _eq("no executor → nothing", runner_executor_flags(WorkflowsEnvironment(runner = Runner())), [])
     _eq("endpoint alone", runner_executor_endpoint(exec_only), ["--remote_executor=grpc://e"])
     _eq("no endpoint", runner_executor_endpoint(WorkflowsEnvironment()), [])
+
+def _fake_trait():
+    return struct(extra_flags = [], rc_flags = [], injected_flag_filters = [])
+
+def _test_add_task_flags_defers_the_keepalive(_ctx):
+    # The keepalive goes through an rc hook; everything else straight onto
+    # `extra_flags`, where it beats the repository's rc.
+    t = _fake_trait()
+    add_task_flags(t, endpoint_flags(cache = True, bes = False))
+    _eq("keepalive kept off extra_flags", [f for f in _texts(t.extra_flags) if f in _CHANNEL], [])
+    _has("tuning still direct", t.extra_flags, "--remote_timeout=3600")
+    _eq("one hook", len(t.rc_flags), 1)
+    hook = t.rc_flags[0]
+
+    # Nothing set: both arrive.
+    _eq("rc silent", hook(_ctx, _ctx.bazel.new_rc(flags = []), "build"), _CHANNEL)
+
+    # The rc's own interval stands; the option it leaves unset is still ours.
+    rc = _ctx.bazel.new_rc(flags = ["--grpc_keepalive_time=30s"])
+    _eq("rc sets the interval", hook(_ctx, rc, "build"), ["--grpc_keepalive_timeout=30s"])
+
+    # Read per command: a `test`-only entry leaves `build` unset.
+    scoped = _ctx.bazel.new_rc(flags = [("--grpc_keepalive_time=30s", "", "test")])
+    _eq("test-scoped, on build", hook(_ctx, scoped, "build"), _CHANNEL)
+    _eq("test-scoped, on test", hook(_ctx, scoped, "test"), ["--grpc_keepalive_timeout=30s"])
+
+    # The opt-out reaches the hook's flags, read when the hook fires.
+    t.injected_flag_filters.append(lambda flags: omit_flags(flags, ["--grpc_keepalive_timeout"]))
+    _eq("omitted", hook(_ctx, _ctx.bazel.new_rc(flags = []), "build"), ["--grpc_keepalive_time=330s"])
+
+    # A filter is not offered an empty list, as for `extra_flags`.
+    offered = []
+    t.injected_flag_filters.append(lambda flags: offered.append(flags) or flags)
+    hook(_ctx, _ctx.bazel.new_rc(flags = ["--grpc_keepalive_time=1s", "--grpc_keepalive_timeout=1s"]), "build")
+    _eq("no empty list offered", offered, [])
+
+    # Nothing deferring: no hook.
+    plain = _fake_trait()
+    add_task_flags(plain, independent_flags())
+    _eq("no hook", plain.rc_flags, [])
+    _eq("all direct", plain.extra_flags, independent_flags())
+
+def _test_unset_flags(_ctx):
+    rc = _ctx.bazel.new_rc(flags = ["--remote_timeout=60", "--disk_cache="])
+    flags = ["--remote_timeout=3600", "--disk_cache=/x", ("--noslim_profile", ">=1.0.0")]
+
+    # Set to an empty value still counts as set.
+    _eq("set ones dropped", unset_flags(rc, "build", flags), [("--noslim_profile", ">=1.0.0")])
 
 def _test_color_flags(_ctx):
     _eq("misdetected", color_flags(True), ["--color=yes"])
@@ -293,6 +345,8 @@ _UNIT_TESTS = [
     _test_runner_diagnostics_flags,
     _test_runner_bes_flags,
     _test_runner_executor_flags,
+    _test_add_task_flags_defers_the_keepalive,
+    _test_unset_flags,
     _test_color_flags,
     _test_exec_log_flags,
     _test_omit_flags,

@@ -782,6 +782,92 @@ fn an_rc_set_execution_log_path_is_the_one_used() {
     }
 }
 
+/// The value Bazel takes for `--name` from the case's `bazel build`/`bazel test`
+/// argv: the last literal `--name=VALUE`, else the last `--default_override`
+/// payload, since Bazel applies rc content (which the CLI renders as overrides)
+/// ahead of the whole command line. `None` when neither sets it.
+fn effective_flag(argv: &[String], name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    let literal = argv
+        .iter()
+        .filter_map(|t| t.strip_prefix(prefix.as_str()))
+        .last();
+    let from_rc = argv
+        .iter()
+        .filter_map(|t| t.strip_prefix("--default_override="))
+        .filter_map(|body| body.split_once('=').map(|(_section, option)| option))
+        .filter_map(|option| option.strip_prefix(prefix.as_str()))
+        .last();
+    literal.or(from_rc).map(str::to_string)
+}
+
+/// The gRPC keepalive the CLI injects for a hand-set Workflows cache is a
+/// default: a repository whose rc sets its own interval keeps it.
+///
+/// Every other injected flag is a plain command-line option and so beats the rc.
+/// The keepalive used to be one too, which overrode a repository's
+/// `common:ci --grpc_keepalive_time=30s` with the CLI's 330s; on a CI host whose
+/// NAT drops idle flows sooner than that, builds stalled for the whole timeout.
+/// The rc entry here sits under a config, the shape that was overridden, so the
+/// CLI has to read the config-expanded rc to see it.
+///
+/// The no-rc and omit cases pin the other two halves: with nothing set, both
+/// flags still arrive; and `--bazel-flags:omit` still drops a deferred flag even
+/// though it no longer travels through `extra_flags`.
+#[test]
+fn an_rc_set_grpc_keepalive_is_the_one_used() {
+    let run = |rc: Option<&str>, extra: &[&str]| -> Vec<String> {
+        let case = Case::new("success", Fixture::default(), rc);
+        let mut args = vec!["build"];
+        args.extend_from_slice(extra);
+        args.push("//...");
+        let output = case
+            .command(&args)
+            .env("ASPECT_WORKFLOWS_REMOTE_CACHE", "grpc://127.0.0.1:1")
+            .output()
+            .expect("running `aspect build`");
+        assert!(
+            case.dir.path().join(ARGV_LOG).exists(),
+            "`aspect {}` never reached Bazel\n--- stderr ---\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        case.bazel_argv()
+    };
+
+    let rc = "common:ci --grpc_keepalive_time=30s\ncommon --config=ci\n";
+    let argv = run(Some(rc), &[]);
+    assert_eq!(
+        effective_flag(&argv, "--grpc_keepalive_time").as_deref(),
+        Some("30s"),
+        "the repository's own keepalive interval should win over the CLI's: {argv:?}",
+    );
+    assert_eq!(
+        effective_flag(&argv, "--grpc_keepalive_timeout").as_deref(),
+        Some("30s"),
+        "a keepalive option the rc leaves unset is still injected: {argv:?}",
+    );
+
+    let argv = run(None, &[]);
+    assert_eq!(
+        effective_flag(&argv, "--grpc_keepalive_time").as_deref(),
+        Some("330s"),
+        "with nothing in the rc, the CLI's interval applies: {argv:?}",
+    );
+
+    let argv = run(None, &["--bazel-flags:omit=--grpc_keepalive_time"]);
+    assert_eq!(
+        effective_flag(&argv, "--grpc_keepalive_time"),
+        None,
+        "`--bazel-flags:omit` should drop a deferred flag too: {argv:?}",
+    );
+    assert_eq!(
+        effective_flag(&argv, "--grpc_keepalive_timeout").as_deref(),
+        Some("30s"),
+        "omitting one keepalive flag leaves the other: {argv:?}",
+    );
+}
+
 /// The one shape worth warning about: bazel succeeded and produced no log.
 ///
 /// That is what a nominated holder which died out from under the reader looks

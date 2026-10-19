@@ -94,7 +94,10 @@ overrides `trait.base_flags`, by design. An injected flag wins over a typed one
 either way: a section-scoped entry lands in a more specific section, and a
 carved-out unscoped entry shares the typed flag's block but is appended after it
 (rank 7 before rank 9). So `--bazel-flags:omit` is the way to override an
-injected flag — dropping it rather than shadowing it. `aspect query` and the
+injected flag — dropping it rather than shadowing it. The exception is a
+`defers` flag from `private/lib/aspect_flags.axl` (the gRPC keepalive): an
+`rc_flags` hook adds it only where the resolved rc leaves its option unset, so
+there an rc entry or a typed flag simply wins. `aspect query` and the
 sidecar queries read the `query` column; `ctx.bazel.info` reads the `info` one.
 
 Two wrinkles in that table are artifacts of how a run command is rendered rather

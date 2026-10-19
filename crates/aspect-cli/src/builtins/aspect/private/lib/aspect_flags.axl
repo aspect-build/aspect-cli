@@ -49,10 +49,15 @@ InjectedFlag = record(
     needs = field(Needs, default = Needs("nothing")),
     # Semver constraint on the Bazel version, "" for every version.
     bazel = field(str, default = ""),
+    # A default rather than a requirement: a task sets it only where its own rc
+    # files and flags leave the option unset (`add_task_flags`). For a value that
+    # depends on the network path, which a repository may know better than we
+    # do. Every other injected flag beats the repository's rc.
+    defers = field(bool, default = False),
 )
 
-def _entry(flag: str, why: str, needs: str = "nothing", bazel: str = "") -> InjectedFlag:
-    return InjectedFlag(flag = flag, why = why, needs = Needs(needs), bazel = bazel)
+def _entry(flag: str, why: str, needs: str = "nothing", bazel: str = "", defers: bool = False) -> InjectedFlag:
+    return InjectedFlag(flag = flag, why = why, needs = Needs(needs), bazel = bazel, defers = defers)
 
 # The tuning and reporting flags Aspect sets wherever their endpoint is wired.
 CATALOG = [
@@ -80,9 +85,16 @@ CATALOG = [
         needs = "cache",
     ),
     _entry(
-        "--grpc_keepalive_timeout=30s",
-        "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it.",
+        "--grpc_keepalive_time=330s",
+        "Ping a channel that has a call pending. Bazel sends no pings by default and then ignores --grpc_keepalive_timeout. Above 5 minutes because gRPC servers by default answer more frequent pings with a too_many_pings GOAWAY, which resets the connection. A repository that knows its server allows faster pings sets its own value, which a task keeps.",
         needs = "channel",
+        defers = True,
+    ),
+    _entry(
+        "--grpc_keepalive_timeout=30s",
+        "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it until the kernel abandons the connection (~15 minutes on Linux).",
+        needs = "channel",
+        defers = True,
     ),
     _entry(
         "--generate_json_trace_profile",
@@ -237,6 +249,40 @@ def omit_flags(flags: list, omitted: list) -> list:
     entry may itself carry a value."""
     names = [flag_name(o) for o in omitted]
     return [f for f in flags if flag_name(f) not in names]
+
+def _defers(flag) -> bool:
+    text = flag_text(flag)
+    return any([e.defers and e.flag == text for e in CATALOG])
+
+def unset_flags(rc, command: str, flags: list) -> list:
+    """The entries of `flags` whose option `rc` leaves unset for `command`. Reads
+    the config-expanded options, so a `common:ci` entry the run activates counts
+    as set."""
+    return [f for f in flags if rc.flag_value(flag_name(f), command = command) == None]
+
+def add_task_flags(bazel_trait, flags: list) -> None:
+    """Inject `flags` into a task through `bazel_trait`. Each goes onto
+    `extra_flags`, which beats the repository's rc, except a `defers` catalog
+    flag: an `rc_flags` hook adds that one only where the resolved rc (the rc
+    files, the typed flags, and every other injected flag) leaves its option
+    unset, so a repository that sets its own value keeps it. The hook's flags
+    pass through `injected_flag_filters` as `extra_flags` do, so
+    `--bazel-flags:omit` still drops them. The rc `aspect setup bazelrc` writes
+    needs no such step: there Bazel's own rc order decides."""
+    deferring = [f for f in flags if _defers(f)]
+    bazel_trait.extra_flags.extend([f for f in flags if not _defers(f)])
+    if not deferring:
+        return
+
+    def _unset_deferring(_ctx, rc, command):
+        unset = unset_flags(rc, command, deferring)
+        for flag_filter in bazel_trait.injected_flag_filters:
+            # Skipped on an empty list, as `bazel/flags.axl`'s `_filter_injected` does.
+            if unset:
+                unset = flag_filter(unset)
+        return unset
+
+    bazel_trait.rc_flags.append(_unset_deferring)
 
 def protected_omissions(omitted: list) -> list:
     """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user
