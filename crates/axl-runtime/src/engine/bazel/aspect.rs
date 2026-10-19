@@ -62,6 +62,7 @@ fn install_base(signals: &Arc<Signals>, startup_flags: &[String]) -> anyhow::Res
     let mut cmd = super::bazel_command();
     cmd.args(startup_flags);
     cmd.arg("info");
+    cmd.arg("--lockfile_mode=off");
     cmd.arg("install_base");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
