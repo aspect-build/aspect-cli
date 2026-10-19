@@ -1,0 +1,4 @@
+com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext blazon/impl/CppIncludeExtractionContext$deb6efb48af4af41 453 bytes b2b0d6ce06f3ba4f [artifact_resolver]
+com.google.devtools.build.lib.rules.cpp.CppIncludeScanningContext blazon/impl/CppIncludeScanningContext$ff25c088b73ade1a 612 bytes 279c8ac8a142437e [find_additional_inputs]
+com.google.devtools.build.lib.actions.SpawnStrategy blazon/impl/SpawnStrategy$6b3e0e19bb215dba 644 bytes 0b061cbf32ff967d [exec, can_exec]
+com.google.devtools.build.lib.buildeventstream.BuildEvent blazon/impl/BuildEvent$5858c99f9f8e313a 677 bytes 27a0c4e6c7f1736f [as_stream_proto, event_id, children_events]

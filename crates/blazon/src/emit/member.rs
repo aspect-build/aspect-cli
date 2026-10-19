@@ -21,7 +21,7 @@ pub fn class_static(c: &Class) -> Ident {
     format_ident!("CLASS_{}", c.rust.to_uppercase().replace(['$', '.'], "_"))
 }
 
-fn lifetime(name: &str) -> TokenStream {
+pub(super) fn lifetime(name: &str) -> TokenStream {
     let l = syn::Lifetime::new(&format!("'{name}"), Span::call_site());
     quote!(#l)
 }
@@ -104,7 +104,7 @@ fn jvalue_prim(p: Prim, var: &Ident) -> TokenStream {
     }
 }
 
-fn rust_prim(p: Prim) -> TokenStream {
+pub(super) fn rust_prim(p: Prim) -> TokenStream {
     match p {
         Prim::Boolean => quote!(bool),
         Prim::Byte => quote!(i8),
@@ -208,6 +208,11 @@ fn param_code(kind: &ParamKind, nullable: bool, var: &Ident, env: &TokenStream) 
                 quote!(#var.as_ref()),
             )
         }
+        ParamKind::Bytes if nullable => ParamCode::object(
+            quote!(#var: Option<&[u8]>),
+            quote!(let #var = #var.map(|b| blazon_rt::conv::byte_array(#env, b)).transpose()?;),
+            quote!(&blazon_rt::conv::or_null(&#var)),
+        ),
         ParamKind::Bytes => ParamCode::object(
             quote!(#var: &[u8]),
             quote!(let #var = blazon_rt::conv::byte_array(#env, #var)?;),
@@ -230,7 +235,7 @@ fn param_code(kind: &ParamKind, nullable: bool, var: &Ident, env: &TokenStream) 
 }
 
 /// The Rust result type, with `lt` for the handles in it.
-fn ret_type(kind: &RetKind, nullable: bool, lt: &TokenStream) -> TokenStream {
+pub(super) fn ret_type(kind: &RetKind, nullable: bool, lt: &TokenStream) -> TokenStream {
     let base = match kind {
         RetKind::Void => quote!(()),
         RetKind::Prim(p) => rust_prim(*p),
@@ -251,13 +256,22 @@ fn ret_type(kind: &RetKind, nullable: bool, lt: &TokenStream) -> TokenStream {
         }
     };
     match kind {
-        RetKind::Str | RetKind::Boxed(_) | RetKind::Handle(_) if nullable => quote!(Option<#base>),
+        RetKind::Str
+        | RetKind::Boxed(_)
+        | RetKind::Handle(_)
+        | RetKind::Bytes
+        | RetKind::StrArray
+        | RetKind::ObjArray(_)
+            if nullable =>
+        {
+            quote!(Option<#base>)
+        }
         _ => base,
     }
 }
 
 /// `Ok(value)` for the object `o` a call returned.
-fn ret_convert(kind: &RetKind, nullable: bool, what: &str) -> TokenStream {
+pub(super) fn ret_convert(kind: &RetKind, nullable: bool, what: &str) -> TokenStream {
     match (kind, nullable) {
         (RetKind::Str, false) => quote!(blazon_rt::conv::string(o, #what)),
         (RetKind::Str, true) => quote!(blazon_rt::conv::string_opt(o)),
@@ -283,11 +297,17 @@ fn ret_convert(kind: &RetKind, nullable: bool, what: &str) -> TokenStream {
             let t = ref_arg(r);
             quote!(blazon_rt::conv::optional::<#t>(o, #what))
         }
-        (RetKind::Bytes, _) => quote!(blazon_rt::conv::bytes(o, #what)),
-        (RetKind::StrArray, _) => quote!(blazon_rt::conv::strings(o, #what)),
-        (RetKind::ObjArray(r), _) => {
+        (RetKind::Bytes, false) => quote!(blazon_rt::conv::bytes(o, #what)),
+        (RetKind::Bytes, true) => quote!(blazon_rt::conv::bytes_opt(o)),
+        (RetKind::StrArray, false) => quote!(blazon_rt::conv::strings(o, #what)),
+        (RetKind::StrArray, true) => quote!(blazon_rt::conv::strings_opt(o)),
+        (RetKind::ObjArray(r), n) => {
             let t = ref_arg(r);
-            quote!(blazon_rt::conv::objects::<#t>(o, #what))
+            if n {
+                quote!(blazon_rt::conv::objects_opt::<#t>(o))
+            } else {
+                quote!(blazon_rt::conv::objects::<#t>(o, #what))
+            }
         }
         (RetKind::Void | RetKind::Prim(_), _) => quote!(Ok(())),
     }

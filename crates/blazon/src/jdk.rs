@@ -31,11 +31,19 @@ pub const MAPPED: &[Mapped] = &[
     m("java/lang/Iterable", "Iterable", "lang::Iterable", 1),
     m("java/lang/Runnable", "Runnable", "lang::Runnable", 0),
     m("java/lang/Throwable", "Throwable", "lang::Throwable", 0),
+    m("java/lang/Exception", "Exception", "lang::Exception", 0),
+    m(
+        "java/lang/RuntimeException",
+        "RuntimeException",
+        "lang::RuntimeException",
+        0,
+    ),
     m("java/util/Iterator", "JavaIterator", "util::Iterator", 1),
     m("java/util/Collection", "Collection", "util::Collection", 1),
     m("java/util/List", "List", "util::List", 1),
     m("java/util/Set", "Set", "util::Set", 1),
     m("java/util/Map", "Map", "util::Map", 2),
+    m("java/util/SortedMap", "SortedMap", "util::SortedMap", 2),
     m("java/util/Map$Entry", "Entry", "util::Entry", 2),
     m("java/util/Optional", "Optional", "util::Optional", 1),
     m("java/util/UUID", "UUID", "util::UUID", 0),
@@ -51,7 +59,14 @@ pub const MAPPED: &[Mapped] = &[
         "io::ByteArrayOutputStream",
         0,
     ),
+    m(
+        "java/io/BufferedOutputStream",
+        "BufferedOutputStream",
+        "io::BufferedOutputStream",
+        0,
+    ),
     m("java/math/BigInteger", "BigInteger", "math::BigInteger", 0),
+    m("java/time/Instant", "Instant", "time::Instant", 0),
     m("java/time/Duration", "Duration", "time::Duration", 0),
 ];
 
@@ -61,7 +76,12 @@ pub fn mapped_supers(internal: &str) -> &'static [&'static str] {
     match internal {
         "java/util/List" | "java/util/Set" => &["java/util/Collection", "java/lang/Iterable"],
         "java/util/Collection" => &["java/lang/Iterable"],
-        "java/io/ByteArrayOutputStream" => &["java/io/OutputStream"],
+        "java/util/SortedMap" => &["java/util/Map"],
+        "java/lang/Exception" => &["java/lang/Throwable"],
+        "java/lang/RuntimeException" => &["java/lang/Exception", "java/lang/Throwable"],
+        "java/io/ByteArrayOutputStream" | "java/io/BufferedOutputStream" => {
+            &["java/io/OutputStream"]
+        }
         _ => &[],
     }
 }

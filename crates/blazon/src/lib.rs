@@ -11,6 +11,7 @@
 
 pub mod annot;
 pub mod classfile;
+pub mod classwriter;
 pub mod dump;
 pub mod emit;
 pub mod facet;
@@ -19,6 +20,7 @@ pub mod jar;
 pub mod jdk;
 pub mod lower;
 pub mod names;
+pub mod options;
 #[cfg(feature = "release")]
 pub mod release;
 pub mod report;
@@ -39,6 +41,8 @@ pub struct Version {
 pub struct Report {
     pub versions: Vec<String>,
     pub classes: Vec<ir::Class>,
+    /// The implemented types of the last version.
+    pub implementations: Vec<ir::Implementation>,
     pub shape: Option<String>,
 }
 
@@ -75,13 +79,24 @@ pub fn generate(spec_path: &Path, versions: &[Version], out: &Path) -> Result<Re
         }
     }
     let mut resolved = Vec::new();
+    let mut schemas = Vec::new();
+    let mut implemented = Vec::new();
     for v in versions {
         let jar = jar::Jar::open(&v.jar)?;
         let mut classes = classfile::Classes::new(jar);
-        let ir = lower::lower(&spec, &mut classes, &v.label)?;
-        let source = emit::module(&v.label, &ir).with_context(|| format!("Bazel {}", v.label))?;
+        let vspec = spec.for_version(&v.label);
+        let ir = lower::lower(&vspec, &mut classes, &v.label)?;
+        let impls = lower::implementations(&vspec, &mut classes, &v.label, &ir)?;
+        let schema = match &spec.options {
+            Some(rules) => Some(options::schema(&mut classes, rules, &v.label)?),
+            None => None,
+        };
+        let source = emit::module(&v.label, &ir, &impls, schema.as_ref())
+            .with_context(|| format!("Bazel {}", v.label))?;
         write_if_changed(&out.join(format!("{}.rs", module_name(&v.label))), &source)?;
+        schemas.push((v.label.clone(), schema));
         resolved.push((v.label.clone(), ir));
+        implemented.push((v.label.clone(), impls));
     }
     let out_abs = out.canonicalize().unwrap_or_else(|_| out.to_path_buf());
     let starlark = resolved
@@ -89,12 +104,14 @@ pub fn generate(spec_path: &Path, versions: &[Version], out: &Path) -> Result<Re
         .any(|(_, cs)| cs.iter().any(|c| c.starlark.is_some()));
     write_if_changed(
         &out.join("mod.rs"),
-        &emit::mod_rs(&out_abs, &mods, starlark)?,
+        &emit::mod_rs(&out_abs, &mods, starlark, spec.options.is_some())?,
     )?;
-    let shape = (resolved.len() > 1).then(|| report::shape_report(&resolved));
+    let shape =
+        (resolved.len() > 1).then(|| report::shape_report(&resolved, &schemas, &implemented));
     Ok(Report {
         versions: versions.iter().map(|v| v.label.clone()).collect(),
         classes: resolved.pop().map(|(_, c)| c).unwrap_or_default(),
+        implementations: implemented.pop().map(|(_, i)| i).unwrap_or_default(),
         shape,
     })
 }
@@ -126,6 +143,57 @@ pub fn build_script(spec_path: &Path, out: &Path) -> Result<Report> {
 
 pub fn module_name(label: &str) -> String {
     format!("v{}", label.replace(['.', '-'], "_"))
+}
+
+/// The option schema a spec's `[options]` selects from a jar, counts first,
+/// then every included option.
+pub fn dump_options(spec_path: &Path, jar: &Path) -> Result<String> {
+    use std::fmt::Write;
+    let spec = spec::load(spec_path)?;
+    let Some(rules) = &spec.options else {
+        anyhow::bail!("{}: no [options] section", spec_path.display());
+    };
+    let mut classes = classfile::Classes::new(jar::Jar::open(jar)?);
+    let schema = options::schema(&mut classes, rules, "dump")?;
+    let mut out = schema.summary();
+    let _ = writeln!(out, "\nincluded options:");
+    for o in &schema.options {
+        let _ = writeln!(
+            out,
+            "  {} {} [{}] {}",
+            o.name,
+            o.kind.describe(),
+            o.effect_tags.join(","),
+            o.class
+        );
+    }
+    Ok(out)
+}
+
+/// Every option class in a jar with its options, one per line, for choosing a
+/// spec's `[options]` rules.
+pub fn dump_raw_options(jar: &Path) -> Result<String> {
+    use std::fmt::Write;
+    let mut classes = classfile::Classes::new(jar::Jar::open(jar)?);
+    let mut out = String::new();
+    for (class, options) in options::discover(&mut classes)? {
+        let _ = writeln!(out, "{} ({})", class.replace('/', "."), options.len());
+        for o in options {
+            let _ = writeln!(
+                out,
+                "  {} field={} type={} converter={} multiple={} effects={:?} meta={:?} default={:?}",
+                o.anno.name,
+                o.field,
+                signature::pretty(&o.ty),
+                o.anno.converter.as_deref().unwrap_or("-"),
+                o.anno.allow_multiple,
+                o.anno.effect_tags,
+                o.anno.metadata_tags,
+                o.anno.default_value
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Every member of the given classes, one per line, for writing a spec.

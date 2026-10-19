@@ -25,7 +25,11 @@ pub fn class(classes: &mut Classes, java: &str) -> Result<String> {
         let _ = writeln!(
             out,
             "  method {:<16} {}{}  {} {}({}){}{}",
-            m.access.modifiers(),
+            if m.access.is_abstract {
+                format!("{} abstract", m.access.modifiers())
+            } else {
+                m.access.modifiers()
+            },
             m.name,
             m.descriptor,
             pretty(&m.ret),

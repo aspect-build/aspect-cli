@@ -129,6 +129,14 @@ pub fn bytes(o: JObject, what: &str) -> Result<Vec<u8>> {
     Ok(env.convert_byte_array(JByteArray::from(o))?)
 }
 
+/// Like [`bytes`], with null as `None`.
+pub fn bytes_opt(o: JObject) -> Result<Option<Vec<u8>>> {
+    if o.is_null() {
+        return Ok(None);
+    }
+    bytes(o, "").map(Some)
+}
+
 fn elements<'a, T>(
     o: JObject<'a>,
     what: &str,
@@ -151,6 +159,22 @@ fn elements<'a, T>(
 /// A `String[]` result.
 pub fn strings(o: JObject, what: &str) -> Result<Vec<String>> {
     elements(o, what, |e| string(e, what))
+}
+
+/// Like [`strings`], with null as `None`.
+pub fn strings_opt(o: JObject) -> Result<Option<Vec<String>>> {
+    if o.is_null() {
+        return Ok(None);
+    }
+    strings(o, "").map(Some)
+}
+
+/// Like [`objects`], with null as `None`.
+pub fn objects_opt<'a, T: crate::Rebind<'a>>(o: JObject<'a>) -> Result<Option<Vec<T::Out>>> {
+    if o.is_null() {
+        return Ok(None);
+    }
+    objects::<T>(o, "").map(Some)
 }
 
 /// A reference array result, as handles.

@@ -17,9 +17,11 @@
 pub mod conv;
 mod error;
 mod handle;
+pub mod implement;
 pub mod java;
 mod jvm;
 pub mod member;
+pub mod options;
 pub mod reflect;
 mod refs;
 pub mod vm;

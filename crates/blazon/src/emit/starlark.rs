@@ -524,8 +524,7 @@ fn behaviours(f: &Facet, v: &Ident, rt: &Runtime) -> TokenStream {
                     }
                     Ok(Some(blazon_starlark::wrap(r.as_ref(), heap)?))
                 })()
-                .ok()
-                .flatten()
+                .unwrap_or_else(|e| Some(blazon_starlark::failed(attribute, &e, heap)))
             }
 
             fn dir_attr(&self) -> Vec<String> {
@@ -535,7 +534,8 @@ fn behaviours(f: &Facet, v: &Ident, rt: &Runtime) -> TokenStream {
                     let sem = rt_semantics(&mut env)?;
                     let mu = #mutability::#immutable(&mut env)?;
                     let names = #starlark::#dir(&mut env, &mu, &sem, &obj)?;
-                    let names: Iterable<JavaString<'static>> = names.upcast();
+                    let names: Object = names.upcast();
+                    let names: Iterable<JavaString<'static>> = names.downcast()?;
                     names.into_iter().map(|s| s?.to_rust()).collect()
                 })()
                 .unwrap_or_default()

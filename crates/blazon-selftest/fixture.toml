@@ -90,3 +90,41 @@ members = [
     "flip", "inc", "sinc", "next", "twice", "big", "half", "scale",
     "setTimeoutScaling", "all", "withDefaults",
 ]
+
+[[class]]
+java = "fx.Bag"
+members = ["<init>() as new"]
+
+[[class]]
+java = "fx.Host"
+starlark = false
+members = [
+    "add",
+    "exercise",
+    "describe",
+    "parallel",
+    "attempt",
+    "runTask",
+    "hold",
+    "startSlow",
+    "finish",
+    "gc",
+    "boom",
+    "digest",
+    "callRisky",
+    "caughtIsOriginal",
+]
+
+[[implement]]
+java = "fx.Callback"
+
+[[implement]]
+java = "fx.Task"
+
+[[class]]
+java = "fx.BoomException"
+starlark = false
+members = ["<init>(Ljava/lang/String;)"]
+
+[[implement]]
+java = "fx.Risky"

@@ -20,17 +20,22 @@ pub use blazon_rt::java::lang::Long;
 pub use blazon_rt::java::lang::Iterable;
 pub use blazon_rt::java::lang::Runnable;
 pub use blazon_rt::java::lang::Throwable;
+pub use blazon_rt::java::lang::Exception;
+pub use blazon_rt::java::lang::RuntimeException;
 pub use blazon_rt::java::util::Iterator as JavaIterator;
 pub use blazon_rt::java::util::Collection;
 pub use blazon_rt::java::util::List;
 pub use blazon_rt::java::util::Set;
 pub use blazon_rt::java::util::Map;
+pub use blazon_rt::java::util::SortedMap;
 pub use blazon_rt::java::util::Entry;
 pub use blazon_rt::java::util::Optional;
 pub use blazon_rt::java::util::UUID;
 pub use blazon_rt::java::io::OutputStream;
 pub use blazon_rt::java::io::ByteArrayOutputStream;
+pub use blazon_rt::java::io::BufferedOutputStream;
 pub use blazon_rt::java::math::BigInteger;
+pub use blazon_rt::java::time::Instant;
 pub use blazon_rt::java::time::Duration;
 /// The Bazel release these bindings were generated from.
 pub const BAZEL_VERSION: &str = "fixture";
@@ -774,6 +779,7 @@ impl<'a> Prims<'a> {
         blazon_rt::conv::wrap(o, "Prims.<init>")
     }
 }
+blazon_rt::handle!(#[doc = " `fx.Target`"] Target, "fx/Target");
 static CLASS_STARLARK: blazon_rt::member::ClassRef = blazon_rt::member::ClassRef::new(
     "net/starlark/java/eval/Starlark",
 );
@@ -946,6 +952,8 @@ blazon_rt::handle!(
     #[doc = " `net.starlark.java.eval.StarlarkValue`"] StarlarkValue,
     "net/starlark/java/eval/StarlarkValue"
 );
+blazon_rt::handle!(#[doc = " `fx.Callback`"] Callback, "fx/Callback", T);
+blazon_rt::handle!(#[doc = " `fx.Task`"] Task, "fx/Task");
 static CLASS_STARLARKTHREAD: blazon_rt::member::ClassRef = blazon_rt::member::ClassRef::new(
     "net/starlark/java/eval/StarlarkThread",
 );
@@ -1677,7 +1685,7 @@ fn base_methods(builder: &mut starlark::environment::MethodsBuilder) {
             .map_err(blazon_starlark::error)
     }
     #[starlark(attribute)]
-    fn held<'v>(
+    fn held_field<'v>(
         this: &BaseValue,
         heap: starlark::values::Heap<'v>,
     ) -> starlark::Result<starlark::values::Value<'v>> {
@@ -1943,7 +1951,7 @@ fn prims_methods(builder: &mut starlark::environment::MethodsBuilder) {
         })()
             .map_err(blazon_starlark::error)
     }
-    fn setTimeoutScaling<'v>(
+    fn set_timeout_scaling<'v>(
         this: &PrimsValue,
         #[starlark(require = pos)]
         arg0: starlark::values::float::UnpackFloat,
@@ -2017,6 +2025,106 @@ fn prims_methods(builder: &mut starlark::environment::MethodsBuilder) {
             Ok(__r)
         })()
             .map_err(blazon_starlark::error)
+    }
+}
+#[derive(
+    starlark::values::ProvidesStaticType,
+    starlark::values::NoSerialize,
+    allocative::Allocative
+)]
+pub struct TargetValue {
+    #[allocative(skip)]
+    pub obj: blazon_rt::Global<Target<'static>>,
+}
+starlark::starlark_simple_value!(TargetValue);
+impl TargetValue {
+    pub fn new(obj: &jni::objects::JObject) -> blazon_rt::Result<Self> {
+        let env = blazon_rt::vm::env()?;
+        Ok(TargetValue {
+            obj: blazon_rt::Global::new(env.new_global_ref(obj)?),
+        })
+    }
+    fn text(&self) -> blazon_rt::Result<String> {
+        let mut env = blazon_rt::vm::env()?;
+        let obj = self.obj.get(&mut env)?;
+        Ok(obj.to_string())
+    }
+    fn repr_text(&self) -> blazon_rt::Result<String> {
+        let mut env = blazon_rt::vm::env()?;
+        let obj = self.obj.get(&mut env)?;
+        Ok(obj.to_string())
+    }
+}
+impl<'a> Target<'a> {
+    /// This object as a Starlark value.
+    pub fn to_value<'v>(
+        &self,
+        heap: starlark::values::Heap<'v>,
+    ) -> blazon_rt::Result<starlark::values::Value<'v>> {
+        let env = blazon_rt::vm::env()?;
+        Ok(
+            heap
+                .alloc(TargetValue {
+                    obj: blazon_rt::Global::new(env.new_global_ref(&self.obj)?),
+                }),
+        )
+    }
+}
+impl blazon_starlark::JavaValue for TargetValue {
+    fn java_object(&self) -> blazon_rt::Result<jni::objects::JObject<'static>> {
+        let env = blazon_rt::vm::env()?;
+        Ok(
+            env
+                .new_local_ref(unsafe {
+                    jni::objects::JObject::from_raw(self.obj.raw())
+                })?,
+        )
+    }
+}
+impl std::fmt::Display for TargetValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.text() {
+            Ok(s) => f.write_str(&s),
+            Err(e) => write!(f, concat!("<", "Target", ": {}>"), e),
+        }
+    }
+}
+impl std::fmt::Debug for TargetValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(stringify!(TargetValue))
+    }
+}
+#[starlark::values::starlark_value(type = "Target")]
+impl<'v> starlark::values::StarlarkValue<'v> for TargetValue {
+    fn collect_repr(&self, collector: &mut String) {
+        match self.repr_text() {
+            Ok(s) => collector.push_str(&s),
+            Err(e) => collector.push_str(&format!(concat!("<", "Target", ": {}>"), e)),
+        }
+    }
+    fn equals(&self, other: starlark::values::Value<'v>) -> starlark::Result<bool> {
+        match other.downcast_ref::<TargetValue>() {
+            Some(o) => {
+                (|| -> blazon_rt::Result<bool> {
+                    let mut env = blazon_rt::vm::env()?;
+                    Ok(self.obj.get(&mut env)? == o.obj.get(&mut env)?)
+                })()
+                    .map_err(blazon_starlark::error)
+            }
+            None => Ok(false),
+        }
+    }
+    fn write_hash(
+        &self,
+        hasher: &mut starlark::collections::StarlarkHasher,
+    ) -> starlark::Result<()> {
+        let h = (|| -> blazon_rt::Result<i32> {
+            let mut env = blazon_rt::vm::env()?;
+            blazon_rt::java::lang::hash_code(self.obj.get(&mut env)?.as_ref())
+        })()
+            .map_err(blazon_starlark::error)?;
+        hasher.write_i32(h);
+        Ok(())
     }
 }
 #[derive(
@@ -2265,6 +2373,14 @@ impl blazon_starlark::Registry for Bridge {
         }
         {
             static CLASS: blazon_rt::member::ClassRef = blazon_rt::member::ClassRef::new(
+                "fx/Target",
+            );
+            if CLASS.is_instance(&mut env, obj)? {
+                return Ok(Some(heap.alloc(TargetValue::new(obj)?)));
+            }
+        }
+        {
+            static CLASS: blazon_rt::member::ClassRef = blazon_rt::member::ClassRef::new(
                 "fx/Widget$Inner",
             );
             if CLASS.is_instance(&mut env, obj)? {
@@ -2302,6 +2418,9 @@ impl blazon_starlark::Registry for Bridge {
         if let Some(x) = v.downcast_ref::<PrimsValue>() {
             return Ok(Some(x.java_object()?));
         }
+        if let Some(x) = v.downcast_ref::<TargetValue>() {
+            return Ok(Some(x.java_object()?));
+        }
         if let Some(x) = v.downcast_ref::<WidgetInnerValue>() {
             return Ok(Some(x.java_object()?));
         }
@@ -2331,4 +2450,1198 @@ impl blazon_starlark::Registry for Bridge {
 /// Registers this version's Starlark types with `blazon_starlark`.
 pub fn register() {
     blazon_starlark::register(&Bridge);
+}
+static BLAZON_FREE_CLASS: &[u8] = b"\xCA\xFE\xBA\xBE\0\0\x004\0'\x01\0\x10blazon/impl/Free\x07\0\x01\x01\0\x10java/lang/Object\x07\0\x03\x01\0\x12java/lang/Runnable\x07\0\x05\x01\0\x06handle\x01\0\x01J\x01\0\x07CLEANER\x01\0\x17Ljava/lang/ref/Cleaner;\x01\0\x06<init>\x01\0\x03()V\x0C\0\x0B\0\x0C\n\0\x04\0\r\x0C\0\x07\0\x08\t\0\x02\0\x0F\x0C\0\t\0\n\t\0\x02\0\x11\x01\0\x15java/lang/ref/Cleaner\x07\0\x13\x01\0\x06create\x01\0\x19()Ljava/lang/ref/Cleaner;\x0C\0\x15\0\x16\n\0\x14\0\x17\x01\0\x08register\x01\0I(Ljava/lang/Object;Ljava/lang/Runnable;)Ljava/lang/ref/Cleaner$Cleanable;\x0C\0\x19\0\x1A\n\0\x14\0\x1B\x01\0\x04(J)V\x0C\0\x0B\0\x1D\n\0\x02\0\x1E\x01\0\x04drop\x0C\0 \0\x1D\n\0\x02\0!\x01\0\x08<clinit>\x01\0\x16(Ljava/lang/Object;J)V\x01\0\x03run\x01\0\x04Code\x001\0\x02\0\x04\0\x01\0\x06\0\x02\0\x12\0\x07\0\x08\0\0\0\x1A\0\t\0\n\0\0\0\x05\0\x08\0#\0\x0C\0\x01\0&\0\0\0\x13\0\x01\0\0\0\0\0\x07\xB8\0\x18\xB3\0\x12\xB1\0\0\0\0\0\x02\0\x0B\0\x1D\0\x01\0&\0\0\0\x16\0\x03\0\x03\0\0\0\n*\xB7\0\x0E*\x1F\xB5\0\x10\xB1\0\0\0\0\0\x08\0\x19\0$\0\x01\0&\0\0\0\x1D\0\x06\0\x03\0\0\0\x11\xB2\0\x12*\xBB\0\x02Y\x1F\xB7\0\x1F\xB6\0\x1CW\xB1\0\0\0\0\0\x01\0%\0\x0C\0\x01\0&\0\0\0\x14\0\x02\0\x01\0\0\0\x08*\xB4\0\x10\xB8\0\"\xB1\0\0\0\0\x01\n\0 \0\x1D\0\0\0\0";
+/// Implements `fx.Callback` from Rust.
+///
+/// [`Callback::from_impl`] makes the Java object that calls it. An `Err` is thrown in Java
+/// as a `RuntimeException`, a panic as an `IllegalStateException`.
+pub trait CallbackImpl: Send + Sync {
+    /// `int add(int, int)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn add<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: i32,
+        arg1: i32,
+    ) -> blazon_rt::Result<i32>;
+    /// `long mix(long, double, boolean, byte, char, short, float)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn mix<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: i64,
+        arg1: f64,
+        arg2: bool,
+        arg3: i8,
+        arg4: u16,
+        arg5: i16,
+        arg6: f32,
+    ) -> blazon_rt::Result<i64>;
+    /// `String greet(String)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn greet<'a>(&self, env: &mut JNIEnv<'a>, arg0: String) -> blazon_rt::Result<String>;
+    /// `String maybe(String)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn maybe<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Option<String>,
+    ) -> blazon_rt::Result<Option<String>>;
+    /// `Target parent(Target)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn parent<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Target<'a>,
+    ) -> blazon_rt::Result<Target<'a>>;
+    /// `Target maybeParent(Target)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn maybe_parent<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Option<Target<'a>>,
+    ) -> blazon_rt::Result<Option<Target<'a>>>;
+    /// `List<String> names(List<String>)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn names<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: List<'a, JavaString<'static>>,
+    ) -> blazon_rt::Result<List<'a, JavaString<'static>>>;
+    /// `T identity(T)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn identity<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Object<'a>,
+    ) -> blazon_rt::Result<Object<'a>>;
+    /// `Integer boxed(Boolean, Long)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn boxed<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: bool,
+        arg1: i64,
+    ) -> blazon_rt::Result<i32>;
+    /// `void notify(String)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn notify<'a>(&self, env: &mut JNIEnv<'a>, arg0: String) -> blazon_rt::Result<()>;
+    /// `byte[] bytes(byte[])`
+    ///
+    /// Declared by `fx.Callback`.
+    fn bytes<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Vec<u8>,
+    ) -> blazon_rt::Result<Vec<u8>>;
+    /// `String[] strings(String[])`
+    ///
+    /// Declared by `fx.Callback`.
+    fn strings<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Vec<String>,
+    ) -> blazon_rt::Result<Vec<String>>;
+    /// `byte[] maybeBytes(byte[])`
+    ///
+    /// Declared by `fx.Callback`.
+    fn maybe_bytes<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Option<Vec<u8>>,
+    ) -> blazon_rt::Result<Option<Vec<u8>>>;
+    /// `Optional<String> opt(Optional<String>)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn opt<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        arg0: Option<JavaString<'a>>,
+    ) -> blazon_rt::Result<Option<JavaString<'a>>>;
+    /// `int fail(String)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn fail<'a>(&self, env: &mut JNIEnv<'a>, arg0: String) -> blazon_rt::Result<i32>;
+    /// `int explode()`
+    ///
+    /// Declared by `fx.Callback`.
+    fn explode<'a>(&self, env: &mut JNIEnv<'a>) -> blazon_rt::Result<i32>;
+    /// `String slow(int)`
+    ///
+    /// Declared by `fx.Callback`.
+    fn slow<'a>(&self, env: &mut JNIEnv<'a>, arg0: i32) -> blazon_rt::Result<String>;
+}
+unsafe extern "system" fn __Callback_0(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jint,
+    arg1: jni::sys::jint,
+) -> jni::sys::jint {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jint,
+            >(
+                env,
+                this,
+                "Callback.add",
+                |env, imp| {
+                    let arg0: i32 = arg0;
+                    let arg1: i32 = arg1;
+                    let out = imp.add(env, arg0, arg1)?;
+                    Ok(out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_1(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jlong,
+    arg1: jni::sys::jdouble,
+    arg2: jni::sys::jboolean,
+    arg3: jni::sys::jbyte,
+    arg4: jni::sys::jchar,
+    arg5: jni::sys::jshort,
+    arg6: jni::sys::jfloat,
+) -> jni::sys::jlong {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jlong,
+            >(
+                env,
+                this,
+                "Callback.mix",
+                |env, imp| {
+                    let arg0: i64 = arg0;
+                    let arg1: f64 = arg1;
+                    let arg2 = arg2 != 0;
+                    let arg3: i8 = arg3;
+                    let arg4: u16 = arg4;
+                    let arg5: i16 = arg5;
+                    let arg6: f32 = arg6;
+                    let out = imp.mix(env, arg0, arg1, arg2, arg3, arg4, arg5, arg6)?;
+                    Ok(out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_2(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.greet",
+                |env, imp| {
+                    let arg0: String = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::string(o, "Callback.greet")
+                    }?;
+                    let out = imp.greet(env, arg0)?;
+                    blazon_rt::implement::string(env, &out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_3(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.maybe",
+                |env, imp| {
+                    let arg0: Option<String> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::string_opt(o)
+                    }?;
+                    let out = imp.maybe(env, arg0)?;
+                    blazon_rt::implement::string_opt(env, out.as_deref())
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_4(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.parent",
+                |env, imp| {
+                    let arg0: Target<'static> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::wrap(o, "Callback.parent")
+                    }?;
+                    let out = imp.parent(env, arg0)?;
+                    Ok(blazon_rt::implement::object(out))
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_5(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.maybeParent",
+                |env, imp| {
+                    let arg0: Option<Target<'static>> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::wrap_opt(o)
+                    }?;
+                    let out = imp.maybe_parent(env, arg0)?;
+                    Ok(blazon_rt::implement::object_opt(out))
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_6(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.names",
+                |env, imp| {
+                    let arg0: List<'static, JavaString<'static>> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::wrap(o, "Callback.names")
+                    }?;
+                    let out = imp.names(env, arg0)?;
+                    Ok(blazon_rt::implement::object(out))
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_7(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.identity",
+                |env, imp| {
+                    let arg0: Object<'static> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::wrap(o, "Callback.identity")
+                    }?;
+                    let out = imp.identity(env, arg0)?;
+                    Ok(blazon_rt::implement::object(out))
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_8(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+    arg1: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.boxed",
+                |env, imp| {
+                    let arg0: bool = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::boxed_bool(o, "Callback.boxed")
+                    }?;
+                    let arg1: i64 = {
+                        let o = blazon_rt::implement::local(env, arg1)?;
+                        blazon_rt::conv::boxed_long(o, "Callback.boxed")
+                    }?;
+                    let out = imp.boxed(env, arg0, arg1)?;
+                    blazon_rt::implement::boxed_int(env, out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_9(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                (),
+            >(
+                env,
+                this,
+                "Callback.notify",
+                |env, imp| {
+                    let arg0: String = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::string(o, "Callback.notify")
+                    }?;
+                    imp.notify(env, arg0)?;
+                    Ok(())
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_10(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.bytes",
+                |env, imp| {
+                    let arg0: Vec<u8> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::bytes(o, "Callback.bytes")
+                    }?;
+                    let out = imp.bytes(env, arg0)?;
+                    blazon_rt::implement::bytes(env, &out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_11(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.strings",
+                |env, imp| {
+                    let arg0: Vec<String> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::strings(o, "Callback.strings")
+                    }?;
+                    let out = imp.strings(env, arg0)?;
+                    blazon_rt::implement::strings(env, &out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_12(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.maybeBytes",
+                |env, imp| {
+                    let arg0: Option<Vec<u8>> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::bytes_opt(o)
+                    }?;
+                    let out = imp.maybe_bytes(env, arg0)?;
+                    blazon_rt::implement::bytes_opt(env, out.as_deref())
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_13(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.opt",
+                |env, imp| {
+                    let arg0: Option<JavaString<'static>> = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::optional::<
+                            JavaString<'static>,
+                        >(o, "Callback.opt")
+                    }?;
+                    let out = imp.opt(env, arg0)?;
+                    blazon_rt::implement::optional(env, out.as_ref())
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_14(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jint {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jint,
+            >(
+                env,
+                this,
+                "Callback.fail",
+                |env, imp| {
+                    let arg0: String = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::string(o, "Callback.fail")
+                    }?;
+                    let out = imp.fail(env, arg0)?;
+                    Ok(out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_15(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+) -> jni::sys::jint {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jint,
+            >(
+                env,
+                this,
+                "Callback.explode",
+                |env, imp| {
+                    let out = imp.explode(env)?;
+                    Ok(out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Callback_16(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jint,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_CALLBACKIMPL
+            .dispatch::<
+                Box<dyn CallbackImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Callback.slow",
+                |env, imp| {
+                    let arg0: i32 = arg0;
+                    let out = imp.slow(env, arg0)?;
+                    blazon_rt::implement::string(env, &out)
+                },
+            )
+    }
+}
+static IMPL_CALLBACKIMPL: blazon_rt::implement::Implementation = blazon_rt::implement::Implementation::new(
+    &blazon_rt::implement::Def {
+        class: "blazon/impl/Callback$54df25480ee39969",
+        bytes: b"\xCA\xFE\xBA\xBE\0\0\x004\x006\x01\0%blazon/impl/Callback$54df25480ee39969\x07\0\x01\x01\0\x10java/lang/Object\x07\0\x03\x01\0\x0Bfx/Callback\x07\0\x05\x01\0\x06handle\x01\0\x01J\x01\0\x06<init>\x01\0\x03()V\x0C\0\t\0\n\n\0\x04\0\x0B\x0C\0\x07\0\x08\t\0\x02\0\r\x01\0\x10blazon/impl/Free\x07\0\x0F\x01\0\x08register\x01\0\x16(Ljava/lang/Object;J)V\x0C\0\x11\0\x12\n\0\x10\0\x13\x01\0\x04(J)V\x01\0\x03add\x01\0\x05(II)I\x01\0\x03mix\x01\0\n(JDZBCSF)J\x01\0\x05greet\x01\0&(Ljava/lang/String;)Ljava/lang/String;\x01\0\x05maybe\x01\0\x06parent\x01\0\x18(Lfx/Target;)Lfx/Target;\x01\0\x0BmaybeParent\x01\0\x05names\x01\0\"(Ljava/util/List;)Ljava/util/List;\x01\0\x08identity\x01\0&(Ljava/lang/Object;)Ljava/lang/Object;\x01\0\x05boxed\x01\08(Ljava/lang/Boolean;Ljava/lang/Long;)Ljava/lang/Integer;\x01\0\x06notify\x01\0\x15(Ljava/lang/String;)V\x01\0\x05bytes\x01\0\x06([B)[B\x01\0\x07strings\x01\0(([Ljava/lang/String;)[Ljava/lang/String;\x01\0\nmaybeBytes\x01\0\x03opt\x01\0*(Ljava/util/Optional;)Ljava/util/Optional;\x01\0\x04fail\x01\0\x15(Ljava/lang/String;)I\x01\0\x07explode\x01\0\x03()I\x01\0\x04slow\x01\0\x15(I)Ljava/lang/String;\x01\0\x04Code\x001\0\x02\0\x04\0\x01\0\x06\0\x01\0\x12\0\x07\0\x08\0\0\0\x12\0\0\0\t\0\x15\0\x01\x005\0\0\0\x1B\0\x03\0\x03\0\0\0\x0F*\xB7\0\x0C*\x1F\xB5\0\x0E*\x1F\xB8\0\x14\xB1\0\0\0\0\x01\x01\0\x16\0\x17\0\0\x01\x01\0\x18\0\x19\0\0\x01\x01\0\x1A\0\x1B\0\0\x01\x01\0\x1C\0\x1B\0\0\x01\x01\0\x1D\0\x1E\0\0\x01\x01\0\x1F\0\x1E\0\0\x01\x01\0 \0!\0\0\x01\x01\0\"\0#\0\0\x01\x01\0$\0%\0\0\x01\x01\0&\0'\0\0\x01\x01\0(\0)\0\0\x01\x01\0*\0+\0\0\x01\x01\0,\0)\0\0\x01\x01\0-\0.\0\0\x01\x01\0/\x000\0\0\x01\x01\x001\x002\0\0\x01\x01\x003\x004\0\0\0\0",
+        free: BLAZON_FREE_CLASS,
+        anchor: "fx/Callback",
+        natives: &[
+            blazon_rt::implement::Native::new(
+                "add",
+                "(II)I",
+                __Callback_0 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "mix",
+                "(JDZBCSF)J",
+                __Callback_1 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "greet",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                __Callback_2 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "maybe",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                __Callback_3 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "parent",
+                "(Lfx/Target;)Lfx/Target;",
+                __Callback_4 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "maybeParent",
+                "(Lfx/Target;)Lfx/Target;",
+                __Callback_5 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "names",
+                "(Ljava/util/List;)Ljava/util/List;",
+                __Callback_6 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "identity",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                __Callback_7 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "boxed",
+                "(Ljava/lang/Boolean;Ljava/lang/Long;)Ljava/lang/Integer;",
+                __Callback_8 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "notify",
+                "(Ljava/lang/String;)V",
+                __Callback_9 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "bytes",
+                "([B)[B",
+                __Callback_10 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "strings",
+                "([Ljava/lang/String;)[Ljava/lang/String;",
+                __Callback_11 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "maybeBytes",
+                "([B)[B",
+                __Callback_12 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "opt",
+                "(Ljava/util/Optional;)Ljava/util/Optional;",
+                __Callback_13 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "fail",
+                "(Ljava/lang/String;)I",
+                __Callback_14 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "explode",
+                "()I",
+                __Callback_15 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "slow",
+                "(I)Ljava/lang/String;",
+                __Callback_16 as *const std::ffi::c_void,
+            ),
+        ],
+    },
+);
+impl<'l> Callback<'l> {
+    /// A Java object of the generated class that calls `value`; the value is
+    /// dropped when the object is garbage collected.
+    pub fn from_impl(
+        env: &mut JNIEnv<'l>,
+        value: Box<dyn CallbackImpl>,
+    ) -> blazon_rt::Result<Self> {
+        let o = IMPL_CALLBACKIMPL.instantiate(env, value)?;
+        blazon_rt::conv::wrap(o, "Callback::from_impl")
+    }
+}
+/// Implements `fx.Task` from Rust.
+///
+/// [`Task::from_impl`] makes the Java object that calls it. An `Err` is thrown in Java
+/// as a `RuntimeException`, a panic as an `IllegalStateException`.
+pub trait TaskImpl: Send + Sync {
+    /// `String run(String)`
+    ///
+    /// Declared by `fx.Task`.
+    fn run<'a>(&self, env: &mut JNIEnv<'a>, arg0: String) -> blazon_rt::Result<String>;
+    /// `int priority()`
+    ///
+    /// Declared by `fx.Task`.
+    fn priority<'a>(&self, env: &mut JNIEnv<'a>) -> blazon_rt::Result<i32>;
+}
+unsafe extern "system" fn __Task_0(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+    arg0: jni::sys::jobject,
+) -> jni::sys::jobject {
+    unsafe {
+        IMPL_TASKIMPL
+            .dispatch::<
+                Box<dyn TaskImpl>,
+                jni::sys::jobject,
+            >(
+                env,
+                this,
+                "Task.run",
+                |env, imp| {
+                    let arg0: String = {
+                        let o = blazon_rt::implement::local(env, arg0)?;
+                        blazon_rt::conv::string(o, "Task.run")
+                    }?;
+                    let out = imp.run(env, arg0)?;
+                    blazon_rt::implement::string(env, &out)
+                },
+            )
+    }
+}
+unsafe extern "system" fn __Task_1(
+    env: *mut jni::sys::JNIEnv,
+    this: jni::sys::jobject,
+) -> jni::sys::jint {
+    unsafe {
+        IMPL_TASKIMPL
+            .dispatch::<
+                Box<dyn TaskImpl>,
+                jni::sys::jint,
+            >(
+                env,
+                this,
+                "Task.priority",
+                |env, imp| {
+                    let out = imp.priority(env)?;
+                    Ok(out)
+                },
+            )
+    }
+}
+static IMPL_TASKIMPL: blazon_rt::implement::Implementation = blazon_rt::implement::Implementation::new(
+    &blazon_rt::implement::Def {
+        class: "blazon/impl/Task$6ffa3729b38d8176",
+        bytes: b"\xCA\xFE\xBA\xBE\0\0\x004\0\x19\x01\0!blazon/impl/Task$6ffa3729b38d8176\x07\0\x01\x01\0\x07fx/Task\x07\0\x03\x01\0\x06handle\x01\0\x01J\x01\0\x06<init>\x01\0\x03()V\x0C\0\x07\0\x08\n\0\x04\0\t\x0C\0\x05\0\x06\t\0\x02\0\x0B\x01\0\x10blazon/impl/Free\x07\0\r\x01\0\x08register\x01\0\x16(Ljava/lang/Object;J)V\x0C\0\x0F\0\x10\n\0\x0E\0\x11\x01\0\x04(J)V\x01\0\x03run\x01\0&(Ljava/lang/String;)Ljava/lang/String;\x01\0\x08priority\x01\0\x03()I\x01\0\x04Code\x001\0\x02\0\x04\0\0\0\x01\0\x12\0\x05\0\x06\0\0\0\x03\0\0\0\x07\0\x13\0\x01\0\x18\0\0\0\x1B\0\x03\0\x03\0\0\0\x0F*\xB7\0\n*\x1F\xB5\0\x0C*\x1F\xB8\0\x12\xB1\0\0\0\0\x01\x01\0\x14\0\x15\0\0\x01\x01\0\x16\0\x17\0\0\0\0",
+        free: BLAZON_FREE_CLASS,
+        anchor: "fx/Task",
+        natives: &[
+            blazon_rt::implement::Native::new(
+                "run",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                __Task_0 as *const std::ffi::c_void,
+            ),
+            blazon_rt::implement::Native::new(
+                "priority",
+                "()I",
+                __Task_1 as *const std::ffi::c_void,
+            ),
+        ],
+    },
+);
+impl<'l> Task<'l> {
+    /// A Java object of the generated class that calls `value`; the value is
+    /// dropped when the object is garbage collected.
+    pub fn from_impl(
+        env: &mut JNIEnv<'l>,
+        value: Box<dyn TaskImpl>,
+    ) -> blazon_rt::Result<Self> {
+        let o = IMPL_TASKIMPL.instantiate(env, value)?;
+        blazon_rt::conv::wrap(o, "Task::from_impl")
+    }
+}
+/// Bazel's options for this release, selected by the spec's `[options]`.
+pub mod options {
+    use blazon_rt::options::{Kind, OptionDef};
+    /// The options, sorted by name.
+    pub static OPTIONS: &[OptionDef] = &[
+        OptionDef {
+            name: "big",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "big",
+            kind: Kind::Long,
+            default: "1",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["NO_OP"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "count",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "count",
+            kind: Kind::Int,
+            default: "3",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["LOADING_AND_ANALYSIS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "csv",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "csv",
+            kind: Kind::List(&Kind::String),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["LOADING_AND_ANALYSIS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "dir",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "dir",
+            kind: Kind::Path,
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["ACTION_COMMAND_LINES"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "env",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "env",
+            kind: Kind::Dict(&Kind::String),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["ACTION_COMMAND_LINES"],
+            metadata_tags: &[],
+            allows_multiple: true,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "flag",
+            abbrev: 'f',
+            class: "fx.opts.Fragment",
+            field: "flag",
+            kind: Kind::Bool,
+            default: "false",
+            help: "A boolean.",
+            value_help: "",
+            category: "TOOLCHAIN",
+            effect_tags: &["AFFECTS_OUTPUTS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "implied",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "implied",
+            kind: Kind::Bool,
+            default: "false",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["BAZEL_INTERNAL_CONFIGURATION"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &["--flag=true"],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "jobs",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "jobs",
+            kind: Kind::Opaque("fx.opts.Jobs"),
+            default: "auto",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["HOST_MACHINE_RESOURCE_OPTIMIZATIONS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "kind",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "kind",
+            kind: Kind::Enum(&["FASTBUILD", "DBG", "OPT"]),
+            default: "opt",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["AFFECTS_OUTPUTS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "limits",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "limits",
+            kind: Kind::Dict(&Kind::List(&Kind::String)),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["ACTION_COMMAND_LINES"],
+            metadata_tags: &[],
+            allows_multiple: true,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "mode",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "mode",
+            kind: Kind::Enum(&["FASTBUILD", "DBG", "OPT"]),
+            default: "fastbuild",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["AFFECTS_OUTPUTS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "no_value",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "noValue",
+            kind: Kind::Void,
+            default: "null",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["LOADING_AND_ANALYSIS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: true,
+            expands_to: &["--flag", "--count=1"],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "old_flag",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "oldFlag",
+            kind: Kind::Int,
+            default: "0",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["NO_OP"],
+            metadata_tags: &["DEPRECATED", "EXPERIMENTAL"],
+            allows_multiple: false,
+            deprecated: true,
+            deprecation_warning: "Use `flag`.",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &["older_flag"],
+            fragment: true,
+        },
+        OptionDef {
+            name: "ratio",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "ratio",
+            kind: Kind::Double,
+            default: "0.5",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["EXECUTION"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "tag",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "tags",
+            kind: Kind::List(&Kind::String),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["LOADING_AND_ANALYSIS"],
+            metadata_tags: &[],
+            allows_multiple: true,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "target",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "target",
+            kind: Kind::Label,
+            default: "null",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["CHANGES_INPUTS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "targets",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "targets",
+            kind: Kind::List(&Kind::Label),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["CHANGES_INPUTS"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "text",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "text",
+            kind: Kind::String,
+            default: "",
+            help: "A string.",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["UNKNOWN"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "timeout",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "timeout",
+            kind: Kind::Duration,
+            default: "1s",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["EXECUTION", "TERMINAL_OUTPUT"],
+            metadata_tags: &[],
+            allows_multiple: false,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+        OptionDef {
+            name: "vars",
+            abbrev: '\0',
+            class: "fx.opts.Fragment",
+            field: "vars",
+            kind: Kind::Dict(&Kind::String),
+            default: "",
+            help: "",
+            value_help: "",
+            category: "UNCATEGORIZED",
+            effect_tags: &["ACTION_COMMAND_LINES"],
+            metadata_tags: &[],
+            allows_multiple: true,
+            deprecated: false,
+            deprecation_warning: "",
+            expansion: false,
+            expands_to: &[],
+            implicit_requirements: &[],
+            old_names: &[],
+            fragment: true,
+        },
+    ];
+    /// The option called `name`, or that used to be.
+    pub fn option(name: &str) -> Option<&'static OptionDef> {
+        blazon_rt::options::find(OPTIONS, name)
+    }
+    /// Option names that look like `name`, nearest first.
+    pub fn closest(name: &str) -> Vec<&'static str> {
+        blazon_rt::options::closest(OPTIONS, name)
+    }
 }

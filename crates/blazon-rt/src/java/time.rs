@@ -45,3 +45,60 @@ impl<'a> Duration<'a> {
         }
     }
 }
+
+crate::handle!(
+    /// `java.time.Instant`
+    Instant,
+    "java/time/Instant"
+);
+
+static INSTANT: ClassRef = ClassRef::new("java/time/Instant");
+static NOW: StaticMethod = StaticMethod::new(&INSTANT, "now", "()Ljava/time/Instant;");
+static OF_EPOCH_MILLI: StaticMethod =
+    StaticMethod::new(&INSTANT, "ofEpochMilli", "(J)Ljava/time/Instant;");
+static OF_EPOCH_SECOND: StaticMethod =
+    StaticMethod::new(&INSTANT, "ofEpochSecond", "(J)Ljava/time/Instant;");
+static TO_EPOCH_MILLI: Method = Method::new(&INSTANT, "toEpochMilli", "()J");
+
+impl<'l> Instant<'l> {
+    /// `Instant.now()`
+    pub fn now(env: &mut JNIEnv<'l>) -> Result<Self> {
+        let o = NOW.object(env, &[])?;
+        // SAFETY: `now` returns an `Instant`.
+        Ok(unsafe { Instant::from_raw(o) })
+    }
+
+    /// `Instant.ofEpochMilli(ms)`
+    pub fn of_epoch_milli(env: &mut JNIEnv<'l>, ms: i64) -> Result<Self> {
+        let o = OF_EPOCH_MILLI.object(env, &[JValue::Long(ms)])?;
+        // SAFETY: `ofEpochMilli` returns an `Instant`.
+        Ok(unsafe { Instant::from_raw(o) })
+    }
+
+    /// `Instant.ofEpochSecond(s)`
+    pub fn of_epoch_second(env: &mut JNIEnv<'l>, s: i64) -> Result<Self> {
+        let o = OF_EPOCH_SECOND.object(env, &[JValue::Long(s)])?;
+        // SAFETY: `ofEpochSecond` returns an `Instant`.
+        Ok(unsafe { Instant::from_raw(o) })
+    }
+}
+
+impl<'a> Instant<'a> {
+    /// Milliseconds since the epoch.
+    pub fn to_epoch_milli(&self) -> Result<i64> {
+        let mut env = vm::env()?;
+        TO_EPOCH_MILLI.long(&mut env, &self.obj, &[])
+    }
+}
+
+impl<'a, 'b> PartialOrd<Instant<'b>> for Instant<'a> {
+    fn partial_cmp(&self, other: &Instant<'b>) -> Option<std::cmp::Ordering> {
+        Some(crate::java::lang::compare_to(&self.obj, &other.obj))
+    }
+}
+
+impl<'a> Ord for Instant<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        crate::java::lang::compare_to(&self.obj, &other.obj)
+    }
+}

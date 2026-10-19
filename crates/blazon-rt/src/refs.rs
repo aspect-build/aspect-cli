@@ -206,7 +206,8 @@ pub(crate) fn pending(env: &mut JNIEnv) -> Result<Option<Error>> {
     }
     let throwable = env.exception_occurred()?;
     env.exception_clear()?;
-    Ok(Some(Error::java(describe(env, &throwable))))
+    let kept = env.new_global_ref(&throwable).ok();
+    Ok(Some(Error::java(describe(env, &throwable), kept)))
 }
 
 fn describe(env: &mut JNIEnv, t: &JThrowable) -> JavaException {
@@ -267,4 +268,26 @@ pub fn class_name(obj: &JObject) -> Result<String> {
     let cls = env.get_object_class(obj)?;
     let name = call_obj(&mut env, &cls, "getName", "()Ljava/lang/String;")?;
     Ok(env.get_string(&JString::from(name))?.into())
+}
+
+impl Error {
+    /// An error that carries the Java exception `t`: returned from a Rust
+    /// implementation of a Java type, it is thrown as that very object, whatever
+    /// checked exceptions the method declares.
+    pub fn from_throwable(t: &impl IsA<crate::java::lang::Throwable<'static>>) -> Error {
+        let object = t.borrowed();
+        let made = (|| -> Result<Error> {
+            let mut env = vm::env()?;
+            let throwable = JThrowable::from(env.new_local_ref(&object)?);
+            let kept = env.new_global_ref(&throwable)?;
+            Ok(Error::java(describe(&mut env, &throwable), Some(kept)))
+        })();
+        made.unwrap_or_else(|e| e.context("keep the exception to throw it"))
+    }
+}
+
+impl<T: IsA<crate::java::lang::Throwable<'static>>> From<T> for Error {
+    fn from(t: T) -> Error {
+        Error::from_throwable(&t)
+    }
 }

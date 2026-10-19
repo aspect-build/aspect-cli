@@ -9,8 +9,10 @@ use bazel::{BazelRepositoryModule, Object, OptionsBase};
 use blazon::release::Install;
 use blazon_rt::{Global, HandleExt, Jvm, vm};
 use jni::JNIEnv;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub struct EngineOptions {
     pub install: Install,
@@ -29,13 +31,15 @@ pub type Live = Global<Object<'static>>;
 /// What one `sync` of package loading needs, built once and reused per query.
 struct Loading {
     skyframe: Global<bazel::SkyframeExecutor<'static>>,
-    package_locator: Global<bazel::PathPackageLocator<'static>>,
+    /// Rebuilt when the applied engine half's `package_path` changes.
+    package_locator: Mutex<Global<bazel::PathPackageLocator<'static>>>,
     /// An `OptionsParser` over every option class the engine reads during
     /// loading, parsed with no arguments, so defaults throughout.
     options: Global<bazel::OptionsParser<'static>>,
     tsgm: Global<bazel::TimestampGranularityMonitor<'static>>,
     executors: Global<bazel::QuiescingExecutors<'static>>,
     reporter: Global<bazel::Reporter<'static>>,
+    event_bus: Global<bazel::EventBus<'static>>,
     lockfile_module: Option<Global<bazel::BazelLockFileModule<'static>>>,
     client_env: Global<
         bazel::ImmutableMap<'static, bazel::JavaString<'static>, bazel::JavaString<'static>>,
@@ -43,10 +47,96 @@ struct Loading {
     relative_working_directory: Global<bazel::PathFragment<'static>>,
 }
 
+/// A parsed configuration: the parser holding every flag's value (what
+/// `SkyframeExecutor.sync` reads) and the `BuildOptions` the rule fragments
+/// read.
+pub struct EngineConfig {
+    /// The engine half: applied before a call when it differs from the last.
+    pub(crate) half: Half,
+    parser: Global<bazel::OptionsParser<'static>>,
+    options: Global<bazel::BuildOptions<'static>>,
+}
+
+impl EngineConfig {
+    pub fn checksum(&self) -> Result<String> {
+        let mut env = vm::env()?;
+        Ok(self.options.get(&mut env)?.checksum()?)
+    }
+
+    /// Whether both configurations hold the same options, as `BuildOptions.equals` says.
+    pub fn same_as(&self, other: &EngineConfig) -> Result<bool> {
+        let mut env = vm::env()?;
+        Ok(self.options.get(&mut env)? == other.options.get(&mut env)?)
+    }
+}
+
+mod apply;
+mod artifacts;
+mod build;
+mod contexts;
+mod events;
+mod metrics;
+mod sandboxed;
+mod status;
+mod strategy;
+pub use apply::Half;
+pub use build::{ArtifactInfo, Batch};
+
+/// What a script named to build or analyze: a pattern, run as a query in the
+/// call's own synced graph, or a live target.
+pub enum Spec {
+    Pattern(String),
+    Live(Live),
+}
+
+/// The target keys of the last target set analyzed, reused while the targets
+/// and the top-level configuration are equal.
+#[derive(Clone)]
+struct KeysCache {
+    targets: Global<bazel::Collection<'static, bazel::Target<'static>>>,
+    top_key: Global<bazel::BuildConfigurationKey<'static>>,
+    by_label: Global<bazel::ImmutableMap<'static, bazel::Label<'static>, bazel::Target<'static>>>,
+    keys: Global<bazel::ImmutableList<'static, bazel::ConfiguredTargetKey<'static>>>,
+    labels: Arc<Vec<Global<bazel::Label<'static>>>>,
+}
+
+/// The outcome of analysis for the requested targets, held on the Java side.
+pub(crate) struct Core<'l> {
+    pub labels: Arc<Vec<Global<bazel::Label<'static>>>>,
+    /// The targets that analyzed, in order.
+    pub configured: Global<bazel::ImmutableList<'static, bazel::ConfiguredTarget<'static>>>,
+    /// For each requested target its place in `configured`, None when every one analyzed.
+    pub positions: Option<Vec<Option<usize>>>,
+    pub failures: HashMap<usize, String>,
+    pub roots: bazel::PackageRoots<'l>,
+}
+
+impl Core<'_> {
+    /// Where requested target `i` is in `configured`, None when it did not analyze.
+    pub fn position(&self, i: usize) -> Option<usize> {
+        match &self.positions {
+            None => Some(i),
+            Some(p) => p[i],
+        }
+    }
+}
+
+/// One requested target's analysis outcome.
+pub struct Analyzed {
+    pub label: Global<bazel::Label<'static>>,
+    pub target: Option<Global<bazel::ConfiguredTarget<'static>>>,
+    pub failure: Option<String>,
+}
+
 pub struct Engine {
     jvm: Jvm,
     runtime: Global<bazel::BlazeRuntime<'static>>,
     loading: Loading,
+    default_config: Mutex<Option<Arc<EngineConfig>>>,
+    /// The engine half the modules were last given; empty is the defaults they
+    /// were seeded with.
+    applied: Mutex<apply::Applied>,
+    keys_cache: Mutex<Option<KeysCache>>,
     _lock: output_base::Lock,
 }
 
@@ -62,6 +152,19 @@ const LANGUAGE_OPTIONS: &str =
 const COMMON_OPTIONS: &str = "com/google/devtools/build/lib/runtime/CommonCommandOptions";
 const REPOSITORY_OPTIONS: &str = "com/google/devtools/build/lib/bazel/repository/RepositoryOptions";
 const QUERY_OPTIONS: &str = "com/google/devtools/build/lib/query2/common/CommonQueryOptions";
+
+/// The option classes of `bazel build` that are not rule fragments: the
+/// command's own `options` plus the loading ones every command shares.
+const BUILD_COMMAND_OPTIONS: [&str; 8] = [
+    "com/google/devtools/build/lib/buildtool/BuildRequestOptions",
+    "com/google/devtools/build/lib/exec/ExecutionOptions",
+    "com/google/devtools/build/lib/exec/local/LocalExecutionOptions",
+    "com/google/devtools/build/lib/analysis/AnalysisOptions",
+    "com/google/devtools/build/lib/pkgcache/LoadingOptions",
+    "com/google/devtools/build/lib/runtime/KeepGoingOption",
+    "com/google/devtools/build/lib/runtime/LoadingPhaseThreadsOption",
+    "com/google/devtools/build/lib/analysis/WorkspaceStatusAction$Options",
+];
 
 impl Engine {
     pub fn start(o: EngineOptions) -> Result<Engine> {
@@ -88,6 +191,12 @@ impl Engine {
             jvm,
             runtime: runtime.to_global()?,
             loading,
+            default_config: Mutex::new(None),
+            applied: Mutex::new(apply::Applied {
+                fingerprint: String::new(),
+                ignore_dev_deps: false,
+            }),
+            keys_cache: Mutex::new(None),
             _lock: lock,
         })
     }
@@ -102,30 +211,401 @@ impl Engine {
         Ok(vm::env()?)
     }
 
+    /// Parses `arguments` with the engine's own `OptionsParser` over the
+    /// option classes of a build and derives the `BuildOptions` from it, the way
+    /// `BlazeRuntime.createBuildOptions` does for a command. Starlark build
+    /// settings (`starlark`, in option-string form) are resolved by Skyframe's
+    /// `ParsedFlagsFunction`, which needs the graph synced with this parser and
+    /// knows only the configuration's own options (`fragment_arguments`).
+    pub fn config(
+        &self,
+        arguments: &[String],
+        fragment_arguments: &[String],
+        starlark: &[String],
+        half: Half,
+    ) -> Result<EngineConfig> {
+        // A build reports each target's failure as data, so every target is
+        // attempted: the build-wide `keep_going` that the script never sees.
+        let mut arguments = arguments.to_vec();
+        arguments.push("--keep_going".into());
+        let arguments = &arguments[..];
+        let (parser, native) = {
+            let mut env = vm::env()?;
+            let runtime = self.runtime.get(&mut env)?;
+            let parser = parse_flags(&mut env, &runtime, arguments)?.to_global()?;
+            let options = runtime
+                .create_build_options(&parser.get(&mut env)?)?
+                .to_global()?;
+            (parser, options)
+        };
+        if starlark.is_empty() {
+            return Ok(EngineConfig {
+                half,
+                parser,
+                options: native,
+            });
+        }
+        let all: Vec<String> = fragment_arguments.iter().chain(starlark).cloned().collect();
+        let options = self.synced(&parser, &Half::default(), "build", false, |env, handler| {
+            let args = bazel::List::of_strs(env, &all)?;
+            let args = bazel::ImmutableList::copy_of::<bazel::JavaString>(env, &args)?;
+            Ok(self
+                .loading
+                .skyframe
+                .get(env)?
+                .create_build_options_for_testing(handler, &args)?
+                .to_global()?)
+        })?;
+        Ok(EngineConfig {
+            half,
+            parser,
+            options,
+        })
+    }
+
+    /// Configures and analyzes the targets of `spec` in `config`: the steps of
+    /// `BuildView.update` for a build that stops after analysis, driven on the
+    /// `SkyframeExecutor` and `SkyframeBuildView`. One entry per requested
+    /// target, in order: its configured target, or why it did not analyze.
+    pub fn analyze(&self, spec: &[Spec], config: &EngineConfig) -> Result<Vec<Analyzed>> {
+        self.synced(
+            &config.parser,
+            &config.half,
+            "build",
+            false,
+            |env, handler| {
+                let targets = self.resolve(env, handler, spec, config)?;
+                let core = self.analysis_core(env, handler, &targets, config)?;
+                let n = core.labels.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let position = core.position(i);
+                    out.push(Analyzed {
+                        label: core.labels[i].clone(),
+                        target: match position {
+                            Some(p) => Some(
+                                core.configured
+                                    .get(env)?
+                                    .upcast::<bazel::List<bazel::ConfiguredTarget>>()
+                                    .get(p)?
+                                    .to_global()?,
+                            ),
+                            None => None,
+                        },
+                        failure: core.failures.get(&i).cloned(),
+                    });
+                }
+                Ok(out)
+            },
+        )
+    }
+
+    /// The targets a script named, as one Java collection: each pattern string
+    /// evaluated as a query in the build's own synced graph, each live target
+    /// as it is. A single pattern is the query's own result set, untouched.
+    pub(crate) fn resolve(
+        &self,
+        env: &mut JNIEnv<'_>,
+        handler: &bazel::ExtendedEventHandler,
+        spec: &[Spec],
+        config: &EngineConfig,
+    ) -> Result<Global<bazel::Collection<'static, bazel::Target<'static>>>> {
+        let _resolving = crate::phases::start("resolve targets");
+        let l = &self.loading;
+        let runtime = self.runtime.get(env)?;
+        let skyframe = l.skyframe.get(env)?;
+        let options = config.parser.get(env)?;
+        type Found = Global<bazel::Collection<'static, bazel::Target<'static>>>;
+        let pattern = |env: &mut JNIEnv<'_>, expr: &str| -> Result<Found> {
+            let set = evaluate(env, &runtime, &skyframe, handler, &options, l, expr)?;
+            Ok(set
+                .get(env)?
+                .downcast::<bazel::Collection<bazel::Target>>()?
+                .to_global()?)
+        };
+        if let [Spec::Pattern(expr)] = spec {
+            let found = pattern(env, expr)?;
+            if found.get(env)?.is_empty()? {
+                bail!("no targets given");
+            }
+            return Ok(found);
+        }
+        let all = bazel::List::<bazel::Target>::new(env)?;
+        for item in spec {
+            match item {
+                Spec::Pattern(expr) => {
+                    let found = pattern(env, expr)?.get(env)?;
+                    for t in &found.upcast::<bazel::Iterable<bazel::Target>>() {
+                        all.add(&t?)?;
+                    }
+                }
+                Spec::Live(t) => {
+                    all.add(&t.get(env)?.downcast::<bazel::Target>()?)?;
+                }
+            }
+        }
+        let all = all.upcast::<bazel::Collection<bazel::Target>>();
+        if all.is_empty()? {
+            bail!("no targets given");
+        }
+        Ok(all.to_global()?)
+    }
+
+    /// `BuildView.update` up to and including `SkyframeBuildView.configureTargets`,
+    /// with `keep_going`: a target whose analysis fails does not stop the others,
+    /// and its `ErrorInfo` becomes its failure. The configured target keys of
+    /// an unchanged target set in an unchanged configuration are reused.
+    pub(crate) fn analysis_core<'l>(
+        &self,
+        env: &mut JNIEnv<'l>,
+        handler: &bazel::ExtendedEventHandler,
+        targets: &Global<bazel::Collection<'static, bazel::Target<'static>>>,
+        config: &EngineConfig,
+    ) -> Result<Core<'l>> {
+        let l = &self.loading;
+        let skyframe = l.skyframe.get(env)?;
+        let options = config.options.get(env)?;
+        let parser = config.parser.get(env)?;
+        let artifact_context = top_level_artifact_context(env, &parser)?;
+
+        let configuration = crate::phases::start("analysis: configuration");
+        skyframe.set_baseline_configuration(&options, handler)?;
+        let view = skyframe.skyframe_build_view()?;
+        let discard = view.should_discard_analysis_cache(
+            handler,
+            &options,
+            MAX_CONFIG_CHANGES_TO_SHOW,
+            true,
+            None::<&bazel::Object>,
+        )?;
+        let top = skyframe.create_configuration(handler, &options, false)?;
+        view.set_configuration(&top, &options, discard)?;
+        drop(configuration);
+
+        let keys_phase = crate::phases::start("analysis: target keys");
+        let top_key = top.key()?;
+        let collection = targets.get(env)?;
+        let reusable = {
+            let cache = self
+                .keys_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("keys cache lock poisoned"))?;
+            match &*cache {
+                Some(c) if c.targets.get(env)? == collection && c.top_key.get(env)? == top_key => {
+                    Some(c.clone())
+                }
+                _ => None,
+            }
+        };
+        let keys = match reusable {
+            Some(k) => k,
+            None => {
+                let by_label = bazel::Map::<bazel::Label, bazel::Target>::new(env)?;
+                let keys = bazel::List::<bazel::ConfiguredTargetKey>::new(env)?;
+                let mut labels = Vec::new();
+                for t in &collection.upcast::<bazel::Iterable<bazel::Target>>() {
+                    let target = t?;
+                    let label = target.label()?;
+                    by_label.put(&label, &target)?;
+                    keys.add(
+                        &bazel::ConfiguredTargetKey::builder(env)?
+                            .set_label(&label)?
+                            .set_configuration_key(Some(&top_key))?
+                            .build()?,
+                    )?;
+                    labels.push(label.to_global()?);
+                }
+                let built = KeysCache {
+                    targets: targets.clone(),
+                    top_key: top_key.to_global()?,
+                    by_label: bazel::ImmutableMap::copy_of(env, &by_label)?.to_global()?,
+                    keys: bazel::ImmutableList::copy_of(env, &keys)?.to_global()?,
+                    labels: Arc::new(labels),
+                };
+                *self
+                    .keys_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("keys cache lock poisoned"))? =
+                    Some(built.clone());
+                built
+            }
+        };
+        drop(keys_phase);
+        let recorded = bazel::StoredEventHandler::new(env)?;
+        let reporter = l.reporter.get(env)?;
+        reporter.add_handler(&recorded)?;
+        let configure_targets = crate::phases::start("analysis: configureTargets");
+        let configured = view.configure_targets(
+            handler,
+            &keys.by_label.get(env)?,
+            &keys.keys.get(env)?,
+            &bazel::ImmutableList::empty::<bazel::TopLevelAspectsKey>(env)?,
+            &artifact_context,
+            &l.event_bus.get(env)?,
+            &self.runtime.get(env)?.bug_reporter()?,
+            true,
+            &l.executors.get(env)?,
+            true,
+        );
+        reporter.remove_handler(&recorded)?;
+        drop(configure_targets);
+        let _collect = crate::phases::start("analysis: collect results");
+        let result = configured?;
+        if result.has_action_conflicts()? {
+            bail!("analysis found action conflicts; see the errors above");
+        }
+        let requested = keys.labels.len();
+        let analyzed = result.configured_targets()?;
+        let list = bazel::ImmutableList::copy_of::<bazel::ConfiguredTarget>(
+            env,
+            &analyzed.upcast::<bazel::Collection<bazel::ConfiguredTarget>>(),
+        )?;
+        let plain = list.upcast::<bazel::List<bazel::ConfiguredTarget>>();
+        if plain.len()? == requested {
+            // Every target analyzed, in the order of the keys.
+            return Ok(Core {
+                labels: keys.labels.clone(),
+                configured: list.to_global()?,
+                positions: None,
+                failures: HashMap::new(),
+                roots: result.package_roots()?,
+            });
+        }
+        // Some did not: match the configured targets to the requested ones by label.
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        for i in 0..plain.len()? {
+            by_name.insert(plain.get(i)?.label()?.to_string(), i);
+        }
+        let mut positions = Vec::with_capacity(requested);
+        let mut failed = Vec::new();
+        let failed_keys = bazel::List::<bazel::SkyKey>::new(env)?;
+        for (i, label) in keys.labels.iter().enumerate() {
+            match by_name.get(&label.get(env)?.to_string()) {
+                Some(p) => positions.push(Some(*p)),
+                None => {
+                    positions.push(None);
+                    failed.push(i);
+                    failed_keys.add(
+                        &keys
+                            .keys
+                            .get(env)?
+                            .upcast::<bazel::List<bazel::ConfiguredTargetKey>>()
+                            .get(i)?
+                            .upcast::<bazel::SkyKey>(),
+                    )?;
+                }
+            }
+        }
+        let mut failures = HashMap::new();
+        if !failed.is_empty() {
+            // The failed keys hold their errors in the graph, so asking again
+            // reads them (with events silenced: they were reported once).
+            let silent: bazel::ExtendedEventHandler =
+                bazel::NullEventHandler::instance(env)?.upcast();
+            let evaluated = skyframe.evaluate_sky_keys(&silent, &failed_keys, true)?;
+            let mut errors = Vec::new();
+            for e in &recorded.events()?.upcast::<bazel::Iterable<bazel::Event>>() {
+                let e = e?;
+                if e.kind()?.to_string() == "ERROR" {
+                    errors.push(e.message()?);
+                }
+            }
+            for i in failed {
+                let key = keys
+                    .keys
+                    .get(env)?
+                    .upcast::<bazel::List<bazel::ConfiguredTargetKey>>()
+                    .get(i)?;
+                let label = keys.labels[i].get(env)?.to_string();
+                let about: Vec<&str> = errors
+                    .iter()
+                    .filter(|m| m.contains(&label))
+                    .map(String::as_str)
+                    .collect();
+                let cause = match evaluated.get_error(&key.upcast::<bazel::SkyKey>())? {
+                    Some(e) => failure_message(&e)?,
+                    None => String::new(),
+                };
+                failures.insert(
+                    i,
+                    if !about.is_empty() {
+                        about.join("\n")
+                    } else if cause.is_empty() {
+                        "analysis failed; see the errors above".to_string()
+                    } else {
+                        cause
+                    },
+                );
+            }
+        }
+        Ok(Core {
+            labels: keys.labels.clone(),
+            configured: list.to_global()?,
+            positions: Some(positions),
+            failures,
+            roots: result.package_roots()?,
+        })
+    }
+
+    /// The configuration of no flags, parsed once.
+    pub fn default_config(&self) -> Result<Arc<EngineConfig>> {
+        let mut slot = self
+            .default_config
+            .lock()
+            .map_err(|_| anyhow::anyhow!("configuration lock poisoned"))?;
+        if let Some(c) = slot.as_ref() {
+            return Ok(c.clone());
+        }
+        let c = Arc::new(self.config(&[], &[], &[], Half::default())?);
+        *slot = Some(c.clone());
+        Ok(c)
+    }
+
     /// Evaluates a query expression on the heap and returns the live result
     /// set, the query's own aggregate of `Target`s in label order.
     pub fn query(&self, expr: &str) -> Result<Live> {
-        self.synced(|env, handler| {
+        self.query_synced(&self.loading.options, &Half::default(), expr)
+    }
+
+    /// `query`, with the graph synced to `config` (its repository environment
+    /// and its loading options), as the targets of a build in `config` are.
+    pub fn query_in(&self, expr: &str, config: &EngineConfig) -> Result<Live> {
+        self.query_synced(&config.parser, &config.half, expr)
+    }
+
+    fn query_synced(
+        &self,
+        parser: &Global<bazel::OptionsParser<'static>>,
+        half: &Half,
+        expr: &str,
+    ) -> Result<Live> {
+        self.synced(parser, half, "query", false, |env, handler| {
             let l = &self.loading;
             let runtime = self.runtime.get(env)?;
             let skyframe = l.skyframe.get(env)?;
-            let options = l.options.get(env)?;
+            let options = parser.get(env)?;
             evaluate(env, &runtime, &skyframe, handler, &options, l, expr)
         })
     }
 
     /// The live `Package` for `//pkg`, loaded on demand.
     pub fn package(&self, label: &str) -> Result<Live> {
-        self.synced(|env, _| {
-            let manager: bazel::PackageProvider =
-                self.loading.skyframe.get(env)?.package_manager()?.upcast();
-            let handler = bazel::NullEventHandler::instance(env)?;
-            let id = bazel::PackageIdentifier::parse(env, label.trim_start_matches("//"))?;
-            Ok(manager
-                .get_package(&handler, &id)?
-                .upcast::<Object>()
-                .to_global()?)
-        })
+        self.synced(
+            &self.loading.options,
+            &Half::default(),
+            "query",
+            false,
+            |env, _| {
+                let manager: bazel::PackageProvider =
+                    self.loading.skyframe.get(env)?.package_manager()?.upcast();
+                let handler = bazel::NullEventHandler::instance(env)?;
+                let id = bazel::PackageIdentifier::parse(env, label.trim_start_matches("//"))?;
+                Ok(manager
+                    .get_package(&handler, &id)?
+                    .upcast::<Object>()
+                    .to_global()?)
+            },
+        )
     }
 
     /// What every command begins and ends with on the executor: module values
@@ -133,6 +613,10 @@ impl Engine {
     /// notice. Nothing else of a command is run.
     fn synced<T>(
         &self,
+        options: &Global<bazel::OptionsParser<'static>>,
+        half: &Half,
+        command: &str,
+        executes: bool,
         f: impl FnOnce(&mut JNIEnv<'_>, &bazel::ExtendedEventHandler) -> Result<T>,
     ) -> Result<T> {
         let mut env = vm::env()?;
@@ -140,19 +624,38 @@ impl Engine {
         let l = &self.loading;
         let skyframe = l.skyframe.get(env)?;
         let handler: bazel::ExtendedEventHandler = l.reporter.get(env)?.upcast();
+        let prelude = crate::phases::start("sync: apply + inject + sync");
+        self.ensure_applied(env, options, half)?;
         inject_module_values(&self.runtime.get(env)?, &skyframe)?;
+        if self
+            .applied
+            .lock()
+            .map_err(|_| anyhow::anyhow!("engine half lock poisoned"))?
+            .ignore_dev_deps
+        {
+            inject_ignore_dev_deps(env, &skyframe)?;
+        }
+        let locator = l
+            .package_locator
+            .lock()
+            .map_err(|_| anyhow::anyhow!("package locator lock poisoned"))?
+            .get(env)?;
         skyframe.sync(
             &handler,
-            &l.package_locator.get(env)?,
+            &locator,
             &bazel::UUID::random(env)?,
             &l.client_env.get(env)?,
             &l.tsgm.get(env)?,
             &l.executors.get(env)?,
-            &l.options.get(env)?,
-            "query",
-            false,
+            &options.get(env)?,
+            command,
+            executes,
         )?;
+        drop(prelude);
+        let body = crate::phases::start("call body");
         let outcome = f(env, &handler);
+        drop(body);
+        let _after = crate::phases::start("sync: notify + after_command");
         let notified = skyframe.notify_command_complete(&handler);
         let result = outcome?;
         notified?;
@@ -250,8 +753,87 @@ fn evaluate(
     Ok(live)
 }
 
+/// An `OptionsParser` over every option class a `build` command reads (the
+/// modules' common options, the loading and query classes, the build command's
+/// own and the rule fragments'), parsed with `flags` and nothing else: no rc
+/// files, no residue.
+fn parse_flags<'l>(
+    env: &mut JNIEnv<'l>,
+    runtime: &bazel::BlazeRuntime,
+    flags: &[String],
+) -> Result<bazel::OptionsParser<'l>> {
+    let classes = bazel::Set::<bazel::Class<OptionsBase>>::new(env)?;
+    let common = bazel::BlazeCommandUtils::get_common_options(
+        env,
+        &runtime
+            .blaze_modules()?
+            .downcast::<bazel::Iterable<bazel::OptionsSupplier>>()?,
+    )?;
+    for c in &common.upcast::<bazel::Iterable<bazel::Class<OptionsBase>>>() {
+        classes.add(&c?)?;
+    }
+    for name in [PACKAGE_OPTIONS, LANGUAGE_OPTIONS, QUERY_OPTIONS]
+        .into_iter()
+        .chain(BUILD_COMMAND_OPTIONS)
+    {
+        classes.add(&class::<OptionsBase>(env, name)?)?;
+    }
+    let fragments = runtime
+        .rule_class_provider()?
+        .fragment_registry()?
+        .options_classes()?;
+    for c in &fragments.upcast::<bazel::Iterable<bazel::Class<bazel::FragmentOptions>>>() {
+        classes.add(&c?.downcast::<bazel::Class<OptionsBase>>()?)?;
+    }
+    let parser = bazel::OptionsParser::builder(env)?
+        .options_classes(&classes)?
+        .build()?;
+    parser.parse(&bazel::List::of_strs(env, flags)?)?;
+    Ok(parser)
+}
+
+const MAX_CONFIG_CHANGES_TO_SHOW: i32 = 3;
+
+/// `BuildRequest.getTopLevelArtifactContext` from the parsed options.
+pub(crate) fn top_level_artifact_context<'l>(
+    env: &mut JNIEnv<'l>,
+    options: &bazel::OptionsParser,
+) -> Result<bazel::TopLevelArtifactContext<'l>> {
+    let request = options.get_options(&class::<bazel::BuildRequestOptions>(
+        env,
+        "com/google/devtools/build/lib/buildtool/BuildRequestOptions",
+    )?)?;
+    let execution = options.get_options(&class::<bazel::ExecutionOptions>(
+        env,
+        "com/google/devtools/build/lib/exec/ExecutionOptions",
+    )?)?;
+    let protocol = options.get_options(&class::<bazel::BuildEventProtocolOptions>(
+        env,
+        "com/google/devtools/build/lib/buildeventstream/BuildEventProtocolOptions",
+    )?)?;
+    let validation = if !request.run_validation_actions()? {
+        bazel::ValidationMode::off(env)?
+    } else if request.use_validation_aspect()? {
+        bazel::ValidationMode::aspect(env)?
+    } else {
+        bazel::ValidationMode::output_group(env)?
+    };
+    let groups = bazel::OutputGroupInfo::determine_output_groups(
+        env,
+        &request.output_groups()?,
+        &validation,
+        false,
+    )?;
+    Ok(bazel::TopLevelArtifactContext::new(
+        env,
+        execution.test_strategy()? == "exclusive",
+        protocol.expand_filesets()?,
+        &groups,
+    )?)
+}
+
 /// `Class` of an option class, found by its internal name.
-fn class<'l, T>(env: &mut JNIEnv<'l>, name: &str) -> Result<bazel::Class<'l, T>> {
+pub(crate) fn class<'l, T>(env: &mut JNIEnv<'l>, name: &str) -> Result<bazel::Class<'l, T>> {
     Ok(bazel::Class::find(env, name)?)
 }
 
@@ -288,23 +870,7 @@ fn prepare_loading(
     let printing = bazel::PrintingEventHandler::new(env, &out_err, &kinds)?;
     reporter.add_handler(&printing)?;
 
-    let classes = bazel::Set::<bazel::Class<OptionsBase>>::new(env)?;
-    let common = bazel::BlazeCommandUtils::get_common_options(
-        env,
-        &runtime
-            .blaze_modules()?
-            .downcast::<bazel::Iterable<bazel::OptionsSupplier>>()?,
-    )?;
-    for c in &common.upcast::<bazel::Iterable<bazel::Class<OptionsBase>>>() {
-        classes.add(&c?)?;
-    }
-    for name in [PACKAGE_OPTIONS, LANGUAGE_OPTIONS, QUERY_OPTIONS] {
-        classes.add(&class::<OptionsBase>(env, name)?)?;
-    }
-    let options = bazel::OptionsParser::builder(env)?
-        .options_classes(&classes)?
-        .build()?;
-    options.parse(&bazel::List::of_strs::<&str>(env, &[])?)?;
+    let options = parse_flags(env, runtime, &[])?;
 
     let package_options =
         options.get_options(&class::<bazel::PackageOptions>(env, PACKAGE_OPTIONS)?)?;
@@ -328,15 +894,63 @@ fn prepare_loading(
     seed_repository_module(env, runtime, &reporter, &options)?;
     Ok(Loading {
         skyframe: skyframe.to_global()?,
-        package_locator: package_locator.to_global()?,
+        package_locator: Mutex::new(package_locator.to_global()?),
         options: options.to_global()?,
         tsgm: bazel::TimestampGranularityMonitor::new(env, &runtime.clock()?)?.to_global()?,
         executors: bazel::QuiescingExecutorsImpl::for_testing(env)?.to_global()?,
         reporter: reporter.to_global()?,
+        event_bus: event_bus.to_global()?,
         lockfile_module: seed_lockfile_module(runtime, &skyframe, &options, env)?,
         client_env: client_env(env, false)?.to_global()?,
         relative_working_directory: relative.to_global()?,
     })
+}
+
+fn strict_repo_env(env: &mut JNIEnv<'_>, options: &bazel::OptionsParser) -> Result<bool> {
+    Ok(options
+        .get_options(&class::<bazel::CommonCommandOptions>(env, COMMON_OPTIONS)?)?
+        .use_strict_repo_env()?)
+}
+
+/// The repository environment of a command: the client environment (only
+/// `PATH` when strict) with the `Config`'s `repo_env` assignments on top, for
+/// the repository rules and the non-strict one for credential helpers.
+/// `CommandEnvironment` computes the same from `--repo_env`.
+fn apply_repo_env(
+    env: &mut JNIEnv<'_>,
+    runtime: &bazel::BlazeRuntime,
+    strict: bool,
+    assignments: &[(String, String)],
+) -> Result<()> {
+    let Some(module) = find_module::<BazelRepositoryModule>(runtime)? else {
+        return Ok(());
+    };
+    for (supplier, only_path) in [
+        (module.repo_env_supplier()?, strict),
+        (module.nonstrict_repo_env_supplier()?, false),
+    ] {
+        let map = bazel::Map::<bazel::JavaString, bazel::JavaString>::new(env)?;
+        for (k, v) in std::env::vars_os() {
+            let (Ok(k), Ok(v)) = (k.into_string(), v.into_string()) else {
+                continue;
+            };
+            if only_path && k != "PATH" {
+                continue;
+            }
+            map.put(
+                &bazel::JavaString::new(env, &k)?,
+                &bazel::JavaString::new(env, &v)?,
+            )?;
+        }
+        for (k, v) in assignments {
+            map.put(
+                &bazel::JavaString::new(env, k)?,
+                &bazel::JavaString::new(env, v)?,
+            )?;
+        }
+        supplier.set(&bazel::ImmutableMap::copy_of(env, &map)?)?;
+    }
+    Ok(())
 }
 
 /// Each module's precomputed values (repository overrides, registries, the
@@ -372,7 +986,6 @@ fn seed_repository_module(
     };
     let common =
         options.get_options(&class::<bazel::CommonCommandOptions>(env, COMMON_OPTIONS)?)?;
-    let repo = options.get_options(&class::<bazel::RepositoryOptions>(env, REPOSITORY_OPTIONS)?)?;
 
     module.set_clock(Some(&runtime.clock()?))?;
     module.set_registries(Some(&BazelRepositoryModule::default_registries(env)?))?;
@@ -391,59 +1004,11 @@ fn seed_repository_module(
         .parent_directory()?
         .ok_or_else(|| anyhow::anyhow!("the output base has no parent directory"))?;
     cache.set_path(Some(&user_root.get_relative("cache/repos/v1")?))?;
-    cache
-        .download_cache()?
-        .set_hardlink(repo.use_hardlinks()?)?;
     if cache.repo_contents_cache()?.is_enabled()? {
         cache.repo_contents_cache()?.acquire_shared_lock()?;
     }
 
-    let scaling = common.http_timeout_scaling()?;
-    let http_scaling = if scaling > 0.0 { scaling as f32 } else { 1.0 };
-    let http = bazel::HttpDownloader::new(
-        env,
-        common.http_connector_attempts()?,
-        &common.http_connector_retry_max_timeout()?,
-        common.http_max_parallel_downloads()?,
-        http_scaling,
-    )?;
-    let delegating = bazel::DelegatingDownloader::new(env, &http)?;
-    let manager =
-        bazel::DownloadManager::new(env, &cache.download_cache()?, &delegating, &http, reporter)?;
-    manager.set_disable_download(repo.disable_download()?)?;
-    if repo.repository_downloader_retries()? >= 0 {
-        manager.set_retries(repo.repository_downloader_retries()?)?;
-    }
-
-    let repo_scaling = repo.experimental_scale_timeouts()?;
-    let repo_scaling = if repo_scaling > 0.0 {
-        repo_scaling
-    } else {
-        1.0
-    };
-    let process_wrapper = process_wrapper(env, runtime)?;
-    let fetch = module.repository_fetch_function()?.ok_or_else(unset)?;
-    fetch.set_download_manager(&manager)?;
-    fetch.set_timeout_scaling(repo_scaling)?;
-    fetch.set_process_wrapper(process_wrapper.as_ref())?;
-    fetch.set_syscall_cache(&bazel::SyscallCache::no_cache(env)?)?;
-    let extension = module.single_extension_eval_function()?.ok_or_else(unset)?;
-    extension.set_download_manager(&manager)?;
-    extension.set_timeout_scaling(repo_scaling)?;
-    extension.set_process_wrapper(process_wrapper.as_ref())?;
-    module
-        .module_file_function()?
-        .ok_or_else(unset)?
-        .set_download_manager(&manager)?;
-    module
-        .repo_spec_function()?
-        .ok_or_else(unset)?
-        .set_download_manager(&manager)?;
-    module
-        .yanked_versions_function()?
-        .ok_or_else(unset)?
-        .set_download_manager(&manager)?;
-    module.vendor_command()?.set_download_manager(&manager)?;
+    apply::install_download_manager(env, runtime, reporter, options, &module)?;
     Ok(())
 }
 
@@ -587,4 +1152,42 @@ fn javalog(log: &std::path::Path) -> String {
          com.google.devtools.build.lib.util.SimpleLogHandler.formatter=com.google.devtools.build.lib.util.SingleLineFormatter\n",
         log.display()
     )
+}
+
+/// What an `ErrorInfo` says: its exception's message, then each cause's
+/// message that differs, outermost first; the `ErrorInfo` text when it has no
+/// exception (a cycle).
+pub(crate) fn failure_message(info: &bazel::ErrorInfo) -> Result<String> {
+    let mut messages: Vec<String> = Vec::new();
+    let mut next = info
+        .exception()?
+        .map(|e| e.upcast::<blazon_rt::java::lang::Throwable>());
+    while let Some(t) = next {
+        if let Some(m) = t.message()? {
+            let m = m.trim().to_string();
+            if !m.is_empty() && !messages.iter().any(|x| x.contains(&m)) {
+                messages.push(m);
+            }
+        }
+        next = t.cause()?;
+    }
+    Ok(if messages.is_empty() {
+        info.to_string()
+    } else {
+        messages.join(" <- ")
+    })
+}
+
+/// `ignore_dev_dependency` as a precomputed value, injected after the
+/// repository module's own (which holds its `AtomicBoolean` at false): Skyframe
+/// keeps the last injection of a key before an evaluation, so the pair costs
+/// nothing when the value did not change.
+fn inject_ignore_dev_deps(env: &mut JNIEnv<'_>, skyframe: &bazel::SkyframeExecutor) -> Result<()> {
+    let key = bazel::ModuleFileFunction::ignore_dev_deps(env)?;
+    let on = blazon_rt::java::lang::Boolean::of(env, true)?;
+    let injected = bazel::PrecomputedValue::injected(env, &key, &on)?;
+    let list = bazel::List::<bazel::InjectedPrecomputedValue>::new(env)?;
+    list.add(&injected)?;
+    skyframe.inject_extra_precomputed_values(&list)?;
+    Ok(())
 }

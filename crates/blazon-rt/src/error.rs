@@ -1,5 +1,6 @@
 //! The error type of every fallible call into the JVM.
 
+use jni::objects::GlobalRef;
 use std::fmt;
 
 /// An exception the JVM threw, as it was when it was caught.
@@ -38,6 +39,8 @@ enum Kind {
 pub struct Error {
     context: Vec<String>,
     kind: Kind,
+    /// The exception object, when the error came from one.
+    throwable: Option<GlobalRef>,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -48,14 +51,22 @@ impl Error {
         Error {
             context: Vec::new(),
             kind: Kind::Message(message.into()),
+            throwable: None,
         }
     }
 
-    pub(crate) fn java(e: JavaException) -> Error {
+    pub(crate) fn java(e: JavaException, throwable: Option<GlobalRef>) -> Error {
         Error {
             context: Vec::new(),
             kind: Kind::Java(e),
+            throwable,
         }
+    }
+
+    /// The Java exception object this error came from, kept so that a Rust
+    /// implementation of a Java type can throw it back unchanged.
+    pub fn throwable(&self) -> Option<&GlobalRef> {
+        self.throwable.as_ref()
     }
 
     /// The exception the JVM threw, when this error is one.
@@ -109,6 +120,7 @@ impl From<jni::errors::Error> for Error {
         Error {
             context: Vec::new(),
             kind: Kind::Jni(e),
+            throwable: None,
         }
     }
 }

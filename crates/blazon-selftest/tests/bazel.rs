@@ -10,6 +10,8 @@ use starlark::environment::{Globals, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::{Heap, Value};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn eval(src: &str, name: &str, value: impl for<'v> Fn(Heap<'v>) -> Value<'v>) -> String {
     let ast = AstModule::parse("t.star", src.to_string(), &Dialect::Extended).expect("parse");
@@ -43,7 +45,10 @@ fn bazel() -> Result<()> {
     dict(&mut env)?;
     unannotated(&mut env)?;
     inherited();
+    no_java_style_names();
     repository_module(&mut env)?;
+    implemented(&mut env)?;
+    spawn_failure(&mut env)?;
     Ok(())
 }
 
@@ -211,9 +216,9 @@ fn unannotated(env: &mut jni::JNIEnv<'static>) -> Result<()> {
     };
     assert_eq!(run("p.path_string"), "\"a/b\"");
     assert_eq!(run("p.is_absolute"), "False");
-    assert_eq!(run("p.segmentCount()"), "2");
-    assert_eq!(run("p.getParentDirectory().path_string"), "\"a\"");
-    assert_eq!(run("p.getRelative(\"c\").path_string"), "\"a/b/c\"");
+    assert_eq!(run("p.segment_count()"), "2");
+    assert_eq!(run("p.parent_directory().path_string"), "\"a\"");
+    assert_eq!(run("p.get_relative(\"c\").path_string"), "\"a/b/c\"");
     assert_eq!(run("type(p)"), "\"PathFragment\"");
     assert_eq!(run("p == q"), "True");
     assert_eq!(run("{p: 1}[q]"), "1");
@@ -232,7 +237,7 @@ fn inherited() {
     use starlark::docs::DocType;
     let members = |doc: DocType| doc.members.keys().cloned().collect::<Vec<_>>();
     let rule = members(DocType::from_starlark_value::<bz::RuleValue>());
-    for want in ["label", "name", "getAttr", "rule_class", "visibility"] {
+    for want in ["label", "name", "attr", "rule_class", "visibility"] {
         assert!(rule.iter().any(|m| m == want), "Rule has {want}: {rule:?}");
     }
     let input = members(DocType::from_starlark_value::<bz::InputFileValue>());
@@ -242,4 +247,149 @@ fn inherited() {
     );
     let package = members(DocType::from_starlark_value::<bz::PackageValue>());
     assert!(package.iter().any(|m| m == "targets"), "{package:?}");
+}
+
+/// Scripts never see Java-style names: every member of a generated type is snake_case.
+fn no_java_style_names() {
+    use starlark::docs::DocType;
+    fn check(type_name: &str, doc: DocType) {
+        assert!(!doc.members.is_empty(), "{type_name} has members");
+        for name in doc.members.keys() {
+            assert!(
+                !name.chars().any(|c| c.is_uppercase()),
+                "{type_name}.{name} is camelCase"
+            );
+        }
+    }
+    check("Rule", DocType::from_starlark_value::<bz::RuleValue>());
+    check(
+        "Package",
+        DocType::from_starlark_value::<bz::PackageValue>(),
+    );
+    check(
+        "InputFile",
+        DocType::from_starlark_value::<bz::InputFileValue>(),
+    );
+    check(
+        "PathFragment",
+        DocType::from_starlark_value::<bz::PathFragmentValue>(),
+    );
+    check("Label", DocType::from_starlark_value::<bz::LabelValue>());
+    check("Dict", DocType::from_starlark_value::<bz::DictValue>());
+    check(
+        "StarlarkList",
+        DocType::from_starlark_value::<bz::StarlarkListValue>(),
+    );
+}
+
+struct IncludeContext {
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+impl bz::CppIncludeExtractionContextImpl for IncludeContext {
+    fn artifact_resolver<'a>(
+        &self,
+        _env: &mut jni::JNIEnv<'a>,
+    ) -> Result<Option<bz::ArtifactResolver<'a>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            return Err(blazon_rt::Error::msg("no resolver in this test"));
+        }
+        Ok(None)
+    }
+}
+
+/// Bazel's own `CppIncludeExtractionContext` implemented in Rust: the class is
+/// defined next to Bazel's classes, Java dispatches into Rust, and an error
+/// comes back as an exception.
+fn implemented(env: &mut jni::JNIEnv<'static>) -> Result<()> {
+    use blazon_rt::HandleExt;
+    use blazon_rt::java::lang::Object;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let ctx = bz::CppIncludeExtractionContext::from_impl(
+        env,
+        Box::new(IncludeContext {
+            calls: calls.clone(),
+            fail: false,
+        }),
+    )?;
+    assert!(ctx.artifact_resolver()?.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let object: Object = ctx.upcast();
+    let class = object.class()?.name()?;
+    assert!(
+        class.starts_with("blazon.impl.CppIncludeExtractionContext$"),
+        "{class}"
+    );
+    let as_context: bz::ActionContext = ctx.upcast();
+    assert!(as_context.is_a::<bz::CppIncludeExtractionContext>()?);
+
+    let failing = bz::CppIncludeExtractionContext::from_impl(
+        env,
+        Box::new(IncludeContext {
+            calls: calls.clone(),
+            fail: true,
+        }),
+    )?;
+    let err = failing
+        .artifact_resolver()
+        .expect_err("the Rust side failed");
+    let text = format!("{err}");
+    assert!(
+        text.contains("RuntimeException")
+            && text.contains("no resolver in this test")
+            && text.contains("CppIncludeExtractionContext.getArtifactResolver"),
+        "{text}"
+    );
+    Ok(())
+}
+
+struct Strategy;
+
+impl bz::SpawnStrategyImpl for Strategy {
+    fn exec<'a>(
+        &self,
+        env: &mut jni::JNIEnv<'a>,
+        _spawn: Option<bz::Spawn<'a>>,
+        _context: Option<bz::ActionExecutionContext<'a>>,
+    ) -> Result<bz::ImmutableList<'a, bz::SpawnResult<'static>>> {
+        let status = bz::SpawnResultStatus::non_zero_exit(env)?;
+        let builder = bz::SpawnResultBuilder::new(env)?;
+        builder.set_status(&status)?;
+        builder.set_exit_code(1)?;
+        builder.set_failure_detail(&bz::FailureDetail::default_instance(env)?)?;
+        builder.set_runner_name("remote")?;
+        let result = builder.build()?;
+        let failure = bz::SpawnExecException::new(env, "the remote spawn failed", &result, false)?;
+        Err(failure.into())
+    }
+
+    fn can_exec<'a>(
+        &self,
+        _env: &mut jni::JNIEnv<'a>,
+        _spawn: bz::Spawn<'a>,
+        _registry: bz::ActionContextRegistry<'a>,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A Rust `SpawnStrategy` fails a spawn with Bazel's own checked
+/// `SpawnExecException`, which reaches the Java caller as that class.
+fn spawn_failure(env: &mut jni::JNIEnv<'static>) -> Result<()> {
+    let strategy = bz::SpawnStrategy::from_impl(env, Box::new(Strategy))?;
+    let err = strategy
+        .exec(None::<&bz::Spawn>, None::<&bz::ActionExecutionContext>)
+        .expect_err("the strategy fails");
+    let exception = err.exception().expect("a Java exception");
+    assert_eq!(
+        exception.class,
+        "com.google.devtools.build.lib.exec.SpawnExecException"
+    );
+    assert_eq!(
+        exception.message.as_deref(),
+        Some("the remote spawn failed")
+    );
+    Ok(())
 }

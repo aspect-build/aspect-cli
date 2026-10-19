@@ -71,12 +71,28 @@ members = [
 ]
 
 [[class]]
+java = "fx.Target"
+members = []
+
+[[implement]]
+java = "fx.Callback"
+
+[[implement]]
+java = "fx.Task"
+
+[[class]]
 java = "net.starlark.java.eval.Starlark"
 members = []
 
 [[class]]
 java = "net.starlark.java.eval.StarlarkValue"
 members = []
+
+[options]
+fragments = true
+include_effect_tags = ["LOADING_AND_ANALYSIS"]
+exclude_effect_tags = ["EXECUTION"]
+exclude_classes = ["fx.opts.RemoteStuff", "fx.opts.Dup"]
 "#;
 
 fn generate_into(spec: &str, out: &Path) -> anyhow::Result<()> {

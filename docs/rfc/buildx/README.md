@@ -372,6 +372,43 @@ Tools that speak BES keep a BES: the event bus is engine code and emitting the p
 
 The thread asked what the cost is, and whether it is only ease of use. It is not ease of use. It is that the entire class of per-invocation decisions moves from flags the user sets to code the task runs, and with it the programmability the command line never had: retry, upload, execution, platform selection, all per target, all in one language. The technical cost is one thin glue layer per Bazel minor. The real cost is that it asks people to change how they use Bazel, and that is the hard part, not the engine.
 
+## Durable state
+
+Status: the implementation described here (`ctx.state.dump` and `hydrate`, `crates/buildx/src/state/`) is not in the tree. It is on the local branch `buildx-durable-state`, one commit on top of the engine without it. It works and is correct, but it is slower than a cold start on this repository, so it was set aside until the engine produces analysis results that are expensive to rebuild and can be serialized. The findings below stand.
+
+The persistent process stays in the plan because Skyframe state is the product. `buildx` can also write that state down: `ctx.state.dump(path)` writes the evaluated graph of its hosted engine to disk and `ctx.state.hydrate(path)` puts it back in a later process, so the JVM may restart and the work continues. Both calls are explicit, there is no dump on exit and no background snapshot, and `crates/buildx/README.md` has the surface and the manual test.
+
+### What is captured
+
+The node entries of the loading graph with their values, versions and edges: loaded packages, globs, transitive-target values, file and directory state, package lookups, written through Bazel's own `ObjectCodecs`. After the three queries of `state-dump.star` on the repository root that is 56,907 of 75,433 nodes in 7.9 MB. The other 18,525, the `.bzl` modules, module resolution and what they depend on, hold code Bazel's codecs cannot write (a `Module` of Starlark functions; a Java `record` in the module-resolution values) or are what those need, so a hydrating engine evaluates them again and attaches the restored nodes to them, comparing each by a digest. The restored values name the `.bzl` globals they refer to rather than their position, so a hydrating engine resolves each name against the modules it just loaded: adding or removing a global, or renaming a `.bzl`, no longer invalidates anything but the nodes that load the changed module. A hydrate validates the Bazel version, the workspace path, a format version and the body's length and digest before an engine starts; what changed on disk since is invalidated by Skyframe's ordinary file diffing at the next command, and a changed `.bzl` drops the restored nodes that depend on it.
+
+### What is not captured
+
+Repository rule outputs on disk (they are the output base's and are reused), in-flight actions, the script's Starlark values, live JNI handles, and analysis: the engine does not run analysis yet, so there are no configured-target or action nodes to keep. When it does, Bazel's frontier serializer is the mechanism meant for those nodes.
+
+### Version coupling and platforms
+
+A dump is valid for the exact Bazel version, buildx bindings, workspace path and engine configuration that wrote it, because the values are written by reflection over Bazel's own classes. It is written and verified on macOS arm64. Linux x86_64 and arm64 are expected to behave the same, since nothing in the mechanism is platform specific, and are not tested.
+
+### Mechanisms measured
+
+All four were tried on Bazel 9.0.1 over the repository root (399 targets, 529 packages; 73,696 graph nodes after `deps(//:all)`, 75,429 after the three queries of `state-dump.star`).
+
+| Mechanism | macOS arm64 | Linux | Result |
+|---|---|---|---|
+| Bazel's frontier serializer, `--experimental_remote_analysis_cache*` | runs, captures nothing | same | It selects only analysis and execution nodes, of which a loading graph has none (none of its 73,696 nodes). `PackageCodec` needs a `PackageSerializer` the open-source jar does not ship, `RuleCodec` refuses by design, and the only store is in memory. Its command module is not in the jar. Not usable. |
+| CRaC (Azul Zulu 25 CRaC) | the JDK exists, only the `simengine` is in it: a checkpoint wrote 842 bytes and the same process went on | Zulu 25 CRaC JDKs exist for x64 and arm64, glibc and musl; paper only | Cannot restore on macOS (measured). On Linux it needs the `criu` engine, privileges, every open file descriptor closed (Bazel holds jars, the output base lock and sockets), and a `libjvm` hosted by a launcher, where buildx hosts it through JNI from a Rust process. Not tried: no Linux environment. |
+| CRIU on the whole `buildx` process | none | Linux only; paper only | Image of the whole resident set, privileges, same kernel and paths on restore; it would restore at memory speed and capture everything, JVM and handles included. Not tried: no Linux environment. |
+| Custom dump over `ObjectCodecs` (this section) | works | expected; untested | Dump 2.3 s and 7.9 MB, hydrate 1.6 s; 399 / 23310 / 736 unchanged; a BUILD edit, an edited, extended, renamed or global-removing `.bzl`, a changed `MODULE.bazel`, an added source and a deleted BUILD file all match a cold run. |
+
+Docker's CLI is installed on the development machine but its daemon was not running, and there is no Colima, Lima or OrbStack, so the Linux rows are analysis from documentation, not measurements.
+
+The custom dump is the only one that restores on macOS, and on this repository it is still not faster than a cold start. A cold `deps(//:all)` is 1.98 s as a whole process; a hydrated one is 2.40 s, of which the hydrate is 1.61 s: 1.0 s evaluating the nodes it cannot restore and 0.5 s restoring. Restoring on four or more threads, each attached to the JVM and inserting nodes through the typed bindings, took the restore from 0.95 s to 0.50 s (2 threads 0.68 s) and the whole run from 2.88 s to 2.40 s; it stops there because reading the graph is Bazel's single-threaded decoder (0.14 s) and the rest is about 17 JNI calls per node. A synthetic workspace of 3,000 light packages measured 2.1 s cold and 2.2 s hydrated, and one of 1,000 packages of 240 targets 5.7 s and 5.5 s (before the parallel restore). It pays for itself only where loading is slower than restoring: slow or cold disks, few cores, heavy BUILD evaluation. A process-level checkpoint is the mechanism that restores at memory speed, and it is Linux only.
+
+The 1.0 s is the floor of this design. The 1,028 `.bzl` loads cannot be written: Bazel's own codecs write a `Module` only as a reference (load key and global name), resolved by a Skyframe lookup that evaluates the file again, and the code itself (functions, closures, the compiled program) has no codec. The module-resolution values hold a `record`, which `DynamicCodec` cannot write; they must not be trusted in any case. Everything else in the 18,525 is a dependency of those, and every one is needed to attach the restored nodes, so none can be deferred to the first query. A thread-dump profile of that evaluation attributes about 40% of the samples to `.bzl` loading, 25% to the file and directory nodes under it, 10% to `bzlmod` and the rest to repository nodes.
+
+Decision: macOS is a first-class platform, so the Linux-only checkpoint routes (CRaC, including its Warp engine, and CRIU) are not pursued. Durable state is the Skyframe dump, which has to earn its keep on macOS. Done: the restore runs on all cores, and the values refer to `.bzl` globals by name, so a hydrate keeps everything the edits since the dump did not reach. Not done, and not possible from here: restoring the `.bzl` and module nodes themselves, which needs Java-side codecs (a `Module`'s code, a `record`), and putting entries into the graph's node map in one call, which needs a blazon binding for `java.util.concurrent.ConcurrentHashMap`. Neither is likely to matter until analysis results are in the graph.
+
 ## Alternatives considered
 
 Four independent specifications were written against the same requirements from skeptical, minimalist, maximalist and layered stances. All four converged on no `run` verb, a per-target completion stream, Bazel-named records and `std.process.Command` as the local surface. They differed on a mode switch on `build`, which this RFC rejects in favour of explicit materialization, and on whether remote execution is a separate `action` record, which this RFC replaces with a second `command` type. Seven call-site sketches of candidate shapes preceded them; the BXL-style handle won.

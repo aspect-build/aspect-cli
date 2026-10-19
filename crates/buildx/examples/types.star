@@ -3,7 +3,7 @@ def _impl(ctx):
     rules = ctx.analysis().query("kind(rule, //...)")
     rule = [r for r in rules if r.label.package == "lib" and r.label.name == "lib"][0]
     label = rule.label
-    srcs = rule.getAttr("srcs")
+    srcs = rule.attr("srcs")
     pkg = ctx.analysis().package("//lib")
     ctx.output.print("result set:", type(rules), "rule:", type(rule), "label:", type(label))
     ctx.output.print("package:", type(pkg), "targets:", type(pkg.targets), "runtime:", type(ctx.java.runtime))

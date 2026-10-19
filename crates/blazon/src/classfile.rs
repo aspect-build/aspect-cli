@@ -66,6 +66,8 @@ pub struct FieldInfo {
     pub access: Access,
     pub constant: Option<Constant>,
     pub nullable: bool,
+    /// The field's `@Option`, for an options class.
+    pub option: Option<crate::annot::OptionAnno>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +88,8 @@ pub struct ClassInfo {
     pub name: String,
     pub public: bool,
     pub is_interface: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
     pub type_params: Vec<TypeParam>,
     pub super_class: Option<Ty>,
     pub interfaces: Vec<Ty>,
@@ -105,6 +109,7 @@ impl ClassInfo {
 pub struct Classes {
     jar: Jar,
     cache: HashMap<String, Option<Rc<ClassInfo>>>,
+    superclasses: Option<Rc<HashMap<String, String>>>,
 }
 
 impl Classes {
@@ -112,11 +117,22 @@ impl Classes {
         Classes {
             jar,
             cache: HashMap::new(),
+            superclasses: None,
         }
     }
 
     pub fn contains(&self, internal: &str) -> bool {
         self.jar.contains(internal)
+    }
+
+    /// The superclass of every class in the jar, read once.
+    pub fn superclasses(&mut self) -> Result<Rc<HashMap<String, String>>> {
+        if let Some(s) = &self.superclasses {
+            return Ok(s.clone());
+        }
+        let s = Rc::new(self.jar.superclasses()?);
+        self.superclasses = Some(s.clone());
+        Ok(s)
     }
 
     /// The class, `None` when the jar does not have it.
@@ -341,6 +357,7 @@ fn read(bytes: &[u8]) -> Result<ClassInfo> {
             access: field_access(f.access_flags),
             constant: constant_of(&f.attributes),
             nullable: nullable_return(&f.attributes),
+            option: crate::annot::option_of(&annotations(&f.attributes)),
         });
     }
     let mut methods = Vec::new();
@@ -377,6 +394,8 @@ fn read(bytes: &[u8]) -> Result<ClassInfo> {
         name,
         public: cf.access_flags.contains(ClassAccessFlags::PUBLIC),
         is_interface: cf.access_flags.contains(ClassAccessFlags::INTERFACE),
+        is_abstract: cf.access_flags.contains(ClassAccessFlags::ABSTRACT),
+        is_final: cf.access_flags.contains(ClassAccessFlags::FINAL),
         type_params,
         super_class,
         interfaces,

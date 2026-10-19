@@ -322,6 +322,7 @@ crate::handle!(
 
 static THROWABLE: ClassRef = ClassRef::new("java/lang/Throwable");
 static GET_MESSAGE: Method = Method::new(&THROWABLE, "getMessage", "()Ljava/lang/String;");
+static GET_CAUSE: Method = Method::new(&THROWABLE, "getCause", "()Ljava/lang/Throwable;");
 static PRINT_STACK_TRACE: Method =
     Method::new(&THROWABLE, "printStackTrace", "(Ljava/io/PrintWriter;)V");
 
@@ -334,6 +335,25 @@ impl<'a> Throwable<'a> {
             return Ok(None);
         }
         Ok(Some(read_string(&mut env, m)?))
+    }
+
+    /// `getCause()`, `None` when there is none.
+    pub fn cause(&self) -> Result<Option<Throwable<'a>>> {
+        let mut env = vm::env()?;
+        let c = GET_CAUSE.object(&mut env, &self.obj, &[])?;
+        if c.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: `getCause` returns a `Throwable`.
+        Ok(Some(unsafe { Throwable::from_raw(c) }))
+    }
+
+    /// The class name, e.g. `java.lang.IllegalStateException`.
+    pub fn class_name(&self) -> Result<std::string::String> {
+        let mut env = vm::env()?;
+        let c = GET_CLASS.object(&mut env, &self.obj, &[])?;
+        // SAFETY: `getClass` returns a `Class`.
+        unsafe { Class::<Object<'static>>::from_raw(c) }.name()
     }
 
     /// What `printStackTrace` prints: the exception, its frames and its causes.
@@ -349,3 +369,51 @@ impl<'a> Throwable<'a> {
         to_string(&sw)
     }
 }
+
+impl std::error::Error for Throwable<'_> {}
+
+crate::handle!(
+    /// `java.lang.Exception`
+    Exception,
+    "java/lang/Exception"
+);
+
+crate::handle!(
+    /// `java.lang.RuntimeException`
+    RuntimeException,
+    "java/lang/RuntimeException"
+);
+
+crate::is_a!(Exception[] => Throwable[]);
+crate::is_a!(RuntimeException[] => Exception[]);
+crate::is_a!(RuntimeException[] => Throwable[]);
+
+macro_rules! throwable_view {
+    ($($t:ident),*) => {$(
+        impl<'a> $t<'a> {
+            /// `getMessage()`, `None` when it is null.
+            pub fn message(&self) -> Result<Option<std::string::String>> {
+                Throwable::from(self.clone()).message()
+            }
+
+            /// `getCause()`, `None` when there is none.
+            pub fn cause(&self) -> Result<Option<Throwable<'a>>> {
+                Throwable::from(self.clone()).cause()
+            }
+
+            /// What `printStackTrace` prints.
+            pub fn stack_trace(&self) -> Result<std::string::String> {
+                Throwable::from(self.clone()).stack_trace()
+            }
+
+            /// The class name, e.g. `java.lang.IllegalStateException`.
+            pub fn class_name(&self) -> Result<std::string::String> {
+                Throwable::from(self.clone()).class_name()
+            }
+        }
+
+        impl std::error::Error for $t<'_> {}
+    )*};
+}
+
+throwable_view!(Exception, RuntimeException);

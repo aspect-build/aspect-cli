@@ -2,9 +2,11 @@
 //! signatures, Rust names, and the supertypes each class is a subtype of.
 
 use crate::classfile::{ClassInfo, Classes, FieldInfo, MethodInfo};
-use crate::ir::{Class, Member, MemberKind, ParamSig, Signature, SuperType, Target};
+use crate::ir::{
+    Class, ImplMethod, Implementation, Member, MemberKind, ParamSig, Signature, SuperType, Target,
+};
 use crate::signature::{Arg, Ty};
-use crate::spec::{ClassSpec, MemberSel, Spec, parse_member};
+use crate::spec::{ClassSpec, ImplementSpec, MemberSel, Spec, parse_member};
 use crate::{jdk, names};
 use anyhow::{Result, bail};
 use std::collections::HashMap;
@@ -233,6 +235,7 @@ pub(crate) fn lower_class(cs: &ClassSpec, classes: &mut Classes, label: &str) ->
         comparable: false,
         members,
         missing: Vec::new(),
+        conditional: cs.conditional.clone(),
         starlark: None,
     };
     assign_names(&mut class, &explicit)?;
@@ -526,4 +529,261 @@ pub(crate) fn arg_bound(a: &Arg) -> Ty {
         Arg::Exact(t) | Arg::Extends(t) => t.clone(),
         Arg::Any | Arg::Super(_) => crate::annot::object_ty(),
     }
+}
+
+/// Methods of `java.lang.Object` that an interface may redeclare; the
+/// generated class inherits them.
+const OBJECT_METHODS: &[(&str, &str)] = &[
+    ("equals", "(Ljava/lang/Object;)Z"),
+    ("hashCode", "()I"),
+    ("toString", "()Ljava/lang/String;"),
+];
+
+/// The implementations the spec asks for, against one version's classes.
+pub fn implementations(
+    spec: &Spec,
+    classes: &mut Classes,
+    label: &str,
+    bound: &[Class],
+) -> Result<Vec<Implementation>> {
+    let mut out: Vec<Implementation> = Vec::new();
+    for is in &spec.implementations {
+        let imp = implement(is, classes, label, bound)?;
+        if out.iter().any(|o| o.internal == imp.internal) {
+            bail!("{}: implemented twice in the spec", is.java);
+        }
+        if let Some(clash) = bound.iter().find(|c| c.rust == imp.trait_name) {
+            bail!(
+                "{}: the trait `{}` has the name of the bound class {}; set `rust = \"...\"`",
+                is.java,
+                imp.trait_name,
+                clash.java
+            );
+        }
+        out.push(imp);
+    }
+    Ok(out)
+}
+
+fn implement(
+    is: &ImplementSpec,
+    classes: &mut Classes,
+    label: &str,
+    bound: &[Class],
+) -> Result<Implementation> {
+    let internal = is.java.replace('.', "/");
+    let who = format!("Bazel {label}: [[implement]] {}", is.java);
+    if jdk::is_jdk(&internal) {
+        bail!(
+            "{who}: a JDK type cannot be implemented from Rust, because its handle lives in blazon-rt; wrap it in a type of the jar"
+        );
+    }
+    let info = classes.require(&internal, &format!("[[implement]] `{}`", is.java))?;
+    if !info.public {
+        bail!("{who}: the type is not public, and the generated class lives in another package");
+    }
+    let (interface, super_internal) = if info.is_interface {
+        let sup = match &is.extends {
+            Some(e) => e.replace('.', "/"),
+            None => "java/lang/Object".to_string(),
+        };
+        (Some(internal.clone()), sup)
+    } else {
+        if is.extends.is_some() {
+            bail!(
+                "{who}: it is a class, so it is what the implementation extends; `extends` is for an interface"
+            );
+        }
+        (None, internal.clone())
+    };
+    let mut roots = vec![info.clone()];
+    if super_internal != "java/lang/Object" {
+        let sup = classes.require(&super_internal, &format!("{who}: `extends`"))?;
+        if sup.is_interface {
+            bail!(
+                "{who}: {} is an interface, not a class to extend",
+                super_internal.replace('/', ".")
+            );
+        }
+        if !sup.public || sup.is_final {
+            bail!(
+                "{who}: {} must be a public, non-final class to extend",
+                super_internal.replace('/', ".")
+            );
+        }
+        let ctor = sup
+            .methods
+            .iter()
+            .find(|m| m.name == "<init>" && m.descriptor == "()V");
+        match ctor {
+            Some(c) if c.access.public || c.access.protected => {}
+            Some(_) => bail!(
+                "{who}: {} has a no-argument constructor, but it is not public or protected",
+                super_internal.replace('/', ".")
+            ),
+            None => bail!(
+                "{who}: {} has no no-argument constructor, which the generated constructor calls; blazon cannot pass it arguments",
+                super_internal.replace('/', ".")
+            ),
+        }
+        roots.push(sup);
+    }
+    let mut chain: Vec<Rc<ClassInfo>> = Vec::new();
+    for r in &roots {
+        for c in chain_of(classes, r)? {
+            if !chain.iter().any(|x| x.name == c.name) {
+                chain.push(c);
+            }
+        }
+    }
+    let concrete: Vec<(&str, &str)> = chain
+        .iter()
+        .flat_map(|c| c.methods.iter())
+        .filter(|m| !m.access.is_abstract && !m.access.is_static && !m.access.private)
+        .map(|m| (m.name.as_str(), m.descriptor.as_str()))
+        .collect();
+    let mut abstracts: Vec<(&MethodInfo, &str)> = Vec::new();
+    for c in &chain {
+        for m in &c.methods {
+            let key = (m.name.as_str(), m.descriptor.as_str());
+            if !m.access.is_abstract
+                || m.access.is_static
+                || m.name == "<init>"
+                || concrete.contains(&key)
+                || OBJECT_METHODS.contains(&key)
+                || abstracts
+                    .iter()
+                    .any(|(a, _)| a.name == m.name && a.descriptor == m.descriptor)
+            {
+                continue;
+            }
+            abstracts.push((m, &c.name));
+        }
+    }
+    let mut chosen: Vec<(&MethodInfo, &str, MemberSel)> = Vec::new();
+    if is.members.is_empty() {
+        for (m, declared) in &abstracts {
+            let sel = parse_member(&format!("{}({})", m.name, params_of(&m.descriptor)))?;
+            chosen.push((m, declared, sel));
+        }
+    } else {
+        for text in &is.members {
+            let sel = parse_member(text)?;
+            let hits: Vec<&(&MethodInfo, &str)> = abstracts
+                .iter()
+                .filter(|(m, _)| {
+                    m.name == sel.name
+                        && sel
+                            .params
+                            .as_ref()
+                            .is_none_or(|p| m.descriptor.starts_with(&format!("({p})")))
+                })
+                .collect();
+            match hits.as_slice() {
+                [(m, declared)] => chosen.push((m, declared, sel)),
+                [] => bail!(
+                    "{who}: `{text}` is not an abstract method of the type; its abstract methods are: {}",
+                    abstracts
+                        .iter()
+                        .map(|(m, _)| format!("{}({})", m.name, params_of(&m.descriptor)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                many => bail!(
+                    "{who}: `{text}` has {} overloads; pick one by its parameters:\n{}",
+                    many.len(),
+                    many.iter()
+                        .map(|(m, _)| format!("  {}({})", m.name, params_of(&m.descriptor)))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            }
+        }
+    }
+    for (m, declared, _) in &chosen {
+        if !m.access.public && !m.access.protected {
+            bail!(
+                "{who}: {}.{} is package-private, so a class in another package cannot implement it",
+                declared.replace('/', "."),
+                m.name
+            );
+        }
+    }
+    let mut methods: Vec<ImplMethod> = Vec::new();
+    for (m, declared, sel) in &chosen {
+        let member = method_member(m, sel)?;
+        methods.push(ImplMethod {
+            java_name: m.name.clone(),
+            rust_name: member.rust_name.clone(),
+            descriptor: m.descriptor.clone(),
+            sig: member.sig,
+            selector: sel.text.clone(),
+            declared_in: (*declared).to_string(),
+        });
+    }
+    let explicit: Vec<bool> = chosen.iter().map(|(_, _, s)| s.rust.is_some()).collect();
+    for i in 0..methods.len() {
+        let name = methods[i].rust_name.clone();
+        let dup = |n: &str| {
+            methods
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != i && o.rust_name == n)
+        };
+        if dup(&name) && !explicit[i] {
+            let long = names::method_long(&methods[i].java_name);
+            if !dup(&long) {
+                methods[i].rust_name = long;
+            }
+        }
+    }
+    for (i, m) in methods.iter().enumerate() {
+        if methods
+            .iter()
+            .enumerate()
+            .any(|(j, o)| j != i && o.rust_name == m.rust_name)
+        {
+            bail!(
+                "{who}: two methods are named `{}`; add ` as <name>` to one of them in `members`",
+                names::bare(&m.rust_name)
+            );
+        }
+    }
+    let handle = bound
+        .iter()
+        .find(|c| c.internal == internal)
+        .map(|c| c.rust.clone())
+        .unwrap_or_else(|| names::class(&is.java));
+    let trait_name = is.rust.clone().unwrap_or_else(|| format!("{handle}Impl"));
+    let signature: Vec<String> = methods
+        .iter()
+        .map(|m| format!("{}{}", m.java_name, m.descriptor))
+        .collect();
+    let mut parts: Vec<&str> = vec![label, &internal, &super_internal];
+    parts.extend(signature.iter().map(String::as_str));
+    let short: String = handle
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let class = format!("blazon/impl/{short}${}", crate::classwriter::hash(&parts));
+    let natives: Vec<crate::classwriter::Native> = methods
+        .iter()
+        .map(|m| crate::classwriter::Native {
+            name: &m.java_name,
+            descriptor: &m.descriptor,
+        })
+        .collect();
+    let class_bytes =
+        crate::classwriter::implementation(&class, &super_internal, interface.as_deref(), &natives);
+    Ok(Implementation {
+        java: is.java.clone(),
+        internal,
+        handle,
+        trait_name,
+        class,
+        super_class: super_internal,
+        methods,
+        class_bytes,
+        free_bytes: crate::classwriter::free(),
+    })
 }

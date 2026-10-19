@@ -125,8 +125,12 @@ fn widget() -> Result<()> {
         get("w.scaled(1, 2)")
     );
     unannotated(&mut env)?;
+    failing_attribute(&mut env)?;
+    throwables(&mut env)?;
     inherited(&mut env)?;
-    primitives(&mut env)
+    primitives(&mut env)?;
+    no_java_style_names();
+    Ok(())
 }
 
 /// Classes with no `@StarlarkBuiltin`: facets from the spec's members.
@@ -183,27 +187,96 @@ fn unannotated(env: &mut jni::JNIEnv<'static>) -> Result<()> {
         })
         .expect("heap")
     };
-    assert_eq!(run("len(p.getTargets())"), "2");
-    assert_eq!(run("[t.name for t in p.getTargets()]"), "[\"a\", \"bb\"]");
+    assert_eq!(run("len(p.targets())"), "2");
+    assert_eq!(run("[t.name for t in p.targets()]"), "[\"a\", \"bb\"]");
     assert_eq!(
-        run("[t.rule_class for t in p.getTargets()]"),
+        run("[t.rule_class for t in p.targets()]"),
         "[\"cc_test\", \"cc_library\"]"
     );
     assert_eq!(
-        run("[type(t) for t in p.getTargets()]"),
+        run("[type(t) for t in p.targets()]"),
         "[\"Rule\", \"Rule\"]"
     );
-    assert_eq!(run("r in p.getTargets()"), "True");
-    assert_eq!(run("same in p.getTargets()"), "True");
+    assert_eq!(run("r in p.targets()"), "True");
+    assert_eq!(run("same in p.targets()"), "True");
     assert_eq!(run("type(p)"), "\"Pkg\"");
-    assert_eq!(run("type(p.getTargets())"), "\"Set\"");
+    assert_eq!(run("type(p.targets())"), "\"Set\"");
     assert_eq!(run("r.is_test"), "True");
-    assert_eq!(run("r.attributeCount()"), "1");
+    assert_eq!(run("r.attribute_count()"), "1");
     assert_eq!(run("r.describe(\"x\", 3)"), "\"xxxa\"");
     assert_eq!(run("r == same"), "True");
     assert_eq!(run("{r: 1}[same]"), "1");
     assert_eq!(run("str(r)"), "\"Rule(a)\"");
     assert!(run("r.nope").starts_with("ERR"));
+    Ok(())
+}
+
+/// `Throwable`, `Exception` and `RuntimeException` read a thrown object.
+fn throwables(env: &mut jni::JNIEnv<'static>) -> Result<()> {
+    use blazon_rt::Handle;
+    use blazon_rt::java::lang::{Exception, RuntimeException, Throwable};
+    let cause = env.new_object("java/io/IOException", "()V", &[])?;
+    let msg = env.new_string("outer")?;
+    let outer = env.new_object(
+        "java/lang/IllegalStateException",
+        "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+        &[(&msg).into(), (&cause).into()],
+    )?;
+    // SAFETY: an `IllegalStateException` is a `RuntimeException`.
+    let rt: RuntimeException = unsafe { RuntimeException::from_raw(outer) };
+    assert_eq!(rt.message()?.as_deref(), Some("outer"));
+    assert_eq!(rt.class_name()?, "java.lang.IllegalStateException");
+    assert!(
+        rt.stack_trace()?
+            .starts_with("java.lang.IllegalStateException: outer")
+    );
+    let cause: Throwable = rt.cause()?.expect("cause");
+    assert_eq!(cause.class_name()?, "java.io.IOException");
+    assert_eq!(cause.message()?, None);
+    assert!(cause.cause()?.is_none());
+    assert_eq!(rt.to_string(), "java.lang.IllegalStateException: outer");
+    let e: Exception = rt.upcast();
+    let t: Throwable = e.upcast();
+    let boxed: Box<dyn std::error::Error> = Box::new(t);
+    assert!(boxed.to_string().contains("outer"));
+    Ok(())
+}
+
+/// An attribute whose read throws reports the exception, not a missing attribute.
+fn failing_attribute(env: &mut jni::JNIEnv<'static>) -> Result<()> {
+    let bag = fx::Bag::new(env)?.to_global()?;
+    let run = |expr: &str| {
+        eval(expr, "b", |heap| {
+            let mut env = blazon_rt::vm::env().expect("env");
+            bag.get(&mut env)
+                .expect("bag")
+                .to_value(heap)
+                .expect("value")
+        })
+    };
+    assert!(
+        run("b.other").contains("no attribute `other`"),
+        "{}",
+        run("b.other")
+    );
+    for use_it in [
+        "len(b.boom)",
+        "b.boom + 1",
+        "b.boom[0]",
+        "b.boom()",
+        "{b.boom: 1}",
+    ] {
+        let out = run(use_it);
+        assert!(
+            out.starts_with("ERR")
+                && out.contains("boom from java")
+                && out.contains("IllegalStateException")
+                && !out.contains("no attribute"),
+            "{use_it}: {out}"
+        );
+    }
+    let shown = run("str(b.boom)");
+    assert!(shown.contains("boom from java"), "{shown}");
     Ok(())
 }
 
@@ -261,7 +334,7 @@ fn inherited(env: &mut jni::JNIEnv<'static>) -> Result<()> {
     };
     assert_eq!(run("x.top_value"), "\"top\"");
     assert_eq!(run("x.leaf_value"), "\"leaf\"");
-    assert_eq!(run("x.getMark()"), "\"mark\"");
+    assert_eq!(run("x.mark_of_leaf()"), "\"mark\"");
     assert_eq!(run("type(x)"), "\"Leaf\"");
     Ok(())
 }
@@ -317,7 +390,7 @@ fn primitives(env: &mut jni::JNIEnv<'static>) -> Result<()> {
     assert_eq!(run("x.half(3)"), "1.5");
     assert_eq!(run("x.half(3.0)"), "1.5");
     assert_eq!(run("x.scale(2.5)"), "2.5");
-    assert_eq!(run("x.setTimeoutScaling(2)"), "None");
+    assert_eq!(run("x.set_timeout_scaling(2)"), "None");
     assert_eq!(run("x.scale(2.5)"), "5.0");
     assert_eq!(
         run("x.all(True, 1, 2, \"c\", 4, 5, 6.5, 7.25)"),
@@ -326,4 +399,25 @@ fn primitives(env: &mut jni::JNIEnv<'static>) -> Result<()> {
     assert!(run("x.twice(\"a\")").starts_with("ERR"));
     assert!(run("x.twice(3000000000)").starts_with("ERR"));
     Ok(())
+}
+
+/// Scripts never see Java-style names: every member of a generated type, in `dir()`,
+/// is snake_case.
+fn no_java_style_names() {
+    use starlark::docs::DocType;
+    fn check(type_name: &str, doc: DocType) {
+        assert!(!doc.members.is_empty(), "{type_name} has members");
+        for name in doc.members.keys() {
+            assert!(
+                !name.chars().any(|c| c.is_uppercase()),
+                "{type_name}.{name} is camelCase"
+            );
+        }
+    }
+    check("Widget", DocType::from_starlark_value::<fx::WidgetValue>());
+    check("Rule", DocType::from_starlark_value::<fx::RuleValue>());
+    check("Target", DocType::from_starlark_value::<fx::TargetValue>());
+    check("Pkg", DocType::from_starlark_value::<fx::PkgValue>());
+    check("Leaf", DocType::from_starlark_value::<fx::LeafValue>());
+    check("Prims", DocType::from_starlark_value::<fx::PrimsValue>());
 }

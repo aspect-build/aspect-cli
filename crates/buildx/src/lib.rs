@@ -10,10 +10,24 @@
 //! Bazel version from `bindings.toml` at build time. `starlark` is the script surface,
 //! shaped after Buck2's BXL.
 
+pub mod bep;
 pub mod bindings;
 pub mod engine;
+pub mod events;
+pub mod execution;
+pub mod fake_bes;
+pub mod fake_remote;
 pub mod output_base;
+pub mod phases;
+pub mod progress;
+pub mod reapi;
+pub mod remote;
+pub mod route;
+pub mod sandbox;
+pub mod settings;
 pub mod starlark;
+pub mod store;
+pub mod values;
 pub mod workspace;
 
 pub use blazon::release::{Install, Release};

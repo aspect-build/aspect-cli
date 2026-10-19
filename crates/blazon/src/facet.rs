@@ -152,6 +152,8 @@ impl Facets<'_> {
             members: members.iter().map(|m| m.to_string()).collect(),
             type_params: Vec::new(),
             starlark: Some(false),
+            versions: Vec::new(),
+            conditional: Vec::new(),
         };
         let fresh = lower::lower_class(&spec, self.classes, self.label)?;
         match out.iter_mut().find(|c| c.java == java) {
@@ -313,6 +315,8 @@ impl Facets<'_> {
                 members: Vec::new(),
                 type_params: Vec::new(),
                 starlark: Some(true),
+                versions: Vec::new(),
+                conditional: Vec::new(),
             };
             let c = lower::lower_class(&spec, self.classes, label)?;
             out.push(c);
@@ -368,7 +372,7 @@ impl Facets<'_> {
             if annotated {
                 self.annotated_items(out, i, &info, &mut facet)?;
             } else {
-                member_items(&mut out[i], &mut facet);
+                member_items(&mut out[i], &mut facet, self.label)?;
             }
         }
         out[i].starlark = Some(facet);
@@ -404,6 +408,7 @@ impl Facets<'_> {
             nullable: sm.allow_return_nones,
             field_only: false,
             nullable_params: Vec::new(),
+            versions: Vec::new(),
             attribute: false,
             text: format!("@starlark {}", sm.name),
         };
@@ -552,8 +557,11 @@ fn bridgeable(t: &Ty) -> bool {
     }
 }
 
-/// A class without annotations exposes its selected instance members.
-fn member_items(class: &mut Class, facet: &mut Facet) {
+/// A class without annotations exposes its selected instance members under
+/// their Rust names, which is what the generated Rust API calls them, so a
+/// script never sees a Java-style name. A name two members share is an error.
+fn member_items(class: &mut Class, facet: &mut Facet, label: &str) -> Result<()> {
+    let mut taken: Vec<(String, String)> = Vec::new();
     for (idx, m) in class.members.iter().enumerate() {
         if !matches!(
             m.kind,
@@ -563,24 +571,30 @@ fn member_items(class: &mut Class, facet: &mut Facet) {
             continue;
         }
         if !m.sig.params.iter().all(|p| bridgeable(&p.ty)) || !bridgeable(&m.sig.ret) {
-            facet
-                .skipped
-                .push((m.java_name.clone(), "array parameter or result".into()));
-            continue;
-        }
-        if m.attribute && !m.sig.params.is_empty() {
             facet.skipped.push((
-                m.java_name.clone(),
-                "an attribute cannot take parameters".into(),
+                names::bare(&m.rust_name).to_string(),
+                "array parameter or result".into(),
             ));
             continue;
         }
+        let name = names::bare(&m.rust_name).to_string();
+        if m.attribute && !m.sig.params.is_empty() {
+            facet
+                .skipped
+                .push((name, "an attribute cannot take parameters".into()));
+            continue;
+        }
+        if let Some((_, other)) = taken.iter().find(|(n, _)| *n == name) {
+            bail!(
+                "Bazel {label}: {}: {} and {} are both exposed to Starlark as `{name}`; add ` as <name>` to one of them",
+                class.java,
+                other,
+                m.selector
+            );
+        }
+        taken.push((name.clone(), m.selector.clone()));
         facet.items.push(FacetItem {
-            name: if m.attribute {
-                names::bare(&m.rust_name).to_string()
-            } else {
-                m.java_name.clone()
-            },
+            name,
             doc: String::new(),
             member: idx,
             attribute: m.kind.is_field() || m.attribute,
@@ -597,6 +611,7 @@ fn member_items(class: &mut Class, facet: &mut Facet) {
             use_semantics: false,
         });
     }
+    Ok(())
 }
 
 /// The Starlark surface of `internal` as `--dump` prints it.

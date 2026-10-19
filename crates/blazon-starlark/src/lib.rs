@@ -13,11 +13,15 @@
 
 pub mod jdk;
 
+mod failure;
+
+pub use failure::{AttributeFailure, failed};
+
 use blazon_rt::member::ClassRef;
 use blazon_rt::{Error, Handle, Result, vm};
 use jni::objects::JObject;
 use starlark::values::none::NoneType;
-use starlark::values::{Heap, Value};
+use starlark::values::{Heap, Value, ValueLike};
 use std::sync::OnceLock;
 
 pub use either::Either;
@@ -194,6 +198,9 @@ pub fn wrap<'v>(obj: &JObject, heap: Heap<'v>) -> Result<Value<'v>> {
 
 /// A Starlark value as a Java object, as a new local reference the caller owns.
 pub fn unwrap(v: Value) -> Result<JObject<'static>> {
+    if let Some(f) = v.downcast_ref::<AttributeFailure>() {
+        return Err(Error::msg(f.message()));
+    }
     if v.is_none() {
         return registry()?.none();
     }

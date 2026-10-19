@@ -94,6 +94,8 @@ pub struct Class {
     pub members: Vec<Member>,
     /// Selectors that matched nothing in this version.
     pub missing: Vec<String>,
+    /// Selectors a `when` condition leaves out of this version.
+    pub conditional: Vec<String>,
     /// The Starlark value type bound for this class, when there is one.
     pub starlark: Option<Facet>,
 }
@@ -140,4 +142,37 @@ pub struct Facet {
     pub skipped: Vec<(String, String)>,
     /// (selector, shape) pairs for the shape report.
     pub shapes: Vec<(String, String)>,
+}
+
+/// An abstract method of an implemented type, which the trait declares and a
+/// native method of the generated class forwards to.
+#[derive(Clone, Debug)]
+pub struct ImplMethod {
+    pub java_name: String,
+    pub rust_name: String,
+    /// The erased descriptor, which the native method has exactly.
+    pub descriptor: String,
+    pub sig: Signature,
+    /// The spec selector, which lines methods up across versions.
+    pub selector: String,
+    /// The type that declares the method (internal name).
+    pub declared_in: String,
+}
+
+/// A Java interface or abstract class Rust implements.
+#[derive(Clone, Debug)]
+pub struct Implementation {
+    pub java: String,
+    pub internal: String,
+    /// The handle type of the implemented type, which `from_impl` returns.
+    pub handle: String,
+    pub trait_name: String,
+    /// The generated class (internal name), `blazon/impl/<Handle>$<hash>`.
+    pub class: String,
+    /// The superclass of the generated class.
+    pub super_class: String,
+    pub methods: Vec<ImplMethod>,
+    pub class_bytes: Vec<u8>,
+    /// The helper class every implementation shares.
+    pub free_bytes: Vec<u8>,
 }

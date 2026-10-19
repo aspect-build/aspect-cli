@@ -150,3 +150,80 @@ members = []
 java = "net.starlark.java.eval.StarlarkValue"
 starlark = true
 members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionContext"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ArtifactResolver"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext"
+starlark = false
+members = ["getArtifactResolver?"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext"
+members = ["getArtifactResolver?"]
+
+[[class]]
+java = "com.google.common.collect.ImmutableList"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.Spawn"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult$Builder"
+rust = "SpawnResultBuilder"
+starlark = false
+members = ["<init>()", "setStatus", "setExitCode", "setRunnerName", "setFailureDetail", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult$Status"
+rust = "SpawnResultStatus"
+starlark = false
+members = ["NON_ZERO_EXIT"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionExecutionContext"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionContext$ActionContextRegistry"
+rust = "ActionContextRegistry"
+starlark = false
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnExecException"
+starlark = false
+members = ["<init>(Ljava/lang/String;Lcom/google/devtools/build/lib/actions/SpawnResult;Z)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnStrategy"
+starlark = false
+members = ["exec nullable(0,1)"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.actions.SpawnStrategy"
+members = ["exec nullable(0,1)", "canExec"]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$FailureDetail"
+rust = "FailureDetail"
+starlark = false
+members = ["getDefaultInstance"]

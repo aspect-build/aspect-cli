@@ -368,6 +368,95 @@ impl<'a, K: Rebind<'a>, V: Rebind<'a>> Map<'a, K, V> {
 }
 
 crate::handle!(
+    /// `java.util.SortedMap<K, V>`: a [`Map`] that iterates in key order.
+    SortedMap,
+    "java/util/SortedMap",
+    K,
+    V
+);
+
+crate::is_a!(SortedMap[K, V] => Map[K, V]);
+
+static SORTED_MAP: ClassRef = ClassRef::new("java/util/SortedMap");
+static FIRST_KEY: Method = Method::new(&SORTED_MAP, "firstKey", "()Ljava/lang/Object;");
+static LAST_KEY: Method = Method::new(&SORTED_MAP, "lastKey", "()Ljava/lang/Object;");
+
+impl<'l, K, V> SortedMap<'l, K, V> {
+    /// A new empty, mutable `TreeMap` in the keys' natural order.
+    pub fn new(env: &mut JNIEnv<'l>) -> Result<Self> {
+        let r = env.new_object("java/util/TreeMap", "()V", &[]);
+        let o = checked(r)?;
+        // SAFETY: a `TreeMap` is a `SortedMap`.
+        Ok(unsafe { SortedMap::from_raw(o) })
+    }
+}
+
+impl<'a, K, V> SortedMap<'a, K, V> {
+    fn as_map(&self) -> Map<'a, K, V> {
+        Map::from(self.clone())
+    }
+
+    pub fn len(&self) -> Result<usize> {
+        self.as_map().len()
+    }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        self.as_map().is_empty()
+    }
+
+    pub fn contains_key(&self, key: &impl IsA<Object<'static>>) -> Result<bool> {
+        self.as_map().contains_key(key)
+    }
+
+    /// `put(key, value)` on a mutable map.
+    pub fn put(&self, key: &impl IsA<K>, value: &impl IsA<V>) -> Result<()> {
+        self.as_map().put(key, value)
+    }
+}
+
+impl<'a, K: Rebind<'a>, V: Rebind<'a>> SortedMap<'a, K, V> {
+    /// `keySet()`, in key order.
+    pub fn keys(&self) -> Result<Set<'a, K>> {
+        self.as_map().keys()
+    }
+
+    /// `values()`, in key order.
+    pub fn values(&self) -> Result<Collection<'a, V>> {
+        self.as_map().values()
+    }
+
+    /// `entrySet()`, in key order.
+    pub fn entries(&self) -> Result<Set<'a, Entry<'static, K, V>>> {
+        self.as_map().entries()
+    }
+
+    /// `get(key)`, `None` when the map has no mapping (or maps to null).
+    pub fn get(&self, key: &impl IsA<Object<'static>>) -> Result<Option<V::Out>> {
+        self.as_map().get(key)
+    }
+
+    /// `firstKey()`, `None` when the map is empty.
+    pub fn first_key(&self) -> Result<Option<K::Out>> {
+        self.end(&FIRST_KEY)
+    }
+
+    /// `lastKey()`, `None` when the map is empty.
+    pub fn last_key(&self) -> Result<Option<K::Out>> {
+        self.end(&LAST_KEY)
+    }
+
+    fn end(&self, method: &Method) -> Result<Option<K::Out>> {
+        if self.is_empty()? {
+            return Ok(None);
+        }
+        let mut env = vm::env()?;
+        let o = method.object(&mut env, &self.obj, &[])?;
+        // SAFETY: the promise of the type parameter.
+        Ok(Some(unsafe { <K::Out as Handle<'a>>::from_raw(o) }))
+    }
+}
+
+crate::handle!(
     /// `java.util.Optional<T>`
     Optional,
     "java/util/Optional",

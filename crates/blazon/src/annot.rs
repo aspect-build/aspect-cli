@@ -264,3 +264,102 @@ pub fn method_of(anns: &[Annotation], java_name: &str, descriptor: &str) -> Opti
         declared_in: String::new(),
     })
 }
+
+/// A field's `@Option`: what `OptionsBase` subclasses declare their flags with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptionAnno {
+    pub name: String,
+    pub abbrev: Option<char>,
+    pub help: String,
+    pub value_help: String,
+    pub default_value: String,
+    pub category: String,
+    pub documentation_category: String,
+    pub effect_tags: Vec<String>,
+    pub metadata_tags: Vec<String>,
+    /// The `converter` class in internal form; `None` for the default (`Converter`),
+    /// which means Bazel picks one from the field's type.
+    pub converter: Option<String>,
+    pub allow_multiple: bool,
+    pub expansion: Vec<String>,
+    pub implicit_requirements: Vec<String>,
+    pub deprecation_warning: String,
+    pub old_name: String,
+    pub old_name_warning: bool,
+}
+
+const OPTION: &str = "Lcom/google/devtools/common/options/Option;";
+const CONVERTER_DEFAULT: &str = "Lcom/google/devtools/common/options/Converter;";
+
+fn enum_names(a: &Annotation, name: &str) -> Vec<String> {
+    let one = |v: &AnnotationElementValue| match v {
+        AnnotationElementValue::EnumConstant { const_name, .. } => Some(const_name.to_string()),
+        _ => None,
+    };
+    match element(a, name) {
+        Some(AnnotationElementValue::ArrayValue(items)) => items.iter().filter_map(one).collect(),
+        Some(v) => one(v).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+fn string_array(a: &Annotation, name: &str) -> Vec<String> {
+    let one = |v: &AnnotationElementValue| match v {
+        AnnotationElementValue::StringConstant(s) => Some(s.to_string()),
+        _ => None,
+    };
+    match element(a, name) {
+        Some(AnnotationElementValue::ArrayValue(items)) => items.iter().filter_map(one).collect(),
+        Some(v) => one(v).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The `@Option` among a field's annotations, with the annotation's own
+/// defaults for what the field leaves out.
+pub fn option_of(anns: &[&Annotation]) -> Option<OptionAnno> {
+    let a = anns
+        .iter()
+        .copied()
+        .find(|a| a.type_descriptor.to_string() == OPTION)?;
+    let abbrev = match element(a, "abbrev") {
+        Some(AnnotationElementValue::CharConstant(c)) => u32::try_from(*c)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|c| *c != '\0'),
+        _ => None,
+    };
+    let converter = match element(a, "converter") {
+        Some(AnnotationElementValue::ClassLiteral { class_name })
+            if class_name != CONVERTER_DEFAULT =>
+        {
+            class_name
+                .strip_prefix('L')
+                .and_then(|c| c.strip_suffix(';'))
+                .map(str::to_string)
+        }
+        _ => None,
+    };
+    let documentation_category = enum_names(a, "documentationCategory")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "UNCATEGORIZED".to_string());
+    Some(OptionAnno {
+        name: string(a, "name", ""),
+        abbrev,
+        help: string(a, "help", ""),
+        value_help: string(a, "valueHelp", ""),
+        default_value: string(a, "defaultValue", ""),
+        category: string(a, "category", ""),
+        documentation_category,
+        effect_tags: enum_names(a, "effectTags"),
+        metadata_tags: enum_names(a, "metadataTags"),
+        converter,
+        allow_multiple: boolean(a, "allowMultiple", false),
+        expansion: string_array(a, "expansion"),
+        implicit_requirements: string_array(a, "implicitRequirements"),
+        deprecation_warning: string(a, "deprecationWarning", ""),
+        old_name: string(a, "oldName", ""),
+        old_name_warning: boolean(a, "oldNameWarning", true),
+    })
+}

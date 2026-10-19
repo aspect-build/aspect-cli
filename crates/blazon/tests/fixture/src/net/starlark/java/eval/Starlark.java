@@ -29,6 +29,9 @@ public final class Starlark {
       Object x,
       String name,
       @javax.annotation.Nullable Object defaultValue) {
+    if (name.equals("boom")) {
+      throw new IllegalStateException("boom from java");
+    }
     return defaultValue;
   }
 

@@ -691,6 +691,7 @@ version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
+ "axl-proto",
  "blazon",
  "blazon-rt",
  "blazon-starlark",
@@ -699,7 +700,12 @@ dependencies = [
  "jni",
  "libc",
  "md-5",
+ "prost",
+ "sha2",
  "starlark",
+ "tokio",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]

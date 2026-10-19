@@ -9,8 +9,8 @@ def _impl(ctx: Context):
     for name in pkg.targets:
         target = pkg.targets[name]
         ctx.output.print(" ", name, target)
-        if hasattr(target, "getAttr"):
-            srcs = target.getAttr("srcs")
+        if hasattr(target, "attr"):
+            srcs = target.attr("srcs")
             ctx.output.print("    srcs:", srcs, srcs[0].name)
 
 main = buildx_main(impl = _impl, cli_args = {})

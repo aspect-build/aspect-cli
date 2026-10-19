@@ -23,11 +23,19 @@ members = [
     "getQueryFunctions",
     "getClock",
     "getBlazeModules",
+    "createBuildOptions",
+    "getRuleClassProvider",
+    "getBugReporter",
+    "getFileSystem",
 ]
 
 [[class]]
 java = "com.google.devtools.build.lib.runtime.BlazeWorkspace"
-members = ["getSkyframeExecutor", "getWorkspace", "getOutputBase", "getBinTools"]
+members = [
+    "getSkyframeExecutor", "getWorkspace", "getOutputBase", "getBinTools",
+    "getDirectories",
+    "getOrLoadPersistentActionCache",
+]
 
 # Package loading, driven on the SkyframeExecutor directly.
 
@@ -43,6 +51,20 @@ members = [
     "getQueryTransitivePackagePreloader",
     "setEventBus",
     "getEffectiveStarlarkSemantics",
+    "setBaselineConfiguration",
+    "createConfiguration",
+    "getSkyframeBuildView",
+    "setOutputService",
+    "setActionOutputRoot",
+    "configureActionExecutor",
+    "detectModifiedOutputFiles",
+    "buildArtifacts",
+    "getWorkspaceStatusArtifacts",
+    "getActionKeyContext",
+    "getEvaluator",
+    "setSaltAndDeleteActionsIfChanged",
+    "createBuildOptionsForTesting",
+    "evaluateSkyKeys(Lcom/google/devtools/build/lib/events/ExtendedEventHandler;Ljava/lang/Iterable;Z)",
 ]
 
 [[class]]
@@ -51,7 +73,10 @@ members = ["create"]
 
 [[class]]
 java = "com.google.devtools.build.lib.pkgcache.PackageManager"
-members = ["getPackagePath"]
+members = [
+    "getPackagePath",
+    "getAndClearStatistics as get_and_clear_statistics",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.pkgcache.PackageProvider"
@@ -80,7 +105,7 @@ members = ["getCommonOptions"]
 
 [[class]]
 java = "com.google.devtools.build.lib.events.Reporter"
-members = ["<init>(Lcom/google/common/eventbus/EventBus;)", "addHandler"]
+members = ["<init>(Lcom/google/common/eventbus/EventBus;)", "addHandler", "removeHandler"]
 
 [[class]]
 java = "com.google.devtools.build.lib.events.PrintingEventHandler"
@@ -92,19 +117,41 @@ members = ["ERRORS_AND_WARNINGS"]
 
 [[class]]
 java = "com.google.devtools.build.lib.util.io.OutErr"
-members = ["SYSTEM_OUT_ERR"]
+members = [
+    "SYSTEM_OUT_ERR",
+    "printErrLn",
+    "printOut",
+    "printErr",
+]
 
 [[class]]
 java = "com.google.common.eventbus.EventBus"
-members = ["<init>()"]
+members = [
+    "<init>()",
+    "register",
+    "post",
+    "unregister",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.vfs.Path"
-members = ["asFragment", "getParentDirectory?", "getRelative(Ljava/lang/String;)"]
+members = [
+    "asFragment", "getParentDirectory?", "getRelative(Ljava/lang/String;)",
+    "createDirectoryAndParents",
+    "getPathString",
+    "exists()",
+    "deleteTree",
+    "getOutputStream()",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.vfs.PathFragment"
-members = ["EMPTY_FRAGMENT", "create(Ljava/lang/String;)"]
+members = [
+    "EMPTY_FRAGMENT", "create(Ljava/lang/String;)",
+    "isAbsolute(Ljava/lang/String;)",
+    "getPathString",
+    "isEmpty",
+]
 
 [[class]]
 java = "com.google.common.collect.ImmutableMap"
@@ -218,11 +265,14 @@ members = ["immutableCopyOf"]
 
 [[class]]
 java = "com.google.common.collect.ImmutableList"
-members = []
+members = ["of() as empty", "copyOf(Ljava/util/Collection;)"]
 
 [[class]]
 java = "com.google.common.collect.ImmutableSet"
-members = []
+members = [
+    "of() as empty",
+    "copyOf(Ljava/util/Collection;)",
+]
 
 [[class]]
 java = "com.google.common.base.Predicate"
@@ -263,7 +313,7 @@ members = []
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.Target"
-members = []
+members = ["getLabel"]
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.CachingPackageLocator"
@@ -279,11 +329,16 @@ members = []
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions"
-members = []
+members = [
+    "experimentalSiblingRepositoryLayout",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.pkgcache.PackageOptions"
-members = ["packagePath"]
+members = [
+    "packagePath",
+    "fetch",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.pkgcache.TargetProvider"
@@ -370,6 +425,15 @@ members = [
     "yankedVersionsFunction?",
     "singleExtensionEvalFunction?",
     "vendorCommand",
+    "fetchDisabled",
+    "overrides",
+    "injections",
+    "moduleOverrides",
+    "checkDirectDepsMode",
+    "bazelCompatibilityMode",
+    "bazelLockfileMode",
+    "allowedYankedVersions",
+    "vendorDirectory",
 ]
 
 [[class]]
@@ -399,7 +463,10 @@ members = [
 
 [[class]]
 java = "com.google.devtools.build.lib.bazel.bzlmod.ModuleFileFunction"
-members = ["setDownloadManager"]
+members = [
+    "setDownloadManager",
+    "IGNORE_DEV_DEPS",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.bazel.bzlmod.RepoSpecFunction"
@@ -433,14 +500,17 @@ members = [
     "@getName",
     "@getRuleClass",
     "@getTargetKind",
-    "getAttr(Ljava/lang/String;)",
+    "getAttr(Ljava/lang/String;) as attr",
     "@getVisibility",
     "@getRuleTags",
 ]
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.InputFile"
-members = ["@getLabel", "@getTargetKind"]
+members = [
+    "@getLabel", "@getTargetKind",
+    "@getVisibility",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.Package"
@@ -456,7 +526,7 @@ members = []
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.RuleOrMacroInstance"
-members = ["@getLabel", "@getName", "getAttr(Ljava/lang/String;)"]
+members = ["@getLabel", "@getName", "getAttr(Ljava/lang/String;) as attr"]
 
 [[class]]
 java = "com.google.devtools.build.lib.packages.Packageoid"
@@ -492,7 +562,7 @@ members = ["NO_CACHE"]
 
 [[class]]
 java = "com.google.devtools.build.lib.runtime.ProcessWrapper"
-members = ["<init> nullable(2)"]
+members = ["<init> nullable(2)", "commandLineBuilder"]
 
 [[class]]
 java = "com.google.devtools.build.lib.exec.BinTools"
@@ -500,7 +570,11 @@ members = ["getActionInput?", "getEmbeddedPath?"]
 
 [[class]]
 java = "com.google.devtools.build.lib.actions.ActionInput"
-members = []
+members = [
+    "getExecPathString",
+    "isDirectory",
+    "isSymlink",
+]
 
 [[class]]
 java = "com.google.devtools.build.lib.bazel.repository.downloader.DelegatingDownloader"
@@ -533,6 +607,17 @@ members = [
     "experimentalScaleTimeouts",
     "repositoryCache?",
     "lockfileMode",
+    "repositoryOverrides",
+    "repositoryInjections",
+    "moduleOverrides",
+    "registries",
+    "moduleMirrors",
+    "ignoreDevDependency",
+    "checkDirectDependencies",
+    "bazelCompatibilityMode",
+    "allowedYankedVersions",
+    "vendorDirectory?",
+    "experimentalDistdir?",
 ]
 
 [[class]]
@@ -543,3 +628,1100 @@ members = ["executor", "workspaceRoot", "outputBase", "optionsLockfileMode"]
 java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$LockfileMode"
 rust = "LockfileMode"
 members = []
+
+# Configuration and analysis, driven on the SkyframeExecutor and
+# SkyframeBuildView without a command.
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider"
+members = [
+    "getFragmentRegistry",
+    "getRunfilesPrefix",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.config.FragmentRegistry"
+members = ["getOptionsClasses"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.config.FragmentOptions"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.config.BuildOptions"
+members = ["checksum()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.SkyframeBuildView"
+members = [
+    "shouldDiscardAnalysisCache", "setConfiguration", "configureTargets",
+    "getArtifactFactory",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.config.BuildConfigurationValue"
+members = ["getKey"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.config.BuildConfigurationKey"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.ConfiguredTargetKey"
+members = [
+    "builder",
+    "fromConfiguredTarget",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.ConfiguredTargetKey$Builder"
+rust = "ConfiguredTargetKeyBuilder"
+members = ["setLabel", "setConfigurationKey", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.SkyframeAnalysisResult"
+members = [
+    "hasLoadingError()", "hasAnalysisError()", "hasActionConflicts()", "getConfiguredTargets",
+    "getPackageRoots",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.AspectKeyCreator$TopLevelAspectsKey"
+rust = "TopLevelAspectsKey"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bugreport.BugReporter"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.TopLevelArtifactContext"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.OutputGroupInfo$ValidationMode"
+rust = "ValidationMode"
+members = ["OFF", "OUTPUT_GROUP", "ASPECT"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildtool.BuildRequestOptions"
+members = [
+    "outputGroups", "runValidationActions", "useValidationAspect",
+    "directoryCreationCacheSpec",
+    "useActionCache",
+    "jobs",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.ExecutionOptions"
+members = [
+    "testStrategy",
+    "getLocalResources",
+    "allowOneActionOnResourceUnavailable",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions"
+members = [
+    "expandFilesets",
+    "getOutputGroupFileModesMapping",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.KeepGoingOption"
+members = ["keepGoing"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.ConfiguredTarget"
+members = ["getLabel"]
+
+[[class]]
+java = "com.google.common.collect.ImmutableSortedSet"
+members = []
+
+# Providers and artifacts as scripts read them from analyzed targets.
+
+[[class]]
+java = "com.google.devtools.build.lib.collect.nestedset.Depset"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.Artifact"
+members = [
+    "key", "getPath", "getExecPathString", "isTreeArtifact", "isSourceArtifact",
+    "isRunfilesTree",
+    "isFileset",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.FilesToRunProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.Runfiles"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.DefaultInfo"
+members = ["PROVIDER"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.DefaultInfo$DefaultInfoProvider"
+rust = "DefaultInfoProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.OutputGroupInfo"
+members = ["STARLARK_CONSTRUCTOR as provider", "determineOutputGroups(Ljava/util/List;Lcom/google/devtools/build/lib/analysis/OutputGroupInfo$ValidationMode;Z)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.OutputGroupInfo$OutputGroupInfoProvider"
+rust = "OutputGroupInfoProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.RunEnvironmentInfo"
+members = ["PROVIDER"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.RunEnvironmentInfo$RunEnvironmentInfoProvider"
+rust = "RunEnvironmentInfoProvider"
+members = []
+
+# Execution: the executor, action contexts and local spawn strategy a build
+# command's ExecutionTool would assemble from the modules, built by hand.
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.BlazeDirectories"
+members = ["getExecRoot(Ljava/lang/String;)", "getActionTempsDirectory", "getRelativeOutputPath()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.LocalOutputService"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.OutputService"
+members = ["getProxyMetadataFactory", "shouldStoreRemoteOutputMetadataInActionCache", "startBuild", "getOutputChecker"]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.ModifiedFileSet"
+members = ["EVERYTHING_MODIFIED"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ArtifactResolver"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ProxyMetadataFactory"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.OutputChecker"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionCacheChecker"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionCacheChecker$CacheConfig"
+rust = "CacheConfig"
+members = ["builder"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionCacheChecker$CacheConfig$Builder"
+rust = "CacheConfigBuilder"
+members = ["setEnabled", "setStoreOutputMetadata", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.CheckUpToDateFilter"
+members = ["fromOptions"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionOutputDirectoryHelper"
+members = ["<init>"]
+
+[[class]]
+java = "com.github.benmanes.caffeine.cache.CaffeineSpec"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ArtifactFactory"
+members = ["setPackageRoots"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.PackageRoots"
+members = ["getPackageRootsMap", "getPackageRootLookup"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.PackageRoots$PackageRootLookup"
+rust = "PackageRootLookup"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.Root"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildtool.SymlinkForest"
+members = ["<init>(Lcom/google/common/collect/ImmutableMap;Lcom/google/devtools/build/lib/vfs/Path;Ljava/lang/String;Z)", "plantSymlinkForest"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ResourceManager"
+members = ["<init>", "setAvailableResources", "setAllowOneActionOnResourceUnavailable", "acquireResources"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ResourceSet"
+members = ["create(Lcom/google/common/collect/ImmutableMap;I)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SingleBuildFileCache"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.InputMetadataProvider"
+members = [
+    "getInputMetadata?",
+    "expandArtifacts",
+    "getRunfilesMetadata",
+    "getTreeMetadata",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionInputPrefetcher"
+members = ["NONE"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.ModuleActionContextRegistry"
+members = ["builder"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.ModuleActionContextRegistry$Builder"
+rust = "ModuleActionContextRegistryBuilder"
+members = ["<init>", "register", "restrictTo", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnStrategyResolver"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SymlinkTreeStrategy"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.actions.SymlinkTreeActionContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.FileWriteStrategy"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.actions.FileWriteActionContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.actions.LocalTemplateExpansionStrategy"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.actions.TemplateExpansionContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.WorkspaceStatusAction$Context"
+rust = "WorkspaceStatusContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnStrategyRegistry"
+members = ["builder()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnStrategyRegistry$Builder"
+rust = "SpawnStrategyRegistryBuilder"
+members = ["registerStrategy", "setDefaultStrategies", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnStrategy"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.standalone.StandaloneSpawnStrategy"
+members = [
+    "<init>",
+    "exec(Lcom/google/devtools/build/lib/actions/Spawn;Lcom/google/devtools/build/lib/actions/ActionExecutionContext;)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnRunner"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.local.LocalSpawnRunner"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.local.LocalEnvProvider"
+members = ["forCurrentOs", "rewriteLocalEnv"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.local.LocalExecutionOptions"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.RunfilesTreeUpdater"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.BlazeExecutor"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.Executor"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.FileSystem"
+members = [
+    "getPath(Ljava/lang/String;)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.vfs.XattrProvider"
+members = []
+
+# Results of a build: completion keys, artifact values and errors.
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.cache.ActionCache"
+members = [
+    "save",
+    "resetStatistics",
+    "mergeIntoActionCacheStatistics",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.TargetCompletionValue$TargetCompletionKey"
+rust = "TargetCompletionKey"
+members = ["create"]
+
+[[class]]
+java = "com.google.devtools.build.skyframe.SkyKey"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.skyframe.SkyValue"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.skyframe.EvaluationResult"
+members = ["get", "hasError", "getError(Lcom/google/devtools/build/skyframe/SkyKey;)?"]
+
+[[class]]
+java = "com.google.devtools.build.skyframe.ErrorInfo"
+members = ["getException"]
+
+[[class]]
+java = "com.google.devtools.build.skyframe.MemoizingEvaluator"
+members = ["getExistingValue"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.ProviderCollection"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.query2.common.CqueryNode"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.TopLevelArtifactHelper"
+members = ["getAllArtifactsToBuild(Lcom/google/devtools/build/lib/analysis/ProviderCollection;Lcom/google/devtools/build/lib/analysis/TopLevelArtifactContext;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.TopLevelArtifactHelper$ArtifactsToBuild"
+rust = "ArtifactsToBuild"
+members = ["getAllArtifacts"]
+
+[[class]]
+java = "com.google.devtools.build.lib.collect.nestedset.NestedSet"
+members = ["toList()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.FileArtifactValue"
+members = [
+    "getDigest?", "getSize", "isRemote",
+    "getUnresolvedSymlinkTarget",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.TreeArtifactValue"
+members = [
+    "getMetadata", "getChildValues",
+    "getChildren",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.Artifact$TreeFileArtifact"
+rust = "TreeFileArtifact"
+members = []
+
+[[class]]
+java = "com.google.common.collect.Range"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.skyframe.EvaluationProgressReceiver"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$RepositoryOverride"
+rust = "RepositoryOverride"
+members = ["repositoryName()", "path()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$RepositoryInjection"
+rust = "RepositoryInjection"
+members = ["apparentName()", "path()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$ModuleOverride"
+rust = "ModuleOptionOverride"
+members = ["moduleName()", "path()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$CheckDirectDepsMode"
+rust = "CheckDirectDepsMode"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.repository.RepositoryOptions$BazelCompatibilityMode"
+rust = "BazelCompatibilityMode"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.ModuleOverride"
+rust = "ModuleOverride"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.NonRegistryOverride"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.RepoSpec"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.bazel.bzlmod.LocalPathRepoSpecs"
+members = ["create"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.PrecomputedValue"
+members = ["injected(Lcom/google/devtools/build/lib/skyframe/PrecomputedValue$Precomputed;Ljava/lang/Object;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.PrecomputedValue$Precomputed"
+rust = "Precomputed"
+members = []
+
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult"
+members = [
+    "getRunnerName",
+    "POSIX_TIMEOUT_EXIT_CODE",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult$Builder"
+rust = "SpawnResultBuilder"
+members = [
+    "<init>", "setStatus", "setExitCode", "setFailureMessage", "setRunnerName", "build",
+    "setFailureDetail",
+    "setCacheHit",
+    "setRemote",
+    "setStartTime", "setWallTimeInMs",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.SpawnResult$Status"
+rust = "SpawnStatus"
+members = ["NON_ZERO_EXIT", "EXECUTION_FAILED", "SUCCESS", "TIMEOUT"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.io.FileOutErr"
+members = ["getOutputPath", "getErrorPath"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionExecutionMetadata"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.PathMapper"
+members = ["isNoop"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.RunfilesArtifactValue"
+members = ["getRunfilesTree"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnInputExpander"
+members = [
+    "getInputMapping",
+    "<init>()",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.RunfilesTree"
+members = ["getArtifacts", "getMapping"]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$FailureDetail"
+rust = "FailureDetail"
+members = [
+    "newBuilder()",
+    "parseFrom([B)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$FailureDetail$Builder"
+rust = "FailureDetailBuilder"
+members = ["setMessage(Ljava/lang/String;)", "setSpawn(Lcom/google/devtools/build/lib/server/FailureDetails$Spawn;)", "build()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$Spawn"
+rust = "SpawnDetail"
+members = ["newBuilder()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$Spawn$Builder"
+rust = "SpawnDetailBuilder"
+members = ["setCode(Lcom/google/devtools/build/lib/server/FailureDetails$Spawn$Code;)", "build()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.server.FailureDetails$Spawn$Code"
+rust = "SpawnDetailCode"
+members = [
+    "EXECUTION_FAILED",
+    "NON_ZERO_EXIT",
+    "TIMEOUT",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.cache.VirtualActionInput"
+members = ["getBytes"]
+
+[[class]]
+java = "com.google.protobuf.ByteString"
+members = ["toByteArray"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnExecException"
+members = ["<init>(Ljava/lang/String;Lcom/google/devtools/build/lib/actions/SpawnResult;Z)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.CommandFailureUtils"
+members = ["describeCommandFailure(ZLjava/lang/String;Lcom/google/devtools/build/lib/util/DescribableExecutionUnit;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.DescribableExecutionUnit"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.util.Fingerprint"
+members = ["<init>()", "addBoolean", "addStringMap", "hexDigestAndReset"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BuildEventStreamer"
+members = ["registerOutErrProvider", "close()", "closeOnAbort", "getCloseFuturesMap", "isClosed"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BuildEventStreamer$Builder"
+rust = "BuildEventStreamerBuilder"
+members = ["<init>", "buildEventTransports(Ljava/util/Set;)", "besStreamOptions(Lcom/google/devtools/build/lib/buildeventstream/transports/BuildEventStreamOptions;)", "outputGroupFileModes(Lcom/google/devtools/build/lib/buildeventstream/BuildEventProtocolOptions$OutputGroupFileModes;)", "publishTargetSummaries(Z)", "artifactGroupNamer(Lcom/google/devtools/build/lib/runtime/CountingArtifactGroupNamer;)", "oomMessage(Ljava/lang/String;)", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.BuildEventStreamer$OutErrProvider"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.transports.FileTransport"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventTransport"
+members = ["close()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploader"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.LocalFilesArtifactUploader"
+members = [
+    "<init>",
+    "upload",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.CountingArtifactGroupNamer"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.transports.BuildEventStreamOptions"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions$OutputGroupFileModes"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions$BesUploadMode"
+members = ["WAIT_FOR_UPLOAD_COMPLETE", "NOWAIT_FOR_UPLOAD_COMPLETE", "FULLY_ASYNC"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos$BuildEvent"
+rust = "StreamEvent"
+members = ["parseFrom([B)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos$BuildEventId"
+members = ["parseFrom([B)"]
+
+[[class]]
+java = "com.google.common.util.concurrent.FluentFuture"
+members = ["from(Lcom/google/common/util/concurrent/ListenableFuture;)"]
+
+[[class]]
+java = "com.google.common.util.concurrent.AbstractFuture"
+members = ["get()?", "isDone"]
+
+[[class]]
+java = "com.google.common.util.concurrent.ListenableFuture"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.skyframe.ActionExecutionValue"
+members = ["getExistingFileArtifactValue"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.StoredEventHandler"
+members = ["<init>", "getEvents"]
+
+[[class]]
+java = "com.google.devtools.build.lib.events.Event"
+members = ["getKind", "getMessage"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.Spawn"
+members = [
+    "getArguments",
+    "getEnvironment",
+    "getExecutionInfo",
+    "getOutputFiles",
+    "getMnemonic",
+    "getCombinedExecProperties",
+    "getInputFiles",
+    "getPathMapper",
+    "getTargetLabel?",
+    "getResourceOwner", "getLocalResources",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.rules.cpp.CppCompileAction"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionContext$ActionContextRegistry"
+rust = "ActionContextActionContextRegistry"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ActionExecutionContext"
+members = [
+    "getInputMetadataProvider",
+    "getExecRoot",
+    "getFileOutErr",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.rules.cpp.IncludeScanner$IncludeScanningHeaderData"
+rust = "IncludeScannerIncludeScanningHeaderData"
+members = []
+
+[[implement]]
+java = "com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext"
+
+[[implement]]
+java = "com.google.devtools.build.lib.rules.cpp.CppIncludeScanningContext"
+
+[[implement]]
+java = "com.google.devtools.build.lib.actions.SpawnStrategy"
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.client.BuildEventServiceClient"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.client.BuildEventServiceClient$CommandContext"
+members = ["<init>(Ljava/lang/String;Ljava/lang/String;ILjava/util/Set;Ljava/lang/String;Z)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions"
+members = []
+
+[[class]]
+java = "io.grpc.netty.NettyChannelBuilder"
+members = ["forTarget(Ljava/lang/String;)", "usePlaintext()", "useTransportSecurity()"]
+
+[[class]]
+java = "io.grpc.ForwardingChannelBuilder2"
+members = ["build()"]
+
+[[class]]
+java = "io.grpc.ManagedChannel"
+members = ["shutdownNow()"]
+
+[[class]]
+java = "io.grpc.CallCredentials"
+members = []
+
+[[class]]
+java = "io.grpc.ClientInterceptor"
+members = []
+
+[[class]]
+java = "io.grpc.Metadata"
+members = [
+    "<init>()", "put",
+    "ASCII_STRING_MARSHALLER",
+]
+
+[[class]]
+java = "io.grpc.Metadata$Key"
+rust = "MetadataKey"
+members = ["of(Ljava/lang/String;Lio/grpc/Metadata$AsciiMarshaller;)"]
+
+[[class]]
+java = "io.grpc.Metadata$AsciiMarshaller"
+members = []
+
+[[class]]
+java = "io.grpc.stub.MetadataUtils"
+members = ["newAttachHeadersInterceptor"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent"
+members = ["<init>(Lcom/google/devtools/build/lib/buildtool/BuildResult;Ljava/util/Collection;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildtool.BuildResult"
+members = ["<init>", "setStopTime", "setDetailedExitCode"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.DetailedExitCode"
+members = ["success", "of(Lcom/google/devtools/build/lib/util/ExitCode;Lcom/google/devtools/build/lib/server/FailureDetails$FailureDetail;)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.ExitCode"
+members = ["SUCCESS", "BUILD_FAILURE", "ANALYSIS_FAILURE", "PARTIAL_ANALYSIS_FAILURE"]
+
+[[class]]
+java = "io.netty.util.ReferenceCounted"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.PathConverter"
+members = ["apply?"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEvent$LocalFile"
+rust = "LocalFile"
+members = [".path", ".type as kind"]
+
+[[class]]
+java = "com.google.common.util.concurrent.SettableFuture"
+members = ["create()", "set", "setException"]
+
+[[class]]
+java = "com.google.devtools.build.lib.pkgcache.PackageManager$PackageManagerStatistics"
+rust = "PackageManagerStatistics"
+members = ["getPackagesSuccessfullyLoaded"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.cache.Protos$ActionCacheStatistics"
+rust = "ActionCacheStatistics"
+members = ["newBuilder()"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.cache.Protos$ActionCacheStatistics$Builder"
+rust = "ActionCacheStatisticsBuilder"
+members = ["build()"]
+
+[[class]]
+java = "com.google.protobuf.AbstractMessageLite"
+members = ["toByteArray"]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[options]
+fragments = true
+include_effect_tags = [
+    "LOADING_AND_ANALYSIS",
+    "BUILD_FILE_SEMANTICS",
+    "AFFECTS_OUTPUTS",
+    "ACTION_COMMAND_LINES",
+    "CHANGES_INPUTS",
+    "LOSES_INCREMENTAL_STATE",
+]
+exclude_effect_tags = [
+    "EXECUTION",
+    "NO_OP",
+    "TERMINAL_OUTPUT",
+    "BAZEL_MONITORING",
+    "EAGERNESS_TO_EXIT",
+    "HOST_MACHINE_RESOURCE_OPTIMIZATIONS",
+    "TEST_RUNNER",
+]
+include_classes = [
+    "com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions",
+    "com.google.devtools.build.lib.pkgcache.PackageOptions",
+    "com.google.devtools.build.lib.pkgcache.LoadingOptions",
+    "com.google.devtools.build.lib.bazel.repository.RepositoryOptions",
+]
+include = [
+    "repo_env",
+    "incompatible_repo_env_ignores_action_env",
+    "experimental_strict_repo_env",
+    "enable_bzlmod",
+    "enable_workspace",
+    "incompatible_use_plus_in_repo_names",
+    "experimental_enable_aspect_hints",
+    "aspects_parameters",
+    "workspace_status_command",
+    "embed_label",
+]
+exclude_classes = [
+    "com.google.devtools.build.lib.runtime.*",
+    "com.google.devtools.build.lib.bazel.commands.*",
+    "com.google.devtools.build.lib.bazel.BazelStartupOptionsModule$*",
+    "com.google.devtools.build.lib.bazel.rules.BazelRulesModule$*",
+    "com.google.devtools.build.lib.bazel.coverage.*",
+    "com.google.devtools.build.lib.bazel.debug.*",
+    "com.google.devtools.build.lib.buildtool.*",
+    "com.google.devtools.build.lib.remote.*",
+    "com.google.devtools.build.lib.sandbox.*",
+    "com.google.devtools.build.lib.buildeventservice.*",
+    "com.google.devtools.build.lib.buildeventstream.*",
+    "com.google.devtools.build.lib.authandtls.*",
+    "com.google.devtools.build.lib.worker.*",
+    "com.google.devtools.build.lib.dynamic.*",
+    "com.google.devtools.build.lib.profiler.*",
+    "com.google.devtools.build.lib.exec.*",
+    "com.google.devtools.build.lib.metrics.*",
+    "com.google.devtools.build.lib.query2.*",
+    "com.google.devtools.build.lib.starlarkdebug.*",
+    "com.google.devtools.build.lib.skyframe.*",
+    "com.google.devtools.build.lib.rules.android.WriteAdbArgsAction$*",
+    "com.google.devtools.build.lib.packages.metrics.*",
+    "com.google.devtools.build.lib.outputfilter.*",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildtool.ExecutionProgressReceiver"
+members = ["<init>", "getProgressString"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEvent"
+rust = "BuildEventImpl"
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventContext"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventstream.transports.BinaryFormatFileTransport"
+members = ["<init>"]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.BuildEventServiceTransport"
+members = [
+    "close()",
+    "getHalfCloseFuture()",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.BuildEventServiceTransport$Builder"
+rust = "BuildEventServiceTransportBuilder"
+members = [
+    "<init>()", "commandStartTime(Ljava/time/Instant;)", "build",
+    "besClient(Lcom/google/devtools/build/lib/buildeventservice/client/BuildEventServiceClient;)",
+    "localFileUploader(Lcom/google/devtools/build/lib/buildeventstream/BuildEventArtifactUploader;)",
+    "bepOptions(Lcom/google/devtools/build/lib/buildeventstream/BuildEventProtocolOptions;)",
+    "besOptions(Lcom/google/devtools/build/lib/buildeventservice/BuildEventServiceOptions;)",
+    "clock(Lcom/google/devtools/build/lib/clock/Clock;)",
+    "artifactGroupNamer(Lcom/google/devtools/build/lib/buildeventstream/ArtifactGroupNamer;)",
+    "eventBus(Lcom/google/common/eventbus/EventBus;)",
+    "commandContext(Lcom/google/devtools/build/lib/buildeventservice/client/BuildEventServiceClient$CommandContext;)",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.buildeventservice.client.BuildEventServiceGrpcClient"
+members = [
+    "<init>(Lio/grpc/ManagedChannel;Lio/grpc/CallCredentials;Lio/grpc/ClientInterceptor;Ljava/lang/String;Ljava/util/UUID;) when 9.0.1",
+    "<init>(Lio/grpc/ManagedChannel;Lio/grpc/CallCredentials;Lio/grpc/ClientInterceptor;) when 9.2.0",
+    "shutdown()",
+]
+
+[[implement]]
+java = "com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploader"
+rust = "ArtifactUploaderImpl"
+members = [
+    "upload",
+    "mayBeSlow",
+    "refCnt",
+    "retain() as retain",
+    "retain(I) as retain_n",
+    "touch() as touch",
+    "touch(Ljava/lang/Object;) as touch_with",
+    "release() as release",
+    "release(I) as release_n",
+]
+
+[[implement]]
+java = "com.google.devtools.build.lib.buildeventstream.PathConverter"
+rust = "PathConverterImpl"
+
+[[implement]]
+java = "com.google.devtools.build.lib.runtime.BuildEventStreamer$OutErrProvider"
+rust = "OutErrImpl"
+
+# Workspace status action and stamping.
+
+[[class]]
+java = "com.google.devtools.build.lib.analysis.WorkspaceStatusAction$Options"
+rust = "WorkspaceStatusOptions"
+members = ["embedLabel", "workspaceStatusCommand"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.analysis.WorkspaceStatusAction$Context"
+members = ["getOptions", "getClientEnv", "getCommand?"]
+
+[[class]]
+java = "com.google.devtools.build.lib.util.CommandBuilder"
+members = ["<init>(Ljava/util/Map;)", "addArgs(Ljava/lang/Iterable;)", "setEnv", "setWorkingDir", "useShell(Z)", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.shell.Command"
+members = []
+
+# Sandboxed local executor: Bazel's sandbox pieces that do not need a CommandEnvironment.
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SandboxOptions"
+members = ["<init>", "getInaccessiblePaths(Lcom/google/devtools/build/lib/vfs/FileSystem;)", ".defaultSandboxAllowNetwork as default_allow_network", ".asyncTreeDeleteIdleThreads as async_tree_delete_idle_threads"]
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SandboxHelpers"
+members = ["processInputFiles", "getOutputs"]
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SandboxHelpers$SandboxInputs"
+rust = "SandboxInputs"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SandboxHelpers$SandboxOutputs"
+rust = "SandboxOutputs"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SandboxedSpawn"
+members = ["createFileSystem", "copyOutputs", "delete"]
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.SymlinkedSandboxedSpawn"
+members = ["<init> nullable(12)"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.TreeDeleter"
+members = ["shutdown"]
+
+[[class]]
+java = "com.google.devtools.build.lib.sandbox.DarwinSandboxedSpawnRunner"
+members = ["writeConfig"]
+
+[[class]]
+java = "com.google.devtools.build.lib.runtime.ProcessWrapper$CommandLineBuilder"
+rust = "ProcessWrapperCommandLine"
+members = ["addExecutionInfo", "setTimeout", "setStatisticsPath", "build"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ResourceManager$ResourcePriority"
+rust = "ResourcePriority"
+members = ["LOCAL", "DYNAMIC_STANDALONE"]
+
+[[class]]
+java = "com.google.devtools.build.lib.actions.ResourceManager$ResourceHandle"
+rust = "ResourceHandle"
+members = ["close"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnRunner$SpawnExecutionContext"
+members = [
+    "getId", "prefetchInputsAndWait", "speculating", "getTimeout", "getFileOutErr",
+    "getInputMapping", "report", "lockOutputFiles",
+]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnRunner$ProgressStatus"
+members = []
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnSchedulingEvent"
+members = ["create"]
+
+[[class]]
+java = "com.google.devtools.build.lib.exec.SpawnExecutingEvent"
+members = ["create"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.exec.SpawnRunner"
+rust = "SpawnRunnerImpl"
+members = ["exec", "canExec", "handlesCaching", "getName"]
+
+[[implement]]
+java = "com.google.devtools.build.lib.exec.TreeDeleter"
+rust = "TreeDeleterImpl"

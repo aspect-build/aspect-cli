@@ -25,6 +25,12 @@ struct Cli {
     /// Version label for --jar.
     #[arg(long)]
     version: Option<String>,
+    /// Print the options the spec's `[options]` select from the first version, with counts, and exit.
+    #[arg(long = "dump-options")]
+    dump_options: bool,
+    /// Print every option class of the first version, with its options, and exit.
+    #[arg(long = "dump-raw-options")]
+    dump_raw_options: bool,
     /// Print every member of these classes (dotted names) from the first version and exit.
     #[arg(long = "dump")]
     dump: Vec<String>,
@@ -53,6 +59,14 @@ fn main() -> Result<()> {
         bail!(
             "nothing to bind: pass --bazel <version>, --jar <path> --version <label>, or `versions` in the spec"
         );
+    }
+    if cli.dump_options {
+        print!("{}", blazon::dump_options(&cli.spec, &versions[0].jar)?);
+        return Ok(());
+    }
+    if cli.dump_raw_options {
+        print!("{}", blazon::dump_raw_options(&versions[0].jar)?);
+        return Ok(());
     }
     if !cli.dump.is_empty() {
         print!("{}", blazon::dump(&versions[0].jar, &cli.dump)?);
