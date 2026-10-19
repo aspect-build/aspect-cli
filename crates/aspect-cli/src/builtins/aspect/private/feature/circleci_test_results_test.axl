@@ -1,0 +1,74 @@
+"""Unit tests for `feature/circleci_test_results.axl`: `collect_test_xml` keys
+each run, shard and attempt of a target separately, and keeps only the final
+attempt unless `upload_failed_attempts` is set. Run with:
+  aspect dev test-circleci-test-results
+"""
+
+load("@aspect//feature/circleci_test_results.axl", "collect_test_xml")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _event(label, shard, attempt, status, src):
+    return struct(
+        kind = "test_result",
+        id = struct(label = label, run = 1, shard = shard, attempt = attempt),
+        payload = struct(
+            status = status,
+            cached_locally = False,
+            test_action_output = [struct(name = "test.xml", file = "file://" + src)],
+        ),
+    )
+
+def _collect(ctx, events, strategy, upload_failed_attempts):
+    entries = {}
+    for e in events:
+        collect_test_xml(ctx, e, strategy, entries, upload_failed_attempts)
+    return {dest: info["src"] for dest, info in entries.items()}
+
+def _test_impl(ctx):
+    tmp = ctx.std.fs.mkdtemp(prefix = "circleci-tr-test-", parent = ctx.std.env.temp_dir())
+    xml = {}
+    for name in ["s1", "s2_a1", "s2_a2", "unsharded"]:
+        xml[name] = tmp + "/" + name + ".xml"
+        ctx.std.fs.write(xml[name], "<testsuites/>")
+
+    # Shard 2 fails on attempt 1 and passes on attempt 2 (FLAKY).
+    events = [
+        _event("//p:t", 1, 1, "passed", xml["s1"]),
+        _event("//p:t", 2, 1, "failed", xml["s2_a1"]),
+        _event("//p:t", 2, 2, "passed", xml["s2_a2"]),
+        _event("//q:u", 1, 1, "passed", xml["unsharded"]),
+    ]
+
+    _eq("final attempt per shard", _collect(ctx, events, "all", False), {
+        "p/t/test.xml": xml["s1"],
+        "p/t/shard_2/test.xml": xml["s2_a2"],
+        "q/u/test.xml": xml["unsharded"],
+    })
+    _eq("every attempt", _collect(ctx, events, "all", True), {
+        "p/t/test.xml": xml["s1"],
+        "p/t/shard_2/test.xml": xml["s2_a1"],
+        "p/t/shard_2_attempt_2/test.xml": xml["s2_a2"],
+        "q/u/test.xml": xml["unsharded"],
+    })
+
+    # A passing retry is not collected under "failed", but still replaces the
+    # failed attempt unless every attempt is uploaded.
+    _eq("failed: retry passed", _collect(ctx, events, "failed", False), {})
+    _eq("failed: every attempt", _collect(ctx, events, "failed", True), {
+        "p/t/shard_2/test.xml": xml["s2_a1"],
+    })
+
+    ctx.std.fs.remove_dir_all(tmp)
+    print("circleci_test_results.axl: OK")
+    return 0
+
+circleci_test_results_tests = task(
+    summary = "Run the CircleCI test results AXL unit tests.",
+    kind = "test-circleci-test-results",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

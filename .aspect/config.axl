@@ -14,6 +14,7 @@ load("@aspect//gc_test.axl", "gc_tests")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
 load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
+load("@aspect//private/feature/circleci_test_results_test.axl", "circleci_test_results_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/agent_test.axl", "agent_tests")
@@ -374,6 +375,10 @@ def config(ctx: ConfigContext):
     # CircleCI S3 error parsing: expired-credential 400 → legible reason.
     # Run with: aspect dev test-circleci
     ctx.tasks.add(circleci_tests)
+
+    # CircleCITestResults: one JUnit file per run/shard, and per attempt on opt-in.
+    # Run with: aspect dev test-circleci-test-results
+    ctx.tasks.add(circleci_test_results_tests)
 
     # Cross-CI URL helpers (lib/ci.axl): host detection, build URL, per-job cache.
     # Run with: aspect dev test-ci

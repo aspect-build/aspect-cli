@@ -9,6 +9,7 @@ on CircleCI.
 
 load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//helpers.axl", "file_uri_to_path")
+load("../private/lib/artifacts.axl", "testlog_dest_dir")
 load("../private/lib/bazel_results.axl", "bes_get")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
@@ -36,15 +37,26 @@ def _should_collect(strategy: str, status: str, cached: bool) -> bool:
         return status in _NOT_PASSED_STATUSES
     return False
 
-def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
+def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_attempts: bool) -> None:
     """Record `{dest: {"src", "cached"}}` for each test.xml in a test_result event.
 
-    Keyed by dest so repeated events for one target (shards/attempts) keep the
-    last. `cached` covers local and remote cache hits. `bes_get` everywhere so
-    an `aborted` payload variant no-ops instead of raising.
+    BEP names every run's, shard's and attempt's file `test.xml`, so dest is
+    keyed by `testlog_dest_dir`. Without `upload_failed_attempts` every attempt
+    shares one key and a later attempt replaces the earlier one even when it is
+    not collected itself, so a flaky test reports only its final outcome.
+    `cached` covers local and remote cache hits. `bes_get` everywhere so an
+    `aborted` payload variant no-ops instead of raising.
     """
     if event.kind != "test_result":
         return
+
+    run = bes_get(event.id, "run", 1) or 1
+    shard = bes_get(event.id, "shard", 1) or 1
+    attempt = bes_get(event.id, "attempt", 1) or 1
+    dest_dir = testlog_dest_dir(event.id.label, run, shard, attempt if upload_failed_attempts else 1)
+    if not upload_failed_attempts and attempt > 1:
+        for dest in [d for d in entries if d.rsplit("/", 1)[0] == dest_dir]:
+            entries.pop(dest)
 
     payload = event.payload
     status = bes_get(payload, "status", "") or ""
@@ -54,9 +66,6 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
     if not _should_collect(strategy, status, cached):
         return
 
-    label = event.id.label
-    label_path = label.lstrip("/").replace(":", "/")
-
     for file in (bes_get(payload, "test_action_output", None) or []):
         name = bes_get(file, "name", "") or ""
         if not name.endswith(".xml"):
@@ -64,7 +73,7 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
         src = file_uri_to_path(ctx.std.env, bes_get(file, "file", "") or "")
         if not src or not ctx.std.fs.exists(src):
             continue
-        entries[label_path + "/" + name] = {"src": src, "cached": cached}
+        entries[dest_dir + "/" + name] = {"src": src, "cached": cached}
 
 def _staged_archive_sources(ctx, entries: dict, staging: str, cached_as_skipped: bool) -> dict:
     """`{dest: src}` for the archive; cached XML is rewritten to skipped under
@@ -96,11 +105,12 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
         return
 
     cached_as_skipped = ctx.args.cached_as_skipped
+    upload_failed_attempts = ctx.args.upload_failed_attempts
     bazel_trait = ctx.traits[BazelTrait]
     entries = {}
 
     def _on_build_event(ctx, event):
-        _collect_test_xml(ctx, event, strategy, entries)
+        collect_test_xml(ctx, event, strategy, entries, upload_failed_attempts)
 
     def _on_build_end(ctx, exit_code):
         if not entries:
@@ -156,6 +166,13 @@ CircleCITestResults = feature(
             description = "Report cached tests under 'Skipped' instead of 'Passed' by " +
                           "rewriting each cached testcase with a <skipped> element. Off by " +
                           "default; only meaningful when upload_test_results is 'all'.",
+        ),
+        "upload_failed_attempts": args.boolean(
+            default = False,
+            description = "Upload each --flaky_test_attempts attempt as its own file, so an " +
+                          "attempt that failed before a passing retry shows as a failure. " +
+                          "Off by default: only each shard's final attempt is uploaded, and " +
+                          "a flaky target that Bazel reports as passed shows as passed.",
         ),
     },
 )
