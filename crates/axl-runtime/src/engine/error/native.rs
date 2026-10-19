@@ -61,6 +61,32 @@ impl NativeFieldType for String {
     }
 }
 
+impl NativeFieldType for i32 {
+    fn type_value() -> FrozenValue {
+        // The `int` global is both the constructor and the type value, which
+        // is what a record field spelled `field(int)` resolves to.
+        static INT: std::sync::LazyLock<FrozenValue> = std::sync::LazyLock::new(|| {
+            // The globals' heap lives for the program, as every type value
+            // in the frozen heap does.
+            let globals = Box::leak(Box::new(starlark::environment::Globals::standard()));
+            globals
+                .iter()
+                .find(|(name, _)| *name == "int")
+                .map(|(_, value)| value)
+                .expect("the standard globals define `int`")
+        });
+        *INT
+    }
+
+    fn ty() -> Ty {
+        Ty::int()
+    }
+
+    fn alloc<'v>(&self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc(*self)
+    }
+}
+
 /// A native error in flight: what `anyhow::Error` carries for it.
 #[derive(Debug)]
 pub(crate) struct NativeRaised(Box<dyn NativeError>);

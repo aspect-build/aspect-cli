@@ -94,7 +94,6 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/runnable.axl", "runnable")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/watch.axl", "watch")
@@ -474,10 +473,9 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         data["gazelle"]["no_changed_dirs"] = True
         return 0
 
-    # `rc=` opts into the runinfo aspect: `r.flags` captures the gazelle
-    # target's executable (the sh_binary, not its `-runner.bash` helper), its
-    # `args` attribute, and its env so `r.spawn` resolves and replays them.
-    r = runnable(ctx, [ctx.args.gazelle_target], rc = rc)
+    # The run command is the build's only input: per-invocation endpoint auth
+    # joins it rather than riding alongside as flags.
+    rc = bzl.rc_with_flags(ctx, rc, endpoint_auth_flags)
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -507,12 +505,15 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
 
     xl = bzl.exec_log.open(bazel_trait)
 
-    build = ctx.bazel.build(
-        ctx.args.gazelle_target,
+    # Build gazelle for running: the runtime captures the target's executable
+    # (the sh_binary, not its `-runner.bash` helper), its `args` attribute and
+    # env the way `bazel run` would, and materializes its runfiles tree from
+    # the manifest, without touching any build option.
+    runs = ctx.bazel.run_all(
+        [ctx.args.gazelle_target],
         build_events = build_events,
         execution_log = xl.sinks or False,
-        flags = r.flags + endpoint_auth_flags,
-        aspects = r.aspects,
+        rc = rc,
         directory = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
@@ -521,7 +522,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # sink_invocation_id is minted in Build::spawn before it returns. Populate
     # data + emit a running task_update so the BK annotation / status check
     # picks up the Workflows link at spawn rather than waiting for build.wait().
-    data["sink_invocation_id"] = build.sink_invocation_id
+    data["sink_invocation_id"] = runs.sink_invocation_id
 
     # Re-emit now the link is known, but only to status surfaces — empty
     # `stream` suppresses the duplicate CLI line.
@@ -536,8 +537,8 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     )
 
     # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS even
-    # when bazel is silent. Per event: r.event() (entrypoint discovery),
-    # build_event hooks (ArtifactUpload records testlogs), process_event.
+    # when bazel is silent. Per event: build_event hooks (ArtifactUpload
+    # records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
@@ -547,7 +548,6 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
             event = events.try_pop()
             if event == None:
                 break
-            r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
             if process_event(data, event, bb_root):
@@ -565,7 +565,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
             break
 
     bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
-    build_status = build.wait()
+    build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
@@ -576,9 +576,9 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         error(ctx.std, "Building the gazelle target has failed.")
         return build_status.code or 1
 
-    ep = r.determine_entrypoint(ctx.args.gazelle_target)
-    if not ep:
-        error(ctx.std, "Failed to determine the gazelle target's entrypoint.")
+    err, ep = runs.get(ctx.args.gazelle_target).catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()
+    if err:
+        error(ctx.std, "Failed to determine the gazelle target's entrypoint: %s" % err.message)
         return 1
 
     # Diff phase: -mode=diff yields the verdict + patch without touching the
@@ -590,8 +590,8 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # swallows ErrDiff), from-source exits 1. So drive off stdout: empty stdout
     # + non-zero = real error; otherwise stdout speaks regardless of exit code.
     #
-    # capture=True pipes stdout+stderr; drain both, stdout to EOF first (gazelle
-    # has usually flushed stderr by then). User --gazelle-flag values pass
+    # Both streams are piped; drain both, stdout to EOF first (gazelle has
+    # usually flushed stderr by then). User --gazelle-flag values pass
     # through but any -mode is stripped so our -mode=diff stays last.
     diff_args = []
     if ctx.args.gazelle_command:
@@ -614,7 +614,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         data = data,
         phase = phases.Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
-    diff_proc = r.spawn(ep, diff_args, capture = True)
+    diff_proc = ep.command(args = diff_args).stdout("piped").stderr("piped").spawn()
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
     diff_status = diff_proc.wait()

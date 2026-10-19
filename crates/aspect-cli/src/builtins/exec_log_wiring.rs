@@ -7,7 +7,8 @@
 //! reads the AXL sources and so covers the call sites that exist, which is what
 //! turns "a new task forgot the wiring" from a silent omission into a failure.
 //!
-//! Coverage is per `ctx.bazel.build` / `.test` site, not per file, because the
+//! Coverage is per `ctx.bazel.build` / `.test` / `.run_all` / `.run` site, not
+//! per file, because the
 //! tasks that drive Bazel more than once are exactly the ones where a missing
 //! handle hides: a hook watching `aspect delivery` hears about three
 //! invocations, and a per-file rule is satisfied by the first. A spawn that
@@ -24,17 +25,21 @@ use include_dir::{Dir, DirEntry, include_dir};
 
 static ASPECT: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
 
-/// A real `ctx.bazel.build(` / `.test(` call, as this tree formats them: the
-/// open paren ends the line. Prose mentions the calls inline
-/// (`ctx.bazel.build(aspects = ...)`), so requiring the line to end there is
-/// what separates a call site from a docstring.
+/// A real `ctx.bazel.build(` / `.test(` / `.run_all(` / `.run(` call, as this
+/// tree formats them: the open paren ends the line. Prose mentions the calls
+/// inline (`ctx.bazel.build(aspects = ...)`), so requiring the line to end
+/// there is what separates a call site from a docstring. The run verbs are
+/// spawn sites too: each is one `bazel build` with the same streams.
 fn spawn_lines(source: &str) -> Vec<usize> {
     source
         .lines()
         .enumerate()
         .filter(|(_, line)| {
             let t = line.trim_end();
-            t.ends_with("ctx.bazel.build(") || t.ends_with("ctx.bazel.test(")
+            t.ends_with("ctx.bazel.build(")
+                || t.ends_with("ctx.bazel.test(")
+                || t.ends_with("ctx.bazel.run_all(")
+                || t.ends_with("ctx.bazel.run(")
         })
         .map(|(i, _)| i + 1)
         .collect()
@@ -55,17 +60,21 @@ fn calls(source: &str, name: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Lines where the invocation handle is awaited. The receiver is named `build`
-/// or `handle` at every site; a sink's `wait()` or the cancel probe's is not
-/// what `close` has to precede. Prose names these calls too, so the line has to
-/// end with one — the docstring of the drain itself explains the ordering.
+/// Lines where the invocation handle is awaited. The receiver is named `build`,
+/// `handle` or `runs` at every site; a sink's `wait()` or the cancel probe's is
+/// not what `close` has to precede. Prose names these calls too, so the line
+/// has to end with one — the docstring of the drain itself explains the
+/// ordering.
 fn handle_waits(source: &str) -> Vec<usize> {
     source
         .lines()
         .enumerate()
         .filter(|(_, line)| {
             let t = line.trim();
-            !t.starts_with('#') && (t.ends_with("build.wait()") || t.ends_with("handle.wait()"))
+            !t.starts_with('#')
+                && (t.ends_with("build.wait()")
+                    || t.ends_with("handle.wait()")
+                    || t.ends_with("runs.wait()"))
         })
         .map(|(i, _)| i + 1)
         .collect()

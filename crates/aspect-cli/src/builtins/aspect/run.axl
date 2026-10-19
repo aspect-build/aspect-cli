@@ -11,7 +11,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/ibazel_strategy.axl", "ibazel_strategy")
 load("./private/lib/incremental_build_protocol_host.axl", "incremental_build_protocol_host")
 load("./private/lib/lifecycle.axl", "phases")
-load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in")
 load("./private/lib/source_tracker.axl", "source_tracker")
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/watch.axl", "watch")
@@ -20,10 +20,25 @@ load("./private/lib/watch_supervisor.axl", "watch_supervisor")
 
 _WATCH_TICK_MS = 100
 
-def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase: phases.Phase, label: str, execution_log_path: str | None = None, extra_aspects: list = []) -> struct:
-    """One `bazel build` of `target` with BES drained into `ph.data` and the
-    runnable tracker `r`. When `execution_log_path` is set, captures a complete
-    decoded log and returns the paths output by executed actions."""
+# The failures `runs.get(target)` can settle with: a build that failed, a
+# target the build never reported, a target with nothing to run.
+_RUN_ERRORS = [bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable]
+
+def _resolve(runs, target: str) -> struct:
+    """Resolve `target` from a finished `run_all`.
+
+    Returns `struct(runnable, error)`: the target's `Runnable`, or None with
+    the error it settled with."""
+    err, runnable = runs.get(target).catch(*_RUN_ERRORS).block()
+    return struct(runnable = runnable, error = err)
+
+def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version: bool, announce_command: bool, phase: phases.Phase, label: str, execution_log_path: str | None = None) -> struct:
+    """One build of `target` for running, with BES drained into `ph.data`.
+
+    Returns `struct(status, runnable, error, execution_outputs)`: the build's
+    status, the target's `Runnable` (None when it did not build, with `error`
+    saying why), and, when `execution_log_path` is set, the paths output by
+    executed actions."""
     bazel_trait = ctx.traits[BazelTrait]
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     ph.data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -52,11 +67,10 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
     if execution_log_path != None:
         execution_log.append(bazel.execution_log.file(path = execution_log_path))
 
-    build = ctx.bazel.build(
-        target,
+    runs = ctx.bazel.run_all(
+        [target],
         build_events = build_events,
-        flags = flags,
-        aspects = r.aspects + extra_aspects,
+        rc = rc,
         announce_version = announce_version,
         announce_command = announce_command,
         execution_log = execution_log or False,
@@ -69,7 +83,6 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
             event = events.try_pop()
             if event == None:
                 break
-            r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
             process_event(ph.data, event, bb_root)
@@ -77,7 +90,7 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
             break
 
     bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
-    build_status = build.wait()
+    build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
@@ -86,15 +99,17 @@ def _build_once(ctx: TaskContext, ph: struct, r: struct, target: str, flags: lis
     execution_outputs = []
     if execution_log_path != None:
         execution_outputs = changedetector.take_execution_outputs(ctx, execution_log_path, build_status.success)
+    resolved = _resolve(runs, target)
     return struct(
         execution_outputs = execution_outputs,
         status = build_status,
+        runnable = resolved.runnable,
+        error = resolved.error,
     )
 
-def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_environment: dict = {}, stdin = None) -> std.process.Child | None:
-    """Resolve the entrypoint and spawn the target; None when unresolvable."""
-    entrypoint = r.determine_entrypoint(target)
-    if entrypoint == None:
+def _spawn_target(ctx: TaskContext, ph, runnable, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool, extra_environment: dict = {}, stdin = None) -> std.process.Child | None:
+    """Spawn the target from its `Runnable`; None when the last build left none."""
+    if runnable == None:
         error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
         return None
     body = "Running %s (watching for changes)..." if watching else "Running %s..."
@@ -106,24 +121,29 @@ def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str],
         ),
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
-    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd, process_group = watching, extra_environment = extra_environment, stdin = stdin)
+    cmd = runnable.command(args = forward_args, env = extra_environment, cwd = spawn_cwd)
+    if stdin != None:
+        cmd = cmd.stdin(stdin)
+    return cmd.spawn()
 
-def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
+def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spawn_cwd: str | None, rc, announce_version: bool, announce_command: bool):
     """Rebuild on workspace changes, incrementally updating protocol-aware
     targets and restarting other targets. Runs until Ctrl-C, the session's
     normal ending: the watched target and any rebuild in flight are bound to
     the root, so they are already stopping; the loop waits for the target and
     returns 0."""
     ws = watch.new(ctx, rc = rc)
-    detector = changedetector.new(ctx, r, target, ws.root)
+    detector = changedetector.new(ctx, target, ws.root)
     sources = source_tracker.new(ctx, ws.root, ws.ignored_paths, ws.ignored_patterns)
     ibp_supported = incremental_build_protocol_host.is_supported(ctx.std)
     required_ibp_timeout_ms = [None]
     warned_unsupported_ibp = [False]
 
+    # The target as the last successful build left it; None after a failed one.
+    current = [None]
+
     def protocol_candidates():
-        entrypoint = r.determine_entrypoint(target)
-        tags = entrypoint.tags if entrypoint != None else []
+        tags = current[0].tags if current[0] != None else []
         if ibazel_strategy.enabled(tags):
             return [ibazel_strategy.new()]
         expected_ibp = incremental_build_protocol_host.is_expected(tags)
@@ -146,7 +166,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
 
     supervisor = watch_supervisor.new(
         ctx,
-        lambda environment, stdin: _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True, extra_environment = environment, stdin = stdin),
+        lambda environment, stdin: _spawn_target(ctx, ph, current[0], target, forward_args, spawn_cwd, watching = True, extra_environment = environment, stdin = stdin),
         candidate_factory = protocol_candidates,
     )
 
@@ -155,21 +175,21 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
     build_result = _build_once(
         ctx,
         ph,
-        r,
         target,
-        flags,
         rc,
         announce_version,
         announce_command,
         phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
         "Building %s" % target,
-        extra_aspects = detector.aspects,
     )
     build_status = build_result.status
-    if build_status.success:
-        detector.capture_baseline()
+    current[0] = build_result.runnable
+    if build_status.success and build_result.runnable != None:
+        detector.capture_baseline(build_result.runnable)
         supervisor.restart()
     else:
+        if build_status.success:
+            error(ctx.std, str(build_result.error))
         detector.record_build_failure()
         ph.update(
             "running",
@@ -197,9 +217,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
         build_result = _build_once(
             ctx,
             ph,
-            r,
             target,
-            flags,
             rc,
             False,
             announce_command,
@@ -210,9 +228,9 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             ),
             "Rebuilding %s" % target,
             execution_log_path = detector.execution_log_path,
-            extra_aspects = detector.aspects,
         )
         build_status = build_result.status
+        current[0] = build_result.runnable
         # Deliberately no drain: bazel writes its outputs outside the
         # workspace (the ignore list covers the convenience symlinks), so
         # pending events here are the user's own mid-build edits — dropping
@@ -230,7 +248,9 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             rescan = batch.rescan,
         )
 
-        if not build_status.success:
+        if not build_status.success or build_result.runnable == None:
+            if build_status.success:
+                error(ctx.std, str(build_result.error))
             detector.record_build_failure()
             supervisor.build_finished(watch_result.result(False, sources = source_changes))
             ph.update(
@@ -241,6 +261,7 @@ def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], s
             return
 
         detected = detector.changes(
+            build_result.runnable,
             source_paths,
             removed_paths,
             build_result.execution_outputs,
@@ -286,17 +307,16 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
     # inside phases.setup). Expand the "build" rc section, not "run": this task
-    # ultimately invokes `ctx.bazel.build`, which spawns a literal `bazel
-    # build`. The `run:` rc section can contain options Bazel's `build` command
-    # rejects as unrecognized (e.g. `--script_path`).
+    # ultimately spawns a literal `bazel build`. The `run:` rc section can
+    # contain options Bazel's `build` command rejects as unrecognized (e.g.
+    # `--script_path`).
     rc = ph.setup(target, "bazel_results", "build")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
-    # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
-    # flags + aspect injection that capture the executable, the `args` attribute,
-    # and the target env so `r.spawn` replays them the way `bazel run` does.
-    r = runnable(ctx, [target], rc = rc)
+    # The run command is the build's only input: per-invocation endpoint auth
+    # joins it rather than riding alongside as flags.
+    rc = bzl.rc_with_flags(ctx, rc, bzl.rc_flags(ctx, rc, "build"))
+
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
     events = bazel.build_events.iterator()
@@ -322,7 +342,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # The watch loop never concludes: it runs until Ctrl-C ends the process.
     if ctx.args.watch:
-        return _watch_loop(ctx, ph, r, target, forward_args, spawn_cwd, r.flags + endpoint_auth_flags, rc, announce_version, announce_command)
+        return _watch_loop(ctx, ph, target, forward_args, spawn_cwd, rc, announce_version, announce_command)
 
     for hook in bazel_trait.build_start:
         hook(ctx)
@@ -342,12 +362,15 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     announce_bes_sinks(ctx, bes_sinks)
 
     xl = bzl.exec_log.open(bazel_trait)
-    build = ctx.bazel.build(
-        target,
+
+    # Build for running: the runtime captures what `bazel run` would set up
+    # (executable, `args` attribute, `RunEnvironmentInfo`) and materializes the
+    # runfiles tree from the manifest, without touching any build option.
+    runs = ctx.bazel.run_all(
+        [target],
         build_events = build_events,
         execution_log = xl.sinks or False,
-        flags = r.flags + endpoint_auth_flags,
-        aspects = r.aspects,
+        rc = rc,
         announce_version = announce_version,
         announce_command = announce_command,
     )
@@ -359,7 +382,6 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
             event = events.try_pop()
             if event == None:
                 break
-            r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
             process_event(data, event, bb_root)
@@ -367,7 +389,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
-    build_status = build.wait()
+    build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
@@ -381,9 +403,9 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         verdict = "aborted" if data["bazel"]["aborted"] else "failed"
         return _conclude(verdict, build_status.code, conclusion(verdict, data))
 
-    entrypoint = r.determine_entrypoint(target)
-    if entrypoint == None:
-        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+    resolved = _resolve(runs, target)
+    if resolved.runnable == None:
+        error(ctx.std, str(resolved.error))
         return _conclude("failed", 1, "Could not determine the run entrypoint for %s" % target)
 
     ph.update(
@@ -395,7 +417,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
+    code = resolved.runnable.command(args = forward_args, cwd = spawn_cwd).spawn().wait().code
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 

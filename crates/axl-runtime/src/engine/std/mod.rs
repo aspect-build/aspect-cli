@@ -27,7 +27,7 @@ mod env;
 mod fs;
 pub mod io;
 mod net;
-mod process;
+pub(crate) mod process;
 pub mod stream;
 pub(crate) mod watch;
 
