@@ -5325,7 +5325,7 @@ def _results_new(ctx, command, report_uploader = None):
         ph = ph,
         data = data,
         # Emit BES events only when a status surface is listening — mirrors the
-        # old `need_bes` gate (no surfaces → bazel runs with no BEP fifo).
+        # old `need_bes` gate (no surfaces → bazel runs with no BEP file).
         live = bool(ctx.traits[Phases].task_update),
         setup = setup,
         attempt = attempt,

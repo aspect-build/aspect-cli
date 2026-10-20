@@ -13,7 +13,7 @@
 //!     length-delimited `BuildEvent` protobufs into the BES path according
 //!     to the named scenario. Each "attempt" is one open/write/close cycle
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
-//!     reconnect-after-eviction behavior on a FIFO.
+//!     reconnect-after-eviction behavior.
 //!
 //!     When `--execution_log_compact_file <path>` is also present, a scenario
 //!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there, in
@@ -44,7 +44,7 @@
 //! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
 
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::process;
 use std::thread;
@@ -109,7 +109,7 @@ fn run_info(args: &[String]) {
     // Honors BASIL_SERVER_PID so tests can pin the reported pid to a holder
     // process (e.g. `sleep 60`) that outlives basil's own short-lived info
     // invocation. Required for galvanize's IfOpenForPid retry loop to keep
-    // the FIFO read end open across the lifetime of the test.
+    // the event file open across the lifetime of the test.
     let pid: u32 = env::var("BASIL_SERVER_PID")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -157,10 +157,9 @@ fn run_build(args: &[String], verb: &str) {
         write_json_bep(&path, s.json_bep_tests, exit_code);
     }
 
-    // Before the BES write, which blocks on a FIFO until the reader opens it.
-    // Bazel writes the execution log as it executes, i.e. during the build, and
-    // the reader tails it; writing it first here is the closest a one-shot fake
-    // gets to that, and it means the entries are already on disk while the AXL
+    // Before the BES write. Bazel writes the execution log as it executes;
+    // the reader tails it, and writing it first here is the closest a one-shot
+    // fake gets to that. It means the entries are already on disk while the AXL
     // side is draining BES.
     if s.execlog_delay.is_zero() {
         log();
@@ -217,7 +216,7 @@ enum ExitBehavior {
 }
 
 /// One full BES interaction. Each attempt is one open/write/close cycle on
-/// the FIFO. `open_delay` sleeps after the FIFO open and before any writes —
+/// the event file. `open_delay` sleeps after creating it and before any writes —
 /// only set this on scenarios whose tests assert on what the AXL iterator
 /// received. `build.build_events()` subscribes after `Build::spawn` returns
 /// (the broadcaster doesn't replay history; see
@@ -303,13 +302,17 @@ fn write_json_bep(path: &str, tests: &[&str], exit_code: i32) {
 fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
     let last_attempt = scenario.attempts.len().saturating_sub(1);
     for (attempt, events) in scenario.attempts.iter().enumerate() {
-        // One open/write/close per attempt: the read side observes a writer
-        // appear, drain bytes, and disappear — same as Bazel reopening the
-        // BEP file on each retry.
-        let mut f = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .unwrap_or_else(|e| panic!("basil: opening BES path {path:?} for write: {e}"));
+        // One create/write/close per attempt. `File::create` truncates, which
+        // is what Bazel does when it reopens the event file for a retry, so the
+        // read side sees each attempt's stream start at offset zero.
+        if attempt > 0 {
+            // Bazel's gap between attempts is a whole loading and analysis
+            // phase. The reader tells attempts apart by seeing the file closed
+            // between them, so leave it closed long enough to be observed.
+            thread::sleep(ATTEMPT_GAP);
+        }
+        let mut f = File::create(path)
+            .unwrap_or_else(|e| panic!("basil: creating BES path {path:?} for write: {e}"));
         if !scenario.open_delay.is_zero() {
             thread::sleep(scenario.open_delay);
         }
@@ -326,9 +329,18 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
                 .expect("basil: encode BuildEvent");
             f.write_all(&buf)
                 .unwrap_or_else(|e| panic!("basil: writing to BES path: {e}"));
+            f.flush()
+                .unwrap_or_else(|e| panic!("basil: flushing BES path: {e}"));
         }
+        // End the attempt: the reader sees the file closed and, when the
+        // attempt ended on a retryable verdict, waits for the next one.
+        drop(f);
     }
 }
+
+/// How long the event file stays closed between attempts, so a reader can see
+/// that one attempt ended before the next truncates the file.
+const ATTEMPT_GAP: Duration = Duration::from_millis(150);
 
 /// How long [`await_pump_handshake`] waits for the consumer. Long enough that a
 /// loaded machine cannot time out a working handshake, short enough that a
@@ -453,9 +465,9 @@ fn scenario(name: &str) -> Scenario {
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
-        // opened the BEP file, so no attempts at all. The read side waits on
-        // a writer that cannot come, which is what `spawn_open_watchdog`
-        // exists to break out of.
+        // created the BEP file, so no attempts at all. The read side is
+        // waiting for a file that will never appear, and ends when the
+        // invocation does.
         "rejects_command_line" => Scenario {
             attempts: vec![],
             exit: ExitBehavior::Code(2),

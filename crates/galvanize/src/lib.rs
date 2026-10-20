@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use nix::sys::stat::Mode;
@@ -249,10 +249,31 @@ impl Read for Pipe {
 /// the daemon that writes the file and `invocation_pid` is the client that ran the
 /// command; the daemon outlives the invocation by design, so only the client can
 /// answer "is this over?".
+
+/// How often a restartable file re-checks that it is still reading the same
+/// stream. Short next to the gap between bazel's attempts, long next to the
+/// per-byte reads a length-delimited decoder makes.
+const TRUNCATION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 pub struct StreamingFile {
     path: PathBuf,
     inner: File,
     holder_pid: u32,
+    /// Whether [`await_restart`](Self::await_restart) may be called, and
+    /// whether reads watch for the file being replaced under them. Off by
+    /// default: a writer that only ever appends has no second stream.
+    restartable: bool,
+    /// When the file's length was last compared against what has been read.
+    last_truncation_check: std::time::Instant,
+    /// Set when a read found the file shorter than it had already been.
+    /// Cleared by [`take_truncated`](Self::take_truncated).
+    truncated: bool,
+    /// The greatest length this file has been observed to have. A length below
+    /// it can only mean the file was replaced.
+    high_water: u64,
+    /// Bytes consumed from the current segment, so a caller can see where an
+    /// attempt ended. Reset by [`await_restart`](Self::await_restart).
+    pos: u64,
     /// Test-only hook, run exactly once — on the first read that finds the holder
     /// has closed the file, and before the re-read that follows. The bug the
     /// re-read exists for lives in exactly that window — the writer finishing and
@@ -272,6 +293,15 @@ impl StreamingFile {
     /// Returns `BrokenPipe` if either pid dies before the file appears.
     /// Path is canonicalized after open for accurate fd matching.
     pub fn open(path: PathBuf, holder_pid: u32, invocation_pid: u32) -> io::Result<Self> {
+        Self::open_inner(path, holder_pid, invocation_pid, true)
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        holder_pid: u32,
+        invocation_pid: u32,
+        holder_must_live: bool,
+    ) -> io::Result<Self> {
         loop {
             if path.exists() {
                 break;
@@ -279,7 +309,8 @@ impl StreamingFile {
             // Sample liveness *before* the last existence check: a writer that
             // finished the file and exited in between must not be read as a
             // writer that never wrote one.
-            let over = !is_pid_alive(invocation_pid) || !is_pid_alive(holder_pid);
+            let over =
+                !is_pid_alive(invocation_pid) || (holder_must_live && !is_pid_alive(holder_pid));
             if path.exists() {
                 break;
             }
@@ -297,9 +328,187 @@ impl StreamingFile {
             path,
             inner,
             holder_pid,
+            restartable: false,
+            last_truncation_check: std::time::Instant::now(),
+            truncated: false,
+            high_water: 0,
+            pos: 0,
             #[cfg(test)]
             on_holder_closed: None,
         })
+    }
+
+    /// [`open`](Self::open) for a writer that may truncate this file and write a
+    /// fresh stream into it, as Bazel does when it retries an invocation in
+    /// place rather than moving to a new path.
+    ///
+    /// Arms two things: [`await_restart`](Self::await_restart), and the
+    /// replacement check reads make against the file's length.
+    ///
+    /// The check is a backstop, not the signal. The new stream overtakes the
+    /// old one's length almost immediately, so a length comparison has to win
+    /// a race it often loses; what the caller actually steers by is the
+    /// attempt boundary in the stream's own contents, which it knows and this
+    /// does not. The check exists for the reader that falls so far behind that
+    /// a replacement reaches it before that boundary does.
+    pub fn open_restartable(
+        path: PathBuf,
+        holder_pid: u32,
+        invocation_pid: u32,
+    ) -> io::Result<Self> {
+        // Only the invocation can answer "will a file ever appear?". The holder
+        // is the process that writes it — for bazel the daemon — and a dead
+        // daemon does not mean no file is coming: the client starts another
+        // one. Waiting on it here ends the stream, empty and successful, for a
+        // daemon that was replaced between the pid being read and the first
+        // event being written.
+        let mut f = Self::open_inner(path, holder_pid, invocation_pid, false)?;
+        f.restartable = true;
+        Ok(f)
+    }
+
+    /// Bytes consumed from the current segment.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// Whether this file was opened with
+    /// [`open_restartable`](Self::open_restartable).
+    pub fn is_restartable(&self) -> bool {
+        self.restartable
+    }
+
+    /// Whether the holder has the file open at this instant.
+    ///
+    /// `Ok(0)` from [`read`](Self::read) means "no bytes right now", which on a
+    /// regular file is the normal state between two writes. A caller that ends
+    /// its stream on some other signal — the invocation exiting, say — needs
+    /// this to tell "caught up, more is coming" from "caught up, and that was
+    /// everything".
+    ///
+    /// A pid that is dead, or alive but no longer the process the caller meant,
+    /// answers `false`. Callers must treat that as "nothing more is coming"
+    /// rather than as patience, or a stale pid becomes an unbounded wait.
+    pub fn holder_has_file(&self) -> io::Result<bool> {
+        is_path_open_for_pid(&self.path, self.holder_pid)
+    }
+
+    /// Whether a read found the file replaced under it, and clears the flag.
+    /// Checked alongside the `BrokenPipe` such a read reports, to tell a
+    /// writer that started over from one that finished.
+    pub fn take_truncated(&mut self) -> bool {
+        std::mem::replace(&mut self.truncated, false)
+    }
+
+    /// Has the file been replaced under us since we last looked?
+    ///
+    /// A file shorter than what has already been consumed from it can only be a
+    /// new one. The check costs an `fstat`, and a caller reading a
+    /// length-delimited stream calls `read` once per byte of each length
+    /// prefix, so it is rate-limited rather than run on every read: the cost is
+    /// then one `fstat` per interval instead of per byte, and the exposure is
+    /// bounded to whatever the writer can produce within one interval.
+    ///
+    /// **This is a backstop, not a guarantee.** A replacement that grows past
+    /// the previous stream's length between two checks is invisible to it:
+    /// nothing in the file's metadata distinguishes "longer than it was" from
+    /// "a different, longer stream", since the writer truncates in place and
+    /// the inode never changes. What the reader actually steers by is the
+    /// attempt boundary in the data — it reads a stream to its end, sees the
+    /// verdict, and waits for the next writer. This only narrows the window
+    /// for a reader so far behind that a replacement reaches it before that
+    /// boundary does, and a stream that slips through it desynces loudly, on
+    /// the length prefix of the next record, rather than yielding plausible
+    /// wrong events.
+    fn check_replaced(&mut self) -> io::Result<bool> {
+        if !self.restartable {
+            return Ok(false);
+        }
+        // The first check is not rate limited: until the file's length has been
+        // looked at once there is no high-water mark to compare against, and a
+        // reader that only ever consumed a fraction of the stream would
+        // otherwise carry a mark of zero and never see a replacement.
+        if self.high_water != 0 && self.last_truncation_check.elapsed() < TRUNCATION_CHECK_INTERVAL
+        {
+            return Ok(false);
+        }
+        self.last_truncation_check = std::time::Instant::now();
+        // An `fstat` on an open fd, on a local temp file. A failure here says
+        // nothing about whether the stream was replaced, and must not be the
+        // thing that fails an otherwise good build.
+        let len = match self.inner.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(false),
+        };
+        // Against whichever is greater of what has been read and what the file
+        // has been seen to hold. Neither alone is enough: a reader that has
+        // fallen behind holds an offset short of what the previous stream
+        // reached, and a reader keeping up runs past a high-water mark that is
+        // only sampled once an interval.
+        let reached = self.pos.max(self.high_water);
+        if len < reached {
+            self.high_water = len;
+            return Ok(true);
+        }
+        self.high_water = reached.max(len);
+        Ok(false)
+    }
+
+    /// Wait for the writer to begin a new stream in this same file, then resume
+    /// from its start. For a caller that has read one attempt to its end and
+    /// expects another.
+    ///
+    /// The wait is for the writer to *reopen* the file, not for it to truncate.
+    /// Bazel closes its event file when an attempt ends and only reopens it —
+    /// with `O_TRUNC` — once the next attempt has an event to write, which is a
+    /// whole loading and analysis phase later. So "closed" is a state that lasts
+    /// long enough to observe, while "truncated and still empty" lasts as long
+    /// as it takes to write the first event.
+    ///
+    /// `give_up` is polled alongside, for the caller's own "no further attempt
+    /// is coming" answer — the invocation's pid dying, typically. Returns
+    /// whether a new stream was found; `false` means `give_up` ended the wait.
+    pub fn await_restart(&mut self, give_up: impl Fn() -> bool) -> io::Result<bool> {
+        debug_assert!(
+            self.restartable,
+            "await_restart on a file opened without open_restartable"
+        );
+        loop {
+            // The holder having the file open again is the signal, and it is
+            // the one that lasts: an attempt holds its file open for as long as
+            // the attempt runs.
+            if is_path_open_for_pid(&self.path, self.holder_pid)? {
+                self.inner.seek(SeekFrom::Start(0))?;
+                self.pos = 0;
+                // A new stream is measured from scratch: the previous one's
+                // length says nothing about whether this one has been replaced,
+                // and carrying it over reads the new stream's own growth as a
+                // replacement.
+                self.high_water = 0;
+                self.truncated = false;
+                return Ok(true);
+            }
+            // Belt and braces, for an attempt short enough to have opened and
+            // closed the file between two polls: a file shorter than where the
+            // last attempt ended can only be a new one. It does not catch a
+            // longer attempt missed the same way, which is why it is the
+            // fallback and not the signal.
+            if self.inner.metadata()?.len() < self.pos {
+                self.inner.seek(SeekFrom::Start(0))?;
+                self.pos = 0;
+                // A new stream is measured from scratch: the previous one's
+                // length says nothing about whether this one has been replaced,
+                // and carrying it over reads the new stream's own growth as a
+                // replacement.
+                self.high_water = 0;
+                self.truncated = false;
+                return Ok(true);
+            }
+            if give_up() {
+                return Ok(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// Run `f` inside the window described on [`Self::on_holder_closed`].
@@ -330,9 +539,63 @@ impl Read for StreamingFile {
     /// everything there is. Bytes mean the stream continues; a second empty read
     /// means it is over.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Before the read: bytes from a stream that replaced the one we were
+        // reading must not be spliced onto it.
+        if self.check_replaced()? {
+            self.truncated = true;
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "the file was replaced while it was being read",
+            ));
+        }
         match self.inner.read(buf) {
             Ok(0) => {
-                if is_path_open_for_pid(&self.path, self.holder_pid)? {
+                // A restartable file's holder pid is not trustworthy enough
+                // to end a stream on its own. It came from `bazel info
+                // server_pid` before the build, and the daemon it named may
+                // have been replaced since — by differing startup options, a
+                // concurrent `bazel clean`, an OOM kill. "That pid does not
+                // have this file open" is then true and means nothing, and
+                // every gap between events would end the stream.
+                //
+                // Getting this wrong is worse than the open-time gate it
+                // replaces: an empty stream is conspicuous, and one cut short
+                // at the first gap between events looks complete. So report
+                // "nothing right now" and leave the end of the stream to
+                // whoever owns the invocation.
+                //
+                // A file opened with `open`, not `open_restartable`, keeps the
+                // old contract: there the holder is the process the caller
+                // nominated and its exit is the end.
+                //
+                // Liveness is a proxy, and it leaves one case: a pid that is
+                // alive but is no longer the process the caller meant, because
+                // the slot was reused. That reads as a holder that simply does
+                // not have the file open, and the stream ends at the first gap
+                // between events. Callers that cannot afford a truncated stream
+                // must not rest on this alone — `PendingWriterReader` pairs it
+                // with the invocation's own liveness for that reason.
+                //
+                // Patience is also the answer while the holder does have the
+                // file open, so the two cases share what follows. Left as
+                // separate branches, the patient one skipped the forced
+                // replacement check below and fell back on the rate-limited
+                // one — the weaker of the two, in the case that needs the
+                // stronger.
+                let holder_gone_but_patient = self.restartable && !is_pid_alive(self.holder_pid);
+                if holder_gone_but_patient || is_path_open_for_pid(&self.path, self.holder_pid)? {
+                    // At the end of the file with more bytes still possible.
+                    // The cheapest moment to look for a replacement, and the
+                    // one a lagging reader reaches as it catches up.
+                    self.last_truncation_check =
+                        std::time::Instant::now() - TRUNCATION_CHECK_INTERVAL;
+                    if self.check_replaced()? {
+                        self.truncated = true;
+                        return Err(io::Error::new(
+                            ErrorKind::BrokenPipe,
+                            "the file was replaced while it was being read",
+                        ));
+                    }
                     return Ok(0);
                 }
                 #[cfg(test)]
@@ -341,8 +604,15 @@ impl Read for StreamingFile {
                 }
                 match self.inner.read(buf)? {
                     0 => Err(std::io::Error::new(ErrorKind::BrokenPipe, "end of stream")),
-                    n => Ok(n),
+                    n => {
+                        self.pos += n as u64;
+                        Ok(n)
+                    }
                 }
+            }
+            Ok(n) => {
+                self.pos += n as u64;
+                Ok(n)
             }
             other => other,
         }
@@ -352,6 +622,190 @@ impl Read for StreamingFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape Bazel presents when it retries in place: one stream, the file
+    /// closed, then a *longer* stream written over it from the start by the
+    /// same holder process.
+    ///
+    /// The second segment being longer is the whole point. It is why the reader
+    /// cannot find the truncation by watching the file's length — by the time
+    /// anyone looks the file is longer than it ever was — and why the restart
+    /// is driven by the caller instead.
+    ///
+    /// The holder is a child process, as it is in production: `is_path_open_for_pid`
+    /// asks whether *that* process has the file open, and a reader asking about
+    /// itself would always say yes.
+    #[test]
+    fn await_restart_resumes_at_the_start_of_the_next_stream() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-restart-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Attempt one: written and closed, so nothing holds it open.
+        std::fs::write(&path, vec![b'a'; 4096]).expect("write first segment");
+
+        // Attempt two, by a separate holder: wait, then truncate (`>`), write
+        // MORE than attempt one held, and keep the descriptor open.
+        let script = format!(
+            "sleep 0.4; exec 3> {p}; head -c 8192 /dev/zero | tr '\\0' 'b' >&3; sleep 5",
+            p = path.display()
+        );
+        let mut holder = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .expect("spawn holder");
+        let holder_pid = holder.id();
+
+        let mut f = StreamingFile::open_restartable(path.clone(), holder_pid, holder_pid)
+            .expect("open restartable");
+
+        let mut buf = vec![0u8; 8192];
+        let n = f.read(&mut buf).expect("read first segment");
+        assert_eq!(n, 4096, "the first attempt reads whole");
+        assert!(buf[..n].iter().all(|b| *b == b'a'));
+        assert_eq!(
+            f.position(),
+            4096,
+            "position tracks where the attempt ended"
+        );
+
+        let found = f
+            .await_restart(|| !is_pid_alive(holder_pid))
+            .expect("await restart");
+        assert!(found, "the holder reopening the file is the next stream");
+        assert_eq!(f.position(), 0, "the new stream is read from its start");
+
+        // Read until the new segment produces bytes; it is being written as we go.
+        let mut got = 0usize;
+        for _ in 0..500 {
+            match f.read(&mut buf) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(n) => {
+                    assert!(
+                        buf[..n].iter().all(|b| *b == b'b'),
+                        "after a restart the reader must be at the start of the new \
+                         stream, not at its old offset inside it"
+                    );
+                    got += n;
+                    if got >= 8192 {
+                        break;
+                    }
+                }
+                Err(e) => panic!("read after restart: {e}"),
+            }
+        }
+        assert_eq!(got, 8192, "the whole second attempt is readable");
+
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A reader that has fallen behind must not splice the stream that replaced
+    /// the one it was reading onto the end of it.
+    ///
+    /// This is the case a reader cannot steer by the attempt boundary in the
+    /// data, because it never reaches that boundary: the writer replaces the
+    /// file while the reader is still partway through the previous stream, and
+    /// the replacement is longer than the offset the reader holds, so the next
+    /// read would succeed and return bytes from the middle of a message.
+    #[test]
+    fn a_lagging_reader_is_not_spliced_across_a_replacement() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-splice-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, vec![b'a'; 50_000]).expect("write first stream");
+
+        let me = std::process::id();
+        let mut f =
+            StreamingFile::open_restartable(path.clone(), me, me).expect("open restartable");
+
+        // Consume a fraction of it, as a reader behind a slow consumer would.
+        let mut buf = vec![0u8; 1024];
+        let n = f.read(&mut buf).expect("partial read");
+        assert_eq!(n, 1024);
+        assert!(buf.iter().all(|b| *b == b'a'));
+
+        // The writer starts over. Caught because the file is now shorter than
+        // the 50,000 bytes it had reached, even though it is still far longer
+        // than the 1,024 the reader had consumed — which is why the check is
+        // against the high-water mark and not against the read offset.
+        {
+            let mut w = File::create(&path).expect("replace");
+            w.write_all(&vec![b'b'; 20_000])
+                .expect("write second stream");
+            w.flush().expect("flush");
+        }
+
+        // The check is rate limited; a reader in a real stream reaches it
+        // within one interval of the replacement.
+        std::thread::sleep(TRUNCATION_CHECK_INTERVAL + std::time::Duration::from_millis(5));
+
+        let err = f
+            .read(&mut buf)
+            .expect_err("the replacement must be reported");
+        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
+        assert!(
+            f.take_truncated(),
+            "the error must be distinguishable from the end of a stream"
+        );
+        assert!(!f.take_truncated(), "take_truncated clears the flag");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `give_up` is the caller's answer to "is another attempt coming?". With no
+    /// holder ever opening the file, it is the only way the wait ends.
+    #[test]
+    fn await_restart_gives_up_when_the_caller_says_so() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-restart-giveup-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"one attempt").expect("write");
+
+        // pid 1 is alive and does not hold this file, so the restart never arrives.
+        let mut f = StreamingFile::open_restartable(path.clone(), 1, 1).expect("open restartable");
+        let mut buf = vec![0u8; 64];
+        let _ = f.read(&mut buf).expect("read");
+
+        let found = f.await_restart(|| true).expect("await restart");
+        assert!(!found, "give_up ends the wait");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The default is unchanged, which is what keeps the execution log reader
+    /// behaving exactly as it did: a plain `open` is not restartable.
+    #[test]
+    fn plain_open_is_not_restartable() {
+        let path = std::env::temp_dir().join(format!(
+            "galvanize-plain-{}-{}.bin",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"hello").expect("write");
+
+        let me = std::process::id();
+        let mut f = StreamingFile::open(path.clone(), me, me).expect("open");
+        let mut buf = vec![0u8; 16];
+        let n = f.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], b"hello");
+        assert!(!f.is_restartable(), "a plain open is not restartable");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
