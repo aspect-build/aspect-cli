@@ -215,6 +215,26 @@ def _make_results_hold_the_line():
     accumulate(r, diags)
     return r
 
+def _make_results_file_level():
+    """hold-the-line run with a buf=hard override: line, file-level and
+    location-less findings side by side."""
+    r = _make_base()
+    r["lint"]["strategy"] = "hold-the-line"
+    r["lint"]["strategies"] = {"buf": "hard"}
+    r["lint"]["changed_files"] = [
+        {"file": "proto/a/v1/a.proto", "hunk_lines": [2]},
+        {"file": "apps/web/src/auth/login.ts", "hunk_lines": [41]},
+    ]
+    r["lint"]["tools_run"] = ["Buf", "ESLint"]
+    accumulate(r, [
+        {"tool": "buf", "file": "proto/a/v1/a.proto", "line": 3, "end_line": 3, "rule_id": "FIELD_LOWER_SNAKE_CASE", "severity": "error", "message": "field name should be lower_snake_case", "has_fix": False, "related_files": []},
+        {"tool": "buf", "file": "proto/b/v1/b.proto", "line": 0, "end_line": 0, "rule_id": "FILE_SAME_PACKAGE", "severity": "error", "message": "package differs from its siblings", "has_fix": False, "related_files": ["proto/a/v1/a.proto"]},
+        {"tool": "buf", "file": "", "line": 0, "end_line": 0, "rule_id": "MODULE_NAME", "severity": "warning", "message": "module has no name", "has_fix": False, "related_files": ["buf.yaml"]},
+        {"tool": "buf", "file": "", "line": 0, "end_line": 0, "rule_id": "config", "severity": "info", "message": "no lint config found", "has_fix": False, "related_files": []},
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 42, "end_line": 42, "rule_id": "no-unused-vars", "severity": "error", "message": "'foo' is defined but never used", "has_fix": False, "related_files": []},
+    ])
+    return r
+
 # ─── Annotation scenarios ────────────────────────────────────────────────────
 
 def _make_results_annotations_mixed():
@@ -649,6 +669,33 @@ def _annotation_scenarios(ctx):
         fail("expected message fallback to rule_id when message empty, got %r" % anns[2]["message"])
     print("")
 
+def _check_file_level_annotations():
+    """File-level findings annotate line 1; location-less ones are skipped; the
+    changed-region filter keeps a file-level finding whose related file changed."""
+    print("-" * 70)
+    print("ANNOTATION SCENARIO H: file-level and location-less findings")
+    print("-" * 70)
+    r = _make_results_file_level()
+    (anns, total) = compute_annotations(r)
+    for a in anns:
+        _print_annotation(a)
+    if total != 3 or len(anns) != 3:
+        fail("expected 3 annotations (2 line + 1 file-level, 2 location-less skipped), got %d of %d" % (len(anns), total))
+    copy = [a for a in anns if a["path"] == "proto/b/v1/b.proto"]
+    if len(copy) != 1 or copy[0]["start_line"] != 1 or copy[0]["end_line"] != 1:
+        fail("file-level finding must anchor at line 1: %r" % copy)
+    if [a for a in anns if not a["path"]]:
+        fail("location-less finding must not annotate")
+    (on, _t) = compute_annotations(r, only_changed_regions = True)
+    if not [a for a in on if a["path"] == "proto/b/v1/b.proto"]:
+        fail("changed-region filter dropped a file-level finding whose related file changed")
+    r["lint"]["changed_files"] = [{"file": "apps/web/src/auth/login.ts", "hunk_lines": [41]}]
+    (on, _t) = compute_annotations(r, only_changed_regions = True)
+    if [a for a in on if a["path"] == "proto/b/v1/b.proto"]:
+        fail("changed-region filter kept a file-level finding with no changed file")
+    print("OK")
+    print("")
+
 def _render_all(ctx, templates = None):
     """Render each scenario and print TITLE + SUMMARY + first 4000 chars of DETAILS."""
 
@@ -664,6 +711,7 @@ def _render_all(ctx, templates = None):
         ("7. hold-the-line · GitHub", _make_results_hold_the_line(), "failed", "//...", True, "github", None),
         # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
         ("8. mixed · meta=*", _make_results_mixed(), "failed", "//...", True, "github", ["*"]),
+        ("9. file-level + location-less · per-linter strategy · GitHub", _make_results_file_level(), "failed", "//...", True, "github", None),
     ]
 
     sep = "=" * 70
@@ -689,7 +737,11 @@ def _render_all(ctx, templates = None):
     # any failure surfaces with the renderer scenarios already validated.
     _annotation_scenarios(ctx)
 
+    _check_file_level_annotations()
+
     _check_fix_renders_before_reproduce(ctx)
+
+    _check_file_level_findings_render(ctx, templates)
 
     _check_failed_actions_invoke_snippet_macro(ctx)
 
@@ -765,6 +817,37 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
         fail("Bazel-targets block missing — failed_actions did not render: %r" % body[:600])
     if "//workflows/telemetry/telemetry-rs:telemetry-rs" not in body:
         fail("failed action label missing from rendered body: %r" % body[:600])
+
+def _check_file_level_findings_render(ctx, templates):
+    """File-level rows show the bare file, location-less rows a marker plus
+    their related files; both count toward totals; overrides show next to the
+    run strategy."""
+    t = resolve_templates(templates, "lint", renderer_kind = "lint_results") if templates else None
+    out = render_check_output(ctx, _make_results_file_level(), "failed", _render_ctx(), _links(), templates = t)
+    body = out["text"]
+    for want in [
+        "`proto/a/v1/a.proto:3`",
+        "`proto/b/v1/b.proto` (related: `proto/a/v1/a.proto`)",
+        "_(no location)_ (related: `buf.yaml`)",
+        "_(no location)_",
+        "`apps/web/src/auth/login.ts:42`",
+    ]:
+        if want not in body:
+            fail("file-level render: missing %r in details: %s" % (want, body[:1500]))
+    if "proto/b/v1/b.proto:0" in body or ":0`" in body:
+        fail("file-level render: line 0 leaked into a row anchor: %s" % body[:1500])
+    if "3 errors" not in out["title"] or "1 warning" not in out["title"]:
+        fail("file-level render: findings missing from totals: %r" % out["title"])
+    if "hold-the-line (buf: hard) — filtered to 2 changed files" not in out["summary"]:
+        fail("file-level render: per-linter override missing from Strategy row: %s" % out["summary"])
+
+    # A scoped override under `--strategy=hard` still filters, so the row says so.
+    scoped_override = _make_results_file_level()
+    scoped_override["lint"]["strategy"] = "hard"
+    scoped_override["lint"]["strategies"] = {"eslint": "hold-the-line"}
+    out = render_check_output(ctx, scoped_override, "failed", _render_ctx(), _links(), templates = t)
+    if "hard (eslint: hold-the-line) — filtered to 2 changed files" not in out["summary"]:
+        fail("file-level render: scoped override missing the changed-file filter: %s" % out["summary"])
 
 def _check_fix_renders_before_reproduce(ctx):
     """The Fix block renders before the Reproduce block in the details body.
