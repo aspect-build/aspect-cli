@@ -42,10 +42,9 @@ def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_att
 
     BEP names every run's, shard's and attempt's file `test.xml`, so dest is
     keyed by `testlog_dest_dir`. Without `upload_failed_attempts` every attempt
-    shares one key and a later attempt replaces the earlier one even when it is
-    not collected itself, so a flaky test reports only its final outcome.
-    `cached` covers local and remote cache hits. `bes_get` everywhere so an
-    `aborted` payload variant no-ops instead of raising.
+    shares one key, so the last collected attempt wins. `cached` covers local
+    and remote cache hits. `bes_get` everywhere so an `aborted` payload variant
+    no-ops instead of raising.
     """
     if event.kind != "test_result":
         return
@@ -54,9 +53,6 @@ def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_att
     shard = bes_get(event.id, "shard", 1) or 1
     attempt = bes_get(event.id, "attempt", 1) or 1
     dest_dir = testlog_dest_dir(event.id.label, run, shard, attempt if upload_failed_attempts else 1)
-    if not upload_failed_attempts and attempt > 1:
-        for dest in [d for d in entries if d.rsplit("/", 1)[0] == dest_dir]:
-            entries.pop(dest)
 
     payload = event.payload
     status = bes_get(payload, "status", "") or ""
@@ -171,8 +167,9 @@ CircleCITestResults = feature(
             default = False,
             description = "Upload each --flaky_test_attempts attempt as its own file, so an " +
                           "attempt that failed before a passing retry shows as a failure. " +
-                          "Off by default: only each shard's final attempt is uploaded, and " +
-                          "a flaky target that Bazel reports as passed shows as passed.",
+                          "Off by default: each run and shard uploads its last collected " +
+                          "attempt. A cached result carries only its final attempt, so " +
+                          "earlier attempts are uploaded only when the test ran.",
         ),
     },
 )

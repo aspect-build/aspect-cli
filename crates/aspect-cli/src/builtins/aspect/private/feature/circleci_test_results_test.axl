@@ -1,6 +1,6 @@
 """Unit tests for `feature/circleci_test_results.axl`: `collect_test_xml` keys
-each run, shard and attempt of a target separately, and keeps only the final
-attempt unless `upload_failed_attempts` is set. Run with:
+each run and shard of a target separately, and each attempt too when
+`upload_failed_attempts` is set. Run with:
   aspect dev test-circleci-test-results
 """
 
@@ -54,9 +54,10 @@ def _test_impl(ctx):
         "q/u/test.xml": xml["unsharded"],
     })
 
-    # A passing retry is not collected under "failed", but still replaces the
-    # failed attempt unless every attempt is uploaded.
-    _eq("failed: retry passed", _collect(ctx, events, "failed", False), {})
+    # A passing retry is not collected under "failed", so the failed attempt stays.
+    _eq("failed: retry passed", _collect(ctx, events, "failed", False), {
+        "p/t/shard_2/test.xml": xml["s2_a1"],
+    })
     _eq("failed: every attempt", _collect(ctx, events, "failed", True), {
         "p/t/shard_2/test.xml": xml["s2_a1"],
     })
