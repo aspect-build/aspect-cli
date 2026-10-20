@@ -2,31 +2,6 @@
 
 load("./path_utils.axl", "path_utils")
 
-_MANIFEST_OUTPUT_GROUP = "aspect_watch_manifest"
-
-# Expose the executable's native runfiles manifest as an aspect output group so
-# AXL can receive its path through BES.
-_WATCH_MANIFEST_BZL = """def _watch_manifest_impl(target, ctx):
-    if DefaultInfo not in target:
-        return []
-    files_to_run = target[DefaultInfo].files_to_run
-    if files_to_run == None or files_to_run.executable == None:
-        return []
-    manifest = getattr(files_to_run, "runfiles_manifest", None)
-    if manifest == None:
-        return []
-    return [OutputGroupInfo(aspect_watch_manifest = depset([manifest]))]
-
-watch_manifest = aspect(implementation = _watch_manifest_impl)
-"""
-
-def _aspect(ctx: TaskContext):
-    return ctx.bazel.aspect(
-        implementation = _WATCH_MANIFEST_BZL,
-        symbol = "watch_manifest",
-        output_groups = [_MANIFEST_OUTPUT_GROUP],
-    )
-
 def _execution_outputs(ctx: TaskContext, path: str) -> list[str]:
     """Return output paths from a complete decoded execution log file.
 
@@ -200,14 +175,6 @@ def _runfile_changes(previous, current, source_paths: list[str], removed_paths: 
         return None
     return _runfile_delta(current, changed, removed_paths, root)
 
-def _manifest_path(paths: list[str]) -> str | None:
-    for path in paths:
-        # Depending on Bazel/platform, FilesToRunProvider surfaces either the
-        # sibling `<executable>.runfiles_manifest` or the tree's `MANIFEST`.
-        if path.endswith(".runfiles_manifest") or path.endswith("/MANIFEST"):
-            return path
-    return None
-
 def _read_manifest(ctx: TaskContext, path: str | None, root: str):
     if path == None or not ctx.std.fs.exists(path):
         return None
@@ -279,45 +246,51 @@ def _outputs_changed(output_paths: list[str] | None, watched_paths: list[str], r
             origins[key] = True
     return _paths_changed(output_paths, origins)
 
-def _entrypoint_state(ep) -> tuple | None:
+def _entrypoint_state(r) -> tuple | None:
     """Stable run state that can change without a spawn (the runinfo aspect
-    writes args and environment with ctx.actions.write)."""
-    if ep == None:
+    writes args and environment with ctx.actions.write). `r` is the target's
+    `bazel.run.Runnable`, or None when the last build failed."""
+    if r == None:
         return None
     return (
-        ep.path,
-        list(getattr(ep, "args", []) or []),
-        dict(getattr(ep, "environment", {}) or {}),
-        list(getattr(ep, "inherited_environment", []) or []),
-        getattr(ep, "runfiles_dir", None),
-        getattr(ep, "runfiles_workspace_dir", None),
+        r.path,
+        list(r.args),
+        dict(r.env),
+        list(r.inherited_env),
+        r.runfiles_dir,
+        r.workspace_dir,
     )
 
-def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
+def _new(ctx: TaskContext, target: str, root: str) -> struct:
+    """A detector for `target`. Each build hands it the target's
+    `bazel.run.Runnable` (None when the build failed): `capture_baseline`
+    after the first successful build, `changes` after every rebuild. The
+    runnable carries the runfiles manifest and default outputs the detector
+    diffs, so no aspect of its own rides the build."""
     execution_log_dir = ctx.std.fs.mkdtemp(prefix = "aspect-run-watch-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(execution_log_dir) if ctx.std.fs.exists(execution_log_dir) else None)
 
     state = {
         "entrypoint_before_build": None,
+        "runnable": None,
         "manifest": None,
         "restart_pending": False,
     }
 
-    def read_current_manifest():
-        paths = r.get_output_group_outputs(target, _MANIFEST_OUTPUT_GROUP)
-        return _read_manifest(ctx, _manifest_path(paths), root)
+    def read_manifest(r):
+        return _read_manifest(ctx, r.runfiles_manifest if r != None else None, root)
 
     def begin_build():
-        entrypoint = _entrypoint_state(r.determine_entrypoint(target))
+        entrypoint = _entrypoint_state(state["runnable"])
 
-        # Failed builds clear BES outputs; retain the last successful state.
+        # Failed builds hand over no runnable; retain the last successful state.
         if entrypoint != None:
             state["entrypoint_before_build"] = entrypoint
-        r.clear_default_outputs(target)
-        r.clear_output_group_outputs(target, _MANIFEST_OUTPUT_GROUP)
+        state["runnable"] = None
 
-    def capture_baseline():
-        state["manifest"] = read_current_manifest()
+    def capture_baseline(r):
+        state["runnable"] = r
+        state["manifest"] = read_manifest(r)
         state["restart_pending"] = False
 
     def current_runfiles():
@@ -326,11 +299,12 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
     def record_build_failure():
         state["restart_pending"] = True
 
-    def changes(source_paths: list[str], removed_paths: list[str], execution_outputs: list[str] | None, rescan: bool = False) -> struct:
+    def changes(r, source_paths: list[str], removed_paths: list[str], execution_outputs: list[str] | None, rescan: bool = False) -> struct:
         """Return changes relevant to each watch-update strategy."""
-        after = _entrypoint_state(r.determine_entrypoint(target))
+        state["runnable"] = r
+        after = _entrypoint_state(r)
         previous_manifest = state["manifest"]
-        next_manifest = read_current_manifest()
+        next_manifest = read_manifest(r)
         changes_unknown = state["restart_pending"]
         changed_runfiles = None
         if not changes_unknown:
@@ -345,7 +319,7 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
             )
         default_outputs_changed = _outputs_changed(
             execution_outputs,
-            r.get_default_outputs(target),
+            list(r.default_outputs) if r != None else [],
             root,
         )
         state["manifest"] = next_manifest
@@ -358,7 +332,6 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
         )
 
     return struct(
-        aspects = [_aspect(ctx)],
         changes = changes,
         execution_log_path = execution_log_dir + "/execution.binpb",
         begin_build = begin_build,
@@ -370,7 +343,6 @@ def _new(ctx: TaskContext, r: struct, target: str, root: str) -> struct:
 changedetector = namespace(
     changed_runfiles = _changed_runfiles,
     entrypoint_state = _entrypoint_state,
-    manifest_path = _manifest_path,
     new = _new,
     outputs_changed = _outputs_changed,
     parse_manifest = _parse_manifest,

@@ -131,7 +131,7 @@ fn dup_fd<H: std::os::windows::io::AsHandle>(h: &H) -> io::Result<Stdio> {
     Ok(Stdio::from(h.as_handle().try_clone_to_owned()?))
 }
 
-#[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
+#[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
 pub struct BuildStatus {
     success: bool,
@@ -576,6 +576,21 @@ impl BuildEventIter {
             },
             state: Arc::new(Mutex::new(IterState::Pending)),
             signals,
+        }
+    }
+
+    /// Take the bound receiver out of this handle, for a Rust consumer that
+    /// wants the subscription `Build::spawn` made for it without going
+    /// through Starlark iteration. The handle reads as `done` afterwards.
+    /// `None` when the handle was never bound or was already taken.
+    pub(super) fn take_recv(&self) -> Option<Subscriber<Arc<BuildEventEnvelope>>> {
+        let mut state = self.state.lock().unwrap();
+        match std::mem::replace(&mut *state, IterState::Done) {
+            IterState::Live { recv } => Some(recv),
+            other => {
+                *state = other;
+                None
+            }
         }
     }
 
@@ -1585,6 +1600,27 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// its SIGINT by then.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        build.wait_status()
+    }
+}
+
+impl Build {
+    /// The client's token, the one `handle.cancellation` wraps.
+    pub(super) fn cancellation_token(&self) -> &CancellationToken {
+        self.bound.token()
+    }
+
+    /// The shared id every gRPC BES sink used for this build, `""` without
+    /// sinks: what the `sink_invocation_id` attribute reads.
+    pub(super) fn sink_invocation_id(&self) -> String {
+        self.sink_invocation_id.borrow().clone().unwrap_or_default()
+    }
+
+    /// What the `wait()` method does: wait for the client, join every
+    /// stream, release every decoded consumer. Idempotent only in that a
+    /// second call after the first finds nothing left to join.
+    pub(super) fn wait_status(&self) -> anyhow::Result<BuildStatus> {
+        let build = self;
 
         // Re-enter the span so trace coverage includes the full build lifecycle
         let span = build.span.borrow().clone();

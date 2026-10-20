@@ -14,14 +14,17 @@ def _test_missing_execution_log_is_safe(ctx):
     _eq("failed build without log", changedetector.take_execution_outputs(ctx, path, False), [])
     _eq("successful build without log", changedetector.take_execution_outputs(ctx, path, True), None)
 
-def _entrypoint(args = [], environment = {}, inherited_environment = []):
+def _entrypoint(args = [], environment = {}, inherited_environment = [], manifest = None, default_outputs = []):
+    """A `bazel.run.Runnable` stand-in with the fields the detector reads."""
     return struct(
         path = "/out/bin/app",
         args = args,
-        environment = environment,
-        inherited_environment = inherited_environment,
+        env = environment.items(),
+        inherited_env = inherited_environment,
         runfiles_dir = "/out/bin/app.runfiles",
-        runfiles_workspace_dir = "/out/bin/app.runfiles/_main",
+        workspace_dir = "/out/bin/app.runfiles/_main",
+        runfiles_manifest = manifest,
+        default_outputs = default_outputs,
     )
 
 def _manifest(entries):
@@ -557,18 +560,6 @@ def _test_manifest_fallbacks_are_conservative(_ctx):
     _eq("watcher rescan", changedetector.changed_runfiles(state, state, [], [], rescan = True), None)
     _eq("missing execution log", changedetector.changed_runfiles(state, state, [], None), None)
 
-def _test_manifest_output_path(_ctx):
-    _eq(
-        "select native manifest",
-        changedetector.manifest_path(["/out/metadata.json", "/out/app.runfiles_manifest"]),
-        "/out/app.runfiles_manifest",
-    )
-    _eq(
-        "select runfiles-tree manifest",
-        changedetector.manifest_path(["/out/app.runfiles/MANIFEST"]),
-        "/out/app.runfiles/MANIFEST",
-    )
-
 def _test_unchanged_entrypoint_state_is_equal(_ctx):
     before = changedetector.entrypoint_state(_entrypoint(args = ["serve"]))
     after = changedetector.entrypoint_state(_entrypoint(args = ["serve"]))
@@ -584,32 +575,25 @@ def _test_detector_separates_unknown_deltas_from_restart_reasons(ctx):
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory) if ctx.std.fs.exists(directory) else None)
     manifest_path = directory + "/app.runfiles_manifest"
     ctx.std.fs.write(manifest_path, "_main/app.py /repo/app.py\n")
-    state = {
-        "default_outputs": [],
-        "entrypoint": _entrypoint(args = ["serve"]),
-    }
-    runnable = struct(
-        clear_default_outputs = lambda _target: None,
-        clear_output_group_outputs = lambda _target, _group: None,
-        determine_entrypoint = lambda _target: state["entrypoint"],
-        get_default_outputs = lambda _target: state["default_outputs"],
-        get_output_group_outputs = lambda _target, _group: [manifest_path],
-    )
-    detector = changedetector.new(ctx, runnable, "//:app", "/repo")
-    detector.capture_baseline()
+    serve = _entrypoint(args = ["serve"], manifest = manifest_path)
+    detector = changedetector.new(ctx, "//:app", "/repo")
+    detector.capture_baseline(serve)
 
     detector.begin_build()
     detector.record_build_failure()
-    result = detector.changes(["app.py"], [], [])
+    result = detector.changes(serve, ["app.py"], [], [])
     _eq("failed-build changes unknown", result.changes_unknown, True)
     _eq("unknown runfile delta", result.runfiles, None)
     _eq("unknown delta is not universal restart", result.restart_required, False)
     _eq("unchanged outputs remain separate", result.outputs_changed, False)
 
     detector.begin_build()
-    state["entrypoint"] = _entrypoint(args = ["serve", "--debug"])
-    state["default_outputs"] = ["/tmp/output/execroot/_main/bazel-out/k8/bin/app"]
-    result = detector.changes([], [], ["bazel-out/k8/bin/app"])
+    debug = _entrypoint(
+        args = ["serve", "--debug"],
+        manifest = manifest_path,
+        default_outputs = ["/tmp/output/execroot/_main/bazel-out/k8/bin/app"],
+    )
+    result = detector.changes(debug, [], [], ["bazel-out/k8/bin/app"])
     _eq("launch-state change requires restart", result.restart_required, True)
     _eq("default-output change remains separate", result.outputs_changed, True)
     _eq("subsequent deltas are precise", result.changes_unknown, False)
@@ -619,34 +603,22 @@ def _test_detector_preserves_launch_state_across_failed_build(ctx):
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory) if ctx.std.fs.exists(directory) else None)
     manifest_path = directory + "/app.runfiles_manifest"
     ctx.std.fs.write(manifest_path, "_main/app /out/bin/app\n")
-    original = _entrypoint(args = ["serve"])
-    state = {"entrypoint": original}
+    original = _entrypoint(args = ["serve"], manifest = manifest_path)
+    detector = changedetector.new(ctx, "//:app", "/repo")
+    detector.capture_baseline(original)
 
-    def clear_default_outputs(_target):
-        state["entrypoint"] = None
-
-    runnable = struct(
-        clear_default_outputs = clear_default_outputs,
-        clear_output_group_outputs = lambda _target, _group: None,
-        determine_entrypoint = lambda _target: state["entrypoint"],
-        get_default_outputs = lambda _target: [],
-        get_output_group_outputs = lambda _target, _group: [manifest_path],
-    )
-    detector = changedetector.new(ctx, runnable, "//:app", "/repo")
-    detector.capture_baseline()
-
+    # A failed build hands the detector nothing; the next successful one with
+    # the same launch state must not read as a restart.
     detector.begin_build()
     detector.record_build_failure()
     detector.begin_build()
-    state["entrypoint"] = original
-    result = detector.changes([], [], [])
+    result = detector.changes(original, [], [], [])
 
     _eq("failed build makes changes unknown", result.changes_unknown, True)
     _eq("restored launch state does not restart", result.restart_required, False)
 
     detector.begin_build()
-    state["entrypoint"] = _entrypoint(args = ["serve", "--debug"])
-    result = detector.changes([], [], [])
+    result = detector.changes(_entrypoint(args = ["serve", "--debug"], manifest = manifest_path), [], [], [])
     _eq("real launch change still restarts", result.restart_required, True)
 
 _UNIT_TESTS = [
@@ -681,7 +653,6 @@ _UNIT_TESTS = [
     _test_protocol_source_delta_resets_on_filesystem_errors,
     _test_protocol_source_baseline_scans_workspace,
     _test_manifest_fallbacks_are_conservative,
-    _test_manifest_output_path,
     _test_unchanged_entrypoint_state_is_equal,
     _test_runinfo_changes_entrypoint_state,
     _test_detector_separates_unknown_deltas_from_restart_reasons,

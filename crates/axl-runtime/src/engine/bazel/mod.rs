@@ -42,7 +42,10 @@ mod cancel;
 mod health_check;
 mod info;
 mod iter;
+mod label;
 mod query;
+mod run;
+mod runfiles;
 mod sandbox_recovery;
 mod sink;
 mod stream;
@@ -306,10 +309,16 @@ impl<'v> values::Freeze for Bazel<'v> {
     }
 }
 
+/// Every method on `ctx.bazel`: the ones defined here plus the run verbs.
+fn all_bazel_methods(registry: &mut MethodsBuilder) {
+    bazel_methods(registry);
+    run::run_natives(registry);
+}
+
 #[starlark_value(type = "bazel.Bazel")]
 impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", all_bazel_methods);
         Some(RES.methods())
     }
 }
@@ -327,7 +336,7 @@ starlark_simple_value!(FrozenBazel);
 impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     type Canonical = Bazel<'v>;
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", bazel_methods);
+        static RES: MethodsStatic = MethodsStatic::new("bazel_methods", all_bazel_methods);
         Some(RES.methods())
     }
 }
@@ -1549,6 +1558,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("execution_log", |globals| {
         register_execlog_types(globals);
         register_execlog_sinks(globals);
+    });
+
+    globals.namespace("run", |globals| {
+        run::register_run_types(globals);
+        run::register_run_errors(globals);
     });
 }
 

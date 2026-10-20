@@ -26,6 +26,7 @@ load(
     _announce = "announce",
     _core_args = "core_args",
     _flags = "flags",
+    _rc_with_flags = "rc_with_flags",
     _resolve_rc_flags = "resolve_rc_flags",
     _setup_command = "setup_command",
     _sibling_rc = "sibling_rc",
@@ -56,4 +57,5 @@ bazel = namespace(
     flags = _flags,
     announce = _announce,
     rc_flags = _resolve_rc_flags,
+    rc_with_flags = _rc_with_flags,
 )

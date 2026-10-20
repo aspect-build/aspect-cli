@@ -720,6 +720,22 @@ def _resolve_rc_flags(ctx, rc, command: str) -> list:
         out.extend(hook(ctx, rc, command))
     return out
 
+def _rc_with_flags(ctx, rc, flags: list[str]):
+    """`rc` with `flags` layered on top as command-line extras.
+
+    The run command is the only build input `ctx.bazel.run` and `run_all`
+    take, so per-invocation extras (endpoint auth from `rc_flags`, a release
+    build's `--release-bazel-flag`s) reach the build by becoming part of it.
+    The merged command expands `flags` after everything the rc files say, so
+    they win under Bazel's last-wins rule. `rc` comes back unchanged when
+    `flags` is empty."""
+    if not flags:
+        return rc
+    extras = ctx.bazel.new_rc(flags = list(flags))
+    if rc == None:
+        return extras
+    return rc.merge(extras)
+
 flags = namespace(
     BAZEL_VALUE_FLAGS = BAZEL_VALUE_FLAGS,
     BAZEL_STARTUP_VALUE_FLAGS = BAZEL_STARTUP_VALUE_FLAGS,
@@ -741,6 +757,7 @@ announce = namespace(
 # `bazel` namespace.
 setup_command = _setup_command
 resolve_rc_flags = _resolve_rc_flags
+rc_with_flags = _rc_with_flags
 sibling_rc = _sibling_rc
 resolve_announce = _resolve_announce
 core_args = _core_args

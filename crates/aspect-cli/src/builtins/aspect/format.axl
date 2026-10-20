@@ -31,7 +31,7 @@ load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_sever
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/path_utils.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
 
@@ -312,12 +312,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = ph.setup(ctx.args.formatter_target, "format_results")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
-    # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
-    # executable + `args` attribute + env so `r.spawn` replays them ahead of the
-    # changed-file list.
-    r = runnable(ctx, [ctx.args.formatter_target], rc = rc)
+    # The run command is the build's only input: per-invocation endpoint auth
+    # joins it rather than riding alongside as flags.
+    rc = bzl.rc_with_flags(ctx, rc, bzl.rc_flags(ctx, rc, "build"))
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -347,12 +345,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     xl = bzl.exec_log.open(bazel_trait)
 
-    build = ctx.bazel.build(
-        ctx.args.formatter_target,
+    # Build the formatter for running: the runtime captures its `args`
+    # attribute and env the way `bazel run` would and materializes its
+    # runfiles tree from the manifest, without touching any build option.
+    runs = ctx.bazel.run_all(
+        [ctx.args.formatter_target],
         build_events = build_events,
         execution_log = xl.sinks or False,
-        flags = r.flags + endpoint_auth_flags,
-        aspects = r.aspects,
+        rc = rc,
         directory = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
@@ -361,7 +361,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # sink_invocation_id is minted in Build::spawn before it returns. Populate
     # data + emit a running task_update so the BK annotation / status check
     # picks up the Workflows link at spawn rather than waiting for build.wait().
-    data["sink_invocation_id"] = build.sink_invocation_id
+    data["sink_invocation_id"] = runs.sink_invocation_id
 
     # Re-emit now the link is known, but only to status surfaces — empty
     # `stream` suppresses the duplicate CLI line.
@@ -376,8 +376,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
     # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS even
-    # when bazel is silent. Per event: r.event() (entrypoint discovery),
-    # build_event hooks (ArtifactUpload records testlogs), process_event.
+    # when bazel is silent. Per event: build_event hooks (ArtifactUpload
+    # records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
@@ -387,7 +387,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             event = events.try_pop()
             if event == None:
                 break
-            r.event(event)
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
             if process_event(data, event, bb_root):
@@ -405,7 +404,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
-    build_status = build.wait()
+    build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
@@ -416,10 +415,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _emit_final(ph, build_status.code or 1)
         fail("Building the formatter has failed.")
 
-    ep = r.determine_entrypoint(ctx.args.formatter_target)
-    if not ep:
+    err, ep = runs.get(ctx.args.formatter_target).catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()
+    if err:
         _emit_final(ph, 1)
-        fail("Failed to determine the formatter entrypoint.")
+        fail("Failed to determine the formatter entrypoint: %s" % err.message)
 
     exclude_patterns = list(ctx.args.exclude_patterns)
     include_patterns = list(ctx.args.include_patterns)
@@ -526,7 +525,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         format_args,
         ctx.args.formatter_args_for_tree_walk,
     )
-    exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
+    exit = ep.command(args = spawn_args, cwd = spawn_cwd).spawn().wait()
 
     if not exit.success:
         # Formatter itself errored — skip the formatting-required check;

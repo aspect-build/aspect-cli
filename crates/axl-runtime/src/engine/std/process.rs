@@ -147,6 +147,16 @@ pub struct Command {
 }
 
 impl Command {
+    /// Wrap a command the runtime assembled. With `own_group` the child is
+    /// spawned as the leader of a new process group, so stopping it stops
+    /// everything it started.
+    pub(crate) fn from_std(inner: process::Command, own_group: bool) -> Self {
+        Self {
+            inner: RefCell::new(inner),
+            process_group: Cell::new(own_group.then_some(0)),
+        }
+    }
+
     /// Format as `program "arg1" "arg2"` for use in error messages.
     /// Deliberately excludes environment variables to avoid leaking secrets.
     fn describe(&self) -> String {
@@ -216,7 +226,7 @@ impl<'v> values::StarlarkValue<'v> for Command {
 /// strings `"null"`/`"piped"`/`"inherit"`, or a writable file stream from
 /// `fs.create(...)` — whose owned file is taken and handed to the child so its
 /// output lands directly on disk. `field` names the caller for error messages.
-fn stdio_from<'v>(
+pub(crate) fn stdio_from<'v>(
     io: Either<values::StringValue<'v>, stream::Writable>,
     field: &str,
 ) -> anyhow::Result<Stdio> {
@@ -403,6 +413,15 @@ pub struct Child {
 }
 
 impl Child {
+    /// A child the runtime spawned through `children::spawn`, as the value
+    /// AXL handles it by.
+    pub(crate) fn from_parts(child: process::Child, bound: Bound) -> Self {
+        Self {
+            inner: RefCell::new(Some(child)),
+            bound,
+        }
+    }
+
     /// Wait for the child to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
     /// first.
@@ -410,6 +429,22 @@ impl Child {
         children::wait(&self.inner, &self.bound, timeout)
     }
 
+    /// [`Child::wait`], for runtime code outside this module.
+    pub(crate) fn wait_status(
+        &self,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<Option<process::ExitStatus>> {
+        self.wait(timeout)
+    }
+}
+
+impl crate::engine::r#async::future::FutureAlloc for Child {
+    fn alloc_value_fut<'v>(self: Box<Self>, heap: Heap<'v>) -> values::Value<'v> {
+        self.alloc_value(heap)
+    }
+}
+
+impl Child {
     /// The child's pid, or the group it leads, for a signal sent now. `None`
     /// once the child was reaped: its pid may be someone else's by then, so a
     /// signal after `wait()` goes nowhere.

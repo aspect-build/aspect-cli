@@ -2560,8 +2560,10 @@ def _redact_arg(arg, allow_env):
     return arg
 
 def _redact_args(args, allow_env):
-    """Apply _redact_arg to each element of a list."""
-    return [_redact_arg(a, allow_env) for a in args]
+    """Apply _redact_arg to each element of a list. An entry may be the
+    `(flag, constraint[, command])` tuple a producer version-gated or scoped
+    its flag as (what `rc.expand` hands back); only its flag text is shown."""
+    return [_redact_arg(a[0] if type(a) == "tuple" else a, allow_env) for a in args]
 
 def redact_flags(args, metadata = None):
     """Redact a raw flag list (e.g. `rc.expand(...)`) for terminal output.

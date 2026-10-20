@@ -31,7 +31,7 @@ load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
-load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
+load("@aspect//private/lib/runnable.axl", "apparent_label")
 load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
 load("@aspect//private/lib/tips.axl", "tips")
@@ -3110,48 +3110,6 @@ def test_repro_commands_lib(tc: int) -> int:
 
     return tc
 
-def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
-    """Regression test for the apparent_label-shadow bug in _process_bes.
-
-    The local variable assigned inside `_process_bes` must not shadow the
-    module-level `apparent_label` function used on the right-hand side of the
-    same assignment. Before the fix, this raised "referenced before assignment";
-    after the fix it succeeds and populates target_fileset.
-    """
-    r = runnable(ctx, ["//foo:bar"])
-    fake_event = struct(
-        kind = "target_completed",
-        id = struct(id = "evt1", label = "//foo:bar"),
-        payload = struct(output_group = [
-            struct(name = "default", file_sets = [struct(id = "fs1")]),
-        ]),
-    )
-
-    # Pre-fix this call raised; post-fix it returns None and updates state.
-    r.event(fake_event)
-    tc = test_case(tc, True, "_process_bes: target_completed does not raise (apparent_label shadow regression)")
-
-    # named_set_of_files event also goes through _process_bes — sanity check.
-    fake_nsf = struct(
-        kind = "named_set_of_files",
-        id = struct(id = "fs1"),
-        payload = struct(files = [], file_sets = []),
-    )
-    r.event(fake_nsf)
-    tc = test_case(tc, True, "_process_bes: named_set_of_files does not raise")
-
-    # Untracked targets are silently ignored — verify by feeding an event for
-    # a label that wasn't in the constructor list.
-    fake_untracked = struct(
-        kind = "target_completed",
-        id = struct(id = "evt2", label = "//other:thing"),
-        payload = struct(output_group = []),
-    )
-    r.event(fake_untracked)
-    tc = test_case(tc, True, "_process_bes: target_completed for untracked label is a no-op")
-
-    return tc
-
 def test_json_try_decode(tc: int) -> int:
     """Coverage for the AXL runtime's `json.try_decode` — fallible JSON decode.
 
@@ -4156,7 +4114,6 @@ def impl(ctx: TaskContext) -> int:
     tc = test_bb_clientd_root(ctx, tc)
     tc = test_json_try_decode(tc)
     tc = test_apparent_label(tc)
-    tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
     tc = test_parse_patch_hunks(tc)
