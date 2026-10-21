@@ -409,7 +409,7 @@ def _discover_deployment(ctx, host):
             return None
         if info.status == "not_a_deployment":
             error(ctx.std, "'" + host + "' is not an Aspect Workflows deployment authentication endpoint.")
-            error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
+            error(ctx.std, "Double-check the URL — it should be the deployment's web UI, remote-cache or BES host (e.g. app.<deployment>.example.com).")
             return None
         if info.status == "issuer_not_advertised":
             # `reason` is the issuer actually looked for — for `--name aspect-cloud` that
@@ -480,7 +480,7 @@ def _configure_impl(ctx: TaskContext) -> int:
     _print_deployment(summary, header = not is_aspect_cloud)
     if is_aspect_cloud:
         _print_aspect_cloud_usage_hint(ctx)
-    else:
+    elif capability_labels(summary, only = REMOTE_DEFAULT_CAPS):
         _print_configured_usage_hint(summary)
     return 0
 
@@ -491,7 +491,7 @@ configure = task(
     implementation = _configure_impl,
     args = {
         "host": args.positional(
-            description = "A deployment host or endpoint URL (e.g. remote.acme.aspect.build). Its /.well-known/oauth-protected-resource document is fetched to discover the auth config.",
+            description = "A deployment host or endpoint URL: its web UI, remote cache or BES (e.g. app.acme.aspect.build). Its /.well-known/oauth-protected-resource document is fetched to discover the auth config.",
         ),
         "name": args.string(
             description = "Name for this deployment. Defaults to a name derived from the host.",

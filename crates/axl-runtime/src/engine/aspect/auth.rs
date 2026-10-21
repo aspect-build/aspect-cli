@@ -134,14 +134,14 @@ impl Endpoints {
             && self.results_url.is_empty()
     }
 
-    /// Whether this advertises somewhere Bazel can actually talk to, which is
-    /// what makes a resource a *deployment* rather than merely an Aspect service.
+    /// Whether this advertises somewhere Bazel can actually talk to.
     ///
     /// Deliberately narrower than [`Self::is_empty`], which counts `results_url`
-    /// and `api` as well. Both are served alongside no cache or BES at all
-    /// (`app.aspect.build` serves exactly that), and treating such a resource as a
-    /// deployment would record an entry that cannot serve a build — and, under
-    /// Aspect Cloud's own name, would replace the endpoints that can.
+    /// and `api` as well. A deployment whose cache and BES sit on a private
+    /// network advertises only its web UI, which is still a deployment to
+    /// configure and log in to; but recorded under Aspect Cloud's own name it
+    /// would replace the endpoints that do serve builds, so
+    /// [`configure_deployment`] requires this of Aspect Cloud alone.
     fn serves_build_endpoints(&self) -> bool {
         !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
     }
@@ -999,11 +999,12 @@ fn auth_server_info(server: AuthServer) -> AuthServerInfo {
 
 /// The result of probing a host for its protected-resource metadata, so
 /// `configure` can tell the two user-facing failure modes apart:
-///   - `Reachable` — a valid Aspect Workflows discovery doc (has `aspect_endpoints`).
+///   - `Reachable` — a valid Aspect Workflows discovery doc (has a non-empty
+///     `aspect_endpoints`, which may name only the web UI's `results_url`).
 ///   - `Unreachable` — a transport error (DNS/connect/TLS/timeout); the host may
 ///     well be a real deployment we just can't reach right now.
 ///   - `NotADeployment` — reached the host, but it isn't an Aspect Workflows
-///     deployment endpoint (non-2xx, unparseable, or no `aspect_endpoints`).
+///     deployment endpoint (non-2xx, unparseable, or an empty `aspect_endpoints`).
 enum Discovery {
     Reachable(Box<ProtectedResource>),
     Unreachable(String),
@@ -1029,9 +1030,7 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         return Discovery::NotADeployment;
     }
     match resp.json::<ProtectedResource>().await {
-        Ok(info) if info.aspect_endpoints.serves_build_endpoints() => {
-            Discovery::Reachable(Box::new(info))
-        }
+        Ok(info) if !info.aspect_endpoints.is_empty() => Discovery::Reachable(Box::new(info)),
         _ => Discovery::NotADeployment,
     }
 }
@@ -1321,7 +1320,8 @@ fn save_user_deployment(
 ///
 /// The returned `status` distinguishes every outcome the caller reports:
 /// `"unreachable"` (transport failure, `reason` carries a terse cause),
-/// `"not_a_deployment"` (reached, but serves no `aspect_endpoints`),
+/// `"not_a_deployment"` (reached, but serves no `aspect_endpoints`, or claims
+/// Aspect Cloud without serving a cache, BES or executor),
 /// `"needs_issuer"` / `"issuer_not_advertised"` (the advertised servers come back
 /// in `auth_servers` so the caller can prompt from — or list — them), or `"ok"`.
 /// Only `"ok"` writes anything.
@@ -1355,6 +1355,9 @@ fn configure_deployment(
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
     let (name, explicit_aspect_cloud) = resolve_deployment_name(name, &host, &info);
+    if explicit_aspect_cloud && !info.aspect_endpoints.serves_build_endpoints() {
+        return Ok(mk("not_a_deployment", String::new()));
+    }
     // Endpoints recorded under Aspect Cloud's own name are folded into the seed and
     // reached with Aspect Cloud's own credential, so only a deployment on the
     // account's issuer may claim them: `hosts` is the auth gate, and a host on some
@@ -6165,20 +6168,16 @@ mod tests {
         assert_eq!(callback_host(&urlish).as_deref(), Some("cache.example"));
     }
 
-    /// A resource advertising only a build-result viewer is not a deployment.
-    /// `app.aspect.build` serves that shape — a `results_url` and an issuer, with
-    /// no cache, no BES and no `client_id`. Recording it under Aspect Cloud's name
-    /// would replace the endpoints that do serve builds with ones that cannot,
-    /// behind a client that can never complete a login.
-    ///
-    /// Defence in depth: the document is silo's to get right, and these two guards
-    /// mean a malformed one is refused rather than half-adopted.
+    /// A deployment whose cache and BES sit on a private network advertises only
+    /// its web UI. That is still a deployment — [`probe_protected_resource`] keys
+    /// on a non-empty `aspect_endpoints` — but it serves no build endpoint, which
+    /// is what keeps it from being recorded under Aspect Cloud's name.
     #[test]
-    fn a_results_viewer_is_not_a_deployment() {
+    fn a_web_ui_only_deployment_is_a_deployment_without_build_endpoints() {
         let viewer = ProtectedResource {
-            resource: "https://app.aspect.build/api/v1".to_string(),
+            resource: "https://app.acme.example.com/api/v1".to_string(),
             aspect_authorization_servers: Vec::new(),
-            authorization_servers: vec![DEFAULT_ISSUER.to_string()],
+            authorization_servers: vec!["https://acme.okta.com".to_string()],
             client_id: String::new(),
             scopes_supported: Vec::new(),
             aspect_endpoints: Endpoints {
@@ -6186,30 +6185,24 @@ mod tests {
                 bes: String::new(),
                 exec: String::new(),
                 api: String::new(),
-                results_url: "https://app.aspect.build".to_string(),
+                results_url: "https://app.acme.example.com".to_string(),
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
             resource_name: String::new(),
         };
+        assert!(!viewer.aspect_endpoints.is_empty());
         assert!(!viewer.aspect_endpoints.serves_build_endpoints());
         // An issuer with no client is no login target.
         assert!(viewer.auth_servers().is_empty());
 
-        // A real edge advertises somewhere Bazel can talk to, and a client.
-        let edge = ProtectedResource {
-            aspect_endpoints: Endpoints {
-                cache: "cache.aspect.build".to_string(),
-                bes: "bes.aspect.build".to_string(),
-                exec: String::new(),
-                api: String::new(),
-                results_url: String::new(),
-            },
+        // With a client it can be logged in to, still without a build endpoint.
+        let loggable = ProtectedResource {
             client_id: "client".to_string(),
             ..viewer
         };
-        assert!(edge.aspect_endpoints.serves_build_endpoints());
-        assert_eq!(edge.auth_servers().len(), 1);
+        assert_eq!(loggable.auth_servers().len(), 1);
+        assert!(!loggable.aspect_endpoints.serves_build_endpoints());
     }
 
     /// The account's own name is writable when the caller asks for it by name —
