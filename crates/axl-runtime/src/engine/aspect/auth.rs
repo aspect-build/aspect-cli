@@ -73,9 +73,9 @@ pub(crate) struct Deployment {
     /// The capability → host map the deployment advertised (`cache`, `bes`, and
     /// `exec` when it serves remote execution), so `aspect <build|test>
     /// --deployment <name>` wires each to the right Bazel flag. Absent for the
-    /// built-in Aspect seed (it advertises none yet) and for a hand-edited
-    /// `config.json` entry that omits them — `configure` requires an advertised
-    /// `aspect_endpoints` map, so a discovered deployment always has this.
+    /// built-in Aspect seed (it advertises none yet), for a hand-edited
+    /// `config.json` entry that omits them, and for a deployment whose cache and
+    /// BES are private, which advertises only its web UI.
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
     pub(crate) endpoints: Endpoints,
     /// The `redirect_uri` this deployment's login sends the IdP to, exactly as it
