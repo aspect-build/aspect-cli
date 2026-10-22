@@ -53,6 +53,7 @@ load(
     "serialize_state",
     "should_create_fallback",
     "snippet_key",
+    "superseded",
     "terminal_post_deadline_s",
 )
 load(
@@ -1172,6 +1173,25 @@ def _check_merge_comment_only_accretes():
     jobs = sorted([e["job"] for e in merged["entries"]])
     _eq("comment-only — matrix sibling row survives", jobs, ["cpu", "gpu"])
 
+def _check_superseded():
+    """A newer numeric run on another SHA supersedes the writer.
+
+    That covers a late update from an older push and a re-run of an older
+    commit. A newer run (fresh push) and a non-numeric id never are."""
+    parsed = {
+        "head_sha": "shaB",
+        "workflow_runs": [
+            {"run_id": "200", "workflow_name": "ci"},
+            {"run_id": "201", "workflow_name": "docs"},
+        ],
+        "entries": [],
+    }
+    _eq("superseded — older run on another SHA", superseded(parsed, "shaA", "100"), True)
+    _eq("superseded — same SHA never", superseded(parsed, "shaB", "100"), False)
+    _eq("superseded — newer run resets", superseded(parsed, "shaA", "300"), False)
+    _eq("superseded — non-numeric run id", superseded(parsed, "shaA", "bk-build-1"), False)
+    _eq("superseded — no prior state", superseded(None, "shaA", "100"), False)
+
 def _check_merge_state_two_workflows_with_fresh_refresh():
     """Cross-workflow: workflow A reads existing comment with B's slot
     and snapshot entries, fetches B's fresh data via
@@ -1967,6 +1987,7 @@ def _test_impl(ctx):
     _check_parse_state_filters_non_dict_rows()
     _check_merge_state_first_writer()
     _check_merge_comment_only_accretes()
+    _check_superseded()
     _check_merge_state_two_workflows_with_fresh_refresh()
     _check_merge_state_falls_back_to_snapshot_when_refresh_missing()
     _check_merge_state_per_task_union_with_snapshot()

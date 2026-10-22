@@ -17,7 +17,8 @@ CircleCI) since coordination no longer depends on CI artifacts.
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
 render → post under a local time lease), so a single job still renders a
-correct comment.
+correct comment. A job from a run older than the block's, on another SHA,
+skips the fallback post (see `_superseded`).
 
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
@@ -1390,6 +1391,25 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         "entries": entries,
     }
 
+def _superseded(existing_state, head_sha, run_id):
+    """True when `existing_state` holds a newer run on another `head_sha`.
+
+    That makes `run_id` a late update from an older push or a re-run of an
+    older commit, which must not reset the comment. GitHub Actions and GitLab
+    run ids increase across runs and a re-run keeps its id, so a fresh push
+    (including one back to an earlier SHA) still resets. Only numeric ids
+    compare; a non-numeric id never supersedes."""
+    if not existing_state or existing_state.get("head_sha") == head_sha:
+        return False
+    if not str(run_id or "").isdigit():
+        return False
+    mine = _run_id_sort_key(run_id)
+    for r in existing_state.get("workflow_runs", []) or []:
+        rid = str(r.get("run_id", ""))
+        if rid.isdigit() and _run_id_sort_key(rid) > mine:
+            return True
+    return False
+
 def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
     """`_merge_state` for the comment-state-block fallback (no cross-job
     discovery): all jobs in a run share one run_id and `_merge_state` replaces
@@ -1921,6 +1941,8 @@ def _github_status_comments(ctx: FeatureContext):
         if not final and _lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
             return
 
+        if _superseded(parsed, head_sha, run_id):
+            return
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
 
         # Seed the prior sticky-selection sets from the existing comment so
@@ -2167,6 +2189,10 @@ def merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entrie
 def merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
     """Public test hook; see `_merge_comment_only_state`."""
     return _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries)
+
+def superseded(existing_state, head_sha, run_id):
+    """Public test hook + shared helper for GitLab; see `_superseded`."""
+    return _superseded(existing_state, head_sha, run_id)
 
 def lease_held(now_epoch, last_upsert_epoch, lease_window_s):
     """Public test hook; see `_lease_held`."""
