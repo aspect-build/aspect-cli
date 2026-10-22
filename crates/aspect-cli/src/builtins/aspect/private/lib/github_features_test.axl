@@ -14,6 +14,7 @@ Run with:
 """
 
 load("@aspect//feature/github_status_checks.axl", "conclusion_for", "registration_request")
+load("./lint_comments.axl", "parse_marker")
 
 def _eq(label, got, want):
     if got != want:
@@ -48,6 +49,101 @@ def _test_registration_request():
     _eq("register — no installation proof", _request(circleci, installation_proof = None), None)
     _eq("register — no check run", _request(circleci, check_run_id = None), None)
 
+def _test_lint_comment_identity(ctx):
+    root = ctx.std.fs.mkdtemp(prefix = "github-lint-comments-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", """
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+load("@aspect//traits.axl", "LintTrait")
+
+def config(ctx):
+    ctx.traits[LintTrait].findings_destination = "comments"
+    ctx.features[GithubStatusChecks].enabled = False
+    ctx.features[GithubStatusComments].enabled = False
+    for name, value in {
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_RUN_ID": "1",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_REPOSITORY": "fixture/repo",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_SHA": "head",
+        "ASPECT_GITHUB_PR_NUMBER": "1",
+    }.items():
+        ctx.std.env.set_var(name, value)
+""")
+    ctx.std.fs.write(root + "/.aspect/probe.axl", """
+load("@aspect//traits.axl", "LintTrait")
+
+def _impl(ctx):
+    posted = []
+
+    def _send(method, **kwargs):
+        url = kwargs["url"]
+        if "/github/token" in url:
+            payload = {"token": "fixture-token"}
+        elif method == "get" and url.endswith("/pulls/1/comments"):
+            payload = []
+        elif method == "post" and url.endswith("/pulls/1/comments"):
+            posted.append(json.decode(kwargs["data"]))
+            payload = {"id": len(posted), "html_url": "https://github.com/fixture/repo/pull/1#discussion_r" + str(len(posted))}
+        else:
+            fail("Unexpected HTTP request: " + method + " " + url)
+        return struct(catch = lambda: struct(block = lambda: (None, struct(status = 200, body = json.encode(payload), headers = []))))
+
+    fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["http"] = lambda: struct(
+        get = lambda **kwargs: _send("get", **kwargs),
+        post = lambda **kwargs: _send("post", **kwargs),
+    )
+    fields["aspect"] = struct(auth = struct(
+        credentials = lambda **_kwargs: struct(access_token = "fixture-token"),
+        aspect_cloud_api_url = "https://api.aspect.build",
+        aspect_cloud_deployment = "fixture",
+    ))
+    proxy = struct(**fields)
+    lint = ctx.traits[LintTrait]
+    lint.changed_files_scoped = False
+    for callback in lint.lint_start:
+        callback(proxy)
+    for _ in range(2):
+        for callback in lint.lint_report:
+            callback(proxy, "findings.sarif")
+    ctx.std.fs.write("posted.json", json.encode(posted))
+    return 0
+
+probe = task(kind = "probe", summary = "Capture native lint review comments.", implementation = _impl, traits = [LintTrait])
+""")
+    ctx.std.fs.write(root + "/findings.sarif", json.encode({
+        "runs": [{
+            "tool": {"driver": {"name": "eslint"}},
+            "results": [{
+                "ruleId": rule,
+                "level": "error",
+                "message": {"text": rule + " finding"},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": "subject.ts"},
+                    "region": {"startLine": 1, "endLine": end},
+                }}],
+            } for rule, end in [("first-rule", 1), ("second-rule", 1), ("range-rule", 3)]],
+        }],
+    }))
+    output = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not output.status.success:
+        fail(output.stdout + output.stderr)
+    posted = json.decode(ctx.std.fs.read_to_string(root + "/posted.json"))
+    _eq("distinct same-line findings post once each", len(posted), 3)
+    for comment, rule in zip(posted, ["first-rule", "second-rule", "range-rule"]):
+        marker = parse_marker(comment["body"].split("\n")[0])
+        _eq("marker matches its finding", marker["rule_id"], rule)
+        _eq("marker uses finding start", marker["line"], "1")
+        _eq("body matches its marker", rule + " finding" in comment["body"], True)
+    _eq("multiline comment starts at finding", posted[2]["start_line"], 1)
+    _eq("multiline comment ends at range end", posted[2]["line"], 3)
+
 def _test_impl(ctx):
     # Early-fail concludes `failure` before the terminal update, so a broken
     # build turns the check red without waiting for build.wait().
@@ -75,6 +171,7 @@ def _test_impl(ctx):
     _eq("unknown status", conclusion_for("bogus", True), "")
 
     _test_registration_request()
+    _test_lint_comment_identity(ctx)
 
     print("github features test: OK")
     return 0

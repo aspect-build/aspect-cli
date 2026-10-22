@@ -51,7 +51,7 @@ load("../private/lib/environment.axl", "color_enabled", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
-load("../private/lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("../private/lib/sarif.axl", "parse_sarif", "sarif_result_to_comment")
 
 _LOG = feature_logger("GitHub lint comments")
 
@@ -242,31 +242,30 @@ def _build_comments(ctx, filepath, run_id, task_key, destination):
 
     run_id/task_key are woven into each marker (see "Marker scheme"). `destination`
     drives `_filter_for_destination`. Markers attribute each surviving comment to
-    its source diagnostic by `(file, line)` anchor.
+    the SARIF result that produced it.
     """
     content = ctx.std.fs.read_to_string(filepath)
     sarif = parse_sarif(content)
-    comments = sarif_to_review_comments(sarif)
-
-    # Filter BEFORE enrichment: _enrich_with_suggestions pops `_fixes`, so after
-    # it we can't tell which comments were fix-bearing.
-    comments = _filter_for_destination(comments, destination)
-    _enrich_with_suggestions(ctx, comments)
-
-    diags_by_anchor = {}
-    for d in parse_sarif_diagnostics(content):
-        diags_by_anchor[(d["file"], d["line"])] = d
-    for comment in comments:
-        d = diags_by_anchor.get((comment.get("path", ""), comment.get("line", 0)))
-        if d:
+    comments = []
+    for run in sarif.get("runs", []):
+        tool = run.get("tool", {}).get("driver", {}).get("name", "Linter")
+        for result in run.get("results", []):
+            comment = sarif_result_to_comment(result, tool)
+            if comment == None:
+                continue
             comment["body"] = lc_build_marker(
                 run_id,
                 task_key,
-                d["tool"],
-                d["file"],
-                d["line"],
-                d["rule_id"],
+                tool,
+                comment["path"],
+                comment.get("start_line", comment["line"]),
+                result.get("ruleId", ""),
             ) + "\n" + comment["body"] + _task_attribution_footer(task_key)
+            comments.append(comment)
+
+    # Enrichment removes `_fixes`, which destination filtering still needs.
+    comments = _filter_for_destination(comments, destination)
+    _enrich_with_suggestions(ctx, comments)
     return comments
 
 def _task_attribution_footer(task_key):
