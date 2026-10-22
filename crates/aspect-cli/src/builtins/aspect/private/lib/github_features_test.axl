@@ -55,12 +55,14 @@ def _test_lint_comment_identity(ctx):
     ctx.std.fs.create_dir_all(root + "/.aspect")
     ctx.std.fs.write(root + "/MODULE.aspect", "")
     ctx.std.fs.write(root + "/.aspect/config.axl", """
+load("@aspect//feature/deployment.axl", "Deployment")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
 load("@aspect//traits.axl", "LintTrait")
 
 def config(ctx):
     ctx.traits[LintTrait].findings_destination = "comments"
+    ctx.features[Deployment].enabled = False
     ctx.features[GithubStatusChecks].enabled = False
     ctx.features[GithubStatusComments].enabled = False
     for name, value in {
