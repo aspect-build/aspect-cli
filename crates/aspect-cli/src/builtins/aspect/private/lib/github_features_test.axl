@@ -1,4 +1,4 @@
-"""Unit tests for pure `GithubStatusChecks` logic.
+"""Tests for GitHub status-check mappings and lint review comments.
 
 Sibling of `gitlab_features_test.axl`: exercises the mapping functions the
 feature exposes as public test hooks, without standing up auth, the check-runs
@@ -74,6 +74,7 @@ def config(ctx):
         "GITHUB_SERVER_URL": "https://github.com",
         "GITHUB_SHA": "head",
         "ASPECT_GITHUB_PR_NUMBER": "1",
+        "ASPECT_VCS_URL": "https://github.com/fixture/repo",
     }.items():
         ctx.std.env.set_var(name, value)
 """)
