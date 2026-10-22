@@ -248,24 +248,26 @@ def _build_comments(ctx, filepath, run_id, task_key, destination):
     sarif = parse_sarif(content)
     comments = []
     for run in sarif.get("runs", []):
-        tool = run.get("tool", {}).get("driver", {}).get("name", "Linter")
+        driver = run.get("tool", {}).get("driver", {})
         for result in run.get("results", []):
-            comment = sarif_result_to_comment(result, tool)
+            comment = sarif_result_to_comment(result, driver.get("name", "Linter"))
             if comment == None:
                 continue
             comment["body"] = lc_build_marker(
                 run_id,
                 task_key,
-                tool,
+                driver.get("name", "unknown"),
                 comment["path"],
                 comment.get("start_line", comment["line"]),
                 result.get("ruleId", ""),
-            ) + "\n" + comment["body"] + _task_attribution_footer(task_key)
+            ) + "\n" + comment["body"]
             comments.append(comment)
 
     # Enrichment removes `_fixes`, which destination filtering still needs.
     comments = _filter_for_destination(comments, destination)
     _enrich_with_suggestions(ctx, comments)
+    for comment in comments:
+        comment["body"] += _task_attribution_footer(task_key)
     return comments
 
 def _task_attribution_footer(task_key):
