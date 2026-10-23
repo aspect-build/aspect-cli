@@ -90,7 +90,8 @@ def build_report(data, status, command = "", targets = None, aspect_url = "", ta
     Every built-in task kind is covered by one shape: the bazel sections are
     populated for whatever bazel invocation the task ran (empty when it ran
     none), and the task's own bucket — `lint`, `format`, `gazelle`, `delivery` or
-    `warming` — is carried through as that renderer defines it.
+    `warming` — is carried through, with lint comment URLs keyed by file and
+    line strings for JSON encoding.
     """
     bz = data.get("bazel", {}) or {}
     task = task or {}
@@ -103,6 +104,13 @@ def build_report(data, status, command = "", targets = None, aspect_url = "", ta
     skipped = _rows(bz.get("skipped_targets", []))
     failed_actions = _rows(bz.get("failed_actions", []))
     passed_tests = _rows(bz.get("passed_tests", []))
+
+    lint = dict(data.get("lint", {}) or {})
+    if "comment_urls" in lint:
+        comment_urls = {}
+        for (file, line), url in lint["comment_urls"].items():
+            comment_urls.setdefault(file, {})[str(line)] = url
+        lint["comment_urls"] = comment_urls
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -213,11 +221,7 @@ def build_report(data, status, command = "", targets = None, aspect_url = "", ta
             "fix": _commands(data.get("fix_commands")),
         },
         "attempts": _attempts(data.get("bazel_attempts")),
-
-        # Whichever kind bucket this task owns, verbatim. Each non-bazel
-        # renderer layers exactly one onto `bazel_results.init_data()`, so at
-        # most one is present and its shape is that renderer's own contract.
-        "lint": data.get("lint", {}) or {},
+        "lint": lint,
         "format": data.get("format", {}) or {},
         "gazelle": data.get("gazelle", {}) or {},
         "delivery": data.get("delivery", {}) or {},
