@@ -274,12 +274,17 @@ impl Signals {
     }
 
     /// The backstop: kill every bound child still alive. With `spare_bazel`,
-    /// bazel clients are left to the host's own escalation (a SIGKILL during
-    /// sandbox cleanup is bazelbuild/bazel#23880).
+    /// bazel clients are never killed (a SIGKILL during sandbox cleanup
+    /// poisons the next command, bazelbuild/bazel#23880), so one that ignores
+    /// its SIGINTs outlives us and the next command's health check handles it.
+    /// One the cancel never reached, a build a task started while shutting
+    /// down, still gets its single graceful SIGINT here rather than running on
+    /// uncancelled.
     pub fn kill_all(&self, spare_bazel: bool) -> usize {
         let mut killed = 0;
         for stop in self.alive() {
             if spare_bazel && stop.is_bazel() {
+                stop.interrupt_unless_stopping();
                 continue;
             }
             stop.kill();
@@ -535,6 +540,34 @@ mod tests {
         assert!(!s.default_binding().is_cancelled());
         s.record(Kind::Interrupt, Origin::Process);
         assert!(!s.default_binding().is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_backstop_interrupts_a_spared_bazel_the_cancel_never_reached() {
+        use crate::engine::children::{Kind as ChildKind, bind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("interrupted");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap 'touch \"$1\"; exit 0' INT; while :; do sleep 0.05; done")
+            .arg("sh")
+            .arg(&marker)
+            .spawn()
+            .unwrap();
+        let s = Signals::new();
+        s.record(Kind::Terminate, Origin::Process);
+        // Spawned after the root was cancelled: bound to a token of its own.
+        let _bound = bind(&s, &s.default_binding(), child.id(), None, ChildKind::Bazel);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert_eq!(s.kill_all(true), 0, "a spared bazel client is not killed");
+        let status = child.wait().unwrap();
+        assert!(
+            status.success() && marker.exists(),
+            "it was interrupted instead"
+        );
     }
 
     /// A file the AXL under test appends one line per event to.

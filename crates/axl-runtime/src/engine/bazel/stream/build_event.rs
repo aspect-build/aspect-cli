@@ -67,10 +67,13 @@ const WRITER_RELEASE_OFFERS: u32 = 200;
 /// Retries temporary FIFO EOFs below the length-delimited framing.
 ///
 /// A writer may reconnect part-way through a record. The invocation PID bounds
-/// the wait because the Bazel server can outlive the command.
-struct PendingWriterReader {
-    inner: galvanize::Pipe,
-    writer_pid: u32,
+/// the wait because the Bazel server can outlive the command: the server can
+/// also keep the write end open after the client has exited (a BEP transport
+/// stuck closing), which a blocking read never reports, so the read waits for
+/// readability in slices and asks the PID between them.
+pub(super) struct PendingWriterReader {
+    pub(super) inner: galvanize::Pipe,
+    pub(super) writer_pid: u32,
 }
 
 impl Read for PendingWriterReader {
@@ -80,14 +83,24 @@ impl Read for PendingWriterReader {
             return Ok(0);
         }
         loop {
-            match self.inner.read(buf)? {
-                0 => {
+            match self.inner.read(buf) {
+                // A writer is attached and quiet. Bytes the client wrote before
+                // exiting are read first, so only a quiet pipe with a dead
+                // client is the end.
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    if !galvanize::is_pid_alive(self.writer_pid) {
+                        return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
+                    }
+                    self.inner.wait_readable(WRITER_POLL_INTERVAL)?;
+                }
+                Err(err) => return Err(err),
+                Ok(0) => {
                     if !galvanize::is_pid_alive(self.writer_pid) {
                         return Err(io::Error::new(ErrorKind::BrokenPipe, "end of stream"));
                     }
                     thread::sleep(WRITER_POLL_INTERVAL);
                 }
-                n => return Ok(n),
+                Ok(n) => return Ok(n),
             }
         }
     }
@@ -104,7 +117,7 @@ impl Read for PendingWriterReader {
 ///
 /// The returned flag retires the watchdog; the caller sets it once its own
 /// open has returned, so a reader that got its writer honestly is left alone.
-fn spawn_open_watchdog(path: PathBuf, writer_pid: u32) -> Arc<AtomicBool> {
+pub(super) fn spawn_open_watchdog(path: PathBuf, writer_pid: u32) -> Arc<AtomicBool> {
     let opened = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&opened);
     thread::spawn(move || {
@@ -222,13 +235,10 @@ impl BuildEventStream {
             galvanize::Pipe::mkfifo(&path)?;
 
             let opened = spawn_open_watchdog(path.clone(), writer_pid);
-            let mut reader = PendingWriterReader {
-                inner: galvanize::Pipe::open(
-                    path,
-                    galvanize::RetryPolicy::IfOpenForPid(server_pid),
-                )?,
-                writer_pid,
-            };
+            let inner =
+                galvanize::Pipe::open(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
+            inner.set_nonblocking()?;
+            let mut reader = PendingWriterReader { inner, writer_pid };
             opened.store(true, Ordering::Relaxed);
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
@@ -658,6 +668,66 @@ mod tests {
             outcome,
             Some((true, 0)),
             "the stream must end promptly and empty, not wait for a writer that cannot come"
+        );
+    }
+
+    /// The invocation that never opens the file is also never reaped while the
+    /// task is still iterating the stream: it is a zombie, not a free pid.
+    #[test]
+    fn a_zombie_writer_that_never_opens_ends_the_stream() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            let mut holder = spawn_pid_holder();
+            let zombie = std::process::Command::new("true")
+                .spawn()
+                .expect("spawn true");
+            std::thread::sleep(Duration::from_millis(200));
+            let mut stream =
+                BuildEventStream::spawn(path, holder.id(), zombie.id(), vec![]).unwrap();
+            let sub = stream.subscribe();
+            let joined = stream.join().is_ok();
+            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+            let _ = holder.kill();
+            drop(zombie);
+            (joined, events.len())
+        });
+        assert_eq!(outcome, Some((true, 0)));
+    }
+
+    /// The server can keep the write end open after the client is gone (a BEP
+    /// transport stuck closing). No end-of-file ever arrives, so the stream
+    /// has to end on the client's death alone.
+    #[test]
+    fn a_dead_client_ends_the_stream_while_the_server_holds_the_pipe() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            galvanize::Pipe::mkfifo(&path).expect("mkfifo");
+            let mut server_pid = spawn_pid_holder();
+            let mut client = spawn_pid_holder();
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let path_w = path.clone();
+            let server = std::thread::spawn(move || {
+                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+                f.write_all(&encode_event(&make_event(false))).unwrap();
+                let _ = held.recv();
+            });
+            let mut stream =
+                BuildEventStream::spawn(path, server_pid.id(), client.id(), vec![]).unwrap();
+            let sub = stream.subscribe();
+            let first = sub.recv().is_ok();
+            // The client exits; the server still holds the write end.
+            let _ = client.kill();
+            let _ = client.wait();
+            let joined = stream.join().is_ok();
+            let _ = release.send(());
+            let _ = server.join();
+            let _ = server_pid.kill();
+            (first, joined)
+        });
+        assert_eq!(
+            outcome,
+            Some((true, true)),
+            "the stream must end on the client's death while the server holds the pipe"
         );
     }
 

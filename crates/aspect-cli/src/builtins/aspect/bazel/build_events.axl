@@ -149,9 +149,12 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     return sinks
 
 # How long a cancelled run gives its BES sinks to forward bazel's final
-# events. Inside both CI cancel windows: the Buildkite agent SIGKILLs 9s after
-# its SIGTERM and GitHub Actions escalates 7.5s after its SIGINT.
-_DRAIN_TIMEOUT_MS = 5000
+# events. The drain runs as a defer after the body was ended, so it has to fit
+# inside the runtime's exit window (`exit_drain` in main.rs, 4s) or the process
+# exits mid-drain; which in turn keeps the whole cancel inside both CI cancel
+# windows (Buildkite SIGKILLs 9s after its SIGTERM, GitHub Actions escalates
+# 7.5s after its SIGINT).
+_DRAIN_TIMEOUT_MS = 3000
 
 def drain_bes_sinks(ctx, sinks: list) -> None:
     """Give the sinks one bounded window, shared across all of them, to finish

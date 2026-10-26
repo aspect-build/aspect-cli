@@ -199,6 +199,50 @@ impl Pipe {
         Self::open(path, policy)
     }
 
+    /// Make reads return `WouldBlock` instead of parking while a writer is
+    /// attached and nothing is written; end-of-file still reads as `Ok(0)`.
+    ///
+    /// A blocking `read` cannot be given up on. While any process holds the
+    /// write end it parks, even when the one that was meant to write is long
+    /// gone, so a caller that needs to notice that death reads this way and
+    /// waits with [`Pipe::wait_readable`] between attempts.
+    pub fn set_nonblocking(&self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let fd = self.inner.as_raw_fd();
+        // SAFETY: `fd` is owned by `self.inner` for the duration of both calls.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Wait up to `timeout` for bytes to read. A wake-up is not a promise of
+    /// data (end-of-file and timeouts look alike on some platforms), so the
+    /// caller reads next and treats `WouldBlock` as "nothing yet".
+    pub fn wait_readable(&self, timeout: std::time::Duration) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let mut fd = libc::pollfd {
+            fd: self.inner.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        // SAFETY: `fd` is a valid pollfd and the count is one.
+        let rc = unsafe { libc::poll(&mut fd, 1, ms) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     fn read_with_policy(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.policy {
             RetryPolicy::Never => self.inner.read(buf).map_err(|err| err.into()),

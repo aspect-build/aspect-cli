@@ -1182,10 +1182,10 @@ impl Build {
             None
         };
 
-        let workspace_event_stream = if workspace_events {
-            let (out, stream) = WorkspaceEventStream::spawn_with_pipe(pid)?;
+        let workspace_event_path = if workspace_events {
+            let out = WorkspaceEventStream::reserve_path()?;
             cmd.arg("--experimental_workspace_rules_log_file").arg(&out);
-            Some(stream)
+            Some(out)
         } else {
             None
         };
@@ -1293,6 +1293,13 @@ impl Build {
         // end-of-build, which is why we want a separate per-invocation pid.
         let build_event_stream = match bes_path {
             Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            None => None,
+        };
+
+        // The workspace log is read the same way: the server holds the FIFO
+        // while writing, the client's death ends the stream.
+        let workspace_event_stream = match workspace_event_path {
+            Some(p) => Some(WorkspaceEventStream::spawn(p, pid, child.id())?),
             None => None,
         };
 

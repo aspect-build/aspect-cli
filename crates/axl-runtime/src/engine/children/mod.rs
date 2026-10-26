@@ -111,6 +111,17 @@ impl Stop {
         self.kind == Kind::Bazel
     }
 
+    /// The backstop's graceful rung for a child the cancel never reached (one
+    /// spawned after the root was cancelled, which binds to a token of its
+    /// own): a single SIGINT, sent from the caller because the process is
+    /// about to exit and no runtime task would get to send it. A child whose
+    /// stop sequence has begun already has its SIGINTs.
+    pub(crate) fn interrupt_unless_stopping(&self) {
+        if !self.token.is_cancelled() && !self.gone() {
+            os::interrupt(self.target());
+        }
+    }
+
     /// The backstop's rung: kill outright, unless the child is already gone.
     pub(crate) fn kill(&self) {
         if !self.gone() {
