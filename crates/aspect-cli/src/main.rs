@@ -669,10 +669,11 @@ fn main() -> ExitCode {
 /// it is ended. Long enough for an interrupted bazel to exit and its events
 /// to drain; short enough, with the exit window after it, to fit the CI cancel
 /// windows (the Buildkite agent SIGKILLs 9s after its SIGTERM, GitHub Actions
-/// escalates 7.5s after its SIGINT).
+/// escalates 7.5s after its SIGINT). On CI the process is gone by
+/// `body_grace() + exit_drain()` = 6s, 1.5s inside the tighter of the two.
 fn body_grace() -> Duration {
     if on_recognized_ci() {
-        Duration::from_secs(3)
+        Duration::from_secs(2)
     } else {
         Duration::from_secs(5)
     }
@@ -683,7 +684,9 @@ fn body_grace() -> Duration {
 const PROMPT_GRACE: Duration = Duration::from_secs(1);
 
 /// How long, once the task has ended or the second signal has arrived, the
-/// children still stopping get before the process exits regardless.
+/// children still stopping and the task's defers (the BES sink drain, whose
+/// own window in `build_events.axl` must fit inside this) get before the
+/// process exits regardless.
 fn exit_drain() -> Duration {
     Duration::from_secs(4)
 }
@@ -700,10 +703,12 @@ fn exit_drain() -> Duration {
 /// signal, hooks and defers still running. Then, or on a second signal at
 /// any point, the backstop: kill every child still alive and exit at once.
 ///
-/// On CI the bazel client is spared the kill (the host's own escalation is
-/// the last rung there): a SIGKILL landing during sandbox cleanup strands
-/// `_moved_trash_dir` and poisons the next command on the runner
-/// (bazelbuild/bazel#23880).
+/// On CI the bazel client is never SIGKILLed: a SIGKILL landing during sandbox
+/// cleanup strands `_moved_trash_dir` and poisons the next command on the
+/// runner (bazelbuild/bazel#23880). It gets its graceful SIGINTs and no more,
+/// and one that ignores them is left running when we exit, since runners do not
+/// reap our process tree and nothing escalates against it afterwards. The next
+/// bazel command's health check is what deals with a client left behind.
 ///
 /// Runs as a detached tokio task for the life of the process. Per tokio's
 /// docs, dropping a `Signal` stream does not uninstall the OS handler, so it

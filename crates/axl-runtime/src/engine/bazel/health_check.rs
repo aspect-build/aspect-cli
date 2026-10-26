@@ -20,7 +20,7 @@
 //!   probe starts a fresh one.
 //!
 //! [`run`] therefore climbs a ladder: wait for a client holder to finish on
-//! its own, SIGINT it (Bazel's graceful cancel, as in `live.rs`), SIGKILL it,
+//! its own, SIGINT it (Bazel's graceful cancel, as in `children::os`), SIGKILL it,
 //! and only then kill a wedged server and re-probe. A new holder taking the
 //! lock mid-ladder gets a fresh ladder, a bounded number of times. Each rung
 //! logs what it found and what it is about to do, so a job log explains a
