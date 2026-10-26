@@ -9,7 +9,8 @@ the implementations that ship with the CLI.
 
 `DeliveryState.connect` is `(ctx, delivery_state.Params) -> delivery_state.Backend`.
 Unset, the delivery task uses `deliveryd.connect` (the Workflows daemon over
-its Unix socket). `redis_state.connect` talks to Redis directly and reads
+its Unix socket). `cloud_state.connect` asks Aspect Cloud, which keeps the state for the organization
+(`lib/delivery_cloud.axl`). `redis_state.connect` talks to Redis directly and reads
 `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`,
 `_REDIS_LEGACY_TTL_SECONDS`).
 Any function returning a `delivery_state.Backend` works as a third option.
@@ -17,6 +18,7 @@ Internal modules load from `private/lib/` directly.
 """
 
 load("./private/lib/delivery_state.axl", _DeliveryState = "DeliveryState", _delivery_state = "delivery_state")
+load("./private/lib/delivery_cloud.axl", _cloud_state = "cloud_state")
 load("./private/lib/deliveryd.axl", _deliveryd = "deliveryd")
 load("./private/lib/redis_state.axl", _redis_state = "redis_state")
 
@@ -24,3 +26,4 @@ DeliveryState = _DeliveryState
 delivery_state = _delivery_state
 deliveryd = _deliveryd
 redis_state = _redis_state
+cloud_state = _cloud_state

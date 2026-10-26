@@ -37,7 +37,7 @@ Three orthogonal flags shape every invocation:
 `selective` uses change detection (only candidates not yet delivered for the
 `--task:name[:--salt]` prefix); `always` skips it and treats every resolved
 target as a candidate (legacy `only_on_change: false`; `--force-target`
-redundant here). `--track-state=true` records this run's digests/deliveries
+redundant here). `--track-state=true` records this run's digests/delivery
 and queries prior ones; since change detection builds on it,
 `--mode=selective --track-state=false` is rejected at startup.
 
@@ -73,6 +73,17 @@ config.axl can point it at Redis directly instead, which reads
         ctx.traits[DeliveryState].connect = redis_state.connect
 
 Both backends share one key scheme, so they interoperate against one Redis.
+
+
+Aspect cloud records
+--------------------
+
+With Aspect credentials, a repo and a phase-1 BES invocation, each delivery
+attempt is also recorded in Aspect cloud (`lib/delivery_record.axl`) and change
+detection prefers the cloud's last-delivered artifact digest for targets whose
+artifact format is known, falling back per target to the state backend. Recording
+never fails a delivery and is off under `--dry-run` and
+`--record-deliveries=false`. The README's delivery section has the full contract.
 
 
 Output base isolation
@@ -227,6 +238,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
+load("./private/lib/delivery_record.axl", "delivery_record")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
@@ -236,7 +248,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./private/lib/runnable.axl", "apparent_label", "runnable")
+load("./private/lib/runnable.axl", "apparent_label", "runnable", "spawn_environment")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
 
@@ -246,6 +258,17 @@ load("./private/lib/tips.axl", "tips")
 DRY_RUN_OFF = "false"
 DRY_RUN_ON = "true"
 DRY_RUN_BUILD = "build"
+
+VERIFY_OFF = "false"
+VERIFY_BLOCK = "block"
+VERIFY_SKIP = "skip"
+VERIFY_WARN = "warn"
+
+# TestSummary.overall_status values that verify a target. Everything else, and a test that
+# produced no summary at all, counts as failed.
+_VERIFY_PASSING = ["passed", "flaky"]
+
+_DEFAULT_TASK_NAME = "delivery"
 
 DeliveryTrait = trait(
     delivery_start = attr(
@@ -365,23 +388,29 @@ def _print_captured_output(label, exit_code, stdout, stderr, color):
         print(combined)
     print(ansi.style(sep, ansi.BOLD, color))
 
-def _spawn_deliverable(ctx, run_tracker, color, capture, label, ep, is_forced, output_sha):
+def _spawn_deliverable(ctx, run_tracker, color, capture, tee, label, ep, is_forced, output_sha):
     """Spawn one deliverable, print its `Delivering` line, and return the
     running-tuple `(label, is_forced, output_sha, t_start, child, stdout_path,
-    stderr_path)`. When capturing, the child's stdout/stderr are redirected to
-    per-target temp files so the reap loop polls `try_wait()` and reads them
-    after exit instead of draining a pipe (the path fields are None otherwise)."""
+    stderr_path, ep, tee)`. When capturing or teeing, the child's stdout/stderr
+    are redirected to per-target temp files so the reap loop polls `try_wait()`
+    and reads them after exit instead of draining a pipe (the path fields are
+    None otherwise). `tee` additionally tails those files to the console while
+    the child runs, so a serial delivery still streams live; it is the
+    `delivery_record.capture` state, None when not teeing."""
     forced_marker = " (FORCED)" if is_forced else ""
     print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
     stdout_path = None
     stderr_path = None
-    if capture:
+    tail = None
+    if capture or tee:
         stdout_path = _DELIVER_STDOUT_PATH.format(ctx.task.name, sanitize_filename(label))
         stderr_path = _DELIVER_STDERR_PATH.format(ctx.task.name, sanitize_filename(label))
         child = run_tracker.spawn(ep, [], stdout_path = stdout_path, stderr_path = stderr_path)
+        if tee:
+            tail = delivery_record.capture.new(ctx.std.fs.open, stdout_path, stderr_path)
     else:
         child = run_tracker.spawn(ep, [], capture)
-    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path)
+    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path, ep, tail)
 
 _HEX = "0123456789abcdef"
 
@@ -564,7 +593,7 @@ def _surface_phase_stderr(ctx, phase, log_path):
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri, color):
+def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri, color, artifact_tracker = None):
     """Run phase 1 (build) + phase 2 (digest extraction); return
     `(output_shas, non_hermetic_misses, uncacheable_actions, exit_code)`.
     Phase-1 BES events drive `data`; phase-2's gRPC log yields the per-target
@@ -576,6 +605,10 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     captured and echoed/uploaded only when rows can't explain it (see
     `should_surface_phase2_stderr`). The gRPC log uploads per
     `ctx.args.upload_grpc_log`. Uploads no-op off-CI.
+
+    `artifact_tracker`, when given, is a `runnable` tracker fed every phase-1
+    BES event, so the caller can read each target's default output `File`
+    entries (digest, length, `bytestream://` URI) afterwards.
     """
     ctx = ph.ctx
     data = ph.data
@@ -695,6 +728,8 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                     break
                 if process_event(data, event, bb_root):
                     interesting = True
+                if artifact_tracker != None:
+                    artifact_tracker.event(event)
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
             if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
@@ -1032,6 +1067,98 @@ def _fire_target_hook(data, delivery_trait, run_tracker, label):
         fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
     for k, v in extras.items():
         entry["custom"][k] = v
+
+def _record_outcome(ctx, recorder, data, cloud_artifacts, label, status, output_sha, execution = None):
+    """Send the target's latest outcome entry to Aspect Cloud. Runs after
+    `_fire_target_hook`, so `entry["custom"]` already carries the
+    `delivery_target` hook's enrichment: it becomes the record's
+    `user_metadata`, with a string `version` / `tag` key lifted into the
+    record's own fields. No-op unless `recorder.recording`."""
+    if not recorder.recording:
+        return
+    custom = data["delivery"]["deliveries"][-1]["custom"]
+    version = custom.get("version")
+    tag = custom.get("tag")
+    recorder.record(delivery_record.Delivery(
+        label = label,
+        status = delivery_record.Status(status),
+        delivered_at_ms = now_ms(ctx),
+        artifact = cloud_artifacts.get(label),
+        version = version if type(version) == "string" else "",
+        tag = tag if type(tag) == "string" else "",
+        user_metadata = custom,
+        execution = execution,
+        output_digest = output_sha,
+    ))
+
+def _verify_deliverables(ctx, bazel_trait, rc, targets, announce_version, announce_command):
+    """Runs every test that depends on `targets`: `kind(".*_test rule", rdeps(//..., set(targets)))`,
+    so a test that exercises a deliverable (its package, its image, a binary inside) is run before
+    it ships. The run streams to the same BES sinks as the delivery build, which is what the
+    delivery's Verified count reads, because it counts the tests of builds with the same
+    repository and commit.
+
+    All tests run even when one fails, so each target is judged by its own tests. Returns
+    `struct(tests, failed, code)`: the tests found, those that did not pass, and `bazel test`'s
+    exit code (0 when none depend on the targets)."""
+    expr = 'kind(".*_test rule", rdeps(//..., set({})))'.format(" ".join(targets))
+    info(ctx.std, "Running bazel query: {}".format(expr))
+    tests = [t.name for t in ctx.bazel.query(
+        expr,
+        rc = rc,
+        announce_version = announce_version,
+        announce_command = announce_command,
+    )]
+    if not tests:
+        info(ctx.std, "No tests depend on the targets to deliver")
+        return struct(tests = tests, failed = [], code = 0)
+    info(ctx.std, "Verifying with {} test{}".format(len(tests), "" if len(tests) == 1 else "s"))
+    summaries = bazel.build_events.iterator(kinds = ["test_summary"])
+    sinks = collect_bes_sinks(ctx, bazel_trait, rc, command = "test")
+    announce_bes_sinks(ctx, sinks)
+    handle = ctx.bazel.test(
+        build_events = [summaries] + sinks,
+        flags = bzl.rc_flags(ctx, rc, "test") + ["--keep_going"],
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *tests
+    )
+    statuses = {}
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        for _ in range(10000):
+            event = summaries.try_pop()
+            if event == None:
+                break
+            label = apparent_label(bes_get(event.id, "label", "") or "")
+            statuses[label] = bes_get(event.payload, "overall_status", "") or ""
+        if summaries.done:
+            break
+    status = handle.wait()
+    for sink in sinks:
+        sink.wait()
+    dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+    failed = []
+    if status.code != 0:
+        failed = [t for t in tests if statuses.get(apparent_label(t), "") not in _VERIFY_PASSING]
+    return struct(tests = tests, failed = failed, code = status.code)
+
+def _verify_blocked(ctx, rc, targets, failed_tests, announce_version, announce_command) -> dict:
+    """`{target: [failed tests it depends on]}` for the `--verify=skip` gate: a target is blocked
+    by exactly the failed tests that depend on it, and a target no failed test reaches ships."""
+    blocked = {}
+    wanted = {apparent_label(t): t for t in targets}
+    for test in failed_tests:
+        reached = ctx.bazel.query(
+            'deps({}) intersect set({})'.format(test, " ".join(targets)),
+            rc = rc,
+            announce_version = announce_version,
+            announce_command = announce_command,
+        )
+        for hit in reached:
+            target = wanted.get(apparent_label(hit.name))
+            if target != None:
+                blocked.setdefault(target, []).append(test)
+    return blocked
 
 def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
@@ -1427,12 +1554,18 @@ def _delivery_impl(ctx):
     # rides phase 3 (the build feeding `.event`) via `run_tracker.aspects`.
     run_tracker = runnable(ctx, targets, rc = rc)
 
+    # Phase 1's BES events carry each target's default outputs with their digest
+    # and `bytestream://` URI (the release build in phase 3 reports local paths
+    # only, and its stamped digests differ every run), so the Aspect Cloud record
+    # and the "unchanged since the last delivery" check both read them from here.
+    artifact_tracker = runnable(ctx, targets) if ctx.args.record_deliveries else None
+
     _t_total = time.monotonic()
 
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri or "", color)
+        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri or "", color, artifact_tracker)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1468,6 +1601,27 @@ def _delivery_impl(ctx):
     unresolved_deliverables = [t for t in targets if not output_shas.get(t)]
     if phase_1_2_runs and unresolved_deliverables and blocking_culprits:
         _report_blocking_culprits(ctx, blocking_culprits, len(unresolved_deliverables), failing = not ctx.args.warn_unresolved_digest)
+
+    # Aspect Cloud: records each delivery below, with its command and output, whatever state
+    # backend is in use. Inert without credentials or under --record-deliveries=false;
+    # never fails the run. Without a phase-1 BES invocation only the delivered fact is kept.
+    recorder = delivery_record.new(
+        ctx,
+        sink_invocation_id = data.get("sink_invocation_id") or "",
+        workspace = prefix,
+        dry_run = dry_run,
+        enabled = ctx.args.record_deliveries,
+        env_allowlist = list(ctx.args.record_env_allowlist),
+    )
+    cloud_artifacts = {}
+    if artifact_tracker != None and recorder.recording:
+        bytestream_prefix = rc.flag_value("--remote_bytestream_uri_prefix", command = "build") or ""
+        for label in targets:
+            picked = delivery_record.artifact.pick(apparent_label(label), artifact_tracker.get_default_output_files(label), bytestream_prefix)
+            if picked != None:
+                cloud_artifacts[label] = picked
+    if recorder.recording:
+        info(ctx.std, "Recording deliveries in Aspect cloud for {}.".format(recorder.repo or "an unknown repository"))
 
     # Record each target's digest with deliveryd. Skipped when --track-state=false.
     if track_state:
@@ -1521,11 +1675,44 @@ def _delivery_impl(ctx):
             )
         ]
 
+    verify_blocked = {}
+    verify_mode = ctx.args.verify
+    if verify_mode != VERIFY_OFF and delivery_targets and not dry_run:
+        ph.update(
+            _pick_status(data, had_failure = False, terminal = False),
+            phases.ProgressStyles(
+                body = "Running the tests that depend on the targets to deliver...",
+                stream = "Verifying the targets to deliver",
+            ),
+            kind = "delivery_results",
+            data = data,
+            phase = phases.Phase(name = "verify", description = "Verify targets with their tests", emoji = "🧪"),
+        )
+        verified = _verify_deliverables(ctx, bazel_trait, rc, delivery_targets, announce_version, announce_command)
+        if verified.failed:
+            failing = ", ".join(verified.failed)
+            if verify_mode == VERIFY_BLOCK:
+                error(ctx.std, "Verification failed ({}): nothing was delivered.".format(failing))
+                return _emit_final(ph, exit_code = verified.code or 1)
+            if verify_mode == VERIFY_WARN:
+                warn(ctx.std, "Verification failed ({}); delivering anyway (--verify=warn).".format(failing))
+            else:
+                verify_blocked = _verify_blocked(ctx, rc, delivery_targets, verified.failed, announce_version, announce_command)
+                delivery_targets = [t for t in delivery_targets if t not in verify_blocked]
+                warn(ctx.std, "Verification failed ({}): skipping {} target{}, delivering the rest (--verify=skip).".format(failing, len(verify_blocked), "" if len(verify_blocked) == 1 else "s"))
+
     max_par = ctx.args.max_parallelization
     if max_par < 1:
         error(ctx.std, "--max-parallelization must be >= 1, got {}.".format(max_par))
         return _emit_final(ph, exit_code = 1)
     capture = max_par > 1
+
+    # A serial delivery inherits the console today. When recording, its stdout and
+    # stderr go to files instead and are tailed to the console as they grow, so
+    # the record has the output and the user still sees it live (the child just
+    # no longer sees a terminal). Parallel deliveries already capture.
+    tee = recorder.recording and not capture
+    console = [ctx.std.io.stdout, ctx.std.io.stderr]
 
     status = _pick_status(data, had_failure = False, terminal = False)
     ph.update(
@@ -1589,6 +1776,13 @@ def _delivery_impl(ctx):
                 rows.append((label, "WARN", "warn", msg, "-", "-"))
                 delivery_add_result(data, label, "warn", message = msg, is_forced = is_forced)
             _fire_target_hook(data, delivery_trait, run_tracker, label)
+        elif label in verify_blocked:
+            msg = "verification failed: " + ", ".join(verify_blocked[label])
+            failed_count += 1
+            rows.append((label, "FAIL", "fail", msg, output_sha or "-", "-"))
+            delivery_add_result(data, label, "fail", message = msg, output_sha = output_sha or "-", is_forced = is_forced)
+            _fire_target_hook(data, delivery_trait, run_tracker, label)
+            _record_outcome(ctx, recorder, data, cloud_artifacts, label, "failed", output_sha or "")
         elif not is_forced and label in delivered:
             skipped_count += 1
             delivered_by = delivered[label] or "-"
@@ -1602,6 +1796,7 @@ def _delivery_impl(ctx):
                 is_forced = is_forced,
             )
             _fire_target_hook(data, delivery_trait, run_tracker, label)
+            _record_outcome(ctx, recorder, data, cloud_artifacts, label, "skipped", output_sha)
         elif skip_delivery_build:
             # Phase 3 was skipped, so there is no build event to spawn off:
             # preview directly. `run_tracker` saw no events, so the hook's
@@ -1787,8 +1982,12 @@ def _delivery_impl(ctx):
                 if not ready or len(running) >= max_par:
                     break
                 label, ep, is_forced, output_sha = ready.pop(0)
-                running.append(_spawn_deliverable(ctx, run_tracker, color, capture, label, ep, is_forced, output_sha))
+                running.append(_spawn_deliverable(ctx, run_tracker, color, capture, tee, label, ep, is_forced, output_sha))
                 interesting = True
+
+            for r in running:
+                if r[8] != None:
+                    delivery_record.capture.pump(r[8], console)
 
             # Harvest finished deliveries out of submission order so a slow head
             # never idles the slots queued behind it: scan for any exited child
@@ -1806,7 +2005,9 @@ def _delivery_impl(ctx):
                         break
                 if reap_idx == None:
                     break
-                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
+                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path, ep, tail = running.pop(reap_idx)
+                record_stdout = ""
+                record_stderr = ""
                 if capture:
                     # Output was redirected to files, so wait() has no pipe to
                     # drain; read them after exit, print atomically, upload as
@@ -1820,6 +2021,15 @@ def _delivery_impl(ctx):
                         artifacts.upload(ctx, "delivery_target_output", safe_label + ".stdout.log", stdout)
                     if stderr.strip():
                         artifacts.upload(ctx, "delivery_target_output", safe_label + ".stderr.log", stderr)
+                    ctx.std.fs.remove_file(stdout_path)
+                    ctx.std.fs.remove_file(stderr_path)
+                    if recorder.recording:
+                        record_stdout = delivery_record.log.bounded(stdout)
+                        record_stderr = delivery_record.log.bounded(stderr)
+                elif tail != None:
+                    exit_code = child.wait().code
+                    delivery_record.capture.drain(tail, console)
+                    record_stdout, record_stderr = delivery_record.capture.text(tail)
                     ctx.std.fs.remove_file(stdout_path)
                     ctx.std.fs.remove_file(stderr_path)
                 else:
@@ -1839,12 +2049,21 @@ def _delivery_impl(ctx):
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
                     delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
                 _fire_target_hook(data, delivery_trait, run_tracker, label)
+                if recorder.recording:
+                    _record_outcome(ctx, recorder, data, cloud_artifacts, label, "delivered" if exit_code == 0 else "failed", output_sha, delivery_record.Execution(
+                        command = [ep.path] + list(ep.args),
+                        env = spawn_environment(ctx, ep),
+                        exit_code = exit_code if exit_code != None else -1,
+                        duration_ms = int((time.monotonic() - t_start) * 1000),
+                        stdout = record_stdout,
+                        stderr = record_stderr,
+                    ))
                 interesting = True
                 for _ in range(max_par):
                     if not ready or len(running) >= max_par:
                         break
                     nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
-                    running.append(_spawn_deliverable(ctx, run_tracker, color, capture, nlabel, nep, nis_forced, noutput_sha))
+                    running.append(_spawn_deliverable(ctx, run_tracker, color, capture, tee, nlabel, nep, nis_forced, noutput_sha))
 
             # priority=False throttles surface PATCHes; the per-target lines
             # already tick the CLI.
@@ -1862,6 +2081,10 @@ def _delivery_impl(ctx):
 
             if build_done and not ready and not running:
                 break
+
+    # Records the service could not take yet (its BES ingest lagging) get their
+    # bounded retry now that nothing else is waiting on this loop.
+    recorder.flush()
 
     # The fused loop appends rows as deliveries complete; sort back to request
     # order for a stable table.
@@ -2005,6 +2228,21 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
             values = [DRY_RUN_OFF, DRY_RUN_ON, DRY_RUN_BUILD],
             bare = DRY_RUN_ON,
             description = "Resolve delivery state and print what would be delivered without running any targets. `false` (the default) delivers. `true` — which bare --dry-run means — previews: it combines with both modes (--mode=selective --dry-run previews change-detection data; --mode=always --dry-run lists every resolved target as a delivery candidate) and skips the final delivery build (phase 3) along with the dispatch, since that build exists only to put the pending targets' runfiles on disk for a dispatch that never happens — so a preview neither stamps nor materializes release artifacts. `build` previews and runs that build anyway, for the preview that needs what only it produces: the per-target on-disk paths in the manifest (entrypoint_path, runfiles_dir, runfiles_workspace_dir, default_outputs — all empty under `true`) and the 'never built' / 'not runnable' checks that run as each target completes.",
+        ),
+        "verify": args.string(
+            default = VERIFY_OFF,
+            values = [VERIFY_OFF, VERIFY_BLOCK, VERIFY_SKIP, VERIFY_WARN],
+            bare = VERIFY_BLOCK,
+            description = "Run the tests that depend on the targets to deliver before delivering them: `kind(\".*_test rule\", rdeps(//..., <targets>))`, one `bazel test` streamed to the same build-event backends as the delivery build, and say what a failing test does. `block` (bare --verify) delivers nothing if any test fails. `skip` skips the targets a failing test depends on and delivers the rest, and the run still fails. `warn` delivers everything and only warns. `false` (the default) runs no tests. Only targets that would be delivered are verified, so a run with everything already delivered runs no tests. Ignored by --dry-run.",
+        ),
+        "record_deliveries": args.boolean(
+            default = True,
+            description = "Record each delivery in Aspect cloud (`POST /delivery`: status, artifact digest and URI, the command that ran with its environment redacted, exit code, duration, and its console output) and use the cloud's last-delivered artifact digest for change detection, falling back to the state backend per target when the cloud has nothing or cannot be reached. Needs Aspect credentials (`aspect auth login` or `ASPECT_API_TOKEN`), a GitHub `owner/name` repo (from `GITHUB_REPOSITORY`, `ASPECT_VCS_URL` or the `origin` remote) and the phase-1 build uploaded to a BES backend; without them it does nothing. Never fails a delivery and records nothing under --dry-run. While recording, a serial delivery's stdout and stderr are redirected through files and forwarded live, so the deliverable no longer sees a terminal. Pass --record-deliveries=false to switch it all off.",
+        ),
+        "record_env_allowlist": args.string_list(
+            long = "record-env-allowlist",
+            default = [],
+            description = "Environment variable names whose values may appear in the Aspect cloud delivery record. Every other variable the delivered command was started with is recorded by name only, with the value `[redacted]`. Always allowed: the BUILD_* / ASPECT_* workspace directories and RUNFILES_DIR / JAVA_RUNFILES / RUNFILES_WORKSPACE_DIR.",
         ),
         "track_state": args.boolean(
             default = True,

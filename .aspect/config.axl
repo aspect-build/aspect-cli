@@ -30,6 +30,7 @@ load("@aspect//private/lib/changedetector_test.axl", "changedetector_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/confirm_test.axl", "confirm_tests")
+load("@aspect//private/lib/delivery_record_test.axl", "delivery_record_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_default_preset_snapshot_tests", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
@@ -576,6 +577,11 @@ def config(ctx: ConfigContext):
     # deliveryd.axl: the startup probe and the wire shape of each verb.
     # Run with: aspect dev test-deliveryd
     ctx.tasks.add(deliveryd_tests)
+
+    # delivery_record.axl: Aspect Cloud delivery records — artifact selection,
+    # env redaction, log chunking, retry/backoff, last-delivered digest check.
+    # Run with: aspect dev test-delivery-record
+    ctx.tasks.add(delivery_record_tests)
 
     # resp.axl: RESP2 encoding, reply parsing across read boundaries, pipelining.
     # Run with: aspect dev test-resp

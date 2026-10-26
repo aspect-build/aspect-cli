@@ -1,0 +1,654 @@
+"""Records each delivery in Aspect Cloud and speaks the delivery backend's state verbs.
+
+`POST /delivery` stores one record per (build invocation, target): status,
+artifact, the command that ran with its redacted environment, and the console
+output, chunked to stay under 1 MiB per request. A `delivered` record also stores the
+output digest as delivered, which needs no build, so without a `sink_invocation_id` only
+that is kept. `POST /delivery/query` answers which output digests were already delivered
+and `GET /delivery/health` is the startup probe; `delivery_cloud.axl` wraps them as a
+`DeliveryState` backend.
+
+    rec = delivery_record.new(ctx, sink_invocation_id = id, workspace = prefix, dry_run = dry_run)
+    rec.record(delivery_record.Delivery(label = "//pkg:deb", status = delivery_record.Status("delivered"), output_digest = sha, ...))
+    rec.flush()                             # retries records the service could not take yet
+
+Recording never fails a delivery. A rejected or unreachable service warns once and
+the run carries on; a 409, or a 503 with `Retry-After` (the invocation's BES is not
+ingested yet), is retried by `flush` for up to a minute, then dropped with a warning.
+A 503 without `Retry-After` (the gateway cannot write at all) is not retried. Without credentials the
+recorder is inert (`recording` is False), so the Redis and deliveryd backends keep working
+untouched.
+"""
+
+load("@std//time.axl", "sleep")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
+load("./environment.axl", "warn")
+load("./github.axl", "detect_github_repo")
+
+REDACTED = "[redacted]"
+
+DEFAULT_ENV_ALLOWLIST = [
+    "ASPECT_BAZEL_ROOT_DIRECTORY",
+    "ASPECT_GIT_ROOT_DIRECTORY",
+    "ASPECT_ROOT_DIRECTORY",
+    "ASPECT_WORKING_DIRECTORY",
+    "BUILD_WORKING_DIRECTORY",
+    "BUILD_WORKSPACE_DIRECTORY",
+    "JAVA_RUNFILES",
+    "RUNFILES_DIR",
+    "RUNFILES_WORKSPACE_DIR",
+]
+
+LOG_HEAD_BYTES = 1024 * 1024
+LOG_TAIL_BYTES = 1024 * 1024
+
+_REQUEST_BUDGET_BYTES = 900 * 1024
+_LOG_PIECE_CHARS = 32 * 1024
+_RETRY_BUDGET_MS = 60000
+_MAX_USER_METADATA_BYTES = 64 * 1024
+_MAX_STRUCTURED_OUTPUT_BYTES = 256 * 1024
+_MAX_QUEUED_BYTES = 32 * 1024 * 1024
+_READ_BYTES = 64 * 1024
+_PUMP_READS = 64
+
+Status = enum("delivered", "failed", "skipped")
+_Sent = enum("ok", "retry", "failed")
+
+Artifact = record(
+    format = field(str, default = ""),
+    uri = field(str, default = ""),
+    digest_hash = field(str),
+    digest_size = field(int, default = 0),
+)
+
+Execution = record(
+    command = field(list[str]),
+    env = field(dict),
+    exit_code = field(int),
+    duration_ms = field(int),
+    stdout = field(str, default = ""),
+    stderr = field(str, default = ""),
+)
+
+Delivery = record(
+    label = field(str),
+    status = field(Status),
+    delivered_at_ms = field(int),
+    artifact = field(Artifact | None, default = None),
+    version = field(str, default = ""),
+    tag = field(str, default = ""),
+    user_metadata = field(dict, default = {}),
+    execution = field(Execution | None, default = None),
+    output_digest = field(str, default = ""),
+)
+
+_Response = record(
+    status = field(int),
+    retry_after_ms = field(int, default = 0),
+    body = field(str, default = ""),
+)
+
+_Client = record(
+    ctx = field(typing.Any),
+    base_url = field(str),
+    sink_invocation_id = field(str),
+    repo = field(str),
+    workspace = field(str),
+    where = field(str),
+    env_allowlist = field(list[str]),
+    pause = field(typing.Any),
+    state = field(dict),
+)
+
+def _pad(n: int, width: int) -> str:
+    s = str(n)
+    return "0" * (width - len(s)) + s
+
+def rfc3339(ms: int) -> str:
+    """UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` for epoch milliseconds."""
+    days = ms // 86400000
+    rem = ms % 86400000
+    z = days + 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    day = doy - (153 * mp + 2) // 5 + 1
+    month = mp + 3 if mp < 10 else mp - 9
+    year = yoe + era * 400 + (1 if month <= 2 else 0)
+    return "{}-{}-{}T{}:{}:{}.{}Z".format(
+        _pad(year, 4),
+        _pad(month, 2),
+        _pad(day, 2),
+        _pad(rem // 3600000, 2),
+        _pad(rem // 60000 % 60, 2),
+        _pad(rem // 1000 % 60, 2),
+        _pad(rem % 1000, 3),
+    )
+
+def redact_env(env: dict, allowlist: list[str]) -> dict:
+    """`env` with every value replaced by `[redacted]` unless its name is in
+    `allowlist`. Names mapped to `None` (unset in the child) are dropped."""
+    out = {}
+    for name in sorted(env.keys()):
+        value = env[name]
+        if value == None:
+            continue
+        out[name] = str(value) if name in allowlist else REDACTED
+    return out
+
+def _basename(path: str) -> str:
+    return path.rsplit("/", 1)[-1]
+
+def _dirname(path: str) -> str:
+    return path.rpartition("/")[0]
+
+def artifact_format(name: str) -> str:
+    """The artifact format an output file name stands for: `deb`, `tar_gz`,
+    `oci` (an image tarball), or `""` when the name says nothing."""
+    base = _basename(name).lower()
+    if base.endswith((".oci.tar", ".oci.tar.gz", ".oci.tgz", "_image.tar", "-image.tar")) or base in ("image.tar", "tarball.tar"):
+        return "oci"
+    if base.endswith(".deb"):
+        return "deb"
+    if base.endswith((".tar.gz", ".tgz", ".tar")):
+        return "tar_gz"
+    return ""
+
+def parse_blob_uri(uri: str) -> tuple | None:
+    """`(hash, size)` from a `bytestream://host/[instance/]blobs/<hash>/<size>`
+    URI, or None."""
+    if not uri.startswith("bytestream://"):
+        return None
+    parts = uri.split("/")
+    if "blobs" not in parts or len(parts) < 2:
+        return None
+    digest = parts[-2]
+    size = parts[-1]
+    if not digest or digest == "blobs" or not size.isdigit():
+        return None
+    return (digest, int(size))
+
+def _bytestream_uri(prefix: str, digest: str, size: int) -> str:
+    if not prefix:
+        return ""
+    return "bytestream://{}/blobs/{}/{}".format(prefix.removeprefix("bytestream://").rstrip("/"), digest, size)
+
+def pick_artifact(target: str, files: list, bytestream_prefix: str = "") -> Artifact | None:
+    """The artifact a target's default outputs amount to, from BES `File`
+    entries (`struct(name, uri, digest, length)`, see `runnable`).
+
+    The first output whose name has a known format wins (`.deb`, `.tar.gz`,
+    `.tgz`, `.tar`, an OCI image tarball, or an OCI layout's `index.json`, whose
+    digest covers every manifest, config and layer it names). Without one, the
+    output named like the target, or the only output, is the artifact with no
+    format. `uri` is the output's `bytestream://` URI, or one built from
+    `bytestream_prefix` and the digest; a `file://` path is never reported.
+    None when no output carries a digest.
+    """
+    layouts = {_dirname(f.name): True for f in files if _basename(f.name) == "oci-layout"}
+    chosen = None
+    fmt = ""
+    for f in files:
+        kind = artifact_format(f.name)
+        if not kind and _basename(f.name) == "index.json" and _dirname(f.name) in layouts:
+            kind = "oci"
+        if kind:
+            chosen = f
+            fmt = kind
+            break
+    if chosen == None:
+        name = target.rsplit(":", 1)[-1]
+        named = [f for f in files if _basename(f.name) == name or _basename(f.name).startswith(name + ".")]
+        if named:
+            chosen = named[0]
+        elif len(files) == 1:
+            chosen = files[0]
+    if chosen == None:
+        return None
+
+    digest = chosen.digest
+    size = chosen.length
+    blob = parse_blob_uri(chosen.uri)
+    if not digest and blob != None:
+        digest = blob[0]
+        size = blob[1]
+    if not digest:
+        return None
+    uri = chosen.uri if chosen.uri.startswith("bytestream://") else _bytestream_uri(bytestream_prefix, digest, size)
+    return Artifact(format = fmt, uri = uri, digest_hash = digest, digest_size = size)
+
+def log_new(head: int = LOG_HEAD_BYTES, tail: int = LOG_TAIL_BYTES) -> dict:
+    """An output buffer that keeps the first `head` and last `tail` bytes."""
+    return {"head": bytes(""), "tail": bytes(""), "total": 0, "head_cap": head, "tail_cap": tail}
+
+def log_feed(buf: dict, chunk) -> None:
+    """Append `chunk` (bytes) to `buf`, dropping the middle once both caps are full."""
+    buf["total"] += len(chunk)
+    room = buf["head_cap"] - len(buf["head"])
+    if room > 0:
+        buf["head"] = buf["head"] + chunk[:room]
+        chunk = chunk[room:]
+    if len(chunk) > 0:
+        tail = buf["tail"] + chunk
+        buf["tail"] = tail[-buf["tail_cap"]:] if len(tail) > buf["tail_cap"] else tail
+
+def log_text(buf: dict) -> str:
+    """The buffered output, with a marker where the middle was dropped."""
+    omitted = buf["total"] - len(buf["head"]) - len(buf["tail"])
+    if omitted <= 0:
+        return str(buf["head"] + buf["tail"])
+    return str(buf["head"]) + "\n[... {} bytes of output omitted ...]\n".format(omitted) + str(buf["tail"])
+
+def log_bounded(text: str) -> str:
+    """`text` cut to its first and last `LOG_HEAD_BYTES` / `LOG_TAIL_BYTES`."""
+    buf = log_new()
+    log_feed(buf, bytes(text))
+    return log_text(buf)
+
+def capture_new(open_file, stdout_path: str, stderr_path: str) -> dict:
+    """Tail two files a running child writes its stdout and stderr to. Reading
+    never blocks: `open_file(path)` returns a readable whose `read(n)` gives empty
+    bytes at the end of what has been written so far."""
+    return {"streams": [
+        {"rd": open_file(stdout_path), "log": log_new()},
+        {"rd": open_file(stderr_path), "log": log_new()},
+    ]}
+
+def capture_pump(cap: dict, sinks: list) -> bool:
+    """Forward whatever the child wrote since the last call to `sinks` (stdout
+    sink, stderr sink, flushed so a partial line shows) and into the buffers.
+    True when anything moved."""
+    moved = False
+    for i in range(2):
+        stream = cap["streams"][i]
+        for _ in range(_PUMP_READS):
+            chunk = stream["rd"].read(_READ_BYTES)
+            if len(chunk) == 0:
+                break
+            log_feed(stream["log"], chunk)
+            sinks[i].write(chunk)
+            moved = True
+        if moved:
+            sinks[i].flush()
+    return moved
+
+def capture_drain(cap: dict, sinks: list) -> None:
+    """Forward everything left, for after the child exited."""
+    for _ in range(1000000):
+        if not capture_pump(cap, sinks):
+            return
+
+def capture_text(cap: dict) -> tuple:
+    """`(stdout, stderr)` as buffered."""
+    return (log_text(cap["streams"][0]["log"]), log_text(cap["streams"][1]["log"]))
+
+def last_json_object(text: str) -> dict | None:
+    """The last line of `text` as a JSON object, or None."""
+    last = text.rstrip().rsplit("\n", 1)[-1].strip()
+    if not last.startswith("{"):
+        return None
+    parsed = json.try_decode(last, None)
+    return parsed if type(parsed) == "dict" else None
+
+def chunk_log(stdout: str, stderr: str, ts: str, piece_chars: int = _LOG_PIECE_CHARS) -> list[dict]:
+    """Console output as `{seq, stdout, stderr, ts}` entries of at most
+    `piece_chars` characters each, stdout first."""
+    entries = []
+    for key, text in (("stdout", stdout), ("stderr", stderr)):
+        for i in range(0, len(text), piece_chars):
+            entry = {"seq": len(entries), "stdout": "", "stderr": "", "ts": ts}
+            entry[key] = text[i:i + piece_chars]
+            entries.append(entry)
+    return entries
+
+def _json_size(value) -> int:
+    return len(bytes(json.encode(value)))
+
+def _pack(entries: list, first_room: int, room: int) -> list[list]:
+    groups = [[]]
+    used = 0
+    limit = first_room
+    for entry in entries:
+        size = _json_size(entry) + 1
+        if used + size > limit and (used > 0 or len(groups) == 1):
+            groups.append([])
+            used = 0
+            limit = room
+        groups[-1].append(entry)
+        used += size
+    return groups
+
+def build_requests(base: dict, extra: dict, entries: list, budget: int = _REQUEST_BUDGET_BYTES) -> list[str]:
+    """JSON bodies for one delivery. The first carries `base` + `extra` and as
+    many log entries as fit in `budget` bytes; every later body repeats `base`
+    and carries the next entries (the service merges by key and `seq`)."""
+    main = dict(base)
+    main.update(extra)
+    if _json_size(main) > budget:
+        main.pop("user_metadata", None)
+    if _json_size(main) > budget and "exec" in main:
+        main["exec"] = {k: v for k, v in main["exec"].items() if k != "structured_output"}
+    groups = _pack(entries, budget - _json_size(main) - 16, budget - _json_size(base) - 16)
+    bodies = []
+    for i in range(len(groups)):
+        body = dict(main) if i == 0 else dict(base)
+        if groups[i]:
+            body["log"] = groups[i]
+        bodies.append(json.encode(body))
+    return bodies
+
+def _where(ctx) -> str:
+    for name in ("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME", "ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID", "BUILDKITE_AGENT_NAME", "RUNNER_NAME", "HOSTNAME"):
+        value = ctx.std.env.var(name)
+        if value:
+            return value
+    return ""
+
+def _detect_repo(ctx) -> str:
+    # Best effort: a missing git binary or a non-GitHub remote just means no repo.
+    err, found = catch(detect_github_repo, ctx.std)
+    if err or not found or not found[0] or not found[1]:
+        return ""
+    return found[0] + "/" + found[1]
+
+def _credentials(ctx):
+    # A bearer minted outside Aspect Cloud, for pointing a debug build (see
+    # ASPECT_DEBUG_API_URL) at a gateway on this machine. Sent as is; it can only ever
+    # reach the API base, which a release build resolves to Aspect Cloud alone.
+    debug_token = ctx.std.env.var("ASPECT_DEBUG_ACCESS_TOKEN")
+    if debug_token:
+        return struct(access_token = debug_token)
+    err, creds = catch(aspect_cloud_credentials, ctx, required = False)
+    return None if err else creds
+
+def _warn_once(c: _Client, what: str) -> None:
+    if c.state["warned"]:
+        return
+    c.state["warned"] = True
+    warn(c.ctx.std, "Recording deliveries in Aspect cloud: {}. The delivery carries on without it.".format(what))
+
+def _request(c: _Client, method: str, path: str, body: str | None) -> _Response:
+    creds = _credentials(c.ctx)
+    if creds == None:
+        _warn_once(c, "no Aspect credentials (run `aspect auth login` or set ASPECT_API_TOKEN)")
+        return _Response(status = 401)
+    headers = {"Authorization": "Bearer " + creds.access_token, "Content-Type": "application/json"}
+    http = c.ctx.http()
+    if method == "GET":
+        fut = http.get(url = c.base_url + path, headers = headers)
+    else:
+        fut = http.post(url = c.base_url + path, headers = headers, data = body)
+    err, resp = fut.catch().block()
+    if err:
+        return _Response(status = 0, body = err.message)
+    retry_after_ms = 0
+    for name, value in (getattr(resp, "headers", None) or []):
+        if name.lower() == "retry-after" and value.strip().isdigit():
+            retry_after_ms = int(value.strip()) * 1000
+    return _Response(status = resp.status, retry_after_ms = retry_after_ms, body = resp.body)
+
+def _error_message(body: str) -> str:
+    parsed = json.try_decode(body, None)
+    message = parsed.get("message") if type(parsed) == "dict" else None
+    return message.strip() if type(message) == "string" else ""
+
+def _failure_detail(path: str, res: _Response) -> str:
+    if res.status == 0:
+        return "{} unreachable ({})".format(path, res.body)
+    detail = _error_message(res.body) or aspect_cloud_error(res) or res.body.strip()[:200]
+    hint = " (the token needs the aspect.bes.write permission)" if res.status in (401, 403) else ""
+    return "HTTP {} from {}{}{}".format(res.status, path, hint, ": " + detail if detail else "")
+
+def _post(c: _Client, body: str) -> _Sent:
+    res = _request(c, "POST", "/delivery", body)
+    if res.status >= 200 and res.status < 300:
+        return _Sent("ok")
+    if res.status == 409 or (res.status == 503 and res.retry_after_ms > 0):
+        c.state["retry_after_ms"] = res.retry_after_ms
+        return _Sent("retry")
+    _warn_once(c, _failure_detail("POST /delivery", res))
+    return _Sent("failed")
+
+def _post_with_retry(c: _Client, body: str, spent: dict) -> bool:
+    for attempt in range(64):
+        sent = _post(c, body)
+        if sent.value == "ok":
+            return True
+        if sent.value == "failed":
+            return False
+        remaining = _RETRY_BUDGET_MS - spent["ms"]
+        if remaining <= 0:
+            return False
+        delay = c.state["retry_after_ms"] or min(1000 << min(attempt, 4), 10000)
+        delay = min(delay, remaining)
+        c.pause(delay)
+        spent["ms"] += delay
+    return False
+
+def _payloads(c: _Client, d: Delivery) -> list[str]:
+    base = {
+        "repo": c.repo,
+        "label": d.label,
+        "status": d.status.value,
+        "delivered_at": rfc3339(d.delivered_at_ms),
+    }
+    if c.sink_invocation_id:
+        base["sink_invocation_id"] = c.sink_invocation_id
+    if c.workspace:
+        base["workspace"] = c.workspace
+    if d.output_digest:
+        base["output_digest"] = d.output_digest
+    extra = {}
+    if d.artifact != None:
+        artifact = {}
+        if d.artifact.format:
+            artifact["format"] = d.artifact.format
+        if d.artifact.uri:
+            artifact["uri"] = d.artifact.uri
+        artifact["digest_hash"] = d.artifact.digest_hash
+        artifact["digest_size"] = d.artifact.digest_size
+        extra["artifact"] = artifact
+    if d.version:
+        extra["version"] = d.version
+    if d.tag:
+        extra["tag"] = d.tag
+    if d.user_metadata:
+        extra["user_metadata"] = d.user_metadata
+    entries = []
+    e = d.execution
+    if e != None:
+        run = {
+            "command": e.command,
+            "env": redact_env(e.env, c.env_allowlist),
+            "exit_code": e.exit_code,
+            "duration_ms": e.duration_ms,
+            "locus": "local",
+            "retry_count": 0,
+        }
+        if c.where:
+            run["where"] = c.where
+        structured = last_json_object(e.stdout)
+        if structured != None:
+            run["structured_output"] = structured
+        extra["exec"] = run
+        entries = chunk_log(e.stdout, e.stderr, base["delivered_at"])
+    _drop_oversized(c, d.label, extra)
+    return build_requests(base, extra, entries)
+
+def _drop_oversized(c: _Client, label: str, extra: dict) -> None:
+    # The service answers 400 for either field above its cap, which would lose
+    # the whole record.
+    dropped = []
+    metadata = extra.get("user_metadata")
+    if metadata != None and _json_size(metadata) > _MAX_USER_METADATA_BYTES:
+        dropped.append("user_metadata ({} bytes, limit {})".format(_json_size(metadata), _MAX_USER_METADATA_BYTES))
+        extra.pop("user_metadata")
+    run = extra.get("exec")
+    structured = run.get("structured_output") if run != None else None
+    if structured != None and _json_size(structured) > _MAX_STRUCTURED_OUTPUT_BYTES:
+        dropped.append("structured_output ({} bytes, limit {})".format(_json_size(structured), _MAX_STRUCTURED_OUTPUT_BYTES))
+        run.pop("structured_output")
+    if dropped:
+        _warn_once(c, "{} is over the size the service accepts for {}; it was left out of the record".format(" and ".join(dropped), label))
+
+def _record(c: _Client, d: Delivery) -> None:
+    # `user_metadata` is whatever a `delivery_target` hook returned; a value JSON
+    # cannot hold must cost the metadata, not the record.
+    err, bodies = catch(_payloads, c, d)
+    if err:
+        err, bodies = catch(_payloads, c, Delivery(
+            label = d.label,
+            status = d.status,
+            delivered_at_ms = d.delivered_at_ms,
+            artifact = d.artifact,
+            version = d.version,
+            tag = d.tag,
+            execution = d.execution,
+        ))
+    if err:
+        _warn_once(c, "could not encode the record for {}: {}".format(d.label, err.message))
+        return
+    for i in range(len(bodies)):
+        sent = _post(c, bodies[i])
+        if sent.value == "retry":
+            queued = 0
+            for b in bodies[i:]:
+                queued += len(b)
+            if c.state["queued_bytes"] + queued > _MAX_QUEUED_BYTES:
+                _warn_once(c, "too many records waiting for the service to ingest the build; dropping {}".format(d.label))
+                return
+            c.state["queued_bytes"] += queued
+            c.state["pending"].append(bodies[i:])
+            return
+        if sent.value == "failed":
+            return
+
+def _flush(c: _Client) -> None:
+    pending = c.state["pending"]
+    c.state["pending"] = []
+    c.state["queued_bytes"] = 0
+    spent = {"ms": 0}
+    for i in range(len(pending)):
+        for body in pending[i]:
+            if not _post_with_retry(c, body, spent):
+                if spent["ms"] >= _RETRY_BUDGET_MS:
+                    dropped = len(pending) - i
+                    _warn_once(c, "the service had not ingested this build after {}s; {} delivery record(s) were not stored".format(_RETRY_BUDGET_MS // 1000, dropped))
+                    return
+                break
+
+def _decode_object(res: _Response):
+    parsed = json.try_decode(res.body, None)
+    return parsed if type(parsed) == "dict" else {}
+
+def _state_health(c: _Client) -> str:
+    """"" when the service accepts deliveries from this credential, else why not."""
+    if not c.base_url:
+        return "no Aspect credentials (run `aspect auth login` or set ASPECT_API_TOKEN)"
+    res = _request(c, "GET", "/delivery/health", None)
+    if res.status >= 200 and res.status < 300:
+        return ""
+    return _failure_detail("GET /delivery/health", res)
+
+def _state_query(c: _Client, digests: dict) -> struct:
+    """Which of `{label: output digest}` the service already holds as delivered, as
+    `{label: delivered-by text}`; `error` is set when it could not answer."""
+    if not digests:
+        return struct(delivered = {}, error = "")
+    body = {"workspace": c.workspace, "digests": digests}
+    if c.repo:
+        body["repo"] = c.repo
+    res = _request(c, "POST", "/delivery/query", json.encode(body))
+    if res.status < 200 or res.status >= 300:
+        return struct(delivered = {}, error = _failure_detail("POST /delivery/query", res))
+    delivered = {}
+    for label, found in (_decode_object(res).get("delivered") or {}).items():
+        if label not in digests or type(found) != "dict":
+            continue
+        by = "Aspect cloud, " + (found.get("delivered_at") or "earlier")
+        if found.get("invocation_id"):
+            by += ", invocation " + found["invocation_id"]
+        delivered[label] = by
+    return struct(delivered = delivered, error = "")
+
+def _state_deliver(c: _Client, label: str, digest: str, at_ms: int) -> str:
+    """Stores `digest` as delivered for `label`, with no build attached. "" on success."""
+    body = {
+        "repo": c.repo,
+        "workspace": c.workspace,
+        "label": label,
+        "status": "delivered",
+        "delivered_at": rfc3339(at_ms),
+        "output_digest": digest,
+    }
+    res = _request(c, "POST", "/delivery", json.encode(body))
+    if res.status >= 200 and res.status < 300:
+        return ""
+    return _failure_detail("POST /delivery", res)
+
+def _new(
+        ctx,
+        sink_invocation_id: str = "",
+        repo: str | None = None,
+        workspace: str = "",
+        dry_run: bool = False,
+        enabled: bool = True,
+        env_allowlist: list[str] = [],
+        pause = sleep) -> struct:
+    """A recorder for one delivery run.
+
+    `sink_invocation_id` is the BES invocation the deliveries belong to; without one the
+    service keeps only the delivered fact, not the record of the delivery. `workspace` is
+    the run's `--task:name` prefix, which scopes the state. `enabled=False` makes the
+    recorder fully inert. `repo` is `owner/name`, detected from the environment and the
+    `origin` remote when None; with none, state is kept under an empty repository.
+    `env_allowlist` adds to `DEFAULT_ENV_ALLOWLIST`.
+    """
+    creds = _credentials(ctx) if enabled else None
+    err, base_url = catch(aspect_cloud_url, ctx, "") if creds != None else (None, "")
+    authenticated = creds != None and not err
+    c = _Client(
+        ctx = ctx,
+        base_url = base_url if authenticated else "",
+        sink_invocation_id = sink_invocation_id,
+        repo = (repo if repo != None else _detect_repo(ctx)) if authenticated else "",
+        workspace = workspace,
+        where = _where(ctx) if authenticated else "",
+        env_allowlist = DEFAULT_ENV_ALLOWLIST + list(env_allowlist),
+        pause = pause,
+        state = {"warned": False, "retry_after_ms": 0, "pending": [], "queued_bytes": 0},
+    )
+    recording = authenticated and not dry_run
+    return struct(
+        authenticated = authenticated,
+        recording = recording,
+        repo = c.repo,
+        health = lambda: _state_health(c),
+        query = lambda digests: _state_query(c, digests),
+        deliver = lambda label, digest, at_ms: _state_deliver(c, label, digest, at_ms),
+        record = lambda delivery: _record(c, delivery) if recording else None,
+        flush = lambda: _flush(c) if recording else None,
+    )
+
+delivery_record = namespace(
+    new = _new,
+    Status = Status,
+    Artifact = Artifact,
+    Execution = Execution,
+    Delivery = Delivery,
+    DEFAULT_ENV_ALLOWLIST = DEFAULT_ENV_ALLOWLIST,
+    artifact = namespace(pick = pick_artifact),
+    log = namespace(new = log_new, feed = log_feed, text = log_text, bounded = log_bounded),
+    capture = namespace(new = capture_new, pump = capture_pump, drain = capture_drain, text = capture_text),
+)
+
+testonly_rfc3339 = rfc3339
+testonly_redact_env = redact_env
+testonly_artifact_format = artifact_format
+testonly_parse_blob_uri = parse_blob_uri
+testonly_last_json_object = last_json_object
+testonly_chunk_log = chunk_log
+testonly_build_requests = build_requests
+testonly_failure_detail = lambda path, status, body: _failure_detail(path, _Response(status = status, body = body))

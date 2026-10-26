@@ -1,0 +1,638 @@
+"""Unit tests for lib/delivery_record.axl.
+
+The pure functions (format detection, artifact selection from BES `File` entries,
+env redaction, log buffering and chunking, request building) are tested directly.
+The recorder runs against a struct-based fake `ctx` whose `http()` serves canned
+responses and records every request, like `deliveryd_test.axl`.
+
+Run with:
+  aspect dev test-delivery-record
+"""
+
+load("@std//time.axl", "sleep_iter")
+load("./auth_fakes.axl", "fake_auth")
+load(
+    "./delivery_record.axl",
+    "delivery_record",
+    "testonly_artifact_format",
+    "testonly_build_requests",
+    "testonly_chunk_log",
+    "testonly_failure_detail",
+    "testonly_last_json_object",
+    "testonly_parse_blob_uri",
+    "testonly_redact_env",
+    "testonly_rfc3339",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _file(name, uri = "", digest = "", length = 0):
+    return struct(name = name, uri = uri, digest = digest, length = length)
+
+_HASH = "a" * 64
+
+def _test_rfc3339(ctx):
+    _eq("epoch", testonly_rfc3339(0), "1970-01-01T00:00:00.000Z")
+    _eq("2023-11-14", testonly_rfc3339(1700000000000), "2023-11-14T22:13:20.000Z")
+    _eq("2025-10-09", testonly_rfc3339(1760000000123), "2025-10-09T08:53:20.123Z")
+    _eq("leap day", testonly_rfc3339(1709164800000), "2024-02-29T00:00:00.000Z")
+    _eq("year end", testonly_rfc3339(1735689599999), "2024-12-31T23:59:59.999Z")
+
+def _test_redact_env(ctx):
+    got = testonly_redact_env(
+        {"RUNFILES_DIR": "/r", "TOKEN": "s3cret", "UNSET": None, "REGION": "eu"},
+        ["RUNFILES_DIR", "REGION"],
+    )
+    _eq("allowlisted keep values, others redacted, unset dropped", got, {
+        "REGION": "eu",
+        "RUNFILES_DIR": "/r",
+        "TOKEN": "[redacted]",
+    })
+    _eq("nothing allowlisted", testonly_redact_env({"A": "1"}, []), {"A": "[redacted]"})
+    _eq("empty env", testonly_redact_env({}, ["A"]), {})
+    _eq("default allowlist never covers a secret-looking name", "AWS_SECRET_ACCESS_KEY" in delivery_record.DEFAULT_ENV_ALLOWLIST, False)
+
+def _test_artifact_format(ctx):
+    for name, want in [
+        ("pkg/app_1.0_amd64.deb", "deb"),
+        ("pkg/APP.DEB", "deb"),
+        ("pkg/app.tar.gz", "tar_gz"),
+        ("pkg/app.tgz", "tar_gz"),
+        ("pkg/app.tar", "tar_gz"),
+        ("pkg/app.oci.tar", "oci"),
+        ("pkg/web_image.tar", "oci"),
+        ("pkg/image.tar", "oci"),
+        ("pkg/tarball.tar", "oci"),
+        ("pkg/app", ""),
+        ("pkg/app.sh", ""),
+        ("pkg/app.tar.gz.sha256", ""),
+    ]:
+        _eq(name, testonly_artifact_format(name), want)
+
+def _test_parse_blob_uri(ctx):
+    _eq("plain", testonly_parse_blob_uri("bytestream://cache.example:443/blobs/" + _HASH + "/1234"), (_HASH, 1234))
+    _eq("instance name", testonly_parse_blob_uri("bytestream://cache/main/blobs/" + _HASH + "/7"), (_HASH, 7))
+    _eq("digest function prefix", testonly_parse_blob_uri("bytestream://cache/blobs/blake3/" + _HASH + "/7"), (_HASH, 7))
+    _eq("file uri", testonly_parse_blob_uri("file:///out/x"), None)
+    _eq("no blobs segment", testonly_parse_blob_uri("bytestream://cache/" + _HASH + "/7"), None)
+    _eq("non numeric size", testonly_parse_blob_uri("bytestream://cache/blobs/" + _HASH + "/x"), None)
+
+def _test_pick_artifact_deb(ctx):
+    files = [
+        _file("pkg/launcher.sh", uri = "bytestream://c/blobs/" + "b" * 64 + "/10", digest = "b" * 64, length = 10),
+        _file("pkg/app.deb", uri = "bytestream://cache.example/blobs/" + _HASH + "/2048", digest = _HASH, length = 2048),
+    ]
+    got = delivery_record.artifact.pick("//pkg:app", files)
+    _eq("deb wins over the launcher", got, delivery_record.Artifact(
+        format = "deb",
+        uri = "bytestream://cache.example/blobs/" + _HASH + "/2048",
+        digest_hash = _HASH,
+        digest_size = 2048,
+    ))
+
+def _test_pick_artifact_uri_handling(ctx):
+    local = [_file("pkg/app.tar.gz", uri = "file:///out/pkg/app.tar.gz", digest = _HASH, length = 5)]
+    _eq("local path is never reported", delivery_record.artifact.pick("//pkg:app", local).uri, "")
+    _eq(
+        "uri built from the bytestream prefix",
+        delivery_record.artifact.pick("//pkg:app", local, bytestream_prefix = "cache.example:443/main").uri,
+        "bytestream://cache.example:443/main/blobs/" + _HASH + "/5",
+    )
+    _eq(
+        "prefix with scheme",
+        delivery_record.artifact.pick("//pkg:app", local, bytestream_prefix = "bytestream://cache.example/").uri,
+        "bytestream://cache.example/blobs/" + _HASH + "/5",
+    )
+    from_uri = [_file("pkg/app.deb", uri = "bytestream://c/blobs/" + _HASH + "/99")]
+    got = delivery_record.artifact.pick("//pkg:app", from_uri)
+    _eq("digest recovered from the uri", (got.digest_hash, got.digest_size), (_HASH, 99))
+
+def _test_pick_artifact_without_format(ctx):
+    files = [
+        _file("pkg/other.txt", digest = "c" * 64, length = 3),
+        _file("pkg/app", digest = _HASH, length = 8),
+    ]
+    got = delivery_record.artifact.pick("//pkg:app", files)
+    _eq("target-named output is the artifact", (got.format, got.digest_hash), ("", _HASH))
+    _eq("lone output", delivery_record.artifact.pick("//pkg:app", [_file("pkg/x", digest = _HASH, length = 1)]).digest_hash, _HASH)
+    _eq("ambiguous outputs", delivery_record.artifact.pick("//pkg:app", [_file("pkg/a", digest = _HASH), _file("pkg/b", digest = _HASH)]), None)
+
+def _test_pick_artifact_missing_digest(ctx):
+    _eq("no digest and no blob uri", delivery_record.artifact.pick("//pkg:app", [_file("pkg/app.deb", uri = "file:///x")]), None)
+    _eq("no outputs", delivery_record.artifact.pick("//pkg:app", []), None)
+
+def _test_pick_artifact_oci_layout(ctx):
+    files = [
+        _file("pkg/image/blobs/sha256/" + "d" * 64, digest = "d" * 64, length = 100),
+        _file("pkg/image/oci-layout", digest = "e" * 64, length = 31),
+        _file("pkg/image/index.json", uri = "bytestream://c/blobs/" + _HASH + "/200", digest = _HASH, length = 200),
+    ]
+    got = delivery_record.artifact.pick("//pkg:image", files)
+    _eq("layout is identified by its index.json", (got.format, got.digest_hash, got.digest_size), ("oci", _HASH, 200))
+    stray = [_file("pkg/index.json", digest = _HASH, length = 200)]
+    _eq("index.json alone is not a layout", delivery_record.artifact.pick("//pkg:image", stray).format, "")
+
+def _test_log_buffer(ctx):
+    buf = delivery_record.log.new(head = 8, tail = 8)
+    delivery_record.log.feed(buf, bytes("hello "))
+    delivery_record.log.feed(buf, bytes("wor"))
+    _eq("under the caps nothing is omitted", delivery_record.log.text(buf), "hello wor")
+
+    buf = delivery_record.log.new(head = 4, tail = 4)
+    for chunk in ["abcd", "efgh", "ijkl", "mnop"]:
+        delivery_record.log.feed(buf, bytes(chunk))
+    _eq("head and tail kept, middle marked", delivery_record.log.text(buf), "abcd\n[... 8 bytes of output omitted ...]\nmnop")
+
+    buf = delivery_record.log.new(head = 4, tail = 4)
+    delivery_record.log.feed(buf, bytes("0123456789abcdefghij"))
+    _eq("one big chunk", delivery_record.log.text(buf), "0123\n[... 12 bytes of output omitted ...]\nghij")
+
+    big = delivery_record.log.new(head = 16, tail = 16)
+    for _ in range(200):
+        delivery_record.log.feed(big, bytes("x" * 100))
+    _eq("memory stays at the caps", (len(big["head"]), len(big["tail"]), big["total"]), (16, 16, 20000))
+
+def _fake_readable(chunks):
+    """Serves `chunks` one per read, then empty bytes (the end so far)."""
+    state = {"i": 0}
+
+    def read(n):
+        if state["i"] >= len(chunks):
+            return bytes("")
+        chunk = chunks[state["i"]]
+        state["i"] += 1
+        return bytes(chunk)
+
+    return struct(read = read)
+
+def _test_capture(ctx):
+    files = {
+        "/o": _fake_readable(["out1 ", "out2"]),
+        "/e": _fake_readable(["err1"]),
+    }
+    cap = delivery_record.capture.new(lambda path: files[path], "/o", "/e")
+    written = {"out": [], "err": []}
+    sinks = [
+        struct(write = lambda b: written["out"].append(str(b)), flush = lambda: None),
+        struct(write = lambda b: written["err"].append(str(b)), flush = lambda: None),
+    ]
+    _eq("pump reports movement", delivery_record.capture.pump(cap, sinks), True)
+    _eq("stdout forwarded as it arrived", "".join(written["out"]), "out1 out2")
+    _eq("stderr forwarded to its own sink", "".join(written["err"]), "err1")
+    _eq("idle pump reports none", delivery_record.capture.pump(cap, sinks), False)
+    delivery_record.capture.drain(cap, sinks)
+    _eq("buffered text", delivery_record.capture.text(cap), ("out1 out2", "err1"))
+
+def _test_capture_tails_a_live_child(ctx):
+    """A real child writing to files: its output reaches the sinks while it is
+    still running, and the buffered text is complete after the drain."""
+    out_path = ctx.std.env.temp_dir() + "/delivery-record-test.stdout"
+    err_path = ctx.std.env.temp_dir() + "/delivery-record-test.stderr"
+    child = ctx.std.process.command("/bin/sh") \
+        .args(["-c", "echo first; echo oops 1>&2; sleep 1; echo second"]) \
+        .stdout(ctx.std.fs.create(out_path)) \
+        .stderr(ctx.std.fs.create(err_path)) \
+        .spawn()
+    cap = delivery_record.capture.new(ctx.std.fs.open, out_path, err_path)
+    written = {"out": [], "err": []}
+    sinks = [
+        struct(write = lambda b: written["out"].append(str(b)), flush = lambda: None),
+        struct(write = lambda b: written["err"].append(str(b)), flush = lambda: None),
+    ]
+    forwarded_while_running = ""
+    for _tick in sleep_iter(50):
+        delivery_record.capture.pump(cap, sinks)
+        if child.try_wait() != None:
+            break
+        forwarded_while_running = "".join(written["out"])
+    child.wait()
+    delivery_record.capture.drain(cap, sinks)
+    ctx.std.fs.remove_file(out_path)
+    ctx.std.fs.remove_file(err_path)
+    _eq("first line arrived before the child exited", forwarded_while_running, "first\n")
+    _eq("everything arrived once the child exited", ("".join(written["out"]), "".join(written["err"])), ("first\nsecond\n", "oops\n"))
+    _eq("buffered text", delivery_record.capture.text(cap), ("first\nsecond\n", "oops\n"))
+
+def _test_last_json_object(ctx):
+    _eq("last line", testonly_last_json_object("building\n{\"image\": \"x@sha256:1\"}\n"), {"image": "x@sha256:1"})
+    _eq("only earlier lines are json", testonly_last_json_object("{\"a\": 1}\ndone"), None)
+    _eq("not an object", testonly_last_json_object("[1, 2]"), None)
+    _eq("invalid json", testonly_last_json_object("{oops"), None)
+    _eq("empty", testonly_last_json_object(""), None)
+
+def _test_chunk_log(ctx):
+    entries = testonly_chunk_log("a" * 5, "b" * 3, "T", piece_chars = 2)
+    _eq("seqs increase across streams", [e["seq"] for e in entries], [0, 1, 2, 3, 4])
+    _eq("stdout pieces", ["".join([e["stdout"] for e in entries])], ["aaaaa"])
+    _eq("stderr pieces", ["".join([e["stderr"] for e in entries])], ["bbb"])
+    _eq("each entry carries one stream", [(len(e["stdout"]) > 0) != (len(e["stderr"]) > 0) for e in entries], [True] * 5)
+    _eq("no output no entries", testonly_chunk_log("", "", "T"), [])
+
+def _test_build_requests_small(ctx):
+    base = {"label": "//a:b", "status": "delivered"}
+    bodies = testonly_build_requests(base, {"exec": {"exit_code": 0}}, testonly_chunk_log("hi", "", "T"))
+    _eq("one request", len(bodies), 1)
+    decoded = json.decode(bodies[0])
+    _eq("base + extra + log", (decoded["label"], decoded["exec"], len(decoded["log"])), ("//a:b", {"exit_code": 0}, 1))
+
+def _test_build_requests_split_under_1mib(ctx):
+    base = {"sink_invocation_id": "i", "repo": "o/r", "label": "//a:b", "status": "delivered", "delivered_at": "T"}
+    ugly = "\u0001\"\\\n" * (3 * 1024 * 1024 // 4)
+    entries = testonly_chunk_log(ugly, ugly, "T")
+    bodies = testonly_build_requests(base, {"exec": {"exit_code": 0}}, entries)
+    if len(bodies) < 2:
+        fail("a large log must split into several requests, got %d" % len(bodies))
+    seqs = []
+    for i in range(len(bodies)):
+        if len(bytes(bodies[i])) >= 1024 * 1024:
+            fail("request %d is %d bytes, over 1 MiB" % (i, len(bytes(bodies[i]))))
+        decoded = json.decode(bodies[i])
+        _eq("request %d repeats the key fields" % i, (decoded["sink_invocation_id"], decoded["label"], decoded["status"], decoded["delivered_at"]), ("i", "//a:b", "delivered", "T"))
+        _eq("only the first request carries exec", "exec" in decoded, i == 0)
+        for e in decoded.get("log", []):
+            seqs.append(e["seq"])
+    _eq("every entry sent once, in order", seqs, list(range(len(entries))))
+
+def _test_build_requests_drops_oversized_metadata(ctx):
+    base = {"label": "//a:b"}
+    huge = {"user_metadata": {"k": "v" * (1024 * 1024)}, "exec": {"exit_code": 0}}
+    bodies = testonly_build_requests(base, huge, [])
+    _eq("one small request", len(bodies), 1)
+    _eq("metadata dropped, exec kept", ("user_metadata" in json.decode(bodies[0]), "exec" in json.decode(bodies[0])), (False, True))
+
+def _res(status, body = "", headers = None):
+    return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers or [])
+
+def _future(res):
+    return struct(catch = lambda: struct(block = lambda: (None, res)), block = lambda: res)
+
+def _error_future(message):
+    return struct(catch = lambda: struct(block = lambda: (error(message), None)), block = lambda: fail(message))
+
+_BASE = "https://api.aspect.build"
+
+def _ctx(responses, calls, credentials = struct(access_token = "jwt"), env = {}):
+    """`responses` maps "<METHOD> <path>" to a response, a list served in order
+    (the last repeating), or None for a transport error. Every request is
+    appended to `calls`."""
+
+    def respond(method, url, headers, data):
+        path = url[len(_BASE):]
+        key = method + " " + path.partition("?")[0]
+        calls.append(struct(method = method, path = path, headers = headers, body = json.try_decode(data, None) if data else None))
+        if key not in responses:
+            fail("unexpected request: " + key)
+        res = responses[key]
+        if type(res) == "list":
+            n = len([c for c in calls if c.method == method and c.path.partition("?")[0] == path.partition("?")[0]])
+            res = res[min(n, len(res)) - 1]
+        if res == None:
+            return _error_future("connection refused")
+        return _future(res)
+
+    http = struct(
+        get = lambda url, headers = {}: respond("GET", url, headers, None),
+        post = lambda url, headers = {}, data = None: respond("POST", url, headers, data),
+    )
+    return struct(
+        aspect = struct(auth = fake_auth(credentials = credentials)),
+        http = lambda: http,
+        std = struct(
+            env = struct(var = lambda name: env.get(name)),
+            io = struct(stdout = struct(is_tty = False)),
+        ),
+    )
+
+def _recorder(responses, calls, pauses = None, **kwargs):
+    recorded = pauses if pauses != None else []
+    ctx = kwargs.pop("ctx", None) or _ctx(responses, calls, env = kwargs.pop("env", {}))
+    return delivery_record.new(
+        ctx,
+        sink_invocation_id = kwargs.pop("sink_invocation_id", "11111111-1111-1111-1111-111111111111"),
+        repo = kwargs.pop("repo", "aspect-build/aspect-cli"),
+        pause = lambda ms: recorded.append(ms),
+        **kwargs
+    )
+
+def _delivered(label = "//pkg:app", execution = None, artifact = None, **kwargs):
+    return delivery_record.Delivery(
+        label = label,
+        status = delivery_record.Status("delivered"),
+        delivered_at_ms = 1700000000000,
+        artifact = artifact,
+        execution = execution,
+        **kwargs
+    )
+
+def _test_record_posts_the_whole_record(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200, {"recorded": True})}, calls, env = {"ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME": "runner-7"})
+    _eq("recording", rec.recording, True)
+    rec.record(_delivered(
+        artifact = delivery_record.Artifact(format = "deb", uri = "bytestream://c/blobs/" + _HASH + "/9", digest_hash = _HASH, digest_size = 9),
+        version = "1.2.3",
+        tag = "v1.2.3",
+        user_metadata = {"image": "x"},
+        execution = delivery_record.Execution(
+            command = ["/out/push", "--flag"],
+            env = {"RUNFILES_DIR": "/r", "API_TOKEN": "s3cret"},
+            exit_code = 0,
+            duration_ms = 1234,
+            stdout = "pushing\n{\"digest\": \"sha256:1\"}\n",
+            stderr = "warn\n",
+        ),
+    ))
+    _eq("one request", len(calls), 1)
+    call = calls[0]
+    _eq("endpoint", (call.method, call.path), ("POST", "/delivery"))
+    _eq("bearer auth", call.headers["Authorization"], "Bearer jwt")
+    body = call.body
+    _eq("identity", (body["sink_invocation_id"], body["repo"], body["label"], body["status"], body["delivered_at"]), ("11111111-1111-1111-1111-111111111111", "aspect-build/aspect-cli", "//pkg:app", "delivered", "2023-11-14T22:13:20.000Z"))
+    _eq("artifact", body["artifact"], {"format": "deb", "uri": "bytestream://c/blobs/" + _HASH + "/9", "digest_hash": _HASH, "digest_size": 9})
+    _eq("version and tag", (body["version"], body["tag"], body["user_metadata"]), ("1.2.3", "v1.2.3", {"image": "x"}))
+    run = body["exec"]
+    _eq("command and result", (run["command"], run["exit_code"], run["duration_ms"], run["locus"], run["retry_count"]), (["/out/push", "--flag"], 0, 1234, "local", 0))
+    _eq("env redacted by allowlist", run["env"], {"API_TOKEN": "[redacted]", "RUNFILES_DIR": "/r"})
+    _eq("where", run["where"], "runner-7")
+    _eq("structured output from the last stdout line", run["structured_output"], {"digest": "sha256:1"})
+    _eq("log", [(e["seq"], e["stdout"], e["stderr"]) for e in body["log"]], [(0, "pushing\n{\"digest\": \"sha256:1\"}\n", ""), (1, "", "warn\n")])
+
+def _test_record_minimal(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls, repo = None)
+    rec.record(delivery_record.Delivery(label = "//a:b", status = delivery_record.Status("skipped"), delivered_at_ms = 0))
+    body = calls[0].body
+    _eq("optional parts omitted", sorted(body.keys()), ["delivered_at", "label", "repo", "sink_invocation_id", "status"])
+    _eq("status", body["status"], "skipped")
+
+def _test_record_extra_env_allowlist(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls, env_allowlist = ["STAGE"])
+    rec.record(_delivered(execution = delivery_record.Execution(command = ["x"], env = {"STAGE": "prod", "RUNFILES_DIR": "/r", "OTHER": "o"}, exit_code = 1, duration_ms = 1)))
+    _eq("allowlist extends the defaults", calls[0].body["exec"]["env"], {"OTHER": "[redacted]", "RUNFILES_DIR": "/r", "STAGE": "prod"})
+
+def _test_record_unencodable_metadata_costs_only_the_metadata(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls)
+    rec.record(_delivered(user_metadata = {"fn": lambda: None}))
+    _eq("still recorded", len(calls), 1)
+    _eq("without the metadata", "user_metadata" in calls[0].body, False)
+
+def _test_record_is_inert_without_credentials_or_when_dry(ctx):
+    calls = []
+    anon = delivery_record.new(_ctx({}, calls, credentials = None), sink_invocation_id = "i", repo = "o/r")
+    _eq("no credentials: cannot record", (anon.authenticated, anon.recording), (False, False))
+    anon.record(_delivered())
+    anon.flush()
+    _eq("health says why", "no Aspect credentials" in anon.health(), True)
+    _eq("query is an error without a request", anon.query({"//a:b": "aa"}).error != "", True)
+    _eq("no request was made", calls, [])
+
+    dry = _recorder({}, calls, dry_run = True)
+    _eq("dry run never records", (dry.authenticated, dry.recording), (True, False))
+    dry.record(_delivered())
+    _eq("dry run sent nothing", calls, [])
+
+    no_sink = _recorder({}, calls, sink_invocation_id = "")
+    _eq("no invocation id: the delivered fact is still recorded", (no_sink.authenticated, no_sink.recording), (True, True))
+
+    off = _recorder({}, calls, enabled = False)
+    _eq("disabled is fully inert", (off.authenticated, off.recording), (False, False))
+
+    no_repo = _recorder({}, calls, repo = "")
+    _eq("no repo: records still go out", (no_repo.authenticated, no_repo.recording), (True, True))
+    _eq("nothing was requested", calls, [])
+
+def _test_record_large_log_is_several_posts(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls)
+    text = "line of output\n" * 200000
+    rec.record(_delivered(execution = delivery_record.Execution(command = ["x"], env = {}, exit_code = 0, duration_ms = 1, stdout = text)))
+    if len(calls) < 2:
+        fail("a 3 MB log must take several requests, got %d" % len(calls))
+    _eq("only the first request carries exec", [c.body.get("exec") != None for c in calls], [True] + [False] * (len(calls) - 1))
+    _eq("the log arrives complete", "".join([e["stdout"] for c in calls for e in c.body.get("log", [])]), text)
+
+def _test_record_rejection_warns_and_moves_on(ctx):
+    for status in [401, 403, 400, 500]:
+        calls = []
+        rec = _recorder({"POST /delivery": _res(status, {"error": "no"})}, calls)
+        rec.record(_delivered(label = "//a:one"))
+        rec.record(_delivered(label = "//a:two"))
+        _eq("HTTP %d: not retried" % status, [c.body["label"] for c in calls], ["//a:one", "//a:two"])
+        rec.flush()
+        _eq("HTTP %d: nothing pending" % status, len(calls), 2)
+
+def _test_record_transport_error_does_not_raise(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": None}, calls)
+    rec.record(_delivered())
+    rec.flush()
+    _eq("one attempt", len(calls), 1)
+
+def _test_unknown_invocation_is_retried_by_flush(ctx):
+    for status in [409, 503]:
+        calls = []
+        pauses = []
+        retry_after = [("retry-after", "2")]
+        rec = _recorder({"POST /delivery": [_res(status, headers = retry_after), _res(status, headers = retry_after), _res(200)]}, calls, pauses)
+        rec.record(_delivered())
+        _eq("first try is immediate", len(calls), 1)
+        _eq("record() never sleeps", pauses, [])
+        rec.flush()
+        _eq("%d: retried until accepted" % status, len(calls), 3)
+        _eq("%d: Retry-After honoured" % status, pauses, [2000])
+
+def _test_503_without_retry_after_is_permanent(ctx):
+    calls = []
+    pauses = []
+    rec = _recorder({"POST /delivery": _res(503, {"code": "unavailable", "message": "no write pool"})}, calls, pauses)
+    rec.record(_delivered(label = "//a:one"))
+    rec.record(_delivered(label = "//a:two"))
+    rec.flush()
+    _eq("each record tried once", [c.body["label"] for c in calls], ["//a:one", "//a:two"])
+    _eq("never waited", pauses, [])
+
+def _test_failure_detail_reads_message(ctx):
+    for body, want in [
+        ({"code": "invalid", "message": "label is too long"}, "label is too long"),
+        ({"error": "legacy"}, "legacy"),
+        ("plain text", "plain text"),
+    ]:
+        detail = testonly_failure_detail("POST /delivery", 400, body if type(body) == "string" else json.encode(body))
+        if want not in detail:
+            fail("detail %r lacks %r" % (detail, want))
+
+def _test_record_drops_oversized_fields(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls)
+    big = {"k": "v" * (65 * 1024)}
+    rec.record(_delivered(user_metadata = big))
+    _eq("metadata over 64 KiB omitted, record sent", ("user_metadata" in calls[0].body, calls[0].body["label"]), (False, "//pkg:app"))
+    ok = {"k": "v" * (60 * 1024)}
+    rec.record(_delivered(user_metadata = ok))
+    _eq("metadata under the cap kept", "user_metadata" in calls[1].body, True)
+    huge = json.encode({"k": "v" * (257 * 1024)})
+    run = delivery_record.Execution(command = ["x"], env = {}, exit_code = 0, duration_ms = 1, stdout = huge + "\n")
+    rec.record(_delivered(execution = run))
+    _eq("structured_output over 256 KiB omitted", ("structured_output" in calls[2].body["exec"], calls[2].body["exec"]["exit_code"]), (False, 0))
+    small = delivery_record.Execution(command = ["x"], env = {}, exit_code = 0, duration_ms = 1, stdout = '{"a": 1}\n')
+    rec.record(_delivered(execution = small))
+    _eq("small structured_output kept", calls[3].body["exec"]["structured_output"], {"a": 1})
+
+def _test_unknown_invocation_gives_up_after_a_minute(ctx):
+    calls = []
+    pauses = []
+    rec = _recorder({"POST /delivery": _res(409)}, calls, pauses)
+    rec.record(_delivered(label = "//a:one"))
+    rec.record(_delivered(label = "//a:two"))
+    rec.flush()
+    waited = 0
+    for ms in pauses:
+        waited += ms
+    _eq("total wait is bounded by 60s", waited, 60000)
+    _eq("backoff doubles up to its cap", pauses[:6], [1000, 2000, 4000, 8000, 10000, 10000])
+    labels = [c.body["label"] for c in calls]
+    _eq("the second record is dropped with the first, not retried for another minute", len([l for l in labels if l == "//a:two"]), 1)
+
+def _test_retry_keeps_log_chunks_in_order(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": [_res(409), _res(200)]}, calls, [])
+    text = "line of output\n" * 200000
+    rec.record(_delivered(execution = delivery_record.Execution(command = ["x"], env = {}, exit_code = 0, duration_ms = 1, stdout = text)))
+    _eq("only the first body went out before the 409", len(calls), 1)
+    rec.flush()
+    _eq("the rest follow", "".join([e["stdout"] for c in calls[1:] for e in c.body.get("log", [])]) != "", True)
+    _eq("first body is resent first", calls[1].body.get("exec") != None, True)
+
+def _test_record_carries_workspace_and_output_digest(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls, workspace = "release")
+    rec.record(_delivered(output_digest = "ab12"))
+    _eq("keyed by workspace and output digest", (calls[0].body["workspace"], calls[0].body["output_digest"]), ("release", "ab12"))
+
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls)
+    rec.record(_delivered())
+    _eq("neither is sent when unset", ("workspace" in calls[0].body, "output_digest" in calls[0].body), (False, False))
+
+def _test_record_without_a_build_omits_the_invocation(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls, sink_invocation_id = "")
+    rec.record(_delivered(output_digest = "ab12"))
+    _eq("one request", len(calls), 1)
+    _eq("no invocation id in the body", "sink_invocation_id" in calls[0].body, False)
+
+def _test_state_health(ctx):
+    calls = []
+    rec = _recorder({"GET /delivery/health": _res(200, {"status": "ok"})}, calls)
+    _eq("healthy", rec.health(), "")
+    _eq("bearer auth", (calls[0].method, calls[0].path, calls[0].headers["Authorization"]), ("GET", "/delivery/health", "Bearer jwt"))
+    for status in (401, 403, 503):
+        why = _recorder({"GET /delivery/health": _res(status, {"message": "nope"})}, []).health()
+        _eq("HTTP %d is a reason" % status, ("HTTP %d" % status) in why and "nope" in why, True)
+    _eq("transport error", "unreachable" in _recorder({"GET /delivery/health": None}, []).health(), True)
+
+def _test_state_query(ctx):
+    calls = []
+    answer = {"delivered": {"//a:one": {"delivered_at": "2025-01-01T00:00:00Z", "invocation_id": "inv-1"}, "//a:two": {"delivered_at": "2025-01-02T00:00:00Z", "invocation_id": None}, "//a:unasked": {"delivered_at": "x"}}}
+    rec = _recorder({"POST /delivery/query": _res(200, answer)}, calls, workspace = "release")
+    got = rec.query({"//a:one": "aa", "//a:two": "bb", "//a:three": "cc"})
+    _eq("no error", got.error, "")
+    _eq("the body names repo, workspace and digests", calls[0].body, {"repo": "aspect-build/aspect-cli", "workspace": "release", "digests": {"//a:one": "aa", "//a:two": "bb", "//a:three": "cc"}})
+    _eq("only asked-about labels come back, with who delivered them", got.delivered, {
+        "//a:one": "Aspect cloud, 2025-01-01T00:00:00Z, invocation inv-1",
+        "//a:two": "Aspect cloud, 2025-01-02T00:00:00Z",
+    })
+
+    calls = []
+    rec = _recorder({}, calls)
+    _eq("nothing to ask", (rec.query({}).delivered, calls), ({}, []))
+
+    no_repo = _recorder({"POST /delivery/query": _res(200, {"delivered": {}})}, calls, repo = "")
+    no_repo.query({"//a:b": "aa"})
+    _eq("no repo: the field is left out", "repo" in calls[0].body, False)
+
+    for status in (401, 500):
+        got = _recorder({"POST /delivery/query": _res(status, {"message": "bad"})}, []).query({"//a:b": "aa"})
+        _eq("HTTP %d is an error, never 'not delivered'" % status, (got.delivered, "HTTP %d" % status in got.error), ({}, True))
+    _eq("a body that is not JSON delivers nothing", _recorder({"POST /delivery/query": _res(200, "not json")}, []).query({"//a:b": "aa"}).delivered, {})
+
+def _test_state_deliver(ctx):
+    calls = []
+    rec = _recorder({"POST /delivery": _res(200)}, calls, workspace = "release", sink_invocation_id = "")
+    _eq("stored", rec.deliver("//a:b", "ab12", 1700000000000), "")
+    _eq("a delivered fact with no build", calls[0].body, {
+        "repo": "aspect-build/aspect-cli",
+        "workspace": "release",
+        "label": "//a:b",
+        "status": "delivered",
+        "delivered_at": "2023-11-14T22:13:20.000Z",
+        "output_digest": "ab12",
+    })
+    why = _recorder({"POST /delivery": _res(403, {"message": "no"})}, []).deliver("//a:b", "ab12", 0)
+    _eq("a refusal is returned", "HTTP 403" in why, True)
+
+def _test_log_bounded(ctx):
+    _eq("short text unchanged", delivery_record.log.bounded("abc"), "abc")
+    huge = "y" * (3 * 1024 * 1024)
+    got = delivery_record.log.bounded(huge)
+    if len(got) > 2 * 1024 * 1024 + 100:
+        fail("bounded text is %d chars" % len(got))
+    _eq("marker names the omitted size", "[... %d bytes of output omitted ...]" % (1024 * 1024) in got, True)
+
+_UNIT_TESTS = [
+    _test_rfc3339,
+    _test_redact_env,
+    _test_artifact_format,
+    _test_parse_blob_uri,
+    _test_pick_artifact_deb,
+    _test_pick_artifact_uri_handling,
+    _test_pick_artifact_without_format,
+    _test_pick_artifact_missing_digest,
+    _test_pick_artifact_oci_layout,
+    _test_log_buffer,
+    _test_capture,
+    _test_capture_tails_a_live_child,
+    _test_last_json_object,
+    _test_chunk_log,
+    _test_build_requests_small,
+    _test_build_requests_split_under_1mib,
+    _test_build_requests_drops_oversized_metadata,
+    _test_record_posts_the_whole_record,
+    _test_record_minimal,
+    _test_record_extra_env_allowlist,
+    _test_record_unencodable_metadata_costs_only_the_metadata,
+    _test_record_is_inert_without_credentials_or_when_dry,
+    _test_record_large_log_is_several_posts,
+    _test_record_rejection_warns_and_moves_on,
+    _test_record_transport_error_does_not_raise,
+    _test_unknown_invocation_is_retried_by_flush,
+    _test_unknown_invocation_gives_up_after_a_minute,
+    _test_503_without_retry_after_is_permanent,
+    _test_failure_detail_reads_message,
+    _test_record_drops_oversized_fields,
+    _test_retry_keeps_log_chunks_in_order,
+    _test_record_carries_workspace_and_output_digest,
+    _test_record_without_a_build_omits_the_invocation,
+    _test_state_health,
+    _test_state_query,
+    _test_state_deliver,
+    _test_log_bounded,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("delivery_record.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+delivery_record_tests = task(
+    summary = "Run the delivery_record AXL unit tests.",
+    kind = "test-delivery-record",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

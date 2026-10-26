@@ -1,0 +1,62 @@
+"""Aspect Cloud as the delivery state backend: the service that answers "was this output
+already delivered?" for `aspect delivery`, in place of deliveryd or Redis.
+
+State is kept by the service per organization (the caller's own), repository and
+`--task:name` prefix. `query` asks which `{label: output digest}` pairs were delivered and
+`deliver` stores one; `record` and `delete` have nothing to do, because nothing is staged
+before a delivery and a failed one never stores a digest. The rich record of each delivery
+(command, output, artifact) goes through `delivery_record.axl` alongside.
+
+Select it from a config.axl; without Aspect credentials its `status` says so and the task
+reports it like any unreachable backend:
+
+    load("@aspect//delivery_state.axl", "DeliveryState", "cloud_state")
+
+    def config(ctx: ConfigContext):
+        if DeliveryState in ctx.traits:
+            ctx.traits[DeliveryState].connect = cloud_state.connect
+"""
+
+load("@std//time.axl", "time")
+load("./aspect_cloud_api.axl", "aspect_cloud_url")
+load("./delivery_record.axl", "delivery_record")
+load("./delivery_state.axl", "delivery_state")
+
+API_VERSION = 1
+
+def _new(ctx, params: delivery_state.Params) -> delivery_state.Backend:
+    """Connect to the service and probe it, once. The probe is reported through `.status`
+    rather than raised, like every backend, so a missing credential or an unreachable
+    service is a startup error the task concludes its own surface for."""
+    rec = delivery_record.new(ctx, workspace = params.prefix)
+    err, endpoint = catch(aspect_cloud_url, ctx, "/delivery")
+    endpoint = "" if err else endpoint
+    why = rec.health() if rec.authenticated else "no Aspect credentials (run `aspect auth login` or set ASPECT_API_TOKEN)"
+    status = delivery_state.Health(ok = not why, version = API_VERSION, status = "ok" if not why else "", error = why)
+
+    def query(digests: dict) -> dict:
+        got = rec.query(digests)
+        if got.error:
+            fail("Aspect cloud query failed: " + got.error)
+        return got.delivered
+
+    def deliver(label: str, digest: str, meta: dict = {}) -> None:
+        failure = rec.deliver(label, digest, time.now_ms())
+        if failure:
+            fail("Aspect cloud could not store the delivery: " + failure)
+
+    return delivery_state.Backend(
+        endpoint = endpoint,
+        describe = "Aspect cloud" + ((" · " + rec.repo) if rec.repo else ""),
+        status = status,
+        health = lambda: delivery_state.Health(ok = not rec.health(), version = API_VERSION),
+        record = lambda label, digest: None,
+        query = query,
+        deliver = deliver,
+        delete = lambda digest: None,
+    )
+
+cloud_state = namespace(
+    connect = _new,
+    API_VERSION = API_VERSION,
+)

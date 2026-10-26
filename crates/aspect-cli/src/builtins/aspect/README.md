@@ -171,9 +171,14 @@ aspect delivery --mode=always                   # always deliver (skip change de
 aspect delivery --dry-run                       # preview without delivering
 aspect delivery --dry-run=build                 # preview, but build the pending targets too
 aspect delivery --force-target=//pkg/foo:release  # force one target through
+aspect delivery --verify                        # run the tests that depend on the deliverables first; a failure blocks everything
+aspect delivery --verify=skip                   # skip only the targets a failing test depends on
+aspect delivery --verify=warn                   # deliver everything, warn about failures
 ```
 
 Phase 1 builds the user's targets with the `hashsum_aspect` to compute action digests. Phase 2 queries the remote cache for those digests via `--experimental_remote_require_cached`. Phase 3 builds the pending targets and invokes their delivery entrypoints. Outcome buckets: `ok` / `skip` (already delivered) / `warn` / `fail` / `pending`.
+
+`--verify[=block|skip|warn]` adds a phase between change detection and delivery: it queries `kind(".*_test rule", rdeps(//..., <targets to deliver>))` and runs the result as one `bazel test --keep_going`, streamed to the same build-event backends as the build, and the value says what a failing test does. `block` (a bare `--verify`) delivers nothing and exits with Bazel's code. `skip` asks Bazel which of the targets each failed test depends on (`deps(<test>) intersect <targets>`), marks exactly those `FAIL` with the failing tests named, delivers the rest, and still exits non-zero so CI goes red; they are not recorded as delivered, so the next run retries them. `warn` delivers everything and only warns. A target no test depends on always counts as verified. Only targets that would be delivered are verified, so a run where everything is already delivered runs no tests, and `--dry-run` skips it. A test is verified against a deliverable only if it depends on it, so a test that exercises the package or image (through `data` or `deps`) counts and an unrelated one does not. The test run also fills the delivery's Verified count: Aspect cloud counts the tests of builds with the same repository and commit as the delivery.
 
 `--dry-run` is tri-state (`false` / `true` / `build`). A preview skips phase 3: it exists to put the pending targets' runfiles on disk for a dispatch that a dry-run never performs, so a preview neither stamps nor materializes release artifacts. `--dry-run=build` opts that build back in for previews that need the manifest's per-target on-disk paths or the `not runnable` check.
 
@@ -188,6 +193,26 @@ def config(ctx: ConfigContext):
     if DeliveryState in ctx.traits:
         ctx.traits[DeliveryState].connect = redis_state.connect
 ```
+
+Aspect cloud as the state backend: `cloud_state.connect` ([`private/lib/delivery_cloud.axl`](private/lib/delivery_cloud.axl)) keeps the "already delivered" state in the Aspect cloud delivery backend instead of deliveryd or Redis. It needs Aspect credentials and nothing else; the organization is the credential's own. Select it the same way:
+
+```python
+load("@aspect//delivery_state.axl", "DeliveryState", "cloud_state")
+
+def config(ctx: ConfigContext):
+    if DeliveryState in ctx.traits:
+        ctx.traits[DeliveryState].connect = cloud_state.connect
+```
+
+State is kept per repository and `--task:name[:--salt]` prefix: a target is skipped when its digest was already delivered under the same prefix, so every target is covered, including plain executables, and a rollback to an earlier digest still skips only while that digest is kept. A digest is stored only after a successful delivery, so a failed one is retried. A superseded digest is kept for 90 days. Without credentials the backend reports itself unavailable and the task stops at startup, like an unreachable deliveryd.
+
+Aspect cloud records: with Aspect credentials (`aspect auth login` or `ASPECT_API_TOKEN`) every delivery attempt (and every skip) is also `POST`ed to Aspect cloud (`POST /delivery`, [`private/lib/delivery_record.axl`](private/lib/delivery_record.axl)), whichever state backend is in use. The record attaches to the phase-1 build when one was uploaded to a BES backend; without one only the delivered fact is kept. Without credentials nothing is recorded and nothing else changes.
+
+- **Artifact.** Read from phase 1's BES `named_set_of_files` / `target_completed` events (the same invocation the record points at; phase 3 reports local `file://` paths and its stamped digests differ every run). The first default output named `*.deb`, `*.tar.gz` / `*.tgz` / `*.tar` (format `tar_gz`), an OCI image tarball, or an OCI layout's `index.json` wins; otherwise the output named like the target, or the only output, is the artifact with no `format`. `uri` is its `bytestream://` URI (or one built from `--remote_bytestream_uri_prefix` and the digest), `digest_hash` / `digest_size` come from `File.digest` / `File.length` (or the URI's `/blobs/<hash>/<size>`). No digest, no `artifact`.
+- **Change detection.** Not part of recording: with `cloud_state` the same service answers `POST /delivery/query` for `{label: output digest}`, the digest the other backends key on.
+- **What is recorded.** `exec` has the argv, the child's environment with only allowlisted names carrying values (`[redacted]` otherwise; `--record-env-allowlist` extends the built-in list), exit code, duration, `locus: local`, `where` (runner instance name, Buildkite agent, `RUNNER_NAME` or `HOSTNAME`), `retry_count: 0`, and `structured_output`, the last stdout line when it is a JSON object. `user_metadata` is the `DeliveryTrait.delivery_target` hook's `custom` dict; a string `version` / `tag` key in it also fills the record's `version` / `tag`. The console output is kept at its first and last 1 MiB per stream and sent in chunks, each request under 1 MiB.
+- **Capture.** A serial delivery (`--max-parallelization=1`) used to inherit the console. While recording it writes to files that are tailed to the console as they grow, so the output still streams live, but the deliverable no longer sees a terminal.
+- **Failure handling.** Recording never fails a delivery: a 401 / 403 / other error or a transport failure warns once and the run continues; a 409 / 503 (BES not ingested yet) is retried with backoff for up to 60 s after the deliveries finish, then dropped with a warning. `--dry-run` records nothing; `--record-deliveries=false` switches the whole thing off.
 
 ---
 
@@ -233,5 +258,6 @@ Behavior notes:
 | [lib/format_results.axl](lib/format_results.axl) | `init_data`, `render_check_output`, `format_summary_title` | format |
 | [lib/gazelle_results.axl](lib/gazelle_results.axl) | `init_data`, `render_check_output`, `gazelle_summary_title` | gazelle |
 | [lib/delivery_results.axl](lib/delivery_results.axl) | `init_data`, `add_result`, `render_check_output`, `delivery_summary_title` | delivery |
+| [lib/delivery_record.axl](lib/delivery_record.axl) | `delivery_record.new`, `.artifact.pick`, `.apply_last_delivered`, `.capture.*`, `.log.*`, `Delivery` / `Artifact` / `Execution` records | delivery |
 
 Each `*_results.axl` derives its `init_data()` from `bazel_results.init_data()` (so `process_event` can populate the full bazel state) and appends `SHARED_DETAILS_BODY_TEMPLATE` to its task-specific top section so the rendered details body has the same Targets / Build Metrics / Invocation / Workflows Runner / Workspace Status / Build Metadata / Options-parsed sections everywhere.

@@ -1,7 +1,7 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
 entrypoint selection (passes 1–3), and runfiles directory detection."""
 
-load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runfiles_env", "runnable")
+load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runfiles_env", "runnable", "spawn_environment")
 
 def _eq(label, got, want):
     if got != want:
@@ -717,6 +717,78 @@ def _test_runfiles_env_empty_without_tree(ctx):
     in play)."""
     _eq("runfiles_env: empty without tree", runfiles_env(_spawn_ep(None)), {})
 
+# get_default_output_files — the BES `File` fields beyond the path: `name`,
+# `uri`, `digest` and `length` (build_event_stream.proto, File; Bazel sets digest
+# and length from the artifact's metadata, TargetCompleteEvent.newFile).
+
+def _test_get_default_output_files_reads_file_entries(ctx):
+    digest = "a" * 64
+    r = runnable(None, ["//pkg:app"])
+    r.event(struct(
+        kind = "named_set_of_files",
+        id = struct(id = "outer"),
+        payload = struct(
+            files = [
+                struct(path_prefix = ["bazel-out", "k8-fastbuild", "bin"], name = "pkg/app.deb", file = "bytestream://cache/blobs/" + digest + "/2048", digest = digest, length = 2048),
+                struct(path_prefix = ["bazel-out", "k8-fastbuild", "bin"], name = "pkg/app", file = "file:///out/pkg/app", digest = "", length = 0),
+                struct(path_prefix = ["bazel-out", "k8-fastbuild", "bin"], name = "pkg/link", file = "../target", digest = "", length = 0),
+                struct(path_prefix = [], name = "stdout", file = "file:///out/stdout", digest = "", length = 0),
+            ],
+            file_sets = [struct(id = "inner")],
+        ),
+    ))
+    r.event(struct(
+        kind = "named_set_of_files",
+        id = struct(id = "inner"),
+        payload = struct(
+            files = [struct(path_prefix = ["bazel-out"], name = "pkg/extra", file = "file:///out/pkg/extra", digest = "b" * 64, length = 7)],
+            file_sets = [],
+        ),
+    ))
+    r.event(_make_target_event("//pkg:app", "outer"))
+    got = [(f.name, f.uri, f.digest, f.length) for f in r.get_default_output_files("//pkg:app")]
+    _eq("entries, in BFS order, without log files", got, [
+        ("pkg/app.deb", "bytestream://cache/blobs/" + digest + "/2048", digest, 2048),
+        ("pkg/app", "file:///out/pkg/app", "", 0),
+        ("pkg/link", "", "", 0),
+        ("pkg/extra", "file:///out/pkg/extra", "b" * 64, 7),
+    ])
+
+def _test_get_default_output_files_tolerates_older_payloads(ctx):
+    r = runnable(None, ["//pkg:app"])
+    r.event(_make_fileset_event("s1", ["/out/bin/pkg/app"]))
+    r.event(_make_target_event("//pkg:app", "s1"))
+    got = r.get_default_output_files("//pkg:app")
+    _eq("a payload without name/digest/length still resolves", [(f.name, f.digest, f.length) for f in got], [("", "", 0)])
+    _eq("unknown target", r.get_default_output_files("//nope:nope"), [])
+
+# spawn_environment — the env `_spawn` applies, in application order.
+
+def _env_ctx():
+    return struct(std = struct(env = struct(
+        bazel_root_dir = lambda: "/ws",
+        current_dir = lambda: "/ws/pkg",
+        aspect_root_dir = lambda: "/ws",
+        git_root_dir = lambda: None,
+    )))
+
+def _test_spawn_environment_order_and_contents(ctx):
+    ep = struct(
+        environment = {"FROM_TARGET": "t", "BUILD_WORKSPACE_DIRECTORY": "/overridden"},
+        runfiles_dir = "/out/app.runfiles",
+        runfiles_workspace_dir = "/out/app.runfiles/_main",
+    )
+    env = spawn_environment(_env_ctx(), ep, {"EXTRA": "e", "RUNFILES_DIR": "/extra-wins"})
+    _eq("target env is applied first and loses to BUILD_*", env["BUILD_WORKSPACE_DIRECTORY"], "/ws")
+    _eq("target env carried", env["FROM_TARGET"], "t")
+    _eq("working dir", env["BUILD_WORKING_DIRECTORY"], "/ws/pkg")
+    _eq("no git root becomes empty", env["ASPECT_GIT_ROOT_DIRECTORY"], "")
+    _eq("extra wins over runfiles", env["RUNFILES_DIR"], "/extra-wins")
+    _eq("runfiles workspace dir", env["RUNFILES_WORKSPACE_DIR"], "/out/app.runfiles/_main")
+    _eq("manifest file unset", env["RUNFILES_MANIFEST_FILE"], None)
+    no_tree = spawn_environment(_env_ctx(), struct(environment = {}, runfiles_dir = None, runfiles_workspace_dir = None))
+    _eq("no runfiles tree, no RUNFILES_*", [k for k in no_tree if k.startswith("RUNFILES")], [])
+
 # flags — runinfo injection + the --remote_download_outputs floor.
 # Exercised through `runnable(rc=...).flags`; the helpers are private.
 
@@ -940,6 +1012,9 @@ _UNIT_TESTS = [
     _test_get_default_outputs_walks_nested_filesets,
     _test_get_default_outputs_apparent_label_normalization,
     _test_get_default_outputs_strips_file_uri_prefix,
+    _test_get_default_output_files_reads_file_entries,
+    _test_get_default_output_files_tolerates_older_payloads,
+    _test_spawn_environment_order_and_contents,
     _test_clear_default_outputs,
     _test_get_named_output_group,
     _test_runinfo_selects_executable_over_heuristic,

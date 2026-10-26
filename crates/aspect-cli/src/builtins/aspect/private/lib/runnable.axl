@@ -390,9 +390,9 @@ def _process_bes(state: struct, event):
         if local_exec_root:
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
-def _collect_fileset_paths(state: struct, fs_refs: list) -> list[str]:
-    """BFS the named-fileset graph rooted at `fs_refs`, returning the
-    absolute local paths of every contained file.
+def _collect_fileset_files(state: struct, fs_refs: list) -> list:
+    """BFS the named-fileset graph rooted at `fs_refs`, returning every
+    contained BES `File` that has a `path_prefix` (a build output, not a log).
 
     The depth bound (`range(32)`) guards against pathological BES streams
     with cyclic or unreasonably deep fileset references.
@@ -414,12 +414,40 @@ def _collect_fileset_paths(state: struct, fs_refs: list) -> list[str]:
                 continue
             for file in payload.files:
                 if len(file.path_prefix):
-                    out.append(file.file.removeprefix("file://"))
+                    out.append(file)
             for child in payload.file_sets:
                 if child.id not in visited:
                     next_frontier.append(child.id)
         frontier = next_frontier
 
+    return out
+
+def _collect_fileset_paths(state: struct, fs_refs: list) -> list[str]:
+    """Absolute local paths of every file `_collect_fileset_files` finds."""
+    return [file.file.removeprefix("file://") for file in _collect_fileset_files(state, fs_refs)]
+
+def _get_default_output_files(state: struct, target: str) -> list:
+    """`struct(name, uri, digest, length)` for every file in `target`'s default
+    output group, straight off the BES `File` entries.
+
+    `name` is the exec-root-relative path, `uri` the `File.uri` (`bytestream://`
+    for a remote-uploaded output, `file://` for a local one, `""` when the file
+    carries inline contents or is an unresolved symlink), `digest` the hex
+    content digest and `length` its size in bytes (`""` / 0 when Bazel reported
+    none). Empty list when no `target_completed` arrived for the target.
+    """
+    target = apparent_label(target, state.current_package)
+    if target not in state.target_fileset:
+        return []
+    out = []
+    for file in _collect_fileset_files(state, state.target_fileset[target]):
+        uri = bes_get(file, "file", "")
+        out.append(struct(
+            name = bes_get(file, "name", "") or "",
+            uri = uri if type(uri) == "string" and "://" in uri else "",
+            digest = bes_get(file, "digest", "") or "",
+            length = bes_get(file, "length", 0) or 0,
+        ))
     return out
 
 def _get_default_outputs(state: struct, target: str) -> list[str]:
@@ -638,20 +666,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     arguments against the user's cwd.
     """
     effective_cwd = cwd or ep.runfiles_workspace_dir or ctx.std.env.current_dir()
-    cmd = ctx.std.process.command(ep.path).current_dir(effective_cwd)
-    for k, v in (getattr(ep, "environment", {}) or {}).items():
-        cmd = cmd.env(k, v)
-    cmd = cmd \
-        .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
-        .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
-        .env("ASPECT_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
-        .env("ASPECT_ROOT_DIRECTORY", ctx.std.env.aspect_root_dir()) \
-        .env("ASPECT_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
-        .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
-        .args(getattr(ep, "args", []) + list(args))
-    for k, v in runfiles_env(ep).items():
-        cmd = cmd.env(k, v)
-    for k, v in extra_environment.items():
+    cmd = ctx.std.process.command(ep.path).current_dir(effective_cwd).args(getattr(ep, "args", []) + list(args))
+    for k, v in spawn_environment(ctx, ep, extra_environment).items():
         cmd = cmd.env(k, v)
     if stdin != None:
         cmd = cmd.stdin(stdin)
@@ -664,6 +680,22 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     if process_group:
         cmd = cmd.process_group(0)
     return cmd.spawn(cancellation = cancellation)
+
+def spawn_environment(ctx, ep: struct, extra_environment: dict = {}) -> dict:
+    """The variables `_spawn` sets for `ep` on top of the inherited environment,
+    in application order (later wins): the target's `RunEnvironmentInfo` env,
+    the BUILD_* / ASPECT_* workspace variables, `runfiles_env(ep)` and
+    `extra_environment`. A `None` value means "remove from the child"."""
+    env = dict(getattr(ep, "environment", {}) or {})
+    env["BUILD_WORKSPACE_DIRECTORY"] = ctx.std.env.bazel_root_dir()
+    env["BUILD_WORKING_DIRECTORY"] = ctx.std.env.current_dir()
+    env["ASPECT_WORKING_DIRECTORY"] = ctx.std.env.current_dir()
+    env["ASPECT_ROOT_DIRECTORY"] = ctx.std.env.aspect_root_dir()
+    env["ASPECT_BAZEL_ROOT_DIRECTORY"] = ctx.std.env.bazel_root_dir()
+    env["ASPECT_GIT_ROOT_DIRECTORY"] = ctx.std.env.git_root_dir() or ""
+    env.update(runfiles_env(ep))
+    env.update(extra_environment)
+    return env
 
 def runfiles_env(ep: struct) -> dict:
     """The RUNFILES_* environment `_spawn` exports for entrypoint `ep`.
@@ -764,6 +796,11 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           the build's `--remote_download_outputs` setting; the caller is
           responsible for materializing what it intends to read.
 
+      get_default_output_files(target) → list[struct(name, uri, digest, length)]
+          The same files as `get_default_outputs`, as the BES `File` entries
+          report them: exec-root-relative `name`, `uri` (`""` unless it is a
+          URI), hex `digest` and byte `length` (`""` / 0 when Bazel sent none).
+
       clear_default_outputs(target)
           Forget the prior build's default output group before starting the
           next build, preventing an incomplete build from leaving stale paths.
@@ -818,6 +855,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
+        get_default_output_files = lambda target: _get_default_output_files(state, target),
         clear_default_outputs = lambda target: _clear_default_outputs(state, target),
         get_output_group_outputs = lambda target, group: _get_output_group_outputs(state, target, group),
         clear_output_group_outputs = lambda target, group: _clear_output_group_outputs(state, target, group),

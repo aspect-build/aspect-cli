@@ -717,12 +717,32 @@ fn resolve_auth_env(name: Option<&str>) -> anyhow::Result<AuthEnv> {
 /// Its advertised `api` endpoint when discovery has recorded one, then its
 /// `api_url`, then the compiled-in default, so the host can move without a CLI
 /// release.
+///
+/// Debug builds only: a non-empty `ASPECT_DEBUG_API_URL` replaces all of that, so a
+/// locally built CLI can talk to a gateway on this machine. The override does not
+/// exist in release builds, which keeps the rule above (config can never redirect
+/// the API, and with it the credential) true for anything shipped.
 fn resolve_aspect_cloud_api_url() -> anyhow::Result<String> {
+    #[cfg(debug_assertions)]
+    if let Some(url) = debug_api_url_override(|key| std::env::var(key).ok()) {
+        return Ok(url);
+    }
     Ok(load_deployments()?
         .iter()
         .find(|d| d.builtin)
         .and_then(deployment_api_base)
         .unwrap_or_else(|| DEFAULT_API_URL.to_string()))
+}
+
+/// The `ASPECT_DEBUG_API_URL` override, without a trailing slash. Compiled only into debug builds.
+#[cfg(debug_assertions)]
+const DEBUG_API_URL_ENV: &str = "ASPECT_DEBUG_API_URL";
+
+#[cfg(debug_assertions)]
+fn debug_api_url_override(env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let url = env(DEBUG_API_URL_ENV)?;
+    let url = url.trim().trim_end_matches('/');
+    (!url.is_empty()).then(|| url.to_string())
 }
 
 /// The API base of the deployment named `name` — its own advertised `api`.
@@ -7064,6 +7084,23 @@ mod tests {
             RefreshFailure::Failed.message("acme"),
             session_expired_message("acme")
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_api_url_override_trims_and_ignores_blank() {
+        let with = |v: Option<&str>| {
+            debug_api_url_override(|k| {
+                assert_eq!(k, "ASPECT_DEBUG_API_URL");
+                v.map(str::to_string)
+            })
+        };
+        assert_eq!(
+            with(Some(" http://127.0.0.1:3000/ ")).as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+        assert_eq!(with(Some("  ")), None);
+        assert_eq!(with(None), None);
     }
 
     #[test]

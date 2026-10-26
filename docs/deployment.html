@@ -1,0 +1,862 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Deployments Prototype</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"><style>:root{--canvas:233 241 251;--panel:255 255 255;--elev:238 244 252;--hover:242 247 253;--border:222 232 246;--bs:201 216 238;--accent:45 108 223;--accent2:30 79 181;--green:24 147 90;--red:229 72 77;--amber:176 128 28;--infra:109 78 214;--neutral:136 139 151;--text:27 37 51;--t2:84 96 115;--t3:96 106 126;--faint:150 162 182;--unsupported:217 80 6;color-scheme:light}
+*,::before,::after{box-sizing:border-box;border:0 solid rgb(var(--border))}
+html,body{margin:0;height:100%}
+body{display:flex;background:rgb(var(--canvas));color:rgb(var(--text));font:13.5px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:-.006em;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none;cursor:pointer}
+button{font:inherit;color:inherit;background:transparent;padding:0;cursor:pointer}
+h1{margin:0;font-size:22px;line-height:1.25;font-weight:600;letter-spacing:-.025em}
+p{margin:0}
+table{border-collapse:collapse;width:100%}
+code,.mono{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:0}
+::selection{background:rgb(var(--accent)/.3)}
+*{scrollbar-width:thin;scrollbar-color:rgb(var(--bs)) transparent}
+
+.side{width:212px;flex:none;display:flex;flex-direction:column;background:rgb(var(--panel));border-right:1px solid rgb(var(--border));transition:width .15s}
+.side.col{width:56px}
+.logo{display:flex;align-items:center;height:56px;flex:none;padding:0 16px;color:rgb(var(--text))}
+.logo svg{height:24px;width:auto}
+.side.col .logo{justify-content:center;padding:0}.side.col .logo svg{width:24px}
+.nav{display:flex;flex-direction:column;gap:2px;padding:0 10px}
+.nv1{margin-top:4px}.nv2{margin-bottom:4px}
+.ni{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:7px;font-size:13px;font-weight:500;color:rgb(var(--t2));transition:background .12s,color .12s;white-space:nowrap;overflow:hidden}
+.ni svg{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;color:rgb(var(--t3))}
+.ni:hover{color:rgb(var(--text));background:rgb(var(--elev)/.5)}.ni:hover svg{color:rgb(var(--t2))}
+.ni.on{background:rgb(var(--elev));color:rgb(var(--text))}.ni.on svg{color:rgb(var(--accent))}
+.ni.btn0{width:100%;text-align:left}
+.ni .ext{margin-left:auto;width:12px;height:12px;color:rgb(var(--faint))}
+.ni.btn0{color:rgb(var(--t3))}
+.side.col .ni{justify-content:center;padding:0}.side.col .ni span,.side.col .ni .ext{display:none}
+.sp1{flex:1}
+.acct{margin-top:4px;border-top:1px solid rgb(var(--border));padding:8px 10px}
+.acct button{display:flex;align-items:center;gap:10px;width:100%;height:44px;padding:0 8px;border-radius:7px;text-align:left}
+.acct button:hover{background:rgb(var(--elev)/.5)}
+.side.col .acct{padding:8px 0}.side.col .acct button{justify-content:center;padding:0}.side.col .acct .who{display:none}
+.av{display:inline-flex;flex:none;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:#5B5FC7;color:#fff;font-size:11px;font-weight:600;line-height:1;user-select:none}
+.who{min-width:0;flex:1}.who b{display:block;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.who span{display:block;font-size:11px;line-height:14px;color:rgb(var(--t3));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;height:100vh}
+.top{display:flex;align-items:center;gap:6px;flex:none;height:48px;padding:0 20px;border-bottom:1px solid rgb(var(--border));background:rgb(var(--canvas)/.72);backdrop-filter:blur(8px)}
+.crumb{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;color:rgb(var(--t2))}
+.crumb a:hover{color:rgb(var(--text))}.crumb i{font-style:normal;color:rgb(var(--t3))}.crumb b{font-weight:500;color:rgb(var(--text));white-space:nowrap}
+.sp{flex:1}
+.org{display:inline-flex;align-items:center;gap:6px;height:32px;max-width:200px;padding:0 8px;border-radius:7px;border:1px solid rgb(var(--border));background:rgb(var(--panel));font-size:12px;line-height:16px;color:rgb(var(--t2))}
+.org:hover{border-color:rgb(var(--bs));color:rgb(var(--text))}
+.org svg{width:14px;height:14px;flex:none;color:rgb(var(--t3))}.org svg:last-child{width:12px;height:12px}
+.srch{position:relative}
+.srch svg{position:absolute;left:10px;top:50%;width:14px;height:14px;margin-top:-7px;color:rgb(var(--t3))}
+.srch input{width:240px;height:32px;padding:0 12px 0 32px;border-radius:7px;border:1px solid rgb(var(--border));background:rgb(var(--panel));font:inherit;font-size:12px;line-height:16px;color:rgb(var(--text));outline:0}
+.srch input::placeholder{color:rgb(var(--faint))}.srch input:focus{border-color:rgb(var(--bs))}
+.tgl{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:7px;border:1px solid rgb(var(--border));background:rgb(var(--panel));color:rgb(var(--t2))}
+.tgl:hover{border-color:rgb(var(--bs));color:rgb(var(--text))}.tgl svg{width:16px;height:16px}
+.org svg,.tgl svg,.srch svg,.ic{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.scroll{flex:1;min-height:0;overflow-y:auto}
+.pg{width:100%;max-width:1400px;margin:0 auto;padding:28px 32px}
+
+.dot{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%}.dot.sm{width:6px;height:6px}
+.dot.g{background:rgb(var(--green))}.dot.r{background:rgb(var(--red))}.dot.a{background:rgb(var(--amber))}
+.pass{color:rgb(var(--green))}.fail{color:rgb(var(--red))}.warn{color:rgb(var(--amber))}.t2{color:rgb(var(--t2))}.t3{color:rgb(var(--t3))}.tf{color:rgb(var(--faint))}
+.s11{font-size:11px;line-height:14px}.s12{font-size:12px;line-height:16px}
+.tnum{font-variant-numeric:tabular-nums}
+.sep{color:rgb(var(--faint))}
+
+.hd{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
+.hd .l{min-width:0}.hd .t{display:flex;align-items:center;gap:10px}
+.hd h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:6px;font-size:12px;line-height:16px;color:rgb(var(--t2))}
+.meta .st{font-weight:500}
+.meta .m{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:0}
+.meta .ci{display:inline-flex;align-items:center;gap:4px}.meta .ci svg,.chip svg,.hb svg{width:12px;height:12px}
+.hd .r2{display:flex;flex:none;align-items:center;gap:8px}
+.ptitle{margin-bottom:24px}.ptitle p{margin-top:4px;font-size:13px;line-height:1.625;color:rgb(var(--t2))}
+
+.chip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border-radius:5px;border:1px solid rgb(var(--bs));background:rgb(var(--neutral)/.1);color:rgb(var(--t2));font-size:11px;line-height:14px;font-weight:500;white-space:nowrap}
+.chip.accent{background:rgb(var(--accent)/.1);border-color:rgb(var(--accent)/.4);color:rgb(var(--text))}
+.chip.pass{background:rgb(var(--green)/.1);border-color:rgb(var(--green)/.4);color:rgb(var(--text))}
+.chip.fail{background:rgb(var(--red)/.1);border-color:rgb(var(--red)/.4);color:rgb(var(--text))}
+.chip.warn{background:rgb(var(--amber)/.1);border-color:rgb(var(--amber)/.4);color:rgb(var(--text))}
+.chip.infra{background:rgb(var(--infra)/.1);border-color:rgb(var(--infra)/.4);color:rgb(var(--text))}
+.chip.m{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0}
+.chip.off{opacity:.6}
+
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:9px;border:1px solid rgb(var(--border));background:rgb(var(--panel));font-size:12px;line-height:16px;color:rgb(var(--t2));white-space:nowrap;transition:color .12s,border-color .12s}
+.btn:hover{color:rgb(var(--text));border-color:rgb(var(--bs))}
+.btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.btn.p{background:rgb(var(--accent));border-color:rgb(var(--accent));color:#fff;font-weight:500}.btn.p:hover{filter:brightness(1.1);color:#fff;border-color:rgb(var(--accent))}
+.btn.ic1{width:32px;padding:0;justify-content:center;color:rgb(var(--t3))}.btn.ic1 svg{width:16px;height:16px}
+.btn.sm{height:28px;padding:0 10px}
+
+.tabs{display:flex;align-items:center;gap:4px;overflow-x:auto;overflow-y:hidden;border-bottom:1px solid rgb(var(--border))}
+.tabs a{position:relative;flex:none;height:36px;padding:0 12px;margin-bottom:-1px;border-bottom:2px solid transparent;font-size:13px;font-weight:500;line-height:34px;color:rgb(var(--t2));white-space:nowrap;transition:color .12s}
+.tabs a:hover{color:rgb(var(--text))}
+.tabs a.on{border-color:rgb(var(--accent));color:rgb(var(--text))}
+.tabs small{margin-left:6px;font:11px "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0;color:rgb(var(--t3))}
+.tc{margin-top:20px}
+
+.lbl{margin-bottom:12px;font-size:13px;font-weight:600;line-height:1.5;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t2))}
+.lbl.row2{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.sec{margin-bottom:24px}.stack>*+*{margin-top:24px}
+.mb5{margin-bottom:20px}
+
+.card{background:rgb(var(--panel));border:1px solid rgb(var(--border));border-radius:10px}
+.panel{overflow:hidden}.panel .pb{padding:14px}
+.panel .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 14px;border-bottom:1px solid rgb(var(--border))}
+.panel .ph .pt,.ph.pt{font-size:11px;line-height:14px;font-weight:600;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
+@media(max-width:1024px){.kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:768px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{padding:14px 16px}
+.kpi .k,.k2{font-size:11px;line-height:14px;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+.kpi .v{margin-top:6px;font-size:26px;line-height:1;font-weight:600;font-variant-numeric:tabular-nums}
+.kpi .vr{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.kpi .s{margin-top:6px;font-size:11px;line-height:14px;color:rgb(var(--t3))}
+.dl{display:inline-flex;align-items:center;gap:3px;font:11px/1 "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0;white-space:nowrap;font-variant-numeric:tabular-nums}.dl i{font-style:normal;font-size:8px}
+
+.verdict{display:inline-flex;align-items:center;gap:10px;padding:8px 12px;border-radius:9px;border:1px solid rgb(var(--border));background:rgb(var(--panel))}
+.verdict span{font-size:12px;line-height:16px;color:rgb(var(--t2))}
+
+.ab{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:stretch;gap:12px}
+.ab .mid{display:flex;align-items:center;justify-content:center}
+.side2 .sh{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid rgb(var(--border))}
+.side2 .sh .tag{font-size:11px;line-height:14px;font-weight:600;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+.side2 .sh .id{font:11px/14px "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0;color:rgb(var(--t3))}
+.side2 .sb{padding:12px 14px}
+.side2 .ttl{display:flex;align-items:center;gap:8px;font-size:13px;line-height:18px;font-weight:500}
+.side2 .sm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:8px;font-size:11px;line-height:14px;color:rgb(var(--t3))}
+.side2 .sm .m{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0}
+.side2 .sm .ci{display:inline-flex;align-items:center;gap:4px}.side2 .sm svg{width:12px;height:12px}
+.cause{display:flex;align-items:flex-start;gap:12px;padding:12px 16px;font-size:13px;line-height:1.5}
+.cause .dot{margin-top:6px}.cause .ev{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.note{padding:12px 16px;font-size:12px;line-height:16px;color:rgb(var(--t3))}
+.dp{border-radius:10px;border:1px solid rgb(var(--border));background:rgb(var(--panel));font:11px/1.5 "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0}
+.dp>div{display:flex;align-items:flex-start;gap:8px;padding:6px 12px}.dp>div+div{border-top:1px solid rgb(var(--border)/.6)}
+.dp b{flex:none;width:12px;text-align:center;font-weight:400}
+.dp span{word-break:break-all}.dp .was{margin-left:8px;color:rgb(var(--faint));text-decoration:line-through}.dp .gone{color:rgb(var(--red)/.9);text-decoration:line-through}
+
+.tbl{overflow:hidden}.tbl .sc{overflow-x:auto}
+table{font-size:13px}
+th{padding:8px 12px;text-align:left;font-size:11px;line-height:14px;font-weight:500;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3));border-bottom:1px solid rgb(var(--border));user-select:none;white-space:nowrap}
+td{padding:6px 12px;vertical-align:middle;border-bottom:1px solid rgb(var(--border)/.5)}
+th.r,td.r{text-align:right}
+td .sub{margin-top:2px;font-size:11px;line-height:14px;color:rgb(var(--t3))}
+td .nm{color:rgb(var(--text))}td a.nm:hover{text-decoration:underline}
+.ft tbody tr,tr.lk{cursor:pointer;transition:background .12s}
+.ft tbody tr:hover,tr.lk:hover{background:rgb(var(--elev));box-shadow:inset 2px 0 0 rgb(var(--accent)/.5)}
+.ft tr.sel,.ft tr.sel:hover{background:rgb(var(--accent)/.1);box-shadow:inset 2px 0 0 rgb(var(--accent))}
+.inner{margin-top:12px}.inner th:first-child,.inner td:first-child{padding-left:0}.inner th:last-child,.inner td:last-child{padding-right:0}
+
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px;align-items:start}
+@media(max-width:1100px){.two{grid-template-columns:minmax(0,1fr)}}
+.fh{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fh code{font-size:12px;font-weight:600}
+.fh a.go{margin-left:auto;font-size:12px;color:rgb(var(--accent))}.fh a.go:hover{text-decoration:underline}
+.diff{margin-top:12px;overflow-x:auto;border-radius:9px;border:1px solid rgb(var(--border));background:rgb(var(--elev));padding:6px 0;font:11px/1.5 "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0;white-space:pre}
+.diff span{display:block;padding:0 12px}.diff .p{background:rgb(var(--green)/.1);color:rgb(var(--green))}.diff .m{background:rgb(var(--red)/.1);color:rgb(var(--red))}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.sub2{margin:16px 0 8px;font-size:11px;line-height:14px;font-weight:600;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+
+.info{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px 24px}
+.info .k2{margin-bottom:4px}.info .vv{font-size:13px;line-height:18px}.info .vv b{font-weight:500}.info .s{margin-top:2px;font-size:11px;line-height:14px;color:rgb(var(--t3))}
+.info code{word-break:break-all}
+.acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid rgb(var(--border))}
+.who2{display:inline-flex;align-items:center;gap:6px}.who2 .av{width:20px;height:20px;font-size:8px}
+
+.fld{height:34px;padding:0 10px;border-radius:9px;border:1px solid rgb(var(--bs));background:rgb(var(--elev));font:inherit;font-size:13px;color:rgb(var(--text));outline:0;transition:border-color .12s}
+.fld:focus{border-color:rgb(var(--accent))}
+select.fld{appearance:none;-webkit-appearance:none;padding-right:30px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23606A7E' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;cursor:pointer}
+.si{display:flex;align-items:center;gap:8px;flex:1;max-width:420px;height:32px;padding:0 10px;border-radius:9px;border:1px solid rgb(var(--bs));background:rgb(var(--elev))}
+.si svg{width:15px;height:15px;flex:none;color:rgb(var(--faint));fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.si input{min-width:0;flex:1;border:0;background:transparent;font:inherit;font-size:13px;color:rgb(var(--text));outline:0}.si input::placeholder{color:rgb(var(--faint))}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:16px}
+.bar .cnt{font-size:11px;line-height:14px;color:rgb(var(--t3))}
+.pane{display:none}.pane.on{display:block}
+.ft tr.nh:hover{background:none;box-shadow:none;cursor:default}.ft tr.nh{cursor:default}
+
+.hi{display:flex;flex-wrap:wrap;align-items:center;font-size:12px;line-height:16px;color:rgb(var(--t2))}
+.hi .it2{display:flex;align-items:center;gap:6px;margin-right:14px;margin-top:8px;min-width:0}
+.hi svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;color:rgb(var(--t3))}
+a.l{color:rgb(var(--text))}a.l:hover{color:rgb(var(--accent))}
+.av.sm{width:18px;height:18px;font-size:10px;margin-right:0}
+.dt td{padding:10px 16px;vertical-align:top;font-size:13px;line-height:18px}.dt td:first-child{width:180px;font-size:11px;line-height:18px;font-weight:600;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+.dt .sub{margin-top:2px;font-size:11px;line-height:14px;color:rgb(var(--t3))}.dt .av.sm{display:inline-grid;vertical-align:middle;margin-right:6px}
+svg.ic.xl{width:12px;height:12px;vertical-align:-1px;color:rgb(var(--t3))}
+
+.hd .meta{gap:10px;margin-top:12px}.hd .meta .chip{height:24px;font-size:12px;padding:0 9px;gap:6px}.hd .meta .pass{font-size:14px}
+.hd .meta .sep,.sm .sep{color:rgb(var(--faint))}
+.hi{margin-top:6px}.hi .it2{margin-right:22px;margin-top:12px;gap:8px;font-size:13px}.hi .it2 svg{width:16px;height:16px}
+.chip .ic,.chip svg{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.it3{display:inline-flex;align-items:center;gap:6px}.it3 .ic{width:14px;height:14px;color:rgb(var(--t3))}
+.sm{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.il{display:inline-flex;align-items:center;gap:6px}.il .ic{width:14px;height:14px;color:rgb(var(--t3))}
+.dt td:first-child .ic{width:15px;height:15px;margin-right:10px;vertical-align:-3px;color:rgb(var(--t3))}
+.dt td{padding:12px 16px}.dt td:first-child{width:210px;white-space:nowrap}
+.dt .il{margin-left:6px}.dt .l.il .ic{width:12px;height:12px}
+.ab.mb5,.mb5{margin-bottom:24px}.tc{padding-top:4px}
+
+.runh{margin-bottom:14px;padding:14px 16px}.runc{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px}.runc .ic{width:14px;height:14px;color:rgb(var(--t3))}
+.runh .chip{height:22px;gap:6px}
+.bar2{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid rgb(var(--border));border-radius:9px;background:rgb(var(--panel));overflow:hidden}
+.seg a{padding:0 12px;height:30px;display:flex;align-items:center;font-size:12px;color:rgb(var(--t2));cursor:pointer;border-right:1px solid rgb(var(--border))}.seg a:last-child{border:0}
+.seg a.on{background:rgb(var(--elevated));color:rgb(var(--text));font-weight:500}
+.lv{border:1px solid rgb(var(--border));border-radius:12px;background:rgb(var(--canvas));overflow:hidden}
+.lvh{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid rgb(var(--border));background:rgb(var(--panel))}
+.lvh i{width:8px;height:8px;border-radius:50%;background:rgb(var(--faint))}.lvh .mono{font-size:11px;color:rgb(var(--t3));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cnt2{margin-left:auto;font-size:11px;color:rgb(var(--t3));font-variant-numeric:tabular-nums}
+.lvb{max-height:420px;overflow:auto;padding:8px 12px;font:11px/1.6 "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;color:rgb(var(--t2))}
+.ll{display:flex;gap:12px}.ll .ts{flex:none;width:56px;font-variant-numeric:tabular-nums;color:rgb(var(--t3))}.ll span:last-child{white-space:pre-wrap;word-break:break-all}
+.ll .e{color:rgb(var(--red))}.ll .w{color:rgb(var(--amber))}.ll.p{background:rgb(var(--green)/.12)}.ll.m{background:rgb(var(--red)/.1)}
+.pb2{padding:0;overflow:hidden}.pb2 .diff{margin:0;border:0;border-radius:0;white-space:pre;overflow:auto}
+
+.two2{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}@media(max-width:1100px){.two2{grid-template-columns:1fr}}
+.tsplit{display:flex;justify-content:space-between;font-size:11px;color:rgb(var(--t3));margin-bottom:6px}
+.hb2{display:flex;height:8px;border-radius:4px;overflow:hidden;background:rgb(var(--elevated))}.hb2 i{display:block}
+.old{color:rgb(var(--t3));text-decoration:line-through}
+td.mono,.mono{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
+
+.kpi .v.sm{font-size:21px;white-space:nowrap}
+
+.kpis.k6{grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+.kpis.k6 .kpi .v{font-size:24px}.kpis.k6 .kpi .v.sm{font-size:19px}
+
+.lbl{margin-bottom:8px;font-size:11px;line-height:14px;font-weight:600;letter-spacing:.025em;color:rgb(var(--t3))}
+.hd{margin-bottom:16px}.hd .t{gap:10px}
+.hd .kind{display:inline-flex;align-items:center;gap:5px;margin-left:2px;font-size:12px;color:rgb(var(--t3))}.hd .kind svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.meta2{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;margin-top:6px;font-size:12.5px;line-height:20px;color:rgb(var(--t2))}
+.meta2 a.l{color:rgb(var(--t2))}.meta2 a.l:hover{color:rgb(var(--accent))}
+.revbar{display:flex;align-items:center;gap:12px;padding:8px 12px;margin-bottom:16px}
+.rv{display:flex;align-items:center;gap:10px;min-width:0}
+.rv .rl{font-size:11px;font-weight:600;letter-spacing:.025em;text-transform:uppercase;color:rgb(var(--t3))}
+.rv .fld{height:30px;font-size:12.5px}
+.rv .rm{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:rgb(var(--t3));white-space:nowrap}
+.revbar .ic1{height:30px;width:30px;border-color:transparent}
+.tc{margin-top:16px;padding-top:0}
+.mb5,.ab.mb5{margin-bottom:16px}
+
+.strip{overflow:hidden}
+.strip .cells{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.strip .c1{padding:10px 16px;border-left:1px solid rgb(var(--border))}.strip .c1:first-child{border-left:0}
+.strip .k{font-size:11px;line-height:14px;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+.strip .v{margin-top:3px;font-size:17px;line-height:22px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.strip .s{margin-top:1px;font-size:11px;line-height:14px;color:rgb(var(--t3));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .tb{padding:10px 16px 12px;border-top:1px solid rgb(var(--border))}
+.strip .hb2{height:6px;margin-bottom:6px}.strip .tsplit{margin:0}
+
+.st{font:600 11px/14px "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;letter-spacing:0}
+.st.M{color:rgb(var(--amber))}.st.A{color:rgb(var(--green))}.st.D{color:rgb(var(--red))}
+tr.chg td{background:rgb(var(--amber)/.06)}
+
+.bar2{margin-bottom:10px}
+.cmdl{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:9px 12px;border-radius:9px;background:rgb(var(--elev));font-size:12px;color:rgb(var(--t2))}
+.cmdl .ic{width:14px;height:14px;flex:none;color:rgb(var(--t3))}.cmdl code{min-width:0;flex:1;overflow-x:auto;white-space:nowrap;color:rgb(var(--text))}.cmdl .pass{font-size:12px;font-weight:500}
+.dd{overflow:hidden}
+.dd summary{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;cursor:pointer;list-style:none;font-size:11px;line-height:14px;font-weight:600;text-transform:uppercase;letter-spacing:.025em;color:rgb(var(--t3))}
+.dd summary::-webkit-details-marker{display:none}
+.dd summary::before{content:"";width:6px;height:6px;margin-right:2px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .12s}
+.dd[open] summary::before{transform:rotate(45deg)}
+.dd summary .cnt2{margin-left:auto;font-weight:400}
+.dd[open] summary{border-bottom:1px solid rgb(var(--border))}
+.lvh{padding:7px 12px}.lvb{max-height:320px}
+.revbar{width:fit-content;max-width:100%}
+
+.hd .meta{margin-top:8px;gap:8px}.hd .meta .chip{height:22px}.hd .meta .pass{font-size:13px}
+.hi{margin-top:0}.hi .it2{margin-top:8px;margin-right:18px;font-size:12.5px;gap:6px}.hi .it2 svg{width:15px;height:15px}.hi a.l{color:rgb(var(--t2))}.hi a.l:hover{color:rgb(var(--accent))}
+
+.tabrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;border-bottom:1px solid rgb(var(--border));margin-bottom:20px}
+.tabrow .tabs{border:0;margin:0}
+.tctl{display:flex;align-items:center;gap:8px;padding-bottom:8px;flex:none}.tctl .arr{color:rgb(var(--t3));font-size:13px}
+.tctl .fld{height:32px;font-size:12.5px}.tctl .btn{height:32px}
+
+.lv{background:rgb(var(--panel))}.lvh{background:rgb(var(--elev))}
+.lv .diff{margin:0;padding:0;border:0;border-radius:0;background:transparent;overflow:visible}.lv .diff span{padding:0}
+.lvb .ll{padding:0}
+.cbar{flex-wrap:nowrap;gap:10px;margin-bottom:12px}
+.cbar .seg{flex:none}
+.cbar .cmdl{flex:1;min-width:0;height:32px;box-sizing:border-box;margin:0;padding:0 12px;background:rgb(var(--panel));border:1px solid rgb(var(--border));border-radius:9px;font:12px/16px "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace}
+.cbar .cmdl code{font:inherit;overflow:hidden;text-overflow:ellipsis}
+.cbar .cmdl .pass{flex:none;font:500 12px/16px "JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace}
+@media (max-width:640px){.cbar{flex-wrap:wrap}.cbar .cmdl{flex-basis:100%}}
+
+.chain2{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.chain2 .ln{flex:1;min-width:220px;border:1px solid rgb(var(--border));border-radius:12px;background:rgb(var(--panel));padding:12px 14px}
+.chain2 .lk{font-size:11px;font-weight:600;letter-spacing:.025em;text-transform:uppercase;color:rgb(var(--t3))}
+.chain2 .lt{margin-top:4px;font-size:13px;font-weight:500}.chain2 .ls{margin-top:2px;font-size:11px;color:rgb(var(--t3));word-break:break-all}
+.chain2 .lc{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;color:rgb(var(--green))}.chain2 .lc.t3{color:rgb(var(--t3))}.chain2 .lc svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.chain2 .la{display:flex;flex-direction:column;align-items:center;justify-content:center;color:rgb(var(--faint));font-size:16px;min-width:56px}.chain2 .la span{font-size:10px;color:rgb(var(--t3));text-align:center;max-width:110px}
+.cal{display:flex;gap:10px;align-items:flex-start;margin-top:10px;padding:12px 14px;font-size:13px}.cal .dot{margin-top:6px}
+.dd summary .gn{font-weight:500;font-size:13px;margin-right:10px;text-transform:none;letter-spacing:0;color:rgb(var(--text))}
+.dd summary .gm{margin-left:10px}.dd summary .chip{margin-right:6px}
+
+.dd summary .chip,.dd summary .gm,.dd summary .t3.s12{text-transform:none;letter-spacing:0;font-weight:500;font-size:11px}
+.dd summary .t3.s12{font-size:12px;font-weight:400;margin-left:8px}
+
+.dot.n{background:rgb(var(--neutral))}
+.vb{position:relative;display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:5px;border:1px solid;font-size:11px;font-weight:500;line-height:14px;color:rgb(var(--text));white-space:nowrap;cursor:pointer}
+.vb.pass{background:rgb(var(--green)/.1);border-color:rgb(var(--green)/.4)}.vb.warn{background:rgb(var(--amber)/.1);border-color:rgb(var(--amber)/.4)}.vb.fail{background:rgb(var(--red)/.1);border-color:rgb(var(--red)/.4)}
+.vtip{display:none;position:fixed;z-index:60;width:290px;padding-top:6px;text-align:left;white-space:normal;cursor:default}
+.vb:hover .vtip,.vb:focus .vtip{display:block}
+.vbox{display:block;padding:10px 12px;border:1px solid rgb(var(--bs));border-radius:10px;background:rgb(var(--panel));box-shadow:0 8px 24px rgba(20,40,80,.14)}
+.vh{display:block;margin-bottom:8px;font-size:11px;font-weight:600;letter-spacing:.025em;text-transform:uppercase;color:rgb(var(--t3))}
+.vr{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px;font-weight:400}.vr .vn{flex:1}.vr .vc{color:rgb(var(--t3))}
+.vf{display:block;margin-top:8px;padding-top:8px;border-top:1px solid rgb(var(--border));font-size:12px;font-weight:500;color:rgb(var(--accent))}
+.fchip{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 6px 0 10px;border-radius:9px;border:1px solid rgb(var(--accent)/.4);background:rgb(var(--accent)/.08);font-size:12px;color:rgb(var(--text))}
+.fchip .ic{width:13px;height:13px}.fchip a{display:grid;place-items:center;width:20px;height:20px;border-radius:5px;color:rgb(var(--t3));font-size:14px}.fchip a:hover{background:rgb(var(--accent)/.12)}
+
+.vs{display:block;margin:-2px 0 8px;font-size:12px;font-weight:500;color:rgb(var(--text))}
+
+.card.tbl td table.inner{margin:0;width:auto;min-width:0;border:1px solid rgb(var(--border));border-radius:8px}
+
+.tctl .cmpg{display:flex;align-items:center;height:32px;border:1px solid rgb(var(--bs));border-radius:9px;background:rgb(var(--panel));overflow:hidden}
+.tctl .cmpg .fld{height:30px;border:0;border-radius:0;background-color:transparent}
+.tctl .cmpg .fld:focus{background-color:rgb(var(--hover))}
+.tctl .swp{display:grid;place-items:center;width:30px;height:30px;border:0;border-left:1px solid rgb(var(--border));border-right:1px solid rgb(var(--border));border-radius:0;background:transparent;color:rgb(var(--t3));cursor:pointer}
+.tctl .swp:hover{background:rgb(var(--hover));color:rgb(var(--text))}.tctl .swp svg{width:15px;height:15px}
+.tctl .lnk{border:0;background:none;padding:0 4px;font-size:12px;color:rgb(var(--t3));cursor:pointer}.tctl .lnk:hover{color:rgb(var(--text))}
+.tctl{gap:12px}
+.hd{margin-bottom:12px}
+.hd .meta{gap:6px 12px;margin-top:6px}
+.hd .meta .pass{font-size:13px;font-weight:500}
+.meta .qt{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:rgb(var(--t3))}
+.meta .qt svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.meta .qt.mono{font-size:12px}
+.hi{margin-top:4px}
+.hi .it2{margin-top:4px;margin-right:16px;font-size:12px;gap:5px;color:rgb(var(--t3));max-width:100%}
+.hi .it2 svg{width:13px;height:13px}
+.hi a.l{color:rgb(var(--t3))}
+.hi .it2 a.l{display:block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hi .it2 .av.sm{width:16px;height:16px;font-size:9px}
+.tctl{gap:10px;padding-bottom:6px}
+.tctl .fld{height:28px;font-size:12px}
+.tctl .btn{height:28px;font-size:12px}
+.tctl .cmpg{height:28px;border-color:rgb(var(--border));border-radius:8px;background:transparent}
+.tctl .cmpg .fld{height:26px}
+.tctl .swp{width:26px;height:26px;border-color:rgb(var(--border))}
+.tctl .swp svg{width:13px;height:13px}
+.tctl .lnk{font-size:12px}
+.cbar{gap:12px;margin-bottom:12px;margin-top:12px}
+.cbar .seg{border:0;background:rgb(var(--elev));border-radius:8px;padding:2px;gap:2px}
+.cbar .seg a{height:24px;padding:0 10px;border:0;border-radius:6px;font-size:12px}
+.cbar .seg a.on{background:rgb(var(--panel));color:rgb(var(--text));box-shadow:0 0 0 1px rgb(var(--border))}
+.cbar .cmdl{height:28px;padding:0 10px;background:rgb(var(--elev));border:0;border-radius:8px}
+.cbar .cmdl code{color:rgb(var(--t2))}
+
+.strip .v .ex{margin-left:8px;font-size:12px;font-weight:500;color:rgb(var(--green));vertical-align:2px;letter-spacing:0}
+
+.fk{white-space:nowrap}.fk .ic{width:15px;height:15px;margin-right:10px;vertical-align:-3px;color:rgb(var(--t3))}
+
+.ftb{display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap}.ftb .sp3{flex:1}.ftb .si.w64{width:256px}
+.ftb .cnt{margin-left:4px;font-size:12px;color:rgb(var(--t3))}
+.pw{position:relative}
+.fcb{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:8px;border:1px solid rgb(var(--border));background:rgb(var(--panel));font-size:12.5px;font-weight:500;color:rgb(var(--t2));cursor:pointer}
+.fcb:hover{color:rgb(var(--text));border-color:rgb(var(--bs))}.fcb .ic{width:13px;height:13px;color:rgb(var(--t3))}
+.fcb.on{border-color:rgb(var(--accent)/.5);background:rgb(var(--accent)/.08);color:rgb(var(--text))}
+.pop{position:absolute;z-index:40;top:38px;left:0;width:248px;padding:8px;border:1px solid rgb(var(--bs));border-radius:10px;background:rgb(var(--panel));box-shadow:0 8px 24px rgba(20,40,80,.14)}
+.ph2{padding:2px 4px 8px;font-size:11px;font-weight:600;letter-spacing:.025em;text-transform:uppercase;color:rgb(var(--t3))}
+.pop .si{width:100%;margin-bottom:6px}.pop .opts{max-height:220px;overflow:auto}
+.opt{display:flex;align-items:center;gap:8px;width:100%;padding:6px 6px;border:0;border-radius:6px;background:transparent;font:inherit;font-size:12.5px;color:rgb(var(--text));text-align:left;cursor:pointer}.opt:hover{background:rgb(var(--hover))}
+.cbx{display:grid;place-items:center;width:15px;height:15px;border-radius:4px;border:1px solid rgb(var(--bs));background:rgb(var(--panel));flex:none}.cbx.on{background:rgb(var(--accent));border-color:rgb(var(--accent));color:#fff}.cbx .ic{width:11px;height:11px;stroke-width:3}
+.lnk2{border:0;background:none;padding:0 6px;font-size:12.5px;font-weight:500;color:rgb(var(--t3));cursor:pointer}.lnk2:hover{color:rgb(var(--text))}
+
+:root{--elevated:238 244 252}
+#app{display:flex;flex:1;min-width:0;height:100%}
+.protochip{display:inline-flex;align-items:center;height:20px;margin-left:12px;padding:0 8px;border-radius:5px;border:1px dashed rgb(var(--bs));font-size:11px;color:rgb(var(--t3));white-space:nowrap}
+@media(max-width:820px){.side{display:none}.pg{padding:20px 16px 56px}.top{padding:0 16px}.srch{display:none}.hd{flex-wrap:wrap}.tabrow{flex-wrap:wrap;align-items:stretch}.tabs{max-width:100%;overflow-x:auto}.tctl{flex-wrap:wrap;padding-bottom:8px}.protochip{display:none}.ftb .si.w64{width:100%}.ftb .sp3{display:none}.kpis,.cells{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.pseg{display:inline-flex;align-items:center;height:24px;margin-left:8px;border:1px solid rgb(var(--border));border-radius:7px;background:rgb(var(--panel));overflow:hidden;font-size:11px}
+.pseg .pl{padding:0 8px;color:rgb(var(--t3))}.pseg a{padding:0 9px;height:100%;display:flex;align-items:center;color:rgb(var(--t2));border-left:1px solid rgb(var(--border));cursor:pointer}.pseg a.on{background:rgb(var(--accent)/.12);color:rgb(var(--text));font-weight:500}
+.una2{padding:28px 24px;text-align:center}.una2 .uh{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600}.una2 .uh .ic{width:18px;height:18px;color:rgb(var(--t3))}
+.una2 p{margin:8px auto 0;max-width:560px;font-size:13px;color:rgb(var(--t2))}
+.una{display:flex;align-items:flex-start;gap:8px;margin-top:12px;padding:10px 12px;border:1px dashed rgb(var(--bs));border-radius:9px;font-size:12px;color:rgb(var(--t2))}.una .ic{width:15px;height:15px;color:rgb(var(--t3));flex:none;margin-top:1px}
+.sub.ev{display:flex;align-items:center;gap:5px}.sub.ev .ic{width:12px;height:12px}
+.fn{margin:12px 2px 0}
+@media(max-width:820px){.pseg{display:none}}
+
+.protobar{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:30;display:flex;align-items:center;gap:10px;padding:6px 8px 6px 12px;border:1px solid rgb(var(--bs));border-radius:10px;background:rgb(var(--panel));box-shadow:0 6px 20px rgba(20,40,80,.16);font-size:11px;color:rgb(var(--t3))}
+.protobar .pseg{margin:0;height:26px}.protobar .pt{white-space:nowrap}
+@media(max-width:820px){.pseg{display:flex}.protobar .pt{display:none}.protobar{padding-left:8px}}
+</style></head><body><div id="app"></div><script>
+const I={
+builds:'<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+targets:'<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/>',
+compare:'<circle cx="5" cy="6" r="3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/><path d="m15 9-3-3 3-3"/><circle cx="19" cy="18" r="3"/><path d="M12 18H7a2 2 0 0 1-2-2V9"/><path d="m9 15 3 3-3 3"/>',
+agents:'<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+deploy:'<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+docs:'<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/><path d="M8 11h8"/><path d="M8 7h6"/>',
+up:'<path d="M7 7h10v10"/><path d="M7 17 17 7"/>',
+col:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
+open:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/>',
+sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+org:'<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
+chev:'<path d="m6 9 6 6 6-6"/>',
+search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+swap:'<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
+commit:'<circle cx="12" cy="12" r="3"/><line x1="3" x2="9" y1="12" y2="12"/><line x1="15" x2="21" y1="12" y2="12"/>',
+ext:'<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'};
+const ic=k=>`<svg class="ic" viewBox="0 0 24 24">${I[k]}</svg>`;
+const LOGO="<svg class=\"lg\" viewBox=\"0 0 195 44\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" ><g clip-path=\"url(#clip0_7026_1026)\"><path d=\"M85.6918 30.103C86.0331 30.9207 86.5339 31.6617 87.1656 32.2824C87.8585 32.9176 88.2098 33.4356 88.2098 33.846V34.0219C88.2098 34.5692 87.8585 34.8428 87.1656 34.8428H75.9331C75.2827 34.8428 74.9573 34.5692 74.9573 34.0219V33.846C74.9831 33.6495 75.0506 33.4607 75.1548 33.2922C75.2589 33.1237 75.3981 32.9794 75.5623 32.8687C75.9797 32.5154 76.3443 32.104 76.6456 31.6472C76.8043 31.4319 76.9039 31.1789 76.9348 30.9132C76.9656 30.6475 76.9264 30.3783 76.8214 30.1324L75.8452 27.4351H64.8372L63.8614 30.1324C63.7585 30.3762 63.716 30.6415 63.7381 30.9055C63.7602 31.1694 63.846 31.4239 63.9885 31.6472C64.3123 32.0859 64.6747 32.4947 65.0718 32.8687C65.2464 32.9727 65.3956 33.1144 65.5089 33.2834C65.6218 33.4525 65.696 33.6447 65.7256 33.846V34.0219C65.7256 34.5692 65.3743 34.8428 64.6814 34.8428H58.2698C57.5673 34.8428 57.2256 34.5692 57.2256 34.0219V33.846C57.2256 33.4649 57.5573 32.9469 58.2014 32.2824C58.8552 31.6741 59.3739 30.9349 59.7239 30.1128L67.8335 9.09154C67.931 8.84441 67.9698 8.57779 67.946 8.31304C67.9223 8.04826 67.8368 7.79274 67.6968 7.56701C67.4277 7.04 67.1006 6.54501 66.721 6.09134C66.441 5.79043 66.2577 5.41266 66.1939 5.00654V4.83064C66.1939 4.28336 66.5193 4.00973 67.1698 4.00973H72.7227C73.3793 3.9864 74.026 4.17653 74.566 4.55172C75.106 4.92691 75.5102 5.46703 75.7185 6.09134L85.6918 30.103ZM66.0085 24.1514H74.6743L70.3806 12.0332L66.0085 24.1514Z\" fill=\"currentColor\" /><path d=\"M98.1928 35.2141C95.8382 35.3007 93.4965 34.825 91.3615 33.8263C89.5661 32.8686 88.6682 31.6372 88.6682 30.1322C88.6382 29.7448 88.6978 29.3558 88.8415 28.9949C88.9853 28.634 89.2099 28.311 89.4978 28.0506C90.1445 27.5617 90.9428 27.3161 91.752 27.3567C92.1899 27.3408 92.6257 27.4198 93.0299 27.5885C93.434 27.7572 93.7974 28.0115 94.094 28.334C94.6474 28.9071 95.0499 29.609 95.2653 30.3765C95.4728 31.1188 95.824 31.8129 96.2995 32.4191C96.5299 32.7146 96.8265 32.9511 97.1661 33.1091C97.5053 33.2671 97.8774 33.3421 98.2515 33.3279C98.5724 33.371 98.8995 33.3386 99.2057 33.2334C99.5124 33.1281 99.7903 32.9529 100.017 32.7216C100.244 32.4902 100.415 32.2092 100.515 31.9006C100.615 31.5919 100.642 31.2642 100.594 30.9433C100.608 30.4626 100.505 29.9857 100.292 29.5545C100.079 29.1233 99.764 28.7512 99.3736 28.4708C98.5215 27.8214 97.5499 27.3465 96.5145 27.0733C95.392 26.7606 94.2599 26.399 93.1282 25.9886C92.012 25.5713 91.0257 24.8668 90.2686 23.9461C89.4453 22.8667 89.0307 21.5303 89.0978 20.1737C89.0915 19.2321 89.3228 18.3042 89.7695 17.4757C90.2165 16.6473 90.8649 15.945 91.6545 15.434C93.5974 14.1207 95.9095 13.4664 98.2515 13.5673C100.532 13.4687 102.796 13.9959 104.799 15.0919C106.511 16.1083 107.363 17.3396 107.357 18.786C107.362 19.1484 107.287 19.5075 107.137 19.8372C106.987 20.1669 106.765 20.4589 106.488 20.6917C105.928 21.1918 105.198 21.4577 104.448 21.4344C104.029 21.4522 103.61 21.3793 103.221 21.2208C102.832 21.0623 102.482 20.8218 102.194 20.5158C101.675 19.9589 101.292 19.2902 101.072 18.5612C100.906 17.8341 100.612 17.1423 100.203 16.5187C100.049 16.2398 99.8228 16.008 99.5482 15.8479C99.2732 15.6879 98.9599 15.6056 98.6415 15.6098C98.3478 15.601 98.0561 15.6629 97.7911 15.7904C97.5265 15.918 97.2957 16.1074 97.1195 16.3428C96.7711 16.855 96.5903 17.4628 96.602 18.0824C96.5861 18.5741 96.6795 19.0633 96.8753 19.5145C97.0711 19.9658 97.3645 20.3678 97.734 20.6917C98.5474 21.3775 99.4899 21.8926 100.506 22.2065C101.608 22.5583 102.692 22.9297 103.755 23.3401C104.844 23.7231 105.807 24.3994 106.537 25.2947C107.353 26.2984 107.77 27.5688 107.708 28.8618C107.701 29.7821 107.463 30.6859 107.016 31.4902C106.569 32.2945 105.928 32.9735 105.151 33.4647C103.069 34.7558 100.637 35.3671 98.1928 35.2141Z\" fill=\"currentColor\" /><path d=\"M123.234 13.5481C125.874 13.5306 128.42 14.5275 130.348 16.3333C132.423 18.1511 133.465 20.7278 133.471 24.0636C133.532 25.5516 133.295 27.0367 132.773 28.4315C132.252 29.8262 131.458 31.1024 130.436 32.1848C129.513 33.1681 128.396 33.9493 127.157 34.4791C125.918 35.009 124.582 35.2759 123.234 35.2632C121.666 35.3192 120.12 34.8818 118.813 34.0123V39.2603C118.853 40.0696 119.203 40.8324 119.789 41.3907C120.453 42.1139 120.765 42.6514 120.765 42.9935V43.1694C120.765 43.7264 120.414 44.0001 119.721 44.0001H110.528C109.835 44.0001 109.484 43.7264 109.484 43.1694V43.0326C109.615 42.4265 109.917 41.8706 110.353 41.4298C110.885 40.8455 111.193 40.0903 111.221 39.2994V21.4543C111.199 21.0844 111.094 20.7242 110.913 20.401C110.732 20.0777 110.48 19.7996 110.177 19.5877C109.484 18.9818 109.143 18.4931 109.143 18.112V17.897C109.143 17.4279 109.468 17.0077 110.118 16.6363L115.837 13.812C116.046 13.6945 116.279 13.6247 116.519 13.6078C116.758 13.5909 116.999 13.6273 117.223 13.7142C117.373 13.8256 117.492 13.9743 117.567 14.1457C117.643 14.3172 117.672 14.5053 117.652 14.6915V15.9522C118.813 14.3495 120.658 13.5481 123.234 13.5481ZM122.541 33.1425C124.74 33.1425 125.84 31.3183 125.84 27.6697C125.839 25.921 125.692 24.1753 125.4 22.4511C125.169 20.8172 124.671 19.2325 123.927 17.7602C123.237 16.3725 122.398 15.6786 121.409 15.6786C121.028 15.6663 120.65 15.7492 120.31 15.9198C119.969 16.0905 119.676 16.3434 119.458 16.6558C118.966 17.3834 118.723 18.2509 118.765 19.1284V26.9955C118.701 28.549 119.091 30.0873 119.887 31.4225C120.141 31.916 120.52 32.3344 120.985 32.6361C121.451 32.9378 121.988 33.1124 122.541 33.1425Z\" fill=\"currentColor\" /><path d=\"M153.33 27.9723C153.453 27.8224 153.621 27.7159 153.809 27.6685C153.997 27.621 154.195 27.635 154.374 27.7084C154.56 27.7549 154.722 27.8709 154.825 28.0326C154.928 28.1943 154.966 28.3895 154.931 28.5781C154.872 30.0245 154.036 31.5002 152.423 33.0052C150.698 34.5493 148.44 35.3591 146.128 35.2627C144.702 35.3163 143.28 35.074 141.952 34.551C140.623 34.0279 139.417 33.2355 138.409 32.2234C137.401 31.1693 136.616 29.9222 136.102 28.5569C135.587 27.1916 135.352 25.7363 135.413 24.2781C135.366 22.8486 135.62 21.4251 136.158 20.1001C136.696 18.7751 137.506 17.5781 138.536 16.587C139.532 15.6051 140.712 14.8308 142.008 14.3091C143.305 13.7873 144.692 13.5285 146.089 13.5476C148.277 13.4135 150.442 14.0611 152.198 15.3751C152.851 15.8506 153.387 16.4695 153.764 17.1844C154.141 17.8992 154.35 18.6911 154.374 19.4993C154.392 20.0671 154.239 20.6271 153.937 21.1076C153.634 21.5881 153.195 21.9672 152.676 22.1965L144.049 27.0829C144.542 27.9579 145.262 28.6827 146.134 29.1801C147.005 29.6775 147.994 29.9288 148.997 29.9073C149.861 29.9161 150.716 29.7395 151.505 29.3893C152.223 29.0787 152.851 28.5912 153.33 27.9723ZM145.299 15.6683C144.861 15.6756 144.432 15.7998 144.058 16.0283C143.684 16.2569 143.378 16.5813 143.171 16.9681C142.62 17.9651 142.35 19.0934 142.391 20.2322C142.36 21.7758 142.581 23.3139 143.044 24.7863L147.075 22.3627C147.436 22.1202 147.729 21.7888 147.925 21.4003C148.122 21.0119 148.215 20.5793 148.197 20.1442C148.178 19.1241 147.927 18.1216 147.465 17.2124C147.31 16.7607 147.018 16.3689 146.629 16.092C146.241 15.8151 145.776 15.6669 145.299 15.6683Z\" fill=\"currentColor\" /><path d=\"M167.773 35.2631C166.273 35.317 164.779 35.0601 163.384 34.5085C161.988 33.9569 160.721 33.1225 159.663 32.0576C158.65 31.0511 157.849 29.8524 157.304 28.5319C156.76 27.2113 156.483 25.7952 156.491 24.3665C156.427 22.9079 156.68 21.4526 157.235 20.1024C157.789 18.752 158.631 17.5391 159.702 16.5483C161.827 14.5879 164.62 13.5146 167.509 13.548C169.825 13.4452 172.115 14.0706 174.057 15.3364C174.874 15.8051 175.553 16.4809 176.025 17.2958C176.498 18.1107 176.748 19.036 176.751 19.9785C176.756 20.3209 176.689 20.6605 176.554 20.9754C176.42 21.2902 176.221 21.5732 175.97 21.806C175.639 22.0776 175.257 22.2792 174.845 22.3985C174.435 22.5178 174.004 22.5522 173.579 22.4999C172.611 22.4406 171.7 22.0226 171.022 21.3271C170.363 20.6578 169.848 19.8594 169.51 18.9817C169.203 18.1611 168.761 17.398 168.202 16.7241C167.995 16.4154 167.719 16.1599 167.395 15.9782C167.071 15.7965 166.709 15.6938 166.338 15.6785C165.878 15.7054 165.432 15.8519 165.045 16.1039C164.658 16.3558 164.344 16.7044 164.133 17.1151C163.548 18.1611 163.261 19.3475 163.303 20.5453C163.188 22.9781 163.874 25.3815 165.255 27.3863C165.843 28.2004 166.621 28.8589 167.52 29.3049C168.42 29.751 169.414 29.9713 170.417 29.9467C171.359 29.9372 172.284 29.7004 173.115 29.2564C173.946 28.8123 174.657 28.1741 175.189 27.3961C175.308 27.2389 175.471 27.1212 175.657 27.0585C175.843 26.9957 176.044 26.9907 176.233 27.0442C176.421 27.08 176.588 27.1857 176.7 27.3399C176.812 27.4942 176.862 27.6854 176.838 27.8749C176.813 28.8686 176.579 29.8458 176.152 30.7431C175.725 31.6404 175.114 32.4379 174.36 33.0838C172.521 34.6232 170.165 35.4026 167.773 35.2631Z\" fill=\"currentColor\" /><path d=\"M187.798 35.2636C186.832 35.3128 185.868 35.1522 184.97 34.7929C184.072 34.4336 183.262 33.8841 182.597 33.182C181.257 31.4998 180.592 29.3775 180.733 27.2304V16.9397H179.084C178.812 16.947 178.548 16.853 178.342 16.6758C178.172 16.4698 178.082 16.2097 178.088 15.9428V14.9656C178.072 14.8335 178.087 14.6995 178.13 14.5737C178.174 14.448 178.245 14.3338 178.339 14.2397C178.433 14.1457 178.547 14.0742 178.673 14.0306C178.798 13.987 178.932 13.9726 179.064 13.9883H179.884C181.132 14.0187 182.349 13.603 183.319 12.8155C184.28 11.9812 184.936 10.8498 185.183 9.60033C185.319 8.84783 185.709 8.46666 186.354 8.46666H187.329C187.487 8.43158 187.651 8.43616 187.806 8.48004C187.962 8.52391 188.104 8.60566 188.219 8.718C188.336 8.83033 188.422 8.96971 188.471 9.12371C188.52 9.27766 188.53 9.44146 188.501 9.60033V13.9883H192.97C193.101 13.9832 193.231 14.0078 193.351 14.0603C193.471 14.1128 193.578 14.1917 193.663 14.2912C193.761 14.3775 193.839 14.4844 193.892 14.6043C193.944 14.7243 193.969 14.8543 193.966 14.9851V15.9624C193.969 16.099 193.944 16.2347 193.892 16.361C193.84 16.4872 193.762 16.6011 193.663 16.6953C193.476 16.8711 193.227 16.966 192.97 16.9592H188.501V27.3965C188.467 28.0237 188.669 28.6409 189.067 29.1263C189.239 29.3234 189.452 29.4806 189.692 29.5869C189.931 29.6932 190.191 29.7461 190.452 29.742C191.031 29.7599 191.602 29.6191 192.107 29.3349C192.61 29.0507 193.027 28.6338 193.312 28.1295C193.389 28.012 193.492 27.9128 193.611 27.8386C193.731 27.7644 193.865 27.7169 194.004 27.6995C194.116 27.6666 194.233 27.6609 194.347 27.683C194.461 27.7052 194.568 27.7544 194.659 27.8265C194.756 27.8939 194.835 27.9847 194.887 28.0907C194.94 28.1966 194.966 28.3141 194.961 28.4325C194.962 29.363 194.774 30.284 194.408 31.1391C194.042 31.9942 193.505 32.7656 192.831 33.406C192.157 34.0463 191.359 34.5422 190.487 34.8632C189.615 35.1844 188.687 35.3239 187.759 35.2734L187.798 35.2636Z\" fill=\"currentColor\" /><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M37.8837 39.7852H24.1335L30.9647 27.8625L24.1335 15.9397H37.8837L44.7635 27.8625L37.8837 39.7852ZM6.87999 39.7852H20.6106L27.4417 27.8527H13.7794L6.89953 15.9201L0.0683594 27.8527L6.87999 39.7852ZM8.76344 12.9199L15.6532 24.8427L22.4843 12.9003H36.2344L29.3935 0.977539H15.6336L8.76344 12.9199Z\" fill=\"#176ACC\" /></g><defs><clipPath id=\"clip0_7026_1026\"><rect width=\"195\" height=\"44\" fill=\"white\" /></clipPath></defs></svg>",MARK="<svg class=\"lg\" viewBox=\"0 0 45 40\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M37.8837 39.7852H24.1335L30.9647 27.8625L24.1335 15.9397H37.8837L44.7635 27.8625L37.8837 39.7852ZM6.87999 39.7852H20.6106L27.4417 27.8527H13.7794L6.89953 15.9201L0.0683594 27.8527L6.87999 39.7852ZM8.76344 12.9199L15.6532 24.8427L22.4843 12.9003H36.2344L29.3935 0.977539H15.6336L8.76344 12.9199Z\" fill=\"#176ACC\" /></svg> ";
+let NAVC=false;
+function toggleNav(){NAVC=!NAVC;const s=document.querySelector('.side');s.classList.toggle('col',NAVC);s.querySelector('.cb').innerHTML=ic(NAVC?'open':'col')+'<span>Collapse</span>';s.querySelector('.cb').title=NAVC?'Expand navigation':''}
+function renderChrome(p,links){
+const nav=[['builds','Builds'],['targets','Targets'],['deploy','Deployments'],['compare','Compare'],['agents','Agents']];
+return `<aside class="side${NAVC?' col':''}"><a class="logo" href="#/deployments" aria-label="Aspect home">${NAVC?MARK:LOGO}</a><nav class="nav nv1">
+${nav.map(([k,l])=>`<a href="${links[k]}" title="${l}" class="ni${k===p.nav?' on':''}">${ic(k)}<span>${l}</span></a>`).join('')}
+</nav><div class="sp1"></div><nav class="nav nv2"><a class="ni" href="#" title="Docs">${ic('docs')}<span>Docs</span>${ic('up').replace('class="ic"','class="ic ext"')}</a><button class="ni btn0 cb" type="button" onclick="toggleNav()" aria-label="Collapse navigation">${ic(NAVC?'open':'col')}<span>Collapse</span></button></nav>
+<div class="acct"><button type="button" aria-label="Account"><span class="av">Ş</span><span class="who"><b>Şahin Yort</b><span>sahin@aspect.build</span></span></button></div></aside>
+<div class="main"><header class="top"><nav class="crumb">${p.crumb}</nav><span class="sp"></span><button class="org" type="button">${ic('org')}<span>Aspect Build Public</span>${ic('chev')}</button><div class="srch">${ic('search')}<input placeholder="Search…" aria-label="Search"></div><button class="tgl" type="button" aria-label="Toggle light or dark">${ic('sun')}</button></header>
+<div class="scroll" id="m"><div class="pg">${p.html}</div></div></div><div class="protobar"><span class="pt">Prototype · invented data</span></div>`}
+const KB=1024,MB=1048576;
+const fmt=n=>{const a=Math.abs(n);return a>=MB?(a/MB).toFixed(a>=10*MB?1:2)+' MB':a>=KB?(a/KB).toFixed(a>=10*KB?0:1)+' KB':a+' B'};
+const sgn=n=>(n>0?'+':n<0?'−':'')+fmt(n);
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const strip=(cells,foot)=>`<div class="card strip"><div class="cells">${cells.map(([k,v,sb,t])=>`<div class="c1"><div class="k">${k}</div><div class="v ${t||''}">${v}</div><div class="s tnum">${sb||''}</div></div>`).join('')}</div>${foot||''}</div>`;
+const ctlText=m=>['Package','Version','Architecture','Maintainer','Installed-Size','Depends','Section','Priority'].map(k=>`${k}: ${m['Package::'+k]}`).join('\n');
+function mkRev(o){
+  const m=o.meta;
+  o.files['DEBIAN/control']={kind:'text',size:ctlText(m).length,sha:'ctl-'+o.sha,text:ctlText(m)};
+  return o;
+}
+const ELF=(size,sha,bid,t,r,s,syms,strs)=>({kind:'elf',size,sha,bid,sections:{'.text':t,'.rodata':r,'.symtab':s},syms,strs});
+const TXT=(text,sha,note)=>({kind:'text',size:text.length,sha,text,note});
+const BIN=(size,sha,info)=>({kind:'bin',size,sha,info});
+const base=['aqnav::nav::run','aqnav::io::gnss_read','aqnav::fusion::imu_predict'];
+const REV_DEB=[
+mkRev({v:'4.2.0~rc3',sha:'d09a4c1',msg:'nav: switch to kalman_v2, add drift guard',build:8812,run:4412,by:'Dana Okafor',trig:'workflow_dispatch',when:'2d ago',date:'Oct 17, 2026 09:41 UTC',dur:'6m 03s',cache:'91.4%',
+ pr:{n:1894,t:'Fix heading drift after GNSS dropout',a:'Marcus Lin'},art:'s3://aqnav-debs/pool/4.2.0~rc3/aqnav_4.2.0~rc3_amd64.deb',size:61431*KB,total:1204,
+ meta:{'Package::Package':'aqnav','Package::Version':'4.2.0~rc3','Package::Architecture':'amd64','Package::Maintainer':'AQNav Release <aqnav-release@sandboxaq.example>','Package::Installed-Size':'61431','Package::Depends':'libc6 (>= 2.31), libssl3, libonnxruntime1.18','Package::Section':'misc','Package::Priority':'optional',
+  'Build::Bazel':'7.4.1','Build::Target':'//aqnav:deb','Build::Commit':'d09a4c1','Build::Toolchain':'clang 18.1.8 · glibc 2.31','Build::Built at':'2026-10-17T09:41Z','Build::Runner':'aspect-runner-04',
+  'Digests::.deb sha256':'4f1a…c90e','Digests::data.tar.xz sha256':'a2d7…18b3','Digests::Signature':'GPG 7A3C…E1F4 · valid',
+  'Provenance::Source':'sandboxaq/aqnav @ release/4.2','Provenance::Workflow':'release-deb.yml','Provenance::Builder':'GitHub Actions · ubuntu-22.04'},
+ files:{
+ 'usr/bin/aqnav':ELF(18.4*MB|0,'bin-rc3','b2a840d9e1',9.28*MB|0,3.41*MB|0,2.2*MB|0,[...base,'aqnav::fusion::kalman_update_v2','aqnav::nav::drift_guard'],['aqnav 4.2.0~rc3']),
+ 'usr/lib/aqnav/libnav.so':ELF(6.1*MB|0,'lib-rc3','b2a840d9e1',3.1*MB|0,1.2*MB|0,.8*MB|0,['libnav::init'],['libnav 4.2.0~rc3']),
+ 'etc/aqnav/config.yaml':TXT('nav:\n  mode: autonomous\n  drift_alarm_m: 0.25\n  fusion:\n    filter: kalman_v2\n    max_gap_ms: 800','cfg-rc3'),
+ 'usr/share/doc/aqnav/changelog.gz':TXT('aqnav (4.2.0~rc3) unstable; urgency=medium\n  * Fix heading drift after GNSS dropout\n  * Replace model v6 with v7\naqnav (4.2.0~rc2) unstable; urgency=medium\n  * Add GNSS dropout detector\naqnav (4.2.0~rc1) unstable; urgency=medium\n  * First 4.2 candidate','chg-rc3','gzip → text'),
+ 'usr/share/aqnav/models/v7.onnx':BIN(9*MB,'v7','ONNX model · opset 17 · 14 nodes'),
+ 'usr/share/aqnav/models/v7.sha256':TXT('91c0…e7f2  v7.onnx','v7s')}}),
+mkRev({v:'4.2.0~rc2',sha:'77be012',msg:'nav: GNSS dropout detector, model v6',build:8790,run:4388,by:'Marcus Lin',trig:'workflow_dispatch',when:'5d ago',date:'Oct 14, 2026 14:02 UTC',dur:'5m 48s',cache:'90.8%',
+ pr:{n:1881,t:'Add GNSS dropout detector',a:'Priya Nair'},art:'s3://aqnav-debs/pool/4.2.0~rc2/aqnav_4.2.0~rc2_amd64.deb',size:61244*KB,total:1204,
+ meta:{'Package::Package':'aqnav','Package::Version':'4.2.0~rc2','Package::Architecture':'amd64','Package::Maintainer':'AQNav Release <aqnav-release@sandboxaq.example>','Package::Installed-Size':'61244','Package::Depends':'libc6 (>= 2.31), libssl3','Package::Section':'misc','Package::Priority':'optional',
+  'Build::Bazel':'7.4.1','Build::Target':'//aqnav:deb','Build::Commit':'77be012','Build::Toolchain':'clang 18.1.8 · glibc 2.31','Build::Built at':'2026-10-14T14:02Z','Build::Runner':'aspect-runner-02',
+  'Digests::.deb sha256':'9c1e…07aa','Digests::data.tar.xz sha256':'e5b0…42d1','Digests::Signature':'GPG 7A3C…E1F4 · valid',
+  'Provenance::Source':'sandboxaq/aqnav @ release/4.2','Provenance::Workflow':'release-deb.yml','Provenance::Builder':'GitHub Actions · ubuntu-22.04'},
+ files:{
+ 'usr/bin/aqnav':ELF(18.2*MB|0,'bin-rc2','5c1f9e03a7',9.10*MB|0,3.40*MB|0,2.2*MB|0,[...base,'aqnav::fusion::kalman_update'],['aqnav 4.2.0~rc2']),
+ 'usr/lib/aqnav/libnav.so':ELF(6.1*MB|0,'lib-rc2','5c1f9e03a7',3.1*MB|0,1.2*MB|0,.8*MB|0,['libnav::init'],['libnav 4.2.0~rc2']),
+ 'etc/aqnav/config.yaml':TXT('nav:\n  mode: autonomous\n  drift_alarm_m: 0.4\n  fusion:\n    filter: kalman','cfg-rc2'),
+ 'usr/share/doc/aqnav/changelog.gz':TXT('aqnav (4.2.0~rc2) unstable; urgency=medium\n  * Add GNSS dropout detector\naqnav (4.2.0~rc1) unstable; urgency=medium\n  * First 4.2 candidate','chg-rc2','gzip → text'),
+ 'usr/share/aqnav/models/v6.onnx':BIN(9*MB,'v6','ONNX model · opset 17 · 12 nodes')}}),
+mkRev({v:'4.2.0~rc1',sha:'5c3e9a7',msg:'release: cut 4.2',build:8731,run:4351,by:'Dana Okafor',trig:'push (tag)',when:'12d ago',date:'Oct 7, 2026 10:15 UTC',dur:'38m 20s',cache:'12.0%',
+ pr:{n:1862,t:'Cut release/4.2',a:'Dana Okafor'},art:'s3://aqnav-debs/pool/4.2.0~rc1/aqnav_4.2.0~rc1_amd64.deb',size:60812*KB,total:1198,
+ meta:{'Package::Package':'aqnav','Package::Version':'4.2.0~rc1','Package::Architecture':'amd64','Package::Maintainer':'AQNav Release <aqnav-release@sandboxaq.example>','Package::Installed-Size':'60812','Package::Depends':'libc6 (>= 2.31), libssl3','Package::Section':'misc','Package::Priority':'optional',
+  'Build::Bazel':'7.4.1','Build::Target':'//aqnav:deb','Build::Commit':'5c3e9a7','Build::Toolchain':'clang 18.1.8 · glibc 2.31','Build::Built at':'2026-10-07T10:15Z','Build::Runner':'aspect-runner-01',
+  'Digests::.deb sha256':'b73d…5e19','Digests::data.tar.xz sha256':'0c88…f6a4','Digests::Signature':'GPG 7A3C…E1F4 · valid',
+  'Provenance::Source':'sandboxaq/aqnav @ release/4.2','Provenance::Workflow':'release-deb.yml','Provenance::Builder':'GitHub Actions · ubuntu-22.04'},
+ files:{
+ 'usr/bin/aqnav':ELF(18.0*MB|0,'bin-rc1','1d77a2c4be',9.0*MB|0,3.38*MB|0,2.2*MB|0,[...base,'aqnav::fusion::kalman_update'],['aqnav 4.2.0~rc1']),
+ 'usr/lib/aqnav/libnav.so':ELF(6.0*MB|0,'lib-rc1','1d77a2c4be',3.0*MB|0,1.2*MB|0,.8*MB|0,['libnav::init'],['libnav 4.2.0~rc1']),
+ 'etc/aqnav/config.yaml':TXT('nav:\n  mode: assisted\n  drift_alarm_m: 0.4\n  fusion:\n    filter: kalman','cfg-rc1'),
+ 'usr/share/doc/aqnav/changelog.gz':TXT('aqnav (4.2.0~rc1) unstable; urgency=medium\n  * First 4.2 candidate','chg-rc1','gzip → text'),
+ 'usr/share/aqnav/models/v6.onnx':BIN(9*MB,'v6','ONNX model · opset 17 · 12 nodes')}}),
+mkRev({v:'4.1.0',sha:'3e51ab0',msg:'release: 4.1.0',build:8602,run:4210,by:'github-actions[bot]',trig:'schedule',when:'8w ago',date:'Aug 24, 2026 02:00 UTC',dur:'6m 51s',cache:'88.0%',
+ pr:{n:1790,t:'Release 4.1.0',a:'Priya Nair'},art:'s3://aqnav-debs/pool/4.1.0/aqnav_4.1.0_amd64.deb',size:58104*KB,total:1180,
+ meta:{'Package::Package':'aqnav','Package::Version':'4.1.0','Package::Architecture':'amd64','Package::Maintainer':'AQNav Release <aqnav-release@sandboxaq.example>','Package::Installed-Size':'58104','Package::Depends':'libc6 (>= 2.31), libssl3','Package::Section':'misc','Package::Priority':'optional',
+  'Build::Bazel':'7.3.2','Build::Target':'//aqnav:deb','Build::Commit':'3e51ab0','Build::Toolchain':'clang 17.0.6 · glibc 2.31','Build::Built at':'2026-08-24T02:00Z','Build::Runner':'aspect-runner-03',
+  'Digests::.deb sha256':'6a0f…d2c7','Digests::data.tar.xz sha256':'7714…93be','Digests::Signature':'GPG 7A3C…E1F4 · valid',
+  'Provenance::Source':'sandboxaq/aqnav @ release/4.1','Provenance::Workflow':'release-deb.yml','Provenance::Builder':'GitHub Actions · ubuntu-20.04'},
+ files:{
+ 'usr/bin/aqnav':ELF(17.6*MB|0,'bin-410','a09c3e7712',8.7*MB|0,3.3*MB|0,2.1*MB|0,[...base,'aqnav::fusion::kalman_update'],['aqnav 4.1.0']),
+ 'usr/lib/aqnav/libnav.so':ELF(5.8*MB|0,'lib-410','a09c3e7712',2.9*MB|0,1.1*MB|0,.8*MB|0,['libnav::init'],['libnav 4.1.0']),
+ 'etc/aqnav/config.yaml':TXT('nav:\n  mode: assisted\n  drift_alarm_m: 0.5\n  fusion:\n    filter: kalman','cfg-410'),
+ 'usr/share/doc/aqnav/changelog.gz':TXT('aqnav (4.1.0) unstable; urgency=medium\n  * Stable 4.1','chg-410','gzip → text'),
+ 'usr/share/aqnav/models/v5.onnx':BIN(8.4*MB|0,'v5','ONNX model · opset 16 · 11 nodes')}}),
+];
+[{br:'release/4.2',full:'d09a4c1e55b27f90a3c1d4e8b6a2f07c9e31b5d8',au:'Marcus Lin',tag:'v4.2.0-rc3',base:'main @ 8a1f3c0',ahead:3,cp:'3 cherry-picks from main'},
+ {br:'release/4.2',full:'77be012c9d31a4e6f8b0c2d5e7a19b3c4d6f8e02',au:'Priya Nair',tag:'v4.2.0-rc2',base:'main @ 8a1f3c0',ahead:9,cp:'2 cherry-picks from main'},
+ {br:'release/4.2',full:'5c3e9a7b1d4f6e8a0c2b4d6f8a1c3e5b7d9f0a24',au:'Dana Okafor',tag:'v4.2.0-rc1',base:'main @ 8a1f3c0',ahead:0,cp:'branch cut'},
+ {br:'release/4.1',full:'3e51ab0f7c2d4a6e8b1c3d5f7a9e0b2c4d6f8a13',au:'Priya Nair',tag:'v4.1.0',base:'main @ 41c9d7e',ahead:6,cp:'1 cherry-pick from main'}].forEach((x,i)=>Object.assign(REV_DEB[i],x));
+let REV=REV_DEB,DP;
+const DEPS={};
+const ST={a:1,b:0,tab:'contents',sel:null,q:'',dep:'deb',rv:'b',oa:false,oe:false,cmp:false};
+function setDep(k){DP=DEPS[k]||DEPS.deb;REV=DP.rev;ST.dep=k;ST.a=1;ST.b=0;ST.cmp=REV.length>1;ST.baseAuto=true;ST.tab='contents';ST.sel=null;ST.q='';ST.rv=ST.cmp?'d':'b'}
+Object.assign(I,{ci:'<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>',pr:'<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',br:'<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',tag:'<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>',package:'<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',layers:'<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',archive:'<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',user:'<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',hammer:'<path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/>'});
+function lineDiff(a,b){a=a.split('\n');b=b.split('\n');const n=a.length,m=b.length,L=Array.from({length:n+1},()=>Array(m+1).fill(0));
+ for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)L[i][j]=a[i]===b[j]?L[i+1][j+1]+1:Math.max(L[i+1][j],L[i][j+1]);
+ const o=[];let i=0,j=0;while(i<n&&j<m){if(a[i]===b[j]){o.push(['=',a[i]]);i++;j++}else if(L[i+1][j]>=L[i][j+1]){o.push(['-',a[i++]])}else o.push(['+',b[j++]])}
+ while(i<n)o.push(['-',a[i++]]);while(j<m)o.push(['+',b[j++]]);return o}
+const dtxt=ops=>`<div class="diff">${ops.map(([k,t])=>k==='+'?`<span class="p">+ ${esc(t)}</span>`:k==='-'?`<span class="m">- ${esc(t)}</span>`:`<span>  ${esc(t)}</span>`).join('')}</div>`;
+function diffFiles(A,B){const paths=[...new Set([...Object.keys(A.files),...Object.keys(B.files)])].sort();const out=[];let same=0;
+ for(const p of paths){const x=A.files[p],y=B.files[p];if(x&&y){if(x.sha===y.sha)same++;else out.push({p,st:'M',x,y})}else if(y)out.push({p,st:'A',y});else out.push({p,st:'D',x})}
+ return {list:out,hidden:Math.max(0,B.total-Object.keys(B.files).length)+same}}
+function pane(f){const{p,st,x,y}=f,k=(y||x).kind,chip={M:'<span class="st M">modified</span>',A:'<span class="st A">added</span>',D:'<span class="st D">removed</span>'}[st];
+ const kind={elf:'ELF x86-64',text:'text',bin:'binary'}[k]+((y||x).note?` · ${(y||x).note}`:'');
+ let h=`<div class="fh"><code>${esc(p)}</code><span class="t3 s12">${kind}</span>${chip}<a class="go" href="#/compare">Compare builds #${REV[ST.a].build} → #${REV[ST.b].build} →</a></div>`;
+ if(k==='text')h+=dtxt(lineDiff(x?x.text:'',y?y.text:''));
+ else if(k==='elf'&&x&&y){const secs=Object.keys(y.sections);
+  h+=`<table class="inner"><thead><tr><th>Section</th><th class="r">A</th><th class="r">B</th><th class="r">Δ</th></tr></thead><tbody>${secs.map(s=>{const d=y.sections[s]-x.sections[s];return `<tr><td><code>${s}</code></td><td class="r mono">${fmt(x.sections[s])}</td><td class="r mono">${fmt(y.sections[s])}</td><td class="r mono ${Math.abs(d)>20*KB?'warn':'t3'}">${d?sgn(d):'0'}</td></tr>`}).join('')}</tbody></table>`;
+  const ad=y.syms.filter(s=>!x.syms.includes(s)),rm=x.syms.filter(s=>!y.syms.includes(s));
+  h+=`<div class="sub2">Symbols</div><div class="chips">${ad.map(s=>`<span class="chip pass m">+ ${esc(s)}</span>`).join('')}${rm.map(s=>`<span class="chip fail m">− ${esc(s)}</span>`).join('')}${!ad.length&&!rm.length?'<span class="t3 s12">No symbol changes</span>':''}</div>`;
+  h+=`<div class="sub2">Build ID and strings</div>`+dtxt(lineDiff(`Build ID ${x.bid}\n${x.strs.join('\n')}`,`Build ID ${y.bid}\n${y.strs.join('\n')}`))}
+ else{const z=y||x;h+=`<p class="t2 s12" style="margin-top:12px">${fmt(z.size)} · ${esc(z.info||'')}. No text diff for this file type.<br>${st==='M'?`sha256 <code>${x.sha}</code> → <code>${y.sha}</code>`:`sha256 <code>${z.sha}</code>`}</p>`}
+ return h}
+function head(A,B){
+ const sel=(id,cur)=>`<select class="fld" aria-label="Revision ${id.toUpperCase()}" onchange="pickRev('${id}',this.value)">${REV.map((r,i)=>`<option value="${i}" ${i===cur?'selected':''}>${r.v}</option>`).join('')}</select>`;
+ const side=(lbl,id,R,cur)=>`<div class="rv" title="build #${R.build} · ${R.br} · ${R.tag}"><span class="rl">${lbl}</span>${sel(id,cur)}<span class="rm"><span class="mono">${R.sha}</span><span class="sep">·</span>${R.when}</span></div>`;
+ const lk=(t,u)=>`<a class="l" href="#" title="${u}">${t}</a>`,dot=`<span class="sep">·</span>`;
+ const GH=DP.gh;
+ const gi=(k,h)=>`<span class="it2">${ic(k)}${h}</span>`;
+ return `<div class="hd"><div class="l"><div class="t"><span class="dot g"></span><h1>${DP.target}</h1></div>
+<div class="meta"><span class="pass">Deployed</span>${DP.tabs.includes('verify')?vbadge(ST.b):''}<span class="chip infra">${ic('br')}${B.br}</span><span class="qt">${ic(DP.icon)}${DP.label}</span><span class="qt">${ic('tag')}${B.tag}</span><span class="qt mono">${DP.repo}</span></div>
+<div class="hi"><span class="it2"><span class="av sm">${esc(B.by)[0]}</span>${esc(B.by)}</span>${gi('ci',lk(DP.ciName+' · run #'+B.run,GH+'/actions/runs/'+B.run))}${gi('pr',lk('#'+B.pr.n+' '+esc(B.pr.t),GH+'/pull/'+B.pr.n))}${gi('clock',B.when)}</div></div>
+<div class="r2"><a class="btn" href="#" title="${GH}/actions/runs/${B.run}">${ic('ext')}Open CI run</a><a class="btn" href="#/compare">${ic('compare')}Compare builds</a></div></div>`}
+function layersDiff(A,B){const names=[...new Set([...(A.layers||[]).map(l=>l.n),...(B.layers||[]).map(l=>l.n)])];
+ const rows=names.map(n=>{const x=(A.layers||[]).find(l=>l.n===n),y=(B.layers||[]).find(l=>l.n===n);return {n,x,y,st:x&&y?(x.d===y.d?'=':'M'):y?'A':'D'}});
+ const ch=rows.filter(r=>r.st!=='=').length,tot=(B.layers||[]).reduce((t,l)=>t+l.size,0)-(A.layers||[]).reduce((t,l)=>t+l.size,0);
+ const kp=(k,v,sb,c)=>[k,v,sb,c];
+ const chip={'=':'<span class="t3">unchanged</span>',M:'<span class="chip warn">changed</span>',A:'<span class="chip pass">added</span>',D:'<span class="chip fail">removed</span>'};
+ return `<div class="mb5">${strip([kp('Layers changed',ch,'of '+rows.length,ch?'warn':''),kp('Layers reused',rows.length-ch,'by digest',rows.length-ch?'pass':''),kp('Layer size delta',sgn(tot),'compressed'),kp('Layers in B',(B.layers||[]).length,fmt((B.layers||[]).reduce((t,l)=>t+l.size,0)))])}</div>
+<div class="card tbl"><div class="sc"><table><thead><tr><th style="width:1%">#</th><th>Layer</th><th>Digest A → B</th><th class="r">Size A → B</th><th>Status</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td class="t3">${i+1}</td><td><span class="nm">${r.n}</span><div class="sub mono">${esc((r.y||r.x).by)}</div></td><td class="mono">${r.st==='=' ? r.y.d : (r.x?r.x.d:'—')+' → '+(r.y?r.y.d:'—')}</td><td class="r mono">${r.st==='A'?'<span class="pass">+'+fmt(r.y.size)+'</span>':r.st==='D'?'<span class="fail">−'+fmt(r.x.size)+'</span>':r.st==='='?fmt(r.y.size):fmt(r.x.size)+' → '+fmt(r.y.size)}</td><td>${chip[r.st]}</td></tr>`).join('')}</tbody></table></div></div>`}
+function contentsDiff(A,B){const {list,hidden}=diffFiles(A,B);if(!ST.sel||!list.find(f=>f.p===ST.sel))ST.sel=list[0]&&list[0].p;
+ const cnt=s=>list.filter(f=>f.st===s),sz=s=>cnt(s).reduce((t,f)=>t+((f.y?f.y.size:0)-(f.x?f.x.size:0)),0),d=B.size-A.size;
+ const kp=(k,v,sb,c)=>[k,v,sb,c];
+ const sizeCell=f=>f.st==='A'?`<span class="pass">+${fmt(f.y.size)}</span>`:f.st==='D'?`<span class="fail">−${fmt(f.x.size)}</span>`:`${fmt(f.x.size)} → ${fmt(f.y.size)}`;
+ return `<div class="mb5">${strip([kp('Files changed',list.length,'of '+B.total.toLocaleString()),kp('Added',cnt('A').length,sgn(sz('A')),'pass'),kp('Modified',cnt('M').length,sgn(sz('M')),'warn'),kp('Removed',cnt('D').length,sgn(sz('D')),'fail'),kp(DP.sizeLabel,fmt(B.size),sgn(d)+' · '+(d/A.size*100).toFixed(1)+'%')])}</div>
+<div class="two"><div class="card tbl ft"><table><thead><tr><th style="width:1%"></th><th>Path</th><th class="r">Size</th></tr></thead><tbody>
+${list.map(f=>`<tr class="${f.p===ST.sel?'sel':''}" onclick="pickFile('${f.p}')"><td><span class="st ${f.st}">${f.st}</span></td><td><code>${f.p}</code></td><td class="r mono">${sizeCell(f)}</td></tr>`).join('')||'<tr class="nh"><td colspan="3" class="t3 s12">These two revisions are identical.</td></tr>'}
+<tr class="nh"><td></td><td class="t3 s12" colspan="2">${hidden.toLocaleString()} unchanged files hidden</td></tr></tbody></table></div>
+<div class="card panel"><div class="pb">${list.length?pane(list.find(f=>f.p===ST.sel)):'<span class="t3 s12">Nothing to show.</span>'}</div></div></div>`}
+function metadataDiff(A,B){const keys=[...new Set([...Object.keys(A.meta),...Object.keys(B.meta)])].filter(k=>!hid(k)),secs=[...new Set(keys.map(k=>k.split('::')[0]))];
+ return `<div class="stack">`+deliveryBlock(A,B)+secs.map(s=>{const rows=keys.filter(k=>k.startsWith(s+'::')),ch=rows.filter(k=>A.meta[k]!==B.meta[k]).length;
+ return `<div><div class="lbl row2">${s}${ch?` <span class="chip warn">${ch} changed</span>`:''}</div><div class="card tbl"><div class="sc"><table><thead><tr><th style="width:24%">Field</th><th>A · ${A.v}</th><th>B · ${B.v}</th></tr></thead><tbody>${rows.map(k=>{const a=A.meta[k]??'—',b=B.meta[k]??'—',c=a!==b;return `<tr class="${c?'chg':''}"><td class="t2">${k.split('::')[1]}</td><td class="${c?'t3':''}" style="${c?'text-decoration:line-through':''}"><code>${esc(a)}</code></td><td><code>${esc(b)}</code></td></tr>`}).join('')}</tbody></table></div></div></div>`}).join('')+customBlock(A,B)+`</div>`}
+function history(){const q=ST.q.toLowerCase();
+ const rows=REV.map((r,i)=>({r,i})).filter(({r})=>!q||[r.v,r.by,r.sha,'#'+r.pr.n,r.pr.t,r.msg].join(' ').toLowerCase().includes(q));
+ return `<div class="bar"><div class="si"><svg viewBox="0 0 24 24">${I.search}</svg><input value="${esc(ST.q)}" placeholder="Filter by version, person, PR, commit…" oninput="ST.q=this.value;draw(true)"></div><span class="cnt">${rows.length} of ${REV.length} deployments</span></div>
+<div class="card tbl"><div class="sc"><table><thead><tr><th>Version</th><th>Deployed</th><th>By</th><th>CI</th><th>PR</th>${DP.tabs.includes('verify')?'<th>Verified</th>':''}<th></th></tr></thead><tbody>
+${rows.map(({r,i})=>{const p=REV[i+1];
+ return `<tr><td><span class="nm">${r.v}</span>${i===0?' <span class="chip pass">latest</span>':''}<div class="sub mono">${r.sha} · ${fmt(r.size)}</div><div class="sub">${r.br} · ${r.tag}</div><div class="sub">${esc(r.msg)}</div>${r.evicted?`<div class="sub ev">${ic('archive')}Contents not in cache</div>`:''}</td><td>${r.when}<div class="sub">${r.date}</div></td><td>${esc(r.by)}</td>
+ <td><a class="nm il" href="#" title="${DP.gh}/actions/runs/${r.run}">${ic('ci')}run #${r.run}</a><div class="sub">${r.trig} · ${r.dur}</div></td>
+ <td><a class="nm il" href="#">${ic('pr')}#${r.pr.n}</a><div class="sub">${esc(r.pr.t)}</div></td>${DP.tabs.includes('verify')?`<td>${vbadge(i)}</td>`:''}
+ <td style="white-space:nowrap"><a class="btn sm" onclick="viewRow(${i})">View</a> ${p?`<a class="btn sm" onclick="diffRow(${i})">Compare with previous</a> `:''}<a class="btn sm" href="#/compare">Build</a></td></tr>`}).join('')}</tbody></table></div></div><p class="t3 s12 fn">Deliveries are kept as long as their build data. Contents are read from the remote cache and are unavailable once an artifact has left it.</p>`}
+function draw(keep){const A=REV[ST.a],B=REV[ST.b],el=document.getElementById('dep');if(!el)return;const y=keep?document.getElementById('m').scrollTop:0;
+ const TL={contents:DP.contentsLabel||'Contents',layers:'Layers',run:'Output',verify:'Verification',metadata:'Metadata',history:'History<small>'+REV.length+'</small>'},T=DP.tabs.map(k=>[k,TL[k]]);
+ el.innerHTML=head(A,B)+`<div class="tabrow"><div class="tabs">${T.map(([k,l])=>`<a class="${ST.tab===k?'on':''}" onclick="setTab('${k}')">${l}</a>`).join('')}</div>${ctl(A,B)}</div><div class="tc">`+(ST.tab==='contents'?contents(A,B):ST.tab==='metadata'?metadata(A,B):ST.tab==='layers'?layers(A,B):ST.tab==='run'?runTab(A,B):ST.tab==='verify'?verification(A,B):history())+`</div>`;
+ if(keep){document.getElementById('m').scrollTop=y;const i=document.querySelector('input[oninput]');if(i&&document.activeElement!==i&&ST.tab==='history'&&ST.q){i.focus();i.setSelectionRange(ST.q.length,ST.q.length)}}}
+function setTab(t){ST.tab=t;draw(true)}
+function pickFile(p){ST.sel=p;draw(true)}
+function pickRev(w,v){ST[w]=+v;ST.sel=null;if(w==='a')ST.baseAuto=false;if(w==='b'&&ST.cmp&&ST.baseAuto){if(ST.b+1<REV.length)ST.a=ST.b+1;else{ST.cmp=false;ST.rv='b'}}draw(true)}
+function swapRev(){[ST.a,ST.b]=[ST.b,ST.a];draw(true)}
+function enterCmp(){ST.cmp=true;ST.baseAuto=ST.b+1<REV.length;ST.a=ST.baseAuto?ST.b+1:ST.b-1;ST.rv='d';ST.sel=null;draw(true)}
+function exitCmp(){ST.cmp=false;ST.rv='b';ST.sel=null;draw(true)}
+function diffRow(i){ST.b=i;ST.a=i+1;ST.cmp=true;ST.baseAuto=true;ST.rv='d';ST.tab='contents';ST.sel=null;draw()}
+function viewRow(i){ST.b=i;ST.cmp=false;ST.rv='b';ST.tab='contents';ST.sel=null;draw()}
+
+function clock(r,i){const m=/(\d\d):(\d\d)/.exec(r.date)||[0,'12','00'];return t=>{let x=(+m[1])*3600+(+m[2])*60+7+t;return [Math.floor(x/3600)%24,Math.floor(x/60)%60,x%60].map(n=>String(n).padStart(2,'0')).join(':')}}
+function runOf(i){const r=REV[i],at=clock(r),k=DP.key,L=[],o={};let t=0;const add=(m,d)=>{t+=d;L.push([at(t),m])};
+ if(k==='deb'){const cmd='bazel run //tools:publish_deb -- --deb aqnav_'+r.v+'_amd64.deb';
+  add('INFO Resolving //tools:publish_deb',0);add('INFO Running: '+cmd,1);add('INFO dpkg-deb --info: Package=aqnav Version='+r.v+' Installed-Size='+r.meta['Package::Installed-Size'],1);add('INFO sha256 '+r.meta['Digests::.deb sha256'],0);
+  add('INFO Uploading '+r.art+' ('+fmt(r.size)+')',1);if(r.v==='4.2.0~rc2')add('WARN upload attempt 1 failed: 503 SlowDown, retrying in 2s',3);add('INFO Uploaded in '+(r.v==='4.2.0~rc2'?'6.8':'4.2')+'s',4);add('INFO Regenerating apt index dists/stable/Packages.gz',1);add('INFO Published '+r.v,1);
+  o.artifact=r.art;o.version=r.v;o.sha256=r.meta['Digests::.deb sha256'];o.size_bytes=r.size;o.apt_index='s3://aqnav-debs/dists/stable/Packages.gz';return{cmd,L,o}}
+ if(k==='docs'){const cmd='bazel run //tools:sync_site -- --dest '+r.art.replace('/site.tar.gz','/');const n=i===0?9:i===1?7:5;
+  add('INFO Resolving //tools:sync_site',0);add('INFO Running: '+cmd,1);add('INFO Extracting site.tar.gz ('+r.total+' entries)',1);add('INFO Uploading changed files',1);add('INFO uploaded '+n+' files, skipped '+(r.total-n)+' unchanged',3);add('INFO CDN invalidation I'+(2400+r.build%97)+' for /*',1);add('INFO Synced '+r.v,1);
+  o.artifact=r.art;o.files_uploaded=n;o.files_skipped=r.total-n;o.cdn_invalidation='I'+(2400+r.build%97);return{cmd,L,o}}
+ const prev=REV[i+1],ch=prev?r.layers.filter(l=>!prev.layers.find(p=>p.n===l.n&&p.d===l.d)).length:r.layers.length,ref='ghcr.io/acme/web:'+r.tag;const cmd='bazel run //web:push -- --tag '+r.tag;
+ add('INFO Resolving //web:push',0);add('INFO Running: '+cmd,1);add('INFO pushing '+ch+' of '+r.layers.length+' layers, '+(r.layers.length-ch)+' already in registry',2);r.layers.filter(l=>!prev||!prev.layers.find(p=>p.n===l.n&&p.d===l.d)).forEach(l=>add('INFO pushed '+l.n+' '+l.d+' ('+fmt(l.size)+')',1));add('INFO pushed manifest '+r.meta['Digests::Manifest'],1);add('INFO tagged '+ref,0);
+ o.reference=ref;o.digest=r.meta['Digests::Manifest'];o.layers_pushed=ch;o.layers_reused=r.layers.length-ch;return{cmd,L,o}}
+const lvl=m=>/\bERROR\b/.test(m)?'e':/\bWARN\b/.test(m)?'w':'';
+Object.assign(I,{monitor:'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',server:'<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',terminal:'<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',lock:'<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'});
+const fs_=n=>n>=60?Math.floor(n/60)+'m '+String(Math.round(n%60)).padStart(2,'0')+'s':n.toFixed(1)+'s';
+function runMeta(i){const r=REV[i],k=DP.key,repo=DP.repo.split('/')[1],retry=k==='deb'&&r.v==='4.2.0~rc2';
+ const env={CI:'true',GITHUB_RUN_ID:String(r.run),GITHUB_SHA:r.full,GITHUB_REF_NAME:r.br,AWS_REGION:'us-east-1',AWS_ACCESS_KEY_ID:'•',AWS_SECRET_ACCESS_KEY:'•',BUILD_WORKSPACE_DIRECTORY:'/home/runner/work/'+repo+'/'+repo,TARGET:DP.target};
+ let args,net,t;
+ if(k==='deb'){args=['bazel','run','//tools:publish_deb','--','--deb','aqnav_'+r.v+'_amd64.deb','--bucket','aqnav-debs','--region','us-east-1','--sign-key','7A3C…E1F4'];env.DELIVERY_VERSION=r.v;env.APT_SUITE='stable';
+  t={build:3.1,run:retry?18.8:11.1};net={down:r.size,up:r.size,req:14+(retry?2:0),retry:retry?1:0}}
+ else if(k==='docs'){const n=i===0?9:i===1?7:5;args=['bazel','run','//tools:sync_site','--','--dest',r.art.replace('/site.tar.gz','/'),'--delete','--cache-control','public,max-age=300'];env.CDN_DISTRIBUTION='E2KX9A41Q7';env.DOCS_VERSION=r.v;
+  t={build:2.4,run:6.8+n*.2};net={down:r.size,up:n*240*KB,req:n+6,retry:0}}
+ else{const prev=REV[i+1],pushed=r.layers.filter(l=>!prev||!prev.layers.find(p=>p.n===l.n&&p.d===l.d));args=['bazel','run','//web:push','--','--tag',r.tag,'--repository','ghcr.io/acme/web'];env.GHCR_USER='acme-ci';env.GHCR_TOKEN='•';env.IMAGE_TAG=r.tag;
+  t={build:4.0,run:3.2+pushed.length*2.1};net={down:.3*MB|0,up:pushed.reduce((x,l)=>x+l.size,0),req:r.layers.length*3+2,retry:0}}
+ const remote=(k==='deb'&&r.v==='4.2.0~rc2')||(k==='docs'&&i===0),venue=remote?{mode:'remote',label:'Remote',where:'pool linux-large · worker w-'+r.sha.slice(0,4)}:{mode:'local',label:'Local',where:'runner '+(r.meta['Build::Runner']||'aspect-runner-01')};
+ t.queue=remote?1.4:0;const total=t.build+t.queue+t.run;net.peakUp=net.up/(t.run*.6);net.peakDown=net.down/(t.build*.8);
+ return{args,env,net,t,total,venue}}
+function runTab(A,B){const ia=ST.a,ib=ST.b,view=ST.cmp?'d':'b',ra=runOf(ia),rb=runOf(ib),ma=runMeta(ia),mb=runMeta(ib),cur=view==='a'?ra:rb,cm=view==='a'?ma:mb,rv=view==='a'?A:B,dm=view==='d';
+ const js=o=>JSON.stringify(o,null,2),strp=L=>L.map(x=>x[1]).join('\n');
+ const dl=(a,b,f,lowGood=true)=>{const d=b-a;return d?`<span class="${(d<0)===lowGood?'pass':'warn'}">${d>0?'▲':'▼'} ${f(Math.abs(d))}</span>`:'<span class="t3">no change</span>'};
+ const m=dm?mb:cm;
+ function diffArgs(x,y){let c=0;const n=Math.max(x.args.length,y.args.length);for(let i=0;i<n;i++)if(x.args[i]!==y.args[i])c++;for(const k of new Set([...Object.keys(x.env),...Object.keys(y.env)]))if(x.env[k]!==y.env[k])c++;return c}
+ const kp=[['Duration',`${fs_(m.total)}<span class="ex">exit 0</span>`,dm?`A ${fs_(ma.total)} · ${dl(ma.total,mb.total,fs_)}`:`build ${fs_(m.t.build)}${m.t.queue?' · queue '+fs_(m.t.queue):''} · run ${fs_(m.t.run)}`],
+  ['Executed',m.venue.label,m.venue.where],
+  ['Retries',m.net.retry,dm?`A ${ma.net.retry}`:m.net.retry?'upload attempt 1 failed':'none',m.net.retry?'warn':''],
+  ['Arguments / env',m.args.length+' / '+Object.keys(m.env).length,dm?`${diffArgs(ma,mb)} changed`:'secrets masked']];
+ const tb=m.t.build/m.total*100,tq=m.t.queue/m.total*100;
+ const bar=`<div class="tb"><div class="hb2"><i style="width:${tb}%;background:rgb(var(--bs))"></i><i style="width:${tq}%;background:rgb(var(--faint))"></i><i style="width:${100-tb-tq}%;background:rgb(var(--accent))"></i></div><div class="tsplit"><span>build ${fs_(m.t.build)}</span>${m.t.queue?`<span>queue for remote worker ${fs_(m.t.queue)}</span>`:''}<span>run ${fs_(m.t.run)}</span></div></div>`;
+ const argRows=()=>{const n=Math.max(ma.args.length,mb.args.length),rows=[];for(let i=0;i<n;i++){const a=ma.args[i],b=mb.args[i];
+  if(dm){const ch=a!==b;rows.push(`<tr><td class="t3">${i}</td><td class="mono">${ch&&a!==undefined?`<span class="old">${esc(a)}</span> `:''}${b!==undefined?esc(b):'<span class="t3">removed</span>'}</td><td>${ch?'<span class="chip warn">changed</span>':''}</td></tr>`)}
+  else{const v=cm.args[i];if(v!==undefined)rows.push(`<tr><td class="t3">${i}</td><td class="mono">${esc(v)}</td><td></td></tr>`)}}return rows.join('')};
+ const envRows=()=>{const ks=[...new Set([...Object.keys(dm?ma.env:cm.env),...Object.keys(dm?mb.env:cm.env)])].sort();return ks.map(k=>{const a=ma.env[k],b=(dm?mb:cm).env[k],sec=(b||a)==='•',show=v=>v===undefined?'':sec?'<span class="t3">••••••••</span>':esc(v);
+  if(dm){const ch=a!==b;return `<tr><td class="mono">${k}</td><td class="mono">${ch&&a!==undefined?`<span class="old">${show(a)}</span> `:''}${show(b)}</td><td>${ch?'<span class="chip warn">changed</span>':sec?`<span class="chip">${ic('lock')}secret</span>`:''}</td></tr>`}
+  return `<tr><td class="mono">${k}</td><td class="mono">${show(b)}</td><td>${sec?`<span class="chip">${ic('lock')}secret</span>`:''}</td></tr>`}).join('')};
+ const fold=(key,title,head,rows)=>{const n=(rows.match(/chip warn/g)||[]).length;return `<details class="card dd" ${ST[key]?'open':''} ontoggle="ST.${key}=this.open"><summary>${title}<span class="cnt2">${n?n+' changed':rows.split('<tr').length-1}</span></summary><div class="sc"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`};
+ let body,count,src,out;
+ if(dm){const ops=lineDiff(strp(ra.L),strp(rb.L));count=ops.length;src='diff · '+A.v+' → '+B.v;
+  body=ops.map(([k,t])=>`<div class="ll ${k==='+'?'p':k==='-'?'m':''}"><span class="ts">${k==='='?'':k}</span><span class="${lvl(t)}">${esc(t)}</span></div>`).join('');out=dtxt(lineDiff(js(ra.o),js(rb.o)))}
+ else{count=cur.L.length;src=cur.cmd.split(' -- ')[0]+' · run #'+rv.run+' · '+rv.by+' · '+rv.date;
+  body=cur.L.map(([t,mm])=>`<div class="ll"><span class="ts">${t}</span><span class="${lvl(mm)}">${esc(mm)}</span></div>`).join('');out=`<div class="diff">${esc(js(cur.o))}</div>`}
+ const oc=dm?lineDiff(js(ra.o),js(rb.o)).length:js(cur.o).split('\n').length;
+ const sub=dm?`Comparing how the deliverable target ran for ${A.v} and ${B.v}`:`How the deliverable target ran for ${rv.v}`;
+ return `
+<div class="mb5">${strip(kp,bar)}</div>
+<div class="two2 mb5">${fold('oa','Arguments','<th style="width:1%">#</th><th>Value</th><th></th>',argRows())}${fold('oe','Environment','<th>Name</th><th>Value</th><th></th>',envRows())}</div>
+<div class="lbl">Console</div>
+<div class="lv"><div class="lvh"><span class="mono">${esc(src)}</span><span class="cnt2">${count} line${count===1?'':'s'}</span></div><div class="lvb">${body}</div></div>
+<div class="lbl" style="margin-top:20px">${dm?'Output changes':'Structured output'}</div><div class="lv"><div class="lvh"><span class="mono">${dm?'diff · structured output':'structured output · json'}</span><span class="cnt2">${oc} lines</span></div><div class="lvb">${out}</div></div>`}
+
+const revSel=(id,cur,lbl)=>`<select class="fld" aria-label="${lbl}" onchange="pickRev('${id}',this.value)">${REV.map((r,i)=>`<option value="${i}" ${i===cur?'selected':''}>${r.v}${r.evicted?' · evicted':''}</option>`).join('')}</select>`;
+function ctl(A,B){if(ST.cmp)return `<div class="tctl"><div class="cmpg">${revSel('a',ST.a,'Base deployment')}<button class="swp" type="button" title="Swap base and compared" aria-label="Swap base and compared" onclick="swapRev()">${ic('swap')}</button>${revSel('b',ST.b,'Compared deployment')}</div><button class="lnk" type="button" onclick="exitCmp()">Exit compare</button></div>`;
+ return `<div class="tctl">${revSel('b',ST.b,'Deployment')}<button class="btn" type="button" onclick="enterCmp()">${ic('compare')}Compare with…</button></div>`}
+function paneOne(p,f){const k=f.kind,kind={elf:'ELF x86-64',text:'text',bin:'binary'}[k]+(f.note?` · ${f.note}`:'');
+ let h=`<div class="fh"><code>${esc(p)}</code><span class="t3 s12">${kind}</span><span class="t3 s12">${fmt(f.size)}</span></div>`;
+ if(k==='text')h+=dtxt(f.text.split('\n').map(t=>['=',t]));
+ else if(k==='elf'){h+=`<table class="inner"><thead><tr><th>Section</th><th class="r">Size</th></tr></thead><tbody>${Object.keys(f.sections).map(x=>`<tr><td><code>${x}</code></td><td class="r mono">${fmt(f.sections[x])}</td></tr>`).join('')}</tbody></table><div class="sub2">Symbols</div><div class="chips">${f.syms.map(x=>`<span class="chip m">${esc(x)}</span>`).join('')}</div><div class="sub2">Build ID and strings</div>`+dtxt(`Build ID ${f.bid}\n${f.strs.join('\n')}`.split('\n').map(t=>['=',t]))}
+ else h+=`<p class="t2 s12" style="margin-top:12px">${esc(f.info||'')}.<br>sha256 <code>${f.sha}</code></p>`;
+ return h}
+function contents(A,B){const g=gone(A,B);if(g)return g;return ST.cmp?contentsDiff(A,B):contentsOne(B)}
+function contentsOne(B){const list=Object.keys(B.files).sort();if(!ST.sel||!B.files[ST.sel])ST.sel=list[0];
+ const big=list.reduce((m,x)=>B.files[x].size>B.files[m].size?x:m,list[0]);
+ return `<div class="mb5">${strip([[DP.sizeLabel,fmt(B.size),B.total.toLocaleString()+' files'],['Files',B.total.toLocaleString(),(B.total-list.length).toLocaleString()+' not listed'],['Largest file',fmt(B.files[big].size),big.split('/').pop()]])}</div>
+<div class="two"><div class="card tbl ft"><table><thead><tr><th>Path</th><th class="r">Size</th></tr></thead><tbody>${list.map(x=>`<tr class="${x===ST.sel?'sel':''}" onclick="pickFile('${x}')"><td><code>${x}</code></td><td class="r mono">${fmt(B.files[x].size)}</td></tr>`).join('')}<tr class="nh"><td class="t3 s12" colspan="2">${(B.total-list.length).toLocaleString()} more files not listed</td></tr></tbody></table></div>
+<div class="card panel"><div class="pb">${paneOne(ST.sel,B.files[ST.sel])}</div></div></div>`}
+function metadata(A,B){return ST.cmp?metadataDiff(A,B):metadataOne(B)}
+function metadataOne(B){const keys=Object.keys(B.meta).filter(k=>!hid(k)),secs=[...new Set(keys.map(k=>k.split('::')[0]))];
+ return `<div class="stack">`+deliveryBlock(null,B)+secs.map(s=>`<div><div class="lbl row2">${s}</div><div class="card tbl"><div class="sc"><table><thead><tr><th style="width:24%">Field</th><th>Value</th></tr></thead><tbody>${keys.filter(k=>k.startsWith(s+'::')).map(k=>`<tr><td class="t2">${k.split('::')[1]}</td><td><code>${esc(B.meta[k])}</code></td></tr>`).join('')}</tbody></table></div></div></div>`).join('')+customBlock(null,B)+`</div>`}
+function layers(A,B){const g=gone(A,B);if(g)return g;return ST.cmp?layersDiff(A,B):layersOne(B)}
+function layersOne(B){const L=B.layers||[],tot=L.reduce((t,l)=>t+l.size,0),big=L.reduce((m,l)=>l.size>m.size?l:m,L[0]);
+ return `<div class="mb5">${strip([['Layers',L.length,'in this image'],['Compressed size',fmt(tot),'sum of layers'],['Largest layer',fmt(big.size),big.n]])}</div>
+<div class="card tbl"><div class="sc"><table><thead><tr><th style="width:1%">#</th><th>Layer</th><th>Digest</th><th class="r">Size</th></tr></thead><tbody>${L.map((l,i)=>`<tr><td class="t3">${i+1}</td><td><span class="nm">${l.n}</span><div class="sub mono">${esc(l.by)}</div></td><td class="mono">${l.d}</td><td class="r mono">${fmt(l.size)}</td></tr>`).join('')}</tbody></table></div></div>`}
+
+const EV={exact:['exact','pass','The test consumed this exact artifact'],lineage:['lineage','pass','The test consumed an ancestor of this artifact (for example the payload before stamping)'],self:['self-reported','accent','The test reported the artifact digest itself'],graph:['graph','','The test depends on targets that ended up in the package'],declared:['declared','','Tagged as verifying this deployment; not proven by the build graph'],same:['same commit','','Ran for the same commit']};
+const evChip=e=>`<span class="chip ${EV[e][1]}" title="${EV[e][2]}">${EV[e][0]}</span>`;
+const stChip=x=>({passed:'<span class="chip pass">passed</span>',failed:'<span class="chip fail">failed</span>',pending:'<span class="chip warn">pending</span>',missing:'<span class="chip">not run</span>'}[x]);
+function verifyOf(i){const r=REV[i],deb=DP.key==='deb',cmt=r.sha;
+ const T=(l,res,ev,cached,dur)=>({l,res,ev,cached,dur});
+ const o=(a,b)=>i===0?a:i===1?b:a;
+ let G;
+ if(deb){const hil=i===0?'pending':i===1?'failed':i===2?'missing':'passed',itg=i===2?'failed':'passed',exact=i===3;
+  G=[{n:'unit',req:1,tests:[T('//aqnav/fusion:kalman_test','passed','graph',1,'1.2s'),T('//aqnav/nav:drift_guard_test','passed','graph',0,'3.4s'),T('//aqnav/io:gnss_test','passed','graph',1,'0.8s')],more:2},
+   {n:'integration',req:1,tests:[T('//aqnav/it:payload_layout_test',itg,'exact',0,'6.1s'),T('//aqnav/it:config_schema_test','passed','exact',1,'2.0s'),T('//aqnav/it:model_load_test','passed','exact',0,'9.7s')],more:0},
+   {n:'hardware',req:1,tests:[T('//aqnav/hil:boot_test',hil==='failed'?'failed':hil,'exact',0,hil==='pending'?'running':'4m 12s'),T('//aqnav/hil:nav_drift_test',hil==='failed'?'passed':hil,'exact',0,hil==='pending'?'queued':'7m 40s'),T('//aqnav/hil:gnss_dropout_test',hil,'exact',0,hil==='pending'?'queued':'3m 05s'),T('//aqnav/hil:soak_test',hil,'exact',0,hil==='pending'?'queued':'42m')]},
+   {n:'install smoke',req:0,tests:[T('//aqnav/it:deb_install_smoke',exact?'passed':'missing',exact?'exact':'declared',0,exact?'11s':'')]}];
+  return {G}}
+ const e2e=i===1?'failed':'passed';
+ G=[{n:'unit',req:1,tests:[T('//web/src/cart:price_test','passed','graph',1,'0.9s'),T('//web/src/cart:totals_test','passed','graph',0,'1.4s')],more:3},
+  {n:'integration',req:1,tests:[T('//web/it:bundle_size_test','passed','exact',0,'4.0s'),T('//web/it:server_boot_test','passed','exact',0,'7.2s')],more:1},
+  {n:'e2e (Playwright)',req:1,tests:[T('//web/e2e:checkout_test',e2e,'exact',0,'1m 12s'),T('//web/e2e:cart_test','passed','exact',0,'48s')]}];
+ return {G}}
+function gState(g){const t=g.tests;return t.some(x=>x.res==='failed')?'failed':t.every(x=>x.res==='missing')?'missing':t.some(x=>x.res==='pending'||x.res==='missing')?'pending':'passed'}
+const ORD={failed:0,pending:1,missing:2,passed:3};
+function flatTests(V){const t=V.G.flatMap(g=>g.tests).sort((x,y)=>ORD[x.res]-ORD[y.res]||(x.ev==='exact'?0:1)-(y.ev==='exact'?0:1));return {t,more:V.G.reduce((a,g)=>a+(g.more||0),0)}}
+function tally(V){const {t,more}=flatTests(V),c=x=>t.filter(y=>y.res===x).length;return {t,more,passed:c('passed')+more,failed:c('failed'),pending:c('pending'),missing:c('missing'),total:t.length+more}}
+function verification(A,B){const V=verifyOf(ST.b),VA=ST.cmp?verifyOf(ST.a):null,T=tally(V),ex=T.t.filter(x=>x.ev==='exact'&&x.res!=='missing').length;
+ const cells=[['Tests passed',`${T.passed} of ${T.total}`,T.failed?'some failed':T.passed===T.total?'all passed':'not all run yet',T.failed?'fail':T.passed===T.total?'pass':'warn'],['Failed',T.failed,T.failed?'see the list below':'none',T.failed?'fail':''],['Pending or not run',T.pending+T.missing,`${T.pending} pending · ${T.missing} not run`,T.pending+T.missing?'warn':''],['Exercised this artifact',`${ex} tests`,ex?'consumed the exact artifact':'no test consumed it']];
+ const base=VA?Object.fromEntries(VA.G.flatMap(g=>g.tests).map(t=>[t.l,t.res])):null;
+ const rows=T.t.map(t=>`<tr><td class="mono">${t.l}</td><td>${stChip(t.res)}</td>${base?`<td>${base[t.l]?stChip(base[t.l]):'<span class="t3">—</span>'}</td>`:''}<td>${evChip(t.ev)}</td><td class="t3 s12">${t.res==='missing'?'not run for this commit':t.res==='pending'?'in progress':t.cached?'cached':'ran'}</td><td class="r mono">${t.dur||'—'}</td></tr>`).join('')+(T.more?`<tr class="nh"><td class="t3 s12" colspan="${base?6:5}">+ ${T.more} more passed tests</td></tr>`:'');
+ return `<div class="mb5">${strip(cells)}</div><div class="card tbl"><div class="sc"><table><thead><tr><th>Test</th><th>Result</th>${base?`<th>Base · ${A.v}</th>`:''}<th>Evidence</th><th>Run</th><th class="r">Time</th></tr></thead><tbody>${rows}</tbody></table></div></div>`}
+Object.assign(I,{check:'<path d="M20 6 9 17l-5-5"/>'});
+
+const dotc={passed:'g',failed:'r',pending:'a',missing:'n'};
+function vbadge(i){const T=tally(verifyOf(i)),tone=T.failed?'fail':T.passed===T.total?'pass':'warn',tc={fail:'r',pass:'g',warn:'a'}[tone];
+ const row=(d,n,c)=>c?`<span class="vr"><span class="dot ${d}"></span><span class="vn">${n}</span><span class="vc">${c}</span></span>`:'';
+ const rows=row('g','passed',T.passed)+row('r','failed',T.failed)+row('a','pending',T.pending)+row('n','not run',T.missing);
+ return `<a class="vb ${tone}" href="#/targets?dep=${DP.key}&rev=${i}" onmouseenter="vtip(this)" onfocus="vtip(this)"><span class="dot ${tc}"></span>Verified ${T.passed}/${T.total}<span class="vtip"><span class="vbox"><span class="vh">Verification · ${REV[i].v}</span><span class="vs">${T.passed} of ${T.total} tests passed</span>${rows}<span class="vf">View these tests in Targets →</span></span></span></a>`}
+function vbadgeFor(k,i){const sd=DP,sr=REV;DP=DEPS[k];REV=DP.rev;try{return DP.tabs.includes('verify')?vbadge(i):'<span class="t3">—</span>'}finally{DP=sd;REV=sr}}
+function vtip(el){const t=el.querySelector('.vtip'),r=el.getBoundingClientRect();t.style.left=Math.max(8,Math.min(r.left,innerWidth-300))+'px';t.style.top=r.bottom-2+'px'}
+function fillBadges(){document.querySelectorAll('[data-vb]').forEach(e=>{const [k,i]=e.dataset.vb.split(':');e.innerHTML=vbadgeFor(k,+i)})}
+function targetsPage(){const V=verifyOf(ST.b),T=tally(V),pc=l=>{let h=0;for(const c of l)h=(h*31+c.charCodeAt(0))%97;return h},pre=DP.key==='deb'?'//aqnav/':'//web/';
+ const rows=T.t.map(t=>{const miss=t.res==='missing',bad=t.res==='failed',pass=miss?'—':(bad?60+pc(t.l)%25:97+pc(t.l)%4)+'%';return `<tr><td><code>${t.l}</code></td><td class="r mono">${miss?'—':80+pc(t.l)*3}</td><td class="r mono">${t.dur&&/\d/.test(t.dur)?t.dur:'—'}</td><td class="r mono ${bad?'fail':''}">${pass}</td><td class="r mono">${miss?'—':(pc(t.l)%3)+'%'}</td></tr>`}).join('')+(T.more?`<tr class="nh"><td class="t3 s12" colspan="5">+ ${T.more} more tests</td></tr>`:'');
+ return `<div class="ptitle"><h1>Targets</h1></div>
+<div class="bar"><div class="seg"><a class="on">Tests</a><a>Builds</a></div><div class="si"><svg viewBox="0 0 24 24">${I.search}</svg><input value="${pre}" placeholder="Filter targets…"></div></div>
+<div class="card tbl"><div class="sc"><table><thead><tr><th>Target</th><th class="r">Volume</th><th class="r">Time</th><th class="r">Pass</th><th class="r">Flake</th></tr></thead><tbody>${rows}</tbody></table></div></div>`}
+
+const isUrl=v=>typeof v==='string'&&/^https?:\/\//.test(v);
+const vfmt=v=>isUrl(v)?`<a class="l il" href="#" title="${esc(v)}">${esc(v.replace(/^https?:\/\//,''))}${ic('ext')}</a>`:typeof v==='string'?`<code>${esc(v)}</code>`:`<code>${esc(JSON.stringify(v))}</code>`;
+function flattenC(o,pre=''){const out=[];for(const [k,v] of Object.entries(o)){if(Array.isArray(v))out.push([pre+k,v]);else if(v&&typeof v==='object')out.push(...flattenC(v,pre+k+'.'));else out.push([pre+k,v])}return out}
+function arrTable(arr){const cols=[...new Set(arr.flatMap(o=>Object.keys(o)))];return `<table class="inner"><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${arr.map(o=>`<tr>${cols.map(c=>`<td>${o[c]===undefined?'':vfmt(o[c])}</td>`).join('')}</tr>`).join('')}</tbody></table>`}
+function customBlock(A,B){const fb=flattenC(B.custom||{}),fa=A?flattenC(A.custom||{}):[],keys=[...new Set([...fb.map(x=>x[0]),...fa.map(x=>x[0])])],get=(f,k)=>{const x=f.find(y=>y[0]===k);return x?x[1]:undefined};
+ const rows=keys.map(k=>{const b=get(fb,k),a=get(fa,k),ch=A&&JSON.stringify(a)!==JSON.stringify(b),arr=Array.isArray(b===undefined?a:b);
+  const val=arr?arrTable(b===undefined?a:b):`${ch&&a!==undefined?`<span class="old">${vfmt(a)}</span> `:''}${b!==undefined?vfmt(b):'<span class="t3">removed</span>'}`;
+  return `<tr class="${ch?'chg':''}"><td class="t2">${k}</td><td>${val}</td></tr>`}).join('');
+ return `<div><div class="lbl row2">User<span class="t3 s12" style="text-transform:none;letter-spacing:0;font-weight:400">provided with the delivery</span></div><div class="card tbl"><div class="sc"><table><thead><tr><th style="width:24%">Field</th><th>Value</th></tr></thead><tbody>${rows||'<tr class="nh"><td colspan="2" class="t3 s12">No user metadata was attached to this delivery.</td></tr>'}</tbody></table></div></div></div>`}
+
+const HID=new Set(['Build::Commit','Build::Runner','Provenance::Source','Provenance::Workflow','Provenance::Builder']),HIDS=new Set(['Package','Image','Digests']),hid=k=>HID.has(k)||HIDS.has(k.split('::')[0]);
+function deliveryRows(R){const GH=DP.gh,L=(t,u)=>`<a class="l il" href="#" title="${u}">${t}${ic('ext')}</a>`;
+ return [[DP.icon,'Package',`${DP.label} <span class="t3">· ${fmt(R.size)}</span>`,R.size],
+ ['user','Deployed by',`<span class="av sm">${esc(R.by)[0]}</span>${esc(R.by)} <span class="t3">· ${R.date}</span>`,R.by+R.date],
+ ['ci','CI',`${DP.ciName} ${DP.wf} · ${L('run #'+R.run,GH+'/actions/runs/'+R.run)} <span class="t3">· ${R.trig} · ${R.dur}</span>`,R.run+R.trig],
+ ['pr','Pull request',`${L('#'+R.pr.n+' '+esc(R.pr.t),GH+'/pull/'+R.pr.n)} <span class="t3">· by ${esc(R.pr.a)}</span>`,R.pr.n],
+ ['br',DP.brLabel,`${R.br} ${L('Open branch',GH+'/tree/'+R.br)} <span class="t3">· ${R.base} · ${R.cp}</span>`,R.br+R.base],
+ ['tag',DP.tagLabel,`${R.tag} ${DP.tagLink?L(DP.tagLink,GH+'/releases/tag/'+R.tag):''}`,R.tag],
+ ['commit','Git commit',`<code>${R.full}</code> ${L('Open commit',GH+'/commit/'+R.full)}<div class="sub">${esc(R.msg)} · authored by ${esc(R.au)}</div>`,R.full],
+ ['hammer','Build',`<a class="l" href="#/compare">#${R.build}</a> <span class="t3">· cache hit ${R.cache}</span>`,R.build],
+ [DP.icon,DP.artLabel,`<code>${R.art}</code> ${L(DP.artOpen,R.art)}`,R.art],
+ ['commit','Digest',`<code>${R.meta['Digests::.deb sha256']||R.meta['Digests::.tar.gz sha256']||R.meta['Digests::Manifest']}</code>`,R.meta['Digests::.deb sha256']||R.meta['Digests::.tar.gz sha256']||R.meta['Digests::Manifest']]]}
+function deliveryBlock(A,B){const rb=deliveryRows(B),ra=A?deliveryRows(A):null,GH=DP.gh;
+ const ch=ra?rb.filter((r,i)=>r[3]!==ra[i][3]).length:0;
+ const head=ra?`<th style="width:20%">Field</th><th>A · ${A.v}</th><th>B · ${B.v}</th>`:'<th style="width:24%">Field</th><th>Value</th>';
+ const rows=rb.map((r,i)=>{const c=ra&&r[3]!==ra[i][3];return `<tr class="${c?'chg':''}"><td class="t2 fk">${ic(r[0])}${r[1]}</td>${ra?`<td class="${c?'t3':''}">${ra[i][2]}</td>`:''}<td>${r[2]}</td></tr>`}).join('')+(ra?`<tr><td class="t2 fk">${ic('compare')}Git diff</td><td class="t3">—</td><td><a class="l il" href="#" title="${GH}/compare/${A.sha}...${B.sha}">${A.sha}…${B.sha}${ic('ext')}</a></td></tr>`:'');
+ return `<div><div class="lbl row2">Delivery${ch?` <span class="chip warn">${ch} changed</span>`:''}</div><div class="card tbl"><div class="sc"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></div></div>`}
+
+const LF={build:'',repo:[],branch:[],tag:[],open:null};
+const LKEY={'//aqnav:deb':'deb','//web:image':'web','//docs:site':'docs','//cli:release':'cli'};
+function listMeta(){const m={};for(const k of ['deb','web','docs']){const rv=DEPS[k].rev;m[k]={repo:DEPS[k].repo,br:[...new Set(rv.map(r=>r.br))],tag:[...new Set(rv.map(r=>r.tag))],build:rv.flatMap(r=>[String(r.build),r.sha])}}m.cli={repo:'acme/cli',br:['main'],tag:['v1.14.0'],build:['2210','e41b9a0']};return m}
+const LFD={repo:['Repo','repo'],branch:['Branch','br'],tag:['Tag','tag']};
+function lfOptions(f){const M=listMeta();return [...new Set(Object.values(M).flatMap(x=>f==='repo'?[x.repo]:x[LFD[f][1]]))]}
+function initListFilters(){const host=document.getElementById('lf');if(!host)return;
+ const chip=f=>{const n=LF[f].length,o=LF.open===f;return `<div class="pw"><button type="button" class="fcb ${n?'on':''}" onclick="lfToggle('${f}')">${LFD[f][0]}${n?` +${n}`:''}${ic('chev')}</button>${o?`<div class="pop"><div class="ph2">${LFD[f][0]}</div><div class="si"><svg viewBox="0 0 24 24">${I.search}</svg><input placeholder="Filter ${LFD[f][0].toLowerCase()}…" oninput="lfFilter(this)" autofocus></div><div class="opts">${lfOptions(f).map(v=>`<button type="button" class="opt" data-v="${esc(v.toLowerCase())}" onclick="lfPick('${f}','${esc(v)}')"><span class="cbx ${LF[f].includes(v)?'on':''}">${LF[f].includes(v)?ic('check'):''}</span>${esc(v)}</button>`).join('')}</div></div>`:''}</div>`};
+ const any=LF.repo.length||LF.branch.length||LF.tag.length||LF.build;
+ host.innerHTML=`<div class="ftb">${chip('repo')}${chip('branch')}${chip('tag')}${any?'<button type="button" class="lnk2" onclick="lfClear()">Clear</button>':''}<span class="cnt" id="lfc"></span><div class="sp3"></div><div class="si w64"><svg viewBox="0 0 24 24">${I.hammer}</svg><input value="${esc(LF.build)}" placeholder="Filter by build…" aria-label="Build" oninput="LF.build=this.value;applyLF()"></div></div>`;
+ if(!window.__lfc){window.__lfc=1;document.addEventListener('click',e=>{if(LF.open&&!e.target.closest('.pw')){LF.open=null;initListFilters()}})}
+ applyLF()}
+function lfToggle(f){LF.open=LF.open===f?null:f;initListFilters()}
+function lfPick(f,v){const a=LF[f],i=a.indexOf(v);i<0?a.push(v):a.splice(i,1);initListFilters()}
+function lfClear(){LF.repo=[];LF.branch=[];LF.tag=[];LF.build='';LF.open=null;initListFilters()}
+function lfFilter(el){const q=el.value.toLowerCase();el.closest('.pop').querySelectorAll('.opt').forEach(o=>{o.style.display=o.dataset.v.includes(q)?'':'none'})}
+function applyLF(){const M=listMeta(),q=LF.build.trim().replace(/^#/,'').toLowerCase(),rows=[...document.querySelectorAll('.card.tbl tbody tr:not(.lfe)')];let shown=0;
+ rows.forEach(tr=>{const nm=tr.querySelector('.nm'),k=nm&&LKEY[nm.textContent.trim()];if(!k)return;const x=M[k],ok=(!q||x.build.some(b=>b.toLowerCase().includes(q)))&&(!LF.repo.length||LF.repo.includes(x.repo))&&(!LF.branch.length||x.br.some(b=>LF.branch.includes(b)))&&(!LF.tag.length||x.tag.some(t=>LF.tag.includes(t)));tr.style.display=ok?'':'none';if(ok)shown++});
+ const tb=document.querySelector('.card.tbl tbody');let e=tb&&tb.querySelector('.lfe');
+ if(tb&&!shown&&!e){e=document.createElement('tr');e.className='lfe nh';e.innerHTML='<td colspan="5" class="t3 s12">No targets match these filters.</td>';tb.appendChild(e)}
+ if(e)e.style.display=shown?'none':'';
+ const c=document.getElementById('lfc');if(c)c.textContent=`${shown} of ${rows.filter(r=>r.querySelector('.nm')).length} targets`}
+
+function gone(A,B){const ev=(ST.cmp?[A,B]:[B]).filter(r=>r.evicted);if(!ev.length)return '';
+ const names=ev.map(r=>r.v).join(' and ');
+ return `<div class="card una2"><div class="uh">${ic('archive')}Contents not available</div><p>${names} ${ev.length>1?'have':'has'} left the remote cache, so its files${ST.cmp?' and the diff':''} can't be read. Metadata, output, verification and history are still available.</p></div>`}
+const sec=(o,pre)=>Object.fromEntries(Object.entries(o).map(([k,v])=>[pre+'::'+k,v]));
+const rev=(o)=>o;
+const DOC=(v,o)=>({
+ Archive:{'Format':'POSIX tar + gzip','Compression':'gzip -9, deterministic','Entries':o.n,'Uncompressed size':o.un,'Mtime policy':'normalized to 1980-01-01','Owner':'0:0 root','Root directory':'site/'},
+ Build:{'Bazel':o.bz,'Target':'//docs:site','Commit':o.sha,'Toolchain':o.tc,'Built at':o.at,'Runner':o.rn},
+ Digests:{'.tar.gz sha256':o.gz,'.tar sha256 (uncompressed)':o.tar},
+ Provenance:{'Source':'acme/sdk @ tags/'+v,'Workflow':'publish-docs.yml','Builder':'GitHub Actions · ubuntu-22.04'}});
+const flat=o=>Object.assign({},...Object.entries(o).map(([k,v])=>sec(v,k)));
+const sm=(d)=>`<url><loc>https://docs.acme.example/</loc><lastmod>${d}</lastmod></url>\n<url><loc>https://docs.acme.example/guides/install</loc><lastmod>${d}</lastmod></url>`;
+const REV_DOCS=[
+rev({v:'v3.8.1',sha:'b7d4e90',full:'b7d4e90c2a6f18d3e5b0a47c91d2f6e8a3b5c7d1',msg:'docs: release v3.8.1',au:'Lena Fischer',br:'main',tag:'v3.8.1',base:'main @ b7d4e90',cp:'tagged on main',build:9120,run:7731,by:'github-actions[bot]',trig:'push (tag)',when:'1h ago',date:'Oct 19, 2026 11:52 UTC',dur:'2m 30s',cache:'99.0%',
+ pr:{n:2210,t:'Docs: v3.8.1 release notes',a:'Lena Fischer'},art:'s3://acme-docs/releases/v3.8.1/site.tar.gz',size:8.2*MB|0,total:640,
+ meta:flat(DOC('v3.8.1',{n:'640',un:'31.4 MB',bz:'7.4.1',sha:'b7d4e90',tc:'node 20.11 · pnpm 9.4',at:'2026-10-19T11:52Z',rn:'aspect-runner-02',gz:'c19e…3a07',tar:'88d2…f41b'})),
+ files:{
+ 'site/index.html':TXT('<title>Acme SDK 3.8.1</title>\n<nav>\n  <a href="/guides/install">Install</a>\n  <a href="/guides/migrating-to-v3.8">Migrating to 3.8</a>\n  <a href="/api/v3.8">API</a>\n</nav>','i381'),
+ 'site/guides/install.html':TXT('<h1>Install</h1>\n<pre>npm install @acme/sdk@3.8.1</pre>\n<p>Requires Node 18 or newer.</p>','in381'),
+ 'site/guides/migrating-to-v3.8.html':TXT('<h1>Migrating to 3.8</h1>\n<p>The client constructor now takes an options object.</p>','mg381'),
+ 'site/sitemap.xml':TXT(sm('2026-10-19'),'sm381'),
+ 'site/search-index.json':BIN(2.1*MB|0,'s381','JSON · 4,260 entries'),
+ 'site/assets/app.3f9c1a.js':BIN(1.4*MB|0,'js381','JavaScript · minified')}}),
+rev({v:'v3.8.0',sha:'4d1c7a2',full:'4d1c7a2e90b3f5d8c6a1e4b7d0f2a9c3e5b8d6f1',msg:'docs: release v3.8.0',au:'Lena Fischer',br:'main',tag:'v3.8.0',base:'main @ 4d1c7a2',cp:'tagged on main',build:9071,run:7690,by:'github-actions[bot]',trig:'push (tag)',when:'yesterday',date:'Oct 18, 2026 08:14 UTC',dur:'2m 28s',cache:'98.6%',
+ pr:{n:2198,t:'Docs: v3.8.0 release notes',a:'Lena Fischer'},art:'s3://acme-docs/releases/v3.8.0/site.tar.gz',size:7.9*MB|0,total:626,
+ meta:flat(DOC('v3.8.0',{n:'626',un:'30.6 MB',bz:'7.4.1',sha:'4d1c7a2',tc:'node 20.11 · pnpm 9.4',at:'2026-10-18T08:14Z',rn:'aspect-runner-01',gz:'0b6a…9e12',tar:'4f70…c8d5'})),
+ files:{
+ 'site/index.html':TXT('<title>Acme SDK 3.8.0</title>\n<nav>\n  <a href="/guides/install">Install</a>\n  <a href="/api/v3.8">API</a>\n</nav>','i380'),
+ 'site/guides/install.html':TXT('<h1>Install</h1>\n<pre>npm install @acme/sdk@3.8.0</pre>\n<p>Requires Node 18 or newer.</p>','in380'),
+ 'site/sitemap.xml':TXT(sm('2026-10-18'),'sm380'),
+ 'site/search-index.json':BIN(2.0*MB|0,'s380','JSON · 4,212 entries'),
+ 'site/assets/app.7b2e04.js':BIN(1.38*MB|0,'js380','JavaScript · minified')}}),
+rev({v:'v3.7.2',sha:'e02f6b8',full:'e02f6b8d41a7c3095e6b2d8f1a4c7e0b3d5f9a26',msg:'docs: release v3.7.2',au:'Tom Becker',br:'main',tag:'v3.7.2',base:'main @ e02f6b8',cp:'tagged on main',build:8940,run:7544,by:'github-actions[bot]',trig:'push (tag)',when:'3w ago',date:'Sep 28, 2026 15:30 UTC',dur:'2m 41s',cache:'97.9%',
+ pr:{n:2150,t:'Docs: v3.7.2 patch notes',a:'Tom Becker'},art:'s3://acme-docs/releases/v3.7.2/site.tar.gz',size:7.8*MB|0,total:618,
+ meta:flat(DOC('v3.7.2',{n:'618',un:'30.1 MB',bz:'7.3.2',sha:'e02f6b8',tc:'node 20.10 · pnpm 9.2',at:'2026-09-28T15:30Z',rn:'aspect-runner-03',gz:'7e41…20bc',tar:'a95c…1d38'})),
+ files:{
+ 'site/index.html':TXT('<title>Acme SDK 3.7.2</title>\n<nav>\n  <a href="/guides/install">Install</a>\n  <a href="/api/v3.7">API</a>\n</nav>','i372'),
+ 'site/guides/install.html':TXT('<h1>Install</h1>\n<pre>npm install @acme/sdk@3.7.2</pre>\n<p>Requires Node 16 or newer.</p>','in372'),
+ 'site/sitemap.xml':TXT(sm('2026-09-28'),'sm372'),
+ 'site/search-index.json':BIN(1.9*MB|0,'s372','JSON · 4,088 entries'),
+ 'site/assets/app.51d9ee.js':BIN(1.35*MB|0,'js372','JavaScript · minified')}})];
+
+const IMG=(o)=>({
+ Image:{'Platform':'linux/amd64','Entrypoint':'["/nodejs/bin/node", "/app/dist/server.js"]','User':'65532:65532','Working directory':'/app','Environment':'NODE_ENV=production, PORT=8080','Exposed ports':'8080/tcp','Label · revision':o.sha,'Label · created':o.at},
+ Digests:{'Manifest':o.mf,'Config':o.cf,'Reference':'ghcr.io/acme/web@'+o.mf},
+ Build:{'Bazel':'7.4.1','Target':'//web:image','Commit':o.sha,'Toolchain':'rules_oci 2.0.1 · node 20.11','Built at':o.at,'Runner':o.rn},
+ Provenance:{'Source':'acme/web @ main','Workflow':'build-image.yml','Builder':'GitHub Actions · ubuntu-22.04'}});
+const LY=(deps,pub,dist,bi)=>[
+ {n:'distroless base',d:'sha256:5e1c…a0',size:20.4*MB|0,by:'gcr.io/distroless/nodejs20-debian12'},
+ {n:'ca-certificates',d:'sha256:77b2…1f',size:210*KB,by:'rules_oci: tar //certs:bundle'},
+ {n:'tzdata',d:'sha256:c4a9…3e',size:420*KB,by:'rules_oci: tar //tz:data'},
+ {n:'nodejs runtime',d:'sha256:12fe…d8',size:48*MB,by:'rules_oci: tar @nodejs//:runtime'},
+ {n:'passwd',d:'sha256:9d03…42',size:1*KB,by:'rules_oci: tar //web:passwd'},
+ {n:'app dependencies',d:deps,size:96*MB|0,by:'rules_oci: tar //web:node_modules'},
+ {n:'app public',d:pub,size:12.6*MB|0,by:'rules_oci: tar //web:public'},
+ {n:'app dist',d:dist,size:2.4*MB|0,by:'rules_oci: tar //web:dist'},
+ {n:'build info',d:bi,size:1*KB,by:'rules_oci: tar //web:build_info'}];
+const BI=(sha,at)=>TXT(`{\n  "commit": "${sha}",\n  "built_at": "${at}"\n}`,'bi-'+sha);
+const PKG=(lod)=>TXT(`{\n  "name": "web",\n  "dependencies": {\n    "lodash": "${lod}",\n    "react": "18.3.1"\n  }\n}`,'pk-'+lod);
+const LPK=(v)=>TXT(`{ "name": "lodash", "version": "${v}" }`,'lp-'+v);
+const REV_WEB=[
+rev({v:'4a8d1e2',sha:'4a8d1e2',full:'4a8d1e2c91f0b3d5a7e9c2f4b6d8a0e1c3f5a7b9',msg:'cart: round totals half-even',au:'Sam Ortiz',br:'main',tag:'main-4a8d1e2',base:'main',cp:'merged to main',build:8812,run:6210,by:'Sam Ortiz',trig:'push',when:'3m ago',date:'Oct 19, 2026 12:41 UTC',dur:'4m 12s',cache:'96.1%',
+ pr:{n:3321,t:'Round cart totals half-even',a:'Sam Ortiz'},art:'ghcr.io/acme/web@sha256:c40a7e19…',size:212*MB|0,total:18432,
+ meta:flat(IMG({sha:'4a8d1e2',at:'2026-10-19T12:41Z',rn:'aspect-runner-04',mf:'sha256:c40a7e19…b4',cf:'sha256:1de803f2…77'})),
+ layers:LY('sha256:a1b2…c9','sha256:f00d…7a','sha256:9f44…e1','sha256:d2c8…05'),
+ files:{
+ 'app/dist/bundle.js':BIN(1.2*MB|0,'bd-4a8','JavaScript · minified'),
+ 'app/dist/build_info.json':BI('4a8d1e2','2026-10-19T12:41Z'),
+ 'app/package.json':PKG('4.17.21'),
+ 'app/node_modules/lodash/package.json':LPK('4.17.21'),
+ 'app/node_modules/lodash/lodash.js':BIN(544*KB,'ld-4172','JavaScript'),
+ 'app/public/assets/cart.7f3a21.js':BIN(88*KB,'ct-7f3','JavaScript · minified')}}),
+rev({v:'19f0b3c',sha:'19f0b3c',full:'19f0b3c7a2e4d6f8b0c2e4a6c8d0f2b4e6a8c0d2',msg:'checkout: add address validation',au:'Ana Costa',br:'main',tag:'main-19f0b3c',base:'main',cp:'merged to main',build:8790,run:6188,by:'Ana Costa',trig:'push',when:'4d ago',date:'Oct 15, 2026 16:20 UTC',dur:'1m 58s',cache:'99.2%',
+ pr:{n:3310,t:'Checkout address validation',a:'Ana Costa'},art:'ghcr.io/acme/web@sha256:be71d02a…',size:212*MB|0,total:18429,
+ meta:flat(IMG({sha:'19f0b3c',at:'2026-10-15T16:20Z',rn:'aspect-runner-02',mf:'sha256:be71d02a…9e',cf:'sha256:7c20a1b8…31'})),
+ layers:LY('sha256:a1b2…c0','sha256:f00d…7a','sha256:be12…aa','sha256:77a1…19'),
+ files:{
+ 'app/dist/bundle.js':BIN(1.2*MB|0,'bd-19f','JavaScript · minified'),
+ 'app/dist/build_info.json':BI('19f0b3c','2026-10-15T16:20Z'),
+ 'app/package.json':PKG('4.17.20'),
+ 'app/node_modules/lodash/package.json':LPK('4.17.20'),
+ 'app/node_modules/lodash/lodash.js':BIN(543*KB,'ld-4170','JavaScript'),
+ 'app/public/assets/cart.7f3a21.js':BIN(88*KB,'ct-7f3','JavaScript · minified')}}),
+rev({v:'91be3f0',sha:'91be3f0',full:'91be3f0d5b7a9c1e3f5b7d9a1c3e5f7b9d1a3c5e',msg:'cart: new discount banner',au:'Ana Costa',br:'main',tag:'main-91be3f0',base:'main',cp:'merged to main',build:8760,run:6150,by:'Ana Costa',trig:'push',when:'6d ago',date:'Oct 13, 2026 10:05 UTC',dur:'4m 40s',cache:'94.8%',
+ pr:{n:3298,t:'Discount banner on cart',a:'Ana Costa'},art:'ghcr.io/acme/web@sha256:3e51ab07…',size:211*MB|0,total:18420,
+ meta:flat(IMG({sha:'91be3f0',at:'2026-10-13T10:05Z',rn:'aspect-runner-01',mf:'sha256:3e51ab07…4c',cf:'sha256:90bb2e3d…a0'})),
+ layers:LY('sha256:a1b2…c0','sha256:2b9a…44','sha256:3a61…d0','sha256:0e5f…8b'),
+ files:{
+ 'app/dist/bundle.js':BIN(1.19*MB|0,'bd-91b','JavaScript · minified'),
+ 'app/dist/build_info.json':BI('91be3f0','2026-10-13T10:05Z'),
+ 'app/package.json':PKG('4.17.20'),
+ 'app/node_modules/lodash/package.json':LPK('4.17.20'),
+ 'app/node_modules/lodash/lodash.js':BIN(543*KB,'ld-4170','JavaScript'),
+ 'app/public/assets/cart.5c0e8d.js':BIN(84*KB,'ct-5c0','JavaScript · minified')}}),
+rev({v:'3e51ab0',sha:'3e51ab0',full:'3e51ab0f7c2d4a6e8b1c3d5f7a9e0b2c4d6f8a13',msg:'deps: bump react to 18.3.1',au:'Sam Ortiz',br:'main',tag:'main-3e51ab0',base:'main',cp:'merged to main',build:8731,run:6101,by:'Sam Ortiz',trig:'push',when:'9d ago',date:'Oct 10, 2026 09:12 UTC',dur:'5m 02s',cache:'93.0%',
+ pr:{n:3280,t:'Bump React to 18.3.1',a:'Sam Ortiz'},art:'ghcr.io/acme/web@sha256:6a0fd2c7…',size:210*MB|0,total:18401,
+ meta:flat(IMG({sha:'3e51ab0',at:'2026-10-10T09:12Z',rn:'aspect-runner-03',mf:'sha256:6a0fd2c7…18',cf:'sha256:55e0c9aa…d2'})),
+ layers:LY('sha256:7d08…15','sha256:2b9a…44','sha256:81c0…37','sha256:4b7d…e6'),
+ files:{
+ 'app/dist/bundle.js':BIN(1.18*MB|0,'bd-3e5','JavaScript · minified'),
+ 'app/dist/build_info.json':BI('3e51ab0','2026-10-10T09:12Z'),
+ 'app/package.json':PKG('4.17.20'),
+ 'app/node_modules/lodash/package.json':LPK('4.17.20'),
+ 'app/node_modules/lodash/lodash.js':BIN(543*KB,'ld-4170','JavaScript'),
+ 'app/public/assets/cart.5c0e8d.js':BIN(84*KB,'ct-5c0','JavaScript · minified')}})];
+
+const ICOMMON={ciName:'GitHub Actions',artLabel:'Artifact',brLabel:'Branch',tagLabel:'Tag',tagLink:'Open release',sizeLabel:'Package size',tabs:['contents','metadata','verify','run','history']};
+DEPS.deb=Object.assign({},ICOMMON,{key:'deb',target:'//aqnav:deb',repo:'sandboxaq/aqnav',gh:'https://github.com/sandboxaq/aqnav',label:'.deb',icon:'package',wf:'release-deb.yml',brLabel:'Release branch',artOpen:'Open in S3',rev:REV_DEB});
+DEPS.docs=Object.assign({},ICOMMON,{tabs:['contents','metadata','run','history'],key:'docs',target:'//docs:site',repo:'acme/sdk',gh:'https://github.com/acme/sdk',label:'.tar.gz',icon:'archive',wf:'publish-docs.yml',brLabel:'Ref',artOpen:'Open in S3',rev:REV_DOCS});
+DEPS.web=Object.assign({},ICOMMON,{key:'web',target:'//web:image',repo:'acme/web',gh:'https://github.com/acme/web',label:'OCI image',icon:'layers',wf:'build-image.yml',tagLabel:'Image tag',tagLink:'',artLabel:'Image',artOpen:'Open in registry',sizeLabel:'Image size',contentsLabel:'Filesystem',tabs:['contents','layers','metadata','verify','run','history'],rev:REV_WEB});
+setDep('deb');
+
+REV_DEB.forEach((r,i)=>{r.custom={release:{candidate:['rc3','rc2','rc1','ga'][i],ticket:'SQ-'+[1423,1419,1411,1302][i],owner:'dana.okafor'},validation:{pipeline_url:'https://hil.sandboxaq.example/runs/'+[912,881,840,790][i],rig_pool:'rig-fleet-a'}}});
+REV_WEB.forEach((r,i)=>{const run='https://github.com/acme/web/actions/runs/'+r.run,e2e=i===1?'failure':'success';r.custom={workflow:{runUrl:run,status:e2e},jobs:[{name:'Build',status:'success',url:run+'/job/1'},{name:'Playwright',status:e2e,url:run+'/job/2'}]}});
+REV_DOCS.forEach((r,i)=>{r.custom={cdn:{distribution:'E2KX9A41Q7',invalidation:'I'+(2400+r.build%97)},links:{changelog:'https://docs.acme.example/changelog/'+r.v}}});
+
+REV_DEB[2].evicted=REV_DEB[3].evicted=true;REV_WEB[2].evicted=REV_WEB[3].evicted=true;REV_DOCS[2].evicted=true;
+
+const PAGES={"deployments": {"html": "\n<div class=\"ptitle\"><h1>Deployments</h1><p>Each deployment is a package you ship. See exactly what changed inside it between any two versions.</p></div>\n<div id=\"lf\"></div>\n<div class=\"card tbl\"><div class=\"sc\"><table>\n<thead><tr><th>Target</th><th>Package</th><th>Latest build</th><th>Last deployed</th><th>Verified</th></tr></thead>\n<tbody>\n<tr><td><a class=\"nm\" href=\"#/deployment/deb\">//aqnav:deb</a><div class=\"sub\">sandboxaq/aqnav \u00b7 release/4.2</div></td><td><span class=\"chip m\">.deb</span><div class=\"sub\">60.0 MB</div></td><td>4.2.0~rc3<div class=\"sub mono\">d09a4c1 \u00b7 2d ago</div></td><td>4.2.0~rc2<div class=\"sub mono\">77be012 \u00b7 5d ago</div></td><td><span data-vb=\"deb:0\"></span></td></tr>\n<tr><td><a class=\"nm\" href=\"#/deployment/web\">//web:image</a><div class=\"sub\">acme/web \u00b7 main</div></td><td><span class=\"chip m\">OCI image</span><div class=\"sub\">212 MB</div></td><td>4a8d1e2<div class=\"sub\">3m ago</div></td><td>19f0b3c<div class=\"sub\">4d ago</div></td><td><span data-vb=\"web:0\"></span></td></tr>\n<tr><td><a class=\"nm\" href=\"#/deployment/docs\">//docs:site</a><div class=\"sub\">acme/sdk \u00b7 tags/v*</div></td><td><span class=\"chip m\">.tar.gz</span><div class=\"sub\">8.2 MB</div></td><td>v3.8.1<div class=\"sub\">1h ago</div></td><td>v3.8.0<div class=\"sub\">yesterday</div></td><td class=\"t3\">\u2014</td></tr>\n<tr><td><a class=\"nm\" href=\"#\">//cli:release</a><div class=\"sub\">acme/cli \u00b7 main</div></td><td><span class=\"chip m\">.tar.gz</span><div class=\"sub\">31 MB</div></td><td>e41b9a0<div class=\"sub\">3d ago</div></td><td>e41b9a0<div class=\"sub\">3d ago</div></td><td class=\"t3\">\u2014</td></tr>\n</tbody></table></div></div>\n", "nav": "deploy", "crumb": "<b>Deployments</b>"}, "deployment": {"html": "<div id=\"dep\"></div>", "nav": "deploy", "crumb": "<a href=\"#/deployments\">Deployments</a><i>/</i><b>//aqnav:deb</b>"}, "compare": {"html": "\n<div class=\"ab mb5\">\n<div class=\"card side2\"><div class=\"sh\"><span class=\"tag\">A</span><span class=\"id\">#8790</span></div>\n<div class=\"sb\"><div class=\"ttl\"><span class=\"dot g\"></span>build //aqnav:deb</div><div class=\"sm\"><span class=\"chip m\">build</span><span>sandboxaq/aqnav</span><span class=\"sep\">\u00b7</span><span class=\"m\">release/4.2</span><span class=\"sep\">\u00b7</span><span class=\"ci m\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><line x1=\"3\" x2=\"9\" y1=\"12\" y2=\"12\"/><line x1=\"15\" x2=\"21\" y1=\"12\" y2=\"12\"/></svg>77be012</span><span class=\"sep\">\u00b7</span><span>runner</span><span class=\"sep\">\u00b7</span><span>5d ago</span></div></div></div>\n<div class=\"mid\"><button class=\"btn ic1\" type=\"button\" title=\"Swap A and B\" aria-label=\"Swap A and B\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><path d=\"M8 3 4 7l4 4\"/><path d=\"M4 7h16\"/><path d=\"m16 21 4-4-4-4\"/><path d=\"M20 17H4\"/></svg></button></div>\n<div class=\"card side2\"><div class=\"sh\"><span class=\"tag\">B</span><span class=\"id\">#8812</span></div>\n<div class=\"sb\"><div class=\"ttl\"><span class=\"dot g\"></span>build //aqnav:deb</div><div class=\"sm\"><span class=\"chip m\">build</span><span>sandboxaq/aqnav</span><span class=\"sep\">\u00b7</span><span class=\"m\">release/4.2</span><span class=\"sep\">\u00b7</span><span class=\"ci m\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><line x1=\"3\" x2=\"9\" y1=\"12\" y2=\"12\"/><line x1=\"15\" x2=\"21\" y1=\"12\" y2=\"12\"/></svg>d09a4c1</span><span class=\"sep\">\u00b7</span><span>runner</span><span class=\"sep\">\u00b7</span><span>2d ago</span></div></div></div>\n</div>\n<div class=\"mb5\" style=\"display:flex;flex-direction:column;gap:12px\">\n<div><span class=\"verdict\"><span class=\"chip warn\">Slower</span><span>slower by 3m 53s</span></span></div>\n<div class=\"kpis\">\n<div class=\"card kpi\"><div class=\"k\">Duration</div><div class=\"vr\"><span class=\"v\">6m 03s</span><span class=\"dl fail\"><i>\u25b2</i>+114%</span></div><div class=\"s tnum\">2m 10s \u2192 6m 03s</div></div>\n<div class=\"card kpi\"><div class=\"k\">Cache hit</div><div class=\"vr\"><span class=\"v\">96%</span><span class=\"dl fail\"><i>\u25bc</i>-3pp</span></div><div class=\"s tnum\">99% \u2192 96%</div></div>\n<div class=\"card kpi\"><div class=\"k\">Targets failed</div><div class=\"vr\"><span class=\"v\">0</span><span class=\"dl t3\"><i>\u2013</i>0</span></div><div class=\"s tnum\">0 \u2192 0</div></div>\n<div class=\"card kpi\"><div class=\"k\">Actions executed</div><div class=\"vr\"><span class=\"v\">212</span><span class=\"dl fail\"><i>\u25b2</i>+1414%</span></div><div class=\"s tnum\">14 \u2192 212</div></div>\n<div class=\"card kpi\"><div class=\"k\">Critical path</div><div class=\"vr\"><span class=\"v\">1m 41s</span><span class=\"dl fail\"><i>\u25b2</i>+166%</span></div><div class=\"s tnum\">38s \u2192 1m 41s</div></div>\n</div></div>\n<div class=\"sec\"><div class=\"lbl\">Likely cause</div>\n<div class=\"card cause\"><span class=\"dot sm a\"></span><div><div>More actions ran because action inputs changed.</div><div class=\"ev\"><span class=\"chip warn m\">actions executed 14 \u2192 212</span></div></div></div></div>\n<div class=\"tabs\"><a>Targets &amp; Tests</a><a>Overview</a><a>Cache</a><a>Timing</a><a>Executions</a><a class=\"on\">Configuration</a></div>\n<div class=\"tc stack\">\n<div><div class=\"lbl row2\">Build identity <span class=\"chip warn\">1 changed</span></div>\n<div class=\"dp\"><div><b class=\"warn\">~</b><div><span>commit = d09a4c1c91f0</span><span class=\"was\">was 77be0127a2e4</span></div></div></div></div>\n<div><div class=\"lbl row2\">Command-line flags <span class=\"chip warn\">2 changed</span></div>\n<div class=\"dp\"><div><b class=\"warn\">~</b><div><span>--build_event_binary_file=/tmp/build-event-out-95b5.bin</span><span class=\"was\">build_event_binary_file=/tmp/build-event-out-8fe1.bin</span></div></div>\n<div><b class=\"warn\">~</b><div><span>--execution_log_compact_file=/tmp/aspect-bazel-8d3c/exec.log.zstd</span><span class=\"was\">execution_log_compact_file=/tmp/aspect-bazel-6eaf/exec.log.zstd</span></div></div></div></div>\n</div>\n", "nav": "compare", "crumb": "<b>Compare</b>"}, "targets": {"html": "\n<div class=\"ab mb5\">\n<div class=\"card side2\"><div class=\"sh\"><span class=\"tag\">A</span><span class=\"id\">#8790</span></div>\n<div class=\"sb\"><div class=\"ttl\"><span class=\"dot g\"></span>build //aqnav:deb</div><div class=\"sm\"><span class=\"chip m\">build</span><span>sandboxaq/aqnav</span><span class=\"sep\">\u00b7</span><span class=\"m\">release/4.2</span><span class=\"sep\">\u00b7</span><span class=\"ci m\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><line x1=\"3\" x2=\"9\" y1=\"12\" y2=\"12\"/><line x1=\"15\" x2=\"21\" y1=\"12\" y2=\"12\"/></svg>77be012</span><span class=\"sep\">\u00b7</span><span>runner</span><span class=\"sep\">\u00b7</span><span>5d ago</span></div></div></div>\n<div class=\"mid\"><button class=\"btn ic1\" type=\"button\" title=\"Swap A and B\" aria-label=\"Swap A and B\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><path d=\"M8 3 4 7l4 4\"/><path d=\"M4 7h16\"/><path d=\"m16 21 4-4-4-4\"/><path d=\"M20 17H4\"/></svg></button></div>\n<div class=\"card side2\"><div class=\"sh\"><span class=\"tag\">B</span><span class=\"id\">#8812</span></div>\n<div class=\"sb\"><div class=\"ttl\"><span class=\"dot g\"></span>build //aqnav:deb</div><div class=\"sm\"><span class=\"chip m\">build</span><span>sandboxaq/aqnav</span><span class=\"sep\">\u00b7</span><span class=\"m\">release/4.2</span><span class=\"sep\">\u00b7</span><span class=\"ci m\"><svg class=\"ic\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><line x1=\"3\" x2=\"9\" y1=\"12\" y2=\"12\"/><line x1=\"15\" x2=\"21\" y1=\"12\" y2=\"12\"/></svg>d09a4c1</span><span class=\"sep\">\u00b7</span><span>runner</span><span class=\"sep\">\u00b7</span><span>2d ago</span></div></div></div>\n</div>\n<div class=\"mb5\" style=\"display:flex;flex-direction:column;gap:12px\">\n<div><span class=\"verdict\"><span class=\"chip warn\">Slower</span><span>slower by 3m 53s</span></span></div>\n<div class=\"kpis\">\n<div class=\"card kpi\"><div class=\"k\">Duration</div><div class=\"vr\"><span class=\"v\">6m 03s</span><span class=\"dl fail\"><i>\u25b2</i>+114%</span></div><div class=\"s tnum\">2m 10s \u2192 6m 03s</div></div>\n<div class=\"card kpi\"><div class=\"k\">Cache hit</div><div class=\"vr\"><span class=\"v\">96%</span><span class=\"dl fail\"><i>\u25bc</i>-3pp</span></div><div class=\"s tnum\">99% \u2192 96%</div></div>\n<div class=\"card kpi\"><div class=\"k\">Targets failed</div><div class=\"vr\"><span class=\"v\">0</span><span class=\"dl t3\"><i>\u2013</i>0</span></div><div class=\"s tnum\">0 \u2192 0</div></div>\n<div class=\"card kpi\"><div class=\"k\">Actions executed</div><div class=\"vr\"><span class=\"v\">212</span><span class=\"dl fail\"><i>\u25b2</i>+1414%</span></div><div class=\"s tnum\">14 \u2192 212</div></div>\n<div class=\"card kpi\"><div class=\"k\">Critical path</div><div class=\"vr\"><span class=\"v\">1m 41s</span><span class=\"dl fail\"><i>\u25b2</i>+166%</span></div><div class=\"s tnum\">38s \u2192 1m 41s</div></div>\n</div></div>\n<div class=\"sec\"><div class=\"lbl\">Likely cause</div>\n<div class=\"card cause\"><span class=\"dot sm a\"></span><div><div>More actions ran because action inputs changed.</div><div class=\"ev\"><span class=\"chip warn m\">actions executed 14 \u2192 212</span></div></div></div></div>\n<div class=\"tabs\"><a>Targets &amp; Tests</a><a>Overview</a><a>Cache</a><a>Timing</a><a>Executions</a><a class=\"on\">Configuration</a></div>\n<div class=\"tc stack\">\n<div><div class=\"lbl row2\">Build identity <span class=\"chip warn\">1 changed</span></div>\n<div class=\"dp\"><div><b class=\"warn\">~</b><div><span>commit = d09a4c1c91f0</span><span class=\"was\">was 77be0127a2e4</span></div></div></div></div>\n<div><div class=\"lbl row2\">Command-line flags <span class=\"chip warn\">2 changed</span></div>\n<div class=\"dp\"><div><b class=\"warn\">~</b><div><span>--build_event_binary_file=/tmp/build-event-out-95b5.bin</span><span class=\"was\">build_event_binary_file=/tmp/build-event-out-8fe1.bin</span></div></div>\n<div><b class=\"warn\">~</b><div><span>--execution_log_compact_file=/tmp/aspect-bazel-8d3c/exec.log.zstd</span><span class=\"was\">execution_log_compact_file=/tmp/aspect-bazel-6eaf/exec.log.zstd</span></div></div></div></div>\n</div>\n", "nav": "targets", "crumb": "<b>Targets</b>"}};
+let ROUTE=location.hash.replace('#/','')||'deployments';
+function nav(r){ROUTE=r;render()}
+function render(){
+  const qs=new URLSearchParams(ROUTE.split('?')[1]||''),parts=ROUTE.split('?')[0].split('/');
+  const r=parts[0];
+  let p=PAGES[r]||PAGES.deployments;
+  if(r==='targets'){setDep(qs.get('dep')||'deb');ST.b=+(qs.get('rev')||0);p=Object.assign({},p,{html:targetsPage(),crumb:'<b>Targets</b>'})}
+  if(r==='deployment'){setDep(parts[1]||'deb');p=Object.assign({},p,{crumb:'<a href="#/deployments">Deployments</a><i>/</i><b>'+DP.target+'</b>'})}
+  const links={builds:'#',targets:'#/targets',deploy:'#/deployments',compare:'#/compare',agents:'#'};
+  document.getElementById('app').innerHTML=renderChrome(p,links);
+  document.getElementById('m').scrollTop=0;
+  if(r==='deployment')draw(false);
+  fillBadges();
+  initListFilters();
+}
+document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a');if(!a)return;const h=a.getAttribute('href');if(h&&h.startsWith('#/')){e.preventDefault();nav(h.slice(2))}else if(h==='#')e.preventDefault()});
+render();
+</script></body></html>
