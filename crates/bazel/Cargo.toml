@@ -1,5 +1,5 @@
 [package]
-name = "galvanize"
+name = "bazel"
 version.workspace = true
 categories.workspace = true
 homepage.workspace = true
@@ -10,8 +10,11 @@ readme.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+axl-proto = { path = "../axl-proto" }
 libc = "0.2"
 nix = { version = "0.30.1", features = ["fs", "poll"] }
+prost = "0.14.1"
+uuid = { version = "1.18.1", features = ["v4"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
 procfs = "0.18.0"

@@ -35,6 +35,8 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use axl_proto::build_event_stream::BuildEvent;
+use bazel::formats::bes_binary_file::End;
+use bazel::stream::pid_pair::PidPair;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 use crate::engine::cancellation::Signals;
@@ -1098,14 +1100,13 @@ impl Build {
         // times, every sink writes nothing, and the build passes.
         //
         // Only the execution log was ever exposed to that. The BES and workspace
-        // readers take this pid too, but they read a FIFO: `Pipe::open` blocks for
-        // a *writer* rather than for a pid, and the pid is consulted only on an
-        // empty read, which on a blocking FIFO cannot happen until every writer
-        // has closed — by which point "not open" is the right answer whether the
-        // pid is alive or dead. Everything they decide is keyed on the client pid
-        // anyway. A regular file has no kernel primitive for "wait for a writer",
-        // so galvanize substitutes pid liveness, and that substitution is what made
-        // a stale pid matter here and nowhere else.
+        // readers take this pid too, but they read a FIFO: an empty read there
+        // already means "no writer attached", so the pid only speeds up ending
+        // and everything they decide is keyed on the client pid anyway. A regular
+        // file has no kernel primitive for "a writer is attached", so
+        // `bazel::stream::file::File` leans on whether the server pid holds the
+        // path open, and that is what made a stale pid matter here and nowhere
+        // else.
         let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
 
         let span = tracing::info_span!(
@@ -1172,20 +1173,21 @@ impl Build {
         // consumer of the stream reads; per-action data comes from the
         // execution log, so `--build_event_publish_all_actions` is not asked
         // for.
-        let bes_path = if build_events {
-            let p = BuildEventStream::reserve_path()?;
+        let bes_channel = if build_events {
+            let channel = BuildEventStream::reserve()?;
             cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
-                .arg(&p);
-            Some(p)
+                .arg(channel.path());
+            Some(channel)
         } else {
             None
         };
 
-        let workspace_event_path = if workspace_events {
-            let out = WorkspaceEventStream::reserve_path()?;
-            cmd.arg("--experimental_workspace_rules_log_file").arg(&out);
-            Some(out)
+        let workspace_event_channel = if workspace_events {
+            let channel = WorkspaceEventStream::reserve()?;
+            cmd.arg("--experimental_workspace_rules_log_file")
+                .arg(channel.path());
+            Some(channel)
         } else {
             None
         };
@@ -1240,8 +1242,8 @@ impl Build {
         };
 
         // A log at the reserved path from an *earlier* run has to go before Bazel
-        // starts, because `galvanize::StreamingFile::open` polls only for the
-        // path's existence. Left in place the reader opens the stale file
+        // starts, because `bazel::stream::file::File` opens whatever is at the
+        // path as soon as there is something. Left in place the reader opens the stale file
         // immediately, races Bazel's truncation of it and loses: it delivers the
         // previous build's entries — spawns that never ran, inputs that no longer
         // exist — and misses this build's.
@@ -1288,18 +1290,29 @@ impl Build {
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
         // uses to detect aspect-build/aspect-cli#1060 — a hung post-
-        // REMOTE_CACHE_EVICTED state. The server (daemon) pid passed to
-        // galvanize stays alive across invocations and cannot signal
-        // end-of-build, which is why we want a separate per-invocation pid.
-        let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+        // REMOTE_CACHE_EVICTED state. The server (daemon) pid stays alive
+        // across invocations and cannot signal end-of-build, which is why the
+        // streams are keyed on this separate per-invocation pid (see
+        // `PidPair`).
+        let pids = PidPair {
+            client: child.id(),
+            server: Some(pid),
+        };
+        let build_event_stream = match bes_channel {
+            Some(channel) => {
+                let gate = pids.gate(channel.path());
+                Some(BuildEventStream::spawn(channel, gate, file_sinks)?)
+            }
             None => None,
         };
 
         // The workspace log is read the same way: the server holds the FIFO
         // while writing, the client's death ends the stream.
-        let workspace_event_stream = match workspace_event_path {
-            Some(p) => Some(WorkspaceEventStream::spawn(p, pid, child.id())?),
+        let workspace_event_stream = match workspace_event_channel {
+            Some(channel) => {
+                let gate = pids.gate(channel.path());
+                Some(WorkspaceEventStream::spawn(channel, gate)?)
+            }
             None => None,
         };
 
@@ -1642,7 +1655,13 @@ impl Build {
         // be called after wait() to get historical events.
         if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
             match event_stream.join() {
-                Ok(_) => {}
+                Ok(_) => {
+                    if let Some(warning) =
+                        incomplete_events_warning(event_stream.end(), result.success())
+                    {
+                        errln!("{warning}");
+                    }
+                }
                 Err(err) => anyhow::bail!("build event stream thread error: {}", err),
             }
         }
@@ -1706,6 +1725,94 @@ impl Build {
     }
 }
 
+/// What to say about a build event stream that did not end with bazel's final
+/// event, or `None` when there is nothing to say.
+///
+/// Bazel writes that event whenever it ends on its own terms, so its absence
+/// means the writer died, was cut off, or never wrote. That is worth a warning
+/// because the consumers of the stream (BES backends, hooks) saw less than the
+/// build did. It is not worth one when bazel itself failed before writing a
+/// single event (a rejected command line, say): its exit code already says so.
+fn incomplete_events_warning(end: Option<&End>, bazel_succeeded: bool) -> Option<String> {
+    match end? {
+        End::Complete => None,
+        End::Incomplete(done) if !bazel_succeeded && done.bytes() == 0 => None,
+        end => Some(format!(
+            "WARNING: the build events were incomplete ({end}); anything consuming them \
+             (BES backends, hooks) may have missed events."
+        )),
+    }
+}
+
+#[cfg(test)]
+mod incomplete_events_warning_tests {
+    use super::*;
+    use bazel::stream::Done;
+    use std::time::Duration;
+
+    fn ended(bytes: u64) -> End {
+        End::Incomplete(Done::Ended {
+            bytes,
+            quiet: Duration::from_millis(5),
+        })
+    }
+
+    #[test]
+    fn a_stream_that_has_not_ended_has_nothing_to_say() {
+        assert_eq!(incomplete_events_warning(None, true), None);
+    }
+
+    #[test]
+    fn a_complete_stream_is_silent_whatever_the_exit_code() {
+        assert_eq!(incomplete_events_warning(Some(&End::Complete), true), None);
+        assert_eq!(incomplete_events_warning(Some(&End::Complete), false), None);
+    }
+
+    #[test]
+    fn an_incomplete_stream_after_a_successful_build_warns() {
+        let end = ended(10);
+        let warning = incomplete_events_warning(Some(&end), true).unwrap();
+        assert!(
+            warning.starts_with("WARNING: the build events were incomplete"),
+            "{warning}"
+        );
+        assert!(warning.contains("after 10 bytes"), "{warning}");
+        // Even one that wrote nothing: a successful build must have written.
+        assert!(incomplete_events_warning(Some(&ended(0)), true).is_some());
+    }
+
+    #[test]
+    fn an_incomplete_stream_after_a_failed_build_warns_only_if_something_was_written() {
+        assert!(incomplete_events_warning(Some(&ended(10)), false).is_some());
+        assert_eq!(
+            incomplete_events_warning(Some(&ended(0)), false),
+            None,
+            "bazel failed before writing anything; its exit code says so"
+        );
+        let empty_drain = End::Incomplete(Done::Drained { bytes: 0 });
+        assert_eq!(incomplete_events_warning(Some(&empty_drain), false), None);
+    }
+
+    #[test]
+    fn a_broken_stream_with_no_bytes_after_a_failed_build_is_silent_too() {
+        let broken = End::Incomplete(Done::Broken {
+            bytes: 0,
+            error: std::io::Error::other("gone"),
+        });
+        assert_eq!(incomplete_events_warning(Some(&broken), false), None);
+        assert!(incomplete_events_warning(Some(&broken), true).is_some());
+    }
+
+    #[test]
+    fn a_corrupt_stream_always_warns() {
+        let corrupt = End::Corrupt("bad varint".into());
+        for succeeded in [true, false] {
+            let warning = incomplete_events_warning(Some(&corrupt), succeeded).unwrap();
+            assert!(warning.contains("corrupt: bad varint"), "{warning}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
@@ -1740,10 +1847,10 @@ mod tests {
     /// client, whose death means no log is coming at all, and the daemon, which
     /// holds the file open while writing it. basil's `info` invocation is a
     /// separate short-lived process, so by the time the reader looks the pid it
-    /// reported is already reaped — `galvanize::StreamingFile::open` then reads a
+    /// reported is already reaped — `bazel::stream::file::File` then reads a
     /// not-yet-created file as "the writer is gone" and ends the stream empty,
     /// before basil has written a byte. A live pid that holds nothing open is the
-    /// right stand-in: it keeps `open` waiting for the file, and end-of-file
+    /// right stand-in: it keeps the follower waiting for the file, and end-of-file
     /// still terminates the read cleanly.
     #[cfg(unix)]
     struct DaemonStandIn {
@@ -2715,8 +2822,8 @@ Test = task(implementation = _impl)
 
     /// A log left at the reserved path by an earlier build is not this build's.
     ///
-    /// `StreamingFile::open` polls for the path to exist, so a stale file is
-    /// opened at once and read to its end while Bazel truncates and rewrites the
+    /// `bazel::stream::file::File` opens whatever is at the path, so a stale
+    /// file is opened at once and read to its end while Bazel truncates and rewrites the
     /// path underneath — the reader keeps the old inode. The consumer is then
     /// handed the previous run's entries: spawns that never ran, inputs that are
     /// gone, and a `kinds = ["spawn"]` hook told about actions this build did not
@@ -3299,6 +3406,88 @@ Test = task(implementation = _impl)
         .expect("run_task");
 
         assert_eq!(exit, Some(0));
+    }
+
+    /// `fully_async` lets the Bazel client exit while the server still writes
+    /// the terminal `BuildFinished` event. The invocation must deliver that
+    /// event before it reports a complete stream.
+    #[cfg(unix)]
+    #[test]
+    fn fully_async_bep_delivers_build_finished_after_client_exit() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = std::process::Command::new(crate::test::basil_bin())
+            .arg("__async_bep_tail_writer")
+            .arg(dir.path())
+            .spawn()
+            .expect("spawn fake Bazel server writer");
+        let server_pid_flag = format!("--basil-server-pid={}", server.id());
+        let script = format!(
+            r#"
+def _impl(ctx):
+    events = bazel.build_events.iterator()
+    rc = ctx.bazel.parse_rc(startup_flags = [{server_pid_flag:?}], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--scenario=async_bep_tail_after_client_exit", {control_dir_flag:?}],
+        build_events = [events],
+        stderr = None,
+    )
+    started = 0
+    finished = 0
+    for event in events:
+        if event.kind == "build_started":
+            started += 1
+        elif event.kind == "build_finished":
+            finished += 1
+    status = build.wait()
+    if not status.success: return 1
+    if started != 1: return 2
+    if finished != 1: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            server_pid_flag = server_pid_flag,
+            control_dir_flag = format!("--basil-control-dir={}", dir.path().display()),
+        );
+
+        let result = crate::test::with_timeout(Duration::from_secs(30), move || {
+            crate::test::eval(&script).with_fake_bazel().run_task(0)
+        });
+        let Some(result) = result else {
+            let _ = server.kill();
+            let _ = server.wait().expect("wait for fake Bazel server writer");
+            std::mem::forget(dir);
+            panic!("timed out waiting for the asynchronous BEP tail");
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let server_status = loop {
+            if let Some(status) = server
+                .try_wait()
+                .expect("check fake Bazel server writer status")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = server.kill();
+                let _ = server.wait().expect("wait for fake Bazel server writer");
+                panic!("timed out waiting for fake Bazel server writer to exit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(
+            result.expect("run_task"),
+            Some(0),
+            "the stream must deliver BuildFinished after the client exits"
+        );
+        assert!(
+            server_status.success(),
+            "fake Bazel server writer failed: {server_status}"
+        );
     }
 
     /// A mistyped flag reaches Bazel, which rejects the command line and

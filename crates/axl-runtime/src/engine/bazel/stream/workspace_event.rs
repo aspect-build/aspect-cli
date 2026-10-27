@@ -1,17 +1,15 @@
 use axl_proto::workspace_log::WorkspaceEvent;
+use bazel::formats::delimited;
+use bazel::stream::Gate;
+use bazel::stream::pipe::Channel;
 use fibre::spmc::{Receiver, bounded};
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
-use std::io::{self, ErrorKind, Read};
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::io::{self, ErrorKind};
+use std::thread;
 use std::thread::JoinHandle;
-use std::{env, thread};
 use thiserror::Error;
-
-use super::build_event::{PendingWriterReader, spawn_open_watchdog};
-use super::util::read_varint;
 
 #[derive(Error, Debug)]
 pub enum WorkspaceEventError {
@@ -39,69 +37,41 @@ impl Debug for WorkspaceEventStream {
 }
 
 impl WorkspaceEventStream {
-    /// Mint a temp FIFO path and create the inode, returning the path so the
-    /// caller can pass it to bazel before spawning. Pair with `spawn` once the
-    /// client's pid is known.
-    pub fn reserve_path() -> io::Result<PathBuf> {
-        let out = env::temp_dir().join(format!("workspace-event-out-{}.bin", uuid::Uuid::new_v4()));
-        galvanize::Pipe::mkfifo(&out)?;
-        Ok(out)
+    /// Reserve the FIFO the workspace log is written to, so its path can go on
+    /// the command line before bazel is spawned. Pair with
+    /// [`spawn`](Self::spawn) once the bazel client exists.
+    pub fn reserve() -> io::Result<Channel> {
+        Channel::fifo("workspace-event-out")
     }
 
-    /// Spawn the reader. `server_pid` is the bazel server that holds the FIFO
-    /// open while it writes; `writer_pid` is the client of this invocation,
-    /// whose death ends the stream even when the server still holds the pipe
-    /// or never opened it (see `BuildEventStream::spawn`).
-    pub fn spawn(path: PathBuf, server_pid: u32, writer_pid: u32) -> io::Result<Self> {
+    /// Spawn the reader on `channel`. `gate` decides when the stream is over
+    /// (see [`bazel::stream`]); for a real bazel it comes from
+    /// `PidPair::gate`. The workspace log has no end marker, so the stream
+    /// ends only through it.
+    pub fn spawn(channel: Channel, gate: Gate) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<WorkspaceEvent>(1000);
+        let mut pipe = channel.follow(gate)?;
         let handle: JoinHandle<Result<(), WorkspaceEventError>> = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
-            // 10 is the maximum size of a varint so start with that size.
-            buf.resize(10, 0);
-
-            galvanize::Pipe::mkfifo(&path)?;
-            let opened = spawn_open_watchdog(path.clone(), writer_pid);
-            let inner =
-                galvanize::Pipe::open(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
-            inner.set_nonblocking()?;
-            opened.store(true, Ordering::Relaxed);
-            let mut out_raw = PendingWriterReader { inner, writer_pid };
-
-            let mut read = || -> Result<(), WorkspaceEventError> {
-                // varint size can be somewhere between 1 to 10 bytes.
-                let (size, _) = read_varint(&mut out_raw)?;
-                if size > buf.len() {
-                    buf.resize(size, 0);
-                }
-
-                out_raw.read_exact(&mut buf[0..size])?;
-
-                let event = WorkspaceEvent::decode(&buf[0..size])?;
-
-                // Send blocks until there is room in the buffer.
-                // https://docs.rs/fibre/latest/fibre/spmc/index.html
-                sender.send(event)?;
-
-                Ok(())
-            };
 
             loop {
-                let result = read();
-
-                // event decoding was succesfull move to the next.
-                if result.is_ok() {
-                    continue;
-                }
-
-                match result.unwrap_err() {
-                    // this marks the end of the stream
-                    WorkspaceEventError::IO(err) if err.kind() == ErrorKind::BrokenPipe => {
-                        sender.close()?;
-                        return Ok(());
+                match delimited::next_frame(&mut pipe, &mut buf) {
+                    Ok(Some(header)) => {
+                        let event = WorkspaceEvent::decode(&buf[..header.len])?;
+                        // Send blocks until there is room in the buffer.
+                        // https://docs.rs/fibre/latest/fibre/spmc/index.html
+                        sender.send(event)?;
                     }
-                    err => return Err(err),
+                    // The end of the stream: between two events, or cut off in
+                    // the middle of one. Why it ended is the pipe's to say; the
+                    // events before it were good either way.
+                    Ok(None) => break,
+                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(err) => return Err(err.into()),
                 }
             }
+            sender.close()?;
+            Ok(())
         });
 
         Ok(Self { handle, recv })
@@ -119,11 +89,13 @@ impl WorkspaceEventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bazel::stream::pid_pair::PidPair;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn temp_fifo_path() -> PathBuf {
-        env::temp_dir().join(format!("test-workspace-{}.fifo", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("test-workspace-{}.fifo", uuid::Uuid::new_v4()))
     }
 
     fn spawn_pid_holder() -> std::process::Child {
@@ -139,6 +111,19 @@ mod tests {
         WorkspaceEvent::default().encode_length_delimited_to_vec()
     }
 
+    /// A stream whose quiet windows are short enough for a test.
+    fn spawn_at(path: PathBuf, server_pid: u32, client_pid: u32) -> WorkspaceEventStream {
+        let channel = Channel::at(path.clone()).unwrap();
+        let mut gate = PidPair {
+            client: client_pid,
+            server: Some(server_pid),
+        }
+        .gate(&path);
+        gate.quiet = Duration::from_millis(300);
+        gate.quiet_empty = Duration::from_millis(100);
+        WorkspaceEventStream::spawn(channel, gate).unwrap()
+    }
+
     /// Bazel can exit before it opens the workspace log, leaving a live server
     /// that looks like a writer on its way.
     #[test]
@@ -146,9 +131,7 @@ mod tests {
         let joined = crate::test::with_timeout(Duration::from_secs(10), || {
             let mut server = spawn_pid_holder();
             let mut client = spawn_pid_holder();
-            let path = temp_fifo_path();
-            galvanize::Pipe::mkfifo(&path).unwrap();
-            let stream = WorkspaceEventStream::spawn(path, server.id(), client.id()).unwrap();
+            let stream = spawn_at(temp_fifo_path(), server.id(), client.id());
             let _ = client.kill();
             let _ = client.wait();
             let joined = stream.join().is_ok();
@@ -166,7 +149,7 @@ mod tests {
             let mut server = spawn_pid_holder();
             let mut client = spawn_pid_holder();
             let path = temp_fifo_path();
-            galvanize::Pipe::mkfifo(&path).unwrap();
+            let channel = Channel::at(path.clone()).unwrap();
             let (release, held) = std::sync::mpsc::channel::<()>();
             let path_w = path.clone();
             let writer = thread::spawn(move || {
@@ -177,7 +160,13 @@ mod tests {
                 f.write_all(&encoded_event()).unwrap();
                 let _ = held.recv();
             });
-            let stream = WorkspaceEventStream::spawn(path, server.id(), client.id()).unwrap();
+            let mut gate = PidPair {
+                client: client.id(),
+                server: Some(server.id()),
+            }
+            .gate(&path);
+            gate.quiet = Duration::from_millis(300);
+            let stream = WorkspaceEventStream::spawn(channel, gate).unwrap();
             let recv = stream.receiver();
             let first = recv.recv().is_ok();
             let _ = client.kill();
@@ -189,5 +178,93 @@ mod tests {
             (first, joined)
         });
         assert_eq!(outcome, Some((true, true)));
+    }
+
+    #[test]
+    fn events_arrive_in_order_and_the_stream_ends_when_the_writer_is_done() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let mut holder = spawn_pid_holder();
+            let path = temp_fifo_path();
+            let stream = spawn_at(path.clone(), holder.id(), holder.id());
+            let recv = stream.receiver();
+            {
+                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                for _ in 0..3 {
+                    f.write_all(&encoded_event()).unwrap();
+                }
+            }
+            let joined = stream.join().is_ok();
+            let got = std::iter::from_fn(|| recv.recv().ok()).count();
+            let _ = holder.kill();
+            (joined, got)
+        });
+        assert_eq!(outcome, Some((true, 3)));
+    }
+
+    #[test]
+    fn a_stream_cut_off_inside_an_event_keeps_the_events_before_it() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let mut holder = spawn_pid_holder();
+            let path = temp_fifo_path();
+            let stream = spawn_at(path.clone(), holder.id(), holder.id());
+            let recv = stream.receiver();
+            {
+                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                f.write_all(&encoded_event()).unwrap();
+                // A length that promises more than is written.
+                f.write_all(&[5, 0, 0]).unwrap();
+            }
+            let joined = stream.join().is_ok();
+            let got = std::iter::from_fn(|| recv.recv().ok()).count();
+            let _ = holder.kill();
+            (joined, got)
+        });
+        assert_eq!(outcome, Some((true, 1)));
+    }
+
+    #[test]
+    fn an_event_that_does_not_decode_is_an_error() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let mut holder = spawn_pid_holder();
+            let path = temp_fifo_path();
+            let stream = spawn_at(path.clone(), holder.id(), holder.id());
+            {
+                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                f.write_all(&[4, 0xff, 0xff, 0xff, 0xff]).unwrap();
+            }
+            let result = stream.join();
+            let _ = holder.kill();
+            matches!(result, Err(WorkspaceEventError::ProstDecode(_)))
+        });
+        assert_eq!(outcome, Some(true));
+    }
+
+    #[test]
+    fn an_absurd_event_length_is_an_error() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let mut holder = spawn_pid_holder();
+            let path = temp_fifo_path();
+            let stream = spawn_at(path.clone(), holder.id(), holder.id());
+            {
+                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                f.write_all(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x20]).unwrap();
+            }
+            let result = stream.join();
+            let _ = holder.kill();
+            matches!(result, Err(WorkspaceEventError::IO(e)) if e.kind() == ErrorKind::InvalidData)
+        });
+        assert_eq!(outcome, Some(true));
+    }
+
+    #[test]
+    fn a_reserved_workspace_channel_is_named_for_it() {
+        let channel = WorkspaceEventStream::reserve().unwrap();
+        let name = channel
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(name.starts_with("workspace-event-out-"), "{name}");
     }
 }
