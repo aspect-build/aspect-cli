@@ -6,8 +6,8 @@
 //!   - `info <key>...`  — prints `key: value` lines; supports `server_pid`,
 //!     `release`, `output_base`. The pid printed defaults to the basil
 //!     process's own pid; tests can override via `BASIL_SERVER_PID` so a
-//!     long-lived holder process keeps galvanize's `IfOpenForPid` retry
-//!     check satisfied for the whole test.
+//!     long-lived holder process stands in for the server whose open files
+//!     the `bazel` crate's streams ask about, for the whole test.
 //!   - `build` / `test` — finds `--build_event_binary_file <path>`, finds
 //!     `--scenario=<name>` somewhere in argv, and writes a sequence of
 //!     length-delimited `BuildEvent` protobufs into the BES path according
@@ -46,9 +46,10 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axl_proto::build_event_stream::{
     ActionExecuted, BuildEvent, BuildEventId, BuildFinished, BuildStarted, NamedSetOfFiles,
@@ -74,6 +75,7 @@ fn main() {
     match verb {
         "info" => run_info(&args),
         "build" | "test" => run_build(&args, verb),
+        "__async_bep_tail_writer" => run_async_bep_tail_writer(&args),
         "" => {
             eprintln!("basil: no verb given");
             process::exit(2);
@@ -108,11 +110,12 @@ fn record_argv(args: &[String]) {
 fn run_info(args: &[String]) {
     // Honors BASIL_SERVER_PID so tests can pin the reported pid to a holder
     // process (e.g. `sleep 60`) that outlives basil's own short-lived info
-    // invocation. Required for galvanize's IfOpenForPid retry loop to keep
-    // the FIFO read end open across the lifetime of the test.
-    let pid: u32 = env::var("BASIL_SERVER_PID")
-        .ok()
+    // invocation. Required for the `bazel` crate's streams, which ask the
+    // server pid whether it still holds the path open, to have a live process
+    // to ask across the lifetime of the test.
+    let pid: u32 = bazelrc::last_flag_value(args, "--basil-server-pid", "info")
         .and_then(|s| s.parse().ok())
+        .or_else(|| env::var("BASIL_SERVER_PID").ok()?.parse().ok())
         .unwrap_or_else(process::id);
     let release = env::var("BASIL_RELEASE").unwrap_or_else(|_| "9.0.0".to_string());
 
@@ -137,6 +140,32 @@ fn run_build(args: &[String], verb: &str) {
     let bes_path = flag("--build_event_binary_file");
     let execlog_path = flag("--execution_log_compact_file");
     let scenario_name = flag("--scenario").unwrap_or_else(|| "success".to_string());
+    if scenario_name == "async_bep_tail_after_client_exit" {
+        let bes_path = bes_path.unwrap_or_else(|| {
+            panic!("basil: async BEP tail scenario requires --build_event_binary_file")
+        });
+        let control_dir = flag("--basil-control-dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!("basil: async BEP tail scenario requires --basil-control-dir")
+            });
+        fs::create_dir_all(&control_dir)
+            .unwrap_or_else(|e| panic!("basil: creating control directory: {e}"));
+        publish_control_file(&control_dir.join("bep_path"), bes_path.as_bytes());
+        wait_for_file(&control_dir.join("ready"), "the server's BEP prefix");
+
+        let upload_mode = flag("--build_event_binary_file_upload_mode").unwrap_or_default();
+        publish_control_file(&control_dir.join("upload_mode"), upload_mode.as_bytes());
+        if upload_mode == "fully_async" {
+            thread::sleep(ASYNC_BEP_CLIENT_EXIT_DELAY);
+            fs::write(control_dir.join("client_exiting"), b"")
+                .unwrap_or_else(|e| panic!("basil: publishing client exit: {e}"));
+        } else {
+            wait_for_file(&control_dir.join("done"), "the server's BEP tail");
+        }
+        process::exit(0);
+    }
+
     let s = scenario(&scenario_name);
 
     let log = || match &execlog_path {
@@ -205,6 +234,74 @@ fn run_build(args: &[String], verb: &str) {
             process::exit(128 + sig);
         }
     }
+}
+
+const ASYNC_BEP_TAIL_DELAY: Duration = Duration::from_millis(500);
+const ASYNC_BEP_CLIENT_EXIT_DELAY: Duration = Duration::from_millis(500);
+const ASYNC_BEP_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn wait_for_file(path: &Path, description: &str) {
+    let deadline = Instant::now() + ASYNC_BEP_TAIL_TIMEOUT;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            panic!(
+                "basil: timed out waiting for {description} at {}",
+                path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn publish_control_file(path: &Path, contents: &[u8]) {
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, contents)
+        .unwrap_or_else(|e| panic!("basil: writing {}: {e}", tmp_path.display()));
+    fs::rename(&tmp_path, path)
+        .unwrap_or_else(|e| panic!("basil: publishing {}: {e}", path.display()));
+}
+
+fn run_async_bep_tail_writer(args: &[String]) {
+    let control_dir = args
+        .get(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("basil: async BEP tail writer requires a control directory"));
+    let bep_path_file = control_dir.join("bep_path");
+    wait_for_file(&bep_path_file, "the client's BEP path");
+    let bep_path = fs::read_to_string(&bep_path_file)
+        .unwrap_or_else(|e| panic!("basil: reading BEP path: {e}"));
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(&bep_path)
+        .unwrap_or_else(|e| panic!("basil: opening async BEP path {bep_path:?}: {e}"));
+
+    write_bep_event(&mut writer, &build_started());
+    fs::write(control_dir.join("ready"), b"")
+        .unwrap_or_else(|e| panic!("basil: publishing BEP prefix: {e}"));
+    let upload_mode_path = control_dir.join("upload_mode");
+    wait_for_file(&upload_mode_path, "the client's upload mode");
+    let upload_mode = fs::read_to_string(&upload_mode_path)
+        .unwrap_or_else(|e| panic!("basil: reading upload mode: {e}"));
+    if upload_mode == "fully_async" {
+        wait_for_file(&control_dir.join("client_exiting"), "the client's exit");
+    }
+    thread::sleep(ASYNC_BEP_TAIL_DELAY);
+    write_bep_event(&mut writer, &build_finished(0, true));
+    drop(writer);
+    fs::write(control_dir.join("done"), b"")
+        .unwrap_or_else(|e| panic!("basil: publishing BEP tail: {e}"));
+}
+
+fn write_bep_event(writer: &mut impl Write, event: &BuildEvent) {
+    let mut buf = Vec::new();
+    event
+        .encode_length_delimited(&mut buf)
+        .expect("basil: encode BuildEvent");
+    writer
+        .write_all(&buf)
+        .unwrap_or_else(|e| panic!("basil: writing BEP event: {e}"));
 }
 
 /// How basil terminates after writing the BES event stream. `Code(n)`
@@ -321,11 +418,7 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
                     await_pump_handshake(file);
                 }
             }
-            let mut buf = Vec::new();
-            ev.encode_length_delimited(&mut buf)
-                .expect("basil: encode BuildEvent");
-            f.write_all(&buf)
-                .unwrap_or_else(|e| panic!("basil: writing to BES path: {e}"));
+            write_bep_event(&mut f, ev);
         }
     }
 }

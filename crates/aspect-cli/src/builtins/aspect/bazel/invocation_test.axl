@@ -142,7 +142,6 @@ def _test_lookup_is_command_scoped(_):
     rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
     _eq("test unaffected", target_patterns(False, ["..."], "", rc, "test"), ["..."])
 
-
 def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
     """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
     it exit without ever opening the build-event pipe, and the invocation has
@@ -154,7 +153,7 @@ def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
     Bazel rather than a fake."""
     events = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        "//crates/galvanize:galvanize",
+        "//crates/bazel:bazel",
         build_events = [events],
         flags = ["--definitely_not_a_flag"],
         stderr = None,

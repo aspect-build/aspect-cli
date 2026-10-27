@@ -1,17 +1,20 @@
 use axl_proto::tools::protos::ExecLogEntry;
+use bazel::formats::delimited;
+use bazel::stream::file as followed;
+use bazel::stream::pid_pair::PidPair;
 use fibre::spmc::{Receiver, bounded};
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::{env, thread};
 
 use super::super::sink::retry::SinkOutcome;
-use super::util::{MultiTeeReader, read_varint};
+use super::util::MultiTeeReader;
 use thiserror::Error;
 use zstd::Decoder;
 
@@ -74,28 +77,6 @@ pub fn channel_capacity() -> usize {
     CHANNEL_CAPACITY
 }
 
-/// Wraps a `Read` source, blocking on empty reads until real data arrives.
-///
-/// Some `Read` implementations (e.g. [`galvanize::StreamingFile`]) return `Ok(0)` to signal
-/// "no data yet, try again" while the writer is still active. Framing layers like the zstd
-/// `Decoder` interpret `Ok(0)` as EOF and error with "incomplete frame". This adapter sits
-/// between such a source and the decoder, converting empty reads into a brief sleep-and-retry
-/// so the decoder always receives either real bytes or a terminal error.
-struct RetryRead<R: Read> {
-    inner: R,
-}
-
-impl<R: Read> Read for RetryRead<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            match self.inner.read(buf) {
-                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(1)),
-                other => return other,
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
@@ -147,9 +128,10 @@ impl ExecLogStream {
     /// and leaves the daemon idling behind it for `--max_idle_secs`; keyed to
     /// `server_pid` alone the open below waits out that whole idle period.
     ///
-    /// The thread streams the file as Bazel writes it using [`galvanize::StreamingFile`],
-    /// which busy-polls for file existence at open time and retries reads while Bazel
-    /// holds the file open. It self-terminates when Bazel closes the file.
+    /// The thread streams the file as Bazel writes it using
+    /// [`bazel::stream::file::File`], which waits for the file to exist and for
+    /// more bytes while Bazel holds it open, and says when the stream is over. It
+    /// self-terminates when Bazel closes the file.
     ///
     /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
     /// written before the reader opens are still there to be read.
@@ -190,69 +172,61 @@ impl ExecLogStream {
         compact_sink_paths: Vec<String>,
     ) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<ExecLogEntry>(CHANNEL_CAPACITY);
+        let gate = PidPair {
+            client: client_pid,
+            server: Some(server_pid),
+        }
+        .gate(&path);
+        let mut file = followed::File::follow(path, gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
-            // 10 is the maximum size of a varint so start with that size.
-            buf.resize(10, 0);
 
-            let out_raw = match galvanize::StreamingFile::open(path.clone(), server_pid, client_pid)
-            {
-                Ok(f) => f,
-                // Bazel exited without ever writing an execution log. An empty
-                // stream, not a failure: the build's own exit code is the thing the
-                // caller wants to see.
-                //
-                // Whether that is worth saying out loud depends on the exit code,
-                // which this thread does not have — so it reports the fact and
-                // `join()`'s caller decides. See [`ReaderOutcome::NeverAppeared`].
-                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
-                    sender.close()?;
-                    return Ok(ReaderOutcome::NeverAppeared);
+            // Bazel exited without ever writing an execution log: an empty
+            // stream, not a failure, since the build's own exit code is the thing
+            // the caller wants to see.
+            //
+            // Whether that is worth saying out loud depends on the exit code,
+            // which this thread does not have — so it reports the fact and
+            // `join()`'s caller decides. See [`ReaderOutcome::NeverAppeared`].
+            if !file.appear() {
+                if let Some(bazel::stream::Done::Broken { error, .. }) = file.take_done() {
+                    return Err(error.into());
                 }
-                Err(err) => return Err(err.into()),
-            };
+                sender.close()?;
+                return Ok(ReaderOutcome::NeverAppeared);
+            }
             let writers = compact_sink_paths
                 .iter()
                 .map(|p| Ok(BufWriter::new(File::create(p)?)))
                 .collect::<io::Result<Vec<_>>>()?;
             let out_raw = MultiTeeReader {
-                inner: out_raw,
+                inner: file,
                 writers,
             };
-            // RetryRead prevents zstd from seeing Ok(0) ("no data yet") as EOF.
-            let out_raw = RetryRead { inner: out_raw };
             let mut out_raw = Decoder::new(out_raw)?;
 
             let mut has_readers = true;
 
-            let mut read = || -> Result<(), ExecLogStreamError> {
-                let (size, _) = read_varint(&mut out_raw)?;
-                if size > buf.len() {
-                    buf.resize(size, 0);
-                }
-
-                out_raw.read_exact(&mut buf[0..size])?;
-
-                if has_readers {
-                    let entry = ExecLogEntry::decode(&buf[0..size])?;
-                    has_readers = sender.send(entry).is_ok();
-                }
-
-                Ok(())
-            };
-
             loop {
-                match read() {
-                    Ok(()) => continue,
-                    // BrokenPipe signals that Bazel closed the file (end of stream).
-                    Err(ExecLogStreamError::IO(err)) if err.kind() == io::ErrorKind::BrokenPipe => {
-                        sender.close()?;
-                        out_raw.get_mut().get_mut().inner.flush()?;
-                        return Ok(ReaderOutcome::Read);
+                match delimited::next_frame(&mut out_raw, &mut buf) {
+                    Ok(Some(header)) => {
+                        if has_readers {
+                            let entry = ExecLogEntry::decode(&buf[..header.len])?;
+                            has_readers = sender.send(entry).is_ok();
+                        }
                     }
-                    Err(err) => return Err(err),
+                    // The end: between two entries, or the stream stopped under
+                    // the decoder (Bazel killed, its client gone, the file
+                    // failing), which leaves a frame incomplete. The entries
+                    // before it were good; how it ended is the file's to say.
+                    Ok(None) => break,
+                    Err(_) if out_raw.get_ref().get_ref().inner.done().is_some() => break,
+                    Err(err) => return Err(err.into()),
                 }
             }
+            sender.close()?;
+            out_raw.get_mut().get_mut().flush()?;
+            Ok(ReaderOutcome::Read)
         });
 
         Ok(Self {
