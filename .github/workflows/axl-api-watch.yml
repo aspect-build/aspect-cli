@@ -11,7 +11,7 @@ on:
   push:
     branches: [main]
     # The surface is contributed by many crates (e.g. bazel.RunCommand from
-    # crates/bazelrc, std.io.Readable from crates/axl-types), so watch all of
+    # crates/bazel, std.io.Readable from crates/axl-types), so watch all of
     # them plus the renderer/workflow itself.
     paths:
       - "crates/**"

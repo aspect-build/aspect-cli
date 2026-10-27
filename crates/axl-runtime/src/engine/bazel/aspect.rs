@@ -1,14 +1,7 @@
-use std::path::Path;
-use std::path::PathBuf;
-
 use std::sync::Arc;
 
-use crate::engine::cancellation::Signals;
-use crate::engine::children;
-use std::process::Stdio;
-
 use allocative::Allocative;
-use anyhow::Context;
+use bazel::server::Server;
 use derive_more::Display;
 use starlark::values;
 use starlark::values::NoSerialize;
@@ -17,6 +10,9 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
+
+use super::runner::SignalRunner;
+use crate::engine::cancellation::Signals;
 
 /// A Bazel aspect the runtime applies to a `build`/`test` invocation.
 ///
@@ -55,81 +51,22 @@ impl<'v> values::StarlarkValue<'v> for Aspect {}
 
 starlark::starlark_simple_value!(Aspect);
 
-/// Resolve `bazel info install_base` — the directory `@bazel_tools`
-/// (`embedded_tools`) is materialized under. Honors the invocation's startup
-/// flags (`--output_user_root` moves the install base).
-fn install_base(signals: &Arc<Signals>, startup_flags: &[String]) -> anyhow::Result<PathBuf> {
-    let mut cmd = super::bazel_command();
-    cmd.args(startup_flags);
-    cmd.arg("info");
-    cmd.arg("--lockfile_mode=off");
-    cmd.arg("install_base");
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.stdin(Stdio::null());
-    let output = children::spawn_bazel(&mut cmd, signals)?.wait_with_output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`bazel info install_base` failed while materializing aspects: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
-}
-
-/// Write `contents` to `path` atomically (temp file + rename), so a concurrent
-/// build never observes a half-written aspect file.
-fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} into place", path.display()))?;
-    Ok(())
-}
-
 /// Materialize `aspects` into `@bazel_tools` and return the Bazel flags to
-/// append to the invocation (`--aspects` / `--aspects_parameters` /
-/// `--output_groups`). No-op (empty vec) when there are no aspects.
-///
-/// Each aspect is written to `<install_base>/embedded_tools/aspect_<hash>/`,
-/// keyed by a content hash of its source, so the write is idempotent and
-/// concurrency-safe, and reused across runs. It self-heals if the install base
-/// is re-extracted (e.g. on a Bazel upgrade) since it's rewritten when absent.
+/// append to the invocation; see [`bazel::aspect::materialize`].
 pub(crate) fn materialize(
     signals: &Arc<Signals>,
     aspects: &[Aspect],
     startup_flags: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    if aspects.is_empty() {
-        return Ok(vec![]);
-    }
-    let embedded = install_base(signals, startup_flags)?.join("embedded_tools");
-    let mut flags = Vec::new();
-    for aspect in aspects {
-        let hash = sha256::digest(aspect.implementation.as_str());
-        let pkg = format!("aspect_{}", &hash[..16]);
-        let dir = embedded.join(&pkg);
-        let bzl = dir.join("aspect.bzl");
-        if !bzl.exists() {
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating aspect package {}", dir.display()))?;
-            // Empty BUILD.bazel: makes the dir a package so the label resolves,
-            // with no targets — so `//...` / attribute queries never pick it up.
-            write_atomic(&dir.join("BUILD.bazel"), b"")?;
-            write_atomic(&bzl, aspect.implementation.as_bytes())?;
-        }
-        flags.push(format!(
-            "--aspects=@bazel_tools//{pkg}:aspect.bzl%{}",
-            aspect.symbol
-        ));
-        for (key, value) in &aspect.parameters {
-            flags.push(format!("--aspects_parameters={key}={value}"));
-        }
-        for group in &aspect.output_groups {
-            flags.push(format!("--output_groups=+{group}"));
-        }
-    }
-    Ok(flags)
+    let aspects: Vec<bazel::aspect::Aspect> = aspects
+        .iter()
+        .map(|a| bazel::aspect::Aspect {
+            implementation: a.implementation.clone(),
+            symbol: a.symbol.clone(),
+            parameters: a.parameters.clone(),
+            output_groups: a.output_groups.clone(),
+        })
+        .collect();
+    let runner = SignalRunner(signals);
+    bazel::aspect::materialize(&Server::new(&runner, startup_flags), &aspects)
 }

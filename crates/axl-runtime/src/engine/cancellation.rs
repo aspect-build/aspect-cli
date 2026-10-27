@@ -716,13 +716,11 @@ return 0"#,
         assert_eq!(result.expect("run_task"), Some(0));
         let pid: u32 = pidfile.read().trim().parse().expect("pid");
         assert!(
-            crate::engine::children::os::has_exited(pid),
+            bazel::process::signal::has_exited(pid),
             "bash outlived the task"
         );
         assert!(
-            !crate::engine::children::os::is_running(crate::engine::children::Target::Group(
-                pid as i32
-            )),
+            !bazel::process::signal::is_running(bazel::process::signal::Target::Group(pid as i32)),
             "a member of bash's process group outlived the task"
         );
     }

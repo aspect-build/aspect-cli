@@ -3,6 +3,4 @@
 //! execution log on disk.
 
 pub mod execlog;
-pub mod grpc;
 pub mod retry;
-pub mod tracing;

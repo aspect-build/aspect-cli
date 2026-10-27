@@ -350,9 +350,7 @@ dependencies = [
  "axl-types",
  "base64 0.22.1",
  "bazel",
- "bazelrc",
  "blake2",
- "build-event-stream",
  "clap",
  "derive_more 2.0.1",
  "digest",
@@ -515,7 +513,7 @@ name = "basil"
 version = "0.0.0-dev"
 dependencies = [
  "axl-proto",
- "bazelrc",
+ "bazel",
  "prost",
  "zstd",
 ]
@@ -524,27 +522,35 @@ dependencies = [
 name = "bazel"
 version = "0.0.0-dev"
 dependencies = [
+ "allocative",
+ "anyhow",
  "axl-proto",
+ "fibre",
+ "futures 0.3.31",
+ "http",
+ "indexmap",
  "libc",
  "nix 0.30.1",
  "proc_pidinfo",
  "procfs",
  "prost",
- "uuid",
-]
-
-[[package]]
-name = "bazelrc"
-version = "0.0.0-dev"
-dependencies = [
- "allocative",
- "anyhow",
- "derive_more 2.0.1",
+ "prost-types",
+ "rand 0.8.5",
  "semver",
+ "serde",
+ "serde_json",
+ "sha2",
  "starlark",
  "starlark_derive",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "uuid",
+ "windows-sys 0.59.0",
+ "zstd",
 ]
 
 [[package]]
@@ -620,22 +626,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "build-event-stream"
-version = "0.0.0-dev"
-dependencies = [
- "axl-proto",
- "futures 0.3.31",
- "http",
- "prost",
- "prost-types",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tonic",
- "uuid",
 ]
 
 [[package]]

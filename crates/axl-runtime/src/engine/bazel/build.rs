@@ -3,7 +3,6 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
@@ -35,7 +34,6 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use axl_proto::build_event_stream::BuildEvent;
-use bazel::formats::bes_binary_file::End;
 use bazel::stream::pid_pair::PidPair;
 
 use crate::engine::r#async::rt::AsyncRuntime;
@@ -47,20 +45,18 @@ use super::iter::ExecLogIter;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::sink::execlog::ExecLogSink;
-use super::sink::grpc;
-use super::sink::retry::{RetryConfig, SinkOutcome, SinkStats};
-use super::sink::tracing as tracing_sink;
-use super::stream::ExecLogStream;
-use super::stream::Subscriber;
-use super::stream::SubscriberFilter;
-use super::stream::WorkspaceEventStream;
-use super::stream::execlog::ReaderOutcome;
-use super::stream::{BuildEventEnvelope, BuildEventStream};
-
-/// The Bazel flag naming where the compact execution log is written. Read off the
-/// command line to detect an already-requested log, and added when this call is
-/// the one requesting it.
-const EXECUTION_LOG_COMPACT_FILE: &str = "--execution_log_compact_file";
+use bazel::bes::BuildEventEnvelope;
+use bazel::bes::feed::{BuildEventStream, FileSignal};
+use bazel::bes::kind::{self, event_kind_help, event_kind_in};
+use bazel::bes::sink::grpc;
+use bazel::bes::sink::retry::{RetryConfig, SinkStats};
+use bazel::bes::sink::tracing as tracing_sink;
+use bazel::execlog::feed::{ExecLogStream, ReaderOutcome};
+use bazel::fanout::SinkOutcome;
+use bazel::fanout::Subscriber;
+use bazel::fanout::SubscriberFilter;
+use bazel::runner::Runner as _;
+use bazel::workspace_event::feed::WorkspaceEventStream;
 
 /// Subscribe each `execution_log.iterator()` handle to `stream`.
 ///
@@ -212,40 +208,6 @@ struct SinkOutcomeState {
     events_acked: u64,
 }
 
-pub struct FileSignal {
-    result: Mutex<Option<Result<(), String>>>,
-    cv: std::sync::Condvar,
-}
-
-impl FileSignal {
-    pub fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            cv: std::sync::Condvar::new(),
-        }
-    }
-
-    pub fn complete(&self, result: Result<(), String>) {
-        let mut guard = self.result.lock().unwrap();
-        if guard.is_none() {
-            *guard = Some(result);
-            self.cv.notify_all();
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.result.lock().unwrap().is_some()
-    }
-
-    fn wait(&self) -> Result<(), String> {
-        let mut guard = self.result.lock().unwrap();
-        while guard.is_none() {
-            guard = self.cv.wait(guard).unwrap();
-        }
-        guard.as_ref().unwrap().clone()
-    }
-}
-
 #[derive(Clone, Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildEventSink>")]
 pub struct BuildEventSink {
@@ -336,8 +298,9 @@ impl BuildEventSink {
         outcome.error = None;
         outcome.times_bound += 1;
         drop(outcome);
+        bazel::bes::sink::set_warn(crate::diag::warn);
         let join = grpc::Grpc::spawn(
-            rt,
+            rt.0.clone(),
             stream.subscribe(),
             uri.clone(),
             metadata.clone(),
@@ -749,119 +712,15 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// True when `event`'s payload kind is in `kinds`. A payload-less event never
-/// matches a filter (there's no kind to test). Used to build the send-side
-/// subscriber filter in `BuildEventIter::bind`.
-fn event_kind_in(event: &BuildEvent, kinds: &HashSet<i32>) -> bool {
-    let Some(payload) = event.payload.as_ref() else {
-        return false;
-    };
-    kinds.contains(&payload_discriminant(payload))
-}
-
-/// Every BES payload kind a `kinds=` list can name, as
-/// `(tag, type_name, legacy_aliases)`.
-///
-/// `tag` is this runtime's payload discriminant: the integer
-/// [`payload_discriminant`] returns and the set `kinds=` is matched against.
-/// It is deliberately opaque and is *not* the BEP proto field number (the two
-/// numberings diverge for most kinds); only the two sides agreeing matters,
-/// which `payload_tags_agree_with_the_kind_table` pins.
-///
-/// `type_name` is the snake_case name of the payload *message*, which is
-/// exactly the string `type(event.payload)` returns in AXL. Every kind is
-/// reachable under that name, so a `kinds=` filter can be written with the
-/// same literal the `type(event.payload) == "..."` test uses. Closing that
-/// gap is why this table exists: `"action_completed"` was accepted while
-/// `type()` reported `action_executed`, so the filter read correctly and the
-/// comparison never matched.
-///
-/// `legacy_aliases` are the other spellings `kinds=` has always accepted —
-/// the BEP `payload` oneof field name (`action`, `completed`, …), the
-/// `event.kind` string where it differs (`action_completed`,
-/// `target_completed`, …), and `named_set`, which is neither: it is the
-/// `BuildEventId` oneof *field* name, accepted from before the others and kept
-/// for that reason alone. They are a public AXL surface that third-party
-/// `.aspect/*.axl` passes, so they stay accepted — frozen by
-/// `the_spellings_accepted_before_the_payload_names_still_resolve`, which holds
-/// its own literal list because a test derived from this table cannot notice a
-/// row losing an alias.
-const EVENT_KINDS: &[(i32, &str, &[&str])] = &[
-    (3, "progress", &[]),
-    (4, "aborted", &[]),
-    (5, "build_started", &["started"]),
-    (6, "pattern_expanded", &["expanded"]),
-    (7, "target_configured", &["configured"]),
-    (8, "action_executed", &["action", "action_completed"]),
-    (9, "target_complete", &["completed", "target_completed"]),
-    (10, "test_result", &[]),
-    (11, "build_finished", &["finished"]),
-    (12, "unstructured_command_line", &[]),
-    (13, "command_line", &["structured_command_line"]),
-    (14, "options_parsed", &[]),
-    (15, "named_set_of_files", &["named_set"]),
-    (16, "workspace_status", &[]),
-    (17, "fetch", &[]),
-    (19, "configuration", &[]),
-    (20, "test_summary", &[]),
-    (21, "build_tool_logs", &[]),
-    (22, "build_metrics", &[]),
-    (24, "build_metadata", &[]),
-    (25, "workspace_config", &["workspace_info"]),
-    (26, "target_summary", &[]),
-    (27, "convenience_symlinks_identified", &[]),
-    (28, "exec_request_constructed", &["exec_request"]),
-    (30, "test_progress", &[]),
-];
-
-/// The tail of a `kinds=` rejection: every accepted spelling, with the
-/// `type(event.payload)` names first because those are the ones that also
-/// work as a `type()` comparison literal.
-fn event_kind_help() -> String {
-    let mut types: Vec<&str> = EVENT_KINDS.iter().map(|(_, name, _)| *name).collect();
-    types.sort_unstable();
-    let mut legacy: Vec<&str> = EVENT_KINDS
-        .iter()
-        .flat_map(|(_, _, aliases)| aliases.iter().copied())
-        .collect();
-    legacy.sort_unstable();
-    format!(
-        "name a payload the way `type(event.payload)` reports it — {} — or use \
-         one of the older aliases, also accepted: {}",
-        types.join(", "),
-        legacy.join(", "),
-    )
-}
-
 /// Resolve one `kinds=` list element to a payload tag. Accepts the payload's
-/// `type(event.payload)` name, any legacy alias, or the raw tag integer.
-///
-/// A tag no row claims is rejected rather than passed through, because it could
-/// only ever filter to the empty set, and silently matching nothing is the
-/// failure mode worth refusing.
-///
-/// This does **not** rescue someone who read an older docstring's claim that
-/// these are BEP proto field numbers. They are this runtime's own numbering, and
-/// 11 of the 25 real field numbers are themselves claimed tags meaning a
-/// different kind — `7` (BEP `ActionExecuted`) selects `target_configured`,
-/// `8` (`TargetComplete`) selects `action_executed`. Those stay silent, and no
-/// validation can catch them. The integers are documented as opaque and
-/// `event_kind_help()` lists only names, so there is no supported way to obtain
-/// a correct one; the path survives for compatibility alone.
+/// `type(event.payload)` name, any legacy alias, or the raw tag integer; see
+/// [`kind::tag_from_int`] and [`kind::tag_from_name`] for what each is.
 pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
     if let Some(n) = value.unpack_i32() {
-        if !EVENT_KINDS.iter().any(|(tag, _, _)| *tag == n) {
-            anyhow::bail!("unknown build_event payload tag {n}; {}", event_kind_help());
-        }
-        return Ok(n);
+        return kind::tag_from_int(n).map_err(anyhow::Error::msg);
     }
     if let Some(s) = value.unpack_str() {
-        for (tag, type_name, aliases) in EVENT_KINDS {
-            if s == *type_name || aliases.contains(&s) {
-                return Ok(*tag);
-            }
-        }
-        anyhow::bail!("unknown build_event kind '{s}'; {}", event_kind_help());
+        return kind::tag_from_name(s).map_err(anyhow::Error::msg);
     }
     // `unpack_i32` rejects an int too large for i32, which would otherwise reach
     // the wrong-type arm below and tell an int it is not a tag.
@@ -878,39 +737,6 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
         value.get_type(),
         event_kind_help(),
     )
-}
-
-/// Maps a payload variant to this runtime's payload tag — the integers
-/// [`EVENT_KINDS`] lists, so `kinds=` matches by integer set lookup.
-fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload) -> i32 {
-    use axl_proto::build_event_stream::build_event::Payload;
-    match p {
-        Payload::Progress(_) => 3,
-        Payload::Aborted(_) => 4,
-        Payload::Started(_) => 5,
-        Payload::UnstructuredCommandLine(_) => 12,
-        Payload::StructuredCommandLine(_) => 13,
-        Payload::OptionsParsed(_) => 14,
-        Payload::WorkspaceStatus(_) => 16,
-        Payload::Fetch(_) => 17,
-        Payload::Configuration(_) => 19,
-        Payload::Expanded(_) => 6,
-        Payload::Configured(_) => 7,
-        Payload::Action(_) => 8,
-        Payload::NamedSetOfFiles(_) => 15,
-        Payload::Completed(_) => 9,
-        Payload::TestResult(_) => 10,
-        Payload::TestSummary(_) => 20,
-        Payload::TargetSummary(_) => 26,
-        Payload::Finished(_) => 11,
-        Payload::BuildToolLogs(_) => 21,
-        Payload::BuildMetrics(_) => 22,
-        Payload::WorkspaceInfo(_) => 25,
-        Payload::BuildMetadata(_) => 24,
-        Payload::ConvenienceSymlinksIdentified(_) => 27,
-        Payload::ExecRequest(_) => 28,
-        Payload::TestProgress(_) => 30,
-    }
 }
 
 /// Optionally print the detected Bazel version and/or the exact command being
@@ -930,10 +756,16 @@ pub(super) fn announce_spawn(
 ) {
     let (grey, reset) = grey_style();
     if announce.version {
-        errln!("{grey}INFO: {}{reset}", version_line(version));
+        errln!(
+            "{grey}INFO: {}{reset}",
+            bazel::command::version_line(version)
+        );
     }
     if announce.command {
-        errln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
+        errln!(
+            "{grey}INFO: Spawning: {}{reset}",
+            bazel::command::render(cmd)
+        );
     }
 }
 
@@ -956,36 +788,6 @@ fn grey_style() -> (&'static str, &'static str) {
     } else {
         ("", "")
     }
-}
-
-/// The version `INFO:` text. `version` is `None` for a non-release build (see
-/// [`super::info::parse_release`]), which notes the assume-latest behavior.
-fn version_line(version: Option<&semver::Version>) -> String {
-    match version {
-        Some(v) => format!("Bazel {v}"),
-        None => "Bazel development version (version-conditional flags assume latest)".to_string(),
-    }
-}
-
-/// Render `cmd` as a space-joined `program arg…` line for display. Read back
-/// from the fully assembled `Command`, so it shows the full argument set
-/// aspect-cli passes Bazel (including the internal BES/execlog flags).
-///
-/// Secrets (env-var values, request headers, URL credentials) are redacted via
-/// [`super::stream::redaction::redact_command_args`] — the same rules the BES
-/// sink redaction uses — since this line is printed to CI logs by default.
-/// Args are space-joined for readability, not shell-quoted: a value with a
-/// space (or a `<REDACTED>` placeholder) is not guaranteed copy-paste-safe.
-fn render_command(cmd: &Command) -> String {
-    let args: Vec<String> = cmd
-        .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    let redacted = super::stream::redaction::redact_command_args(args.iter().map(String::as_str));
-    std::iter::once(cmd.get_program().to_string_lossy().into_owned())
-        .chain(redacted)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Which pre-spawn `INFO:` lines to emit. Resolved from task flags in AXL
@@ -1107,7 +909,9 @@ impl Build {
         // `bazel::stream::file::File` leans on whether the server pid holds the
         // path open, and that is what made a stale pid matter here and nowhere
         // else.
-        let (pid, version) = super::info::server_info_with_startup_flags(&signals, &startup_flags)?;
+        let (pid, version) =
+            bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
+                .info()?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -1120,28 +924,13 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        // Read before `flags` is moved into the command: a deployment wired to an
-        // Aspect BES backend, a Workflows runner, or a `.bazelrc` already asks Bazel
-        // for the compact log, and whoever asked reads the file at that path. Adding a
-        // second `--execution_log_compact_file` below would win — a literal flag
-        // outranks rc content — and silently repoint Bazel away from it.
-        //
-        // An empty value clears the flag rather than naming a file, so it is not a
-        // request; treating it as a path would have the reader tail "" and report a
-        // clean empty stream. A relative value is joined to the spawn's directory,
-        // because that is what Bazel resolves it against while the reader runs from
-        // the CLI's own cwd.
+        // Read before `flags` is moved into the command: whoever already asked
+        // for the compact log reads the file at that path, so a second flag below
+        // must not repoint Bazel away from it.
         let injected_execlog_path =
-            bazelrc::last_flag_value(&flags, EXECUTION_LOG_COMPACT_FILE, verb)
-                .filter(|path| !path.is_empty())
-                .map(|path| match &directory {
-                    Some(dir) if std::path::Path::new(&path).is_relative() => {
-                        std::path::Path::new(dir).join(path)
-                    }
-                    _ => PathBuf::from(path),
-                });
+            bazel::execlog::requested_path(&flags, verb, directory.as_deref());
 
-        let mut cmd = super::bazel_command();
+        let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
@@ -1210,59 +999,26 @@ impl Build {
         // reader is started after it — once the client pid exists (see the BES
         // reader below for the same split, and why).
         let execlog_path = if execution_logs {
-            let out = match injected_execlog_path {
-                // Something already named the path and put the flag on the command
-                // line. Tail that file and leave the flag alone.
-                Some(out) => out,
-                // Nothing asked yet, so this call owns the flag. A CompactFile sink
-                // lends its path, letting Bazel write straight to the caller's
-                // destination with no temp file or tee step for that copy.
-                None => {
-                    let direct_path = if compact_paths.is_empty() {
-                        None
-                    } else {
-                        Some(PathBuf::from(compact_paths.remove(0)))
-                    };
-                    let out = ExecLogStream::reserve_path(direct_path);
-                    cmd.arg(EXECUTION_LOG_COMPACT_FILE).arg(&out);
-                    out
-                }
-            };
-
-            // Every remaining CompactFile sink is served by the tee rather than by
-            // Bazel writing directly, so each still gets its copy — except one
-            // naming the very file Bazel is writing, whose `File::create` would
-            // truncate it mid-build. Both arms can hold one: a sink's path can
-            // already be on the command line, and two sinks can name one path, in
-            // which case the first lent it to Bazel above.
-            compact_paths.retain(|path| std::path::Path::new(path) != out);
-            Some(out)
+            let plan =
+                bazel::execlog::plan(injected_execlog_path, std::mem::take(&mut compact_paths));
+            if plan.add_flag {
+                cmd.arg(bazel::execlog::COMPACT_FILE_FLAG).arg(&plan.path);
+            }
+            compact_paths = plan.tee;
+            Some(plan.path)
         } else {
             None
         };
 
-        // A log at the reserved path from an *earlier* run has to go before Bazel
-        // starts, because `bazel::stream::file::File` opens whatever is at the
-        // path as soon as there is something. Left in place the reader opens the stale file
-        // immediately, races Bazel's truncation of it and loses: it delivers the
-        // previous build's entries — spawns that never ran, inputs that no longer
-        // exist — and misses this build's.
-        //
-        // The exposure is in reused paths: a `CompactFile` sink's path and one
-        // already on the command line are both fixed per build, so on a Workflows
-        // runner or an Aspect-wired deployment every build finds the last one's
-        // log waiting. Removing it is what makes the existence poll mean "wait for
-        // *this* build's log"; Bazel creates the file itself, so there is nothing
-        // to put back.
+        // A log from an earlier run has to go before Bazel starts, or the reader
+        // delivers the previous build's entries; see `bazel::execlog::clear_stale`.
         if let Some(path) = &execlog_path {
-            if let Err(err) = std::fs::remove_file(path) {
-                if err.kind() != io::ErrorKind::NotFound {
-                    errln!(
-                        "WARNING: could not clear the previous execution log at {}: {err}. \
-                         Entries from an earlier build may be reported as this one's.",
-                        path.display(),
-                    );
-                }
+            if let Err(err) = bazel::execlog::clear_stale(path) {
+                errln!(
+                    "WARNING: could not clear the previous execution log at {}: {err}. \
+                     Entries from an earlier build may be reported as this one's.",
+                    path.display(),
+                );
             }
         }
 
@@ -1393,7 +1149,7 @@ impl Build {
                 let recv = stream.receiver().ok_or_else(|| {
                     io::Error::other("execution log stream has no subscriber to clone")
                 })?;
-                stream.attach_file_sink(ExecLogSink::spawn_file(recv, path));
+                stream.attach_file_sink(bazel::execlog::sink::spawn_file(recv, path));
             }
         }
 
@@ -1567,7 +1323,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // Nothing after a reap: the pid may be someone else's by then.
         if !build.bound.exited() {
             let pid = build.child.borrow().id();
-            children::os::interrupt(children::Target::Pid(pid));
+            bazel::process::signal::interrupt(bazel::process::signal::Target::Pid(pid));
         }
         Ok(NoneType)
     }
@@ -1657,7 +1413,7 @@ impl Build {
             match event_stream.join() {
                 Ok(_) => {
                     if let Some(warning) =
-                        incomplete_events_warning(event_stream.end(), result.success())
+                        bazel::bes::warning::incomplete_events(event_stream.end(), result.success())
                     {
                         errln!("{warning}");
                     }
@@ -1722,94 +1478,6 @@ impl Build {
             success: result.success(),
             code: result.code(),
         })
-    }
-}
-
-/// What to say about a build event stream that did not end with bazel's final
-/// event, or `None` when there is nothing to say.
-///
-/// Bazel writes that event whenever it ends on its own terms, so its absence
-/// means the writer died, was cut off, or never wrote. That is worth a warning
-/// because the consumers of the stream (BES backends, hooks) saw less than the
-/// build did. It is not worth one when bazel itself failed before writing a
-/// single event (a rejected command line, say): its exit code already says so.
-fn incomplete_events_warning(end: Option<&End>, bazel_succeeded: bool) -> Option<String> {
-    match end? {
-        End::Complete => None,
-        End::Incomplete(done) if !bazel_succeeded && done.bytes() == 0 => None,
-        end => Some(format!(
-            "WARNING: the build events were incomplete ({end}); anything consuming them \
-             (BES backends, hooks) may have missed events."
-        )),
-    }
-}
-
-#[cfg(test)]
-mod incomplete_events_warning_tests {
-    use super::*;
-    use bazel::stream::Done;
-    use std::time::Duration;
-
-    fn ended(bytes: u64) -> End {
-        End::Incomplete(Done::Ended {
-            bytes,
-            quiet: Duration::from_millis(5),
-        })
-    }
-
-    #[test]
-    fn a_stream_that_has_not_ended_has_nothing_to_say() {
-        assert_eq!(incomplete_events_warning(None, true), None);
-    }
-
-    #[test]
-    fn a_complete_stream_is_silent_whatever_the_exit_code() {
-        assert_eq!(incomplete_events_warning(Some(&End::Complete), true), None);
-        assert_eq!(incomplete_events_warning(Some(&End::Complete), false), None);
-    }
-
-    #[test]
-    fn an_incomplete_stream_after_a_successful_build_warns() {
-        let end = ended(10);
-        let warning = incomplete_events_warning(Some(&end), true).unwrap();
-        assert!(
-            warning.starts_with("WARNING: the build events were incomplete"),
-            "{warning}"
-        );
-        assert!(warning.contains("after 10 bytes"), "{warning}");
-        // Even one that wrote nothing: a successful build must have written.
-        assert!(incomplete_events_warning(Some(&ended(0)), true).is_some());
-    }
-
-    #[test]
-    fn an_incomplete_stream_after_a_failed_build_warns_only_if_something_was_written() {
-        assert!(incomplete_events_warning(Some(&ended(10)), false).is_some());
-        assert_eq!(
-            incomplete_events_warning(Some(&ended(0)), false),
-            None,
-            "bazel failed before writing anything; its exit code says so"
-        );
-        let empty_drain = End::Incomplete(Done::Drained { bytes: 0 });
-        assert_eq!(incomplete_events_warning(Some(&empty_drain), false), None);
-    }
-
-    #[test]
-    fn a_broken_stream_with_no_bytes_after_a_failed_build_is_silent_too() {
-        let broken = End::Incomplete(Done::Broken {
-            bytes: 0,
-            error: std::io::Error::other("gone"),
-        });
-        assert_eq!(incomplete_events_warning(Some(&broken), false), None);
-        assert!(incomplete_events_warning(Some(&broken), true).is_some());
-    }
-
-    #[test]
-    fn a_corrupt_stream_always_warns() {
-        let corrupt = End::Corrupt("bad varint".into());
-        for succeeded in [true, false] {
-            let warning = incomplete_events_warning(Some(&corrupt), succeeded).unwrap();
-            assert!(warning.contains("corrupt: bad varint"), "{warning}");
-        }
     }
 }
 
@@ -1990,7 +1658,7 @@ mod tests {
     fn execution_logs_delivers_the_whole_log() {
         use std::time::Duration;
 
-        let capacity = super::super::stream::execlog::channel_capacity() as u32;
+        let capacity = bazel::execlog::feed::channel_capacity() as u32;
         assert!(
             SCENARIO_ENTRIES > capacity,
             "the scenario's log must outrun the ring ({capacity}) to be worth asserting on",
@@ -3080,7 +2748,7 @@ Test = task(implementation = _impl)
     #[cfg(unix)]
     #[test]
     fn a_failed_execlog_bind_releases_the_handles_already_bound() {
-        use super::super::stream::execlog::ExecLogStream;
+        use bazel::execlog::feed::ExecLogStream;
 
         // A reaped pid for the log's nominated holder, so the reader thread
         // takes the missing file as "no log is coming" and exits instead of
@@ -3130,6 +2798,7 @@ Test = task(implementation = _impl)
     mod event_kinds {
         use super::super::*;
         use axl_proto::build_event_stream::build_event::Payload;
+        use bazel::bes::kind::{EVENT_KINDS, payload_discriminant};
         use starlark::values::Heap;
 
         /// One default-constructed payload per `Payload` variant, in
@@ -3974,43 +3643,5 @@ Test = task(implementation = _impl)
             err.to_string().contains("still Live"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn version_line_text() {
-        use super::version_line;
-        assert_eq!(
-            version_line(Some(&semver::Version::new(9, 0, 1))),
-            "Bazel 9.0.1"
-        );
-        assert_eq!(
-            version_line(None),
-            "Bazel development version (version-conditional flags assume latest)"
-        );
-    }
-
-    #[test]
-    fn render_command_joins_program_and_args() {
-        use super::render_command;
-        let mut cmd = std::process::Command::new("bazel");
-        cmd.args(["--bazelrc=/dev/null", "build", "--", "//foo:bar"]);
-        assert_eq!(
-            render_command(&cmd),
-            "bazel --bazelrc=/dev/null build -- //foo:bar"
-        );
-    }
-
-    #[test]
-    fn render_command_redacts_env_secrets() {
-        // Delegates to stream::redaction; this asserts the wiring (secret env
-        // values are hidden, the command shape is preserved). The redaction
-        // rules themselves are covered in stream::redaction's own tests.
-        use super::render_command;
-        let mut cmd = std::process::Command::new("bazel");
-        cmd.args(["build", "--action_env=DB_PASSWORD=hunter2", "//foo"]);
-        let rendered = render_command(&cmd);
-        assert!(rendered.starts_with("bazel build --action_env=DB_PASSWORD="));
-        assert!(rendered.ends_with(" //foo"));
-        assert!(!rendered.contains("hunter2"), "secret leaked: {rendered}");
     }
 }

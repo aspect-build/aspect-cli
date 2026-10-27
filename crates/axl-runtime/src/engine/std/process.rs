@@ -34,9 +34,10 @@ use starlark::values::typing::StarlarkNever;
 
 use super::stream;
 use crate::engine::cancellation::{Signals, Token};
-use crate::engine::children::{self, Bound, Target};
+use crate::engine::children::{self, Bound};
 use crate::engine::store::Env;
 use crate::eval::TaskExit;
+use bazel::process::signal::{self, Target};
 use starlark::eval::Evaluator;
 use std::sync::Arc;
 
@@ -558,7 +559,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         if let Some(target) = child.target()? {
-            children::os::interrupt(target);
+            signal::interrupt(target);
         }
         Ok(NoneType)
     }
@@ -569,7 +570,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     fn terminate<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         if let Some(target) = child.target()? {
-            children::os::terminate(target);
+            signal::terminate(target);
         }
         Ok(NoneType)
     }
@@ -580,7 +581,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         if let Some(target) = child.target()? {
-            children::os::kill(target);
+            signal::kill(target);
         }
         Ok(NoneType)
     }

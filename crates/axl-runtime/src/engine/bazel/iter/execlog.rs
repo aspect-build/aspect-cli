@@ -46,8 +46,8 @@ use axl_proto::tools::protos::exec_log_entry;
 use derive_more::Display;
 use fibre::spmc::Receiver;
 
-use super::subscription::Subscription;
 use crate::engine::cancellation::Signals;
+use bazel::execlog::subscription::Subscription;
 
 /// The `build.execution_logs()` iterator: the stream's own subscriber, handed to
 /// AXL as an iterable.
@@ -59,6 +59,7 @@ use crate::engine::cancellation::Signals;
 #[display("<execlog_iterator>")]
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
+    #[trace(unsafe_ignore)]
     sub: Subscription,
     /// The run's cancellation state, so blocking iteration stays a safe point —
     /// as for [`ExecLogIter::signals`]. See `iter_next`.
@@ -155,7 +156,7 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     /// cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         self.sub
-            .recv_blocking(&self.signals, |_| true)
+            .recv_blocking(|| self.signals.should_unwind(), |_| true)
             .map(|entry| entry.alloc_value(heap))
     }
 
@@ -233,7 +234,7 @@ pub fn parse_entry_kind(value: values::Value) -> anyhow::Result<i32> {
 /// Why a handle rather than `build.execution_logs()`: cost and composition, not
 /// completeness. Both forms receive every entry — the producer blocks for
 /// whatever subscribers it has, see
-/// [`ExecLogStream::spawn_with_file`](super::super::stream::ExecLogStream::spawn_with_file).
+/// [`ExecLogStream::spawn_with_file`](bazel::execlog::feed::ExecLogStream::spawn_with_file).
 /// A handle clones a subscriber of its own, so it combines with sinks where
 /// `execution_logs()` takes the stream's one and only, and it filters in Rust,
 /// below.
@@ -252,6 +253,7 @@ pub struct ExecLogIter {
     /// Starts [`Subscription::pending`]: this handle exists before the build it
     /// will be bound to.
     #[allocative(skip)]
+    #[trace(unsafe_ignore)]
     sub: Subscription,
     /// The run's cancellation state, carried from construction so blocking
     /// iteration stays a safe point. Without it a drain would park in a bare
@@ -369,7 +371,7 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
     /// [`Subscription::recv_blocking`] for why it is cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         self.sub
-            .recv_blocking(&self.signals, |entry| self.wants(entry))
+            .recv_blocking(|| self.signals.should_unwind(), |entry| self.wants(entry))
             .map(|entry| entry.alloc_value(heap))
     }
 
@@ -572,7 +574,7 @@ mod tests {
         assert!(pop(&iter).is_none(), "a released handle yields nothing");
 
         // With no subscribers left the blocking send reports Closed rather than
-        // parking forever, which is what `stream::execlog` reads as end-of-stream.
+        // parking forever, which is what `bazel::execlog::feed` reads as end-of-stream.
         let err = sender.send(file(2));
         assert!(
             err.is_err(),

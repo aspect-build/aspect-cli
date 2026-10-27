@@ -29,7 +29,7 @@
 //!     `json_bep_tests` writes the loading-only test selection that
 //!     `aspect cache diff` establishes its scope from — see [`write_json_bep`].
 //!
-//! Flags are read with `bazelrc::last_flag_value` for the invocation's verb — the
+//! Flags are read with `bazel::rc::last_flag_value` for the invocation's verb — the
 //! same resolver the CLI decides with, so the fake sees argv the way Bazel does:
 //! the `--flag=value` and `--flag value` forms alike, last occurrence winning, and
 //! the `--default_override=0:common=…` token the CLI restates a `common`-section rc
@@ -113,7 +113,7 @@ fn run_info(args: &[String]) {
     // invocation. Required for the `bazel` crate's streams, which ask the
     // server pid whether it still holds the path open, to have a live process
     // to ask across the lifetime of the test.
-    let pid: u32 = bazelrc::last_flag_value(args, "--basil-server-pid", "info")
+    let pid: u32 = bazel::rc::last_flag_value(args, "--basil-server-pid", "info")
         .and_then(|s| s.parse().ok())
         .or_else(|| env::var("BASIL_SERVER_PID").ok()?.parse().ok())
         .unwrap_or_else(process::id);
@@ -136,7 +136,7 @@ fn run_info(args: &[String]) {
 }
 
 fn run_build(args: &[String], verb: &str) {
-    let flag = |name: &str| bazelrc::last_flag_value(args, name, verb);
+    let flag = |name: &str| bazel::rc::last_flag_value(args, name, verb);
     let bes_path = flag("--build_event_binary_file");
     let execlog_path = flag("--execution_log_compact_file");
     let scenario_name = flag("--scenario").unwrap_or_else(|| "success".to_string());

@@ -1,1 +1,1 @@
-Reading what bazel writes: followers for its FIFOs and files, and the Build Event Protocol readers on top.
+Everything about driving bazel and reading what it writes, with no dependency on the AXL runtime: followers for its FIFOs and files, one module per output it produces (BES, execution log, workspace events) with the feed that reads it and the sinks that forward it, `.bazelrc` resolution, and a `Server` that probes and stops a bazel server through a host-supplied `Runner`.

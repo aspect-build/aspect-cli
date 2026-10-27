@@ -13,15 +13,40 @@ config_setting(
 rust_library(
     name = "bazel",
     srcs = glob(["src/**/*.rs"]),
+    crate_features = ["starlark"],
+    proc_macro_deps = [
+        "@crates//:starlark_derive",
+    ],
     visibility = [
         "//crates/axl-runtime:__pkg__",
+        # basil, the fake bazel, resolves flags the way the CLI decides them.
+        "//crates/basil:__pkg__",
     ],
     deps = [
         "//crates/axl-proto",
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:fibre",
+        "@crates//:futures",
+        "@crates//:http",
+        "@crates//:indexmap",
         "@crates//:libc",
         "@crates//:nix",
         "@crates//:prost",
+        "@crates//:prost-types",
+        "@crates//:rand",
+        "@crates//:semver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:starlark",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tracing",
         "@crates//:uuid",
+        "@crates//:zstd",
     ] + select({
         ":macos": ["@crates//:proc_pidinfo"],
         ":linux": ["@crates//:procfs"],
@@ -31,4 +56,5 @@ rust_library(
 rust_test(
     name = "bazel_test",
     crate = ":bazel",
+    deps = ["@crates//:tempfile"],
 )

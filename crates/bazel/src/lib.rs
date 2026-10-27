@@ -6,14 +6,34 @@
 //!
 //! * [`stream`]: following a stream bazel's processes are still writing, and
 //!   deciding when it is over. Knows nothing about bazel's protocols.
-//! * [`formats`]: decoding what is in it. Each output bazel writes has a
-//!   module here, built on a [`stream`].
 //! * [`process`]: the per-OS questions about other processes that sit under
 //!   [`stream::pid_pair`].
+//! * [`delimited`]: the length-delimited framing the protocol readers share.
+//! * [`bes`]: the Build Event Protocol, built on a [`stream`].
+//! * [`label`] and [`runfiles`]: bazel's label spelling and runfiles trees.
+//! * [`rc`]: `.bazelrc` files, and the flags they resolve to for a command.
+//! * [`fanout`]: one producer's events to many subscribers.
+//! * [`bes`], [`execlog`], [`workspace_event`]: one module per output, each
+//!   with the feed that reads it and, where there is one, the sinks that
+//!   forward it.
 //!
-//! Dependencies point one way: `formats` uses `stream`, `stream` uses
-//! `process`.
+//! Dependencies point one way: `bes` uses `delimited` and `stream`, `stream`
+//! uses `process`.
 
-pub mod formats;
+pub mod aspect;
+pub mod bes;
+pub mod command;
+pub mod delimited;
+pub mod execlog;
+pub mod fanout;
+pub mod label;
 pub mod process;
+pub mod rc;
+pub mod runfiles;
+pub mod runner;
+pub mod server;
 pub mod stream;
+pub mod workspace_event;
+
+#[cfg(test)]
+mod testing;

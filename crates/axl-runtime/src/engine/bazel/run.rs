@@ -16,20 +16,16 @@
 //! target's process as soon as it is ready and hands out `Future[Child]`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use allocative::Allocative;
-use axl_proto::build_event_stream::build_event::Payload;
-use axl_proto::build_event_stream::build_event_id::Id;
-use axl_proto::build_event_stream::{BuildEvent, NamedSetOfFiles};
 use derive_more::Display;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
-use serde::Deserialize;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::values::dict::UnpackDictEntries;
@@ -45,10 +41,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::aspect::{self, Aspect};
 use super::build::{Build, BuildEventIter, BuildStatus};
-use super::label::apparent_label;
-use super::runfiles::{self, SymlinksMode};
-use super::stream::broadcaster::Subscriber;
-use super::stream::build_event::BuildEventEnvelope;
 use crate::engine::r#async::future::{FutureAlloc, FutureOf};
 use crate::engine::cancellation::{self, Signals};
 use crate::engine::children;
@@ -56,20 +48,21 @@ use crate::engine::error::native_error;
 use crate::engine::std::process::{Child, Command, stdio_from};
 use crate::engine::std::stream::Writable;
 use crate::engine::store::Env;
+use bazel::bes::BuildEventEnvelope;
+use bazel::bes::outputs::{Outputs, Ready, Unsettled};
+use bazel::command::flags::{
+    download_outputs_sufficient, effective_bool, effective_download_outputs,
+};
+use bazel::command::run::{RunInfo, pick_executable};
+use bazel::fanout::Subscriber;
+use bazel::label::apparent_label;
+use bazel::runfiles::{self, SymlinksMode};
 
 const RUNINFO_BZL: &str = include_str!("runinfo.bzl");
 const RUNINFO_SYMBOL: &str = "runinfo";
 const RUNINFO_OUTPUT_GROUP: &str = "aspect_runinfo";
 const RUNINFO_JSON_SUFFIX: &str = ".aspect_runinfo.json";
-const DEFAULT_OUTPUT_GROUP: &str = "default";
 const DEFAULT_WORKSPACE_NAME: &str = "_main";
-
-/// Extensions an executable output may carry when the rule names its
-/// entrypoint after the target plus a suffix, most to least common.
-const SCRIPT_EXTENSIONS: &[&str] = &[".sh", ".bash", ".exe", ".bat"];
-
-/// Bound on fileset nesting when walking BES `named_set_of_files` references.
-const FILESET_DEPTH: usize = 32;
 
 native_error! {
     /// A target cannot be run as asked, known before the build starts: the rc
@@ -151,31 +144,6 @@ impl Failure {
 
 type Outcome = Result<Runnable, Failure>;
 type SharedOutcome = Shared<BoxFuture<'static, Outcome>>;
-
-/// What the `runinfo` aspect writes per runnable target.
-#[derive(Debug, Deserialize, Default)]
-struct RunInfo {
-    #[serde(default)]
-    executable: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    environment: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    inherited_environment: Vec<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    /// The target has runfiles support (a non-empty default runfiles set).
-    #[serde(default = "yes")]
-    runfiles: bool,
-    /// Bazel wrote `<exe>.runfiles_manifest` for it.
-    #[serde(default = "yes")]
-    runfiles_manifest: bool,
-}
-
-fn yes() -> bool {
-    true
-}
 
 /// A built target, materialized and ready to spawn: what `bazel run` would
 /// have in hand right before it executes.
@@ -478,27 +446,13 @@ struct SpawnSpec {
     tx: oneshot::Sender<Result<Child, Failure>>,
 }
 
-/// Per-target bookkeeping on the tracker thread.
-#[derive(Default)]
-struct TargetState {
-    /// Output group name → fileset ids, from every `target_completed` for
-    /// the label (the target's own and the aspect's).
-    groups: HashMap<String, Vec<String>>,
-    /// A `target_completed` said the target failed, or an `aborted` arrived.
-    failed: bool,
-}
-
+/// What the tracker thread does with each target the BES stream settles.
 struct Tracker {
     /// Apparent key → label as the caller wrote it.
     given: HashMap<String, String>,
-    filesets: HashMap<String, NamedSetOfFiles>,
-    targets: HashMap<String, TargetState>,
-    pending: HashSet<String>,
+    outputs: Outputs,
     senders: HashMap<String, oneshot::Sender<Outcome>>,
     completed: mpsc::Sender<String>,
-    exec_root: Option<PathBuf>,
-    workspace_name: String,
-    exit_code: Option<i32>,
     mode: SymlinksMode,
     dirs: Dirs,
     spawn: Option<SpawnSpec>,
@@ -507,158 +461,29 @@ struct Tracker {
 impl Tracker {
     fn run(mut self, recv: Subscriber<Arc<BuildEventEnvelope>>, done: Arc<AtomicBool>) {
         while let Ok(envelope) = recv.recv() {
-            self.handle(&envelope.event);
+            for ready in self.outputs.handle(&envelope.event) {
+                self.settle_resolved(ready);
+            }
         }
         self.finish();
         done.store(true, Ordering::SeqCst);
     }
 
-    fn handle(&mut self, event: &BuildEvent) {
-        let id = event.id.as_ref().and_then(|id| id.id.as_ref());
-        match (&event.payload, id) {
-            (Some(Payload::NamedSetOfFiles(set)), Some(Id::NamedSet(set_id))) => {
-                self.filesets.insert(set_id.id.clone(), set.clone());
-                let pending: Vec<String> = self.pending.iter().cloned().collect();
-                for key in pending {
-                    self.check_ready(&key);
-                }
-            }
-            (Some(Payload::Completed(tc)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
-                if !self.pending.contains(&key) {
-                    return;
-                }
-                let state = self.targets.entry(key.clone()).or_default();
-                for og in &tc.output_group {
-                    state.groups.insert(
-                        og.name.clone(),
-                        og.file_sets.iter().map(|f| f.id.clone()).collect(),
-                    );
-                }
-                if !tc.success && tid.aspect.is_empty() {
-                    state.failed = true;
-                }
-                self.check_ready(&key);
-            }
-            (Some(Payload::Aborted(_)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
-                if self.pending.contains(&key) {
-                    self.targets.entry(key).or_default().failed = true;
-                }
-            }
-            (Some(Payload::WorkspaceInfo(ws)), _) => {
-                let root = ws.local_exec_root.trim_end_matches('/');
-                if !root.is_empty() {
-                    if let Some(name) = root.rsplit('/').next() {
-                        self.workspace_name = name.to_owned();
-                    }
-                    self.exec_root = Some(PathBuf::from(root));
-                }
-            }
-            (Some(Payload::Finished(finished)), _) => {
-                self.exit_code = finished.exit_code.as_ref().map(|c| c.code);
-            }
-            _ => {}
-        }
-    }
-
-    /// Absolute paths of every file under the filesets `ids`, or `None`
-    /// while any referenced fileset has not arrived yet.
-    fn collect(&self, ids: &[String]) -> Option<Vec<PathBuf>> {
-        let mut out = Vec::new();
-        let mut visited = HashSet::new();
-        let mut frontier: Vec<String> = ids.to_vec();
-        for _ in 0..FILESET_DEPTH {
-            if frontier.is_empty() {
-                break;
-            }
-            let mut next = Vec::new();
-            for id in frontier {
-                if !visited.insert(id.clone()) {
-                    continue;
-                }
-                let set = self.filesets.get(&id)?;
-                for file in &set.files {
-                    if let Some(path) = self.file_path(file) {
-                        out.push(path);
-                    }
-                }
-                for child in &set.file_sets {
-                    if !visited.contains(&child.id) {
-                        next.push(child.id.clone());
-                    }
-                }
-            }
-            frontier = next;
-        }
-        Some(out)
-    }
-
-    /// A BES file's local path: the execution root plus `path_prefix` and
-    /// `name`, which BES fills whatever the upload strategy; a `file://` URI
-    /// when there is no prefix to go by.
-    fn file_path(&self, file: &axl_proto::build_event_stream::File) -> Option<PathBuf> {
-        use axl_proto::build_event_stream::file::File as Loc;
-        if !file.path_prefix.is_empty() {
-            if let Some(root) = &self.exec_root {
-                let mut path = root.clone();
-                for seg in &file.path_prefix {
-                    path.push(seg);
-                }
-                path.push(&file.name);
-                return Some(path);
-            }
-        }
-        match &file.file {
-            Some(Loc::Uri(uri)) if uri.starts_with("file://") => {
-                Some(PathBuf::from(uri.trim_start_matches("file://")))
-            }
-            _ => None,
-        }
-    }
-
-    fn check_ready(&mut self, key: &str) {
-        let Some(state) = self.targets.get(key) else {
+    fn settle_resolved(&mut self, ready: Ready) {
+        let Ready {
+            key,
+            default_files,
+            extra_files: runinfo_files,
+        } = ready;
+        let Some(tx) = self.senders.remove(&key) else {
             return;
         };
-        if state.failed {
-            return;
-        }
-        let (Some(default_ids), Some(runinfo_ids)) = (
-            state.groups.get(DEFAULT_OUTPUT_GROUP),
-            state.groups.get(RUNINFO_OUTPUT_GROUP),
-        ) else {
-            return;
-        };
-        let (Some(default_files), Some(runinfo_files)) =
-            (self.collect(default_ids), self.collect(runinfo_ids))
-        else {
-            return;
-        };
-        self.settle_resolved(key, default_files, runinfo_files);
-    }
-
-    fn settle_resolved(
-        &mut self,
-        key: &str,
-        default_files: Vec<PathBuf>,
-        runinfo_files: Vec<PathBuf>,
-    ) {
-        self.pending.remove(key);
-        let Some(tx) = self.senders.remove(key) else {
-            return;
-        };
-        let label = self
-            .given
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| key.to_owned());
+        let label = self.given.get(&key).cloned().unwrap_or_else(|| key.clone());
         let completed = self.completed.clone();
-        let key = key.to_owned();
         let spawn = self.spawn.take();
         let dirs = self.dirs.clone();
-        let exec_root = self.exec_root.clone();
-        let workspace_name = self.workspace_name.clone();
+        let exec_root = self.outputs.exec_root().map(Path::to_path_buf);
+        let workspace_name = self.outputs.workspace_name().to_owned();
         let mode = self.mode;
         // Materializing a runfiles tree can take a while; a thread per target
         // keeps one target's tree from delaying the next target's readiness.
@@ -686,17 +511,15 @@ impl Tracker {
 
     /// The stream closed: everything still pending did not settle on its own.
     fn finish(mut self) {
-        let code = self.exit_code.unwrap_or(1);
-        let pending: Vec<String> = self.pending.drain().collect();
-        for key in pending {
+        let (code, unsettled) = self.outputs.finish();
+        for Unsettled {
+            key,
+            failed,
+            has_default,
+        } in unsettled
+        {
             let target = self.given.get(&key).cloned().unwrap_or_else(|| key.clone());
-            let state = self.targets.get(&key);
-            let failure = classify_unsettled(
-                target,
-                state.is_some_and(|s| s.failed),
-                state.is_some_and(|s| s.groups.contains_key(DEFAULT_OUTPUT_GROUP)),
-                code,
-            );
+            let failure = classify_unsettled(target, failed, has_default, code);
             if let Some(spec) = self.spawn.take() {
                 let _ = spec.tx.send(Err(failure.clone()));
             }
@@ -837,129 +660,6 @@ fn resolve(
     })
 }
 
-/// The executable among `candidates`: the aspect's `files_to_run.executable`
-/// basename when the aspect ran, else a file named after the target, else
-/// the target name plus a script extension, else the first file with the
-/// executable bit.
-fn pick_executable(
-    candidates: &[PathBuf],
-    runinfo: Option<&RunInfo>,
-    target_name: &str,
-) -> Option<PathBuf> {
-    let basename = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned());
-    if let Some(info) = runinfo {
-        let exe = info.executable.rsplit('/').next().unwrap_or("");
-        if !exe.is_empty() {
-            if let Some(found) = candidates
-                .iter()
-                .find(|c| basename(c).as_deref() == Some(exe))
-            {
-                return Some(found.clone());
-            }
-        }
-    }
-    if let Some(found) = candidates
-        .iter()
-        .find(|c| basename(c).as_deref() == Some(target_name))
-    {
-        return Some(found.clone());
-    }
-    for ext in SCRIPT_EXTENSIONS {
-        let name = format!("{target_name}{ext}");
-        if let Some(found) = candidates
-            .iter()
-            .find(|c| basename(c).as_deref() == Some(&name))
-        {
-            return Some(found.clone());
-        }
-    }
-    candidates.iter().find(|c| is_executable(c)).cloned()
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// `(section, token)` for every option on a rendered command line, reading
-/// `--default_override=N:section=payload` the way `bazelrc::last_flag_value`
-/// does, overrides first and literal tokens last so a literal wins.
-fn option_tokens(flags: &[String]) -> Vec<String> {
-    let mut overrides = Vec::new();
-    let mut literals = Vec::new();
-    for flag in flags {
-        match flag.strip_prefix("--default_override=") {
-            Some(rest) => {
-                let payload = rest
-                    .split_once(':')
-                    .and_then(|(_, r)| r.split_once('='))
-                    .map(|(_, p)| p)
-                    .unwrap_or(rest);
-                overrides.push(payload.to_owned());
-            }
-            None => literals.push(flag.clone()),
-        }
-    }
-    overrides.extend(literals);
-    overrides
-}
-
-/// The effective value of a boolean `--name`: `--name`, `--name=<bool>`,
-/// `--noname`. `None` when unset.
-fn effective_bool(flags: &[String], name: &str) -> Option<bool> {
-    let bare = format!("--{name}");
-    let no = format!("--no{name}");
-    let eq = format!("--{name}=");
-    let mut value = None;
-    for token in option_tokens(flags) {
-        if token == bare {
-            value = Some(true);
-        } else if token == no {
-            value = Some(false);
-        } else if let Some(v) = token.strip_prefix(&eq) {
-            value = match v.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "t" | "y" => Some(true),
-                "false" | "0" | "no" | "f" | "n" => Some(false),
-                _ => value,
-            };
-        }
-    }
-    value
-}
-
-/// The effective `--remote_download_outputs` mode, reading the flag and its
-/// three no-value aliases. `None` when unset, which is Bazel's `toplevel`.
-fn effective_download_outputs(flags: &[String]) -> Option<String> {
-    let mut value = None;
-    for token in option_tokens(flags) {
-        match token.as_str() {
-            "--remote_download_minimal" => value = Some("minimal".to_owned()),
-            "--remote_download_toplevel" => value = Some("toplevel".to_owned()),
-            "--remote_download_all" => value = Some("all".to_owned()),
-            _ => {
-                if let Some(v) = token.strip_prefix("--remote_download_outputs=") {
-                    value = Some(v.to_owned());
-                }
-            }
-        }
-    }
-    value
-}
-
-/// Whether a `--remote_download_outputs` mode already puts top-level outputs
-/// and their runfiles on disk. Only `minimal` does not.
-fn download_outputs_sufficient(value: Option<&str>) -> bool {
-    !matches!(value, Some("minimal"))
-}
-
 fn runinfo_aspect() -> Aspect {
     Aspect {
         implementation: RUNINFO_BZL.to_owned(),
@@ -1017,7 +717,7 @@ fn start<'v>(
         Vec<super::sink::execlog::ExecLogSink>,
         Vec<super::iter::ExecLogIter>,
     ),
-    rc: Option<bazelrc::BazelRC>,
+    rc: Option<bazel::rc::BazelRC>,
     directory: Option<String>,
     (build_stdout, build_stderr): (Stdio, Stdio),
     announce: super::build::AnnounceSpawn,
@@ -1091,15 +791,14 @@ fn start<'v>(
     let (completed_tx, completed_rx) = mpsc::channel();
     let done = Arc::new(AtomicBool::new(false));
     let tracker = Tracker {
-        pending: keys.iter().cloned().collect(),
         given,
-        filesets: HashMap::new(),
-        targets: HashMap::new(),
+        outputs: Outputs::new(
+            keys.iter().cloned().collect(),
+            RUNINFO_OUTPUT_GROUP,
+            DEFAULT_WORKSPACE_NAME.to_owned(),
+        ),
         senders,
         completed: completed_tx,
-        exec_root: None,
-        workspace_name: DEFAULT_WORKSPACE_NAME.to_owned(),
-        exit_code: None,
         mode,
         dirs,
         spawn,
@@ -1498,7 +1197,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<super::sink::execlog::ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazelrc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -1604,7 +1303,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<super::sink::execlog::ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazelrc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<
@@ -1679,10 +1378,6 @@ pub(crate) fn register_run_errors(globals: &mut starlark::environment::GlobalsBu
 mod tests {
     use super::*;
 
-    fn flags(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn unsettled_targets_are_classified_by_their_own_state_first() {
         let t = || "//:t".to_owned();
@@ -1710,121 +1405,6 @@ mod tests {
         is_send::<Runnable>();
         is_send::<Child>();
         is_send::<SpawnSpec>();
-    }
-
-    #[test]
-    fn booleans_read_every_spelling_and_the_override_form() {
-        assert_eq!(
-            effective_bool(&flags(&["--enable_runfiles"]), "enable_runfiles"),
-            Some(true)
-        );
-        assert_eq!(
-            effective_bool(&flags(&["--noenable_runfiles"]), "enable_runfiles"),
-            Some(false)
-        );
-        assert_eq!(
-            effective_bool(&flags(&["--enable_runfiles=no"]), "enable_runfiles"),
-            Some(false)
-        );
-        assert_eq!(effective_bool(&flags(&[]), "enable_runfiles"), None);
-        assert_eq!(
-            effective_bool(
-                &flags(&["--default_override=0:common=--nobuild_runfile_manifests"]),
-                "build_runfile_manifests"
-            ),
-            Some(false)
-        );
-        // A literal beats an override whatever the order.
-        assert_eq!(
-            effective_bool(
-                &flags(&[
-                    "--build_runfile_manifests",
-                    "--default_override=0:build=--nobuild_runfile_manifests"
-                ]),
-                "build_runfile_manifests"
-            ),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn download_mode_reads_the_flag_and_its_aliases() {
-        assert_eq!(effective_download_outputs(&flags(&[])), None);
-        assert_eq!(
-            effective_download_outputs(&flags(&["--remote_download_minimal"])).as_deref(),
-            Some("minimal")
-        );
-        assert_eq!(
-            effective_download_outputs(&flags(&["--remote_download_outputs=all"])).as_deref(),
-            Some("all")
-        );
-        assert_eq!(
-            effective_download_outputs(&flags(&[
-                "--default_override=0:common=--remote_download_outputs=minimal",
-                "--remote_download_toplevel"
-            ]))
-            .as_deref(),
-            Some("toplevel")
-        );
-        assert!(download_outputs_sufficient(None));
-        assert!(download_outputs_sufficient(Some("toplevel")));
-        assert!(download_outputs_sufficient(Some("all")));
-        assert!(!download_outputs_sufficient(Some("minimal")));
-    }
-
-    #[test]
-    fn executable_choice_prefers_the_aspect_then_the_name_then_extensions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mk = |name: &str, exec: bool| {
-            let p = tmp.path().join(name);
-            std::fs::write(&p, "").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    &p,
-                    std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }),
-                )
-                .unwrap();
-            }
-            let _ = exec;
-            p
-        };
-        let other = mk("other", true);
-        let tool_sh = mk("tool.sh", false);
-        let tool = mk("tool", false);
-        let candidates = vec![other.clone(), tool_sh.clone(), tool.clone()];
-        let info = RunInfo {
-            executable: "pkg/tool.sh".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(
-            pick_executable(&candidates, Some(&info), "tool"),
-            Some(tool_sh.clone())
-        );
-        assert_eq!(pick_executable(&candidates, None, "tool"), Some(tool));
-        assert_eq!(
-            pick_executable(&[other.clone(), tool_sh.clone()], None, "tool"),
-            Some(tool_sh)
-        );
-        #[cfg(unix)]
-        assert_eq!(pick_executable(&[other.clone()], None, "tool"), Some(other));
-    }
-
-    #[test]
-    fn runinfo_json_decodes_what_the_aspect_writes() {
-        let text = r#"{"executable":"pkg/tool","args":["a","b c"],"environment":{"K":"V"},"inherited_environment":["HOME"],"tags":["manual"]}"#;
-        let info: RunInfo = serde_json::from_str(text).unwrap();
-        assert_eq!(info.executable, "pkg/tool");
-        assert_eq!(info.args, vec!["a", "b c"]);
-        assert_eq!(info.environment.get("K").unwrap(), "V");
-        assert_eq!(info.inherited_environment, vec!["HOME"]);
-        assert_eq!(info.tags, vec!["manual"]);
-        // Fields an older aspect did not write default to the common case.
-        assert!(info.runfiles && info.runfiles_manifest);
-        let text = r#"{"executable":"pkg/tool","runfiles":true,"runfiles_manifest":false}"#;
-        let info: RunInfo = serde_json::from_str(text).unwrap();
-        assert!(info.runfiles && !info.runfiles_manifest);
     }
 
     #[test]
