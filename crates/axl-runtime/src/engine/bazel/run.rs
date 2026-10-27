@@ -686,7 +686,7 @@ impl Tracker {
 
     /// The stream closed: everything still pending did not settle on its own.
     fn finish(mut self) {
-        let code = self.exit_code.unwrap_or(1);
+        let code = self.exit_code;
         let pending: Vec<String> = self.pending.drain().collect();
         for key in pending {
             let target = self.given.get(&key).cloned().unwrap_or_else(|| key.clone());
@@ -716,15 +716,29 @@ impl Tracker {
 /// executable: the aspect returns nothing for a library or a filegroup. One
 /// the build never reported at all was not built, and when the build itself
 /// failed that is the likeliest reason, so the failure carries Bazel's code.
-fn classify_unsettled(target: String, failed: bool, has_default: bool, code: i32) -> Failure {
+/// With no `build_finished` event there is no code to carry: the stream ended
+/// early, which says nothing about whether the build succeeded.
+fn classify_unsettled(
+    target: String,
+    failed: bool,
+    has_default: bool,
+    code: Option<i32>,
+) -> Failure {
     if failed {
-        Failure::Build { target, code }
+        Failure::Build {
+            target,
+            code: code.unwrap_or(1),
+        }
     } else if has_default {
         Failure::NotRunnable { target }
-    } else if code != 0 {
-        Failure::Build { target, code }
     } else {
-        Failure::NotBuilt { target }
+        match code {
+            Some(0) => Failure::NotBuilt { target },
+            Some(code) => Failure::Build { target, code },
+            None => Failure::Internal(format!(
+                "the build event stream ended before {target} was reported"
+            )),
+        }
     }
 }
 
@@ -1687,20 +1701,24 @@ mod tests {
     fn unsettled_targets_are_classified_by_their_own_state_first() {
         let t = || "//:t".to_owned();
         assert!(matches!(
-            classify_unsettled(t(), true, true, 0),
+            classify_unsettled(t(), true, true, Some(0)),
             Failure::Build { code: 0, .. }
         ));
         assert!(matches!(
-            classify_unsettled(t(), false, true, 1),
+            classify_unsettled(t(), false, true, Some(1)),
             Failure::NotRunnable { .. }
         ));
         assert!(matches!(
-            classify_unsettled(t(), false, false, 1),
+            classify_unsettled(t(), false, false, Some(1)),
             Failure::Build { code: 1, .. }
         ));
         assert!(matches!(
-            classify_unsettled(t(), false, false, 0),
+            classify_unsettled(t(), false, false, Some(0)),
             Failure::NotBuilt { .. }
+        ));
+        assert!(matches!(
+            classify_unsettled(t(), false, false, None),
+            Failure::Internal(_)
         ));
     }
 
