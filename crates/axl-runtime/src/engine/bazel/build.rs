@@ -3301,6 +3301,88 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    /// `fully_async` lets the Bazel client exit while the server still writes
+    /// the terminal `BuildFinished` event. The invocation must deliver that
+    /// event before it reports a complete stream.
+    #[cfg(unix)]
+    #[test]
+    fn fully_async_bep_delivers_build_finished_after_client_exit() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = std::process::Command::new(crate::test::basil_bin())
+            .arg("__async_bep_tail_writer")
+            .arg(dir.path())
+            .spawn()
+            .expect("spawn fake Bazel server writer");
+        let server_pid_flag = format!("--basil-server-pid={}", server.id());
+        let script = format!(
+            r#"
+def _impl(ctx):
+    events = bazel.build_events.iterator()
+    rc = ctx.bazel.parse_rc(startup_flags = [{server_pid_flag:?}], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--scenario=async_bep_tail_after_client_exit", {control_dir_flag:?}],
+        build_events = [events],
+        stderr = None,
+    )
+    started = 0
+    finished = 0
+    for event in events:
+        if event.kind == "build_started":
+            started += 1
+        elif event.kind == "build_finished":
+            finished += 1
+    status = build.wait()
+    if not status.success: return 1
+    if started != 1: return 2
+    if finished != 1: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            server_pid_flag = server_pid_flag,
+            control_dir_flag = format!("--basil-control-dir={}", dir.path().display()),
+        );
+
+        let result = crate::test::with_timeout(Duration::from_secs(30), move || {
+            crate::test::eval(&script).with_fake_bazel().run_task(0)
+        });
+        let Some(result) = result else {
+            let _ = server.kill();
+            let _ = server.wait().expect("wait for fake Bazel server writer");
+            std::mem::forget(dir);
+            panic!("timed out waiting for the asynchronous BEP tail");
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let server_status = loop {
+            if let Some(status) = server
+                .try_wait()
+                .expect("check fake Bazel server writer status")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = server.kill();
+                let _ = server.wait().expect("wait for fake Bazel server writer");
+                panic!("timed out waiting for fake Bazel server writer to exit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(
+            result.expect("run_task"),
+            Some(0),
+            "the stream must deliver BuildFinished after the client exits"
+        );
+        assert!(
+            server_status.success(),
+            "fake Bazel server writer failed: {server_status}"
+        );
+    }
+
     /// A mistyped flag reaches Bazel, which rejects the command line and
     /// exits without ever opening the BEP file. The build must report that
     /// exit code instead of waiting forever on a writer that cannot come.
