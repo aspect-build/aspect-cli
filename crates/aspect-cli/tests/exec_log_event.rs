@@ -271,9 +271,6 @@ fn base_env() -> HashMap<String, String> {
 struct Case {
     dir: tempfile::TempDir,
     daemon: Child,
-    /// The pid handed to basil as the log's nominated holder. The live stand-in
-    /// unless a test replaced it to model a server that went away.
-    holder: Option<u32>,
 }
 
 impl Drop for Case {
@@ -304,28 +301,7 @@ impl Case {
             .arg("600")
             .spawn()
             .expect("spawning the daemon stand-in");
-        Self {
-            dir,
-            daemon,
-            holder: None,
-        }
-    }
-
-    /// Nominate a reaped pid as the execution log's holder, modelling the server
-    /// that Bazel killed out from under the reader.
-    ///
-    /// The reader asks that pid whether more bytes are coming; dead, it reads a
-    /// log that has not appeared yet as one that never will. basil still writes
-    /// its log and still exits 0, so this is the one combination that is worth a
-    /// warning: a successful build with nothing delivered.
-    fn with_dead_holder(mut self) -> Self {
-        let mut gone = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .expect("spawning a process to reap");
-        self.holder = Some(gone.id());
-        gone.wait().expect("reaping it");
-        self
+        Self { dir, daemon }
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -336,10 +312,7 @@ impl Case {
             .env_clear()
             .envs(base_env())
             .env("BAZEL_REAL", basil_bin())
-            .env(
-                "BASIL_SERVER_PID",
-                self.holder.unwrap_or_else(|| self.daemon.id()).to_string(),
-            )
+            .env("BASIL_SERVER_PID", self.daemon.id().to_string())
             .env("BASIL_EXECLOG_PUMP_HANDSHAKE", root.join("pumped"))
             .env("BASIL_ARGV_LOG", root.join(ARGV_LOG))
             .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
@@ -870,12 +843,15 @@ fn an_rc_set_grpc_keepalive_is_the_one_used() {
 
 /// The one shape worth warning about: bazel succeeded and produced no log.
 ///
-/// That is what a nominated holder which died out from under the reader looks
-/// like — every hook fires zero times, every sink writes nothing, and without the
+/// Every hook fires zero times, every sink writes nothing, and without the
 /// warning the build is indistinguishable from one whose actions were all cached.
+///
+/// A dead nominated holder no longer produces this shape: the reader looks once
+/// more after the stream ends, so a log bazel did write is still read. The shape
+/// left is bazel never writing one, which `success` models.
 #[test]
 fn a_successful_build_that_produced_no_log_warns() {
-    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None).with_dead_holder();
+    let case = Case::new("success", Fixture::default(), None);
     let out = case.raw(&["build", "//..."]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
