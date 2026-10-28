@@ -24,9 +24,7 @@ use std::sync::{Arc, mpsc};
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
-use super::flags::{
-    download_outputs_sufficient, effective_bool, effective_download_outputs, effective_value,
-};
+use super::flags::{download_outputs_sufficient, effective_bool, effective_download_outputs};
 use crate::aspect::{self, Aspect};
 use crate::bes::BuildEventEnvelope;
 use crate::bes::outputs::{Outputs, Ready, Unsettled};
@@ -176,14 +174,16 @@ const UPLOAD_STRATEGY: &str = "experimental_build_event_upload_strategy";
 ///
 /// * `--remote_download_outputs=toplevel` when the rc resolves to `minimal`:
 ///   the executable and its runfiles have to be on disk.
-/// * `--experimental_build_event_upload_strategy=local`, unless the caller
-///   chose one. The tracker reads local paths out of BEP and nothing else from
-///   the upload. With a remote cache Bazel instead uploads every file BEP names
-///   and holds the event that names it until the upload is done, reporting it
-///   as `bytestream://`. The build is then long over, and the client gone —
+/// * `--experimental_build_event_upload_strategy=local`, always. The tracker
+///   reads local paths out of BEP and nothing else from the upload. With a
+///   remote cache Bazel instead uploads every file BEP names and holds the
+///   event that names it until the upload is done, reporting it as
+///   `bytestream://`. The build is then long over, and the client gone —
 ///   builds run `fully_async` — before the target's completion and the build's
 ///   exit code are written, so the target never settles and is reported as a
-///   failed build (aspect-build/aspect-cli#1604).
+///   failed build (aspect-build/aspect-cli#1604). A caller's own strategy
+///   cannot be honoured: `run` does not work under `remote`. Added last, so it
+///   wins over an earlier literal flag and over rc content.
 fn inject_flags(flags: &mut Vec<String>) -> Result<SymlinksMode, PrepareError> {
     if effective_bool(flags, "build_runfile_manifests") == Some(false) {
         return Err(PrepareError::Refused(
@@ -197,9 +197,7 @@ fn inject_flags(flags: &mut Vec<String>) -> Result<SymlinksMode, PrepareError> {
     if !download_outputs_sufficient(effective_download_outputs(flags).as_deref()) {
         flags.push("--remote_download_outputs=toplevel".to_owned());
     }
-    if effective_value(flags, UPLOAD_STRATEGY).is_none() {
-        flags.push(format!("--{UPLOAD_STRATEGY}=local"));
-    }
+    flags.push(format!("--{UPLOAD_STRATEGY}=local"));
     Ok(mode)
 }
 
@@ -529,21 +527,30 @@ mod run_tests {
         );
     }
 
+    /// `run` does not work under `remote`, so a caller's choice is overridden:
+    /// the injected flag comes last, and the last literal flag wins.
     #[test]
-    fn a_strategy_the_caller_chose_is_left_alone() {
+    fn a_strategy_the_caller_chose_is_overridden_by_the_last_flag() {
+        let name = "--experimental_build_event_upload_strategy=";
         for chosen in ["remote", "local"] {
-            let flag = format!("--experimental_build_event_upload_strategy={chosen}");
-            let mut f = flags(&[&flag]);
+            let mut f = flags(&[&format!("{name}{chosen}")]);
             inject_flags(&mut f).unwrap();
-            assert_eq!(f, vec![flag], "an explicit choice must not be overridden");
+            assert_eq!(
+                f.last().map(String::as_str),
+                Some("--experimental_build_event_upload_strategy=local")
+            );
         }
-        // Chosen in an rc file, which renders as an override.
+        // Chosen in an rc file, which renders as an override: a literal
+        // flag outranks it.
         let mut f = flags(&[
             "--default_override=0:common=--experimental_build_event_upload_strategy=remote",
         ]);
-        let before = f.clone();
         inject_flags(&mut f).unwrap();
-        assert_eq!(f, before);
+        assert_eq!(
+            crate::command::flags::effective_value(&f, "experimental_build_event_upload_strategy")
+                .as_deref(),
+            Some("local")
+        );
     }
 
     #[test]
