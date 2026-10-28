@@ -525,6 +525,7 @@ dependencies = [
  "allocative",
  "anyhow",
  "axl-proto",
+ "bazel",
  "fibre",
  "futures 0.3.31",
  "http",

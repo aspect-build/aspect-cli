@@ -50,4 +50,6 @@ proc_pidinfo = "0.1"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# So `cargo test -p bazel` also runs the tests that need the `starlark` feature.
+bazel = { path = ".", features = ["starlark"] }
 tempfile = "3"

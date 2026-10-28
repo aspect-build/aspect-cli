@@ -15,7 +15,7 @@ ever been exercised against data shaped by the fake. This builds a workspace tha
 produces each of those entry kinds for real and asserts on what the hook received.
 
 The fake also cannot show whether the CLI reads an `--execution_log_compact_file`
-somebody else already asked for: it and the CLI share `bazelrc::last_flag_value`,
+somebody else already asked for: it and the CLI share `bazel::rc::last_flag_value`,
 so they agree by construction. Only real Bazel can say that a path the CLI read is
 a path Bazel honours, so the last leg puts the flag in a `common` rc section and
 asserts on the file Bazel wrote there.
@@ -501,7 +501,7 @@ def main():
             #    path the CLI picked, so they stay green either way. The rc-named
             #    file holding a real log is the assertion, and only Bazel can
             #    answer it — the basil fake reads argv through the same
-            #    `bazelrc::last_flag_value` the CLI does, so the two agree even
+            #    `bazel::rc::last_flag_value` the CLI does, so the two agree even
             #    when both are wrong.
             rc_log = workspace / "rc-asked-for-this.zst"
             bazelrc = workspace / ".bazelrc"

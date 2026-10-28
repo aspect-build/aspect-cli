@@ -183,7 +183,7 @@ fn resolve_flags_for_running_bazel<'v>(
     let version = if items.iter().any(|f| f.is_right()) {
         bazel::server::Server::new(&runner::SignalRunner(signals), &[])
             .info()
-            .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
+            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
             .1
     } else {
         None
@@ -860,7 +860,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait_with_output()
-            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
+            // Context, not a string: a wait that was cancelled has to reach
+            // `TaskExit::from_anyhow` intact.
+            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
 
         if !output.status.success() {
             let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
@@ -909,7 +911,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let status = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait()
-            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
+            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
         Ok(status.code().unwrap_or(-1))
     }
 

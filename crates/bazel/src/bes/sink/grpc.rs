@@ -70,15 +70,16 @@ impl Grpc {
     }
 }
 
-/// Emit a sink-lifecycle log line as a `tracing` debug event; the host's
-/// subscriber decides whether it is shown (stderr under `ASPECT_DEBUG`).
+/// Emit a sink-lifecycle log line as a `tracing` event on the `axl.log`
+/// target, the one the host routes to its log exporters (stderr when
+/// `ASPECT_DEBUG` is set); on any other target the host drops it.
 /// Prefixed `BES sink <endpoint> [<id8>]:` so a single `grep BES\ sink`
 /// pulls every event for one sink across a run, and multi-sink
 /// configurations (e.g. an Aspect backend plus an internal mirror)
 /// stay distinguishable via the endpoint segment.
 fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
     let short = invocation_id.get(..8).unwrap_or(invocation_id);
-    tracing::debug!("BES sink {endpoint} [{short}]: {msg}");
+    tracing::debug!(target: "axl.log", "BES sink {endpoint} [{short}]: {msg}");
 }
 
 /// Emit a user-facing warning for this sink, prefixed `BES sink <endpoint>:`

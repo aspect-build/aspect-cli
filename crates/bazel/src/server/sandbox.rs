@@ -158,9 +158,9 @@ pub fn recover(output_base: &Path) -> RecoveryOutcome {
 /// invoking bazel. Returns `None` when no `--output_base` flag is present
 /// or its value is empty.
 ///
-/// Same shape as the helper used by the health-check probe — kept local
-/// to this module so the recovery path doesn't depend on a wedged
-/// bazel server to resolve its own output_base.
+/// Shared with the health-check probe. Both read it off the startup flags
+/// rather than asking bazel, so recovery doesn't depend on a wedged bazel
+/// server to resolve its own output_base.
 pub fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
     for flag in startup_flags {
         if let Some(value) = flag.strip_prefix("--output_base=") {
