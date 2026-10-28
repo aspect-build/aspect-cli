@@ -23,6 +23,16 @@ pub fn option_tokens(flags: &[String]) -> Vec<String> {
     overrides
 }
 
+/// The effective value of `--name=<value>`, the last one on the command line
+/// (overrides first, so a literal wins). `None` when unset.
+pub fn effective_value(flags: &[String], name: &str) -> Option<String> {
+    let eq = format!("--{name}=");
+    option_tokens(flags)
+        .into_iter()
+        .filter_map(|token| token.strip_prefix(&eq).map(str::to_owned))
+        .next_back()
+}
+
 /// The effective value of a boolean `--name`: `--name`, `--name=<bool>`,
 /// `--noname`. `None` when unset.
 pub fn effective_bool(flags: &[String], name: &str) -> Option<bool> {
@@ -111,6 +121,45 @@ mod tests {
                 "build_runfile_manifests"
             ),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn a_value_flag_reads_the_last_setting_and_a_literal_beats_an_override() {
+        let name = "experimental_build_event_upload_strategy";
+        assert_eq!(effective_value(&flags(&[]), name), None);
+        assert_eq!(
+            effective_value(
+                &flags(&[
+                    "--experimental_build_event_upload_strategy=remote",
+                    "--experimental_build_event_upload_strategy=local"
+                ]),
+                name
+            )
+            .as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            effective_value(
+                &flags(&[
+                    "--experimental_build_event_upload_strategy=local",
+                    "--default_override=0:common=--experimental_build_event_upload_strategy=remote"
+                ]),
+                name
+            )
+            .as_deref(),
+            Some("local"),
+            "a literal flag outranks rc content"
+        );
+        assert_eq!(
+            effective_value(
+                &flags(&[
+                    "--default_override=0:common=--experimental_build_event_upload_strategy=remote"
+                ]),
+                name
+            )
+            .as_deref(),
+            Some("remote")
         );
     }
 

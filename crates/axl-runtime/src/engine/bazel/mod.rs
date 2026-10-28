@@ -36,17 +36,16 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
-mod aspect;
 mod build;
 mod cancel;
-mod health_check;
-mod info;
 mod iter;
 mod query;
+mod retry;
 mod run;
 mod runner;
-mod sandbox_recovery;
-mod sink;
+mod wrappers;
+
+use wrappers::ExecLogSink;
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 pub(crate) use bazel::bes::redact::redact_command_args;
@@ -105,12 +104,8 @@ fn partition_build_events(
 /// stream naming no consumer up front — `build.execution_logs()` can still claim
 /// the stream's own subscriber later — and a list enables it and names consumers.
 fn partition_execution_log(
-    arg: Either<bool, UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>>,
-) -> (
-    bool,
-    Vec<sink::execlog::ExecLogSink>,
-    Vec<iter::ExecLogIter>,
-) {
+    arg: Either<bool, UnpackList<Either<ExecLogSink, iter::ExecLogIter>>>,
+) -> (bool, Vec<ExecLogSink>, Vec<iter::ExecLogIter>) {
     match arg {
         Either::Left(b) => (b, vec![], vec![]),
         Either::Right(items) => {
@@ -463,8 +458,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] output_groups: UnpackList<
             String,
         >,
-    ) -> anyhow::Result<aspect::Aspect> {
-        Ok(aspect::Aspect {
+    ) -> anyhow::Result<wrappers::Aspect> {
+        Ok(wrappers::Aspect {
             implementation,
             symbol,
             parameters: parameters.entries,
@@ -553,7 +548,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -566,7 +561,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
-            aspect::Aspect,
+            wrappers::Aspect,
         >,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
@@ -579,7 +574,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
-        resolved_flags.extend(aspect::materialize(
+        resolved_flags.extend(wrappers::materialize_aspects(
             &env.signals,
             &aspects.items,
             &resolved_startup_flags,
@@ -686,7 +681,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -699,7 +694,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
-            aspect::Aspect,
+            wrappers::Aspect,
         >,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
@@ -712,7 +707,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
-        resolved_flags.extend(aspect::materialize(
+        resolved_flags.extend(wrappers::materialize_aspects(
             &env.signals,
             &aspects.items,
             &resolved_startup_flags,
@@ -875,10 +870,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             );
         }
 
-        Ok(info::parse_output(
-            &String::from_utf8_lossy(&output.stdout),
-            &requested,
-        ))
+        Ok(
+            bazel::server::info::parse_output(&String::from_utf8_lossy(&output.stdout), &requested)
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -946,7 +942,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
         Ok(
-            match info::release_version(&Env::from_eval(eval)?.signals) {
+            match runner::release_version(&Env::from_eval(eval)?.signals) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,
@@ -988,17 +984,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] log: NoneOr<values::Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<health_check::HealthCheckResult> {
+    ) -> anyhow::Result<wrappers::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         let signals = Env::from_eval(eval)?.signals.clone();
         let Some(log) = log.into_option() else {
-            return Ok(health_check::run(&signals, &startup_flags, &mut |line| {
-                crate::errln!("{line}")
-            }));
+            return Ok(wrappers::health_check(
+                &signals,
+                &startup_flags,
+                &mut |line| crate::errln!("{line}"),
+            ));
         };
         let mut log_error = None;
-        let result = health_check::run(&signals, &startup_flags, &mut |line| {
+        let result = wrappers::health_check(&signals, &startup_flags, &mut |line| {
             if log_error.is_some() {
                 return;
             }
@@ -1061,17 +1059,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn recover_poisoned_sandbox<'v>(
         this: values::Value<'v>,
-    ) -> anyhow::Result<sandbox_recovery::SandboxRecoveryResult> {
+    ) -> anyhow::Result<wrappers::SandboxRecoveryResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         let Some(output_base) = bazel::server::sandbox::output_base_from_flags(&startup_flags)
         else {
-            return Ok(sandbox_recovery::SandboxRecoveryResult::skipped());
+            return Ok(wrappers::SandboxRecoveryResult::skipped());
         };
         let outcome = bazel::server::sandbox::recover(&output_base);
-        Ok(sandbox_recovery::SandboxRecoveryResult::from_outcome(
-            outcome,
-        ))
+        Ok(wrappers::SandboxRecoveryResult::from_outcome(outcome))
     }
 
     /// Parse `.bazelrc` files rooted at `root` and return a `RunCommand`.
@@ -1269,7 +1265,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 anyhow::bail!("retry_max_buffer_bytes must be > 0, got {n}");
             }
             NoneOr::Other(n) => n as usize,
-            NoneOr::None => sink::retry::default_retry_max_buffer_bytes(),
+            NoneOr::None => retry::default_retry_max_buffer_bytes(),
         };
         let retry_min_delay = bazel::bes::sink::retry::parse_duration(retry_min_delay)
             .map_err(|e| anyhow::anyhow!("retry_min_delay: {e}"))?;
@@ -1287,7 +1283,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 max_retries: max_retries as u32,
                 retry_min_delay,
                 retry_max_buffer_bytes,
-                buffer_knob: sink::retry::RETRY_MAX_BUFFER_BYTES_ENV,
+                buffer_knob: retry::RETRY_MAX_BUFFER_BYTES_ENV,
                 timeout,
                 ..Default::default()
             },
@@ -1364,11 +1360,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// One path holds one log, as for `compact_file`: a task that retries its
     /// Bazel invocation writes this path afresh per attempt, so what survives is
     /// the last attempt's log.
-    #[starlark(as_type = sink::execlog::ExecLogSink)]
-    fn file(
-        #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
-        Ok(sink::execlog::ExecLogSink::File { path })
+    #[starlark(as_type = ExecLogSink)]
+    fn file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::File { path })
     }
 
     /// Write this build's compact execution log, byte for byte as Bazel's
@@ -1378,10 +1372,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// a build per attempt, and each writes this path afresh, so what is left
     /// when the task ends is the last attempt's log rather than all of them.
     /// Name a path per attempt if every attempt's log has to survive.
-    fn compact_file(
-        #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
-        Ok(sink::execlog::ExecLogSink::CompactFile { path })
+    fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::CompactFile { path })
     }
 
     /// Create a handle iterating this build's decoded execution log. Pass it in
@@ -1462,7 +1454,7 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_execlog_types(globals: &mut GlobalsBuilder) {
     const ExecLogIter: StarlarkValueAsType<iter::ExecLogIter> = StarlarkValueAsType::new();
-    const ExecLogSink: StarlarkValueAsType<sink::execlog::ExecLogSink> = StarlarkValueAsType::new();
+    const ExecLogSink: StarlarkValueAsType<ExecLogSink> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
@@ -1474,9 +1466,9 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
     const RunCommand: StarlarkValueAsType<bazel::rc::BazelRC> = StarlarkValueAsType::new();
-    const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
+    const HealthCheckResult: StarlarkValueAsType<wrappers::HealthCheckResult> =
         StarlarkValueAsType::new();
-    const SandboxRecoveryResult: StarlarkValueAsType<sandbox_recovery::SandboxRecoveryResult> =
+    const SandboxRecoveryResult: StarlarkValueAsType<wrappers::SandboxRecoveryResult> =
         StarlarkValueAsType::new();
 }
 

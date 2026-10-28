@@ -13,6 +13,7 @@ config_setting(
 rust_library(
     name = "bazel",
     srcs = glob(["src/**/*.rs"]),
+    compile_data = ["src/command/runinfo.bzl"],
     crate_features = ["starlark"],
     proc_macro_deps = [
         "@crates//:starlark_derive",

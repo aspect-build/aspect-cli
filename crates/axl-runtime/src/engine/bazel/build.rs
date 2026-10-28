@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use super::iter::ExecLogIter;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
-use super::sink::execlog::ExecLogSink;
+use super::wrappers::ExecLogSink;
 use bazel::bes::BuildEventEnvelope;
 use bazel::bes::feed::{BuildEventStream, FileSignal};
 use bazel::bes::kind::{self, event_kind_help, event_kind_in};
