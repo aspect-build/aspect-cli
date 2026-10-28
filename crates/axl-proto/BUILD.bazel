@@ -30,7 +30,6 @@ rust_library(
         "//crates/axl-runtime:__pkg__",
         "//crates/basil:__pkg__",
         "//crates/bazel:__pkg__",
-        "//crates/build-event-stream:__pkg__",
     ],
     deps = [
         ":build_script",

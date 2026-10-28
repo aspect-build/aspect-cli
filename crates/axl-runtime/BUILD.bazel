@@ -6,7 +6,6 @@ rust_library(
     compile_data = glob([
         "src/builtins/std/**/*.axl",
         "src/builtins/bazel/**/*.axl",
-        "src/engine/bazel/*.bzl",
     ]),
     proc_macro_deps = [
         "//crates/starbuf-derive",
@@ -22,8 +21,6 @@ rust_library(
         "//crates/axl-proto",
         "//crates/axl-types",
         "//crates/bazel",
-        "//crates/bazelrc",
-        "//crates/build-event-stream",
         "//crates/fswatch",
         "@crates//:allocative",
         "@crates//:anyhow",

@@ -9,15 +9,47 @@ edition.workspace = true
 readme.workspace = true
 rust-version.workspace = true
 
+[features]
+# `rc::BazelRC` as the Starlark `bazel.RunCommand` value, with its methods.
+starlark = ["dep:allocative", "dep:starlark", "dep:starlark_derive"]
+
 [dependencies]
+allocative = { version = "0.3.4", optional = true }
+anyhow = "1.0.98"
 axl-proto = { path = "../axl-proto" }
+fibre = "0.5.0"
+futures = "0.3.31"
+http = "1.3.1"
+indexmap = "2"
 libc = "0.2"
-nix = { version = "0.30.1", features = ["fs", "poll"] }
+nix = { version = "0.30.1", features = ["fs", "poll", "process", "signal"] }
 prost = "0.14.1"
+prost-types = "0.14.1"
+rand = "0.8.5"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+sha2 = "0.10"
+starlark = { version = "0.14.2", optional = true }
+starlark_derive = { version = "0.14.2", optional = true }
+thiserror = "2.0.17"
+tokio = { version = "1.45.1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"], default-features = false }
+tokio-stream = "0.1.17"
+tracing = "0.1.41"
+tonic = { version = "0.14.2", features = ["channel", "transport", "tls-ring", "tls-native-roots"] }
 uuid = { version = "1.18.1", features = ["v4"] }
+zstd = "0.13.3"
 
 [target.'cfg(target_os="linux")'.dependencies]
 procfs = "0.18.0"
 
 [target.'cfg(target_os="macos")'.dependencies]
 proc_pidinfo = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# So `cargo test -p bazel` also runs the tests that need the `starlark` feature.
+bazel = { path = ".", features = ["starlark"] }
+tempfile = "3"

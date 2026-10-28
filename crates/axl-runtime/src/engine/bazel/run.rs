@@ -16,20 +16,16 @@
 //! target's process as soon as it is ready and hands out `Future[Child]`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{self, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use allocative::Allocative;
-use axl_proto::build_event_stream::build_event::Payload;
-use axl_proto::build_event_stream::build_event_id::Id;
-use axl_proto::build_event_stream::{BuildEvent, NamedSetOfFiles};
 use derive_more::Display;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
-use serde::Deserialize;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::values::dict::UnpackDictEntries;
@@ -43,12 +39,8 @@ use starlark::{StarlarkResultExt, starlark_module, starlark_simple_value};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use super::aspect::{self, Aspect};
 use super::build::{Build, BuildEventIter, BuildStatus};
-use super::label::apparent_label;
-use super::runfiles::{self, SymlinksMode};
-use super::stream::broadcaster::Subscriber;
-use super::stream::build_event::BuildEventEnvelope;
+use super::wrappers::ExecLogSink;
 use crate::engine::r#async::future::{FutureAlloc, FutureOf};
 use crate::engine::cancellation::{self, Signals};
 use crate::engine::children;
@@ -56,20 +48,9 @@ use crate::engine::error::native_error;
 use crate::engine::std::process::{Child, Command, stdio_from};
 use crate::engine::std::stream::Writable;
 use crate::engine::store::Env;
-
-const RUNINFO_BZL: &str = include_str!("runinfo.bzl");
-const RUNINFO_SYMBOL: &str = "runinfo";
-const RUNINFO_OUTPUT_GROUP: &str = "aspect_runinfo";
-const RUNINFO_JSON_SUFFIX: &str = ".aspect_runinfo.json";
-const DEFAULT_OUTPUT_GROUP: &str = "default";
-const DEFAULT_WORKSPACE_NAME: &str = "_main";
-
-/// Extensions an executable output may carry when the rule names its
-/// entrypoint after the target plus a suffix, most to least common.
-const SCRIPT_EXTENSIONS: &[&str] = &[".sh", ".bash", ".exe", ".bat"];
-
-/// Bound on fileset nesting when walking BES `named_set_of_files` references.
-const FILESET_DEPTH: usize = 32;
+use bazel::command::run::{Dirs, Failure, OnSettled, Outcome, PrepareError, Tracker};
+use bazel::label::apparent_label;
+use bazel::runfiles::SymlinksMode;
 
 native_error! {
     /// A target cannot be run as asked, known before the build starts: the rc
@@ -107,94 +88,52 @@ native_error! {
     }
 }
 
-/// How a target's slot settled when it did not settle with a `Runnable`.
-#[derive(Debug, Clone)]
-enum Failure {
-    NotBuilt { target: String },
-    NotRunnable { target: String },
-    Build { target: String, code: i32 },
-    ManifestsDisabled { target: String },
-    Internal(String),
-}
-
-impl Failure {
-    fn into_anyhow(self) -> anyhow::Error {
-        match self {
-            Failure::NotBuilt { target } => NotBuilt {
-                message: format!("{target} was not built: the build ended without reporting it"),
-                target,
-            }
-            .into(),
-            Failure::NotRunnable { target } => NotRunnable {
-                message: format!("{target} built but is not runnable: it has no executable output"),
-                target,
-            }
-            .into(),
-            Failure::Build { target, code } => BuildError {
-                message: format!("the build of {target} failed with exit code {code}"),
-                target,
-                code,
-            }
-            .into(),
-            Failure::ManifestsDisabled { target } => RunError {
-                message: format!(
-                    "{target} has runfiles but Bazel wrote no runfiles manifest for it: \
-                     --nobuild_runfile_manifests is in effect, and the runfiles tree is built \
-                     from the manifest. Remove it from the rc for this invocation."
-                ),
-            }
-            .into(),
-            Failure::Internal(message) => anyhow::anyhow!(message),
+/// The error a script sees for a slot that settled without a `Runnable`.
+fn failure_error(failure: Failure) -> anyhow::Error {
+    match failure {
+        Failure::NotBuilt { target } => NotBuilt {
+            message: format!("{target} was not built: the build ended without reporting it"),
+            target,
         }
+        .into(),
+        Failure::NotRunnable { target } => NotRunnable {
+            message: format!("{target} built but is not runnable: it has no executable output"),
+            target,
+        }
+        .into(),
+        Failure::Build { target, code } => BuildError {
+            message: format!("the build of {target} failed with exit code {code}"),
+            target,
+            code,
+        }
+        .into(),
+        Failure::ManifestsDisabled { target } => RunError {
+            message: format!(
+                "{target} has runfiles but Bazel wrote no runfiles manifest for it: \
+                 --nobuild_runfile_manifests is in effect, and the runfiles tree is built \
+                 from the manifest. Remove it from the rc for this invocation."
+            ),
+        }
+        .into(),
+        Failure::Internal(message) => anyhow::anyhow!(message),
     }
 }
 
-type Outcome = Result<Runnable, Failure>;
 type SharedOutcome = Shared<BoxFuture<'static, Outcome>>;
 
-/// What the `runinfo` aspect writes per runnable target.
-#[derive(Debug, Deserialize, Default)]
-struct RunInfo {
-    #[serde(default)]
-    executable: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    environment: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    inherited_environment: Vec<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    /// The target has runfiles support (a non-empty default runfiles set).
-    #[serde(default = "yes")]
-    runfiles: bool,
-    /// Bazel wrote `<exe>.runfiles_manifest` for it.
-    #[serde(default = "yes")]
-    runfiles_manifest: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
 /// A built target, materialized and ready to spawn: what `bazel run` would
-/// have in hand right before it executes.
+/// have in hand right before it executes. A script's view of
+/// [`bazel::command::run::Runnable`], whose fields it reads through.
 #[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
-#[display("<bazel.run.Runnable {label}>")]
-pub struct Runnable {
-    label: String,
-    workspace_name: String,
-    exec_path: String,
-    runfiles_exec_path: String,
-    path: PathBuf,
-    runfiles_manifest: Option<PathBuf>,
-    runfiles_dir: Option<PathBuf>,
-    workspace_dir: Option<PathBuf>,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-    inherited_env: Vec<String>,
-    tags: Vec<String>,
-    default_outputs: Vec<PathBuf>,
+#[display("<bazel.run.Runnable {}>", _0.label)]
+pub struct Runnable(#[allocative(skip)] bazel::command::run::Runnable);
+
+impl std::ops::Deref for Runnable {
+    type Target = bazel::command::run::Runnable;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 starlark_simple_value!(Runnable);
@@ -213,87 +152,19 @@ impl FutureAlloc for Runnable {
     }
 }
 
-/// Where a spawned process is told the workspace and the CLI live.
-#[derive(Debug, Clone)]
-struct Dirs {
-    bazel_root: PathBuf,
-    aspect_root: PathBuf,
-    git_root: Option<PathBuf>,
-    cwd: PathBuf,
-}
-
-impl Dirs {
-    fn from_env(env: &Env) -> Self {
-        Self {
-            bazel_root: env.bazel_root_dir.clone(),
-            aspect_root: env.aspect_root_dir.clone(),
-            git_root: env.git_root_dir.clone(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| env.bazel_root_dir.clone()),
-        }
-    }
-
-    /// The workspace-relative package the task was invoked from, `""` at the
-    /// root or outside the workspace. Relative labels resolve against it.
-    fn current_package(&self) -> String {
-        match self.cwd.strip_prefix(&self.bazel_root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-            Err(_) => String::new(),
-        }
+/// Where a spawned process is told the workspace and the CLI live, for this
+/// task.
+fn dirs_from_env(env: &Env) -> Dirs {
+    Dirs {
+        bazel_root: env.bazel_root_dir.clone(),
+        aspect_root: env.aspect_root_dir.clone(),
+        git_root: env.git_root_dir.clone(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| env.bazel_root_dir.clone()),
     }
 }
 
 fn os(path: &Path) -> String {
     path.to_string_lossy().into_owned()
-}
-
-impl Runnable {
-    /// The process `bazel run` would start: the target's `args` attribute
-    /// ahead of `args`, `RunEnvironmentInfo` first so the variables below win,
-    /// the `BUILD_*` and `ASPECT_*` variables, the runfiles variables when a
-    /// tree exists (with `RUNFILES_MANIFEST_FILE` removed, so a launcher never
-    /// inherits the CLI's own manifest), then `env`, and `cwd` defaulting to
-    /// the runfiles workspace directory.
-    fn command(
-        &self,
-        dirs: &Dirs,
-        args: &[String],
-        env: &[(String, Option<String>)],
-        cwd: Option<&Path>,
-    ) -> process::Command {
-        let mut cmd = process::Command::new(&self.path);
-        cmd.args(&self.args).args(args);
-        for (k, v) in &self.env {
-            cmd.env(k, v);
-        }
-        cmd.env("BUILD_WORKSPACE_DIRECTORY", &dirs.bazel_root)
-            .env("BUILD_WORKING_DIRECTORY", &dirs.cwd)
-            .env("ASPECT_WORKING_DIRECTORY", &dirs.cwd)
-            .env("ASPECT_ROOT_DIRECTORY", &dirs.aspect_root)
-            .env("ASPECT_BAZEL_ROOT_DIRECTORY", &dirs.bazel_root)
-            .env(
-                "ASPECT_GIT_ROOT_DIRECTORY",
-                dirs.git_root.as_deref().unwrap_or(Path::new("")),
-            );
-        if let Some(dir) = &self.runfiles_dir {
-            cmd.env("RUNFILES_DIR", dir).env("JAVA_RUNFILES", dir);
-            if let Some(ws) = &self.workspace_dir {
-                cmd.env("RUNFILES_WORKSPACE_DIR", ws);
-            }
-            cmd.env_remove("RUNFILES_MANIFEST_FILE");
-        }
-        for (k, v) in env {
-            match v {
-                Some(v) => cmd.env(k, v),
-                None => cmd.env_remove(k),
-            };
-        }
-        let dir = cwd
-            .map(Path::to_path_buf)
-            .or_else(|| self.workspace_dir.clone())
-            .unwrap_or_else(|| dirs.cwd.clone());
-        cmd.current_dir(dir);
-        cmd
-    }
 }
 
 #[starlark_module]
@@ -449,7 +320,7 @@ fn runnable_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Command> {
         let runnable = this.downcast_ref_err::<Runnable>().into_anyhow_result()?;
-        let dirs = Dirs::from_env(Env::from_eval(eval)?);
+        let dirs = dirs_from_env(Env::from_eval(eval)?);
         let env: Vec<(String, Option<String>)> = env
             .entries
             .into_iter()
@@ -478,258 +349,8 @@ struct SpawnSpec {
     tx: oneshot::Sender<Result<Child, Failure>>,
 }
 
-/// Per-target bookkeeping on the tracker thread.
-#[derive(Default)]
-struct TargetState {
-    /// Output group name → fileset ids, from every `target_completed` for
-    /// the label (the target's own and the aspect's).
-    groups: HashMap<String, Vec<String>>,
-    /// A `target_completed` said the target failed, or an `aborted` arrived.
-    failed: bool,
-}
-
-struct Tracker {
-    /// Apparent key → label as the caller wrote it.
-    given: HashMap<String, String>,
-    filesets: HashMap<String, NamedSetOfFiles>,
-    targets: HashMap<String, TargetState>,
-    pending: HashSet<String>,
-    senders: HashMap<String, oneshot::Sender<Outcome>>,
-    completed: mpsc::Sender<String>,
-    exec_root: Option<PathBuf>,
-    workspace_name: String,
-    exit_code: Option<i32>,
-    mode: SymlinksMode,
-    dirs: Dirs,
-    spawn: Option<SpawnSpec>,
-}
-
-impl Tracker {
-    fn run(mut self, recv: Subscriber<Arc<BuildEventEnvelope>>, done: Arc<AtomicBool>) {
-        while let Ok(envelope) = recv.recv() {
-            self.handle(&envelope.event);
-        }
-        self.finish();
-        done.store(true, Ordering::SeqCst);
-    }
-
-    fn handle(&mut self, event: &BuildEvent) {
-        let id = event.id.as_ref().and_then(|id| id.id.as_ref());
-        match (&event.payload, id) {
-            (Some(Payload::NamedSetOfFiles(set)), Some(Id::NamedSet(set_id))) => {
-                self.filesets.insert(set_id.id.clone(), set.clone());
-                let pending: Vec<String> = self.pending.iter().cloned().collect();
-                for key in pending {
-                    self.check_ready(&key);
-                }
-            }
-            (Some(Payload::Completed(tc)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
-                if !self.pending.contains(&key) {
-                    return;
-                }
-                let state = self.targets.entry(key.clone()).or_default();
-                for og in &tc.output_group {
-                    state.groups.insert(
-                        og.name.clone(),
-                        og.file_sets.iter().map(|f| f.id.clone()).collect(),
-                    );
-                }
-                if !tc.success && tid.aspect.is_empty() {
-                    state.failed = true;
-                }
-                self.check_ready(&key);
-            }
-            (Some(Payload::Aborted(_)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
-                if self.pending.contains(&key) {
-                    self.targets.entry(key).or_default().failed = true;
-                }
-            }
-            (Some(Payload::WorkspaceInfo(ws)), _) => {
-                let root = ws.local_exec_root.trim_end_matches('/');
-                if !root.is_empty() {
-                    if let Some(name) = root.rsplit('/').next() {
-                        self.workspace_name = name.to_owned();
-                    }
-                    self.exec_root = Some(PathBuf::from(root));
-                }
-            }
-            (Some(Payload::Finished(finished)), _) => {
-                self.exit_code = finished.exit_code.as_ref().map(|c| c.code);
-            }
-            _ => {}
-        }
-    }
-
-    /// Absolute paths of every file under the filesets `ids`, or `None`
-    /// while any referenced fileset has not arrived yet.
-    fn collect(&self, ids: &[String]) -> Option<Vec<PathBuf>> {
-        let mut out = Vec::new();
-        let mut visited = HashSet::new();
-        let mut frontier: Vec<String> = ids.to_vec();
-        for _ in 0..FILESET_DEPTH {
-            if frontier.is_empty() {
-                break;
-            }
-            let mut next = Vec::new();
-            for id in frontier {
-                if !visited.insert(id.clone()) {
-                    continue;
-                }
-                let set = self.filesets.get(&id)?;
-                for file in &set.files {
-                    if let Some(path) = self.file_path(file) {
-                        out.push(path);
-                    }
-                }
-                for child in &set.file_sets {
-                    if !visited.contains(&child.id) {
-                        next.push(child.id.clone());
-                    }
-                }
-            }
-            frontier = next;
-        }
-        Some(out)
-    }
-
-    /// A BES file's local path: the execution root plus `path_prefix` and
-    /// `name`, which BES fills whatever the upload strategy; a `file://` URI
-    /// when there is no prefix to go by.
-    fn file_path(&self, file: &axl_proto::build_event_stream::File) -> Option<PathBuf> {
-        use axl_proto::build_event_stream::file::File as Loc;
-        if !file.path_prefix.is_empty() {
-            if let Some(root) = &self.exec_root {
-                let mut path = root.clone();
-                for seg in &file.path_prefix {
-                    path.push(seg);
-                }
-                path.push(&file.name);
-                return Some(path);
-            }
-        }
-        match &file.file {
-            Some(Loc::Uri(uri)) if uri.starts_with("file://") => {
-                Some(PathBuf::from(uri.trim_start_matches("file://")))
-            }
-            _ => None,
-        }
-    }
-
-    fn check_ready(&mut self, key: &str) {
-        let Some(state) = self.targets.get(key) else {
-            return;
-        };
-        if state.failed {
-            return;
-        }
-        let (Some(default_ids), Some(runinfo_ids)) = (
-            state.groups.get(DEFAULT_OUTPUT_GROUP),
-            state.groups.get(RUNINFO_OUTPUT_GROUP),
-        ) else {
-            return;
-        };
-        let (Some(default_files), Some(runinfo_files)) =
-            (self.collect(default_ids), self.collect(runinfo_ids))
-        else {
-            return;
-        };
-        self.settle_resolved(key, default_files, runinfo_files);
-    }
-
-    fn settle_resolved(
-        &mut self,
-        key: &str,
-        default_files: Vec<PathBuf>,
-        runinfo_files: Vec<PathBuf>,
-    ) {
-        self.pending.remove(key);
-        let Some(tx) = self.senders.remove(key) else {
-            return;
-        };
-        let label = self
-            .given
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| key.to_owned());
-        let completed = self.completed.clone();
-        let key = key.to_owned();
-        let spawn = self.spawn.take();
-        let dirs = self.dirs.clone();
-        let exec_root = self.exec_root.clone();
-        let workspace_name = self.workspace_name.clone();
-        let mode = self.mode;
-        // Materializing a runfiles tree can take a while; a thread per target
-        // keeps one target's tree from delaying the next target's readiness.
-        std::thread::spawn(move || {
-            let outcome = resolve(
-                &label,
-                exec_root.as_deref(),
-                &workspace_name,
-                mode,
-                default_files,
-                runinfo_files,
-            );
-            if let Some(spec) = spawn {
-                match &outcome {
-                    Ok(runnable) => spawn_child(runnable, &dirs, spec),
-                    Err(failure) => {
-                        let _ = spec.tx.send(Err(failure.clone()));
-                    }
-                }
-            }
-            let _ = tx.send(outcome);
-            let _ = completed.send(key);
-        });
-    }
-
-    /// The stream closed: everything still pending did not settle on its own.
-    fn finish(mut self) {
-        let code = self.exit_code.unwrap_or(1);
-        let pending: Vec<String> = self.pending.drain().collect();
-        for key in pending {
-            let target = self.given.get(&key).cloned().unwrap_or_else(|| key.clone());
-            let state = self.targets.get(&key);
-            let failure = classify_unsettled(
-                target,
-                state.is_some_and(|s| s.failed),
-                state.is_some_and(|s| s.groups.contains_key(DEFAULT_OUTPUT_GROUP)),
-                code,
-            );
-            if let Some(spec) = self.spawn.take() {
-                let _ = spec.tx.send(Err(failure.clone()));
-            }
-            if let Some(tx) = self.senders.remove(&key) {
-                let _ = tx.send(Err(failure));
-            }
-            let _ = self.completed.send(key);
-        }
-    }
-}
-
-/// Why a target the build ended on did not produce a `Runnable`.
-///
-/// A target whose own completion reported failure, or that was aborted, is a
-/// build failure whatever else happened. One that completed with its default
-/// outputs but never got an `aspect_runinfo` group built fine and has no
-/// executable: the aspect returns nothing for a library or a filegroup. One
-/// the build never reported at all was not built, and when the build itself
-/// failed that is the likeliest reason, so the failure carries Bazel's code.
-fn classify_unsettled(target: String, failed: bool, has_default: bool, code: i32) -> Failure {
-    if failed {
-        Failure::Build { target, code }
-    } else if has_default {
-        Failure::NotRunnable { target }
-    } else if code != 0 {
-        Failure::Build { target, code }
-    } else {
-        Failure::NotBuilt { target }
-    }
-}
-
 /// Start the process `run` asked for and hand it to the `child` future.
-fn spawn_child(runnable: &Runnable, dirs: &Dirs, spec: SpawnSpec) {
+fn spawn_child(runnable: &bazel::command::run::Runnable, dirs: &Dirs, spec: SpawnSpec) {
     let SpawnSpec {
         args,
         env,
@@ -751,251 +372,19 @@ fn spawn_child(runnable: &Runnable, dirs: &Dirs, spec: SpawnSpec) {
     let _ = tx.send(result);
 }
 
-/// Turn a ready target's files into a `Runnable`: pick the executable, read
-/// the aspect's capture, and build the runfiles tree.
-fn resolve(
-    label: &str,
-    exec_root: Option<&Path>,
-    workspace_name: &str,
-    mode: SymlinksMode,
-    default_files: Vec<PathBuf>,
-    runinfo_files: Vec<PathBuf>,
-) -> Outcome {
-    let runinfo = runinfo_files
-        .iter()
-        .find(|p| p.to_string_lossy().ends_with(RUNINFO_JSON_SUFFIX))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str::<RunInfo>(&text).ok());
-    let target_name = label.rsplit(':').next().unwrap_or(label).to_owned();
-    let Some(path) = pick_executable(&default_files, runinfo.as_ref(), &target_name) else {
-        return Err(Failure::NotRunnable {
-            target: label.to_owned(),
-        });
-    };
-    let runinfo = runinfo.unwrap_or_default();
-    let workspace_name = if workspace_name.is_empty() {
-        DEFAULT_WORKSPACE_NAME
-    } else {
-        workspace_name
-    };
-
-    // The aspect says whether Bazel wrote a manifest in this build. A
-    // manifest or `<exe>.runfiles` directory found on disk without that is
-    // from an earlier build and is not trusted: with runfiles but no manifest
-    // nothing can run, and without runfiles there is no tree to build.
-    if runinfo.runfiles && !runinfo.runfiles_manifest {
-        return Err(Failure::ManifestsDisabled {
-            target: label.to_owned(),
-        });
-    }
-    let (runfiles_manifest, runfiles_dir) = if runinfo.runfiles_manifest {
-        let manifest = runfiles::input_manifest(&path);
-        let dir = match runfiles::materialize(&path, workspace_name, mode) {
-            Ok(dir) => dir,
-            Err(err) => {
-                return Err(Failure::Internal(format!(
-                    "failed to build the runfiles tree for {label}: {err}"
-                )));
-            }
-        };
-        (manifest, dir)
-    } else {
-        (None, None)
-    };
-    let workspace_dir = runfiles_dir.as_ref().map(|d| d.join(workspace_name));
-
-    let exec_path = exec_root
-        .and_then(|root| path.strip_prefix(root).ok())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| os(&path));
-    let runfiles_exec_path = format!("{exec_path}{}", runfiles::RUNFILES_DIR_EXT);
-
-    Ok(Runnable {
-        label: label.to_owned(),
-        workspace_name: workspace_name.to_owned(),
-        exec_path,
-        runfiles_exec_path,
-        path,
-        runfiles_manifest,
-        runfiles_dir,
-        workspace_dir,
-        args: runinfo.args,
-        env: runinfo
-            .environment
-            .into_iter()
-            .map(|(k, v)| {
-                let v = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                (k, v)
-            })
-            .collect(),
-        inherited_env: runinfo.inherited_environment,
-        tags: runinfo.tags,
-        default_outputs: default_files,
-    })
-}
-
-/// The executable among `candidates`: the aspect's `files_to_run.executable`
-/// basename when the aspect ran, else a file named after the target, else
-/// the target name plus a script extension, else the first file with the
-/// executable bit.
-fn pick_executable(
-    candidates: &[PathBuf],
-    runinfo: Option<&RunInfo>,
-    target_name: &str,
-) -> Option<PathBuf> {
-    let basename = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned());
-    if let Some(info) = runinfo {
-        let exe = info.executable.rsplit('/').next().unwrap_or("");
-        if !exe.is_empty() {
-            if let Some(found) = candidates
-                .iter()
-                .find(|c| basename(c).as_deref() == Some(exe))
-            {
-                return Some(found.clone());
-            }
-        }
-    }
-    if let Some(found) = candidates
-        .iter()
-        .find(|c| basename(c).as_deref() == Some(target_name))
-    {
-        return Some(found.clone());
-    }
-    for ext in SCRIPT_EXTENSIONS {
-        let name = format!("{target_name}{ext}");
-        if let Some(found) = candidates
-            .iter()
-            .find(|c| basename(c).as_deref() == Some(&name))
-        {
-            return Some(found.clone());
-        }
-    }
-    candidates.iter().find(|c| is_executable(c)).cloned()
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// `(section, token)` for every option on a rendered command line, reading
-/// `--default_override=N:section=payload` the way `bazelrc::last_flag_value`
-/// does, overrides first and literal tokens last so a literal wins.
-fn option_tokens(flags: &[String]) -> Vec<String> {
-    let mut overrides = Vec::new();
-    let mut literals = Vec::new();
-    for flag in flags {
-        match flag.strip_prefix("--default_override=") {
-            Some(rest) => {
-                let payload = rest
-                    .split_once(':')
-                    .and_then(|(_, r)| r.split_once('='))
-                    .map(|(_, p)| p)
-                    .unwrap_or(rest);
-                overrides.push(payload.to_owned());
-            }
-            None => literals.push(flag.clone()),
-        }
-    }
-    overrides.extend(literals);
-    overrides
-}
-
-/// The effective value of a boolean `--name`: `--name`, `--name=<bool>`,
-/// `--noname`. `None` when unset.
-fn effective_bool(flags: &[String], name: &str) -> Option<bool> {
-    let bare = format!("--{name}");
-    let no = format!("--no{name}");
-    let eq = format!("--{name}=");
-    let mut value = None;
-    for token in option_tokens(flags) {
-        if token == bare {
-            value = Some(true);
-        } else if token == no {
-            value = Some(false);
-        } else if let Some(v) = token.strip_prefix(&eq) {
-            value = match v.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "t" | "y" => Some(true),
-                "false" | "0" | "no" | "f" | "n" => Some(false),
-                _ => value,
-            };
-        }
-    }
-    value
-}
-
-/// The effective `--remote_download_outputs` mode, reading the flag and its
-/// three no-value aliases. `None` when unset, which is Bazel's `toplevel`.
-fn effective_download_outputs(flags: &[String]) -> Option<String> {
-    let mut value = None;
-    for token in option_tokens(flags) {
-        match token.as_str() {
-            "--remote_download_minimal" => value = Some("minimal".to_owned()),
-            "--remote_download_toplevel" => value = Some("toplevel".to_owned()),
-            "--remote_download_all" => value = Some("all".to_owned()),
-            _ => {
-                if let Some(v) = token.strip_prefix("--remote_download_outputs=") {
-                    value = Some(v.to_owned());
-                }
-            }
-        }
-    }
-    value
-}
-
-/// Whether a `--remote_download_outputs` mode already puts top-level outputs
-/// and their runfiles on disk. Only `minimal` does not.
-fn download_outputs_sufficient(value: Option<&str>) -> bool {
-    !matches!(value, Some("minimal"))
-}
-
-fn runinfo_aspect() -> Aspect {
-    Aspect {
-        implementation: RUNINFO_BZL.to_owned(),
-        symbol: RUNINFO_SYMBOL.to_owned(),
-        parameters: vec![],
-        output_groups: vec![RUNINFO_OUTPUT_GROUP.to_owned()],
-    }
-}
-
 /// The flags both verbs add to the rc-resolved command line, and the
-/// runfiles mode the rc implies. Every injected flag is a command option;
-/// none is part of the configuration, which is what keeps the analysis cache.
+/// runfiles mode the rc implies; see [`bazel::command::run::prepare_flags`].
 fn prepare_flags(
     signals: &Arc<Signals>,
     flags: &mut Vec<String>,
     startup_flags: &[String],
 ) -> anyhow::Result<SymlinksMode> {
-    if effective_bool(flags, "build_runfile_manifests") == Some(false) {
-        return Err(RunError {
-            message: "--nobuild_runfile_manifests is incompatible with running a target: \
-                      the runfiles tree is built from the manifest. Remove it from the rc \
-                      for this invocation."
-                .to_owned(),
-        }
-        .into());
-    }
-    let mode = SymlinksMode::from_enable_runfiles(effective_bool(flags, "enable_runfiles"));
-    if !download_outputs_sufficient(effective_download_outputs(flags).as_deref()) {
-        flags.push("--remote_download_outputs=toplevel".to_owned());
-    }
-    flags.extend(aspect::materialize(
-        signals,
-        &[runinfo_aspect()],
-        startup_flags,
-    )?);
-    Ok(mode)
+    let runner = super::runner::SignalRunner(signals);
+    bazel::command::run::prepare_flags(&bazel::server::Server::new(&runner, startup_flags), flags)
+        .map_err(|e| match e {
+            PrepareError::Refused(message) => RunError { message }.into(),
+            PrepareError::Other(e) => e,
+        })
 }
 
 /// What both verbs share after the build is spawned.
@@ -1012,12 +401,8 @@ fn start<'v>(
     env: &Env,
     targets: &[String],
     build_events: (bool, Vec<super::build::BuildEventSink>, Vec<BuildEventIter>),
-    execution_log: (
-        bool,
-        Vec<super::sink::execlog::ExecLogSink>,
-        Vec<super::iter::ExecLogIter>,
-    ),
-    rc: Option<bazelrc::BazelRC>,
+    execution_log: (bool, Vec<ExecLogSink>, Vec<super::iter::ExecLogIter>),
+    rc: Option<bazel::rc::BazelRC>,
     directory: Option<String>,
     (build_stdout, build_stderr): (Stdio, Stdio),
     announce: super::build::AnnounceSpawn,
@@ -1036,7 +421,7 @@ fn start<'v>(
     };
     let mode = prepare_flags(&env.signals, &mut flags, &startup_flags)?;
 
-    let dirs = Dirs::from_env(env);
+    let dirs = dirs_from_env(env);
     let package = dirs.current_package();
     let mut given = HashMap::new();
     let mut keys = Vec::new();
@@ -1055,8 +440,9 @@ fn start<'v>(
         let fut: BoxFuture<'static, Outcome> = rx
             .map(|r| {
                 r.unwrap_or_else(|_| {
-                    Failure::Internal("the build ended before this target was resolved".to_owned())
-                        .into_outcome()
+                    Err(Failure::Internal(
+                        "the build ended before this target was resolved".to_owned(),
+                    ))
                 })
             })
             .boxed();
@@ -1090,20 +476,24 @@ fn start<'v>(
         .ok_or_else(|| anyhow::anyhow!("the run tracker's BES subscription was not bound"))?;
     let (completed_tx, completed_rx) = mpsc::channel();
     let done = Arc::new(AtomicBool::new(false));
-    let tracker = Tracker {
-        pending: keys.iter().cloned().collect(),
+    // The one target `run` starts is spawned the moment it settles, from the
+    // tracker's thread, or told why it never will be.
+    let on_settled = spawn.map(|spec| -> OnSettled {
+        Box::new(move |settled| match settled {
+            Ok(runnable) => spawn_child(runnable, &dirs, spec),
+            Err(failure) => {
+                let _ = spec.tx.send(Err(failure.clone()));
+            }
+        })
+    });
+    let tracker = Tracker::new(
         given,
-        filesets: HashMap::new(),
-        targets: HashMap::new(),
+        keys.iter().cloned(),
         senders,
-        completed: completed_tx,
-        exec_root: None,
-        workspace_name: DEFAULT_WORKSPACE_NAME.to_owned(),
-        exit_code: None,
+        completed_tx,
         mode,
-        dirs,
-        spawn,
-    };
+        on_settled,
+    );
     let done_flag = done.clone();
     std::thread::Builder::new()
         .name("bazel-run-tracker".to_owned())
@@ -1117,15 +507,9 @@ fn start<'v>(
     })
 }
 
-impl Failure {
-    fn into_outcome(self) -> Outcome {
-        Err(self)
-    }
-}
-
 fn runnable_future<'v>(shared: &SharedOutcome) -> FutureOf<'v, Runnable> {
     let fut = shared.clone();
-    FutureOf::from_future(async move { fut.await.map_err(Failure::into_anyhow) })
+    FutureOf::from_future(async move { fut.await.map(Runnable).map_err(failure_error) })
 }
 
 /// One target built for running: the handle `ctx.bazel.run` returns.
@@ -1215,7 +599,7 @@ fn run_methods(registry: &mut MethodsBuilder) {
         Ok(FutureOf::from_future(async move {
             match rx.await {
                 Ok(Ok(child)) => Ok(child),
-                Ok(Err(failure)) => Err(failure.into_anyhow()),
+                Ok(Err(failure)) => Err(failure_error(failure)),
                 Err(_) => Err(anyhow::anyhow!(
                     "the build ended before the process was spawned"
                 )),
@@ -1235,7 +619,7 @@ fn run_methods(registry: &mut MethodsBuilder) {
         let rx = run.take_child()?;
         let child = match env.signals.block(rx) {
             Ok(Ok(Ok(child))) => child,
-            Ok(Ok(Err(failure))) => return Err(failure.into_anyhow()),
+            Ok(Ok(Err(failure))) => return Err(failure_error(failure)),
             Ok(Err(_)) => anyhow::bail!("the build ended before the process was spawned"),
             Err(exit) => return Err(exit.into()),
         };
@@ -1496,9 +880,9 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<super::sink::execlog::ExecLogSink, super::iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazelrc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -1542,7 +926,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             &token,
             Some(spec),
         )?;
-        let key = apparent_label(&label, &Dirs::from_env(env_).current_package());
+        let key = apparent_label(&label, &dirs_from_env(env_).current_package());
         let runnable = started
             .shared
             .get(&key)
@@ -1602,9 +986,9 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<super::sink::execlog::ExecLogSink, super::iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazelrc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<
@@ -1620,7 +1004,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<Runs> {
         let env: &Env = Env::from_eval(eval)?;
         let token = super::cancellation_token(&env.signals, cancellation);
-        let dirs = Dirs::from_env(env);
+        let dirs = dirs_from_env(env);
         let package = dirs.current_package();
         let mut given = HashMap::new();
         for target in &targets.items {
@@ -1679,235 +1063,11 @@ pub(crate) fn register_run_errors(globals: &mut starlark::environment::GlobalsBu
 mod tests {
     use super::*;
 
-    fn flags(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn unsettled_targets_are_classified_by_their_own_state_first() {
-        let t = || "//:t".to_owned();
-        assert!(matches!(
-            classify_unsettled(t(), true, true, 0),
-            Failure::Build { code: 0, .. }
-        ));
-        assert!(matches!(
-            classify_unsettled(t(), false, true, 1),
-            Failure::NotRunnable { .. }
-        ));
-        assert!(matches!(
-            classify_unsettled(t(), false, false, 1),
-            Failure::Build { code: 1, .. }
-        ));
-        assert!(matches!(
-            classify_unsettled(t(), false, false, 0),
-            Failure::NotBuilt { .. }
-        ));
-    }
-
     #[test]
     fn what_crosses_threads_is_send() {
         fn is_send<T: Send>() {}
         is_send::<Runnable>();
         is_send::<Child>();
         is_send::<SpawnSpec>();
-    }
-
-    #[test]
-    fn booleans_read_every_spelling_and_the_override_form() {
-        assert_eq!(
-            effective_bool(&flags(&["--enable_runfiles"]), "enable_runfiles"),
-            Some(true)
-        );
-        assert_eq!(
-            effective_bool(&flags(&["--noenable_runfiles"]), "enable_runfiles"),
-            Some(false)
-        );
-        assert_eq!(
-            effective_bool(&flags(&["--enable_runfiles=no"]), "enable_runfiles"),
-            Some(false)
-        );
-        assert_eq!(effective_bool(&flags(&[]), "enable_runfiles"), None);
-        assert_eq!(
-            effective_bool(
-                &flags(&["--default_override=0:common=--nobuild_runfile_manifests"]),
-                "build_runfile_manifests"
-            ),
-            Some(false)
-        );
-        // A literal beats an override whatever the order.
-        assert_eq!(
-            effective_bool(
-                &flags(&[
-                    "--build_runfile_manifests",
-                    "--default_override=0:build=--nobuild_runfile_manifests"
-                ]),
-                "build_runfile_manifests"
-            ),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn download_mode_reads_the_flag_and_its_aliases() {
-        assert_eq!(effective_download_outputs(&flags(&[])), None);
-        assert_eq!(
-            effective_download_outputs(&flags(&["--remote_download_minimal"])).as_deref(),
-            Some("minimal")
-        );
-        assert_eq!(
-            effective_download_outputs(&flags(&["--remote_download_outputs=all"])).as_deref(),
-            Some("all")
-        );
-        assert_eq!(
-            effective_download_outputs(&flags(&[
-                "--default_override=0:common=--remote_download_outputs=minimal",
-                "--remote_download_toplevel"
-            ]))
-            .as_deref(),
-            Some("toplevel")
-        );
-        assert!(download_outputs_sufficient(None));
-        assert!(download_outputs_sufficient(Some("toplevel")));
-        assert!(download_outputs_sufficient(Some("all")));
-        assert!(!download_outputs_sufficient(Some("minimal")));
-    }
-
-    #[test]
-    fn executable_choice_prefers_the_aspect_then_the_name_then_extensions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mk = |name: &str, exec: bool| {
-            let p = tmp.path().join(name);
-            std::fs::write(&p, "").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    &p,
-                    std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }),
-                )
-                .unwrap();
-            }
-            let _ = exec;
-            p
-        };
-        let other = mk("other", true);
-        let tool_sh = mk("tool.sh", false);
-        let tool = mk("tool", false);
-        let candidates = vec![other.clone(), tool_sh.clone(), tool.clone()];
-        let info = RunInfo {
-            executable: "pkg/tool.sh".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(
-            pick_executable(&candidates, Some(&info), "tool"),
-            Some(tool_sh.clone())
-        );
-        assert_eq!(pick_executable(&candidates, None, "tool"), Some(tool));
-        assert_eq!(
-            pick_executable(&[other.clone(), tool_sh.clone()], None, "tool"),
-            Some(tool_sh)
-        );
-        #[cfg(unix)]
-        assert_eq!(pick_executable(&[other.clone()], None, "tool"), Some(other));
-    }
-
-    #[test]
-    fn runinfo_json_decodes_what_the_aspect_writes() {
-        let text = r#"{"executable":"pkg/tool","args":["a","b c"],"environment":{"K":"V"},"inherited_environment":["HOME"],"tags":["manual"]}"#;
-        let info: RunInfo = serde_json::from_str(text).unwrap();
-        assert_eq!(info.executable, "pkg/tool");
-        assert_eq!(info.args, vec!["a", "b c"]);
-        assert_eq!(info.environment.get("K").unwrap(), "V");
-        assert_eq!(info.inherited_environment, vec!["HOME"]);
-        assert_eq!(info.tags, vec!["manual"]);
-        // Fields an older aspect did not write default to the common case.
-        assert!(info.runfiles && info.runfiles_manifest);
-        let text = r#"{"executable":"pkg/tool","runfiles":true,"runfiles_manifest":false}"#;
-        let info: RunInfo = serde_json::from_str(text).unwrap();
-        assert!(info.runfiles && !info.runfiles_manifest);
-    }
-
-    #[test]
-    fn command_composes_the_bazel_run_environment() {
-        let r = Runnable {
-            label: "//pkg:tool".into(),
-            workspace_name: "_main".into(),
-            exec_path: "bazel-out/bin/pkg/tool".into(),
-            runfiles_exec_path: "bazel-out/bin/pkg/tool.runfiles".into(),
-            path: PathBuf::from("/x/bazel-out/bin/pkg/tool"),
-            runfiles_manifest: None,
-            runfiles_dir: Some(PathBuf::from("/x/bazel-out/bin/pkg/tool.runfiles")),
-            workspace_dir: Some(PathBuf::from("/x/bazel-out/bin/pkg/tool.runfiles/_main")),
-            args: vec!["--from-attr".into()],
-            env: vec![("FROM_RULE".into(), "1".into())],
-            inherited_env: vec![],
-            tags: vec![],
-            default_outputs: vec![],
-        };
-        let dirs = Dirs {
-            bazel_root: PathBuf::from("/ws"),
-            aspect_root: PathBuf::from("/ws"),
-            git_root: None,
-            cwd: PathBuf::from("/ws/pkg"),
-        };
-        let cmd = r.command(
-            &dirs,
-            &["--extra".to_owned()],
-            &[
-                ("FROM_RULE".to_owned(), None),
-                ("MINE".to_owned(), Some("2".to_owned())),
-            ],
-            None,
-        );
-        let args: Vec<_> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(args, vec!["--from-attr", "--extra"]);
-        let envs: HashMap<String, Option<String>> = cmd
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|v| v.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        assert_eq!(envs.get("FROM_RULE"), Some(&None));
-        assert_eq!(envs.get("MINE"), Some(&Some("2".to_owned())));
-        assert_eq!(
-            envs.get("RUNFILES_DIR"),
-            Some(&Some("/x/bazel-out/bin/pkg/tool.runfiles".to_owned()))
-        );
-        assert_eq!(envs.get("RUNFILES_MANIFEST_FILE"), Some(&None));
-        assert_eq!(
-            envs.get("BUILD_WORKSPACE_DIRECTORY"),
-            Some(&Some("/ws".to_owned()))
-        );
-        assert_eq!(
-            cmd.get_current_dir(),
-            Some(Path::new("/x/bazel-out/bin/pkg/tool.runfiles/_main"))
-        );
-    }
-
-    #[test]
-    fn current_package_is_relative_to_the_workspace() {
-        let dirs = Dirs {
-            bazel_root: PathBuf::from("/ws"),
-            aspect_root: PathBuf::from("/ws"),
-            git_root: None,
-            cwd: PathBuf::from("/ws/a/b"),
-        };
-        assert_eq!(dirs.current_package(), "a/b");
-        let root = Dirs {
-            cwd: PathBuf::from("/ws"),
-            ..dirs.clone()
-        };
-        assert_eq!(root.current_package(), "");
-        let outside = Dirs {
-            cwd: PathBuf::from("/elsewhere"),
-            ..dirs
-        };
-        assert_eq!(outside.current_package(), "");
     }
 }

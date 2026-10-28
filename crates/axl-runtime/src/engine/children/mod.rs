@@ -26,8 +26,6 @@
 //! process exit can wait for sequences in flight and the backstop can kill
 //! what is left.
 
-pub(crate) mod os;
-
 use std::cell::RefCell;
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Output};
@@ -40,7 +38,8 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::cancellation::Signals;
 use crate::eval::TaskExit;
 
-pub use os::Target;
+use bazel::process::signal as os;
+use bazel::process::signal::Target;
 
 /// How long a signalled process gets to exit before the next rung: SIGINT,
 /// then SIGTERM, then SIGKILL.
@@ -358,52 +357,9 @@ impl Spawned {
     }
 }
 
-/// What a cancellable receive produced.
-pub enum Recv<T> {
-    Item(T),
-    /// `tick` passed with nothing to deliver.
-    Tick,
-    /// The sender is gone.
-    Closed,
-    /// The root token was cancelled while waiting.
-    Cancelled,
-}
+pub use bazel::fanout::{Recv, RecvSlice, Slice};
 
-/// One bounded receive on a channel, whichever crate's.
-pub enum Slice<T> {
-    Item(T),
-    Empty,
-    Closed,
-}
-
-/// A channel receiver [`recv_cancellable`] can poll.
-pub trait RecvSlice<T> {
-    fn recv_slice(&self, slice: Duration) -> Slice<T>;
-}
-
-impl<T> RecvSlice<T> for std::sync::mpsc::Receiver<T> {
-    fn recv_slice(&self, slice: Duration) -> Slice<T> {
-        use std::sync::mpsc::RecvTimeoutError;
-        match self.recv_timeout(slice) {
-            Ok(item) => Slice::Item(item),
-            Err(RecvTimeoutError::Timeout) => Slice::Empty,
-            Err(RecvTimeoutError::Disconnected) => Slice::Closed,
-        }
-    }
-}
-
-impl<T: Send + Clone> RecvSlice<T> for fibre::spmc::Receiver<T> {
-    fn recv_slice(&self, slice: Duration) -> Slice<T> {
-        use fibre::RecvErrorTimeout;
-        match self.recv_timeout(slice) {
-            Ok(item) => Slice::Item(item),
-            Err(RecvErrorTimeout::Timeout) => Slice::Empty,
-            Err(RecvErrorTimeout::Disconnected) => Slice::Closed,
-        }
-    }
-}
-
-/// Receive from `recv`, checking the root token every [`POLL`], for at most
+/// Receive from `recv`, checking the root token every poll, for at most
 /// `tick` when given. For iterators, which cannot raise: on `Cancelled` they
 /// end, and the loop's next call raises the task's exit.
 pub fn recv_cancellable<T>(
@@ -411,25 +367,7 @@ pub fn recv_cancellable<T>(
     recv: &impl RecvSlice<T>,
     tick: Option<Duration>,
 ) -> Recv<T> {
-    let deadline = tick.map(|t| Instant::now() + t);
-    loop {
-        if signals.should_unwind() {
-            return Recv::Cancelled;
-        }
-        let slice = match deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).min(POLL),
-            None => POLL,
-        };
-        match recv.recv_slice(slice) {
-            Slice::Item(item) => return Recv::Item(item),
-            Slice::Closed => return Recv::Closed,
-            Slice::Empty => {
-                if deadline.is_some_and(|d| Instant::now() >= d) {
-                    return Recv::Tick;
-                }
-            }
-        }
-    }
+    bazel::fanout::recv_cancellable(|| signals.should_unwind(), recv, tick)
 }
 
 /// The exit a cancelled wait reports, as the `io::Error` the std-shaped

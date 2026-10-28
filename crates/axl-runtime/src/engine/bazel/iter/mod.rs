@@ -1,5 +1,4 @@
 pub mod execlog;
-pub mod subscription;
 mod workspace_event;
 
 pub use execlog::ExecLogIter;

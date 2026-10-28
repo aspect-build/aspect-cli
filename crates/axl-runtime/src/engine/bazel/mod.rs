@@ -36,48 +36,19 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
-mod aspect;
 mod build;
 mod cancel;
-mod health_check;
-mod info;
 mod iter;
-mod label;
 mod query;
+mod retry;
 mod run;
-mod runfiles;
-mod sandbox_recovery;
-mod sink;
-mod stream;
+mod runner;
+mod wrappers;
+
+use wrappers::ExecLogSink;
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
-pub(crate) use stream::redaction::redact_command_args;
-
-/// Resolve which `bazel` binary to spawn. Honors the `BAZEL_REAL` env var
-/// (the bazelisk convention) so wrapped invocations and tests can substitute
-/// their own binary; falls back to plain `"bazel"` and lets the OS resolve
-/// it via `PATH`.
-pub(crate) fn bazel_binary() -> String {
-    std::env::var("BAZEL_REAL").unwrap_or_else(|_| "bazel".to_string())
-}
-
-/// Build a `Command` for spawning bazel, with the anti-inception env var set.
-///
-/// When `tools/bazel` wrapper scripts forward to `aspect` for build/test/run,
-/// aspect then needs to spawn its OWN child bazel. If `PATH` still has
-/// `tools/bazel` first, that child re-enters the wrapper and bounces right
-/// back into aspect — inception, repeated forever.
-///
-/// `ASPECT_CLI_RUNNING=1` breaks the cycle: cooperating wrapper scripts
-/// check for it on entry and short-circuit straight to the real bazel
-/// (matching the spirit of bazelisk's `BAZELISK_SKIP_WRAPPER`). All bazel
-/// spawns from inside aspect go through this helper so the env var is
-/// always set, regardless of which call site fired.
-pub(crate) fn bazel_command() -> std::process::Command {
-    let mut cmd = std::process::Command::new(bazel_binary());
-    cmd.env("ASPECT_CLI_RUNNING", "1");
-    cmd
-}
+pub(crate) use bazel::bes::redact::redact_command_args;
 
 /// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
 ///
@@ -133,12 +104,8 @@ fn partition_build_events(
 /// stream naming no consumer up front — `build.execution_logs()` can still claim
 /// the stream's own subscriber later — and a list enables it and names consumers.
 fn partition_execution_log(
-    arg: Either<bool, UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>>,
-) -> (
-    bool,
-    Vec<sink::execlog::ExecLogSink>,
-    Vec<iter::ExecLogIter>,
-) {
+    arg: Either<bool, UnpackList<Either<ExecLogSink, iter::ExecLogIter>>>,
+) -> (bool, Vec<ExecLogSink>, Vec<iter::ExecLogIter>) {
     match arg {
         Either::Left(b) => (b, vec![], vec![]),
         Either::Right(items) => {
@@ -165,13 +132,18 @@ fn partition_execution_log(
 fn resolve_rc_version(
     signals: &Arc<cancellation::Signals>,
     requested: Option<String>,
-    rc: &bazelrc::BazelRC,
+    rc: &bazel::rc::BazelRC,
 ) -> anyhow::Result<Option<semver::Version>> {
     if let Some(s) = requested {
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(info::server_info(signals).ok().and_then(|t| t.1));
+        return Ok(
+            bazel::server::Server::new(&runner::SignalRunner(signals), &[])
+                .info()
+                .ok()
+                .and_then(|t| t.1),
+        );
     }
     Ok(None)
 }
@@ -209,8 +181,9 @@ fn resolve_flags_for_running_bazel<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<Vec<String>> {
     let version = if items.iter().any(|f| f.is_right()) {
-        info::server_info(signals)
-            .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
+        bazel::server::Server::new(&runner::SignalRunner(signals), &[])
+            .info()
+            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
             .1
     } else {
         None
@@ -218,31 +191,8 @@ fn resolve_flags_for_running_bazel<'v>(
     resolve_flags(items, version.as_ref())
 }
 
-/// Whether a semver `constraint` is satisfied by the running Bazel `version`.
-///
-/// `version` is `None` when Bazel reports a non-release build (a
-/// `development version` has no version number to parse). Such a build is
-/// compiled from HEAD, so it is effectively newer than any release: it is
-/// matched against a max version, so lower-bound gates (`>=N`, the usual
-/// shape) match and upper-bound gates (`<N`) don't.
-///
-/// An unparseable constraint is a hard error naming the offending value.
-///
-/// The version's pre-release suffix is ignored: semver `VersionReq` matching
-/// treats a pre-release specially (e.g. `8.0.0-rc2` does NOT satisfy `>=8.0.0`),
-/// but for flag gating a release candidate should match the same constraints its
-/// release will. So `8.0.0-rc2` is compared as `8.0.0`.
-fn constraint_matches(constraint: &str, version: Option<&semver::Version>) -> anyhow::Result<bool> {
-    let req = semver::VersionReq::parse(constraint)
-        .map_err(|e| anyhow::anyhow!("invalid version constraint '{}': {}", constraint, e))?;
-    let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-    let probe = match version {
-        Some(v) if !v.pre.is_empty() => semver::Version::new(v.major, v.minor, v.patch),
-        Some(v) => v.clone(),
-        None => assumed_latest,
-    };
-    Ok(req.matches(&probe))
-}
+use bazel::rc::constraint_matches;
+use bazel::runner::Runner as _;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<bazel.Bazel>")]
@@ -341,22 +291,7 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
-/// Bazel's `stderr` rendered as a trailing detail for a spawn-failure error,
-/// on its own line. Empty when Bazel wrote nothing, so a command that died
-/// without diagnostics still yields a clean exit-code message.
-///
-/// Bazel reuses a handful of exit codes across unrelated causes (`2` covers
-/// every command-line error — unknown startup option, unrecognized flag,
-/// unknown `info` key, running outside a workspace), so the code alone rarely
-/// identifies the failure.
-pub(crate) fn stderr_detail(stderr: &str) -> String {
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        String::new()
-    } else {
-        format!("\n{stderr}")
-    }
-}
+pub(crate) use bazel::command::stderr_detail;
 
 /// The startup flags for an invocation: sourced from the active `RunCommand`
 /// (set by `use_rc`), or empty when none is active.
@@ -387,7 +322,7 @@ fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
     }
 }
 
-fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
+fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::BazelRC> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
     } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
@@ -395,7 +330,7 @@ fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
     } else {
         None
     };
-    slot.and_then(|v| v.downcast_ref::<bazelrc::BazelRC>().cloned())
+    slot.and_then(|v| v.downcast_ref::<bazel::rc::BazelRC>().cloned())
 }
 
 /// Resolve the `RunCommand` in effect for an invocation: a per-call `rc=`
@@ -404,9 +339,9 @@ fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
 fn effective_rc<'v>(
     this: values::Value<'v>,
     rc_param: NoneOr<values::Value<'v>>,
-) -> Option<bazelrc::BazelRC> {
+) -> Option<bazel::rc::BazelRC> {
     if let NoneOr::Other(v) = rc_param {
-        return v.downcast_ref::<bazelrc::BazelRC>().cloned();
+        return v.downcast_ref::<bazel::rc::BazelRC>().cloned();
     }
     read_active_rc(this)
 }
@@ -471,7 +406,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] rc: values::Value<'v>,
     ) -> anyhow::Result<NoneType> {
-        if rc.downcast_ref::<bazelrc::BazelRC>().is_none() {
+        if rc.downcast_ref::<bazel::rc::BazelRC>().is_none() {
             return Err(anyhow::anyhow!(
                 "use_rc expects a RunCommand (from parse_rc / new_rc), got {}",
                 rc.get_type()
@@ -523,8 +458,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] output_groups: UnpackList<
             String,
         >,
-    ) -> anyhow::Result<aspect::Aspect> {
-        Ok(aspect::Aspect {
+    ) -> anyhow::Result<wrappers::Aspect> {
+        Ok(wrappers::Aspect {
             implementation,
             symbol,
             parameters: parameters.entries,
@@ -613,7 +548,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -626,7 +561,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
-            aspect::Aspect,
+            wrappers::Aspect,
         >,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
@@ -639,7 +574,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
-        resolved_flags.extend(aspect::materialize(
+        resolved_flags.extend(wrappers::materialize_aspects(
             &env.signals,
             &aspects.items,
             &resolved_startup_flags,
@@ -746,7 +681,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<Either<sink::execlog::ExecLogSink, iter::ExecLogIter>>,
+            UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -759,7 +694,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
-            aspect::Aspect,
+            wrappers::Aspect,
         >,
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
@@ -772,7 +707,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
-        resolved_flags.extend(aspect::materialize(
+        resolved_flags.extend(wrappers::materialize_aspects(
             &env.signals,
             &aspects.items,
             &resolved_startup_flags,
@@ -909,7 +844,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
         let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 
-        let mut cmd = bazel_command();
+        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.args(&command_flags);
@@ -925,7 +860,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait_with_output()
-            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
+            // Context, not a string: a wait that was cancelled has to reach
+            // `TaskExit::from_anyhow` intact.
+            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
 
         if !output.status.success() {
             let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
@@ -935,10 +872,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             );
         }
 
-        Ok(info::parse_output(
-            &String::from_utf8_lossy(&output.stdout),
-            &requested,
-        ))
+        Ok(
+            bazel::server::info::parse_output(&String::from_utf8_lossy(&output.stdout), &requested)
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -966,14 +904,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
 
-        let mut cmd = bazel_command();
+        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
         cmd.args(&startup_flags);
         cmd.arg("shutdown");
         cmd.stdin(Stdio::null());
         let status = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait()
-            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
+            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
         Ok(status.code().unwrap_or(-1))
     }
 
@@ -1006,7 +944,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
         Ok(
-            match info::release_version(&Env::from_eval(eval)?.signals) {
+            match runner::release_version(&Env::from_eval(eval)?.signals) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,
@@ -1048,17 +986,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] log: NoneOr<values::Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<health_check::HealthCheckResult> {
+    ) -> anyhow::Result<wrappers::HealthCheckResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         let signals = Env::from_eval(eval)?.signals.clone();
         let Some(log) = log.into_option() else {
-            return Ok(health_check::run(&signals, &startup_flags, &mut |line| {
-                crate::errln!("{line}")
-            }));
+            return Ok(wrappers::health_check(
+                &signals,
+                &startup_flags,
+                &mut |line| crate::errln!("{line}"),
+            ));
         };
         let mut log_error = None;
-        let result = health_check::run(&signals, &startup_flags, &mut |line| {
+        let result = wrappers::health_check(&signals, &startup_flags, &mut |line| {
             if log_error.is_some() {
                 return;
             }
@@ -1121,16 +1061,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn recover_poisoned_sandbox<'v>(
         this: values::Value<'v>,
-    ) -> anyhow::Result<sandbox_recovery::SandboxRecoveryResult> {
+    ) -> anyhow::Result<wrappers::SandboxRecoveryResult> {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
-        let Some(output_base) = sandbox_recovery::output_base_from_flags(&startup_flags) else {
-            return Ok(sandbox_recovery::SandboxRecoveryResult::skipped());
+        let Some(output_base) = bazel::server::sandbox::output_base_from_flags(&startup_flags)
+        else {
+            return Ok(wrappers::SandboxRecoveryResult::skipped());
         };
-        let outcome = sandbox_recovery::recover(&output_base);
-        Ok(sandbox_recovery::SandboxRecoveryResult::from_outcome(
-            outcome,
-        ))
+        let outcome = bazel::server::sandbox::recover(&output_base);
+        Ok(wrappers::SandboxRecoveryResult::from_outcome(outcome))
     }
 
     /// Parse `.bazelrc` files rooted at `root` and return a `RunCommand`.
@@ -1166,19 +1105,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             String,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            bazelrc::RcOption,
+            bazel::rc::RcOption,
         >,
         #[starlark(require = named, default = UnpackList::default())]
         skip_config_if_missing: UnpackList<String>,
         #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<bazelrc::BazelRC> {
+    ) -> anyhow::Result<bazel::rc::BazelRC> {
         let env = Env::from_eval(eval)?;
         let root = root
             .into_option()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| env.bazel_root_dir.clone());
-        let rc = bazelrc::BazelRC::new(root, &startup_flags.items, &flags.items)
+        let rc = bazel::rc::BazelRC::new(root, &startup_flags.items, &flags.items)
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .with_skip_config_if_missing(skip_config_if_missing.items);
         let version = resolve_rc_version(&env.signals, version.into_option(), &rc)?;
@@ -1198,11 +1137,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             String,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            bazelrc::RcOption,
+            bazel::rc::RcOption,
         >,
         #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
-    ) -> anyhow::Result<bazelrc::BazelRC> {
-        let rc = bazelrc::BazelRC::blank(&flags.items)
+    ) -> anyhow::Result<bazel::rc::BazelRC> {
+        let rc = bazel::rc::BazelRC::blank(&flags.items)
             .with_startup_flags(startup_flags.items)
             .with_version(
                 version
@@ -1218,7 +1157,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// would need workspace-root + redaction context the value can't carry).
     fn announce_rc<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = pos)] rc: &bazelrc::BazelRC,
+        #[starlark(require = pos)] rc: &bazel::rc::BazelRC,
         #[starlark(require = named)] command: String,
         #[starlark(require = named, default = false)] ansi: bool,
         #[starlark(require = named, default = 120)] max_width: i64,
@@ -1226,7 +1165,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<String> {
         let root = Env::from_eval(eval)?.bazel_root_dir.clone();
         let home = std::env::home_dir();
-        let redact = stream::redaction::redactor(rc.all_option_values());
+        let redact = bazel::bes::redact::redactor(rc.all_option_values());
         Ok(rc.announce(
             &command,
             ansi,
@@ -1264,8 +1203,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
-        if let Some(pid) = info::client_pid(&signals, &all_flags) {
-            children::os::interrupt(children::Target::Pid(pid));
+        if let Some(pid) =
+            bazel::server::Server::new(&runner::SignalRunner(&signals), &all_flags).client_pid()
+        {
+            bazel::process::signal::interrupt(bazel::process::signal::Target::Pid(pid));
         }
 
         Ok(cancel::Cancellation::new(
@@ -1288,7 +1229,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// # Arguments
     /// * `uri` - BES endpoint, kept verbatim: it is what `sink.uri` reports and
     ///   what user-facing logs name. `grpcs://` / `grpc://` are mapped to their
-    ///   HTTP equivalents at dial time (see `build_event_stream::client`), TLS
+    ///   HTTP equivalents at dial time (see `bazel::bes::client`), TLS
     ///   following from the scheme.
     /// * `metadata` - Headers attached to every request.
     /// * `max_retries` - Max consecutive reconnect attempts without ack
@@ -1326,12 +1267,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 anyhow::bail!("retry_max_buffer_bytes must be > 0, got {n}");
             }
             NoneOr::Other(n) => n as usize,
-            NoneOr::None => sink::retry::default_retry_max_buffer_bytes(),
+            NoneOr::None => retry::default_retry_max_buffer_bytes(),
         };
-        let retry_min_delay = sink::retry::parse_duration(retry_min_delay)
+        let retry_min_delay = bazel::bes::sink::retry::parse_duration(retry_min_delay)
             .map_err(|e| anyhow::anyhow!("retry_min_delay: {e}"))?;
-        let timeout_dur =
-            sink::retry::parse_duration(timeout).map_err(|e| anyhow::anyhow!("timeout: {e}"))?;
+        let timeout_dur = bazel::bes::sink::retry::parse_duration(timeout)
+            .map_err(|e| anyhow::anyhow!("timeout: {e}"))?;
         let timeout = if timeout_dur.is_zero() {
             None
         } else {
@@ -1340,10 +1281,11 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         Ok(build::BuildEventSink::new_grpc(
             uri,
             HashMap::from_iter(metadata.entries),
-            sink::retry::RetryConfig {
+            bazel::bes::sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
                 retry_min_delay,
                 retry_max_buffer_bytes,
+                buffer_knob: retry::RETRY_MAX_BUFFER_BYTES_ENV,
                 timeout,
                 ..Default::default()
             },
@@ -1420,11 +1362,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// One path holds one log, as for `compact_file`: a task that retries its
     /// Bazel invocation writes this path afresh per attempt, so what survives is
     /// the last attempt's log.
-    #[starlark(as_type = sink::execlog::ExecLogSink)]
-    fn file(
-        #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
-        Ok(sink::execlog::ExecLogSink::File { path })
+    #[starlark(as_type = ExecLogSink)]
+    fn file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::File { path })
     }
 
     /// Write this build's compact execution log, byte for byte as Bazel's
@@ -1434,10 +1374,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// a build per attempt, and each writes this path afresh, so what is left
     /// when the task ends is the last attempt's log rather than all of them.
     /// Name a path per attempt if every attempt's log has to survive.
-    fn compact_file(
-        #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
-        Ok(sink::execlog::ExecLogSink::CompactFile { path })
+    fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::CompactFile { path })
     }
 
     /// Create a handle iterating this build's decoded execution log. Pass it in
@@ -1518,7 +1456,7 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_execlog_types(globals: &mut GlobalsBuilder) {
     const ExecLogIter: StarlarkValueAsType<iter::ExecLogIter> = StarlarkValueAsType::new();
-    const ExecLogSink: StarlarkValueAsType<sink::execlog::ExecLogSink> = StarlarkValueAsType::new();
+    const ExecLogSink: StarlarkValueAsType<ExecLogSink> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
@@ -1529,10 +1467,10 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
-    const RunCommand: StarlarkValueAsType<bazelrc::BazelRC> = StarlarkValueAsType::new();
-    const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
+    const RunCommand: StarlarkValueAsType<bazel::rc::BazelRC> = StarlarkValueAsType::new();
+    const HealthCheckResult: StarlarkValueAsType<wrappers::HealthCheckResult> =
         StarlarkValueAsType::new();
-    const SandboxRecoveryResult: StarlarkValueAsType<sandbox_recovery::SandboxRecoveryResult> =
+    const SandboxRecoveryResult: StarlarkValueAsType<wrappers::SandboxRecoveryResult> =
         StarlarkValueAsType::new();
 }
 
@@ -1564,61 +1502,4 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         run::register_run_types(globals);
         run::register_run_errors(globals);
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{constraint_matches, stderr_detail};
-
-    fn version(s: &str) -> semver::Version {
-        semver::Version::parse(s).unwrap()
-    }
-
-    #[test]
-    fn stderr_detail_is_a_trailing_line_when_present() {
-        assert_eq!(stderr_detail("ERROR: boom\n"), "\nERROR: boom");
-    }
-
-    #[test]
-    fn stderr_detail_is_empty_without_diagnostics() {
-        assert_eq!(stderr_detail(""), "");
-        assert_eq!(stderr_detail("  \n\t "), "");
-    }
-
-    #[test]
-    fn matches_against_a_known_version() {
-        let v = version("8.5.1");
-        assert!(constraint_matches(">=8", Some(&v)).unwrap());
-        assert!(constraint_matches(">=8, <9", Some(&v)).unwrap());
-        assert!(!constraint_matches(">=9", Some(&v)).unwrap());
-        assert!(!constraint_matches("<7", Some(&v)).unwrap());
-    }
-
-    #[test]
-    fn unknown_version_assumes_latest() {
-        // A non-release build is newer than any release: lower-bound gates
-        // match, upper-bound gates and old-major ranges don't.
-        assert!(constraint_matches(">=8", None).unwrap());
-        assert!(constraint_matches(">=9", None).unwrap());
-        assert!(!constraint_matches("<7", None).unwrap());
-        assert!(!constraint_matches(">=8, <9", None).unwrap());
-    }
-
-    #[test]
-    fn pre_release_matches_its_release_constraints() {
-        // A release candidate is gated as its eventual release: the pre-release
-        // suffix is ignored, so `8.0.0-rc2` satisfies `>=8` (plain semver
-        // VersionReq would NOT match a bare pre-release against `>=8`).
-        let rc = version("8.0.0-rc2");
-        assert!(constraint_matches(">=8", Some(&rc)).unwrap());
-        assert!(constraint_matches(">=8.0.0", Some(&rc)).unwrap());
-        assert!(!constraint_matches("<8", Some(&rc)).unwrap());
-        assert!(!constraint_matches("<7", Some(&rc)).unwrap());
-    }
-
-    #[test]
-    fn invalid_constraint_is_an_error() {
-        let err = constraint_matches("not-a-constraint", None).unwrap_err();
-        assert!(err.to_string().contains("invalid version constraint"));
-    }
 }

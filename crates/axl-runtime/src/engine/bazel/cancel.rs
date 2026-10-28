@@ -15,11 +15,11 @@ use starlark::values::starlark_value;
 
 use std::sync::Arc;
 
-use super::info;
+use bazel::server::Server;
+
+use super::runner::SignalRunner;
 use crate::engine::builtins::sleep;
 use crate::engine::cancellation::Signals;
-use crate::engine::children::Target;
-use crate::engine::children::os;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.Cancellation>")]
@@ -68,10 +68,7 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn busy<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let cancellation = this.downcast_ref::<Cancellation>().unwrap();
-        Ok(info::is_server_busy(
-            &cancellation.signals,
-            &cancellation.startup_flags,
-        ))
+        Ok(is_busy(&cancellation.signals, &cancellation.startup_flags))
     }
 
     /// Block until the cancelled invocation finishes.
@@ -98,7 +95,7 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
 
         let start = std::time::Instant::now();
 
-        while info::is_server_busy(&cancellation.signals, &cancellation.startup_flags) {
+        while is_busy(&cancellation.signals, &cancellation.startup_flags) {
             let elapsed = start.elapsed();
 
             // Manual timeout: return False without escalation.
@@ -113,7 +110,7 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
                 force_kill(&cancellation.signals, &cancellation.startup_flags);
                 // After force-kill, wait indefinitely for the server to stop.
                 // Reset by breaking out and falling through to return true.
-                while info::is_server_busy(&cancellation.signals, &cancellation.startup_flags) {
+                while is_busy(&cancellation.signals, &cancellation.startup_flags) {
                     sleep(
                         &cancellation.signals,
                         std::time::Duration::from_millis(poll_ms),
@@ -174,67 +171,14 @@ fn validate_wait_params(timeout_ms: u64, force_kill_after_ms: u64) -> anyhow::Re
     Ok(())
 }
 
-/// How long to wait for the Bazel client to exit after a second SIGINT
-/// before escalating to SIGKILL.
-const FORCE_KILL_TIMEOUT_MS: u64 = 5000;
-const FORCE_KILL_POLL_MS: u64 = 100;
-
-/// Send a forceful cancellation signal following Bazel's 3-SIGINT protocol.
-///
-/// cancel_invocation() already sent the 1st SIGINT (graceful cancel). This
-/// function sends the 2nd and 3rd SIGINTs to escalate:
-///   - 2nd SIGINT: repeated CancelRequest (Bazel is already cancelling)
-///   - 3rd SIGINT: triggers Bazel's built-in KillServerProcess + client exit
-///
-/// If the client still doesn't exit after the 3rd SIGINT, we SIGKILL both
-/// the client and server ourselves as a last resort.
+/// Send a forceful cancellation signal following Bazel's 3-SIGINT protocol;
+/// see [`Server::force_kill`].
 fn force_kill(signals: &Arc<Signals>, startup_flags: &[String]) -> bool {
-    if let Some(client_pid) = info::client_pid(signals, startup_flags) {
-        // 2nd SIGINT: repeated cancel request.
-        tracing::warn!("cancel_invocation: sending 2nd SIGINT to Bazel client PID {client_pid}");
-        os::interrupt(Target::Pid(client_pid));
+    Server::new(&SignalRunner(signals), startup_flags).force_kill()
+}
 
-        // 3rd SIGINT: triggers Bazel's built-in server kill + client exit.
-        tracing::warn!("cancel_invocation: sending 3rd SIGINT to Bazel client PID {client_pid}");
-        os::interrupt(Target::Pid(client_pid));
-
-        // Monitor the client — if it doesn't exit within the timeout,
-        // SIGKILL both the client and the server ourselves.
-        let start = std::time::Instant::now();
-        while os::is_running(Target::Pid(client_pid)) {
-            if start.elapsed() >= std::time::Duration::from_millis(FORCE_KILL_TIMEOUT_MS) {
-                tracing::warn!(
-                    "cancel_invocation: Bazel client PID {client_pid} did not exit \
-                     after {FORCE_KILL_TIMEOUT_MS}ms, sending SIGKILL"
-                );
-                os::kill(Target::Pid(client_pid));
-                if let Some(server_pid) = info::server_pid_nonblocking(signals, startup_flags) {
-                    tracing::warn!(
-                        "cancel_invocation: also sending SIGKILL to Bazel server PID \
-                         {server_pid}"
-                    );
-                    os::kill(Target::Pid(server_pid));
-                }
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(FORCE_KILL_POLL_MS));
-        }
-        return true;
-    }
-
-    // Client is gone (crashed or already exited). Only SIGKILL the server
-    // if it's still busy — otherwise there's nothing to cancel.
-    if info::is_server_busy(signals, startup_flags) {
-        if let Some(pid) = info::server_pid_nonblocking(signals, startup_flags) {
-            tracing::warn!(
-                "cancel_invocation: Bazel client not found, sending SIGKILL to \
-                 server PID {pid}"
-            );
-            os::kill(Target::Pid(pid));
-            return true;
-        }
-    }
-    false
+fn is_busy(signals: &Arc<Signals>, startup_flags: &[String]) -> bool {
+    Server::new(&SignalRunner(signals), startup_flags).is_busy()
 }
 
 #[cfg(test)]

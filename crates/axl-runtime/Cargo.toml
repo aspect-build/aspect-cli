@@ -64,13 +64,11 @@ liquid-core = "0.26.11"
 minijinja = "2.12.0"
 
 aspect-telemetry = { path = "../aspect-telemetry" }
-bazelrc = { path = "../bazelrc" }
 axl-types = { path = "../axl-types" }
 axl-proto = { path = "../axl-proto" }
 starbuf-derive = { path = "../starbuf-derive" }
-build-event-stream = { path = "../build-event-stream" }
 fswatch = { path = "../fswatch" }
-bazel = { path = "../bazel" }
+bazel = { path = "../bazel", features = ["starlark"] }
 
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
 dirs = "6.0.0"

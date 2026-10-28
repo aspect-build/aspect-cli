@@ -1,0 +1,1943 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
+
+use axl_proto::{
+    Timestamp,
+    google::devtools::build::v1::{
+        BuildStatus, PublishBuildToolEventStreamRequest, PublishBuildToolEventStreamResponse,
+        PublishLifecycleEventRequest,
+    },
+};
+use futures::FutureExt;
+use prost::bytes::Bytes;
+use tokio::runtime::Handle;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tonic::Streaming;
+
+use super::retry::{RetainedEvent, RetryBuffer, RetryConfig, SinkStats, backoff, is_retryable};
+use crate::bes::BuildEventEnvelope;
+use crate::bes::client::{Client, ClientError, build_tool, lifecycle};
+use crate::fanout::{SinkError, SinkOutcome, Subscriber};
+
+#[derive(Debug)]
+pub struct Grpc {}
+
+/// Why `drive_stream` returned. Drives the outer state machine's reconnect
+/// or terminal-exit decision.
+enum DriveOutcome {
+    /// `last_message` was sent and the response stream closed cleanly.
+    Done,
+    /// Stream broke or returned a retryable error mid-flight; reconnect if
+    /// budget allows.
+    Transient(ClientError),
+    /// Server returned a non-retryable status; terminal regardless of budget.
+    Fatal(ClientError),
+    /// Upstream broadcaster closed (subscriber disconnected) without ever
+    /// emitting `last_message`. Treat as clean shutdown — no more events to
+    /// send, just wait for outstanding acks then exit.
+    UpstreamClosed,
+}
+
+impl DriveOutcome {
+    /// Short label for debug logging.
+    fn label(&self) -> String {
+        match self {
+            DriveOutcome::Done => "Done".to_string(),
+            DriveOutcome::UpstreamClosed => "UpstreamClosed".to_string(),
+            DriveOutcome::Transient(e) => format!("Transient({e})"),
+            DriveOutcome::Fatal(e) => format!("Fatal({e})"),
+        }
+    }
+}
+
+impl Grpc {
+    /// Spawn a gRPC BES forwarding thread. All sinks for a single build
+    /// share `invocation_id` so every backend indexes it under one UUID.
+    /// Transport / BES errors never panic; they surface as `SinkOutcome`
+    /// for the caller's `sink.wait()` to inspect.
+    pub fn spawn(
+        rt: Handle,
+        recv: Subscriber<Arc<BuildEventEnvelope>>,
+        endpoint: String,
+        headers: HashMap<String, String>,
+        invocation_id: String,
+        retry: RetryConfig,
+    ) -> JoinHandle<(SinkStats, SinkOutcome)> {
+        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
+    }
+}
+
+/// Emit a sink-lifecycle log line as a `tracing` event on the `axl.log`
+/// target, the one the host routes to its log exporters (stderr when
+/// `ASPECT_DEBUG` is set); on any other target the host drops it.
+/// Prefixed `BES sink <endpoint> [<id8>]:` so a single `grep BES\ sink`
+/// pulls every event for one sink across a run, and multi-sink
+/// configurations (e.g. an Aspect backend plus an internal mirror)
+/// stay distinguishable via the endpoint segment.
+fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
+    let short = invocation_id.get(..8).unwrap_or(invocation_id);
+    tracing::debug!(target: "axl.log", "BES sink {endpoint} [{short}]: {msg}");
+}
+
+/// Emit a user-facing warning for this sink, prefixed `BES sink <endpoint>:`
+/// to distinguish it in multi-sink configurations. Unlike [`dbg`], it is not
+/// debug-gated: BES upload is best-effort and never fails the build, so this
+/// is the only signal that events were delayed or lost. Delivery is the
+/// caller's, through [`super::set_warn`].
+fn warn(endpoint: &str, msg: &str) {
+    super::warn(&format!("BES sink {endpoint}: {msg}"));
+}
+
+/// Send one of the unary lifecycle events (`build_enqueued`,
+/// `invocation_started`, `invocation_finished`, `build_finished`),
+/// timing the round trip and logging the result. Errors are wrapped
+/// via `finalize` so a failure exits the sink with a `SinkError`
+/// rather than propagating as a raw `ClientError`.
+async fn send_lifecycle_logged(
+    name: &str,
+    retry: &RetryConfig,
+    client: &mut Client,
+    request: PublishLifecycleEventRequest,
+    endpoint: &str,
+    invocation_id: &str,
+) -> Result<(), SinkError> {
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!("sending lifecycle: {name}"),
+    );
+    let t = std::time::Instant::now();
+    retry_lifecycle(retry, client, request).await.map_err(|e| {
+        dbg(
+            endpoint,
+            invocation_id,
+            &format!("{name} FAILED after {:?}: {e}", t.elapsed()),
+        );
+        finalize(endpoint, format!("{name}: {e}"))
+    })?;
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!("{name} ack'd in {:?}", t.elapsed()),
+    );
+    Ok(())
+}
+
+/// What the sink keeps of a build event once it leaves the broadcaster: the
+/// wire bytes and the one flag the stream lifecycle reads. The decoded proto
+/// is dropped at intake, so a backlog behind a slow backend costs the bytes
+/// bazel wrote and nothing more.
+struct SinkEvent {
+    encoded: Bytes,
+    last_message: bool,
+}
+
+/// The publish request for a retained event. Requests are built as they are
+/// sent — first send and replay alike — and never retained themselves.
+fn publish_request(
+    build_id: &str,
+    invocation_id: &str,
+    seq: i64,
+    retained: &RetainedEvent,
+) -> PublishBuildToolEventStreamRequest {
+    build_tool::bazel_event_encoded(
+        build_id.to_string(),
+        invocation_id.to_string(),
+        seq,
+        retained.encoded.clone(),
+        retained.event_time,
+    )
+}
+
+/// Retain a newly received event under `seq` and build its first request.
+fn intake(
+    build_id: &str,
+    invocation_id: &str,
+    seq: i64,
+    event: SinkEvent,
+    buffer: &mut RetryBuffer,
+) -> PublishBuildToolEventStreamRequest {
+    let retained = RetainedEvent {
+        encoded: event.encoded,
+        event_time: Timestamp::from(std::time::SystemTime::now()),
+    };
+    let req = publish_request(build_id, invocation_id, seq, &retained);
+    buffer.push(seq, retained);
+    req
+}
+
+/// Per-sink stream state that survives across `drive_stream` reconnect
+/// attempts: the unacked-event replay buffer plus the sequence/ack counters
+/// every attempt shares.
+struct StreamState {
+    buffer: RetryBuffer,
+    /// Next unused sequence number (BES streams are 1-based).
+    next_seq: i64,
+    /// Highest sequence number the server has acked.
+    max_acked: i64,
+    /// Whether the event flagged `last_message` has been written to a stream.
+    last_message_sent: bool,
+}
+
+impl StreamState {
+    /// Apply a server ack and report whether it advances `max_acked`.
+    fn record_ack(&mut self, seq: i64) -> bool {
+        let advanced = seq > self.max_acked;
+        self.buffer.prune_until(seq);
+        self.max_acked = self.max_acked.max(seq);
+        advanced
+    }
+}
+
+async fn work(
+    recv: Subscriber<Arc<BuildEventEnvelope>>,
+    endpoint: String,
+    headers: HashMap<String, String>,
+    invocation_id: String,
+    retry: RetryConfig,
+) -> (SinkStats, SinkOutcome) {
+    dbg(
+        &endpoint,
+        &invocation_id,
+        &format!(
+            "starting work (headers={}, max_retries={}, timeout={:?})",
+            headers.len(),
+            retry.max_retries,
+            retry.timeout,
+        ),
+    );
+
+    // Forward the synchronous broadcaster `recv` into a tokio mpsc so
+    // `drive_stream` can pull from `event_rx` inside `tokio::select!`.
+    // The forwarder runs once for the whole sink lifetime — events
+    // queue up on `event_rx` even when no bidi stream is open, ready
+    // for the next `drive_stream` iteration to drain.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
+    let _forwarder = tokio::task::spawn_blocking(move || {
+        while let Ok(envelope) = recv.recv() {
+            let ev = SinkEvent {
+                encoded: envelope.encoded.clone(),
+                last_message: envelope.event.last_message,
+            };
+            drop(envelope);
+            if event_tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+
+    // `Client::new` only builds a lazy channel (endpoint URI + TLS config); it
+    // does not dial, so a failure here is a client misconfiguration, not an
+    // unreachable backend — the real connect/auth errors surface on the first
+    // lifecycle RPC below. The timeout guards against a pathological stall in
+    // channel construction.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let connect_started = std::time::Instant::now();
+    let mut client =
+        match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
+            Ok(Ok(client)) => client,
+            Ok(Err(e)) => {
+                return (
+                    SinkStats::default(),
+                    Err(fail(
+                        &endpoint,
+                        "invalid backend configuration, build events will not be delivered",
+                        format!("client setup failed: {e}"),
+                    )),
+                );
+            }
+            Err(_) => {
+                let secs = CONNECT_TIMEOUT.as_secs();
+                return (
+                    SinkStats::default(),
+                    Err(fail(
+                        &endpoint,
+                        &format!(
+                            "client setup stalled for {secs}s, build events will not be delivered"
+                        ),
+                        format!("client setup timed out after {secs}s"),
+                    )),
+                );
+            }
+        };
+    dbg(
+        &endpoint,
+        &invocation_id,
+        &format!(
+            "Client::new returned in {:?} (lazy channel — no TCP/TLS yet)",
+            connect_started.elapsed()
+        ),
+    );
+
+    let build_id = invocation_id.clone();
+
+    if let Err(e) = send_lifecycle_logged(
+        "build_enqueued",
+        &retry,
+        &mut client,
+        lifecycle::build_enqueued(build_id.clone(), invocation_id.clone()),
+        &endpoint,
+        &invocation_id,
+    )
+    .await
+    {
+        return (SinkStats::default(), Err(e));
+    }
+    if let Err(e) = send_lifecycle_logged(
+        "invocation_started",
+        &retry,
+        &mut client,
+        lifecycle::invocation_started(build_id.clone(), invocation_id.clone()),
+        &endpoint,
+        &invocation_id,
+    )
+    .await
+    {
+        return (SinkStats::default(), Err(e));
+    }
+
+    let mut state = StreamState {
+        buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
+        next_seq: 1,
+        max_acked: 0,
+        last_message_sent: false,
+    };
+    // Consecutive reconnect attempts without ack progress; see
+    // `RetryConfig::max_retries` for the progress-reset contract.
+    let mut attempt: u32 = 0;
+    // Warn at most once per sink, and only for no-progress retries: a
+    // flapping or slow backend gets an early user-facing signal, while
+    // routine server-initiated stream sheds stay quiet.
+    let mut warned_transient = false;
+
+    'reconnect: loop {
+        dbg(
+            &endpoint,
+            &invocation_id,
+            &format!(
+                "entering drive_stream (attempt={}, next_seq={}, buffered={} events / {} bytes)",
+                attempt,
+                state.next_seq,
+                state.buffer.len(),
+                state.buffer.bytes(),
+            ),
+        );
+        let acked_before = state.max_acked;
+        let drive_started = std::time::Instant::now();
+        let outcome = drive_stream(
+            &mut client,
+            &build_id,
+            &invocation_id,
+            &mut event_rx,
+            &mut state,
+            &endpoint,
+            &retry,
+        )
+        .await;
+        dbg(
+            &endpoint,
+            &invocation_id,
+            &format!(
+                "drive_stream returned after {:?}: outcome={}",
+                drive_started.elapsed(),
+                outcome.label(),
+            ),
+        );
+
+        match outcome {
+            DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
+            DriveOutcome::Transient(err) => {
+                // `max_retries == 0` is documented as "retry disabled" and
+                // wins over the progress reset.
+                let made_progress = state.max_acked > acked_before;
+                if made_progress && retry.max_retries > 0 {
+                    dbg(
+                        &endpoint,
+                        &invocation_id,
+                        &format!(
+                            "acks advanced to {} since last connect — resetting retry budget: {err}",
+                            state.max_acked
+                        ),
+                    );
+                    attempt = 0;
+                } else if attempt >= retry.max_retries {
+                    let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
+                    return (
+                        stats,
+                        Err(finalize(
+                            &endpoint,
+                            format!("giving up after {attempt} attempts: {err}"),
+                        )),
+                    );
+                } else if !warned_transient {
+                    warn(
+                        &endpoint,
+                        &format!(
+                            "backend unreachable, retrying (up to {} times): {err}",
+                            retry.max_retries
+                        ),
+                    );
+                    warned_transient = true;
+                }
+                let delay = backoff(retry.retry_min_delay, attempt);
+                dbg(
+                    &endpoint,
+                    &invocation_id,
+                    &format!("backoff {:?} before retry {}", delay, attempt + 1),
+                );
+                tokio::time::sleep(delay).await;
+                if !made_progress {
+                    attempt += 1;
+                }
+                continue 'reconnect;
+            }
+            DriveOutcome::Fatal(err) => {
+                let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
+                return (
+                    stats,
+                    Err(finalize(&endpoint, format!("non-retryable: {err}"))),
+                );
+            }
+        }
+    }
+
+    // Post-stream lifecycle. The user's `bes_timeout` knob lands here:
+    // it mirrors Bazel's `--bes_timeout`, the deadline for BES upload
+    // completion *after* the build and tests finish. When unset (or
+    // explicitly `"0s"`, which the Starlark surface maps to None and
+    // documents as "no deadline"), no deadline applies — matching the
+    // documented behavior even at the cost of a possible hang against a
+    // silent backend. The events themselves were already streamed, so
+    // failing these is non-fatal under the `Warn` default.
+    //
+    // Bazel's exit code lives on the parent process and isn't reachable
+    // from here, so we submit a successful BuildStatus unconditionally.
+    let post_stream = async {
+        send_lifecycle_logged(
+            "invocation_finished",
+            &retry,
+            &mut client,
+            lifecycle::invocation_finished(
+                build_id.clone(),
+                invocation_id.clone(),
+                BuildStatus {
+                    result: 0,
+                    final_invocation_id: build_id.clone(),
+                    build_tool_exit_code: Some(0),
+                    error_message: String::new(),
+                    details: None,
+                },
+            ),
+            &endpoint,
+            &invocation_id,
+        )
+        .await?;
+        send_lifecycle_logged(
+            "build_finished",
+            &retry,
+            &mut client,
+            lifecycle::build_finished(build_id.clone(), invocation_id.clone()),
+            &endpoint,
+            &invocation_id,
+        )
+        .await?;
+        Ok::<(), SinkError>(())
+    };
+    let outcome = match retry.timeout {
+        Some(d) => match tokio::time::timeout(d, post_stream).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(finalize(
+                &endpoint,
+                format!("post-stream lifecycle exceeded {d:?} budget"),
+            )),
+        },
+        None => post_stream.await,
+    };
+    let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
+    (stats, outcome)
+}
+
+/// Bound for the `event_rx.recv()` wait inside `preload_first_event`.
+/// Bazel emits `build_started` very early after JVM startup; if nothing
+/// arrives within this window we proceed to open the bidi anyway and
+/// let the stream-open timeout bound the worst case.
+const FIRST_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Push one message into the request-side mpsc channel before
+/// `drive_stream` awaits `publish_build_tool_event_stream`.
+///
+/// The Aspect Workflows BES backend (and several other BES backends)
+/// defers sending response headers until it sees the first client
+/// message on the bidi stream. Without a message in the channel, tonic's
+/// `await` blocks indefinitely on the response-header read and never
+/// returns. Pushing a message into the channel here is sufficient —
+/// tonic spawns a request-pump task at the start of the bidi call that
+/// pulls from the channel and writes to the wire concurrently with the
+/// response-header await, so as soon as the HTTP/2 stream is open our
+/// event flows out and the server responds.
+///
+/// Source of the first message:
+///   - **Reconnect** (`state.buffer` non-empty): replay its first entry.
+///   - **Fresh attempt** (buffer empty): wait up to `FIRST_EVENT_TIMEOUT`
+///     for the first event on `event_rx`. If none arrives, return `None`
+///     and let the caller open the bidi without pre-load (the stream-open
+///     timeout in `drive_stream` still bounds the worst case).
+///
+/// Returns the sequence number of the pre-loaded entry so `drive_stream`'s
+/// post-open replay loop can skip it (avoiding a wasted re-send; the server
+/// would dedup anyway).
+async fn preload_first_event(
+    sender: &tokio::sync::mpsc::Sender<PublishBuildToolEventStreamRequest>,
+    build_id: &str,
+    invocation_id: &str,
+    endpoint: &str,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SinkEvent>,
+    state: &mut StreamState,
+) -> Result<Option<i64>, DriveOutcome> {
+    if let Some((seq, retained)) = state.buffer.iter().next() {
+        let seq = *seq;
+        let req = publish_request(build_id, invocation_id, seq, retained);
+        if sender.send(req).await.is_err() {
+            return Err(DriveOutcome::Transient(ClientError::Status(
+                tonic::Status::unavailable("request stream closed before bidi open"),
+            )));
+        }
+        dbg(
+            endpoint,
+            invocation_id,
+            &format!("pre-loaded first event from buffer (seq={seq})"),
+        );
+        return Ok(Some(seq));
+    }
+
+    if state.last_message_sent {
+        return Ok(None);
+    }
+
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(FIRST_EVENT_TIMEOUT, event_rx.recv()).await {
+        Ok(Some(event)) => {
+            let seq = state.next_seq;
+            state.next_seq += 1;
+            let last = event.last_message;
+            let req = intake(build_id, invocation_id, seq, event, &mut state.buffer);
+            if sender.send(req).await.is_err() {
+                return Err(DriveOutcome::Transient(ClientError::Status(
+                    tonic::Status::unavailable("request stream closed before bidi open"),
+                )));
+            }
+            if last {
+                state.last_message_sent = true;
+            }
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "pre-loaded first event from event_rx (seq={seq} last_message={last}) in {:?}",
+                    started.elapsed()
+                ),
+            );
+            Ok(Some(seq))
+        }
+        Ok(None) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                "event_rx closed before producing first event — opening bidi without pre-load",
+            );
+            Ok(None)
+        }
+        Err(_) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "no event from event_rx within {FIRST_EVENT_TIMEOUT:?} — opening bidi without pre-load"
+                ),
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Sleep until an optional deadline; pends forever when `None`. For
+/// `tokio::select!` arms guarded on the deadline being armed.
+async fn sleep_opt(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+enum SendWithAcks {
+    Sent,
+    ResponseEnded(ResponseEnd),
+    Failed(DriveOutcome),
+}
+
+/// Send one request into the bidi request channel, draining the response
+/// stream for as long as the send is in flight and giving up after
+/// `stall_timeout` — the channel only backs up when the server has stopped
+/// reading, and an unbounded `send().await` would suspend `drive_stream`'s
+/// select loop forever.
+///
+/// The drain matters because `tokio::select!` runs a chosen branch's body to
+/// completion: a bare `send().await` blinds the caller's ack arm for the whole
+/// stall, and a status arriving in that window would be masked by this
+/// function's own `deadline_exceeded`. Acks land in `acks` rather than being
+/// applied, so the replay loop can share this while holding its borrow of
+/// `state.buffer`.
+///
+/// Both failure modes here — the stall deadline, and a request channel the
+/// ended RPC closed — only guess at a cause the server is often about to
+/// state outright. `Failed` is therefore the caller's fallback, not its
+/// verdict: [`drain_acks`] gets the last word.
+async fn send_draining_acks(
+    sender: &tokio::sync::mpsc::Sender<PublishBuildToolEventStreamRequest>,
+    req: PublishBuildToolEventStreamRequest,
+    response_stream: &mut Streaming<PublishBuildToolEventStreamResponse>,
+    acks: &mut Vec<i64>,
+    stall_timeout: std::time::Duration,
+    context: &str,
+) -> SendWithAcks {
+    let send = sender.send(req);
+    tokio::pin!(send);
+    let stall = tokio::time::sleep(stall_timeout);
+    tokio::pin!(stall);
+    loop {
+        tokio::select! {
+            result = &mut send => {
+                return match result {
+                    Ok(()) => SendWithAcks::Sent,
+                    Err(_) => SendWithAcks::Failed(DriveOutcome::Transient(ClientError::Status(
+                        tonic::Status::unavailable(format!("request stream closed {context}")),
+                    ))),
+                };
+            }
+            resp = response_stream.next() => {
+                match resp {
+                    Some(Ok(r)) => acks.push(r.sequence_number),
+                    Some(Err(status)) => {
+                        return SendWithAcks::ResponseEnded(ResponseEnd::Status(status));
+                    }
+                    None => return SendWithAcks::ResponseEnded(ResponseEnd::Closed),
+                }
+            }
+            _ = &mut stall => {
+                return SendWithAcks::Failed(DriveOutcome::Transient(ClientError::Status(
+                    tonic::Status::deadline_exceeded(format!(
+                        "request stream stalled for {stall_timeout:?} {context} (server stopped reading)"
+                    )),
+                )));
+            }
+        }
+    }
+}
+
+/// Map the end of the response stream onto a drive outcome. `context` names
+/// the phase that observed it and lands in the premature-close message.
+fn response_end_outcome(end: ResponseEnd, state: &StreamState, context: &str) -> DriveOutcome {
+    match end {
+        ResponseEnd::Closed if state.last_message_sent && state.buffer.is_empty() => {
+            DriveOutcome::Done
+        }
+        ResponseEnd::Closed => DriveOutcome::Transient(ClientError::Status(
+            tonic::Status::unavailable(format!("response stream closed prematurely {context}")),
+        )),
+        ResponseEnd::Status(status) => {
+            let err = ClientError::Status(status);
+            if is_retryable(&err) {
+                DriveOutcome::Transient(err)
+            } else {
+                DriveOutcome::Fatal(err)
+            }
+        }
+    }
+}
+
+/// Bound for [`drain_acks`]: long enough to harvest acks the server already
+/// wrote before a request-side failure, negligible next to the retry backoff.
+const DRAIN_ACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Harvest acks already queued on the response stream after a request-side
+/// send failure, before the stream is torn down, and report the response
+/// stream's own ending when it reaches one.
+///
+/// The replay loop and the mid-send path await channel sends without polling
+/// the response stream, so when a server acks some events and then ends the
+/// stream the failure can surface on the send side with those acks still
+/// unread. Recording them keeps the accounting honest: the acked events
+/// leave the replay buffer and — via `max_acked` — count as progress toward
+/// the retry-budget reset. Best-effort and bounded; anything missed is
+/// replayed and deduped by the server.
+///
+/// A status reaching this window is the send failure's cause, not a detail
+/// beside it: the server stopped reading because it was rejecting the call.
+/// It therefore outranks the retryable error the send side reports, and
+/// returning it lets the caller classify a `PermissionDenied` as fatal
+/// instead of retrying it to the end of the budget under the wrong error.
+/// `None` means the window closed with nothing to add and the send-side
+/// outcome stands.
+async fn drain_acks<S>(response_stream: &mut S, state: &mut StreamState) -> Option<ResponseEnd>
+where
+    S: futures::Stream<Item = Result<PublishBuildToolEventStreamResponse, tonic::Status>> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + DRAIN_ACKS_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, response_stream.next()).await {
+            Ok(Some(Ok(resp))) => {
+                state.record_ack(resp.sequence_number);
+            }
+            Ok(Some(Err(status))) => return Some(ResponseEnd::Status(status)),
+            Ok(None) => return Some(ResponseEnd::Closed),
+            Err(_) => return None,
+        }
+    }
+}
+
+enum ResponseEnd {
+    Closed,
+    Status(tonic::Status),
+}
+
+fn drain_ready_replay_acks<S>(
+    response_stream: &mut S,
+    replayed_acks: &mut Vec<i64>,
+) -> Option<ResponseEnd>
+where
+    S: futures::Stream<Item = Result<PublishBuildToolEventStreamResponse, tonic::Status>> + Unpin,
+{
+    loop {
+        match response_stream.next().now_or_never() {
+            None => return None,
+            Some(Some(Ok(resp))) => replayed_acks.push(resp.sequence_number),
+            Some(Some(Err(status))) => return Some(ResponseEnd::Status(status)),
+            Some(None) => return Some(ResponseEnd::Closed),
+        }
+    }
+}
+
+/// Drive a single bidi stream until it ends (cleanly or with error).
+///
+/// Owns the request channel for this connection. Pulls events from
+/// `event_rx`, assigns sequence numbers, buffers them in `state.buffer`,
+/// and writes them down the wire. In parallel reads responses and prunes
+/// the buffer up to each ack'd `sequence_number`. Replays any leftover
+/// buffered events under their original seqs at the start of the
+/// connection (skipping the one already pre-loaded by
+/// `preload_first_event`).
+///
+/// Every wait is bounded so a hung or silently-dropped connection can
+/// never wedge the sink: stream open (`OPEN_TIMEOUT`), each write into
+/// the request channel (`retry.send_stall_timeout`), ack progress while
+/// unacked events are outstanding (`retry.ack_progress_timeout`), and
+/// the post-half-close drain (`retry.half_close_timeout`).
+///
+/// Send-side failures call [`drain_acks`] before returning so acks the
+/// server already wrote still prune the buffer and count as progress, and
+/// so a status the server sent alongside the teardown decides the outcome
+/// instead of the send side's `unavailable`.
+async fn drive_stream(
+    client: &mut Client,
+    build_id: &str,
+    invocation_id: &str,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SinkEvent>,
+    state: &mut StreamState,
+    endpoint: &str,
+    retry: &RetryConfig,
+) -> DriveOutcome {
+    let (sender, receiver) = tokio::sync::mpsc::channel::<PublishBuildToolEventStreamRequest>(64);
+    let request_stream = ReceiverStream::new(receiver);
+
+    let preloaded_seq = match preload_first_event(
+        &sender,
+        build_id,
+        invocation_id,
+        endpoint,
+        event_rx,
+        state,
+    )
+    .await
+    {
+        Ok(seq) => seq,
+        Err(outcome) => return outcome,
+    };
+
+    // Bound the bidi stream open: tonic does not add a deadline and the
+    // server may accept the TCP/TLS handshake without ever responding. With
+    // the pre-load above the open succeeds promptly in practice; the timeout
+    // bounds the worst case.
+    const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    dbg(
+        endpoint,
+        invocation_id,
+        "opening publish_build_tool_event_stream bidi (10s timeout)",
+    );
+    let open_started = std::time::Instant::now();
+    let mut response_stream = match tokio::time::timeout(
+        OPEN_TIMEOUT,
+        client.publish_build_tool_event_stream(request_stream),
+    )
+    .await
+    {
+        Ok(Ok(s)) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream returned response stream in {:?}",
+                    open_started.elapsed()
+                ),
+            );
+            s.into_inner()
+        }
+        Ok(Err(e)) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream returned error in {:?}: {e}",
+                    open_started.elapsed()
+                ),
+            );
+            return if is_retryable(&e) {
+                DriveOutcome::Transient(e)
+            } else {
+                DriveOutcome::Fatal(e)
+            };
+        }
+        Err(_) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream stream-open TIMED OUT after {:?}",
+                    open_started.elapsed()
+                ),
+            );
+            return DriveOutcome::Transient(ClientError::Status(tonic::Status::deadline_exceeded(
+                "stream open timed out",
+            )));
+        }
+    };
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!(
+            "replaying {} buffered events (skipping pre-loaded seq={:?})",
+            state.buffer.len(),
+            preloaded_seq
+        ),
+    );
+
+    // Evicted events were streamed on the previous connection but are no longer
+    // retained, so any the server had not yet acked cannot be resent and will be
+    // missing from it. Warn rather than debug-log: BES upload never fails the
+    // build, making this the only signal that data may be incomplete.
+    let evicted = state.buffer.take_evicted();
+    if evicted > 0 {
+        warn(
+            endpoint,
+            &format!(
+                "replay buffer exceeded its {} byte budget; {evicted} build event(s) \
+                 were dropped from it and cannot be resent on this reconnect. Raise \
+                 {} to retain more.",
+                retry.retry_max_buffer_bytes, retry.buffer_knob,
+            ),
+        );
+    }
+
+    // Replay any buffered (unacked) events under their original sequence
+    // numbers. The server dedups via OrderedBuildEvent.sequence_number.
+    // Skip the entry `preload_first_event` already sent — server would
+    // dedup anyway, but resending wastes bytes.
+    // Acks are read as they land — leaving them unread through a long replay
+    // fills the connection window and trips `send_stall_timeout` — and applied
+    // once the loop releases its borrow of `state.buffer`.
+    let mut replayed_acks: Vec<i64> = Vec::new();
+    let mut replay_failure = None;
+    let mut replay_response_end = None;
+    for (seq, retained) in state.buffer.iter() {
+        if Some(*seq) == preloaded_seq {
+            continue;
+        }
+        match send_draining_acks(
+            &sender,
+            publish_request(build_id, invocation_id, *seq, retained),
+            &mut response_stream,
+            &mut replayed_acks,
+            retry.send_stall_timeout,
+            "during replay",
+        )
+        .await
+        {
+            SendWithAcks::Sent => {}
+            SendWithAcks::Failed(outcome) => {
+                replay_failure = Some(outcome);
+                break;
+            }
+            SendWithAcks::ResponseEnded(end) => {
+                replay_response_end = Some(end);
+                break;
+            }
+        }
+        // Only what is already buffered — waiting would slow the replay.
+        if let Some(end) = drain_ready_replay_acks(&mut response_stream, &mut replayed_acks) {
+            replay_response_end = Some(end);
+            break;
+        }
+    }
+    for seq in replayed_acks {
+        state.record_ack(seq);
+    }
+    if let Some(end) = replay_response_end {
+        return response_end_outcome(end, state, "during replay");
+    }
+    if let Some(outcome) = replay_failure {
+        if let Some(end) = drain_acks(&mut response_stream, state).await {
+            return response_end_outcome(end, state, "during replay");
+        }
+        return outcome;
+    }
+
+    let mut sender_opt = Some(sender);
+
+    // Ack-progress watchdog: armed while unacked events are outstanding and
+    // the request side is still open, reset on every ack. Catches a backend
+    // that keeps the connection alive but silently stops acking mid-stream —
+    // otherwise that case is only detected at buffer overflow, or never.
+    // Once half-closed, `half_close_deadline` governs instead.
+    let mut ack_deadline: Option<tokio::time::Instant> = (!state.buffer.is_empty())
+        .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
+
+    // Hard deadline for waiting after the request side is half-closed
+    // (`sender_opt` dropped: last_message sent or upstream broadcaster
+    // closed), when the server is supposed to ack any pending events and
+    // close the response stream. See `RetryConfig::half_close_timeout`.
+    let mut half_close_deadline: Option<tokio::time::Instant> = None;
+
+    // If a previous attempt already sent last_message, the pre-load
+    // and replay above resent it on this fresh stream. The
+    // event-receive arm below stays disabled (last_message_sent is
+    // set), so the `if last { ... }` branch that normally drops the
+    // sender will never fire on this attempt. Close the request side
+    // now and arm the half-close deadline ourselves — otherwise
+    // drive_stream parks in response_stream.next() forever waiting
+    // for an ack or close that a flaky backend may never send, and
+    // Build.wait() hangs.
+    if state.last_message_sent {
+        sender_opt = None;
+        half_close_deadline = Some(tokio::time::Instant::now() + retry.half_close_timeout);
+    }
+
+    loop {
+        tokio::select! {
+            // Pulling new events from the upstream broadcaster.
+            // Disabled once last_message has been sent.
+            ev = event_rx.recv(), if !state.last_message_sent && sender_opt.is_some() => {
+                let Some(event) = ev else {
+                    // Upstream closed without a final last_message. Drop the
+                    // request side so the server flushes any pending acks,
+                    // and wait for the response stream to wind down.
+                    sender_opt = None;
+                    if state.buffer.is_empty() {
+                        return DriveOutcome::UpstreamClosed;
+                    }
+                    half_close_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + retry.half_close_timeout
+                    });
+                    continue;
+                };
+
+                let seq = state.next_seq;
+                state.next_seq += 1;
+                let last = event.last_message;
+                let req = intake(build_id, invocation_id, seq, event, &mut state.buffer);
+                ack_deadline.get_or_insert_with(|| {
+                    tokio::time::Instant::now() + retry.ack_progress_timeout
+                });
+
+                let s = sender_opt.as_ref().unwrap();
+                let mut acks: Vec<i64> = Vec::new();
+                let sent = send_draining_acks(
+                    s,
+                    req,
+                    &mut response_stream,
+                    &mut acks,
+                    retry.send_stall_timeout,
+                    "mid-send",
+                )
+                .await;
+                if !acks.is_empty() {
+                    for acked in acks {
+                        state.record_ack(acked);
+                    }
+                    ack_deadline = (!state.buffer.is_empty())
+                        .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
+                }
+                match sent {
+                    SendWithAcks::Sent => {}
+                    SendWithAcks::Failed(outcome) => {
+                        if let Some(end) = drain_acks(&mut response_stream, state).await {
+                            return response_end_outcome(end, state, "mid-send");
+                        }
+                        return outcome;
+                    }
+                    SendWithAcks::ResponseEnded(end) => {
+                        return response_end_outcome(end, state, "mid-send");
+                    }
+                }
+
+                if last {
+                    state.last_message_sent = true;
+                    dbg(endpoint, invocation_id, "last_message sent — half-closing");
+                    // Drop the request side to signal half-close, but stay
+                    // in the loop so we keep draining acks until the server
+                    // closes the response side.
+                    sender_opt = None;
+                    half_close_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + retry.half_close_timeout
+                    });
+                }
+            }
+            // Reading server acks from the bidi response stream.
+            resp = response_stream.next() => {
+                match resp {
+                    Some(Ok(r)) => {
+                        let ack_advanced = state.record_ack(r.sequence_number);
+                        ack_deadline = (!state.buffer.is_empty())
+                            .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
+                        // Half-close budgets silence, not drain time: a build
+                        // can end with a large unacked backlog, and a flat
+                        // deadline would tear down a backend that is acking
+                        // fine, just not fast enough to finish inside it.
+                        if ack_advanced
+                            && half_close_deadline.is_some()
+                            && !state.buffer.is_empty()
+                        {
+                            half_close_deadline =
+                                Some(tokio::time::Instant::now() + retry.half_close_timeout);
+                        }
+                        // Once we've sent last_message AND every event we
+                        // sent has been ack'd, we're done — exit without
+                        // waiting for the server to close the response
+                        // stream. Some BES backends keep the response
+                        // stream open after the final ack, which previously
+                        // caused this loop to hang indefinitely on every
+                        // successful upload.
+                        if state.last_message_sent && state.buffer.is_empty() {
+                            return DriveOutcome::Done;
+                        }
+                        if sender_opt.is_none() && state.buffer.is_empty() {
+                            return DriveOutcome::UpstreamClosed;
+                        }
+                    }
+                    Some(Err(status)) => {
+                        dbg(
+                            endpoint,
+                            invocation_id,
+                            &format!("server returned error status: {status}"),
+                        );
+                        return response_end_outcome(
+                            ResponseEnd::Status(status),
+                            state,
+                            "mid-stream",
+                        );
+                    }
+                    None => {
+                        dbg(
+                            endpoint,
+                            invocation_id,
+                            &format!(
+                                "response stream closed (last_message_sent={}, buffered={})",
+                                state.last_message_sent,
+                                state.buffer.len()
+                            ),
+                        );
+                        // Server closed the response stream.
+                        if state.last_message_sent && state.buffer.is_empty() {
+                            return DriveOutcome::Done;
+                        }
+                        if sender_opt.is_none() && state.buffer.is_empty() {
+                            return DriveOutcome::UpstreamClosed;
+                        }
+                        // Server closed prematurely with unacked events —
+                        // treat as transient so we reconnect and replay.
+                        return DriveOutcome::Transient(ClientError::Status(
+                            tonic::Status::unavailable("response stream closed prematurely"),
+                        ));
+                    }
+                }
+            }
+            // Hard deadline arm: only enabled once the request side is
+            // half-closed. Two outcomes:
+            //   * Buffer empty — every event we sent was already acked, so
+            //     the only thing we were waiting for is the server closing
+            //     the response stream. Return Done/UpstreamClosed; this
+            //     bypasses BES backends that keep the stream open forever
+            //     after the final ack.
+            //   * Buffer non-empty — the server stopped acking unacked
+            //     events. Surface as Transient so the outer retry budget
+            //     applies; if every replay attempt also times out, the
+            //     outer loop converts to a terminal SinkError that the
+            //     caller's `sink.wait()` surfaces. Returning Done here
+            //     would silently drop unacked events.
+            _ = sleep_opt(half_close_deadline), if half_close_deadline.is_some() => {
+                if !state.buffer.is_empty() {
+                    return DriveOutcome::Transient(ClientError::Status(
+                        tonic::Status::deadline_exceeded(format!(
+                            "half-close deadline ({:?}) elapsed with {} events unacked",
+                            retry.half_close_timeout,
+                            state.buffer.len()
+                        )),
+                    ));
+                }
+                return if state.last_message_sent {
+                    DriveOutcome::Done
+                } else {
+                    DriveOutcome::UpstreamClosed
+                };
+            }
+            // Ack-progress watchdog arm (see `ack_deadline`). Disabled once
+            // the request side is half-closed — `half_close_deadline` bounds
+            // that phase with a tighter deadline.
+            _ = sleep_opt(ack_deadline), if ack_deadline.is_some() && half_close_deadline.is_none() => {
+                dbg(
+                    endpoint,
+                    invocation_id,
+                    &format!(
+                        "no ack progress within {:?} ({} events unacked) — reconnecting",
+                        retry.ack_progress_timeout,
+                        state.buffer.len()
+                    ),
+                );
+                return DriveOutcome::Transient(ClientError::Status(
+                    tonic::Status::deadline_exceeded(format!(
+                        "no BES ack progress within {:?} ({} events unacked)",
+                        retry.ack_progress_timeout,
+                        state.buffer.len()
+                    )),
+                ));
+            }
+        }
+    }
+}
+
+/// Retry an idempotent lifecycle call. Each attempt uses the same backoff
+/// as stream reconnects. Per the design, every call gets `max_retries`
+/// attempts and the counter is local to the call (a successful lifecycle
+/// event resets to a clean state for the next one).
+///
+/// Each attempt is bounded by a per-RPC deadline. Without it, a server
+/// that accepts the connection but never responds wedges the sink thread
+/// forever — `tonic` does not add a default RPC deadline, and the outer
+/// retry loop only spins on errors, never on hangs.
+async fn retry_lifecycle(
+    cfg: &RetryConfig,
+    client: &mut Client,
+    request: PublishLifecycleEventRequest,
+) -> Result<(), ClientError> {
+    const PER_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let mut attempt: u32 = 0;
+    loop {
+        let result = match tokio::time::timeout(
+            PER_ATTEMPT_TIMEOUT,
+            client.publish_lifecycle_event(request.clone()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(ClientError::Status(tonic::Status::deadline_exceeded(
+                "lifecycle attempt timed out",
+            ))),
+        };
+        match result {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                if !is_retryable(&err) || attempt >= cfg.max_retries {
+                    return Err(err);
+                }
+                tokio::time::sleep(backoff(cfg.retry_min_delay, attempt)).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Terminate the sink: warn the user (with `user_msg`) that events won't be
+/// delivered, and return the `SinkError` carrying the machine-readable
+/// `last_error` cause. The two strings differ when the user-facing phrasing
+/// should read better than the raw cause (e.g. client-setup failures).
+fn fail(endpoint: &str, user_msg: &str, last_error: String) -> SinkError {
+    warn(endpoint, user_msg);
+    SinkError { last_error }
+}
+
+/// [`fail`] for the give-up cases, where the raw cause is also fit to show the
+/// user directly.
+fn finalize(endpoint: &str, last_error: String) -> SinkError {
+    fail(
+        endpoint,
+        &format!("giving up, build events were not delivered: {last_error}"),
+        last_error,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    use axl_proto::build_event_stream::{BuildEvent, Progress, build_event::Payload};
+    use axl_proto::google::devtools::build::v1::publish_build_event_server::{
+        PublishBuildEvent, PublishBuildEventServer,
+    };
+    use prost::Message;
+
+    use crate::fanout::Broadcaster;
+    use futures::Stream;
+    use tonic::{Request, Response, Status, Streaming};
+
+    /// How the in-process BES server treats the bidi stream.
+    #[derive(Clone, Copy)]
+    enum ServerMode {
+        /// Hold the request stream open without ever polling it: HTTP/2
+        /// flow-control credit is never returned and the client's writes
+        /// stall (a hung backend, or a peer that died without closing the
+        /// connection). Never acks, never closes the response stream.
+        Stall,
+        /// Read and discard every request; never ack, never close the
+        /// response stream.
+        DrainNoAck,
+        /// Well-behaved: ack every request's sequence number.
+        Ack,
+        /// Ack the first N requests of each connection, then end the
+        /// response stream with UNAVAILABLE — a server that sheds
+        /// long-lived streams expecting the client to reconnect and
+        /// resume from the last acked event.
+        AckThenShed(u32),
+        /// Ack the first N requests on each connection, then simulate tonic
+        /// mapping an h2 failure without a gRPC status to `Unknown`.
+        AckThenUnknown(u32),
+        /// Ack the first N requests, stop reading, then reject the stream
+        /// with a non-retryable status while the client is blocked in a send.
+        StopReadingThenFatal(u32),
+        /// Ack the first N requests, then hold the request stream open but
+        /// unread: no further acks, no close, the client's writes stall.
+        AckThenStopReading(u32),
+        /// Ack the first N requests, stop reading, and reject the stream
+        /// only after the client's send has already given up — the status
+        /// lands while the client is draining the last acks.
+        StopReadingThenFatalLate(u32),
+    }
+
+    struct TestServer {
+        mode: ServerMode,
+    }
+
+    #[tonic::async_trait]
+    impl PublishBuildEvent for TestServer {
+        async fn publish_lifecycle_event(
+            &self,
+            _request: Request<PublishLifecycleEventRequest>,
+        ) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+
+        type PublishBuildToolEventStreamStream =
+            Pin<Box<dyn Stream<Item = Result<PublishBuildToolEventStreamResponse, Status>> + Send>>;
+
+        async fn publish_build_tool_event_stream(
+            &self,
+            request: Request<Streaming<PublishBuildToolEventStreamRequest>>,
+        ) -> Result<Response<Self::PublishBuildToolEventStreamStream>, Status> {
+            let mut inbound = request.into_inner();
+            match self.mode {
+                ServerMode::Stall | ServerMode::DrainNoAck => {
+                    let drain = matches!(self.mode, ServerMode::DrainNoAck);
+                    tokio::spawn(async move {
+                        if drain {
+                            while inbound.next().await.is_some() {}
+                        }
+                        // Park forever still owning `inbound`: the request
+                        // stream must stay open (and unread in Stall mode),
+                        // never reset from the server side.
+                        let _hold = inbound;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(Response::new(Box::pin(futures::stream::pending())))
+                }
+                ServerMode::StopReadingThenFatal(n) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < n {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        // Long enough for the client's writes to stall.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let _ = ack_tx
+                            .send(Err(Status::permission_denied("bad credentials")))
+                            .await;
+                        let _unread = inbound;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::StopReadingThenFatalLate(n) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < n {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        // Past the client's send-stall timeout, but inside
+                        // the window it drains acks in afterwards.
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        let _ = ack_tx
+                            .send(Err(Status::permission_denied("bad credentials")))
+                            .await;
+                        let _unread = inbound;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::AckThenStopReading(n) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < n {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        let _unread = inbound;
+                        std::future::pending::<()>().await;
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::Ack => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        while let Some(Ok(req)) = inbound.next().await {
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::AckThenShed(acks_per_stream)
+                | ServerMode::AckThenUnknown(acks_per_stream) => {
+                    let shed = match self.mode {
+                        ServerMode::AckThenUnknown(_) => Status::unknown(
+                            "h2 protocol error: error reading a body from connection",
+                        ),
+                        _ => Status::unavailable("stream shed by server"),
+                    };
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < acks_per_stream {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        let _ = ack_tx.send(Err(shed)).await;
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+            }
+        }
+    }
+
+    async fn start_server(mode: ServerMode) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(PublishBuildEventServer::new(TestServer { mode }))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        format!("http://{addr}")
+    }
+
+    fn sink_event(event: &BuildEvent) -> SinkEvent {
+        SinkEvent {
+            encoded: Bytes::from(event.encode_to_vec()),
+            last_message: event.last_message,
+        }
+    }
+
+    fn envelope(event: BuildEvent) -> Arc<BuildEventEnvelope> {
+        let encoded = Bytes::from(event.encode_to_vec());
+        Arc::new(BuildEventEnvelope { event, encoded })
+    }
+
+    fn retained(event: &BuildEvent) -> RetainedEvent {
+        RetainedEvent {
+            encoded: Bytes::from(event.encode_to_vec()),
+            event_time: Timestamp::from(std::time::SystemTime::now()),
+        }
+    }
+
+    fn progress_event(stderr_bytes: usize) -> BuildEvent {
+        BuildEvent {
+            payload: Some(Payload::Progress(Progress {
+                stderr: "x".repeat(stderr_bytes),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replay_ack_drain_preserves_error() {
+        let ack = PublishBuildToolEventStreamResponse {
+            stream_id: None,
+            sequence_number: 1,
+        };
+        let mut responses =
+            futures::stream::iter([Ok(ack), Err(Status::permission_denied("denied"))]);
+        let mut acks = Vec::new();
+
+        let end = drain_ready_replay_acks(&mut responses, &mut acks);
+
+        assert_eq!(acks, [1]);
+        assert!(matches!(
+            end,
+            Some(ResponseEnd::Status(status))
+                if status.code() == tonic::Code::PermissionDenied
+        ));
+    }
+
+    fn drained_state() -> StreamState {
+        StreamState {
+            buffer: RetryBuffer::new(1),
+            next_seq: 1,
+            max_acked: 0,
+            last_message_sent: false,
+        }
+    }
+
+    fn ack(seq: i64) -> PublishBuildToolEventStreamResponse {
+        PublishBuildToolEventStreamResponse {
+            stream_id: None,
+            sequence_number: seq,
+        }
+    }
+
+    /// A status already queued when the drain starts is the one case the
+    /// end-to-end tests cannot stage: it needs the send to have failed while
+    /// the server's rejection sat unread. Whichever `tokio::select!` arm won
+    /// the race that put us here, the drain must surface the status rather
+    /// than record acks past it.
+    #[tokio::test]
+    async fn ack_drain_prefers_a_queued_status() {
+        let mut responses = futures::stream::iter([
+            Ok(ack(1)),
+            Ok(ack(2)),
+            Err(Status::permission_denied("denied")),
+        ]);
+        let mut state = drained_state();
+
+        let end = drain_acks(&mut responses, &mut state).await;
+
+        assert!(matches!(
+            end,
+            Some(ResponseEnd::Status(status))
+                if status.code() == tonic::Code::PermissionDenied
+        ));
+        assert_eq!(state.max_acked, 2, "acks before the status still count");
+    }
+
+    /// A response stream that simply ends is reported too, so the caller can
+    /// tell a clean close from the send side's guess.
+    #[tokio::test]
+    async fn ack_drain_reports_a_clean_close() {
+        let mut responses = futures::stream::iter([Ok(ack(1))]);
+        let mut state = drained_state();
+
+        let end = drain_acks(&mut responses, &mut state).await;
+
+        assert!(matches!(end, Some(ResponseEnd::Closed)));
+        assert_eq!(state.max_acked, 1);
+    }
+
+    /// Nothing more arrives within the window: the send-side outcome stands.
+    /// Costs one `DRAIN_ACKS_TIMEOUT` of real time, the same bound the
+    /// production path already waits out.
+    #[tokio::test]
+    async fn ack_drain_without_an_ending_defers_to_the_send_failure() {
+        let mut responses = futures::stream::pending();
+        let mut state = drained_state();
+
+        assert!(drain_acks(&mut responses, &mut state).await.is_none());
+    }
+
+    #[test]
+    fn record_ack_only_reports_advancing_sequences() {
+        let mut state = StreamState {
+            buffer: RetryBuffer::new(1),
+            next_seq: 1,
+            max_acked: 0,
+            last_message_sent: false,
+        };
+
+        assert!(state.record_ack(1));
+        assert!(!state.record_ack(1));
+        assert!(!state.record_ack(0));
+    }
+
+    /// Run `drive_stream` against a [`TestServer`] and return its outcome,
+    /// panicking if it fails to complete within the test bound (i.e. a stall
+    /// went undetected).
+    async fn drive_against(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+    ) -> DriveOutcome {
+        drive_against_state(endpoint, events, retry).await.0
+    }
+
+    /// [`drive_against`], also handing back the `StreamState` for tests that
+    /// assert on the ack accounting.
+    async fn drive_against_state(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+    ) -> (DriveOutcome, StreamState) {
+        let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
+        let (tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
+        for ev in events {
+            tx.send(sink_event(&ev)).unwrap();
+        }
+        // `tx` stays alive across the call: upstream must look open, since a
+        // closed upstream arms the (already bounded) half-close path instead.
+        let mut state = StreamState {
+            buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
+            next_seq: 1,
+            max_acked: 0,
+            last_message_sent: false,
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            drive_stream(
+                &mut client,
+                "test-build",
+                "test-invocation",
+                &mut event_rx,
+                &mut state,
+                "test-endpoint",
+                &retry,
+            ),
+        )
+        .await
+        .expect("drive_stream did not complete within the test bound");
+        drop(tx);
+        (outcome, state)
+    }
+
+    /// Server accepts the stream then never reads: flow-control windows and
+    /// the request channel fill, and the bounded send must surface a
+    /// Transient outcome instead of suspending the loop forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_stall_surfaces_transient() {
+        let endpoint = start_server(ServerMode::Stall).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_millis(300),
+            // Keep the ack watchdog out of the way so the send path is what
+            // trips first.
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        // 128 KiB events overrun the HTTP/2 window quickly; 100 of them is
+        // far more than window + request-channel capacity (64).
+        let events = (0..100).map(|_| progress_event(128 * 1024)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Transient(ClientError::Status(s)) => {
+                assert!(s.message().contains("stalled"), "unexpected status: {s}");
+            }
+            other => panic!("expected Transient stall, got {}", other.label()),
+        }
+    }
+
+    /// Server reads every event but never acks: the ack-progress watchdog
+    /// must surface a Transient outcome rather than waiting for buffer
+    /// overflow (or forever).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ack_silence_surfaces_transient() {
+        let endpoint = start_server(ServerMode::DrainNoAck).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_secs(60),
+            ack_progress_timeout: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let events = (0..5).map(|_| progress_event(64)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Transient(ClientError::Status(s)) => {
+                assert!(
+                    s.message().contains("no BES ack progress"),
+                    "unexpected status: {s}"
+                );
+            }
+            other => panic!("expected Transient ack timeout, got {}", other.label()),
+        }
+    }
+
+    /// Server ends up holding unacked events when the build finishes
+    /// (`last_message` sent, request side half-closed): the half-close
+    /// deadline must bound the wait for outstanding acks.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn half_close_with_unacked_events_surfaces_transient() {
+        let endpoint = start_server(ServerMode::DrainNoAck).await;
+        let retry = RetryConfig {
+            half_close_timeout: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..5).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Transient(ClientError::Status(s)) => {
+                assert!(
+                    s.message().contains("half-close deadline"),
+                    "unexpected status: {s}"
+                );
+            }
+            other => panic!(
+                "expected Transient half-close timeout, got {}",
+                other.label()
+            ),
+        }
+    }
+
+    /// Well-behaved server acking every event: the stream completes `Done`
+    /// after `last_message` with no deadline firing spuriously.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acked_stream_completes_done() {
+        let endpoint = start_server(ServerMode::Ack).await;
+        let mut events: Vec<BuildEvent> = (0..5).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        match drive_against(endpoint, events, RetryConfig::default()).await {
+            DriveOutcome::Done => {}
+            other => panic!("expected Done, got {}", other.label()),
+        }
+    }
+
+    /// A server status that arrives while a send is stalled must surface as
+    /// itself, not as the send's retryable `deadline_exceeded` — which would
+    /// burn the whole retry budget and then report the wrong cause.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_status_during_a_stalled_send_is_not_masked() {
+        let endpoint = start_server(ServerMode::StopReadingThenFatal(5)).await;
+        let retry = RetryConfig {
+            // Deliberately long: the status must short-circuit it.
+            send_stall_timeout: Duration::from_secs(10),
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let events: Vec<BuildEvent> = (0..400).map(|_| progress_event(16 * 1024)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Fatal(ClientError::Status(status)) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            }
+            other => panic!("expected Fatal(PermissionDenied), got {}", other.label()),
+        }
+    }
+
+    /// The same status, arriving just after the send gave up rather than
+    /// during it: the stall's retryable `deadline_exceeded` is only the
+    /// fallback, so a status reaching the post-failure ack drain must still
+    /// decide the outcome instead of being swallowed by it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_status_reaching_the_ack_drain_outranks_the_send_failure() {
+        let endpoint = start_server(ServerMode::StopReadingThenFatalLate(5)).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_millis(450),
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let events: Vec<BuildEvent> = (0..400).map(|_| progress_event(16 * 1024)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Fatal(ClientError::Status(status)) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            }
+            other => panic!("expected Fatal(PermissionDenied), got {}", other.label()),
+        }
+    }
+
+    /// Acks the server wrote before it stopped reading must survive a send
+    /// that then stalls, or the attempt looks like it made no progress. Either
+    /// recovery path may claim them, so this asserts the accounting rather
+    /// than which one ran.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stalled_send_recovers_acks_written_before_the_stall() {
+        let endpoint = start_server(ServerMode::AckThenStopReading(5)).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_millis(500),
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        // More than the 64-slot request channel plus the HTTP/2 windows, so
+        // the loop is blocked inside a send when the server stops reading.
+        let events: Vec<BuildEvent> = (0..400).map(|_| progress_event(16 * 1024)).collect();
+        let (outcome, state) = drive_against_state(endpoint, events, retry).await;
+        match outcome {
+            DriveOutcome::Transient(_) => {}
+            other => panic!("expected Transient, got {}", other.label()),
+        }
+        assert_eq!(
+            state.max_acked, 5,
+            "acks written before the stall must survive it"
+        );
+    }
+
+    /// Run the full `work` state machine (lifecycle + stream + reconnects)
+    /// against a [`TestServer`], panicking if it fails to complete within the
+    /// test bound.
+    async fn work_against(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+    ) -> (SinkStats, SinkOutcome) {
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        for ev in events {
+            broadcaster.send(envelope(ev));
+        }
+        broadcaster.close();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            work(
+                recv,
+                endpoint,
+                HashMap::new(),
+                "test-invocation".to_string(),
+                retry,
+            ),
+        )
+        .await
+        .expect("work did not complete within the test bound")
+    }
+
+    /// Server sheds every stream with UNAVAILABLE after acking two events:
+    /// each reconnect makes progress, so the retry budget keeps resetting
+    /// (mirroring Bazel) and the whole stream lands even though the number
+    /// of sheds far exceeds `max_retries`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_with_progress_resets_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(2)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(
+            stats,
+            SinkStats {
+                sent: 10,
+                acked: 10
+            }
+        );
+    }
+
+    /// `max_retries = 0` is documented as "retry disabled" and must win over
+    /// the progress reset: a shed that acked events still ends the sink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zero_retry_budget_wins_over_progress_reset() {
+        let endpoint = start_server(ServerMode::AckThenShed(2)).await;
+        let retry = RetryConfig {
+            max_retries: 0,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        let err = outcome.expect_err("expected the sink to give up");
+        assert!(
+            err.last_error.contains("giving up after 0 attempts"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stats.acked, 2);
+    }
+
+    /// Replay a large unacked buffer against a server that acks 10 events
+    /// then sheds while the replay is still pushing: the failure surfaces on
+    /// the send side (the replay loop never polls the response stream), and
+    /// [`drain_acks`] must record the acks the server already wrote so the
+    /// attempt counts as progress and the acked events leave the buffer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_mid_replay_drains_pending_acks() {
+        let endpoint = start_server(ServerMode::AckThenShed(10)).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
+        // Upstream stays open but produces nothing; only the replay runs.
+        let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
+        let mut state = StreamState {
+            buffer: RetryBuffer::new(retry.retry_max_buffer_bytes),
+            next_seq: 101,
+            max_acked: 0,
+            last_message_sent: false,
+        };
+        // 128 KiB events overrun the HTTP/2 flow-control window and the
+        // request channel once the server stops reading, so the replay
+        // blocks mid-buffer with the 10 acks still unread.
+        for seq in 1..=100 {
+            state
+                .buffer
+                .push(seq, retained(&progress_event(128 * 1024)));
+        }
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            drive_stream(
+                &mut client,
+                "test-build",
+                "test-invocation",
+                &mut event_rx,
+                &mut state,
+                "test-endpoint",
+                &retry,
+            ),
+        )
+        .await
+        .expect("drive_stream did not complete within the test bound");
+        assert!(
+            matches!(outcome, DriveOutcome::Transient(_)),
+            "expected Transient, got {}",
+            outcome.label()
+        );
+        assert_eq!(state.max_acked, 10);
+        assert_eq!(state.buffer.len(), 90);
+    }
+
+    /// Server sheds every stream with UNAVAILABLE without ever acking: no
+    /// attempt makes progress, so the budget must still bound the retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_without_progress_exhausts_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(0)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..3).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        let err = outcome.expect_err("expected the sink to give up");
+        assert!(
+            err.last_error.contains("giving up after 1 attempts"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stats.acked, 0);
+    }
+
+    /// The backend pod is terminated mid-stream: tonic maps the h2 protocol
+    /// error to UNKNOWN. The stream never reached the application beyond the
+    /// acked prefix, so the sink must reconnect and replay the rest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_mid_stream_reconnects_and_replays() {
+        let endpoint = start_server(ServerMode::AckThenUnknown(2)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(
+            stats,
+            SinkStats {
+                sent: 10,
+                acked: 10
+            }
+        );
+    }
+
+    #[test]
+    fn fail_preserves_machine_cause_independent_of_user_message() {
+        // The user-facing phrasing and the machine-readable cause are allowed to
+        // differ; `SinkError` must carry the latter verbatim for callers that
+        // inspect `sink.error`.
+        let err = fail(
+            "grpcs://bes.example.com",
+            "could not connect, build events will not be delivered",
+            "connect failed: transport error".to_string(),
+        );
+        assert_eq!(err.last_error, "connect failed: transport error");
+    }
+
+    #[test]
+    fn finalize_carries_cause_in_sink_error() {
+        let err = finalize("grpcs://bes.example.com", "deadline exceeded".to_string());
+        assert_eq!(err.last_error, "deadline exceeded");
+    }
+}
