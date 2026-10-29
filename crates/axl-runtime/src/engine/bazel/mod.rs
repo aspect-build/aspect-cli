@@ -594,7 +594,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             },
             env.signals.clone(),
             &cancellation_token(&env.signals, cancellation),
-            env.rt.clone(),
         )?;
         Ok(build)
     }
@@ -728,7 +727,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             },
             env.signals.clone(),
             &cancellation_token(&env.signals, cancellation),
-            env.rt.clone(),
         )?;
         Ok(test)
     }
