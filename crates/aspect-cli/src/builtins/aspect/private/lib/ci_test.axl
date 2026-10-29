@@ -28,7 +28,7 @@ Run with:
   aspect dev test-ci
 """
 
-load("./ci.axl", "ci_identity", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
+load("./ci.axl", "ci_identity", "detect_artifacts_browse_url", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
 
 # Every CI-host marker + the per-job cache, snapshotted/restored around
 # each subtest so the harness's own CI environment can't leak in.
@@ -53,6 +53,10 @@ _ENV_KEYS = [
     "BUILDKITE_JOB_ID",
     "CIRCLECI",
     "CIRCLE_BUILD_URL",
+    "CIRCLE_PROJECT_USERNAME",
+    "CIRCLE_PIPELINE_NUMBER",
+    "CIRCLE_BUILD_NUM",
+    "CIRCLE_REPOSITORY_URL",
     "GITLAB_CI",
     "CI_JOB_URL",
 ]
@@ -251,6 +255,29 @@ def _test_resolve_build_url_off_gha(ctx):
 
     _restore_env(ctx, snapshot)
 
+def _test_circleci_artifacts_browse_url(ctx):
+    snapshot = _snapshot_env(ctx)
+    _clear_env(ctx)
+    ctx.std.env.set_var("CIRCLECI", "true")
+    ctx.std.env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/acme/web/9")
+    ctx.std.env.set_var("CIRCLE_PROJECT_USERNAME", "acme")
+    ctx.std.env.set_var("CIRCLE_PROJECT_REPONAME", "web")
+    ctx.std.env.set_var("CIRCLE_PIPELINE_NUMBER", "17")
+    ctx.std.env.set_var("CIRCLE_WORKFLOW_ID", "wf-id")
+    ctx.std.env.set_var("CIRCLE_BUILD_NUM", "9")
+    _eq(
+        "public CircleCI artifacts page",
+        detect_artifacts_browse_url(ctx),
+        "https://app.circleci.com/pipelines/github/acme/web/17/workflows/wf-id/jobs/9/artifacts",
+    )
+    ctx.std.env.set_var("CIRCLE_BUILD_URL", "https://ci.example.test/gh/acme/web/9")
+    _eq(
+        "Enterprise artifacts page uses its job URL",
+        detect_artifacts_browse_url(ctx),
+        "https://ci.example.test/gh/acme/web/9",
+    )
+    _restore_env(ctx, snapshot)
+
 def _test_impl(ctx):
     _test_detect_ci_host(ctx)
     _test_ci_identity(ctx)
@@ -259,7 +286,8 @@ def _test_impl(ctx):
     _test_detect_build_url_per_host(ctx)
     _test_detect_build_url_cache_first(ctx)
     _test_resolve_build_url_off_gha(ctx)
-    print("ci.axl: OK (7 sections)")
+    _test_circleci_artifacts_browse_url(ctx)
+    print("ci.axl: OK (8 sections)")
     return 0
 
 ci_tests = task(

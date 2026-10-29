@@ -21,7 +21,8 @@ Shapes by host:
                         opens the step's artifacts tab.
   - CircleCI
       build URL       — `CIRCLE_BUILD_URL` (job-scoped already).
-      artifacts URL   — modern `app.circleci.com/.../artifacts` URL.
+      artifacts URL   — modern `app.circleci.com/.../artifacts` on Cloud;
+                        the job URL itself on self-hosted installations.
   - GitLab
       build URL       — `CI_JOB_URL` (job-scoped already).
       artifacts URL   — `""`; our artifact upload uses the Generic
@@ -200,6 +201,10 @@ def _circleci_vcs(env):
         return "bitbucket"
     return "github"
 
+def is_circleci_cloud_url(build_url: str) -> bool:
+    """Only public CircleCI build URLs support the public artifacts hosts."""
+    return build_url.startswith("https://circleci.com/") or build_url.startswith("https://app.circleci.com/")
+
 def detect_artifacts_browse_url(ctx):
     """Detect the CI artifacts browse URL for the current job.
 
@@ -221,6 +226,12 @@ def detect_artifacts_browse_url(ctx):
             return build_url + "/steps/canvas?sid=" + step_id + "&tab=artifacts"
         return build_url
     elif env.var("CIRCLECI"):
+        build_url = env.var("CIRCLE_BUILD_URL") or ""
+        if not is_circleci_cloud_url(build_url):
+            # Enterprise's UI host comes from the runner; app.circleci.com
+            # would point outside that installation.
+            return build_url
+
         # Modern app.circleci.com URL — the legacy circleci.com hash
         # anchors (#artifacts, /artifacts) don't route reliably anymore.
         org = env.var("CIRCLE_PROJECT_USERNAME") or ""
@@ -234,7 +245,7 @@ def detect_artifacts_browse_url(ctx):
                     "/" + pipeline_num + "/workflows/" + workflow_id + "/jobs/" + job_num + "/artifacts")
 
         # Fall back to the legacy build URL if the pipeline env vars aren't set.
-        return env.var("CIRCLE_BUILD_URL") or ""
+        return build_url
 
     # GitLab: artifact upload uses the Generic Packages API (see
     # `_upload_file_gitlab` in lib/artifacts.axl), which lands files
