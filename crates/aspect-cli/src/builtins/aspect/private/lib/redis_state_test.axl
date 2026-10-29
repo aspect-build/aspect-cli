@@ -1,7 +1,7 @@
 """Unit tests for lib/redis_state.axl.
 
 An in-memory Redis fake implements the handful of commands the backend sends
-(HGET/PTTL/GET/SET/HSET/PEXPIRE/UNLINK/PING/INFO) over dicts and records every
+(HGET/HMGET/PTTL/GET/SET/HSET/PEXPIRE/UNLINK/PING/INFO) over dicts and records every
 pipeline, so the key scheme, TTL policy and legacy migration can be asserted
 command by command without a server. It stands in for the `redis.axl` client
 through `connect`'s `connect` seam; the client itself (AUTH, reconnect) is
@@ -51,6 +51,10 @@ def _fake_redis(info_disabled = False):
         if verb == "HGET":
             v = db["kv"].get(cmd[1])
             return v.get(cmd[2]) if type(v) == "dict" else None
+        if verb == "HMGET":
+            v = db["kv"].get(cmd[1])
+            h = v if type(v) == "dict" else {}
+            return [h.get(f) for f in cmd[2:]]
         if verb == "PTTL":
             return pttl(cmd[1])
         if verb == "GET":
@@ -158,6 +162,13 @@ def _connect(fake, env = {redis_state.ENDPOINT_ENV: _ENDPOINT}, connects = None,
 
 def _v2(digest):
     return "dd:sig:gh:deploy:" + digest
+
+def _read(digest):
+    return ["HMGET", _v2(digest), "sig", "at", "commit", "meta"]
+
+def _by(answers):
+    """`{label: delivered_by}` from a query's `{label: Receipt}`."""
+    return {label: r.delivered_by for label, r in answers.items()}
 
 def _legacy(digest):
     return "delivery-signature:gh:" + digest + ":deploy"
@@ -281,10 +292,32 @@ def _test_query_hit_without_refresh(ctx):
     fake.seed_hash(_v2("d1"), {"sig": "https://ci/1", "label": "//a:b"}, ttl_ms = redis_state.SIG_TTL_MS)
     dd = _connect(fake)
     got = dd.query({"//a:b": "d1"})
-    _eq("delivered", got, {"//a:b": "https://ci/1"})
+    _eq("delivered", _by(got), {"//a:b": "https://ci/1"})
     reads = fake.db["calls"][-1]
-    _eq("one read pipeline: HGET sig + PTTL per digest", reads, [["HGET", _v2("d1"), "sig"], ["PTTL", _v2("d1")]])
-    _eq("full TTL → no write pipeline", fake.verbs()[2:], [["HGET", "PTTL"]])
+    _eq("one read pipeline: HMGET receipt fields + PTTL per digest", reads, [_read("d1"), ["PTTL", _v2("d1")]])
+    _eq("full TTL → no write pipeline", fake.verbs()[2:], [["HMGET", "PTTL"]])
+
+def _test_query_returns_the_stored_receipt(ctx):
+    fake = _fake_redis()
+    dd = _connect(fake)
+    _eq("redis stores details", dd.stores_details, True)
+    dd.deliver("//a:b", "d1", meta = {"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e", "status": "success"}]})
+    receipt = dd.query({"//a:b": "d1"})["//a:b"]
+    _eq("delivered_by is the signature", receipt.delivered_by, "https://ci/build/7")
+    _eq("delivered_commit_sha is the delivering commit", receipt.delivered_commit_sha, "abc123")
+    _eq("delivered_at_unix_s is the write time", receipt.delivered_at_unix_s > 1700000000, True)
+    _eq("details round-trip", receipt.details, {"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e", "status": "success"}]})
+
+def _test_query_reads_bad_meta_as_no_details(ctx):
+    fake = _fake_redis()
+    fake.seed_hash(_v2("bad"), {"sig": "s", "at": "not-a-number", "meta": "{truncated"}, ttl_ms = redis_state.SIG_TTL_MS)
+    fake.seed_hash(_v2("list"), {"sig": "s", "meta": "[1, 2]"}, ttl_ms = redis_state.SIG_TTL_MS)
+    dd = _connect(fake)
+    got = dd.query({"//bad": "bad", "//list": "list"})
+    _eq("corrupt meta → no details", got["//bad"].details, {})
+    _eq("non-numeric at → 0", got["//bad"].delivered_at_unix_s, 0)
+    _eq("missing commit → empty", got["//bad"].delivered_commit_sha, "")
+    _eq("non-object meta → no details", got["//list"].details, {})
 
 def _test_query_refreshes_a_waning_ttl(ctx):
     fake = _fake_redis()
@@ -293,7 +326,7 @@ def _test_query_refreshes_a_waning_ttl(ctx):
     fake.seed_hash(_v2("none"), {"sig": "s-none"})
     dd = _connect(fake)
     got = dd.query({"low": "low", "half": "half", "none": "none"})
-    _eq("all delivered", got, {"low": "s-low", "half": "s-half", "none": "s-none"})
+    _eq("all delivered", _by(got), {"low": "s-low", "half": "s-half", "none": "s-none"})
     writes = fake.db["calls"][-1]
     _eq("below half and no-expiry are refreshed; exactly half is not", writes, [
         ["PEXPIRE", _v2("low"), redis_state.SIG_TTL_MS],
@@ -306,8 +339,9 @@ def _test_query_migrates_legacy_signatures(ctx):
     fake.seed_string(_legacy("old"), "https://ci/legacy")
     dd = _connect(fake)
     got = dd.query({"//old:t": "old", "//new:t": "fresh"})
-    _eq("legacy hit is delivered; miss is absent", got, {"//old:t": "https://ci/legacy"})
-    _eq("three pipelines: v2 reads, legacy GETs, writes", fake.verbs()[2:], [["HGET", "PTTL", "HGET", "PTTL"], ["GET", "GET"], ["HSET", "PEXPIRE", "PEXPIRE"]])
+    _eq("legacy hit is delivered; miss is absent", _by(got), {"//old:t": "https://ci/legacy"})
+    _eq("legacy receipt carries delivered_by alone", (got["//old:t"].delivered_at_unix_s, got["//old:t"].details), (0, {}))
+    _eq("three pipelines: v2 reads, legacy GETs, writes", fake.verbs()[2:], [["HMGET", "PTTL", "HMGET", "PTTL"], ["GET", "GET"], ["HSET", "PEXPIRE", "PEXPIRE"]])
     _eq("legacy GETs only for the misses", fake.db["calls"][3], [["GET", _legacy("old")], ["GET", _legacy("fresh")]])
 
     migrated = fake.db["kv"][_v2("old")]
@@ -320,7 +354,7 @@ def _test_query_migrates_legacy_signatures(ctx):
 
     # A second query finds the v2 hash and no longer touches the legacy key.
     dd.query({"//old:t": "old"})
-    _eq("second query: v2 hit, no legacy read, no write", fake.verbs()[5:], [["HGET", "PTTL"]])
+    _eq("second query: v2 hit, no legacy read, no write", fake.verbs()[5:], [["HMGET", "PTTL"]])
 
 def _test_legacy_ttl_is_configurable(ctx):
     fake = _fake_redis()
@@ -351,11 +385,11 @@ def _test_query_dedupes_and_maps_back(ctx):
     fake.seed_hash(_v2("shared"), {"sig": "s"}, ttl_ms = redis_state.SIG_TTL_MS)
     dd = _connect(fake)
     got = dd.query({"//a": "shared", "//b": "shared", "//c": "", "//d": "nope"})
-    _eq("every label holding a delivered digest", got, {"//a": "s", "//b": "s"})
+    _eq("every label holding a delivered digest", _by(got), {"//a": "s", "//b": "s"})
     _eq("shared digest read once, empty skipped", fake.db["calls"][2], [
-        ["HGET", _v2("shared"), "sig"],
+        _read("shared"),
         ["PTTL", _v2("shared")],
-        ["HGET", _v2("nope"), "sig"],
+        _read("nope"),
         ["PTTL", _v2("nope")],
     ])
     _eq("no digests → no round trip", dd.query({"//c": ""}), {})
@@ -385,7 +419,7 @@ def _test_deliver_writes_hash_and_ttl(ctx):
     hset = fake.db["calls"][-1][0]
     _eq("meta rides along as JSON", hset[10:], ["meta", "{\"image\":\"sha256:beef\"}"])
 
-    _eq("delivered afterwards", dd.query({"//a:b": "d1"}), {"//a:b": "https://ci/build/7"})
+    _eq("delivered afterwards", _by(dd.query({"//a:b": "d1"})), {"//a:b": "https://ci/build/7"})
 
 def _test_delete_unlinks_every_key(ctx):
     fake = _fake_redis()
@@ -411,9 +445,9 @@ def _test_errors_propagate_from_verbs(ctx):
     # Reconnecting is the client's job; what reaches the backend is final.
     fake = _fake_redis()
     dd = _connect(fake)
-    fake.db["fail_next"] = [redis.CommandError("WRONGTYPE Operation against a key holding the wrong kind of value", command = "HGET")]
+    fake.db["fail_next"] = [redis.CommandError("WRONGTYPE Operation against a key holding the wrong kind of value", command = "HMGET")]
     err, _ = catch(dd.query, {"//a:b": "d1"}, types = [redis.CommandError])
-    _eq("command error escapes query", err.command, "HGET")
+    _eq("command error escapes query", err.command, "HMGET")
     fake.db["fail_next"] = [std.io.Error("timed out", kind = "timed_out")]
     err, _ = catch(dd.deliver, "//a:b", "d1", types = [std.io.Error])
     _eq("transport error escapes deliver", err.kind, "timed_out")
@@ -442,6 +476,8 @@ _UNIT_TESTS = [
     _test_probe_failure_closes_and_retries,
     _test_info_disabled_still_ok,
     _test_query_hit_without_refresh,
+    _test_query_returns_the_stored_receipt,
+    _test_query_reads_bad_meta_as_no_details,
     _test_query_refreshes_a_waning_ttl,
     _test_query_migrates_legacy_signatures,
     _test_legacy_ttl_is_configurable,

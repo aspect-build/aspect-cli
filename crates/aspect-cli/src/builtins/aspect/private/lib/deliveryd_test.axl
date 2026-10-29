@@ -167,7 +167,14 @@ def _test_query_narrows_to_delivered_labels(ctx):
     got = dd.query({"//pkg:a": "digest-a", "//pkg:b": "digest-b"})
     _eq("query → POST /query", (calls[-1].method, calls[-1].path), ("POST", "/query"))
     _eq("query payload is commit-keyed", calls[-1].body, {"ci_host": "gh", "commit_sha": "abc123", "workspace": "deliver"})
-    _eq("only delivered, only asked-about", got, {"//pkg:a": "https://ci/build/1"})
+    _eq("only delivered, only asked-about", got.keys(), ["//pkg:a"])
+    receipt = got["//pkg:a"]
+    _eq(
+        "a v1 receipt carries delivered_by alone",
+        (receipt.delivered_by, receipt.delivered_at_unix_s, receipt.delivered_commit_sha, receipt.details),
+        ("https://ci/build/1", 0, "", {}),
+    )
+    _eq("v1 daemon does not store details", dd.stores_details, False)
 
 def _test_deliver_and_delete(ctx):
     calls = []

@@ -13,6 +13,11 @@ a config.axl can select:
 
 A backend reports "not configured" and "unreachable" the same way, through
 `Backend.status.ok`, so the task has one startup error path.
+
+`query` answers with a `Receipt` per delivered label: who delivered the digest,
+when, from which commit, and the `details` stored with it. A backend that
+cannot store details says so with `stores_details = False`, and its receipts
+carry `delivered_by` only.
 """
 
 load("./text.axl", "format_bytes_iec")
@@ -46,7 +51,17 @@ Params = record(
     signature = field(str, default = ""),
 )
 
+# One delivered digest, as `query` reports it. `details` is the user-owned dict
+# `deliver` stored as `meta`; Aspect never writes inside it.
+Receipt = record(
+    delivered_by = field(str),
+    delivered_at_unix_s = field(int, default = 0),
+    delivered_commit_sha = field(str, default = ""),
+    details = field(dict, default = {}),
+)
+
 # What `connect` returns. `endpoint` must be credential-free: it is printed.
+# `query` maps `{label: digest}` to `{label: Receipt}` for the delivered ones.
 # `deliver` takes `(label, digest, meta)`; implementations default `meta = {}`.
 Backend = record(
     endpoint = field(str),
@@ -57,6 +72,7 @@ Backend = record(
     query = field(typing.Callable[[dict], dict]),
     deliver = field(typing.Callable[[str, str, dict], None]),
     delete = field(typing.Callable[[str], None]),
+    stores_details = field(bool, default = False),
 )
 
 DeliveryState = trait(
@@ -95,6 +111,7 @@ def describe_storage(health: Health) -> str:
 delivery_state = namespace(
     Params = Params,
     Backend = Backend,
+    Receipt = Receipt,
     Health = Health,
     Storage = Storage,
     describe_storage = describe_storage,
