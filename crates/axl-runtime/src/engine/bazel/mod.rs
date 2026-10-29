@@ -47,9 +47,6 @@ mod wrappers;
 
 use wrappers::ExecLogSink;
 
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
-pub(crate) use bazel::bes::redact::redact_command_args;
-
 /// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
 ///
 /// Tri-state for each per-fd arg: not passed → inherit, Starlark `None` →
