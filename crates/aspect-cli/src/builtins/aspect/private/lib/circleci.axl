@@ -35,6 +35,7 @@ call (`cache = None`) keeps the original fetch-per-call behavior.
 
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
+load("./ci.axl", "is_circleci_cloud_url")
 load("./environment.axl", "warn")
 
 # Retry the S3 PUT this many times before giving up. A failed attempt
@@ -317,6 +318,21 @@ def _s3_object_url(bucket, region, key):
     """
     return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + aws_uri_encode(key)
 
+def circleci_artifact_download_url(build_url: str, output_url: str, job_id: str, name: str) -> str:
+    """Link to a registered artifact only when its output-service host is known.
+
+    Self-hosted installations need ASPECT_CIRCLECI_OUTPUT_URL set to their
+    output-service origin; the runner API host is not necessarily that host.
+    """
+    if not job_id:
+        return ""
+    base = output_url.rstrip("/") if output_url else ""
+    if not base and is_circleci_cloud_url(build_url):
+        base = "https://output.circle-artifacts.com"
+    if not (base.startswith("https://") or base.startswith("http://")):
+        return ""
+    return base + "/output/job/" + job_id + "/artifacts/0/" + aws_uri_encode(name)
+
 # S3 conditions worth another attempt: the job-scoped credentials rotated or
 # the clock drifted, or S3 itself asked us to come back. Anything else 4xx
 # (`SignatureDoesNotMatch`, `AccessDenied`, a malformed key) fails the same
@@ -422,14 +438,16 @@ def _run_s3_put(ctx, curl_args, url):
     `Authorization` / `x-amz-security-token` that `-v` echoes.
     """
     args = curl_args + (["-v"] if trace.enabled else [])
-    child = ctx.std.process.command("curl") \
+    # Per-file uploads can run thousands of times; this closes both pipes
+    # promptly instead of leaving read_to_string() streams open until AXL GC.
+    result = ctx.std.process.command("curl") \
         .args(args + [url]) \
         .stdout("piped") \
         .stderr("piped") \
-        .spawn()
-    out = child.stdout().read_to_string()
-    curl_err = redact_curl_trace(child.stderr().read_to_string().strip())
-    status = child.wait()
+        .spawn().wait_with_output()
+    out = result.stdout
+    curl_err = redact_curl_trace(result.stderr.strip())
+    status = result.status
 
     parts = out.rsplit("\n", 1)
     if len(parts) == 2:
@@ -485,14 +503,15 @@ def _s3_put(ctx, session, path, name):
             s3_failure_is_retryable(http_code, body),
         )
 
-    # Stable public CircleCI artifact URL so callers can link to individual
-    # files. CIRCLE_WORKFLOW_JOB_ID is always set by the runner; fall back to
-    # the signed S3 URL if it's ever absent.
+    # Public output URLs do not work for Enterprise installations. An unknown
+    # output host is preferable to an inaccessible or incorrect download URL.
     job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
-    if job_id:
-        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + aws_uri_encode(name)
-    else:
-        download_url = s3_url
+    download_url = circleci_artifact_download_url(
+        ctx.std.env.var("CIRCLE_BUILD_URL") or "",
+        ctx.std.env.var("ASPECT_CIRCLECI_OUTPUT_URL") or "",
+        job_id,
+        name,
+    )
     return (True, "", download_url, False)
 
 def _upload_artifact(ctx, path, name, cache = None):

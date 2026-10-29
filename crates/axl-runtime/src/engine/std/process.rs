@@ -158,14 +158,10 @@ impl Command {
         }
     }
 
-    /// Format as `program "arg1" "arg2"` for use in error messages.
-    /// Deliberately excludes environment variables to avoid leaking secrets.
+    /// Only the executable is safe to include in errors: arguments and
+    /// environment variables may carry credentials (for example curl --user).
     fn describe(&self) -> String {
-        let inner = self.inner.borrow();
-        inner.get_args().fold(
-            inner.get_program().to_string_lossy().into_owned(),
-            |acc, a| format!("{acc} {a:?}"),
-        )
+        self.inner.borrow().get_program().to_string_lossy().into_owned()
     }
 
     /// Spawn, bound to `cancellation` (the root unless given): cancelling
@@ -783,39 +779,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spawn_error_includes_command_and_args() {
+    fn spawn_error_excludes_sensitive_args() {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
         };
-        cmd.inner.borrow_mut().args(["--flag", "value"]);
+        cmd.inner.borrow_mut().args([
+            "--aws-sigv4",
+            "aws:amz:us-gov-west-1:s3",
+            "--user",
+            "ASIAFAKE:fake-secret-key",
+            "-H",
+            "x-amz-security-token: fake-session-token",
+        ]);
         let err_msg = cmd
             .try_spawn(&Signals::new(), NoneOr::None)
             .unwrap_err()
             .to_string();
         assert!(err_msg.contains(program));
-        assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+        assert!(!err_msg.contains("ASIAFAKE"));
+        assert!(!err_msg.contains("fake-secret-key"));
+        assert!(!err_msg.contains("fake-session-token"));
+        assert!(!err_msg.contains("--user"));
     }
 
     #[test]
-    fn status_error_includes_command_and_args() {
+    fn status_error_excludes_sensitive_args() {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
         };
-        cmd.inner.borrow_mut().args(["--flag", "value"]);
+        cmd.inner.borrow_mut().args(["--user", "ASIAFAKE:fake-secret-key"]);
         let err_msg = cmd
             .try_status(&Signals::new(), NoneOr::None)
             .unwrap_err()
             .to_string();
         assert!(err_msg.contains(program));
-        assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+        assert!(!err_msg.contains("--user"));
+        assert!(!err_msg.contains("fake-secret-key"));
     }
 
     #[test]
-    fn describe_excludes_env_vars() {
+    fn describe_excludes_args_and_env_vars() {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
             process_group: Cell::new(None),
@@ -825,7 +832,7 @@ mod tests {
             .args(["--flag1", "--flag2", "with spaces"])
             .env("SECRET_TOKEN", "super_secret");
         let description = cmd.describe();
-        assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
+        assert_eq!(description, "program");
     }
 }
 

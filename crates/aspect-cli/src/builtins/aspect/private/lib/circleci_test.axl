@@ -6,7 +6,7 @@ S3 error parsing, the session cache, test-result URL resolution, the
 sigv4 PUT arg builder, trace redaction, and JUnit skipped-marking.
 """
 
-load("./circleci.axl", "aws_uri_encode", "mark_testcases_skipped", "redact_curl_trace", "s3_extract_error_code", "s3_extract_error_message", "s3_failure_is_retryable", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
+load("./circleci.axl", "aws_uri_encode", "circleci_artifact_download_url", "mark_testcases_skipped", "redact_curl_trace", "s3_extract_error_code", "s3_extract_error_message", "s3_failure_is_retryable", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -219,6 +219,35 @@ def _test_not_retryable_unknown_4xx(_ctx):
 
 # test_results_object_url — resolve a test-result Key.location to a PUT URL
 
+def _test_public_circleci_artifact_link(_ctx):
+    _eq(
+        "public CircleCI keeps direct links",
+        circleci_artifact_download_url("https://circleci.com/gh/acme/web/9", "", "job-id", "test/a @b.log"),
+        "https://output.circle-artifacts.com/output/job/job-id/artifacts/0/test/a%20%40b.log",
+    )
+
+def _test_enterprise_circleci_artifact_link(_ctx):
+    _eq(
+        "Enterprise uses configured output-service origin",
+        circleci_artifact_download_url("https://ci.example.test/gh/acme/web/9", "https://output.ci.example.test/", "job-id", "a.log"),
+        "https://output.ci.example.test/output/job/job-id/artifacts/0/a.log",
+    )
+    _eq(
+        "Enterprise without output-service origin does not use public URL",
+        circleci_artifact_download_url("https://ci.example.test/gh/acme/web/9", "", "job-id", "a.log"),
+        "",
+    )
+    _eq(
+        "No job id cannot produce a direct link",
+        circleci_artifact_download_url("https://circleci.com/gh/acme/web/9", "", "", "a.log"),
+        "",
+    )
+    _eq(
+        "Lookalike public domain is not CircleCI Cloud",
+        circleci_artifact_download_url("https://circleci.com.example.test/gh/acme/web/9", "", "job-id", "a.log"),
+        "",
+    )
+
 def _test_object_url_relative_key(_ctx):
     """The common case: a relative S3 object key → virtual-hosted bucket URL."""
     _eq(
@@ -383,6 +412,8 @@ def _test_skip_no_testcases(_ctx):
     _eq("no testcase → unchanged", mark_testcases_skipped('<testsuite tests="0"></testsuite>', "cached"), '<testsuite tests="0"></testsuite>')
 
 _UNIT_TESTS = [
+    _test_public_circleci_artifact_link,
+    _test_enterprise_circleci_artifact_link,
     _test_object_url_relative_key,
     _test_object_url_absolute_https_passthrough,
     _test_object_url_absolute_http_passthrough,
