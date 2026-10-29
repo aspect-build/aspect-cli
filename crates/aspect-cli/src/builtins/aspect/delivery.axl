@@ -386,14 +386,21 @@ def _record_delivery_result(data: dict, outcomes: dict, label: str, outcome: str
 def _delivery_dispatch_settled(build_done: bool, runs_done: bool, running: list) -> bool:
     return build_done and runs_done and not running
 
-def _cleanup_scheduled_deliveries(runs, running: list) -> None:
+def _cleanup_scheduled_deliveries(ctx, runs, xl, running: list) -> None:
     if not runs.done:
         runs.cancellation.cancel()
     for entry in running:
         entry[4].cancellation.cancel()
+    close_error, _ = catch(bzl.exec_log.close, ctx, xl)
     for entry in running:
         entry[4].wait()
     runs.wait()
+    for entry in running:
+        for path in [entry[5], entry[6]]:
+            if path != None and ctx.std.fs.exists(path):
+                ctx.std.fs.remove_file(path)
+    if close_error != None:
+        fail(close_error.message)
 
 testonly_delivery_scheduler = namespace(
     create = _create_delivery_scheduler,
@@ -1820,7 +1827,7 @@ def _delivery_impl(ctx):
         running = []
         scheduler_error = ""
         if selector != None:
-            ctx.defer(_cleanup_scheduled_deliveries, runs, running)
+            ctx.defer(_cleanup_scheduled_deliveries, ctx, runs, xl, running)
 
         def spawn_delivery(entry: tuple) -> tuple:
             return _spawn_deliverable(ctx, color, capture, *entry)

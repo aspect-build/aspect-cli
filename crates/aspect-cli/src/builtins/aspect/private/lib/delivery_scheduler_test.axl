@@ -1,5 +1,6 @@
 """Unit tests for delivery's scheduler extension and dispatch helpers."""
 
+load("@aspect//bazel.axl", "bazel")
 load("@aspect//delivery.axl", "DeliveryPlan", scheduler = "testonly_delivery_scheduler")
 
 def _equal(actual, expected) -> None:
@@ -189,23 +190,68 @@ def _selector_exception(ctx: TaskContext) -> None:
 
 def _cleanup(ctx: TaskContext) -> None:
     events = []
+    root = ctx.std.fs.mkdtemp()
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    stdout_path = root + "/A.stdout"
+    stderr_path = root + "/A.stderr"
+    ctx.std.fs.write(stdout_path, "stdout")
+    ctx.std.fs.write(stderr_path, "stderr")
+
+    def wait_build():
+        events.append("wait build")
+        _equal(events, ["cancel build", "cancel A", "cancel B", "exec log", "wait A", "wait B", "wait build"])
+
     runs = struct(
         done = False,
         cancellation = struct(cancel = lambda: events.append("cancel build")),
-        wait = lambda: events.append("wait build"),
+        wait = wait_build,
     )
-    running = []
-    for label in ["A", "B"]:
-        # Bind each label through a function call, not the loop's closure cell.
-        running.append(_child(label, events))
-    scheduler.cleanup(runs, running)
-    _equal(events, ["cancel build", "cancel A", "cancel B", "wait A", "wait B", "wait build"])
+    running = [
+        _child("A", events, stdout_path, stderr_path),
+        _child("B", events),
+    ]
+    hook = bazel.exec_log.Hook(
+        on_entry = lambda _ctx, _entry: events.append("exec log"),
+    )
+    xl = struct(entries = [struct(type = "spawn")], hooks = [hook], exact = True)
 
-def _child(label, events):
+    scheduler.cleanup(ctx, runs, xl, running)
+    _equal(ctx.std.fs.exists(stdout_path), False)
+    _equal(ctx.std.fs.exists(stderr_path), False)
+
+    failed_events = []
+    failed_stdout_path = root + "/failed.stdout"
+    failed_stderr_path = root + "/failed.stderr"
+    ctx.std.fs.write(failed_stdout_path, "stdout")
+    ctx.std.fs.write(failed_stderr_path, "stderr")
+
+    def fail_hook(_ctx, _entry):
+        failed_events.append("exec log")
+        fail("exec-log callback failed")
+
+    failed_runs = struct(
+        done = False,
+        cancellation = struct(cancel = lambda: failed_events.append("cancel build")),
+        wait = lambda: failed_events.append("wait build"),
+    )
+    failed_running = [_child("A", failed_events, failed_stdout_path, failed_stderr_path)]
+    failed_xl = struct(
+        entries = [struct(type = "spawn")],
+        hooks = [bazel.exec_log.Hook(on_entry = fail_hook)],
+        exact = True,
+    )
+    err, _ = catch(scheduler.cleanup, ctx, failed_runs, failed_xl, failed_running)
+    _equal(err != None, True)
+    _equal("exec-log callback failed" in err.message, True)
+    _equal(failed_events, ["cancel build", "cancel A", "exec log", "wait A", "wait build"])
+    _equal(ctx.std.fs.exists(failed_stdout_path), False)
+    _equal(ctx.std.fs.exists(failed_stderr_path), False)
+
+def _child(label, events, stdout_path = None, stderr_path = None):
     return (label, False, "digest", 0, struct(
         cancellation = struct(cancel = lambda: events.append("cancel " + label)),
         wait = lambda: events.append("wait " + label),
-    ), None, None)
+    ), stdout_path, stderr_path)
 
 _TESTS = [
     _fifo,
