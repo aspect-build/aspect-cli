@@ -161,7 +161,11 @@ impl Command {
     /// Only the executable is safe to include in errors: arguments and
     /// environment variables may carry credentials (for example curl --user).
     fn describe(&self) -> String {
-        self.inner.borrow().get_program().to_string_lossy().into_owned()
+        self.inner
+            .borrow()
+            .get_program()
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Spawn, bound to `cancellation` (the root unless given): cancelling
@@ -811,7 +815,9 @@ mod tests {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
         };
-        cmd.inner.borrow_mut().args(["--user", "ASIAFAKE:fake-secret-key"]);
+        cmd.inner
+            .borrow_mut()
+            .args(["--user", "ASIAFAKE:fake-secret-key"]);
         let err_msg = cmd
             .try_status(&Signals::new(), NoneOr::None)
             .unwrap_err()

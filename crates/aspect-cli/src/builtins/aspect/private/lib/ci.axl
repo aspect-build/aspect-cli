@@ -231,6 +231,7 @@ def detect_artifacts_browse_url(ctx):
             # Enterprise's UI host comes from the runner; app.circleci.com
             # would point outside that installation.
             return build_url
+
         # Modern app.circleci.com URL — the legacy circleci.com hash
         # anchors (#artifacts, /artifacts) don't route reliably anymore.
         org = env.var("CIRCLE_PROJECT_USERNAME") or ""

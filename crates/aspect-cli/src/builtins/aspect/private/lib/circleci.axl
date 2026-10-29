@@ -438,6 +438,7 @@ def _run_s3_put(ctx, curl_args, url):
     `Authorization` / `x-amz-security-token` that `-v` echoes.
     """
     args = curl_args + (["-v"] if trace.enabled else [])
+
     # Per-file uploads can run thousands of times; this closes both pipes
     # promptly instead of leaving read_to_string() streams open until AXL GC.
     result = ctx.std.process.command("curl") \
