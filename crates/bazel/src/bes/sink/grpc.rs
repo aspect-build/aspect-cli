@@ -13,7 +13,6 @@ use axl_proto::{
 };
 use futures::FutureExt;
 use prost::bytes::Bytes;
-use tokio::runtime::Handle;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Streaming;
 
@@ -58,15 +57,41 @@ impl Grpc {
     /// share `invocation_id` so every backend indexes it under one UUID.
     /// Transport / BES errors never panic; they surface as `SinkOutcome`
     /// for the caller's `sink.wait()` to inspect.
+    ///
+    /// The thread drives its own runtime rather than the host's: a sink
+    /// that outlives a timed-out `sink.wait()` is still running when the
+    /// host runtime shuts down at exit, and its timers would panic on a
+    /// runtime being torn down underneath them.
     pub fn spawn(
-        rt: Handle,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
         endpoint: String,
         headers: HashMap<String, String>,
         invocation_id: String,
         retry: RetryConfig,
     ) -> JoinHandle<(SinkStats, SinkOutcome)> {
-        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
+        thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    return (
+                        SinkStats::default(),
+                        Err(fail(
+                            &endpoint,
+                            "could not start, build events will not be delivered",
+                            format!("sink runtime: {e}"),
+                        )),
+                    );
+                }
+            };
+            let outcome = rt.block_on(work(recv, endpoint, headers, invocation_id, retry));
+            // The forwarder may still be parked in a blocking `recv`; don't
+            // hold the join for it.
+            rt.shutdown_background();
+            outcome
+        })
     }
 }
 
@@ -1919,6 +1944,50 @@ mod tests {
                 sent: 10,
                 acked: 10
             }
+        );
+    }
+
+    /// A sink still waiting on its backend when the process exits: a timed-out
+    /// `sink.wait()` leaves it running while `main` returns and tears down the
+    /// host runtime. The sink must outlive that rather than panic, which a
+    /// release build (`panic=abort`) turns into a SIGABRT.
+    #[test]
+    fn sink_survives_the_host_runtime_shutting_down() {
+        let server_rt = tokio::runtime::Runtime::new().unwrap();
+        let endpoint = server_rt.block_on(start_server(ServerMode::DrainNoAck));
+
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        for _ in 0..5 {
+            broadcaster.send(envelope(progress_event(64)));
+        }
+        broadcaster.close();
+        let retry = RetryConfig {
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let host_rt = tokio::runtime::Runtime::new().unwrap();
+        let join = host_rt.block_on(async {
+            Grpc::spawn(
+                recv,
+                endpoint,
+                HashMap::new(),
+                "test-invocation".to_string(),
+                retry,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !join.is_finished(),
+            "the sink should still be awaiting acks"
+        );
+
+        drop(host_rt);
+        std::thread::sleep(Duration::from_millis(500));
+
+        assert!(
+            !join.is_finished() || join.join().is_ok(),
+            "the sink thread panicked when the host runtime shut down"
         );
     }
 
