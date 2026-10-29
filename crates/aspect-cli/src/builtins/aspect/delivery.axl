@@ -82,7 +82,7 @@ Receipts
 --------
 
 Every delivery entry carries a `receipt`. A target writes a JSON object to
-the path in `ASPECT_DELIVERY_RECEIPT_FILE`; that object becomes
+the path in `ASPECT_DELIVERY_RECEIPT_JSON_FILE`; that object becomes
 `receipt.details`, and whatever `delivery_target` returns merges on top. When
 the target is delivered, the details are stored with the delivery and come
 back on every later run that skips the same digest, next to `delivered_by`,
@@ -283,7 +283,7 @@ DeliveryTrait = trait(
             "{label, outcome, message, output_sha, is_forced, receipt, custom, " +
             "entrypoint_path, runfiles_dir, runfiles_workspace_dir, " +
             "default_outputs}. `receipt.details` holds what the target wrote " +
-            "to $ASPECT_DELIVERY_RECEIPT_FILE (on skip: what was stored when " +
+            "to $ASPECT_DELIVERY_RECEIPT_JSON_FILE (on skip: what was stored when " +
             "it was delivered); `custom` is the same dict. Return a dict to " +
             "merge into receipt.details (e.g. " +
             "{'image_digest': ctx.std.fs.read_to_string(path).strip()}), " +
@@ -393,14 +393,14 @@ def _spawn_deliverable(ctx, color, capture, label, ep, is_forced, output_sha):
     stdout/stderr are redirected to per-target temp files so the reap loop polls
     `try_wait()` and reads them after exit instead of draining a pipe (the path
     fields are None otherwise). The child finds its receipt path in
-    `RECEIPT_FILE_ENV`; a file left by an earlier run is removed first, so a
+    `RECEIPT_JSON_FILE_ENV`; a file left by an earlier run is removed first, so a
     target that writes none never inherits one."""
     forced_marker = " (FORCED)" if is_forced else ""
     print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
     receipt_path = _DELIVER_RECEIPT_PATH.format(ctx.task.name, sanitize_filename(label))
     if ctx.std.fs.exists(receipt_path):
         ctx.std.fs.remove_file(receipt_path)
-    cmd = ep.command(env = {RECEIPT_FILE_ENV: receipt_path})
+    cmd = ep.command(env = {RECEIPT_JSON_FILE_ENV: receipt_path})
     stdout_path = None
     stderr_path = None
     if capture:
@@ -520,7 +520,7 @@ _DELIVER_STDERR_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stderr"
 _DELIVER_RECEIPT_PATH = "/tmp/aspect-delivery-deliver-{}-{}.receipt.json"
 
 # The variable a deliverable reads for the path to write its receipt JSON to.
-RECEIPT_FILE_ENV = "ASPECT_DELIVERY_RECEIPT_FILE"
+RECEIPT_JSON_FILE_ENV = "ASPECT_DELIVERY_RECEIPT_JSON_FILE"
 
 # Cap on a receipt file, and on the details stored per delivery.
 RECEIPT_MAX_BYTES = 64 * 1024

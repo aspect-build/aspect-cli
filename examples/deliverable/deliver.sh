@@ -12,6 +12,6 @@ fi
 echo "Delivering Aspect CLI! payload=$payload contents=$(cat "$payload") extra_args=${*:2}"
 # The delivery task stores this receipt with the delivery and returns it when
 # a later run reuses it.
-if [[ -n "${ASPECT_DELIVERY_RECEIPT_FILE:-}" ]]; then
-    printf '{"payload": "%s", "contents": "%s"}\n' "$payload" "$(cat "$payload")" >"$ASPECT_DELIVERY_RECEIPT_FILE"
+if [[ -n "${ASPECT_DELIVERY_RECEIPT_JSON_FILE:-}" ]]; then
+    printf '{"payload": "%s", "contents": "%s"}\n' "$payload" "$(cat "$payload")" >"$ASPECT_DELIVERY_RECEIPT_JSON_FILE"
 fi
