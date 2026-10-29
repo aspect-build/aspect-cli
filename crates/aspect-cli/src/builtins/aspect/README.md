@@ -189,6 +189,62 @@ def config(ctx: ConfigContext):
         ctx.traits[DeliveryState].connect = redis_state.connect
 ```
 
+### Custom delivery scheduling
+
+Set `DeliveryTrait.create_scheduler` to a factory accepting `(ctx, plan)`.
+It runs once after change detection and before the release build, and returns
+`choose_next(ready, outcomes) -> str | None`. With the hook unset, delivery
+uses its existing FIFO order. Neither dry-run mode invokes the factory.
+
+`DeliveryPlan` contains:
+
+- `candidates`: all resolved labels before change-detection filtering.
+- `selected`: labels selected for this invocation, including forced deliveries.
+- `release_rc`: the exact `bazel.RunCommand` passed to the release build.
+- `report_progress(message)`: throttled progress and heartbeat reporting for
+  planning work. Call this while polling a long-running planning operation.
+
+Both label lists are copies. Treat `release_rc` as read-only. Resolve policy
+inputs before returning the selector; the selector itself must not perform
+I/O, spawn processes, or wait for external events.
+
+The selector receives copies of built, runnable, unstarted labels in `ready`
+and native terminal results in `outcomes`. Return one of those labels to
+start it, or `None` when none is eligible. `ok` is published after delivery
+state persistence succeeds; `skip` means the requested digest was already
+delivered in this task's state scope. Missing, `warn`, and `fail` outcomes
+must not satisfy a dependency. A forced delivery has no prior-success shortcut.
+
+For a dependency policy, prepare each target's transitive prerequisites in
+the factory and return a selector with this shape:
+
+```python
+def choose_next(ready, outcomes):
+    for label in ready:
+        if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites[label]]):
+            return label
+    return None
+```
+
+Keep paths through skipped targets and non-delivery targets when computing
+those prerequisites. Ordering applies within the resolved candidate set;
+an excluded target is not a verified prior-delivery skip. Graph discovery
+belongs to the consumer's factory and is not provided by this hook.
+
+Native delivery still owns spawning, reaping, logs, state, manifests, and
+`--max-parallelization`. Waiting targets consume no slots. `None` keeps the
+event loop alive while builds or deliveries can progress, and dependents
+can start as soon as their prerequisites finish without a batch barrier.
+Once all build/runnable streams and running processes finish, remaining
+ineligible targets receive `fail` with a `scheduler_blocked` message.
+
+A non-ready label or invalid return type stops new dispatch, drains current
+work, and fails remaining targets. A selector exception follows task error
+handling; deferred cleanup cancels and waits for owned work. Factory errors
+fail before release execution and publish the native final manifest.
+
+Run `aspect dev test-delivery-scheduler` for the extension's unit tests.
+
 ---
 
 ## Cross-cutting features

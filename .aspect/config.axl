@@ -32,6 +32,7 @@ load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/confirm_test.axl", "confirm_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_default_preset_snapshot_tests", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
+load("@aspect//private/lib/delivery_scheduler_test.axl", "delivery_scheduler_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
@@ -610,6 +611,9 @@ def config(ctx: ConfigContext):
     # Delivery results unit: init_data/add_result/build_manifest schema shape.
     # Run with: aspect dev test-delivery-results
     ctx.tasks.add(delivery_results_unit_tests)
+
+    # Run with: aspect dev test-delivery-scheduler
+    ctx.tasks.add(delivery_scheduler_tests)
 
     # format_results template snapshots.
     # Run with: aspect dev test-format-template-snapshots

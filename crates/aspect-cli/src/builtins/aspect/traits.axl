@@ -43,7 +43,7 @@ into the task's trait list).
 """
 
 load("@aspect//bazel.axl", _BazelTrait = "BazelTrait", _ExecLogHook = "ExecLogHook")
-load("@aspect//delivery.axl", _DeliveryTrait = "DeliveryTrait")
+load("@aspect//delivery.axl", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector", _DeliveryTrait = "DeliveryTrait")
 load("@aspect//lint.axl", _LintTrait = "LintTrait")
 load("./private/lib/delivery_state.axl", _DeliveryState = "DeliveryState")
 load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
@@ -71,6 +71,8 @@ load(
 load("./private/lib/worktrees_trait.axl", _Worktrees = "Worktrees")
 
 BazelTrait = _BazelTrait
+DeliveryPlan = _DeliveryPlan
+DeliverySelector = _DeliverySelector
 DeliveryState = _DeliveryState
 DeliveryTrait = _DeliveryTrait
 ExecLogHook = _ExecLogHook
