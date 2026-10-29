@@ -19,7 +19,8 @@ When the Aspect API is unreachable, it falls back to coordinating through the
 note's own embedded state block: read the note, merge our entry via
 `merge_comment_only_state` (all tasks in a pipeline share one
 `workflow_run_id` / CI_PIPELINE_ID, so it preserves sibling rows), render, and
-upsert under a time lease.
+upsert under a time lease. A job from a pipeline older than the note's, on
+another SHA, skips the fallback post (see `superseded`).
 
 ## Marker
 
@@ -60,6 +61,7 @@ load(
     "render_body",
     "results_subset",
     "should_create_fallback",
+    "superseded",
 )
 load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
@@ -460,6 +462,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if not final and lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
             return
 
+        if superseded(parsed, head_sha, run_id):
+            return
         new_state = merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         _post(ctx, token, new_state, now_epoch)
 
