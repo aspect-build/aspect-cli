@@ -413,7 +413,9 @@ def _upload_group_per_file(ctx, provider, group, entries, name):
             url = result.get("download_url", "")
             if url and url.startswith("http"):
                 files = label_urls.setdefault(entry["label"], {})
-                files.setdefault(entry["name"], url)
+                if entry["name"] not in files:
+                    files[entry["name"]] = url
+                    group.setdefault("pending_urls", []).append((entry["label"], entry["name"], url))
             group["last_count"] += 1
             any_success = True
         else:
@@ -829,7 +831,30 @@ def _new_upload_group():
         "prev_ref": None,
         "download_url": "",
         "label_urls": {},
+        "pending_urls": [],
     }
+
+def upsert_artifact(items, indices, artifact):
+    """Replace the same logical artifact in place without scanning all links."""
+    key = (artifact.kind, artifact.label, artifact.name)
+    index = indices.get(key)
+    if index == None:
+        indices[key] = len(items)
+        items.append(artifact)
+    else:
+        items[index] = artifact
+
+def publish_group_artifacts(group, archive_kind, archive_name, file_kind, append):
+    """Publish only URLs added by the last per-file batch (or an archive)."""
+    if group["download_url"]:
+        append(_Artifact(kind = archive_kind, url = group["download_url"], name = archive_name))
+    for label, name, url in group["pending_urls"]:
+        append(_Artifact(kind = file_kind, url = url, name = name, label = label))
+    group["pending_urls"] = []
+
+# Exercise the real upload/publish path with a fake provider, without CI or S3.
+testonly_upload_group_per_file = _upload_group_per_file
+testonly_new_upload_group = _new_upload_group
 
 def _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
     """Optional per-task debug summary printed when `trace.enabled`."""
@@ -928,15 +953,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
     # Bind the trait callables unconditionally — even off-CI — so
     # producers' `artifacts.append(...)` records a listed entry locally.
     items = []
+    indices = {}
 
     def _append(a):
-        # Upsert by (kind, label, name): rolling-replace same logical
-        # artifact (testlogs across batches), append distinct ones.
-        for i, existing in enumerate(items):
-            if existing.kind == a.kind and existing.label == a.label and existing.name == a.name:
-                items[i] = a
-                return
-        items.append(a)
+        # Preserve insertion order for rolling-replace archives and links.
+        upsert_artifact(items, indices, a)
 
     ctx.traits[_ArtifactsTrait].append = _append
     ctx.traits[_ArtifactsTrait].list = lambda: list(items)
@@ -989,18 +1010,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
     channels = []
 
     def _publish(channel):
-        """Register a channel's uploaded URLs as `_Artifact`s. Re-emits each
-        batch; `_append` upserts so items don't bloat with stale URLs.
-
-        The archive strategies (GitHub zip, GitLab tar) expose one stable URL
-        under `archive_kind`; the per-file strategies (CircleCI) expose one URL
-        per (label, name) under `file_kind`."""
-        group = channel.group
-        if group["download_url"]:
-            _append(_Artifact(kind = channel.archive_kind, url = group["download_url"], name = channel.archive_name))
-        for label, file_urls in group["label_urls"].items():
-            for fname, url in file_urls.items():
-                _append(_Artifact(kind = channel.file_kind, url = url, name = fname, label = label))
+        """Publish new per-file links, or upsert the current archive URL."""
+        publish_group_artifacts(channel.group, channel.archive_kind, channel.archive_name, channel.file_kind, _append)
 
     def _flush(ctx, channel, final):
         """Upload a channel's pending entries and publish on success. `final`
