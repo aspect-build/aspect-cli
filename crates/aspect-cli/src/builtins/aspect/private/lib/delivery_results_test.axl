@@ -470,17 +470,51 @@ def _test_init_data_shape(ctx):
         fail("init_data: deliveries/counts should start empty")
 
 def _test_add_result_seeds_custom(ctx):
-    """add_result seeds an empty `custom` dict so the per-target hook can
-    enrich without re-checking existence on every key."""
+    """add_result seeds an empty `receipt.details` dict, aliased as `custom`,
+    so the per-target hook can enrich without re-checking existence on every key."""
     r = init_data()
     add_result(r, "//a:b", "ok", message = "msg", output_sha = "abc")
     e = r["delivery"]["deliveries"][-1]
+    if e.get("receipt") != {"details": {}}:
+        fail("add_result: expected a receipt with empty details, got %r" % e.get("receipt"))
     if e.get("custom") != {}:
         fail("add_result: expected empty custom dict, got %r" % e.get("custom"))
     if e["label"] != "//a:b" or e["outcome"] != "ok":
         fail("add_result: scalar fields drifted: %r" % e)
     if e["is_forced"] != False:
         fail("add_result: is_forced default should be False, got %r" % e["is_forced"])
+
+def _test_add_result_custom_aliases_receipt_details(ctx):
+    """`custom` is the receipt's details dict itself: a write through either
+    name is visible through the other, which keeps `custom` hooks and
+    templates working while their data is stored with the delivery."""
+    r = init_data()
+    add_result(r, "//a:b", "ok", receipt = {
+        "delivered_by": "https://ci/1",
+        "delivered_at_unix_s": 1761700000,
+        "delivered_commit_sha": "abc",
+        "details": {"runUrl": "https://gh/run/9"},
+    })
+    e = r["delivery"]["deliveries"][-1]
+    e["custom"]["image_digest"] = "sha256:beef"
+    if e["receipt"]["details"] != {"runUrl": "https://gh/run/9", "image_digest": "sha256:beef"}:
+        fail("add_result: custom write not visible in receipt.details: %r" % e["receipt"])
+    e["receipt"]["details"]["status"] = "success"
+    if e["custom"].get("status") != "success":
+        fail("add_result: receipt.details write not visible in custom: %r" % e["custom"])
+    if e["receipt"]["delivered_by"] != "https://ci/1" or e["receipt"]["delivered_commit_sha"] != "abc":
+        fail("add_result: receipt provenance drifted: %r" % e["receipt"])
+
+def _test_add_result_copies_receipt(ctx):
+    """add_result copies the receipt and its details, so a caller reusing one
+    dict for several entries cannot make them share state."""
+    r = init_data()
+    shared = {"delivered_by": "https://ci/1", "details": {"k": "v"}}
+    add_result(r, "//a:b", "skip", receipt = shared)
+    add_result(r, "//c:d", "skip", receipt = shared)
+    r["delivery"]["deliveries"][0]["receipt"]["details"]["k"] = "changed"
+    if r["delivery"]["deliveries"][1]["receipt"]["details"]["k"] != "v" or shared["details"]["k"] != "v":
+        fail("add_result: receipt details are shared between entries")
 
 def _test_add_result_bumps_counts(ctx):
     r = init_data()
@@ -553,7 +587,7 @@ def _test_build_manifest_required_entry_fields(ctx):
     if len(m["deliveries"]) != 1:
         fail("build_manifest: dropped entry: %r" % m["deliveries"])
     e = m["deliveries"][0]
-    for k in ["label", "outcome", "message", "output_sha", "is_forced", "custom"]:
+    for k in ["label", "outcome", "message", "output_sha", "is_forced", "receipt", "custom"]:
         if k not in e:
             fail("build_manifest: entry missing field %r in %r" % (k, e))
 
@@ -571,6 +605,10 @@ def _test_build_manifest_preserves_custom_enrichment(ctx):
         fail("build_manifest: dropped custom.image_digest")
     if custom.get("layer_path") != "/tmp/layer.tar":
         fail("build_manifest: dropped custom.layer_path")
+    if m["deliveries"][0]["receipt"]["details"] != custom:
+        fail("build_manifest: receipt.details and custom diverged")
+    if json.decode(json.encode(m))["deliveries"][0]["receipt"]["details"]["image_digest"] != "sha256:cafef00d":
+        fail("build_manifest: receipt.details lost in JSON round trip")
 
 def _test_build_manifest_preserves_extra_entry_fields(ctx):
     """Extra fields attached to an entry after add_result (e.g. on-disk
@@ -614,6 +652,8 @@ def _test_build_manifest_counts_independent(ctx):
 _UNIT_TESTS = [
     _test_init_data_shape,
     _test_add_result_seeds_custom,
+    _test_add_result_custom_aliases_receipt_details,
+    _test_add_result_copies_receipt,
     _test_add_result_bumps_counts,
     _test_add_result_coerces_none_strings,
     _test_build_manifest_required_top_level_fields,

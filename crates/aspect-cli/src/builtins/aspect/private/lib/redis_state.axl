@@ -10,9 +10,12 @@ database and a fleet can move between them without a migration:
     {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
                                                 ever removed here
 
-A query refreshes the TTL of every signature it finds with less than half its
-window left (or none, for an un-migrated legacy key), so a target that keeps
-being built never expires and the TTL only reclaims targets nobody builds.
+A query reads the whole hash back as a `delivery_state.Receipt` (`sig` →
+`delivered_by`, `at`, `commit`, and `meta` decoded into `details`); a legacy
+signature yields `delivered_by` alone. A query also refreshes the TTL of every
+signature it finds with less than half its window left (or none, for an
+un-migrated legacy key), so a target that keeps being built never expires and
+the TTL only reclaims targets nobody builds.
 
 The connection is `redis.axl`'s client, configured from the runner's environment:
 
@@ -125,13 +128,28 @@ def _should_refresh(pttl: int) -> bool:
 def _now_s() -> int:
     return time.now_ms() // 1000
 
+def _details(meta: str | None) -> dict:
+    """`meta` as stored by `_deliver`; anything but a JSON object reads as none."""
+    decoded = json.try_decode(meta, None) if meta else None
+    return decoded if type(decoded) == "dict" else {}
+
+def _receipt(fields: list) -> delivery_state.Receipt:
+    """A receipt from an `HMGET sig at commit meta` reply."""
+    sig, at, commit, meta = fields
+    return delivery_state.Receipt(
+        delivered_by = sig,
+        delivered_at_unix_s = int(at) if at and at.isdigit() else 0,
+        delivered_commit_sha = commit or "",
+        details = _details(meta),
+    )
+
 def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) -> None:
     """Three pipelines at most: read the v2 hashes, read legacy keys for the
     misses, then write back TTL refreshes and migrations."""
     reads = []
     for d in chunk:
         k = _v2_key(p, d)
-        reads.append(["HGET", k, "sig"])
+        reads.append(["HMGET", k, "sig", "at", "commit", "meta"])
         reads.append(["PTTL", k])
     replies = client.pipeline(reads)
 
@@ -139,11 +157,11 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
     miss = []
     for i in range(len(chunk)):
         d = chunk[i]
-        sig = replies[2 * i]
-        if sig == None:
+        fields = replies[2 * i]
+        if not fields or fields[0] == None:
             miss.append(d)
             continue
-        delivered[d] = sig
+        delivered[d] = _receipt(fields)
         if _should_refresh(replies[2 * i + 1]):
             refresh.append(_v2_key(p, d))
 
@@ -152,7 +170,7 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
         legacy = client.pipeline([["GET", _legacy_sig_key(p, d)] for d in miss])
         for i in range(len(miss)):
             if legacy[i] != None:
-                delivered[miss[i]] = legacy[i]
+                delivered[miss[i]] = delivery_state.Receipt(delivered_by = legacy[i])
                 migrate[miss[i]] = legacy[i]
 
     writes = [["PEXPIRE", k, SIG_TTL_MS] for k in refresh]
@@ -170,7 +188,7 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
         client.pipeline(writes)
 
 def _query(client, p, legacy_ttl_ms: int, digests: dict) -> dict:
-    """Which of `{label: digest}` are delivered → `{label: signature}`. Shared
+    """Which of `{label: digest}` are delivered → `{label: Receipt}`. Shared
     digests are looked up once; labels with an empty digest are never asked about."""
     wanted = {digest: True for digest in digests.values() if digest}
     if not wanted:
@@ -285,6 +303,7 @@ def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause 
         query = lambda digests: _query(client, p, legacy_ttl_ms, digests),
         deliver = lambda label, digest, meta = {}: _deliver(client, p, legacy_ttl_ms, label, digest, meta),
         delete = lambda digest: _delete(client, p, digest),
+        stores_details = True,
     )
 
 redis_state = namespace(

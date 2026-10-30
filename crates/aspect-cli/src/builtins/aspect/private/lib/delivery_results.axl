@@ -111,16 +111,19 @@ def init_data():
     }
     return r
 
-def add_result(data, label, outcome, message = "", output_sha = "", is_forced = False):
+def add_result(data, label, outcome, message = "", output_sha = "", is_forced = False, receipt = None):
     """Record one delivery outcome and bump its count.
 
     Args:
         label:      Bazel target label, e.g. "//pkg/foo:release".
         outcome:    One of "ok", "skip", "warn", "fail", "pending".
-        message:    Context for the outcome: delivered-by URL on skip, error
-                    message on fail, warn reason, dry-run marker on pending.
+        message:    Display text for the outcome: build URL on ok, delivered-by
+                    URL on skip, error message on fail, warn reason, dry-run
+                    marker on pending.
         output_sha: Artifact action digest hash (delivery dedup key).
         is_forced:  True when --force-target re-delivered despite prior delivery.
+        receipt:    The delivery's receipt (shape below); None when there is
+                    none yet, which leaves only empty `details`.
 
     The appended entry has this shape:
 
@@ -130,20 +133,32 @@ def add_result(data, label, outcome, message = "", output_sha = "", is_forced = 
           "message":    str,
           "output_sha": str,
           "is_forced":  bool,
-          "custom":     dict,  # reserved for DeliveryTrait.delivery_target enrichment
+          "receipt": {
+            "delivered_by":         str,   # ok / skip: build URL that delivered it
+            "delivered_at_unix_s":  int,   # ok / skip; 0 when the backend does not know
+            "delivered_commit_sha": str,   # ok / skip; "" when the backend does not know
+            "details":              dict,  # user-owned; Aspect never writes inside it
+          },
+          "custom":     dict,  # the same dict object as receipt["details"]
         }
+
+    The `delivered_*` fields are present only when the target was delivered,
+    in this run or an earlier one.
 
     Callers may also attach additional fields to the entry after appending
     (e.g. on-disk paths for hook consumers); `build_manifest` flows any
     such fields through unchanged.
     """
+    receipt = dict(receipt) if receipt else {}
+    receipt["details"] = dict(receipt.get("details") or {})
     data["delivery"]["deliveries"].append({
         "label": label,
         "outcome": outcome,
         "message": message or "",
         "output_sha": output_sha or "",
         "is_forced": bool(is_forced),
-        "custom": {},
+        "receipt": receipt,
+        "custom": receipt["details"],
     })
     counts = data["delivery"]["counts"]
     counts[outcome] = counts.get(outcome, 0) + 1
@@ -156,8 +171,9 @@ def build_manifest(data):
     per-entry fields in future releases without bumping `schema_version`
     as long as the additions are non-breaking.
 
-    Entries' `custom` dict is reserved for hook-provided enrichment;
-    Aspect will never populate it. Other per-entry fields populated by
+    Entries' `receipt.details` dict is user-owned: the target's receipt
+    file and the `delivery_target` hook write it, and Aspect never writes
+    inside it. `custom` carries the same contents. Other per-entry fields populated by
     the delivery dispatch loop (e.g. `entrypoint_path`, `runfiles_dir`,
     `default_outputs`) flow through unchanged.
     """

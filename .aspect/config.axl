@@ -205,16 +205,17 @@ def _runfiles_path(entry, suffix):
         return "{}/{}/{}{}".format(rwd, package, target_name, suffix)
     return "{}/{}{}".format(rwd, target_name, suffix)
 
-# Jinja2 YAML side-artifact: successfully-delivered images + digest/layer-path
-# from per-target enrichment. Entries without `custom.image_digest` (non-OCI,
+# Jinja2 YAML side-artifact: delivered and reused images + digest/layer file
+# from the receipt. Entries without `receipt.details.image_digest` (non-OCI,
 # dry-run, failed) are filtered out. `is defined` guards satisfy minijinja's
 # strict-undefined check on entries lacking the optional fields.
 _DELIVERY_IMAGES_YAML = """\
 images:
-{% for d in deliveries %}{% if d.outcome == "ok" and d.custom.image_digest is defined %}
+{% for d in deliveries %}{% if d.receipt.delivered_by is defined and d.receipt.details.image_digest is defined %}
   - label: {{ d.label }}
-    image_digest: {{ d.custom.image_digest }}
-    {% if d.custom.layer_path is defined %}layer_path: {{ d.custom.layer_path }}{% endif %}
+    image_digest: {{ d.receipt.details.image_digest }}
+    delivered_by: {{ d.receipt.delivered_by }}
+    {% if d.receipt.details.layer_file is defined %}layer_file: {{ d.receipt.details.layer_file }}{% endif %}
 {% endif %}{% endfor %}
 """
 
@@ -756,9 +757,11 @@ def config(ctx: ConfigContext):
 
         # Pattern 2: sibling default output NOT in runfiles — scan
         # default_outputs (every file BES reported) by suffix for `.layer`.
+        # The details are stored with the delivery and read back on other
+        # machines, so record the file name rather than this runner's path.
         for path in entry.get("default_outputs", []):
             if path.endswith(".layer"):
-                extras["layer_path"] = path
+                extras["layer_file"] = path.rpartition("/")[2]
                 break
 
         return extras if extras else None

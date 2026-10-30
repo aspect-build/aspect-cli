@@ -21,8 +21,9 @@ Up to three Bazel build phases plus a dispatch loop:
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
-  5. Dispatch — `bazel run` each pending target, then `dd.deliver()`
-     (or `dd.delete()` on failure).
+  5. Dispatch — `bazel run` each pending target, read its receipt file, fire
+     `delivery_target`, then `dd.deliver()` with the receipt's details (or
+     `dd.delete()` on failure).
 
 
 Flags
@@ -73,6 +74,21 @@ config.axl can point it at Redis directly instead, which reads
         ctx.traits[DeliveryState].connect = redis_state.connect
 
 Both backends share one key scheme, so they interoperate against one Redis.
+Only `redis_state` stores receipt details; deliveryd keeps the delivered-by
+URL alone, and the task warns once when details it could not store are lost.
+
+
+Receipts
+--------
+
+Every delivery entry carries a `receipt`. A target writes a JSON object to
+the path in `ASPECT_DELIVERY_RECEIPT_JSON_FILE`; that object becomes
+`receipt.details`, and whatever `delivery_target` returns merges on top. When
+the target is delivered, the details are stored with the delivery and come
+back on every later run that skips the same digest, next to `delivered_by`,
+`delivered_at_unix_s` and `delivered_commit_sha`. A failed, previewed or
+untracked run keeps them for that run only. `custom` is the same dict as
+`receipt.details`.
 
 
 Output base isolation
@@ -264,14 +280,19 @@ DeliveryTrait = trait(
         description = (
             "Hook called once per delivery target with its terminal outcome " +
             "(ok / skip / warn / fail / pending). Receives a dict with " +
-            "{label, outcome, message, output_sha, is_forced, custom, " +
+            "{label, outcome, message, output_sha, is_forced, receipt, custom, " +
             "entrypoint_path, runfiles_dir, runfiles_workspace_dir, " +
-            "default_outputs}. The runfiles tree at `runfiles_dir` is " +
-            "materialized to disk before this hook fires, so files declared " +
-            "via `data =` are readable at `runfiles_workspace_dir/<package>/<filename>`. " +
-            "Return a dict to enrich entry['custom'] (e.g. " +
+            "default_outputs}. `receipt.details` holds what the target wrote " +
+            "to $ASPECT_DELIVERY_RECEIPT_JSON_FILE (on skip: what was stored when " +
+            "it was delivered); `custom` is the same dict. Return a dict to " +
+            "merge into receipt.details (e.g. " +
             "{'image_digest': ctx.std.fs.read_to_string(path).strip()}), " +
-            "or None to skip enrichment."
+            "or None to leave it as is. On ok the hook fires before the " +
+            "delivery is recorded, and the merged details are stored with it " +
+            "and returned on every later run that reuses the delivery. The " +
+            "runfiles tree at `runfiles_dir` is materialized to disk before " +
+            "this hook fires, so files declared via `data =` are readable at " +
+            "`runfiles_workspace_dir/<package>/<filename>`."
         ),
     ),
     delivery_manifest = attr(
@@ -368,21 +389,66 @@ def _print_captured_output(label, exit_code, stdout, stderr, color):
 def _spawn_deliverable(ctx, color, capture, label, ep, is_forced, output_sha):
     """Spawn one deliverable from its `Runnable` `ep`, print its `Delivering`
     line, and return the running-tuple `(label, is_forced, output_sha, t_start,
-    child, stdout_path, stderr_path)`. When capturing, the child's stdout/stderr
-    are redirected to per-target temp files so the reap loop polls `try_wait()`
-    and reads them after exit instead of draining a pipe (the path fields are
-    None otherwise)."""
+    child, stdout_path, stderr_path, receipt_path)`. When capturing, the child's
+    stdout/stderr are redirected to per-target temp files so the reap loop polls
+    `try_wait()` and reads them after exit instead of draining a pipe (the path
+    fields are None otherwise). The child finds its receipt path in
+    `RECEIPT_JSON_FILE_ENV`; a file left by an earlier run is removed first, so a
+    target that writes none never inherits one."""
     forced_marker = " (FORCED)" if is_forced else ""
     print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
+    receipt_path = _DELIVER_RECEIPT_PATH.format(ctx.task.name, sanitize_filename(label))
+    if ctx.std.fs.exists(receipt_path):
+        ctx.std.fs.remove_file(receipt_path)
+    cmd = ep.command(env = {RECEIPT_JSON_FILE_ENV: receipt_path})
     stdout_path = None
     stderr_path = None
     if capture:
         stdout_path = _DELIVER_STDOUT_PATH.format(ctx.task.name, sanitize_filename(label))
         stderr_path = _DELIVER_STDERR_PATH.format(ctx.task.name, sanitize_filename(label))
-        child = ep.command().stdout(ctx.std.fs.create(stdout_path)).stderr(ctx.std.fs.create(stderr_path)).spawn()
-    else:
-        child = ep.command().spawn()
-    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path)
+        cmd = cmd.stdout(ctx.std.fs.create(stdout_path)).stderr(ctx.std.fs.create(stderr_path))
+    child = cmd.spawn()
+    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path, receipt_path)
+
+def _read_receipt_file(ctx, label: str, path: str) -> dict:
+    """The JSON object a target wrote to its receipt file, then delete the file.
+    A missing file is no receipt; an unreadable, oversized or non-object one is
+    warned about and read as none, since the delivery itself still stands."""
+    if not ctx.std.fs.exists(path):
+        return {}
+    size = ctx.std.fs.metadata(path).size
+    content = ctx.std.fs.read_to_string(path) if size <= RECEIPT_MAX_BYTES else None
+    ctx.std.fs.remove_file(path)
+    if content == None:
+        warn(ctx.std, "{}: receipt file is {} bytes, over the {}-byte limit; ignoring it.".format(label, size, RECEIPT_MAX_BYTES))
+        return {}
+    if not content.strip():
+        return {}
+    details = json.try_decode(content, None)
+    if type(details) != "dict":
+        warn(ctx.std, "{}: receipt file must hold a JSON object; ignoring it.".format(label))
+        return {}
+    return details
+
+def _stored_receipt(answer) -> dict:
+    """An entry's receipt from one `query` answer: a `delivery_state.Receipt`,
+    or the bare delivered-by string a backend outside this repo may return."""
+    if type(answer) == "string":
+        return {"delivered_by": answer, "delivered_at_unix_s": 0, "delivered_commit_sha": "", "details": {}}
+    return {
+        "delivered_by": answer.delivered_by,
+        "delivered_at_unix_s": answer.delivered_at_unix_s,
+        "delivered_commit_sha": answer.delivered_commit_sha,
+        "details": dict(answer.details),
+    }
+
+def _details_to_store(ctx, label: str, details: dict, file_details: dict) -> dict:
+    """What `deliver` stores for a receipt: the merged details while they fit in
+    `RECEIPT_MAX_BYTES`, else the target's own file contents alone."""
+    if len(json.encode(details)) <= RECEIPT_MAX_BYTES:
+        return details
+    warn(ctx.std, "{}: receipt details exceed {} bytes once delivery_target's additions are merged; storing the receipt file's contents only.".format(label, RECEIPT_MAX_BYTES))
+    return file_details
 
 _HEX = "0123456789abcdef"
 
@@ -451,6 +517,13 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 # as it is reaped.
 _DELIVER_STDOUT_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stdout"
 _DELIVER_STDERR_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stderr"
+_DELIVER_RECEIPT_PATH = "/tmp/aspect-delivery-deliver-{}-{}.receipt.json"
+
+# The variable a deliverable reads for the path to write its receipt JSON to.
+RECEIPT_JSON_FILE_ENV = "ASPECT_DELIVERY_RECEIPT_JSON_FILE"
+
+# Cap on a receipt file, and on the details stored per delivery.
+RECEIPT_MAX_BYTES = 64 * 1024
 
 # Mnemonic of the per-target action our hashsum aspect registers; the gRPC
 # log uses it to find the change-detection digest entries. Any other non-OK
@@ -1016,7 +1089,9 @@ def _progress(status, data):
 
 def _fire_target_hook(data, delivery_trait, runnables, label):
     """Enrich the most-recent outcome entry with on-disk paths and fire the
-    `delivery_target` hook, merging its returned dict into `entry["custom"]`.
+    `delivery_target` hook, merging its returned dict into
+    `entry["receipt"]["details"]`. A hook that rebinds `entry["custom"]` to a
+    new dict has that merged too, and `custom` is re-pointed at the details.
     `runnables` maps apparent labels to the `Runnable` phase 3 built; a label
     missing from it (an early failure, a target that never built) gets
     None/empty path fields."""
@@ -1028,12 +1103,16 @@ def _fire_target_hook(data, delivery_trait, runnables, label):
     entry["default_outputs"] = list(ep.default_outputs) if ep else []
 
     extras = delivery_trait.delivery_target(entry)
+    details = entry["receipt"]["details"]
+    custom = entry.get("custom")
+    if type(custom) == "dict" and custom != details:
+        details.update(custom)
+    entry["custom"] = details
     if extras == None:
         return
     if type(extras) != "dict":
         fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
-    for k, v in extras.items():
-        entry["custom"][k] = v
+    details.update(extras)
 
 def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
@@ -1292,9 +1371,8 @@ def _delivery_impl(ctx):
     data["delivery"]["prefix"] = prefix
 
     # The state backend, from the trait hook or the deliveryd default.
-    # Connecting probes reachability (and, for deliveryd, negotiates the API
-    # version), so a dead or unconfigured backend fails here rather than midway
-    # through the first record.
+    # Connecting probes reachability, so a dead or unconfigured backend fails
+    # here rather than midway through the first record.
     dd = None
     if track_state:
         connect = ctx.traits[DeliveryState].connect or deliveryd.connect
@@ -1593,7 +1671,8 @@ def _delivery_impl(ctx):
             _fire_target_hook(data, delivery_trait, runnables, label)
         elif not is_forced and label in delivered:
             skipped_count += 1
-            delivered_by = delivered[label] or "-"
+            receipt = _stored_receipt(delivered[label])
+            delivered_by = receipt["delivered_by"] or "-"
             rows.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
             delivery_add_result(
                 data,
@@ -1602,6 +1681,7 @@ def _delivery_impl(ctx):
                 message = delivered_by,
                 output_sha = output_sha,
                 is_forced = is_forced,
+                receipt = receipt,
             )
             _fire_target_hook(data, delivery_trait, runnables, label)
         elif skip_delivery_build:
@@ -1704,6 +1784,7 @@ def _delivery_impl(ctx):
         total_deliverable = len(spawn_order)
         build_done = False
         last_emit_ms = now_ms(ctx)
+        warned_unstored_details = False
 
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
@@ -1811,7 +1892,7 @@ def _delivery_impl(ctx):
                         break
                 if reap_idx == None:
                     break
-                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
+                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path, receipt_path = running.pop(reap_idx)
                 if capture:
                     # Output was redirected to files, so wait() has no pipe to
                     # drain; read them after exit, print atomically, upload as
@@ -1831,19 +1912,38 @@ def _delivery_impl(ctx):
                     exit_code = child.wait().code
                 duration = fmt_elapsed(time.monotonic() - t_start)
                 forced_marker = " (FORCED)" if is_forced else ""
+                file_details = _read_receipt_file(ctx, label, receipt_path)
                 if exit_code == 0:
-                    if track_state:
-                        dd.deliver(label, output_sha)
                     success_count += 1
                     rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
-                    delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
+                    delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced, receipt = {
+                        "delivered_by": build_url,
+                        "delivered_at_unix_s": time.now_ms() // 1000,
+                        "delivered_commit_sha": commit_sha,
+                        "details": file_details,
+                    })
                 else:
-                    if track_state:
-                        dd.delete(output_sha)
                     failed_count += 1
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
-                    delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
-                _fire_target_hook(data, delivery_trait, runnables, label)
+                    delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced, receipt = {"details": file_details})
+
+                # The hook runs before the state write so its additions are
+                # stored with the delivery; a hook that raises still lets the
+                # outcome be recorded, then fails the task.
+                hook_err, _ = catch(_fire_target_hook, data, delivery_trait, runnables, label)
+                if track_state:
+                    if exit_code == 0:
+                        details = data["delivery"]["deliveries"][-1]["receipt"]["details"]
+                        if hook_err:
+                            details = file_details
+                        if details and not dd.stores_details and not warned_unstored_details:
+                            warn(ctx.std, "The delivery state backend ({}) does not store receipt details; a later run that reuses these deliveries will show only who delivered them.".format(dd.describe))
+                            warned_unstored_details = True
+                        dd.deliver(label, output_sha, _details_to_store(ctx, label, details, file_details))
+                    else:
+                        dd.delete(output_sha)
+                if hook_err:
+                    fail(hook_err)
                 interesting = True
                 for _ in range(max_par):
                     if not ready or len(running) >= max_par:
@@ -2057,3 +2157,8 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
     ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _delivery_impl,
 )
+
+testonly_read_receipt_file = _read_receipt_file
+testonly_stored_receipt = _stored_receipt
+testonly_details_to_store = _details_to_store
+testonly_fire_target_hook = _fire_target_hook

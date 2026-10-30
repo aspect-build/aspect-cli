@@ -8,7 +8,7 @@ is the default `DeliveryState.connect` (see `delivery_state.axl`).
 
     dd = deliveryd.connect(ctx, delivery_state.Params(host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url))
     dd.record(label, digest)
-    delivered = dd.query(digests)      # {label: digest} -> {label: signature}
+    delivered = dd.query(digests)      # {label: digest} -> {label: Receipt}
     dd.deliver(label, digest)          # after the run succeeded
     dd.delete(digest)                  # after it failed
 """
@@ -137,10 +137,11 @@ def _do_record(c: _Client, label: str, digest: str) -> None:
     _check(c.conn, "record", res)
 
 def _do_query(c: _Client, digests: dict) -> dict:
-    """Which of `{label: digest}` are already delivered → `{label: signature}`,
-    the signature being the build URL that delivered it. The daemon answers for
-    the whole commit, keyed by label, and only for targets a prior `record`
-    registered; the answer is narrowed to the asked-about labels."""
+    """Which of `{label: digest}` are already delivered → `{label: Receipt}`.
+    The daemon stores only the signature (the build URL that delivered it), so
+    each receipt carries `delivered_by` alone. It answers for the whole commit,
+    keyed by label, and only for targets a prior `record` registered; the
+    answer is narrowed to the asked-about labels."""
     res = _send(c.conn, "POST", "/query", {
         "ci_host": c.host,
         "commit_sha": c.commit,
@@ -151,7 +152,7 @@ def _do_query(c: _Client, digests: dict) -> dict:
     for target in _decode(c.conn, "query", res).get("targets", []) or []:
         label = target.get("label", "")
         if label in digests and target.get("delivered"):
-            delivered[label] = target.get("delivered_by") or ""
+            delivered[label] = delivery_state.Receipt(delivered_by = target.get("delivered_by") or "")
     return delivered
 
 def _do_deliver(c: _Client, label: str, digest: str, meta: dict = {}) -> None:

@@ -9,13 +9,15 @@ load(
     "version_gte",
     "version_tuple",
 )
-load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//delivery.axl", delivery_RECEIPT_MAX_BYTES = "RECEIPT_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_details_to_store = "testonly_details_to_store", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_read_receipt_file = "testonly_read_receipt_file", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_stored_receipt = "testonly_stored_receipt")
+load("@aspect//delivery_state.axl", "delivery_state")
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
+load("@aspect//private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_init_data = "init_data")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
     "@aspect//private/lib/gazelle_results.axl",
@@ -1817,6 +1819,75 @@ def test_sanitize_filename(tc: int) -> int:
     for (input, expected, desc) in cases:
         got = sanitize_filename(input)
         tc = test_case(tc, got == expected, "sanitize_filename: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+def test_delivery_receipts(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """Receipt file reading, the query-answer → entry conversion, the stored
+    size cap, and how `delivery_target` merges into `receipt.details`."""
+    path = temp_dir + "/receipt.json"
+
+    tc = test_case(tc, delivery_read_receipt_file(ctx, "//a", path) == {}, "receipt: no file → no details")
+
+    ctx.std.fs.write(path, '{"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e"}]}')
+    got = delivery_read_receipt_file(ctx, "//a", path)
+    tc = test_case(tc, got == {"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e"}]}, "receipt: JSON object read (got %r)" % got)
+    tc = test_case(tc, not ctx.std.fs.exists(path), "receipt: file deleted after reading")
+
+    for content, desc in [("[1, 2]", "non-object"), ("{truncated", "invalid JSON"), ("  \n", "blank")]:
+        ctx.std.fs.write(path, content)
+        tc = test_case(tc, delivery_read_receipt_file(ctx, "//a", path) == {}, "receipt: %s → no details" % desc)
+        tc = test_case(tc, not ctx.std.fs.exists(path), "receipt: %s file deleted" % desc)
+
+    ctx.std.fs.write(path, '{"blob": "' + "x" * delivery_RECEIPT_MAX_BYTES + '"}')
+    tc = test_case(tc, delivery_read_receipt_file(ctx, "//a", path) == {}, "receipt: oversized file → no details")
+    tc = test_case(tc, not ctx.std.fs.exists(path), "receipt: oversized file deleted")
+
+    small = {"runUrl": "https://gh/run/9"}
+    tc = test_case(tc, delivery_details_to_store(ctx, "//a", small, small) == small, "receipt: details within the cap are stored")
+    big = dict(small)
+    big["blob"] = "x" * delivery_RECEIPT_MAX_BYTES
+    tc = test_case(tc, delivery_details_to_store(ctx, "//a", big, small) == small, "receipt: over the cap → the file's details alone")
+
+    stored = delivery_stored_receipt(delivery_state.Receipt(
+        delivered_by = "https://ci/1",
+        delivered_at_unix_s = 1761700000,
+        delivered_commit_sha = "abc",
+        details = {"k": "v"},
+    ))
+    tc = test_case(tc, stored == {
+        "delivered_by": "https://ci/1",
+        "delivered_at_unix_s": 1761700000,
+        "delivered_commit_sha": "abc",
+        "details": {"k": "v"},
+    }, "receipt: query answer → entry receipt (got %r)" % stored)
+    legacy = delivery_stored_receipt("https://ci/0")
+    tc = test_case(tc, legacy["delivered_by"] == "https://ci/0" and legacy["details"] == {}, "receipt: a bare delivered-by string still reads")
+
+    def _fire(hook):
+        data = delivery_init_data()
+        delivery_add_result(data, "//a", "ok", receipt = {"delivered_by": "u", "details": {"from_file": 1}})
+        delivery_fire_target_hook(data, struct(delivery_target = hook), None, "//a")
+        return data["delivery"]["deliveries"][-1]
+
+    e = _fire(lambda entry: {"image_digest": "sha256:beef"})
+    tc = test_case(tc, e["receipt"]["details"] == {"from_file": 1, "image_digest": "sha256:beef"}, "receipt: hook return merges into details (got %r)" % e["receipt"])
+
+    e = _fire(lambda entry: {"from_file": 2})
+    tc = test_case(tc, e["receipt"]["details"]["from_file"] == 2, "receipt: hook wins a key collision")
+
+    def _mutate_custom(entry):
+        entry["custom"]["via_custom"] = True
+
+    e = _fire(_mutate_custom)
+    tc = test_case(tc, e["receipt"]["details"].get("via_custom") == True, "receipt: in-place custom write lands in details")
+
+    def _rebind_custom(entry):
+        entry["custom"] = {"rebound": True}
+
+    e = _fire(_rebind_custom)
+    tc = test_case(tc, e["receipt"]["details"] == {"from_file": 1, "rebound": True}, "receipt: a rebound custom dict is merged (got %r)" % e["receipt"]["details"])
+    e["custom"]["after"] = 1
+    tc = test_case(tc, e["receipt"]["details"].get("after") == 1, "receipt: custom re-points at details after a rebind")
     return tc
 
 def test_delivery_should_upload_grpc_log(tc: int) -> int:
@@ -4126,6 +4197,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_delivery_should_upload_grpc_log(tc)
+    tc = test_delivery_receipts(ctx, tc, temp_dir)
     tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
     tc = test_delivery_collect_blocking_culprits(tc)
