@@ -100,17 +100,23 @@ def _test_circleci_incremental_links(ctx):
     _eq("last direct link", items[-1].url, "https://example.test/testlogs/pkg/test_%d/test.log" % (count - 1))
     _eq("no repeat on final flush", testonly_upload_group_per_file(ctx, provider, group, entries, "testlogs"), False)
     print("synthetic CircleCI upload/publish: %d files, %d batches, %d links, %d ms" % (
-        count, count // 5, len(published), int((time.monotonic() - started) * 1000),
+        count,
+        count // 5,
+        len(published),
+        int((time.monotonic() - started) * 1000),
     ))
 
 def _test_circleci_duplicate_and_archive(ctx):
     group = testonly_new_upload_group()
     items = []
     indices = {}
+
     def append(a):
         upsert_artifact(items, indices, a)
+
     def upload(_ctx, _src, dest, cache = None):
         return {"success": True, "download_url": "https://example.test/" + dest}
+
     provider = struct(upload_artifact = upload)
     entry = {"src": "/synthetic/a", "dest": "a/test.log", "label": "//:a", "name": "test.log"}
     _eq("first upload", testonly_upload_group_per_file(ctx, provider, group, [entry], "testlogs"), True)
@@ -130,6 +136,7 @@ def _test_circleci_duplicate_and_archive(ctx):
 def _test_circleci_permanent_and_transient_failures(ctx):
     group = testonly_new_upload_group()
     attempts = {}
+
     def upload(_ctx, _src, dest, cache = None):
         attempts[dest] = attempts.get(dest, 0) + 1
         if dest.endswith("/a/test.log"):
