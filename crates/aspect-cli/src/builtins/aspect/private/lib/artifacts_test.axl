@@ -1,10 +1,10 @@
-"""Unit tests for `artifacts.axl`: `profile_flags`, which keeps a `--profile` the
-run already carries instead of adding a second one `ArtifactUpload` would lose
-to, and `pending_testlogs`, which places uploaded test outputs on disk. Run
-with: aspect dev test-artifacts
+"""Unit tests for artifact paths and CircleCI batch publication.
+
+Run with: aspect dev test-artifacts
 """
 
-load("./artifacts.axl", "new_testlog_state", "pending_testlogs", "profile_flags")
+load("@std//time.axl", "time")
+load("./artifacts.axl", "new_testlog_state", "pending_testlogs", "profile_flags", "publish_group_artifacts", "testonly_new_upload_group", "testonly_upload_group_per_file", "upsert_artifact")
 
 def _eq(label, got, want):
     if got != want:
@@ -57,9 +57,114 @@ def _test_pending_testlogs(ctx):
     ]))
     _eq("label cleared", pending_testlogs(state, "//p:t", 1, 2), [])
 
+def _test_circleci_incremental_links(ctx):
+    """Thousands of synthetic files through the actual per-file strategy.
+
+    The provider never opens a file or makes a network request. A five-file
+    batch must publish only five new links, not all prior links again.
+    """
+    count = 2000
+    calls = []
+    published = []
+    indices = {}
+    group = testonly_new_upload_group()
+    entries = []
+
+    def upload(_ctx, _src, dest, cache = None):
+        calls.append(dest)
+        return {"success": True, "download_url": "https://example.test/" + dest}
+
+    def append(a):
+        published.append(a)
+        upsert_artifact(items, indices, a)
+
+    items = []
+    provider = struct(upload_artifact = upload)
+    started = time.monotonic()
+    for i in range(count):
+        entries.append({
+            "src": "/synthetic/%d" % i,
+            "dest": "pkg/test_%d/test.log" % i,
+            "label": "//pkg:test_%d" % i,
+            "name": "test.log",
+        })
+        if len(entries) % 5 == 0:
+            _eq("batch uploads", testonly_upload_group_per_file(ctx, provider, group, entries, "testlogs"), True)
+            publish_group_artifacts(group, "testlogs", "testlogs.tar.gz", "testlog_file", append)
+            _eq("only five published per batch", len(published), len(entries))
+            _eq("pending links drained", group["pending_urls"], [])
+
+    _eq("one PUT per synthetic file", len(calls), count)
+    _eq("one publication per URL", len(published), count)
+    _eq("all links retained", len(items), count)
+    _eq("last direct link", items[-1].url, "https://example.test/testlogs/pkg/test_%d/test.log" % (count - 1))
+    _eq("no repeat on final flush", testonly_upload_group_per_file(ctx, provider, group, entries, "testlogs"), False)
+    print("synthetic CircleCI upload/publish: %d files, %d batches, %d links, %d ms" % (
+        count,
+        count // 5,
+        len(published),
+        int((time.monotonic() - started) * 1000),
+    ))
+
+def _test_circleci_duplicate_and_archive(ctx):
+    group = testonly_new_upload_group()
+    items = []
+    indices = {}
+
+    def append(a):
+        upsert_artifact(items, indices, a)
+
+    def upload(_ctx, _src, dest, cache = None):
+        return {"success": True, "download_url": "https://example.test/" + dest}
+
+    provider = struct(upload_artifact = upload)
+    entry = {"src": "/synthetic/a", "dest": "a/test.log", "label": "//:a", "name": "test.log"}
+    _eq("first upload", testonly_upload_group_per_file(ctx, provider, group, [entry], "testlogs"), True)
+    publish_group_artifacts(group, "testlogs", "testlogs.tar.gz", "testlog_file", append)
+    _eq("duplicate upload", testonly_upload_group_per_file(ctx, provider, group, [entry, entry], "testlogs"), True)
+    publish_group_artifacts(group, "testlogs", "testlogs.tar.gz", "testlog_file", append)
+    _eq("first link retained", len(items), 1)
+    _eq("duplicate not requeued", group["pending_urls"], [])
+
+    group["download_url"] = "https://example.test/archive.1"
+    publish_group_artifacts(group, "testlogs", "testlogs.tar.gz", "testlog_file", append)
+    group["download_url"] = "https://example.test/archive.2"
+    publish_group_artifacts(group, "testlogs", "testlogs.tar.gz", "testlog_file", append)
+    _eq("archive upsert preserved insertion order", len(items), 2)
+    _eq("archive URL replaced", items[1].url, "https://example.test/archive.2")
+
+def _test_circleci_permanent_and_transient_failures(ctx):
+    group = testonly_new_upload_group()
+    attempts = {}
+
+    def upload(_ctx, _src, dest, cache = None):
+        attempts[dest] = attempts.get(dest, 0) + 1
+        if dest.endswith("/a/test.log"):
+            return {"success": False, "permanent": True, "errors": []}
+        if dest.endswith("/c/test.log") and attempts[dest] == 1:
+            return {"success": False, "permanent": False, "errors": []}
+        return {"success": True, "download_url": "https://example.test/" + dest}
+
+    provider = struct(upload_artifact = upload)
+    entries = [
+        {"src": "/synthetic/" + name, "dest": name + "/test.log", "label": "//:" + name, "name": "test.log"}
+        for name in ["a", "b", "c"]
+    ]
+    _eq("first batch accepts b", testonly_upload_group_per_file(ctx, provider, group, entries, "testlogs"), True)
+    _eq("transient stops at c", group["last_count"], 2)
+    _eq("only b has a link", len(group["pending_urls"]), 1)
+    _eq("retry uploads c", testonly_upload_group_per_file(ctx, provider, group, entries, "testlogs"), True)
+    _eq("retry did not reupload b", attempts["testlogs/b/test.log"], 1)
+    _eq("permanent failure not retried", attempts["testlogs/a/test.log"], 1)
+    _eq("c retried once", attempts["testlogs/c/test.log"], 2)
+    _eq("both successful links queued", len(group["pending_urls"]), 2)
+
 _UNIT_TESTS = [
     _test_profile_flags,
     _test_pending_testlogs,
+    _test_circleci_incremental_links,
+    _test_circleci_duplicate_and_archive,
+    _test_circleci_permanent_and_transient_failures,
 ]
 
 def _test_impl(ctx):
