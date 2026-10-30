@@ -1,0 +1,286 @@
+"""Unit tests for delivery's scheduler extension and dispatch helpers."""
+
+load("@aspect//bazel.axl", "bazel")
+load("@aspect//delivery.axl", "DeliveryPlan", scheduler = "testonly_delivery_scheduler")
+
+def _equal(actual, expected) -> None:
+    if actual != expected:
+        fail("expected %r, got %r" % (expected, actual))
+
+def _entry(label: str) -> tuple:
+    return (label, None, False, "digest")
+
+def _labels(entries: list) -> list[str]:
+    return [entry[0] for entry in entries]
+
+def _fill(ready, running, selector = None, outcomes = {}, limit = 2, cancelled = lambda: False) -> str:
+    return scheduler.fill(ready, running, limit, selector, outcomes, lambda entry: entry, cancelled)
+
+def _policy(prerequisites: dict) -> typing.Callable:
+    def select(ready: list[str], outcomes: dict) -> str | None:
+        for label in ready:
+            if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites.get(label, [])]):
+                return label
+        return None
+
+    return select
+
+def _fifo(ctx: TaskContext) -> None:
+    ready = [_entry("B"), _entry("A"), _entry("C")]
+    running = []
+    _equal(_fill(ready, running), "")
+    _equal(_labels(running), ["B", "A"])
+    _equal(_labels(ready), ["C"])
+    _equal(_fill(ready, running, selector = lambda _r, _o: fail("no free slot")), "")
+
+def _refill_without_batch_barrier(ctx: TaskContext) -> None:
+    ready = [_entry("B"), _entry("C"), _entry("A"), _entry("D")]
+    running = []
+    outcomes = {}
+    select = _policy({"B": ["A"], "C": ["A", "B"]})
+    _equal(_fill(ready, running, select, outcomes), "")
+    _equal(_labels(running), ["A", "D"])
+    running.pop(0)
+    outcomes["A"] = "ok"
+    _equal(_fill(ready, running, select, outcomes), "")
+    _equal(_labels(running), ["D", "B"])
+    running.pop(1)
+    outcomes["B"] = "ok"
+    _equal(_fill(ready, running, select, outcomes), "")
+    _equal(_labels(running), ["D", "C"])
+    _equal(ready, [])
+
+def _temporarily_blocked(ctx: TaskContext) -> None:
+    ready = [_entry("B")]
+    running = [_entry("A")]
+    calls = []
+
+    def wait(ready, outcomes):
+        calls.append(True)
+        return None
+
+    _equal(_fill(ready, running, wait, limit = 8), "")
+    _equal(calls, [True])
+    _equal(_labels(ready), ["B"])
+    _equal(_labels(running), ["A"])
+    _equal(scheduler.settled(True, True, running), False)
+
+def _empty_ready(ctx: TaskContext) -> None:
+    running = [_entry("A")]
+    _equal(_fill([], running, lambda _r, _o: fail("empty queue")), "")
+    _equal(scheduler.settled(True, True, running), False)
+
+def _snapshot_isolation(ctx: TaskContext) -> None:
+    ready = [_entry("B"), _entry("C")]
+    outcomes = {"A": "skip"}
+    running = []
+
+    def select(labels, results):
+        labels.clear()
+        labels.append("outside")
+        results["A"] = "fail"
+        return "C"
+
+    _equal(_fill(ready, running, select, outcomes, limit = 1), "")
+    _equal(_labels(running), ["C"])
+    _equal(_labels(ready), ["B"])
+    _equal(outcomes, {"A": "skip"})
+
+def _invalid_selection(ctx: TaskContext) -> None:
+    for invalid in ["outside", 1, [], {}]:
+        ready = [_entry("A")]
+        running = []
+        message = _fill(ready, running, lambda _r, _o: invalid)
+        _equal(message.startswith("scheduler_error:"), True)
+        _equal(_labels(ready), ["A"])
+        _equal(running, [])
+
+def _no_duplicate_dispatch(ctx: TaskContext) -> None:
+    ready = [_entry("A"), _entry("B")]
+    running = []
+    message = _fill(ready, running, lambda _r, _o: "A")
+    _equal(message.startswith("scheduler_error:"), True)
+    _equal(_labels(running), ["A"])
+    _equal(_labels(ready), ["B"])
+
+def _cancellation(ctx: TaskContext) -> None:
+    ready = [_entry("A")]
+    running = []
+    _equal(_fill(ready, running, lambda _r, _o: fail("cancelled"), cancelled = lambda: True), "")
+    _equal(running, [])
+    cancelled = [False]
+
+    def select(labels, outcomes):
+        cancelled[0] = True
+        return labels[0]
+
+    _equal(_fill(ready, running, select, cancelled = lambda: cancelled[0]), "")
+    _equal(running, [])
+    _equal(_labels(ready), ["A"])
+
+def _authoritative_outcomes(ctx: TaskContext) -> None:
+    data = {"delivery": {"deliveries": [], "counts": {}}}
+    outcomes = {}
+    scheduler.record(data, outcomes, "A", "fail", message = "exit 1", output_sha = "abc", is_forced = True)
+    entry = data["delivery"]["deliveries"][0]
+    _equal(entry["message"], "exit 1")
+    _equal(entry["output_sha"], "abc")
+    _equal(entry["is_forced"], True)
+    entry["outcome"] = "ok"
+    entry["label"] = "mutated"
+    _equal(outcomes, {"A": "fail"})
+    _equal(data["delivery"]["counts"], {"fail": 1})
+
+def _prerequisite_outcomes(ctx: TaskContext) -> None:
+    select = _policy({"B": ["A"]})
+    for outcome in ["ok", "skip", "warn", "fail", "pending", None]:
+        ready = [_entry("B")]
+        running = []
+        outcomes = {"A": outcome} if outcome != None else {}
+        _equal(_fill(ready, running, select, outcomes), "")
+        _equal(_labels(running), ["B"] if outcome in ["ok", "skip"] else [])
+
+def _settlement_guard(ctx: TaskContext) -> None:
+    for build_done in [False, True]:
+        for runs_done in [False, True]:
+            _equal(scheduler.settled(build_done, runs_done, []), build_done and runs_done)
+            _equal(scheduler.settled(build_done, runs_done, [_entry("A")]), False)
+
+def _plan(ctx: TaskContext, selected = ["A"]) -> DeliveryPlan:
+    return DeliveryPlan(
+        candidates = ["A", "B"],
+        selected = list(selected),
+        release_rc = ctx.bazel.new_rc(),
+        report_progress = lambda _message: None,
+    )
+
+def _factory_gates(ctx: TaskContext) -> None:
+    factory = lambda _ctx, _plan: fail("factory must not run")
+    _equal(scheduler.create(None, ctx, _plan(ctx), False), ("", None))
+    _equal(scheduler.create(factory, ctx, _plan(ctx), True), ("", None))
+    _equal(scheduler.create(factory, ctx, _plan(ctx, selected = []), False), ("", None))
+
+def _factory_results(ctx: TaskContext) -> None:
+    calls = []
+    plan = _plan(ctx)
+
+    def factory(ctx, received):
+        calls.append(received)
+        return lambda ready, outcomes: ready[0]
+
+    message, select = scheduler.create(factory, ctx, plan, False)
+    _equal(message, "")
+    _equal(calls, [plan])
+    _equal(select(["A"], {}), "A")
+    for value in [None, 1, "not a selector"]:
+        message, select = scheduler.create(lambda _c, _p: value, ctx, plan, False)
+        _equal(message.startswith("scheduler_planning_failed:"), True)
+        _equal(select, None)
+    message, select = scheduler.create(lambda _c, _p: fail("query failed"), ctx, plan, False)
+    _equal("query failed" in message, True)
+    _equal(select, None)
+
+def _selector_exception(ctx: TaskContext) -> None:
+    ready = [_entry("A")]
+    running = []
+    err, _ = catch(_fill, ready, running, lambda _r, _o: fail("policy bug"))
+    _equal(err != None, True)
+    _equal(_labels(ready), ["A"])
+    _equal(running, [])
+
+def _cleanup(ctx: TaskContext) -> None:
+    events = []
+    root = ctx.std.fs.mkdtemp()
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    stdout_path = root + "/A.stdout"
+    stderr_path = root + "/A.stderr"
+    ctx.std.fs.write(stdout_path, "stdout")
+    ctx.std.fs.write(stderr_path, "stderr")
+
+    def wait_build():
+        events.append("wait build")
+        _equal(events, ["cancel build", "cancel A", "cancel B", "exec log", "wait A", "wait B", "wait build"])
+
+    runs = struct(
+        done = False,
+        cancellation = struct(cancel = lambda: events.append("cancel build")),
+        wait = wait_build,
+    )
+    running = [
+        _child("A", events, stdout_path, stderr_path),
+        _child("B", events),
+    ]
+    hook = bazel.exec_log.Hook(
+        on_entry = lambda _ctx, _entry: events.append("exec log"),
+    )
+    xl = struct(entries = [struct(type = "spawn")], hooks = [hook], exact = True)
+
+    scheduler.cleanup(ctx, runs, xl, running)
+    _equal(ctx.std.fs.exists(stdout_path), False)
+    _equal(ctx.std.fs.exists(stderr_path), False)
+
+    failed_events = []
+    failed_stdout_path = root + "/failed.stdout"
+    failed_stderr_path = root + "/failed.stderr"
+    ctx.std.fs.write(failed_stdout_path, "stdout")
+    ctx.std.fs.write(failed_stderr_path, "stderr")
+
+    def fail_hook(_ctx, _entry):
+        failed_events.append("exec log")
+        fail("exec-log callback failed")
+
+    failed_runs = struct(
+        done = False,
+        cancellation = struct(cancel = lambda: failed_events.append("cancel build")),
+        wait = lambda: failed_events.append("wait build"),
+    )
+    failed_running = [_child("A", failed_events, failed_stdout_path, failed_stderr_path)]
+    failed_xl = struct(
+        entries = [struct(type = "spawn")],
+        hooks = [bazel.exec_log.Hook(on_entry = fail_hook)],
+        exact = True,
+    )
+    err, _ = catch(scheduler.cleanup, ctx, failed_runs, failed_xl, failed_running)
+    _equal(err != None, True)
+    _equal("exec-log callback failed" in err.message, True)
+    _equal(failed_events, ["cancel build", "cancel A", "exec log", "wait A", "wait build"])
+    _equal(ctx.std.fs.exists(failed_stdout_path), False)
+    _equal(ctx.std.fs.exists(failed_stderr_path), False)
+
+def _child(label, events, stdout_path = None, stderr_path = None):
+    return (label, False, "digest", 0, struct(
+        cancellation = struct(cancel = lambda: events.append("cancel " + label)),
+        wait = lambda: events.append("wait " + label),
+    ), stdout_path, stderr_path)
+
+_TESTS = [
+    _fifo,
+    _refill_without_batch_barrier,
+    _temporarily_blocked,
+    _empty_ready,
+    _snapshot_isolation,
+    _invalid_selection,
+    _no_duplicate_dispatch,
+    _cancellation,
+    _authoritative_outcomes,
+    _prerequisite_outcomes,
+    _settlement_guard,
+    _factory_gates,
+    _factory_results,
+    _selector_exception,
+    _cleanup,
+]
+
+def _test_impl(ctx: TaskContext) -> int:
+    for test in _TESTS:
+        test(ctx)
+    print("delivery scheduler: OK (%d tests)" % len(_TESTS))
+    return 0
+
+delivery_scheduler_tests = task(
+    summary = "Test delivery scheduler selection, liveness, and cleanup.",
+    kind = "test-delivery-scheduler",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
