@@ -98,6 +98,7 @@ No `fail()` calls.
 """
 
 load("./environment.axl", "detect_ci", "warn")
+load("./http_headers.axl", "header_value")
 
 # ── Public bucket keys ───────────────────────────────────────────────
 
@@ -294,18 +295,6 @@ def _save(ctx, state):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _header_value(headers, key):
-    """Case-insensitive lookup against the runtime's `(name, value)` header
-    tuples. Returns `""` if absent."""
-    key_lower = key.lower()
-    for entry in headers or []:
-        # Best-effort: skip length-mismatched entries.
-        if type(entry) != "tuple" or len(entry) != 2:
-            continue
-        if entry[0].lower() == key_lower:
-            return entry[1] or ""
-    return ""
-
 def _parse_int(s, default = 0):
     """Lenient int parse for header values. GitHub never sends fractional /
     negative values, so anything non-digit-only → `default`."""
@@ -474,8 +463,8 @@ def _ratelimit_header(headers, suffix):
     trying the GitHub `X-RateLimit-<suffix>` spelling first, then the GitLab
     `RateLimit-<suffix>` one. `""` if neither is present."""
     return (
-        _header_value(headers, "X-RateLimit-" + suffix) or
-        _header_value(headers, "RateLimit-" + suffix)
+        header_value(headers, "X-RateLimit-" + suffix) or
+        header_value(headers, "RateLimit-" + suffix)
     )
 
 # ── Token budget ─────────────────────────────────────────────────────

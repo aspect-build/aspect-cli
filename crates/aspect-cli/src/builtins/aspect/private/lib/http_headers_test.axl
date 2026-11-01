@@ -1,0 +1,55 @@
+"""Unit tests for lib/http_headers.axl.
+
+Run with:
+  aspect dev test-http-headers
+"""
+
+load("./http_headers.axl", "header_value", "retry_after_ms", "retryable_status")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_header_value(ctx):
+    headers = [("Content-Type", "application/json"), ("retry-after", "2"), ("bad",), ("X-Empty", None)]
+    _eq("case-insensitive", header_value(headers, "content-type"), "application/json")
+    _eq("stored lower, asked mixed", header_value(headers, "Retry-After"), "2")
+    _eq("absent is empty", header_value(headers, "ETag"), "")
+    _eq("a malformed entry is skipped", header_value(headers, "bad"), "")
+    _eq("a None value is empty", header_value(headers, "X-Empty"), "")
+    _eq("no headers", header_value(None, "Retry-After"), "")
+
+def _test_retry_after_ms(ctx):
+    _eq("seconds", retry_after_ms([("Retry-After", "2")]), 2000)
+    _eq("padded", retry_after_ms([("Retry-After", " 3 ")]), 3000)
+    _eq("zero", retry_after_ms([("Retry-After", "0")]), 0)
+    _eq("absent", retry_after_ms([]), None)
+    _eq("an HTTP date", retry_after_ms([("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT")]), None)
+    _eq("fractional", retry_after_ms([("Retry-After", "1.5")]), None)
+    _eq("negative", retry_after_ms([("Retry-After", "-1")]), None)
+
+def _test_retryable_status(ctx):
+    for status in [0, 429, 500, 502, 503, 504, 599]:
+        _eq("%d is retryable" % status, retryable_status(status), True)
+    for status in [200, 400, 401, 403, 404, 409, 413, 422]:
+        _eq("%d is not retryable" % status, retryable_status(status), False)
+
+_UNIT_TESTS = [
+    _test_header_value,
+    _test_retry_after_ms,
+    _test_retryable_status,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("http_headers.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+http_headers_tests = task(
+    summary = "Run the HTTP response helper AXL unit tests.",
+    kind = "test-http-headers",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

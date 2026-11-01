@@ -1,0 +1,36 @@
+"""Unit tests for lib/random.axl.
+
+Run with:
+  aspect dev test-random
+"""
+
+load("./random.axl", "random_hex")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_random_hex(ctx):
+    a = random_hex(ctx)
+    _eq("16 bytes by default", len(a), 32)
+    _eq("lowercase hex", [c for c in a.elems() if c not in "0123456789abcdef"], [])
+    _eq("n_bytes", len(random_hex(ctx, 4)), 8)
+    _eq("fresh each call", a != random_hex(ctx), True)
+
+_UNIT_TESTS = [
+    _test_random_hex,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("random.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+random_tests = task(
+    summary = "Run the random identifier AXL unit tests.",
+    kind = "test-random",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

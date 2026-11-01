@@ -16,6 +16,7 @@ load(
     "pluralize",
     "printable",
     "truncate_for_title",
+    "utf8_len",
 )
 
 def _eq(label, got, want):
@@ -36,6 +37,13 @@ def _test_pad(ctx):
     _eq("a combining mark is none", display_width("e\u0301"), 1)
     _eq("pad_right pads to the drawn width", pad_right("修正", 6), "修正  ")
     _eq("pad_left too", pad_left("修", 3), " 修")
+
+def _test_utf8_len(ctx):
+    _eq("ascii", utf8_len("abc"), 3)
+    _eq("two-byte", utf8_len("é" * 128), 256)
+    _eq("three-byte", utf8_len("€"), 3)
+    _eq("four-byte", utf8_len("🚀"), 4)
+    _eq("empty", utf8_len(""), 0)
 
 def _test_pluralize(ctx):
     _eq("one", pluralize(1, "base"), "1 base")
@@ -74,6 +82,7 @@ _UNIT_TESTS = [
     _test_unsafe_characters,
     _test_pad,
     _test_pluralize,
+    _test_utf8_len,
     _test_format_numbers,
     _test_strings,
 ]

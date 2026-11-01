@@ -10,9 +10,14 @@ database and a fleet can move between them without a migration:
     {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
                                                 ever removed here
 
-A query refreshes the TTL of every signature it finds with less than half its
-window left (or none, for an un-migrated legacy key), so a target that keeps
-being built never expires and the TTL only reclaims targets nobody builds.
+A query reads the whole hash back as a `delivery_state.Delivery` (`sig` →
+`build_url`, `commit` → `commit_sha`, `at` in Unix seconds → RFC 3339 `at`,
+`label`, and `meta` decoded into `metadata`), reported as the target's
+`digest_delivery`; the key scheme has no per-target latest delivery. A legacy
+signature yields `build_url` alone. A query also refreshes the TTL of every
+signature it finds with less than half its window left (or none, for an
+un-migrated legacy key), so a target that keeps being built never expires and
+the TTL only reclaims targets nobody builds.
 
 The connection is `redis.axl`'s client, configured from the runner's environment:
 
@@ -30,6 +35,7 @@ The connection is `redis.axl`'s client, configured from the runner's environment
 load("@std//time.axl", "sleep", "time")
 load("./delivery_state.axl", "delivery_state")
 load("./redis.axl", "redis")
+load("./timestamp.axl", "rfc3339_utc")
 
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT"
 CA_FILE_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE"
@@ -125,13 +131,30 @@ def _should_refresh(pttl: int) -> bool:
 def _now_s() -> int:
     return time.now_ms() // 1000
 
+def _metadata(meta: str | None) -> dict:
+    """`meta` as stored by `_deliver`; anything but a JSON object reads as none."""
+    decoded = json.try_decode(meta, None) if meta else None
+    return decoded if type(decoded) == "dict" else {}
+
+def _delivery(digest: str, fields: list) -> delivery_state.Delivery:
+    """A delivery from an `HMGET sig at commit label meta` reply."""
+    sig, at, commit, label, meta = fields
+    return delivery_state.Delivery(
+        build_url = delivery_state.known_or_none(sig),
+        commit_sha = delivery_state.known_or_none(commit),
+        at = rfc3339_utc(int(at)) if at and at.isdigit() else None,
+        label = label or "",
+        digest = digest,
+        metadata = _metadata(meta),
+    )
+
 def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) -> None:
     """Three pipelines at most: read the v2 hashes, read legacy keys for the
     misses, then write back TTL refreshes and migrations."""
     reads = []
     for d in chunk:
         k = _v2_key(p, d)
-        reads.append(["HGET", k, "sig"])
+        reads.append(["HMGET", k, "sig", "at", "commit", "label", "meta"])
         reads.append(["PTTL", k])
     replies = client.pipeline(reads)
 
@@ -139,11 +162,11 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
     miss = []
     for i in range(len(chunk)):
         d = chunk[i]
-        sig = replies[2 * i]
-        if sig == None:
+        fields = replies[2 * i]
+        if not fields or fields[0] == None:
             miss.append(d)
             continue
-        delivered[d] = sig
+        delivered[d] = _delivery(d, fields)
         if _should_refresh(replies[2 * i + 1]):
             refresh.append(_v2_key(p, d))
 
@@ -152,7 +175,7 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
         legacy = client.pipeline([["GET", _legacy_sig_key(p, d)] for d in miss])
         for i in range(len(miss)):
             if legacy[i] != None:
-                delivered[miss[i]] = legacy[i]
+                delivered[miss[i]] = delivery_state.Delivery(build_url = delivery_state.known_or_none(legacy[i]), digest = miss[i])
                 migrate[miss[i]] = legacy[i]
 
     writes = [["PEXPIRE", k, SIG_TTL_MS] for k in refresh]
@@ -170,8 +193,9 @@ def _query_chunk(client, p, legacy_ttl_ms: int, chunk: list, delivered: dict) ->
         client.pipeline(writes)
 
 def _query(client, p, legacy_ttl_ms: int, digests: dict) -> dict:
-    """Which of `{label: digest}` are delivered → `{label: signature}`. Shared
-    digests are looked up once; labels with an empty digest are never asked about."""
+    """Which of `{label: digest}` are delivered → `{label: PriorDeliveries}`,
+    with `digest_delivery` alone. Shared digests are looked up once; labels with
+    an empty digest are never asked about."""
     wanted = {digest: True for digest in digests.values() if digest}
     if not wanted:
         return {}
@@ -180,24 +204,26 @@ def _query(client, p, legacy_ttl_ms: int, digests: dict) -> dict:
     for start in range(0, len(uniq), CHUNK_SIZE):
         _query_chunk(client, p, legacy_ttl_ms, uniq[start:start + CHUNK_SIZE], delivered)
     return {
-        label: delivered[digest]
+        label: delivery_state.PriorDeliveries(digest_delivery = delivered[digest])
         for label, digest in digests.items()
         if digest and digest in delivered
     }
 
 def _deliver(client, p, legacy_ttl_ms: int, label: str, digest: str, meta: dict = {}) -> None:
     k = _v2_key(p, digest)
-    hset = ["HSET", k, "sig", p.signature, "label", label, "commit", p.commit, "at", _now_s()]
+    writes = [["HSET", k, "sig", p.signature, "label", label, "commit", p.commit, "at", _now_s()]]
     if meta:
-        hset.append("meta")
-        hset.append(json.encode(meta))
+        writes[0] += ["meta", json.encode(meta)]
+    else:
+        # A redelivery without metadata must not keep the previous one's.
+        writes.append(["HDEL", k, "meta"])
 
     # The legacy string too, so a v1 deliveryd on another runner (or after a
     # rollback) does not deliver the same digest again.
     legacy = ["SET", _legacy_sig_key(p, digest), p.signature]
     if legacy_ttl_ms:
         legacy += ["PX", legacy_ttl_ms]
-    client.pipeline([hset, ["PEXPIRE", k, SIG_TTL_MS], legacy])
+    client.pipeline(writes + [["PEXPIRE", k, SIG_TTL_MS], legacy])
 
 def _delete(client, p, digest: str) -> None:
     if not digest:
@@ -285,6 +311,7 @@ def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause 
         query = lambda digests: _query(client, p, legacy_ttl_ms, digests),
         deliver = lambda label, digest, meta = {}: _deliver(client, p, legacy_ttl_ms, label, digest, meta),
         delete = lambda digest: _delete(client, p, digest),
+        stores_metadata = True,
     )
 
 redis_state = namespace(

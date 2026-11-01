@@ -12,7 +12,7 @@ Event kinds consumed:
   "configuration"            — captures cpu arch and compilation_mode (target config only), and each config's output directory
   "workspace_config"         — captures the exec root, which with the output directory locates testlogs on disk
   "action_completed"         — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
-  "target_configured"        — caches rule kind per label; counts configured targets (incl. test targets, the live progress denominator)
+  "target_configured"        — caches rule kind and (target events only) tags per label; counts configured targets (incl. test targets, the live progress denominator)
   "target_completed"         — accumulates failed build targets
   "test_result"              — records each attempt's run/shard/attempt, status, test.log + test.xml paths and duration
   "test_summary"             — buckets tests into failed / flaky / passed; tracks duration; settles the snippet's log path
@@ -522,6 +522,8 @@ def init_data():
             # label -> rule kind (e.g. "cc_library", "py_test") from
             # target_configured. Detects tests and displays the kind.
             "target_kinds": {},
+            # label -> the target's `tags`, from target_configured.
+            "target_tags": {},
             # Count of configured targets whose kind is a test (`*_test`),
             # from target_configured. The expected-test denominator for the
             # live "N of M tests run" progress narrative.
@@ -812,6 +814,8 @@ def process_event(data, event, bb_root):
             data["bazel"]["target_kinds"][label] = target_kind
             if first_seen and _is_test_kind(target_kind):
                 data["bazel"]["test_targets_configured"] += 1
+        if label and not bes_get(event.id, "aspect", ""):
+            data["bazel"]["target_tags"][label] = list(bes_get(payload, "tag", []) or [])
         data["bazel"]["targets_configured_counted"] += 1
         return False
 

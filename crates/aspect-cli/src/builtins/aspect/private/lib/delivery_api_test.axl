@@ -1,0 +1,313 @@
+"""Unit tests for lib/delivery_api.axl.
+
+A fake `http` serves canned responses keyed by path and records each request,
+so the wire format can be checked against the delivery API contract.
+
+Run with:
+  aspect dev test-delivery-api
+"""
+
+load("./delivery_api.axl", "delivery_api")
+load("./delivery_state.axl", "delivery_state")
+
+_BASE = "https://api.example.test"
+_PARAMS = delivery_state.Params(host = "gh", repo = "org/repo", prefix = "delivery", commit = "c1", signature = "https://ci/run/7")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _res(status, body, headers = []):
+    return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers)
+
+def _http(responses, calls):
+    """`responses` maps a path to a response, a list served in order (the last
+    repeating), or a function of the decoded request body; `None` is a
+    transport error."""
+
+    def post(url, headers = {}, data = None):
+        path = url[len(_BASE):]
+        body = json.decode(data)
+        calls.append(struct(path = path, headers = headers, body = body))
+        res = responses[path]
+        if type(res) == "list":
+            n = len([c for c in calls if c.path == path])
+            res = res[min(n, len(res)) - 1]
+        if type(res) == "function":
+            res = res(body)
+        if res == None:
+            return struct(catch = lambda: struct(block = lambda: (error("connection refused"), None)))
+        return struct(catch = lambda: struct(block = lambda: (None, res)))
+
+    return struct(post = post)
+
+def _ids():
+    n = []
+
+    def new_id():
+        n.append(1)
+        return "att-%d" % len(n)
+
+    return new_id
+
+def _backend(responses, calls, params = _PARAMS, pauses = None):
+    recorded = pauses if pauses != None else []
+    return delivery_api.new(_http(responses, calls), _BASE, lambda: "tok-1", params, _ids(), pause = lambda ms: recorded.append(ms))
+
+def _delivery(label, digest, event_id):
+    return {
+        "event_id": event_id,
+        "label": label,
+        "digest": digest,
+        "outcome": "ok",
+        "build_url": "https://ci/run/1",
+        "commit_sha": "c0",
+        "recorded_at": "2025-10-29T01:06:40Z",
+        "metadata": {"runUrl": "https://gh/run/9"},
+    }
+
+def _test_query_returns_prior_deliveries(ctx):
+    calls = []
+    dd = _backend({"/deliveries/query": _res(200, {"targets": {
+        "//a": {"latest_delivery": _delivery("//a", "bb", "e2"), "digest_delivery": _delivery("//a", "aa", "e1")},
+        "//b": {"latest_delivery": None, "digest_delivery": _delivery("//x", "aa", "e1")},
+    }, "unanswered_labels": []})}, calls)
+    got = dd.query({"//a": "aa", "//b": "aa", "//c": "cc", "//d": ""})
+    _eq("labels the API knows", sorted(got.keys()), ["//a", "//b"])
+    _eq("latest delivery", got["//a"].latest_delivery.digest, "bb")
+    r = got["//a"].digest_delivery
+    _eq("digest delivery", (r.label, r.digest, r.build_url, r.commit_sha, r.at, r.metadata), ("//a", "aa", "https://ci/run/1", "c0", "2025-10-29T01:06:40Z", {"runUrl": "https://gh/run/9"}))
+    _eq("null latest", got["//b"].latest_delivery, None)
+    _eq("bearer token", calls[0].headers["Authorization"], "Bearer tok-1")
+    _eq("query body", calls[0].body, {"ci_host": "gh", "repo": "org/repo", "prefix": "delivery", "targets": {"//a": "aa", "//b": "aa", "//c": "cc"}})
+    _eq("tracks latest, stores metadata", (dd.tracks_latest, dd.stores_metadata), (True, True))
+
+def _test_query_batches_and_requeries_unanswered(ctx):
+    calls = []
+
+    def answer(body):
+        # Answers two targets per response, as if each filled the size limit.
+        labels = sorted(body["targets"].keys())
+        return _res(200, {
+            "targets": {l: {"latest_delivery": None, "digest_delivery": _delivery(l, "aa", "e")} for l in labels[:2]},
+            "unanswered_labels": labels[2:],
+        })
+
+    dd = _backend({"/deliveries/query": answer}, calls)
+    digests = {"//t%d" % i: "aa" for i in range(5)}
+    _eq("every target answered", len(dd.query(digests)), 5)
+    _eq("re-queried the unanswered", [len(c.body["targets"]) for c in calls], [5, 3, 1])
+
+def _test_query_batches_at_the_limit(ctx):
+    calls = []
+    dd = _backend({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": []})}, calls)
+    digests = {"//t%d" % i: "aa" for i in range(delivery_api.QUERY_BATCH_SIZE + 1)}
+    _eq("nothing delivered", dd.query(digests), {})
+    _eq("500 per request, then the rest", [len(c.body["targets"]) for c in calls], [delivery_api.QUERY_BATCH_SIZE, 1])
+
+def _test_record_payloads(ctx):
+    calls = []
+    dd = _backend({"/deliveries/record": _res(200, {"event": {}})}, calls)
+    dd.deliver("//a", "aa", {"k": "v"})
+    _eq("ok attempt", calls[-1].body, {
+        "event_id": "att-1",
+        "ci_host": "gh",
+        "repo": "org/repo",
+        "prefix": "delivery",
+        "label": "//a",
+        "digest": "aa",
+        "outcome": "ok",
+        "build_url": "https://ci/run/7",
+        "commit_sha": "c1",
+        "metadata": {"k": "v"},
+    })
+    dd.record_failure("//a", "aa", {"exit": 1})
+    body = calls[-1].body
+    _eq("fail attempt", (body["outcome"], body["event_id"], body["label"], body["digest"], body["metadata"]), ("fail", "att-2", "//a", "aa", {"exit": 1}))
+
+def _test_unknown_values_are_null(ctx):
+    calls = []
+    params = delivery_state.Params(host = "gh", prefix = "delivery", signature = "-")
+    dd = _backend({"/deliveries/record": _res(200, {"event": {}})}, calls, params = params)
+    dd.deliver("//a", "aa", {})
+    _eq("null repo, build_url and commit", (calls[-1].body["repo"], calls[-1].body["build_url"], calls[-1].body["commit_sha"]), (None, None, None))
+
+def _test_record_retries_with_the_same_event_id(ctx):
+    calls = []
+    pauses = []
+    dd = _backend({"/deliveries/record": [None, _res(503, {"error": "unavailable"}), _res(200, {"event": {}})]}, calls, pauses = pauses)
+    dd.deliver("//a", "aa", {})
+    _eq("three tries", len(calls), 3)
+    _eq("one event_id", [c.body["event_id"] for c in calls], ["att-1", "att-1", "att-1"])
+    _eq("backoff", pauses, [1000, 2000])
+
+def _test_internal_server_error_is_retried(ctx):
+    calls = []
+    dd = _backend({"/deliveries/record": [_res(500, {"error": "boom"}), _res(200, {"event": {}})]}, calls)
+    dd.deliver("//a", "aa", {})
+    _eq("a 500 is retried with the same event_id", [c.body["event_id"] for c in calls], ["att-1", "att-1"])
+
+def _test_lost_credential_names_the_fix(ctx):
+    err, _ = catch(delivery_api.access_token, None)
+    _eq("names the fix", err != None and "aspect auth login" in err.message, True)
+    _eq("a credential's token", delivery_api.access_token(struct(access_token = "t")), "t")
+
+def _test_event_ids_are_unique_and_well_formed(ctx):
+    new_id = delivery_api.event_ids("0123456789abcdef0123456789abcdef")
+    ids = [new_id() for _ in range(3)]
+    _eq("counted under the nonce", ids, ["0123456789abcdef0123456789abcdef-%d" % n for n in [1, 2, 3]])
+    other = delivery_api.event_ids("fedcba9876543210fedcba9876543210")
+    _eq("another run's nonce differs", other() != ids[0], True)
+    _eq("within the API's 64 characters", len(new_id()) <= 64, True)
+
+def _test_retry_pause_heartbeats(ctx):
+    beats = []
+    delivery_api.pause_with(lambda: beats.append(True))(0)
+    _eq("heartbeat before the pause", beats, [True])
+    delivery_api.pause_with(None)(0)
+
+def _test_failing_credential_is_retried(ctx):
+    calls = []
+    pauses = []
+    tokens = []
+
+    def token():
+        tokens.append(True)
+        if len(tokens) == 1:
+            fail("token exchange: HTTP 503")
+        return "tok-2"
+
+    dd = delivery_api.new(_http({"/deliveries/record": _res(200, {"event": {}})}, calls), _BASE, token, _PARAMS, _ids(), pause = lambda ms: pauses.append(ms))
+    dd.deliver("//a", "aa", {})
+    _eq("retried after the lookup failed", (len(tokens), len(calls), pauses), (2, 1, [1000]))
+    _eq("with the resolved token", calls[0].headers["Authorization"], "Bearer tok-2")
+
+    dd = delivery_api.new(_http({}, []), _BASE, lambda: fail("no longer resolves"), _PARAMS, _ids(), pause = lambda ms: None)
+    err, _ = catch(dd.deliver, "//a", "aa", {})
+    _eq("a lookup that keeps failing surfaces its message", err != None and "no longer resolves" in err.message, True)
+    _eq("named as a credential failure", "credential lookup failed" in err.message and "transport error" not in err.message, True)
+
+def _test_retry_after_overrides_the_pause(ctx):
+    calls = []
+    pauses = []
+    dd = _backend({"/deliveries/record": [
+        _res(503, {"error": "unavailable"}, [("retry-after", "7")]),
+        _res(429, {"error": "slow down"}, [("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT")]),
+        _res(200, {"event": {}}),
+    ]}, calls, pauses = pauses)
+    dd.deliver("//a", "d1", {})
+    _eq("Retry-After seconds, then the default for an HTTP-date", pauses, [7000, 2000])
+
+def _test_retry_after_is_capped(ctx):
+    pauses = []
+    dd = _backend({"/deliveries/record": [
+        _res(503, {"error": "unavailable"}, [("Retry-After", "3600")]),
+        _res(200, {"event": {}}),
+    ]}, [], pauses = pauses)
+    dd.deliver("//a", "d1", {})
+    _eq("an hour's Retry-After waits 30s", pauses, [30000])
+
+def _test_query_fails_when_nothing_is_answered(ctx):
+    dd = _backend({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": ["//a"]})}, [])
+    err, _ = catch(dd.query, {"//a": "aa"})
+    _eq("a query that never progresses fails", err != None and "answered none" in err.message, True)
+
+def _test_client_errors_are_not_retried(ctx):
+    calls = []
+    dd = _backend({"/deliveries/query": _res(403, {"error": "Forbidden: requires \"aspect.delivery.write\" permission", "error_code": "forbidden"})}, calls)
+    err, _ = catch(dd.query, {"//a": "aa"})
+    _eq("names the permission", "aspect.delivery.write" in err.message, True)
+    _eq("names the status", "HTTP 403" in err.message, True)
+    _eq("not retried", len(calls), 1)
+
+def _test_persistent_transport_error_surfaces(ctx):
+    calls = []
+    dd = _backend({"/deliveries/record": None}, calls)
+    err, _ = catch(dd.deliver, "//a", "aa", {})
+    _eq("transport error", "connection refused" in err.message, True)
+    _eq("retried, then gave up", len(calls), 4)
+
+def _test_record_is_a_noop(ctx):
+    calls = []
+    dd = _backend({}, calls)
+    dd.record("//a", "aa")
+    _eq("no request", len(calls), 0)
+
+def _test_open_probes_with_an_empty_query(ctx):
+    calls = []
+    dd = delivery_api.open(_http({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": []})}, calls), _BASE, lambda: "tok-1", _PARAMS, _ids())
+    _eq("usable", dd.status.ok, True)
+    _eq("probe body", calls[0].body, {"ci_host": "gh", "repo": "org/repo", "prefix": "delivery", "targets": {}})
+
+def _test_open_read_only_credential_can_only_query(ctx):
+    calls = []
+    responses = {"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": [], "writable": False})}
+    dd = delivery_api.open(_http(responses, calls), _BASE, lambda: "tok-1", _PARAMS, _ids())
+    _eq("read-only still connects", dd.status.ok, True)
+    _eq("names the permission", "aspect.delivery.write" in dd.read_only, True)
+    _eq("names the deliveryd opt-out", "deliveryd.connect" in dd.read_only, True)
+    dd.query({"//a": "aa"})
+    _eq("read-only queries", calls[-1].body["targets"], {"//a": "aa"})
+    ok = delivery_api.open(_http({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": [], "writable": True})}, []), _BASE, lambda: "tok-1", _PARAMS, _ids())
+    _eq("writable is not read-only", ok.read_only, "")
+
+def _test_open_refused_credential_names_both_fixes(ctx):
+    for status, fix in [(401, "aspect auth login"), (403, "aspect.delivery.read"), (403, "aspect.delivery.write"), (404, "deliveryd.connect")]:
+        dd = delivery_api.open(_http({"/deliveries/query": _res(status, {"error": "no"})}, []), _BASE, lambda: "tok-1", _PARAMS, _ids())
+        _eq("refused %d is a startup error" % status, dd.status.ok, False)
+        _eq("names the fix for %d" % status, fix in dd.status.error, True)
+        _eq("names the deliveryd opt-out %d" % status, "deliveryd.connect" in dd.status.error, True)
+
+def _test_token_is_read_per_request(ctx):
+    calls = []
+    tokens = ["t1", "t2"]
+    dd = delivery_api.new(_http({"/deliveries/record": _res(200, {"event": {}})}, calls), _BASE, lambda: tokens.pop(0), _PARAMS, _ids())
+    dd.deliver("//a", "d1", {})
+    dd.deliver("//a", "d2", {})
+    _eq("each request reads the credential", [c.headers["Authorization"] for c in calls], ["Bearer t1", "Bearer t2"])
+
+def _test_open_failing_api_is_a_startup_error(ctx):
+    for res in [_res(500, {"error": "boom"}), None]:
+        dd = delivery_api.open(_http({"/deliveries/query": res}, []), _BASE, lambda: "tok-1", _PARAMS, _ids(), pause = lambda ms: None)
+        _eq("not usable", dd.status.ok, False)
+        err, _ = catch(dd.query, {"//a": "aa"})
+        _eq("verbs refuse", "unavailable" in err.message, True)
+
+_UNIT_TESTS = [
+    _test_query_returns_prior_deliveries,
+    _test_query_batches_and_requeries_unanswered,
+    _test_query_batches_at_the_limit,
+    _test_record_payloads,
+    _test_unknown_values_are_null,
+    _test_record_retries_with_the_same_event_id,
+    _test_internal_server_error_is_retried,
+    _test_lost_credential_names_the_fix,
+    _test_event_ids_are_unique_and_well_formed,
+    _test_retry_pause_heartbeats,
+    _test_failing_credential_is_retried,
+    _test_retry_after_overrides_the_pause,
+    _test_retry_after_is_capped,
+    _test_token_is_read_per_request,
+    _test_query_fails_when_nothing_is_answered,
+    _test_client_errors_are_not_retried,
+    _test_persistent_transport_error_surfaces,
+    _test_record_is_a_noop,
+    _test_open_probes_with_an_empty_query,
+    _test_open_read_only_credential_can_only_query,
+    _test_open_refused_credential_names_both_fixes,
+    _test_open_failing_api_is_a_startup_error,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("delivery_api.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+delivery_api_tests = task(
+    summary = "Run the delivery API client AXL unit tests.",
+    kind = "test-delivery-api",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

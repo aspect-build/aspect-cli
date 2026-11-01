@@ -48,7 +48,6 @@ load(
     "testonly_slot_label",
     "testonly_slot_names",
     "testonly_taken_columns",
-    "testonly_utf8_len",
 )
 load("@std//time.axl", "time")
 load(
@@ -2991,12 +2990,6 @@ def _test_an_embedded_repository_gitmodules_does_not_map_counts(ctx):
     run_git(ctx.std, ["commit", "-qm", "gitlink"], env.path)
     _eq("counted", [line[:2] for line in uncommitted_work(ctx.std, env.path)], ["SM"])
 
-def _test_a_branch_name_part_is_measured_in_bytes(ctx):
-    """A file name limit counts bytes, and `é` is two of them."""
-    _eq("ascii", testonly_utf8_len("abc"), 3)
-    _eq("two-byte", testonly_utf8_len("é" * 128), 256)
-    _eq("four-byte", testonly_utf8_len("🚀"), 4)
-
 def _test_a_session_and_its_subagents(ctx):
     """The parent session decides about its subagents' slots; a sibling does
     not. All of them are one harness session for `same_session`."""
@@ -3710,7 +3703,6 @@ _UNIT_TESTS = [
     _test_a_hidden_edit_with_an_unusual_name_still_counts,
     _test_a_skip_worktree_edit_in_a_sparse_checkout_counts,
     _test_an_embedded_repository_gitmodules_does_not_map_counts,
-    _test_a_branch_name_part_is_measured_in_bytes,
     _test_a_session_and_its_subagents,
     _test_a_stopped_session_is_given_time_to_come_back,
     _test_release_all_takes_this_clones_leases,

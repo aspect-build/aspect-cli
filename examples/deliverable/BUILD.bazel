@@ -24,10 +24,14 @@ sh_binary(
 # sibling `.digest` (in runfiles) + a sibling `.layer` (in default
 # outputs only, NOT in runfiles). The dogfood hook in
 # `//.aspect/config.axl` reads `.digest` via `runfiles_workspace_dir`
-# and `.layer` via `default_outputs`.
+# and `.layer` via `default_outputs`. Like a registry push, it delivers each
+# digest at most once.
 oci_like_deliverable(
     name = "deliverable_with_digest",
-    tags = ["deliverable"],
+    tags = [
+        "deliverable",
+        "delivery:once_per_digest",
+    ],
 )
 
 # Non-executable genrule tagged deliverable — exercises --warn-not-runnable.

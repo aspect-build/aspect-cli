@@ -1,0 +1,32 @@
+"""Helpers for HTTP responses: the `(name, value)` tuples `HttpResponse.headers`
+returns, and when a request is worth retrying.
+
+  - `header_value(headers, name)` — case-insensitive lookup, `""` if absent.
+  - `retry_after_ms(headers)` — a `Retry-After` given in seconds, as ms.
+  - `retryable_status(status)` — True for a transport error (0), 429 or 5xx.
+"""
+
+def header_value(headers, name: str) -> str:
+    """Case-insensitive lookup against the runtime's `(name, value)` header
+    tuples. Returns `""` if absent."""
+    name_lower = name.lower()
+    for entry in headers or []:
+        # Best-effort: skip length-mismatched entries.
+        if type(entry) != "tuple" or len(entry) != 2:
+            continue
+        if entry[0].lower() == name_lower:
+            return entry[1] or ""
+    return ""
+
+def retry_after_ms(headers) -> int | None:
+    """The `Retry-After` delay in milliseconds, or None when the header is
+    absent or not a whole number of seconds (the HTTP-date form included)."""
+    value = header_value(headers, "Retry-After").strip()
+    if not value.isdigit():
+        return None
+    return int(value) * 1000
+
+def retryable_status(status: int) -> bool:
+    """True for a transient failure: a transport error (status 0), 429, or a
+    5xx. Other statuses are the request's own fault and fail the same way again."""
+    return status == 0 or status == 429 or status >= 500

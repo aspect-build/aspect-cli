@@ -993,6 +993,25 @@ def _test_target_configured_dedups_aspect_events(ctx):
 
     _eq("test label counted once despite aspect re-emits", data["bazel"]["test_targets_configured"], 1)
 
+def _test_target_configured_captures_tags(ctx):
+    """`target_configured` records each target's tags for the delivery skip
+    policy; an aspect's event for the same label leaves them alone."""
+    data = init_data()
+    process_event(data, struct(
+        kind = "target_configured",
+        id = struct(label = "//pkg:push"),
+        payload = struct(target_kind = "sh_binary rule", tag = ["deliverable", "delivery:once_per_digest"]),
+    ), None)
+    process_event(data, struct(
+        kind = "target_configured",
+        id = struct(label = "//pkg:push", aspect = "//:hashsum.bzl%hashsum"),
+        payload = struct(target_kind = "sh_binary rule", tag = []),
+    ), None)
+    process_event(data, _make_target_configured("//pkg:lib", "cc_library"), None)
+
+    _eq("target tags captured", data["bazel"]["target_tags"]["//pkg:push"], ["deliverable", "delivery:once_per_digest"])
+    _eq("untagged target", data["bazel"]["target_tags"]["//pkg:lib"], [])
+
 def _test_failed_test_survives_passed_bucket_cap(ctx):
     """Regression: a failed test arriving after `passed_tests` hits
     `MAX_TEST_TARGETS` must still land in `failed_tests`. A previous
@@ -2385,6 +2404,7 @@ _UNIT_TESTS = [
     _test_bes_get_handles_none,
     _test_target_configured_counts_test_targets,
     _test_target_configured_dedups_aspect_events,
+    _test_target_configured_captures_tags,
     _test_failed_test_survives_passed_bucket_cap,
     _test_flaky_test_survives_passed_bucket_cap,
     _test_common_label_root_same_package_returns_all_pattern,

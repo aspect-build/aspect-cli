@@ -9,13 +9,15 @@ load(
     "version_gte",
     "version_tuple",
 )
-load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
+load("@aspect//delivery_state.axl", "delivery_state")
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
+load("@aspect//private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_init_data = "init_data")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
     "@aspect//private/lib/gazelle_results.axl",
@@ -1816,6 +1818,205 @@ def test_sanitize_filename(tc: int) -> int:
     for (input, expected, desc) in cases:
         got = sanitize_filename(input)
         tc = test_case(tc, got == expected, "sanitize_filename: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+# Frozen once the module loads, like a constant a user's config.axl rebinds to.
+_FROZEN_FILE_METADATA = {"from_file": 1}
+
+def test_delivery_metadata(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """Metadata file reading, the query-answer conversion, the stored size
+    cap, and how `delivery_target` merges into the entry's `metadata`."""
+    path = temp_dir + "/metadata.json"
+
+    tc = test_case(tc, delivery_read_metadata_file(ctx, "//a", path) == {}, "metadata: no file → no metadata")
+
+    ctx.std.fs.write(path, '{"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e"}]}')
+    got = delivery_read_metadata_file(ctx, "//a", path)
+    tc = test_case(tc, got == {"runUrl": "https://gh/run/9", "jobs": [{"name": "e2e"}]}, "metadata: JSON object read (got %r)" % got)
+    tc = test_case(tc, not ctx.std.fs.exists(path), "metadata: file deleted after reading")
+
+    for content, desc in [("[1, 2]", "non-object"), ("{truncated", "invalid JSON"), ("  \n", "blank")]:
+        ctx.std.fs.write(path, content)
+        tc = test_case(tc, delivery_read_metadata_file(ctx, "//a", path) == {}, "metadata: %s → no metadata" % desc)
+        tc = test_case(tc, not ctx.std.fs.exists(path), "metadata: %s file deleted" % desc)
+
+    ctx.std.fs.write(path, '{"blob": "' + "x" * delivery_METADATA_MAX_BYTES + '"}')
+    tc = test_case(tc, delivery_read_metadata_file(ctx, "//a", path) == {}, "metadata: oversized file → no metadata")
+    tc = test_case(tc, not ctx.std.fs.exists(path), "metadata: oversized file deleted")
+
+    ctx.std.fs.create_dir(path)
+    tc = test_case(tc, delivery_read_metadata_file(ctx, "//a", path) == {}, "metadata: an unreadable path → no metadata, not an error")
+    ctx.std.fs.remove_dir(path)
+
+    small = {"runUrl": "https://gh/run/9"}
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", small, small) == small, "metadata: metadata within the cap is stored")
+    big = dict(small)
+    big["blob"] = "x" * delivery_METADATA_MAX_BYTES
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", big, small) == small, "metadata: over the cap → the file's metadata alone")
+    wide = dict(small)
+    wide["blob"] = "é" * (delivery_METADATA_MAX_BYTES // 2)
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", wide, small) == small, "metadata: the cap counts UTF-8 bytes, not characters")
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", big, big) == {}, "metadata: over the cap twice → none")
+    proto = dict(small)
+    proto["__proto__"] = {"x": 1}
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", proto, proto) == small, "metadata: a __proto__ key is dropped")
+    tc = test_case(tc, delivery_metadata_to_store(ctx, "//a", big, proto) == small, "metadata: a __proto__ key is dropped from the file's metadata too")
+    tc = test_case(tc, "__proto__" in proto, "metadata: dropping __proto__ leaves the caller's dict alone")
+
+    writes = []
+    backend = struct(
+        stores_metadata = True,
+        deliver = lambda label, digest, meta: writes.append(("deliver", label, digest, meta)),
+        record_failure = lambda label, digest, meta: writes.append(("fail", label, digest, meta)),
+        delete = lambda digest: writes.append(("delete", digest)),
+    )
+    delivery_record_outcome(ctx, backend, "//a", "aa", True, small, small)
+    delivery_record_outcome(ctx, backend, "//a", "aa", False, small, small)
+    no_history = struct(stores_metadata = False, deliver = None, record_failure = None, delete = lambda digest: writes.append(("delete", digest)))
+    delivery_record_outcome(ctx, no_history, "//a", "aa", False, small, small)
+    tc = test_case(tc, writes == [("deliver", "//a", "aa", small), ("fail", "//a", "aa", small), ("delete", "aa")], "record outcome: deliver, record_failure, else delete (got %r)" % writes)
+
+    legacy = delivery_prior_deliveries("https://ci/0")
+    tc = test_case(tc, legacy.digest_delivery.build_url == "https://ci/0" and legacy.latest_delivery == None, "metadata: a bare build URL string reads as the digest's delivery")
+    odd = delivery_prior_deliveries(delivery_state.PriorDeliveries(digest_delivery = delivery_state.Delivery(build_url = "u", metadata = {"f": lambda: None})))
+    tc = test_case(tc, odd.digest_delivery.metadata == {} and odd.digest_delivery.build_url == "u", "metadata: a custom backend's metadata JSON cannot encode reads as none")
+    bare = delivery_prior_deliveries(delivery_state.Delivery(build_url = "u"))
+    tc = test_case(tc, bare.digest_delivery.build_url == "u", "metadata: a bare Delivery reads as the digest's delivery")
+
+    def _fire(hook):
+        data = delivery_init_data()
+        delivery_add_result(data, "//a", "ok", metadata = {"from_file": 1}, delivered = {"build_url": "u", "commit_sha": None, "at": None})
+        delivery_fire_target_hook(data, struct(delivery_target = hook), None, "//a", {"//a": "when_changed"})
+        return data["delivery"]["deliveries"][-1]
+
+    e = _fire(lambda entry: {"image_digest": "sha256:beef"})
+    tc = test_case(tc, e["metadata"] == {"from_file": 1, "image_digest": "sha256:beef"}, "metadata: hook return merges into metadata (got %r)" % e["metadata"])
+    tc = test_case(tc, e["skip_policy"] == "when_changed", "metadata: entry carries its skip policy")
+
+    e = _fire(lambda entry: {"from_file": 2})
+    tc = test_case(tc, e["metadata"]["from_file"] == 2, "metadata: hook wins a key collision")
+
+    def _mutate_custom(entry):
+        entry["custom"]["via_custom"] = True
+
+    e = _fire(_mutate_custom)
+    tc = test_case(tc, e["metadata"].get("via_custom") == True, "metadata: in-place custom write lands in metadata")
+
+    def _rebind_custom(entry):
+        entry["custom"] = {"rebound": True}
+
+    e = _fire(_rebind_custom)
+    tc = test_case(tc, e["metadata"] == {"rebound": True}, "metadata: a rebound custom dict replaces the metadata (got %r)" % e["metadata"])
+    e["custom"]["after"] = 1
+    tc = test_case(tc, e["metadata"].get("after") == 1, "metadata: custom re-points at metadata after a rebind")
+
+    def _drop_secret(entry):
+        entry["metadata"] = {k: v for k, v in entry["metadata"].items() if k != "token"}
+
+    data = delivery_init_data()
+    delivery_add_result(data, "//a", "ok", metadata = {"from_file": 1, "token": "s3cret"}, delivered = {"build_url": "u", "commit_sha": None, "at": None})
+    delivery_fire_target_hook(data, struct(delivery_target = _drop_secret), None, "//a", {"//a": "when_changed"})
+    e = data["delivery"]["deliveries"][-1]
+    tc = test_case(tc, e["metadata"] == {"from_file": 1}, "metadata: a rebind drops a key (got %r)" % e["metadata"])
+
+    def _rebind_both(entry):
+        entry["custom"] = {"via": "custom"}
+        entry["metadata"] = {"via": "metadata"}
+
+    e = _fire(_rebind_both)
+    tc = test_case(tc, e["metadata"] == {"via": "metadata"} and e["custom"] == e["metadata"], "metadata: a rebound metadata wins over a rebound custom (got %r)" % e["metadata"])
+
+    def _rebind_copy_with_extra(entry):
+        entry["metadata"] = dict(entry["metadata"])
+        return {"returned": True}
+
+    e = _fire(_rebind_copy_with_extra)
+    tc = test_case(tc, e["metadata"] == {"from_file": 1, "returned": True}, "metadata: the return merges into a rebound dict (got %r)" % e["metadata"])
+    tc = test_case(tc, "\0same-dict-probe" not in e["metadata"], "metadata: the identity probe leaves no key behind")
+
+    def _rebind_metadata(entry):
+        entry["metadata"] = {"from_file": 3}
+
+    e = _fire(_rebind_metadata)
+    tc = test_case(tc, e["metadata"] == {"from_file": 3}, "metadata: a rebound metadata dict wins over the file's (got %r)" % e["metadata"])
+    tc = test_case(tc, e["custom"] == e["metadata"], "metadata: custom follows a rebound metadata")
+
+    def _rebind_frozen(entry):
+        entry["custom"] = _FROZEN_FILE_METADATA
+        return {"returned": True}
+
+    e = _fire(_rebind_frozen)
+    tc = test_case(tc, e["metadata"] == {"from_file": 1, "returned": True}, "metadata: a rebind to a frozen dict is copied, not a hook error (got %r)" % e["metadata"])
+
+    data = delivery_init_data()
+    delivery_add_result(data, "//a", "ok", metadata = {"from_file": 1})
+
+    def _unencodable(entry):
+        entry["metadata"]["f"] = _unencodable
+        return {1: "x"}
+
+    err, _ = catch(delivery_fire_target_hook, data, struct(delivery_target = _unencodable), None, "//a", {})
+    e = data["delivery"]["deliveries"][-1]
+    tc = test_case(tc, err != None and "not JSON" in err.message, "metadata: metadata JSON cannot encode is a hook error (got %r)" % err)
+    tc = test_case(tc, e["metadata"] == {"from_file": 1} and e["custom"] == e["metadata"], "metadata: a failed hook leaves the metadata as before it ran (got %r)" % e["metadata"])
+
+    data = delivery_init_data()
+    delivery_add_result(data, "//a", "ok", metadata = {"image": {"digest": "sha256:a"}})
+
+    def _nested_then_raise(entry):
+        entry["metadata"]["image"]["digest"] = "changed"
+        fail("boom")
+
+    catch(delivery_fire_target_hook, data, struct(delivery_target = _nested_then_raise), None, "//a", {})
+    e = data["delivery"]["deliveries"][-1]
+    tc = test_case(tc, e["metadata"] == {"image": {"digest": "sha256:a"}}, "metadata: a failed hook's nested edits are undone (got %r)" % e["metadata"])
+
+    data = delivery_init_data()
+    delivery_add_result(data, "//a", "ok", metadata = {"from_file": 1})
+    err, _ = catch(delivery_fire_target_hook, data, struct(delivery_target = lambda entry: fail("boom")), None, "//a", {})
+    tc = test_case(tc, err != None and "boom" in err.message, "metadata: a hook's own error surfaces (got %r)" % err)
+
+    shared = delivery_delivered_dict(delivery_state.Delivery(label = "//other", build_url = "u", commit_sha = "c", at = "2026-11-01T00:00:00Z"))
+    tc = test_case(tc, shared == {"label": "//other", "build_url": "u", "commit_sha": "c", "at": "2026-11-01T00:00:00Z"}, "delivered: names the delivering target (got %r)" % shared)
+    tc = test_case(tc, delivery_delivered_dict(delivery_state.Delivery())["label"] == None, "delivered: an unknown label is None")
+    return tc
+
+def test_delivery_skip_policy(tc: int) -> int:
+    """Each target's skip policy (tag, then hook) and which delivery makes it
+    skippable under `when_changed` and `once_per_digest`."""
+    no_hook = struct(skip_policy = lambda t: None)
+    tc = test_case(tc, delivery_resolve_skip_policy(no_hook, "//a", ["deliverable"]) == "when_changed", "skip policy: default when_changed")
+    tc = test_case(tc, delivery_resolve_skip_policy(no_hook, "//a", ["delivery:once_per_digest"]) == "once_per_digest", "skip policy: tag selects once_per_digest")
+
+    seen = []
+
+    def hook(t):
+        seen.append(t)
+        return "once_per_digest" if t["label"].startswith("//packages/") else None
+
+    tc = test_case(tc, delivery_resolve_skip_policy(struct(skip_policy = hook), "//packages/x", []) == "once_per_digest", "skip policy: hook overrides")
+    tc = test_case(tc, seen[-1] == {"label": "//packages/x", "tags": [], "policy": "when_changed"}, "skip policy: hook sees label, tags and the tag's policy (got %r)" % seen[-1])
+    tc = test_case(tc, delivery_resolve_skip_policy(struct(skip_policy = hook), "//apps/y", ["delivery:once_per_digest"]) == "once_per_digest", "skip policy: hook None keeps the tag's")
+    policies = delivery_resolve_skip_policies(no_hook, ["//pkg:push", "//pkg:app"], {"@@//pkg:push": ["delivery:once_per_digest"]})
+    tc = test_case(tc, policies == {"//pkg:push": "once_per_digest", "//pkg:app": "when_changed"}, "skip policy: tags keyed by a BEP label find the target (got %r)" % policies)
+    err, _ = catch(delivery_resolve_skip_policy, struct(skip_policy = lambda t: "always"), "//a", [])
+    tc = test_case(tc, err != None and "skip_policy" in err.message, "skip policy: an unknown policy fails")
+
+    def delivery(digest):
+        return delivery_state.Delivery(build_url = "u-" + digest, digest = digest)
+
+    # A→B→A: the target's latest delivery is B; A was delivered before.
+    after_revert = delivery_state.PriorDeliveries(latest_delivery = delivery("bb"), digest_delivery = delivery("aa"))
+    tc = test_case(tc, delivery_skip_delivery("when_changed", after_revert, "aa", True) == None, "skip: when_changed delivers a revert to an earlier digest")
+    tc = test_case(tc, delivery_skip_delivery("once_per_digest", after_revert, "aa", True).digest == "aa", "skip: once_per_digest skips a digest delivered before")
+
+    unchanged = delivery_state.PriorDeliveries(latest_delivery = delivery("aa"), digest_delivery = delivery("aa"))
+    tc = test_case(tc, delivery_skip_delivery("when_changed", unchanged, "aa", True).build_url == "u-aa", "skip: when_changed skips an unchanged target")
+    tc = test_case(tc, delivery_skip_delivery("when_changed", None, "aa", True) == None, "skip: nothing known → deliver")
+    shared_only = delivery_state.PriorDeliveries(digest_delivery = delivery("aa"))
+    tc = test_case(tc, delivery_skip_delivery("when_changed", shared_only, "aa", True) == None, "skip: when_changed delivers a digest only another target put out")
+    tc = test_case(tc, delivery_skip_delivery("once_per_digest", shared_only, "aa", True).digest == "aa", "skip: once_per_digest reuses another target's delivery of the digest")
+    tc = test_case(tc, delivery_skip_delivery("when_changed", after_revert, "aa", False).digest == "aa", "skip: without latest tracking every policy reads as once_per_digest")
     return tc
 
 def test_delivery_should_upload_grpc_log(tc: int) -> int:
@@ -4103,6 +4304,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_delivery_should_upload_grpc_log(tc)
+    tc = test_delivery_metadata(ctx, tc, temp_dir)
+    tc = test_delivery_skip_policy(tc)
     tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
     tc = test_delivery_collect_blocking_culprits(tc)

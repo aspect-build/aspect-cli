@@ -9,6 +9,7 @@ Currently:
     `…` suffix, for status-surface titles.
   - `join_url(base, segment)` — single-slash URL join.
   - `display_width(s)` — the columns a terminal draws `s` in.
+  - `utf8_len(s)` — `s`'s length in UTF-8 bytes (`len` counts characters).
   - `pad_left(s, width)` / `pad_right(s, width)` — space-padding to a column
     width, as drawn, for the table alignment `%` formatting cannot do.
   - `is_unsafe_char(ch)` / `has_unsafe_chars(s)` / `printable(s, keep)` /
@@ -161,6 +162,15 @@ _WIDE = [
     (0x1FA70, 0x1FAFF),
     (0x20000, 0x3FFFD),
 ]
+
+def utf8_len(s: str) -> int:
+    """`s`'s length in UTF-8 bytes, which is what file name and wire size
+    limits count."""
+    n = 0
+    for ch in s.elems():
+        c = ord(ch)
+        n += 1 if c < 0x80 else 2 if c < 0x800 else 3 if c < 0x10000 else 4
+    return n
 
 def display_width(s: str) -> int:
     """The columns `s` takes on a terminal: two for a wide character, none for

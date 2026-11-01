@@ -1,0 +1,39 @@
+"""Unit tests for lib/timestamp.axl.
+
+Run with:
+  aspect dev test-timestamp
+"""
+
+load("./timestamp.axl", "rfc3339_utc")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_rfc3339_utc(ctx):
+    _eq("epoch", rfc3339_utc(0), "1970-01-01T00:00:00Z")
+    _eq("last second of a day", rfc3339_utc(86399), "1970-01-01T23:59:59Z")
+    _eq("leap day", rfc3339_utc(951782400), "2000-02-29T00:00:00Z")
+    _eq("day after a century leap day", rfc3339_utc(951868800), "2000-03-01T00:00:00Z")
+    _eq("2100 is not a leap year", rfc3339_utc(4107456000), "2100-02-28T00:00:00Z")
+    _eq("so March follows February 28", rfc3339_utc(4107542400), "2100-03-01T00:00:00Z")
+    _eq("year end", rfc3339_utc(1798761599), "2026-12-31T23:59:59Z")
+    _eq("an arbitrary second", rfc3339_utc(1761700000), "2025-10-29T01:06:40Z")
+
+_UNIT_TESTS = [
+    _test_rfc3339_utc,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("timestamp.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+timestamp_tests = task(
+    summary = "Run the timestamp formatting AXL unit tests.",
+    kind = "test-timestamp",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

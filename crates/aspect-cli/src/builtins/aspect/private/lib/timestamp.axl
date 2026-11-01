@@ -1,0 +1,32 @@
+"""Calendar timestamps.
+
+  - `rfc3339_utc(unix_s)` — seconds since the epoch as RFC 3339 UTC, to the
+    second (`2026-10-31T22:13:20Z`).
+"""
+
+def _pad(n: int, width: int) -> str:
+    s = str(n)
+    return "0" * (width - len(s)) + s
+
+def rfc3339_utc(unix_s: int) -> str:
+    """`unix_s` as `YYYY-MM-DDTHH:MM:SSZ`. The date is the proleptic Gregorian
+    civil date (Howard Hinnant's `civil_from_days`)."""
+    days = unix_s // 86400
+    secs = unix_s % 86400
+    z = days + 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    day = doy - (153 * mp + 2) // 5 + 1
+    month = mp + 3 if mp < 10 else mp - 9
+    year = yoe + era * 400 + (1 if month <= 2 else 0)
+    return "{}-{}-{}T{}:{}:{}Z".format(
+        _pad(year, 4),
+        _pad(month, 2),
+        _pad(day, 2),
+        _pad(secs // 3600, 2),
+        _pad(secs // 60 % 60, 2),
+        _pad(secs % 60, 2),
+    )

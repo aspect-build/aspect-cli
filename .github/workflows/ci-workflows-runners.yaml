@@ -1,0 +1,144 @@
+name: CI - Workflows Runners
+# Jobs that need self-hosted Aspect Workflows runners. Runs as its own workflow
+# run so the Aspect PR-summary comment exercises merging tasks across separate
+# workflows. Normally dispatched by ci.yaml's `dispatch-workflows-runners` job
+# right after `pre-build` completes (passing `prebuild_run_id` so we reuse the
+# just-built CLI), but also independently runnable via the GitHub UI /
+# `gh workflow run`.
+on:
+  workflow_dispatch:
+    inputs:
+      force_targets:
+        description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
+        required: false
+        default: ""
+      prebuild_run_id:
+        description: "Workflow run id holding the prebuilt `aspect-cli` artifact (set by ci.yaml). Leave empty to build the CLI from source via bootstrap.sh."
+        required: false
+        default: ""
+      pr_number:
+        description: "Triggering PR number (set by ci.yaml). Restores PR association lost across the workflow_dispatch boundary — surfaced as ASPECT_GITHUB_PR_NUMBER. Empty for a non-PR (push) trigger."
+        required: false
+        default: ""
+      head_sha:
+        description: "Triggering PR head commit SHA (set by ci.yaml). Exported as GITHUB_SHA so the check-run attaches to the PR head commit. Empty for a non-PR (push) trigger."
+        required: false
+        default: ""
+permissions:
+  id-token: write
+  actions: read # download-artifact needs this to read another run's artifact
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+# The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# Both are no-ops if a secret isn't configured (unset env var = empty string,
+# config.axl skips registration).
+env:
+  DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
+  DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Reconstruct the PR context that the workflow_dispatch boundary dropped, so
+  # GithubStatusChecks posts check-runs on the PR head and the Aspect
+  # PR-summary comment can associate (and merge) this run's tasks.
+  # `ASPECT_GITHUB_PR_NUMBER` is github.axl's documented detect_pr override.
+  # When dispatched on a push (no PR), pr_number is empty and GITHUB_SHA falls
+  # back to the runner-provided value so branch runs are unaffected.
+  ASPECT_GITHUB_PR_NUMBER: ${{ inputs.pr_number }}
+  GITHUB_SHA: ${{ inputs.head_sha != '' && inputs.head_sha || github.sha }}
+jobs:
+  # Workflows runner smoke test: the freshly-built CLI starts, prints version /
+  # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
+  # The ASPECT_WORKFLOWS_RUNNER_* values it dumps only exist on a runner.
+  runner-smoke:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Runner smoke test
+        run: |
+          aspect --version
+          aspect version
+          aspect help
+          echo "ASPECT_* env var names present:"
+          env | grep -o '^ASPECT_[^=]*' | sort | sed 's/^/  /'
+          echo "ASPECT_WORKFLOWS_* values:"
+          for var in \
+            ASPECT_WORKFLOWS_BES_BACKEND \
+            ASPECT_WORKFLOWS_BES_RESULTS_URL \
+            ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT \
+            ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX \
+            ASPECT_WORKFLOWS_REMOTE_CACHE \
+            ASPECT_WORKFLOWS_RUNNER \
+            ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_AZ \
+            ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_BIN_DIR \
+            ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER \
+            ASPECT_WORKFLOWS_RUNNER_DATA_DIR \
+            ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE \
+            ASPECT_WORKFLOWS_RUNNER_IMAGE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_NAME \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR \
+            ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE \
+            ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_REGION \
+            ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR \
+            ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH \
+            ASPECT_WORKFLOWS_RUNNER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED \
+          ; do
+            val=$(printenv "$var") && echo "  $var=$val" || true
+          done
+  # Delivery with the runner's deliveryd: on a Workflows runner, .aspect/config.axl
+  # selects `deliveryd.connect`, the explicit opt-out an air-gapped deployment
+  # uses in place of the delivery API.
+  delivery-deliveryd-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    env:
+      ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
+    steps:
+      - uses: actions/checkout@v6
+      # When dispatched by ci.yaml, reuse the CLI that run's pre-build already
+      # built (cross-run artifact download). On a bare manual dispatch there's
+      # no upstream run, so build from source.
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Delivery Task (deliveryd)
+        # --force-target re-delivers every run so the manifest always carries
+        # at least one `ok` outcome. Additional force targets (via the
+        # workflow_dispatch input or the ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
+        # env var) merge in. --warn-unresolved-digest: the deliverable set
+        # includes the stamped, uncacheable py_deliverable.
+        run: aspect delivery --task:name delivery-gha-deliveryd --warn-not-runnable --warn-unresolved-digest --force-target=//examples/deliverable:deliverable_with_digest

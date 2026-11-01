@@ -16,6 +16,9 @@ variables alone, without an authenticated API call:
                        the `ASPECT_JOB_URL_CACHE` cache-first short-circuit
                        (so the per-job URL `resolve_build_url` caches is
                        returned here too).
+  - `repository_from_git_url` / `detect_repository` — `owner/name` from
+                       HTTPS and SSH remotes, per-host detection, and `""`
+                       off a recognized host.
   - `resolve_build_url` — delegation off GitHub Actions, cached job URLs,
                        run-level fallback upgrades, and stale-run rejection.
 
@@ -26,7 +29,7 @@ Run with:
   aspect dev test-ci
 """
 
-load("./ci.axl", "ci_identity", "detect_artifacts_browse_url", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "resolve_build_url")
+load("./ci.axl", "ci_identity", "detect_artifacts_browse_url", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "detect_repository", "repository_from_git_url", "resolve_build_url")
 load("./github.axl", "github_actions_run_url")
 
 # Every CI-host marker + the per-job cache, snapshotted/restored around
@@ -41,6 +44,7 @@ _ENV_KEYS = [
     "GITHUB_WORKFLOW",
     "GITHUB_JOB",
     "BUILDKITE_BUILD_ID",
+    "BUILDKITE_REPO",
     "BUILDKITE_PIPELINE_SLUG",
     "BUILDKITE_STEP_KEY",
     "BUILDKITE_RETRY_COUNT",
@@ -58,6 +62,7 @@ _ENV_KEYS = [
     "CIRCLE_REPOSITORY_URL",
     "GITLAB_CI",
     "CI_JOB_URL",
+    "CI_PROJECT_PATH",
 ]
 
 def _eq(label, got, want):
@@ -328,6 +333,32 @@ def _test_circleci_artifacts_browse_url(ctx):
     )
     _restore_env(ctx, snapshot)
 
+def _test_repository(ctx):
+    for url, want in [
+        ("https://github.com/acme/web.git", "acme/web"),
+        ("https://github.com/acme/web", "acme/web"),
+        ("git@github.com:acme/web.git", "acme/web"),
+        ("ssh://git@gitlab.example.test:2222/group/sub/web.git", "group/sub/web"),
+        ("https://github.com/acme", ""),
+        ("not a url", ""),
+        ("", ""),
+    ]:
+        _eq("repository_from_git_url(%r)" % url, repository_from_git_url(url), want)
+
+    snapshot = _snapshot_env(ctx)
+    _clear_env(ctx)
+    _eq("repository — no host", detect_repository(ctx.std.env), "")
+    ctx.std.env.set_var("CI_PROJECT_PATH", "group/sub/web")
+    _eq("repository — GitLab", detect_repository(ctx.std.env), "group/sub/web")
+    ctx.std.env.set_var("CIRCLE_PROJECT_USERNAME", "acme")
+    ctx.std.env.set_var("CIRCLE_PROJECT_REPONAME", "web")
+    _eq("repository — CircleCI", detect_repository(ctx.std.env), "acme/web")
+    ctx.std.env.set_var("BUILDKITE_REPO", "git@github.com:acme/bk.git")
+    _eq("repository — Buildkite", detect_repository(ctx.std.env), "acme/bk")
+    ctx.std.env.set_var("GITHUB_REPOSITORY", "acme/gha")
+    _eq("repository — GitHub Actions", detect_repository(ctx.std.env), "acme/gha")
+    _restore_env(ctx, snapshot)
+
 def _test_impl(ctx):
     _test_detect_ci_host(ctx)
     _test_ci_identity(ctx)
@@ -338,7 +369,8 @@ def _test_impl(ctx):
     _test_resolve_build_url_off_gha(ctx)
     _test_resolve_build_url_cache(ctx)
     _test_circleci_artifacts_browse_url(ctx)
-    print("ci.axl: OK (9 sections)")
+    _test_repository(ctx)
+    print("ci.axl: OK (10 sections)")
     return 0
 
 ci_tests = task(

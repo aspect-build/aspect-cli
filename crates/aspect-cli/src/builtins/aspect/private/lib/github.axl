@@ -35,6 +35,7 @@ load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error",
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
+load("./http_headers.axl", "retryable_status")
 load(
     "./rate_limit.axl",
     "BUCKET_APP",
@@ -98,10 +99,8 @@ def _api(ctx, api_base):
 # Internal helpers
 
 def _is_retryable_http(success, status):
-    """True for transient failures (transport, 5xx, 429). 4xx → False."""
-    if success:
-        return False
-    return status == 0 or status >= 500 or status == 429
+    """True for a failed request whose status is `retryable_status`."""
+    return not success and retryable_status(status)
 
 _HTTP_MAX_ATTEMPTS = 3
 _HTTP_BACKOFF_BASE_MS = 250

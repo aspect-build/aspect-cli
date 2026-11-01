@@ -36,7 +36,7 @@ SUMMARY_TEMPLATE = _SUMMARY_TEMPLATE
 _DETAILS_LIMIT = 65000
 
 # Outcome buckets used by the delivery task. "ok" = delivered; "skip" =
-# identical hash already delivered for this commit; "warn" = informational
+# the target's skip policy found its digest already delivered; "warn" = informational
 # warning (no output_sha / no entrypoint); "fail" = delivery target run
 # exited non-zero; "pending" = dry-run marker or not-yet-attempted.
 _OUTCOME_ORDER = ["fail", "warn", "ok", "pending", "skip"]
@@ -114,16 +114,23 @@ def init_data():
     }
     return r
 
-def add_result(data, label, outcome, message = "", output_sha = "", is_forced = False):
+def add_result(data, label, outcome, message = "", output_sha = "", is_forced = False, metadata = None, delivered = None):
     """Record one delivery outcome and bump its count.
 
     Args:
         label:      Bazel target label, e.g. "//pkg/foo:release".
         outcome:    One of "ok", "skip", "warn", "fail", "pending".
-        message:    Context for the outcome: delivered-by URL on skip, error
-                    message on fail, warn reason, dry-run marker on pending.
+        message:    Display text for the outcome: build URL on ok, delivered-by
+                    URL on skip, error message on fail, warn reason, dry-run
+                    marker on pending.
         output_sha: Artifact action digest hash (delivery dedup key).
-        is_forced:  True when --force-target re-delivered despite prior delivery.
+        is_forced:  True for a --force-target target, and every target under
+                    --mode=always.
+        metadata:   The delivery's metadata, deep-copied, so it must encode as
+                    JSON; None for none.
+        delivered:  The delivery that put this digest out (shape below), when
+                    the target was delivered in this run or an earlier one;
+                    None otherwise, and the entry has no `delivered`.
 
     The appended entry has this shape:
 
@@ -133,21 +140,37 @@ def add_result(data, label, outcome, message = "", output_sha = "", is_forced = 
           "message":    str,
           "output_sha": str,
           "is_forced":  bool,
-          "custom":     dict,  # reserved for DeliveryTrait.delivery_target enrichment
+          "metadata":   dict,  # user-supplied; Aspect never writes inside it
+          "custom":     dict,  # the same dict object as "metadata"
+          "delivered": {       # ok / skip only
+            "label":      str | None,  # the target that delivered it; None when unknown
+            "build_url":  str | None,  # the build that delivered it
+            "commit_sha": str | None,  # the commit that build built
+            "at":         str | None,  # RFC 3339 UTC; this run's clock on ok
+          },
         }
+
+    On a skip, `metadata` and `delivered` are the earlier delivery's: the
+    target did not run. Under `once_per_digest` that delivery may be another
+    target's with the same digest, named by `delivered.label`.
 
     Callers may also attach additional fields to the entry after appending
     (e.g. on-disk paths for hook consumers); `build_manifest` flows any
     such fields through unchanged.
     """
-    data["delivery"]["deliveries"].append({
+    metadata = json.decode(json.encode(metadata or {}))
+    entry = {
         "label": label,
         "outcome": outcome,
         "message": message or "",
         "output_sha": output_sha or "",
         "is_forced": bool(is_forced),
-        "custom": {},
-    })
+        "metadata": metadata,
+        "custom": metadata,
+    }
+    if delivered:
+        entry["delivered"] = dict(delivered)
+    data["delivery"]["deliveries"].append(entry)
     counts = data["delivery"]["counts"]
     counts[outcome] = counts.get(outcome, 0) + 1
 
@@ -159,8 +182,9 @@ def build_manifest(data):
     per-entry fields in future releases without bumping `schema_version`
     as long as the additions are non-breaking.
 
-    Entries' `custom` dict is reserved for hook-provided enrichment;
-    Aspect will never populate it. Other per-entry fields populated by
+    Entries' `metadata` dict is user-supplied: the target's metadata file
+    and the `delivery_target` hook write it, and Aspect never writes inside
+    it. `custom` carries the same contents. Other per-entry fields populated by
     the delivery dispatch loop (e.g. `entrypoint_path`, `runfiles_dir`,
     `default_outputs`) flow through unchanged.
     """

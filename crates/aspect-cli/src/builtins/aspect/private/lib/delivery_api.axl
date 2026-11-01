@@ -1,0 +1,272 @@
+"""Delivery state from Aspect's delivery API — the default delivery state backend.
+
+Speaks the `/deliveries` routes on Aspect Cloud's API with the Aspect Cloud
+credential (`aspect auth login`, or `ASPECT_API_TOKEN` in CI). Recording needs
+the `aspect.delivery.write` permission; `aspect.delivery.read` alone serves a
+`--dry-run`. The API keeps each target's latest delivery and each digest's
+delivery, with the `metadata` stored with them, and every attempt, failures
+included, in the target's history. Transient failures (`retryable_status`) are
+retried, a record with its original `event_id` so the server applies it once.
+A job that cannot use the API gets a startup error; deliveryd is selected only
+explicitly, with `DeliveryState.connect = deliveryd.connect`:
+
+    dd = delivery_api.connect(ctx, delivery_state.Params(host = "gh", repo = "org/repo", prefix = "delivery", commit = sha, signature = build_url))
+    prior = dd.query({label: digest})            # -> {label: PriorDeliveries}
+    dd.deliver(label, digest, metadata)          # an ok attempt
+    dd.record_failure(label, digest, metadata)  # a fail attempt; clears the digest's delivery, and the latest when it has that digest
+"""
+
+load("@std//time.axl", "sleep")
+load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
+load("./delivery_state.axl", "delivery_state")
+load("./http_headers.axl", "retry_after_ms", "retryable_status")
+load("./random.axl", "random_hex")
+
+# The API's per-request target limit.
+QUERY_BATCH_SIZE = 500
+
+_ROUTES = "/deliveries"
+_RECORD_ROUTE = _ROUTES + "/record"
+_QUERY_ROUTE = _ROUTES + "/query"
+
+_DESCRIBE = "Aspect delivery API"
+
+# `Health.version` numbers deliveryd's protocol; the API has one.
+_VERSION = 1
+
+# A `retryable_status` is retried after the response's `Retry-After` (at most
+# _MAX_RETRY_AFTER_MS), else these pauses; a repeated record reuses its
+# `event_id`, so the server applies it once.
+_RETRY_PAUSES_MS = [1000, 2000, 4000]
+_MAX_RETRY_AFTER_MS = 30000
+
+_Conn = record(
+    http = field(typing.Any),
+    base_url = field(str),
+    token = field(typing.Callable[[], str]),
+    pause = field(typing.Any),
+)
+
+# `status = 0` is a request that got no response; `failure` says why.
+_Response = record(
+    status = field(int),
+    body = field(str),
+    retry_after_ms = field(int | None, default = None),
+    failure = field(str, default = "transport error"),
+)
+
+def _send_once(conn: _Conn, method: str, path: str, payload: dict | None) -> _Response:
+    """One request, with a transport error, or a credential that fails to
+    resolve, flattened into `status = 0`."""
+    err, token = catch(conn.token)
+    if err:
+        return _Response(status = 0, body = err.message, failure = "credential lookup failed")
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    if method == "GET":
+        fut = conn.http.get(url = conn.base_url + path, headers = headers)
+    else:
+        fut = conn.http.post(url = conn.base_url + path, headers = headers, data = json.encode(payload))
+    err, res = fut.catch().block()
+    if err:
+        return _Response(status = 0, body = err.message)
+    return _Response(status = res.status, body = res.body, retry_after_ms = retry_after_ms(res.headers))
+
+def _send(conn: _Conn, method: str, path: str, payload: dict | None) -> _Response:
+    res = _send_once(conn, method, path, payload)
+    for ms in _RETRY_PAUSES_MS:
+        if not retryable_status(res.status):
+            break
+        conn.pause(min(res.retry_after_ms, _MAX_RETRY_AFTER_MS) if res.retry_after_ms != None else ms)
+        res = _send_once(conn, method, path, payload)
+    return res
+
+def _check(op: str, res: _Response) -> dict:
+    """The decoded 2xx body, or `fail` with the server's own message."""
+    if res.status >= 200 and res.status < 300:
+        body = json.try_decode(res.body, None)
+        if type(body) != "dict":
+            fail("delivery API {} returned 2xx but body was not a JSON object: {}".format(op, res.body[:200].replace("\n", " ")))
+        return body
+    if res.status == 0:
+        fail("delivery API {} failed ({}): {}".format(op, res.failure, res.body))
+    message = aspect_cloud_error(res) or res.body.strip()[:200]
+    fail("delivery API {} failed (HTTP {}): {}".format(op, res.status, message))
+
+def _scope(params: delivery_state.Params) -> dict:
+    return {"ci_host": params.host, "repo": params.repo or None, "prefix": params.prefix}
+
+def _delivery(event) -> delivery_state.Delivery | None:
+    """A `latest_delivery` or `digest_delivery` event, or None."""
+    if type(event) != "dict":
+        return None
+    metadata = event.get("metadata")
+    return delivery_state.Delivery(
+        build_url = event.get("build_url") or None,
+        commit_sha = event.get("commit_sha") or None,
+        at = event.get("recorded_at") or None,
+        label = event.get("label") or "",
+        digest = event.get("digest") or "",
+        metadata = metadata if type(metadata) == "dict" else {},
+    )
+
+def _query(conn: _Conn, params: delivery_state.Params, digests: dict) -> dict:
+    """`{label: digest}` → `{label: PriorDeliveries}` for the targets the API
+    knows anything about. Labels the API left unanswered (its response size
+    limit) are asked again."""
+    pending = {label: digest for label, digest in digests.items() if digest}
+    prior = {}
+    for _ in range(len(pending) + 1):
+        if not pending:
+            break
+        labels = sorted(pending.keys())[:QUERY_BATCH_SIZE]
+        body = _check("query", _send(conn, "POST", _QUERY_ROUTE, dict(_scope(params), targets = {
+            label: pending[label]
+            for label in labels
+        })))
+        for label, answer in (body.get("targets") or {}).items():
+            if type(answer) == "dict":
+                prior[label] = delivery_state.PriorDeliveries(
+                    latest_delivery = _delivery(answer.get("latest_delivery")),
+                    digest_delivery = _delivery(answer.get("digest_delivery")),
+                )
+        unanswered = [label for label in (body.get("unanswered_labels") or []) if label in labels]
+        if len(unanswered) == len(labels):
+            fail("delivery API query answered none of {} targets".format(len(labels)))
+        for label in labels:
+            if label not in unanswered:
+                pending.pop(label)
+    return prior
+
+def _record(conn: _Conn, params: delivery_state.Params, new_id, outcome: str, label: str, digest: str, metadata: dict) -> None:
+    payload = dict(
+        _scope(params),
+        event_id = new_id(),
+        label = label,
+        digest = digest,
+        outcome = outcome,
+        build_url = delivery_state.known_or_none(params.signature),
+        commit_sha = delivery_state.known_or_none(params.commit),
+        metadata = metadata,
+    )
+    _check(outcome, _send(conn, "POST", _RECORD_ROUTE, payload))
+
+def _unavailable(endpoint: str, message: str) -> delivery_state.Backend:
+    def refuse(*args, **kwargs):
+        fail("delivery API is unavailable: " + message)
+
+    status = delivery_state.Health(ok = False, version = _VERSION, error = message)
+    return delivery_state.Backend(
+        endpoint = endpoint,
+        describe = _DESCRIBE,
+        status = status,
+        health = lambda: status,
+        record = refuse,
+        query = refuse,
+        deliver = refuse,
+        delete = refuse,
+        record_failure = refuse,
+        stores_metadata = True,
+        tracks_latest = True,
+    )
+
+def _new(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep, read_only = "") -> delivery_state.Backend:
+    """A backend over an already-resolved `base_url`, with no probe. `token()`
+    returns the bearer token for each request, so a run outlasting one gets
+    the refreshed credential. `new_id()` mints an `event_id`; `pause(ms)`
+    sleeps between retries. All three are replaceable in tests. `read_only`
+    is the backend's `read_only`."""
+    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause)
+    status = delivery_state.Health(ok = True, version = _VERSION, status = "ok")
+    return delivery_state.Backend(
+        endpoint = base_url,
+        describe = _DESCRIBE,
+        status = status,
+        health = lambda: status,
+        record = lambda label, digest: None,
+        query = lambda digests: _query(conn, params, digests),
+        deliver = lambda label, digest, meta = {}: _record(conn, params, new_id, "ok", label, digest, meta),
+        delete = lambda digest: fail("delivery API: record failures with `record_failure(label, digest, metadata)`"),
+        record_failure = lambda label, digest, meta = {}: _record(conn, params, new_id, "fail", label, digest, meta),
+        stores_metadata = True,
+        tracks_latest = True,
+        read_only = read_only,
+    )
+
+# Appended to the startup errors a credential fixes.
+_KEEP_DELIVERYD = (
+    " To keep delivery state in the runner's deliveryd instead (an air-gapped" +
+    " deployment), set `ctx.traits[DeliveryState].connect = deliveryd.connect`" +
+    " in .aspect/config.axl."
+)
+
+def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep) -> delivery_state.Backend:
+    """Probe the API with an empty query, which checks the credential without
+    reading any state, and answers whether it may record (`writable`). A
+    failed probe is reported through `.status`, as a startup error; a
+    credential that may only read, through `.read_only`."""
+    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause)
+    res = _send(conn, "POST", _QUERY_ROUTE, dict(_scope(params), targets = {}))
+    if res.status >= 200 and res.status < 300:
+        body = json.try_decode(res.body, None)
+        if type(body) == "dict" and body.get("writable") == False:
+            read_only = "the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`." + _KEEP_DELIVERYD
+            return _new(http, base_url, token, params, new_id, pause, read_only = read_only)
+        return _new(http, base_url, token, params, new_id, pause)
+    if res.status == 0:
+        return _unavailable(base_url, res.failure + ": " + res.body)
+    message = "HTTP {}: {}".format(res.status, aspect_cloud_error(res) or res.body.strip()[:200])
+    if res.status == 401:
+        return _unavailable(base_url, "the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.{}".format(message, _KEEP_DELIVERYD))
+    if res.status == 403:
+        return _unavailable(base_url, "the delivery API refused the Aspect Cloud credential ({}). Grant the token's role `aspect.delivery.write` (or `aspect.delivery.read`, for `--dry-run` alone).{}".format(message, _KEEP_DELIVERYD))
+    return _unavailable(base_url, message + "." + _KEEP_DELIVERYD)
+
+def _event_ids(nonce: str):
+    """A `new_id` minting `<nonce>-<n>`: unique across runs by the random
+    `nonce`, within one by the counter, with one entropy read per run."""
+    count = [0]
+
+    def new_id() -> str:
+        count[0] += 1
+        return "{}-{}".format(nonce, count[0])
+
+    return new_id
+
+def _pause_with(heartbeat):
+    """A retry `pause` that calls `heartbeat` (when set) before sleeping, so a
+    retried request does not silence the task's status surfaces."""
+
+    def pause(ms: int) -> None:
+        if heartbeat:
+            heartbeat()
+        sleep(ms)
+
+    return pause
+
+def _access_token(creds) -> str:
+    """`creds`' bearer token, or `fail` naming the fix when the credential that
+    resolved at startup no longer does (a failed refresh, a removed profile)."""
+    if not creds:
+        fail("the Aspect Cloud credential no longer resolves. Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.")
+    return creds.access_token
+
+def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
+    """The default `DeliveryState.connect`: the delivery API with the Aspect
+    Cloud credential. A job that cannot use it gets a startup error naming the
+    fix, never another backend."""
+    base_url = aspect_cloud_url(ctx, "")
+    creds = aspect_cloud_credentials(ctx, required = False)
+    if not creds:
+        return _unavailable(base_url, "no Aspect Cloud credential. Run `aspect auth login`, or set ASPECT_API_TOKEN in CI." + _KEEP_DELIVERYD)
+    token = lambda: _access_token(aspect_cloud_credentials(ctx, required = False))
+    return _open(ctx.http(), base_url, token, params, _event_ids(random_hex(ctx)), _pause_with(params.heartbeat))
+
+delivery_api = namespace(
+    connect = _connect,
+    new = _new,
+    open = _open,
+    access_token = _access_token,
+    event_ids = _event_ids,
+    pause_with = _pause_with,
+    QUERY_BATCH_SIZE = QUERY_BATCH_SIZE,
+)
