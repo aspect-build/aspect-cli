@@ -15,6 +15,9 @@ Covers:
   - Local `git diff --unified=0` parsing (`github.parse_local_diff`),
     including deleted files and header-shaped hunk content.
   - `list_pull_request_files` auth fallback + rate-limit bucketing.
+  - `ASPECT_GITHUB_TOKEN` and the API base: the explicit token in place of a
+    mint, `resolve_api_base` precedence, Enterprise repo detection, and the
+    github.com-only gate.
 
 Most cases are env- and event-file-driven, so they stub `std` with a
 fake env (dict-backed) and a fake fs (path → content dict). The
@@ -37,6 +40,7 @@ load(
     "detect_ci_base_ref",
     "detect_commit_sha",
     "detect_github_pr",
+    "detect_github_repo",
     "detect_merge_group_base_sha",
     "detect_synthesized_merge_sha",
     "github",
@@ -664,6 +668,9 @@ def _test_impl(ctx):
     # installation is mid-rotation or scope-pruned).
     _test_pr_files_4xx_auth_fallback(ctx)
 
+    # ── ASPECT_GITHUB_TOKEN + Enterprise API base ─────────────────────
+    _test_explicit_token_and_api_base(ctx)
+
     # ── pr_file_is_skipped bucketing decision ─────────────────────────
     _test_pr_file_is_skipped()
 
@@ -1000,6 +1007,106 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     _eq("pr-files no-fallback: no tip emitted", len(tips._inspect_for_test(ctx)), 0)
 
     _test_pr_files_bucket_class_routes_observations(ctx)
+
+def _test_explicit_token_and_api_base(ctx):
+    """`ASPECT_GITHUB_TOKEN` replaces the App mint, `resolve_api_base` picks
+    the REST base every helper defaults to, an Enterprise host is accepted by
+    repo detection, and the github.com-only gate steps aside once both are
+    configured."""
+    ghes = "https://ghes.example.mil/api/v3"
+
+    _eq("api base: default", github.resolve_api_base(_fake_std({}).env), "https://api.github.com")
+    _eq("api base: GITHUB_API_URL", github.resolve_api_base(_fake_std({"GITHUB_API_URL": ghes}).env), ghes)
+    _eq(
+        "api base: ASPECT_GITHUB_API_URL wins, trailing slash dropped",
+        github.resolve_api_base(_fake_std({"ASPECT_GITHUB_API_URL": ghes + "/", "GITHUB_API_URL": "https://other/api/v3"}).env),
+        ghes,
+    )
+
+    # No Aspect credentials and no HTTP stub: a mint attempt would fail.
+    tips._reset_for_test(ctx)
+    explicit_env = {"CI": "true", "GITHUB_ACTIONS": "true", "ASPECT_GITHUB_TOKEN": " pat-tok\n"}
+    no_creds = struct(
+        std = struct(env = struct(var = lambda name: explicit_env.get(name, ""))),
+        aspect = struct(auth = fake_auth()),
+        traits = ctx.traits,
+    )
+    reason = {}
+    extra = {}
+    _eq("explicit token: returned stripped", github.authenticate(no_creds, owner = "o", repo = "r", roles = ["prs.write"], _reason = reason, _extra = extra), "pat-tok")
+    _eq("explicit token: no failure reason", reason, {})
+    _eq("explicit token: no installation proof", extra, {})
+    _eq("explicit token: no missing-credentials tip", len(tips._inspect_for_test(ctx)), 0)
+    _eq("explicit token: preferred pair", github.preferred_token_pair(no_creds, "o", "r"), ("pat-tok", None, BUCKET_APP))
+
+    state, http_client = _http_stub([(200, '{"id": 7, "body": "hi"}')])
+    stub = _stub_ctx(ctx, {"ASPECT_GITHUB_API_URL": ghes}, http_client)
+    github.issues.get_comment(stub, "pat-tok", "o", "r", 7)
+    _eq("api base: helper default follows env", state["calls"][0]["url"], ghes + "/repos/o/r/issues/comments/7")
+
+    vcs = "https://ghes.example.mil/acme/widgets.git"
+    _eq(
+        "repo detection: Enterprise host from ASPECT_GITHUB_API_URL",
+        detect_github_repo(_fake_std({"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_API_URL": ghes})),
+        ("acme", "widgets"),
+    )
+    _eq(
+        "repo detection: Enterprise host from GITHUB_SERVER_URL",
+        detect_github_repo(_fake_std({"ASPECT_VCS_URL": "git@ghes.example.mil:acme/widgets.git", "GITHUB_SERVER_URL": "https://ghes.example.mil"})),
+        ("acme", "widgets"),
+    )
+    _eq(
+        "repo detection: GHE.com api. prefix stripped",
+        detect_github_repo(_fake_std({"ASPECT_VCS_URL": "https://acme.ghe.com/acme/widgets", "ASPECT_GITHUB_API_URL": "https://api.acme.ghe.com"})),
+        ("acme", "widgets"),
+    )
+    _eq(
+        "repo detection: Enterprise mirror on a github.com Actions runner",
+        detect_github_repo(_fake_std({"ASPECT_VCS_URL": vcs, "GITHUB_SERVER_URL": "https://github.com", "ASPECT_GITHUB_API_URL": ghes})),
+        ("acme", "widgets"),
+    )
+    _eq("repo detection: unconfigured host rejected", github.extract_owner_repo(vcs), ("", ""))
+
+    logged = []
+    log = struct(info = lambda std, msg: logged.append(msg))
+
+    def _bails(vars):
+        return github.bail_if_not_public_github(_fake_std(vars), log, "Skipping.")
+
+    _eq("gate: unset", _bails({}), False)
+    _eq("gate: github.com", _bails({"ASPECT_VCS_URL": "https://github.com/o/r"}), False)
+    _eq("gate: Enterprise, nothing configured", _bails({"ASPECT_VCS_URL": vcs}), True)
+    if "ASPECT_GITHUB_TOKEN and ASPECT_GITHUB_API_URL" not in logged[-1]:
+        fail("gate: message should name both missing vars, got %r" % logged[-1])
+    if "https://ghes.example.mil/api/v3" not in logged[-1]:
+        fail("gate: message should suggest the Enterprise Server API base, got %r" % logged[-1])
+    _eq("gate: GHE.com, nothing configured", _bails({"ASPECT_VCS_URL": "https://acme.ghe.com/acme/widgets"}), True)
+    if "https://api.acme.ghe.com" not in logged[-1]:
+        fail("gate: message should suggest the GHE.com API base, got %r" % logged[-1])
+    _eq("gate: Enterprise, token only", _bails({"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_TOKEN": "t"}), True)
+    _eq("gate: Enterprise, API base only", _bails({"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_API_URL": ghes}), True)
+    _eq("gate: Enterprise, configured", _bails({"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_TOKEN": "t", "ASPECT_GITHUB_API_URL": ghes}), False)
+
+    # An Enterprise Actions runner names its host only in GITHUB_SERVER_URL,
+    # and sets GITHUB_API_URL itself, so only the token is missing.
+    ghes_runner = {"GITHUB_SERVER_URL": "https://ghes.example.mil", "GITHUB_API_URL": ghes}
+    _eq("gate: Enterprise runner, no token", _bails(ghes_runner), True)
+    if not logged[-1].startswith("GITHUB_SERVER_URL points at 'ghes.example.mil'") or "missing ASPECT_GITHUB_TOKEN." not in logged[-1]:
+        fail("gate: message should name GITHUB_SERVER_URL and only the token, got %r" % logged[-1])
+    _eq("gate: Enterprise runner, token", _bails(dict(ghes_runner, ASPECT_GITHUB_TOKEN = "t")), False)
+    _eq("gate: github.com runner", _bails({"GITHUB_SERVER_URL": "https://github.com"}), False)
+    _eq("gate: github.com runner's own GITHUB_API_URL", _bails({"GITHUB_API_URL": "https://api.github.com/"}), False)
+
+    # Off Actions only the API base names the Enterprise host.
+    _eq("gate: Enterprise API base, no token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes}), True)
+    if not logged[-1].startswith("ASPECT_GITHUB_API_URL points at 'ghes.example.mil'"):
+        fail("gate: message should name ASPECT_GITHUB_API_URL, got %r" % logged[-1])
+    _eq("gate: Enterprise API base, token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes, "ASPECT_GITHUB_TOKEN": "t"}), False)
+    _eq(
+        "gate: ASPECT_VCS_URL on github.com wins over the runner's server",
+        _bails({"ASPECT_VCS_URL": "https://github.com/o/r", "GITHUB_SERVER_URL": "https://ghes.example.mil"}),
+        False,
+    )
 
 def _test_pr_files_bucket_class_routes_observations(ctx):
     """Rate-limit observations from the primary + fallback calls in

@@ -8,6 +8,18 @@ HTTP failure contract (every helper below):
     exponential backoff (250→500→1000 ms); 4xx is not retried.
   - Retry is gated on method idempotency: GET/PUT/PATCH/DELETE retry;
     POST runs exactly once (avoids duplicate resources on retry).
+
+Token and host:
+
+  - `_authenticate` mints an installation token from the Aspect GitHub App,
+    unless `ASPECT_GITHUB_TOKEN` is set, in which case that token is used
+    as-is and nothing is minted. The explicit token is how GitHub Enterprise
+    Server and deployments that can't reach Aspect Cloud authenticate, since
+    the Aspect App exists only on github.com.
+  - Every helper's `api_base` defaults to `_resolve_api_base`
+    (`ASPECT_GITHUB_API_URL`, then `GITHUB_API_URL`, then api.github.com).
+  - An Enterprise host (`_target_host`) needs both the token and a
+    non-default API base; `_bail_if_not_public_github` gates on them.
 """
 
 load("@std//base64.axl", "base64")
@@ -40,6 +52,42 @@ load(
 )
 
 DEFAULT_GITHUB_API = "https://api.github.com"
+
+# A token the CI config supplies itself (a PAT, the GHA `GITHUB_TOKEN`, or an
+# installation token of the customer's own App). See `_authenticate`.
+_EXPLICIT_TOKEN_ENV = "ASPECT_GITHUB_TOKEN"
+
+# REST API base overrides, most specific first. GitHub Actions sets
+# `GITHUB_API_URL` on every runner, Enterprise Server included.
+_API_URL_ENV = "ASPECT_GITHUB_API_URL"
+_API_URL_ENVS = [_API_URL_ENV, "GITHUB_API_URL"]
+
+# Enterprise Server serves its REST API under this path on the web host;
+# GHE.com serves it on an `api.` subdomain of the web host.
+_GHES_API_PATH = "/api/v3"
+_GHE_API_SUBDOMAIN = "api."
+_GHE_COM_SUFFIX = ".ghe.com"
+
+def _explicit_token(env):
+    """The CI-supplied GitHub token from `ASPECT_GITHUB_TOKEN`, or ""."""
+    return (env.var(_EXPLICIT_TOKEN_ENV) or "").strip()
+
+def _api_base_source(env):
+    """`(var, api_base)` from the first of `_API_URL_ENVS` that is set, without
+    a trailing slash, else `("", DEFAULT_GITHUB_API)`."""
+    for var in _API_URL_ENVS:
+        v = (env.var(var) or "").strip().rstrip("/")
+        if v:
+            return (var, v)
+    return ("", DEFAULT_GITHUB_API)
+
+def _resolve_api_base(env):
+    """The GitHub REST API base without a trailing slash (`_api_base_source`)."""
+    return _api_base_source(env)[1]
+
+def _api(ctx, api_base):
+    """`api_base` when a caller passed one, else the resolved default."""
+    return api_base or _resolve_api_base(ctx.std.env)
 
 # Internal helpers
 
@@ -347,7 +395,8 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
       - App failed, env unset: `(None, None, BUCKET_APP)`.
 
     `_reason` is populated on failure (kind + reason). `existing_app_token`
-    skips a redundant mint. For App-attributed calls (check-runs, comment
+    skips a redundant mint. An `ASPECT_GITHUB_TOKEN` stands in for the App
+    token (see `_authenticate`). For App-attributed calls (check-runs, comment
     create/update), call `_authenticate` directly.
     """
     env = ctx.std.env
@@ -381,7 +430,15 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     Returns the token, or None with `_reason` populated on failure
     (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
 
-    `_extra`, if a dict, is populated on success with `installation_id` +
+    When `ASPECT_GITHUB_TOKEN` is set it is returned as-is: no mint, `roles`
+    are not requested (the token has whatever it was issued with), `_extra`
+    is untouched (there is no installation to prove), and no budget or
+    cadence is seeded, so callers pace on their own intervals. Its
+    rate-limit observations take the App bucket's place. An invalid token
+    surfaces as a 401 at the first API call, on each feature's existing
+    warn-and-skip path.
+
+    `_extra`, if a dict, is populated on a mint with `installation_id` +
     `installation_proof` (the comment surface forwards them on the `contribute`
     call). The budget, cadence, and refresh creds the mint also carries are
     recorded centrally here (see below), not via `_extra`. Other callers pass
@@ -395,6 +452,16 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         _set_auth_reason(_reason, _AUTH_KIND_NO_OWNER_REPO, "owner/repo not provided")
         return None
 
+    if roles:
+        for role in roles:
+            if not validate_role(role):
+                msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
+                fail(msg)
+
+    explicit = _explicit_token(ctx.std.env)
+    if explicit:
+        return explicit
+
     creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
         kind, msg = _classify_missing_credentials(ctx)
@@ -402,12 +469,6 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         if kind == _AUTH_KIND_NO_CREDENTIALS:
             _emit_aspect_api_token_tip(ctx)
         return None
-
-    if roles:
-        for role in roles:
-            if not validate_role(role):
-                msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
-                fail(msg)
 
     url = aspect_cloud_url(ctx, "/github/token")
     if roles:
@@ -601,14 +662,14 @@ def _status_check_register(ctx, request, profile = None):
 
     return {"success": False, "status": status}
 
-def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
+def _read_rate_limit(ctx, token, api_base = None):
     """Read the installation's GitHub core rate-limit headroom with its
     installation `token`. Returns `{"remaining": int, "reset": int}` from the
     `resources.core` bucket (`reset` is absolute Unix seconds), plus `"limit":
     int` when the response carries it — the budget service sizes its reserve
     floor against that ceiling. `None` on any failure. `GET /rate_limit` does
     not itself consume quota."""
-    success, _status, body = _do_request(ctx, "GET", api_base + "/rate_limit", token, quiet_4xx_auth = True)
+    success, _status, body = _do_request(ctx, "GET", _api(ctx, api_base) + "/rate_limit", token, quiet_4xx_auth = True)
     if not success or type(body) != "dict":
         return None
     core = body.get("resources", {}).get("core")
@@ -686,9 +747,9 @@ def _post_budget(ctx, request):
 
 # Check Runs
 
-def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
+def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, details_url = None, api_base = None):
     """Create a new check run on a commit."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/check-runs"
     payload = {"name": name, "head_sha": head_sha}
     if status:
         payload["status"] = status
@@ -704,12 +765,12 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
 
-def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API, skippable = False):
+def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = None, skippable = False):
     """Update an existing check run. `skippable=True` (a mid-run progress
     update) lets the budget gate drop the call when the App token is over
     budget — the result then carries `"skipped": True` (not an error); pass
     `skippable=False` for the terminal conclusion so it lands."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
     payload = {}
     if status:
         payload["status"] = status
@@ -729,7 +790,7 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
 
-def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output = None, api_base = DEFAULT_GITHUB_API):
+def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output = None, api_base = None):
     """Complete a check run with a conclusion."""
     return update_check_run(
         ctx,
@@ -1772,38 +1833,105 @@ def _extract_host(url):
     return rest[:slash] if slash >= 0 else rest
 
 def _is_public_github_url(url):
-    """True when url's host is exactly github.com (not Enterprise).
-
-    The Aspect GitHub App is only installed on github.com; Enterprise needs
-    a follow-up (user PAT + derived API base).
-    """
+    """True when url's host is exactly github.com (not Enterprise)."""
     if not url:
         # Unset → defer to the env/git-remote fallback (github-only anyway).
         return True
     h = _extract_host(url).lower()
     return h == "github.com" or h == "www.github.com"
 
-def _bail_if_not_public_github(std, log, skip_label):
-    """True (feature should bail) when `ASPECT_VCS_URL` points at a
-    non-github.com host, logging an actionable info() first; False when
-    unset / github.com.
+def _target_host(env):
+    """`(var, host)` for the GitHub host this run targets when it isn't
+    github.com, else `("", "")`.
 
-    Every App-authenticating feature needs this gate — the App is
-    github.com-only (Enterprise would 401). `skip_label` names what won't
-    happen (e.g. "Skipping check-run creation.").
+    `ASPECT_VCS_URL` wins over GitHub Actions' `GITHUB_SERVER_URL`, so a
+    mirror can point elsewhere. With neither set (Buildkite, CircleCI), a
+    non-default API base names the host instead."""
+    for var in ("ASPECT_VCS_URL", "GITHUB_SERVER_URL"):
+        url = env.var(var) or ""
+        if url:
+            if _is_public_github_url(url):
+                return ("", "")
+            return (var, _extract_host(url))
+    var, api_base = _api_base_source(env)
+    if api_base == DEFAULT_GITHUB_API:
+        return ("", "")
+    return (var, _web_host_of_api_base(api_base))
+
+def _bail_if_not_public_github(std, log, skip_label):
+    """True (feature should bail) when the run targets a non-github.com host
+    (`_target_host`) without the configuration it needs, logging an
+    actionable info() first.
+
+    Every App-authenticating feature needs this gate. The Aspect App is
+    github.com-only, so an Enterprise host needs both `ASPECT_GITHUB_TOKEN`
+    and an API base other than api.github.com; without them every call would
+    go to the wrong host or 401. `skip_label` names what won't happen (e.g.
+    "Skipping check-run creation.").
     """
-    vcs_url = std.env.var("ASPECT_VCS_URL") or ""
-    if not vcs_url or _is_public_github_url(vcs_url):
+    env = std.env
+    var, host = _target_host(env)
+    if not host:
         return False
-    host = _extract_host(vcs_url)
-    log.info(std, ("ASPECT_VCS_URL points at '%s', not github.com. " +
-                   "This feature currently only supports github.com via the Aspect GitHub App. " +
-                   "Support for GitHub Enterprise (user-provided token + custom API base URL) " +
-                   "is planned. %s") % (host, skip_label))
+    missing = []
+    if not _explicit_token(env):
+        missing.append(_EXPLICIT_TOKEN_ENV)
+    if _resolve_api_base(env) == DEFAULT_GITHUB_API:
+        missing.append(_API_URL_ENV)
+    if not missing:
+        return False
+    log.info(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
+                   "for that host in %s and its API base (e.g. %s) in %s; " +
+                   "missing %s. %s") % (
+        var,
+        host,
+        _EXPLICIT_TOKEN_ENV,
+        _api_base_of_web_host(host),
+        _API_URL_ENV,
+        " and ".join(missing),
+        skip_label,
+    ))
     return True
 
-def _extract_github_owner_repo_from_url(url):
-    """Return (owner, repo) if url is a GitHub (Enterprise) URL, else ("", "")."""
+def _api_base_of_web_host(host):
+    """The likely API base for an Enterprise web host, the inverse of
+    `_web_host_of_api_base`: `https://api.<host>` on GHE.com,
+    `https://<host>/api/v3` on Enterprise Server."""
+    if host.lower().endswith(_GHE_COM_SUFFIX):
+        return "https://" + _GHE_API_SUBDOMAIN + host
+    return "https://" + host + _GHES_API_PATH
+
+def _web_host_of_api_base(api_base):
+    """The web host an API base belongs to: `https://<host>/api/v3`
+    (Enterprise Server) → `<host>`, `https://api.<host>` (GHE.com) → `<host>`."""
+    h = _extract_host(api_base).lower()
+    if not api_base.endswith(_GHES_API_PATH) and h.startswith(_GHE_API_SUBDOMAIN):
+        h = h[len(_GHE_API_SUBDOMAIN):]
+    return h
+
+def _web_host(env):
+    """The web host of the GitHub instance the API base points at:
+    `github.com` by default, the Enterprise host otherwise."""
+    return _web_host_of_api_base(_resolve_api_base(env))
+
+def _enterprise_hosts(env):
+    """Configured non-github.com GitHub hosts: `GITHUB_SERVER_URL`'s and the
+    web host of a non-default API base. Lets repo detection accept an
+    Enterprise host whose name doesn't contain "github"."""
+    hosts = []
+    server = env.var("GITHUB_SERVER_URL") or ""
+    if server and not _is_public_github_url(server):
+        hosts.append(_extract_host(server).lower())
+    api_base = _resolve_api_base(env)
+    if api_base != DEFAULT_GITHUB_API:
+        hosts.append(_web_host_of_api_base(api_base))
+    return hosts
+
+def _extract_github_owner_repo_from_url(url, extra_hosts = []):
+    """Return (owner, repo) if url is a GitHub (Enterprise) URL, else ("", "").
+
+    A host counts as GitHub when its name contains "github" or it is one of
+    `extra_hosts` (see `_enterprise_hosts`)."""
     if not url:
         return ("", "")
     path = ""
@@ -1813,7 +1941,7 @@ def _extract_github_owner_repo_from_url(url):
         rest = url[len("git@"):]
         colon = rest.find(":")
         host = rest[:colon]
-        if "github" not in host.lower():
+        if "github" not in host.lower() and host.lower() not in extra_hosts:
             return ("", "")
         path = rest[colon + 1:]
     else:
@@ -1831,7 +1959,7 @@ def _extract_github_owner_repo_from_url(url):
         if slash < 0:
             return ("", "")
         host = rest[:slash]
-        if "github" not in host.lower():
+        if "github" not in host.lower() and host.lower() not in extra_hosts:
             return ("", "")
         path = rest[slash + 1:]
     if path.endswith(".git"):
@@ -1843,15 +1971,18 @@ def _extract_github_owner_repo_from_url(url):
 
 def detect_github_repo(std):
     """Detect (owner, repo), or ("", "") on failure. In order:
-      1. ASPECT_VCS_URL (if a GitHub URL) — override for mirrors; Enterprise OK.
+      1. ASPECT_VCS_URL (if a GitHub URL) — override for mirrors.
       2. GITHUB_REPOSITORY (set by GHA).
-      3. `git remote get-url origin` (github.com / Enterprise, https or ssh).
+      3. `git remote get-url origin` (https or ssh).
+
+    A URL counts as GitHub when its host contains "github" or is a configured
+    Enterprise host (`_enterprise_hosts`).
     """
     env = std.env
 
     vcs_url = env.var("ASPECT_VCS_URL") or ""
     if vcs_url:
-        (owner, repo) = _extract_github_owner_repo_from_url(vcs_url)
+        (owner, repo) = _extract_github_owner_repo_from_url(vcs_url, _enterprise_hosts(env))
         if owner and repo:
             return (owner, repo)
 
@@ -1864,13 +1995,13 @@ def detect_github_repo(std):
     result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
     if result.status.code != 0:
         return ("", "")
-    return _extract_github_owner_repo_from_url(result.stdout.strip())
+    return _extract_github_owner_repo_from_url(result.stdout.strip(), _enterprise_hosts(env))
 
 # Issue Comments (PR comments use the issues endpoint)
 
-def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFAULT_GITHUB_API):
+def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = None):
     """List PR/issue comments, paginated. PRs use the issues endpoints."""
-    base_url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
+    base_url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
     per_page = 100
     max_pages = 30
     all_comments = []
@@ -1886,29 +2017,29 @@ def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFA
             break
     return {"success": True, "comments": all_comments}
 
-def _issues_get_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+def _issues_get_comment(ctx, token, owner, repo, comment_id, api_base = None):
     """GET a single issue/PR comment by id — used to re-read the body
     between cycles for the cross-workflow merge."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
     success, status_code, body = _do_request(ctx, "GET", url, token)
     if success and type(body) == "dict":
         return {"success": True, "body": body.get("body", "") or "", "html_url": body.get("html_url", "")}
     return {"success": False, "status_code": status_code, "error": "HTTP %d: %s" % (status_code, body)}
 
-def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base = DEFAULT_GITHUB_API):
-    url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
+def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base = None):
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
     success, status_code, resp = _do_request(ctx, "POST", url, token, {"body": body})
     if success:
         return {"success": True, "comment_id": resp.get("id"), "html_url": resp.get("html_url")}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
 
-def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = DEFAULT_GITHUB_API, skippable = False):
+def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = None, skippable = False):
     """PATCH a comment body. `skippable=True` (a mid-run heartbeat refresh)
     lets the budget gate drop the call when the App token is over budget; the
     result then carries `"skipped": True` so the caller distinguishes it from a
     real failure (no WARN). The terminal verdict passes `skippable=False` so the
     final state always lands."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
     success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body}, skippable = skippable, surface = _SURFACE_COMMENTS)
     if success:
         return {"success": True, "comment_id": resp.get("id")}
@@ -1916,17 +2047,17 @@ def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base =
         return {"success": False, "skipped": True}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
 
-def _issues_delete_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
-    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+def _issues_delete_comment(ctx, token, owner, repo, comment_id, api_base = None):
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
     success, status_code, _ = _do_request(ctx, "DELETE", url, token)
     return {"success": success}
 
 # Workflow run artifacts (sibling-job artifacts in the current run)
 
-def _actions_list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = "", api_base = DEFAULT_GITHUB_API):
+def _actions_list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = "", api_base = None):
     """List a workflow run's artifacts, optionally name-prefix filtered
     client-side (GitHub's `name=` filter is exact-match only)."""
-    base_url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + str(run_id) + "/artifacts"
+    base_url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/actions/runs/" + str(run_id) + "/artifacts"
     per_page = 100
     max_pages = 10
     matched = []
@@ -1945,10 +2076,10 @@ def _actions_list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = "
             break
     return {"success": True, "artifacts": matched}
 
-def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_path, api_base = DEFAULT_GITHUB_API):
+def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_path, api_base = None):
     """Download an artifact's zip blob to disk. `/zip` 302s to a signed
     URL, which the http client follows."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/actions/artifacts/" + str(artifact_id) + "/zip"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/actions/artifacts/" + str(artifact_id) + "/zip"
     headers = {
         "Authorization": "Bearer " + token,
         "Accept": "application/vnd.github+json",
@@ -1961,19 +2092,19 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
 
 # Struct-based API
 
-def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
+def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = None):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
-def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, details_url = None, api_base = DEFAULT_GITHUB_API, skippable = False):
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, details_url = None, api_base = None, skippable = False):
     return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, details_url = details_url, api_base = api_base, skippable = skippable)
 
-def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = None):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
 
-def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, api_base = None):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
 
-def _status_checks_neutral(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+def _status_checks_neutral(ctx, token, owner, repo, check_run_id, output = None, api_base = None):
     """Complete with `conclusion = "neutral"` — GitHub's verdict for "ran
     with non-fatal findings" (lint warnings, format diffs, delivery warns).
     UI: gray dot, no red ❌."""
@@ -2215,7 +2346,7 @@ def _check_token(ctx):
         return _MISSING_TOKEN_MSG
     return None
 
-def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = None, token_class = BUCKET_APP, api_base = DEFAULT_GITHUB_API):
+def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = None, token_class = BUCKET_APP, api_base = None):
     """html_url of the currently running GHA job
     (`.../actions/runs/{run_id}/job/{job_id}`), or "".
 
@@ -2235,7 +2366,7 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
     github_job = ctx.std.env.var("GITHUB_JOB") or ""
     attempt = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or ""
 
-    url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + run_id + "/jobs?per_page=100"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/actions/runs/" + run_id + "/jobs?per_page=100"
     if attempt:
         url = url + "&attempt_number=" + attempt
     has_fallback = fallback_token and fallback_token != token
@@ -2264,7 +2395,7 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
 
 # Pull Request Reviews
 
-def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token = None, token_class = BUCKET_APP, api_base = DEFAULT_GITHUB_API):
+def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token = None, token_class = BUCKET_APP, api_base = None):
     """List a PR's changed files, paginated (100/page, up to 30 pages =
     GitHub's 3000-file cap; stop on a short page).
 
@@ -2274,7 +2405,7 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
     means something else broke). Dormant for own-PR queries (GitHub grants
     `GITHUB_TOKEN` implicit access to the triggering PR).
     """
-    base_url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
+    base_url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
     per_page = 100
     max_pages = 30
     all_files = []
@@ -2298,25 +2429,25 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
             break
     return {"success": True, "files": all_files}
 
-def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+def get_pull_request(ctx, token, owner, repo, pull_number, api_base = None):
     """Fetch a pull request object."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number)
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number)
     success, status_code, body = _do_request(ctx, "GET", url, token)
     if success:
         return {"success": True, "pull_request": body}
     return {"success": False, "error": "request failed: " + str(status_code)}
 
-def list_review_comments(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+def list_review_comments(ctx, token, owner, repo, pull_number, api_base = None):
     """List all review comments on a pull request."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
     success, status_code, body = _do_request(ctx, "GET", url, token)
     if success:
         return {"success": True, "comments": body if type(body) == "list" else []}
     return {"success": False, "error": "request failed: " + str(status_code)}
 
-def create_review(ctx, token, owner, repo, pull_number, body, event, comments, commit_id, api_base = DEFAULT_GITHUB_API):
+def create_review(ctx, token, owner, repo, pull_number, body, event, comments, commit_id, api_base = None):
     """Create a pull request review with inline comments."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/reviews"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/reviews"
     payload = {
         "commit_id": commit_id,
         "body": body,
@@ -2341,9 +2472,9 @@ def create_review_comment(
         side = "RIGHT",
         start_line = None,
         start_side = None,
-        api_base = DEFAULT_GITHUB_API):
+        api_base = None):
     """Create a single review comment on a pull request."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
     payload = {
         "body": body,
         "commit_id": commit_id,
@@ -2366,9 +2497,9 @@ def create_review_comment(
         }
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp_body)}
 
-def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = None):
     """Delete a pull request review comment."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/comments/" + str(comment_id)
+    url = _api(ctx, api_base) + "/repos/" + owner + "/" + repo + "/pulls/comments/" + str(comment_id)
     success, status_code, _ = _do_request(ctx, "DELETE", url, token)
     return {"success": success}
 
@@ -2385,6 +2516,8 @@ github = struct(
     validate_role = validate_role,
     check_token = _check_token,
     is_public_github_url = _is_public_github_url,
+    resolve_api_base = _resolve_api_base,
+    web_host = _web_host,
     bail_if_not_public_github = _bail_if_not_public_github,
     extract_host = _extract_host,
     status_checks = struct(

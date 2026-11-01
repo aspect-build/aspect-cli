@@ -13,13 +13,19 @@ stores GitHub PRs and GitLab MRs in disjoint state keyed by `scm`) and gets
 back the merged set of all tasks' entries plus a directive on whether *it*
 should post the note this cycle. The server owns
 the merge + post throttle; this feature only renders the returned state and
-upserts the GitLab MR note (with the GitLab App token).
+upserts the GitLab MR note (with the GitLab App token, or `ASPECT_GITLAB_TOKEN`).
 
 When the Aspect API is unreachable, it falls back to coordinating through the
 note's own embedded state block: read the note, merge our entry via
 `merge_comment_only_state` (all tasks in a pipeline share one
 `workflow_run_id` / CI_PIPELINE_ID, so it preserves sibling rows), render, and
 upsert under a time lease.
+
+As on GitHub, coordination is on whenever the run holds Aspect Cloud
+credentials, whichever GitLab token posts the note (`ASPECT_GITLAB_TOKEN`
+included); `coordinate = False` opts out. Without a coordinator the state block
+is the only store and the first task creates the note (see
+`coordinator_enabled` in `github_status_comments.axl`).
 
 ## Marker
 
@@ -50,6 +56,10 @@ load(
     "DEFAULT_BODY_TEMPLATE",
     "DEFAULT_STATUS_BADGES",
     "bucket_entries",
+    "contribute_rejected",
+    "contribute_scm_fields",
+    "coordination_declined_message",
+    "coordinator_enabled",
     "dedup_survivor",
     "lease_held",
     "markers_stable",
@@ -176,6 +186,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
     # host for an MR note) when off a recognized host (e.g. local-sim).
     ci_host = detect_ci_host(env) or {"label": "GitLab CI", "icon": "🦊"}
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
+    coordinate = ctx.args.coordinate
 
     templates = ctx.args.templates or {}
     body_template = (templates.get("body") or
@@ -217,9 +228,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
         _state["_auth_kind"] = auth_kind
 
         # Installation-ownership proof echoed to the contribute endpoint so the
-        # server can isolate this installation's coordination state.
+        # server can isolate this installation's coordination state; empty for
+        # an `ASPECT_GITLAB_TOKEN`.
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
+        _state["_coordinator"] = coordinator_enabled(ctx, coordinate)
         return True
 
     def _fetch_existing_note_body(ctx, token):
@@ -372,14 +385,15 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
         own_entry = _own_entry(ctx, _state, run_id, run_attempt, job_name)
         now_epoch = epoch_now_s(ctx.std)
+        if not _state.get("_coordinator", False):
+            _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
+            return
 
         # Contribute to the Aspect API, which merges our entry with every
         # sibling job's and tells us whether to post this cycle (same
         # coordination path as GitHub; `scm` keeps GitLab's state disjoint).
         request = {
             "scm": "gitlab",
-            "installation_id": _state.get("_installation_id", ""),
-            "installation_proof": _state.get("_installation_proof", ""),
             "owner": project_path,
             "repo": str(mr_iid),
             "pr_number": mr_iid,
@@ -390,6 +404,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": min_poll_interval_seconds,
         }
+        request.update(contribute_scm_fields(
+            _state.get("_installation_id", ""),
+            _state.get("_installation_proof", ""),
+            github.extract_host(api_base).lower(),
+        ))
 
         # Peek (don't pop) — a failed contribute must not lose the pending
         # confirmation, or the server never learns the post landed.
@@ -398,6 +417,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             request["posted"] = pending
 
         result = github.status_comment_contribute(ctx, request)
+        if not result.get("success") and contribute_rejected(result):
+            _state["_coordinator"] = False
+            _LOG.info(ctx.std, coordination_declined_message(result, "note"))
+            _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
+            return
         if not result.get("success"):
             _LOG.trace("status-comment API unavailable (%s); using note-state fallback" % result.get("error", ""))
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
@@ -433,10 +457,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _state["_pending_post"] = {"comment_id": str(_state.get("_note_id", ""))}
 
     def _publish_via_note_state(ctx, token, own_entry, now_epoch, final):
-        """Fallback when the Aspect API is unreachable: the MR note's own state
-        block is the shared store. Read the note, merge our entry (preserving
-        sibling rows for our pipeline), render, and post under a time lease so
-        concurrent tasks don't all PATCH at once.
+        """Coordination through the MR note's own state block, used when the
+        Aspect API is unreachable and as the only path without a coordinator.
+        The state block is the shared store. Read the note, merge our entry
+        (preserving sibling rows for our pipeline), render, and post under a
+        time lease so concurrent tasks don't all PATCH at once.
 
         To avoid duplicate notes, this path creates one only as a last resort:
         when no marker note is known or discoverable, it creates only if the
@@ -446,13 +471,16 @@ def _gitlab_status_comments(ctx: FeatureContext):
         a quick job's completed status still surfaces during an outage — it's
         the last lifecycle emit, so there's no later retry; the convergent dedup
         collapses any rare duplicate. Otherwise it defers. Once the API has
-        worked (`_api_ok`), it never creates out-of-band."""
+        worked (`_api_ok`), it never creates out-of-band. Without a coordinator
+        there is no server to create the note, so the grace is zero and the
+        first task to post creates it."""
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
             return
         if _state.get("_note_id") == None:
             secs = now_epoch - _state.get("_task_started_at_s", 0)
-            if not should_create_fallback(_state.get("_api_ok", False), final, secs, _FALLBACK_CREATE_GRACE_S):
+            grace_s = _FALLBACK_CREATE_GRACE_S if _state.get("_coordinator", False) else 0
+            if not should_create_fallback(_state.get("_api_ok", False), final, secs, grace_s):
                 return
         parsed = parse_state(existing_body)
 
@@ -567,6 +595,12 @@ GitlabStatusComments = feature(
             default = "ci-only",
             values = ["ci-only", "local-only", "always"],
             description = "When to post MR comments: ci-only (default), local-only, or always.",
+        ),
+        "coordinate": args.boolean(
+            default = True,
+            description = "Coordinate the note across tasks through the Aspect API when Aspect " +
+                          "credentials are present (default). False keeps every task's entry out of the " +
+                          "API and coordinates only through the note's own state block.",
         ),
         "min_poll_interval_seconds": args.int(
             default = 20,

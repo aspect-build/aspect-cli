@@ -319,8 +319,8 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
 
-        # Re-resolve with the just-minted App token to upgrade the GHA run
-        # URL to the per-job URL; cache-hits on the typical path.
+        # Re-resolve with this token to upgrade the GHA run URL to the per-job
+        # URL; cache-hits on the typical path.
         _ci_links_base["ci_url"] = resolve_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
 
