@@ -30,6 +30,7 @@ load(
     "testonly_binaries",
     "testonly_env_detectors",
     "testonly_harnesses",
+    "testonly_hosts_sessions",
 )
 
 _AGENT_VARS = [
@@ -590,6 +591,45 @@ def _test_home_itself_is_not_quoted(ctx):
     _eq("under home", shell_quote("~/src/web"), "~/src/web")
     _eq("a leading =", shell_quote("=x"), "'=x'")
 
+def _test_a_bridge_is_told_apart_by_its_subcommand(ctx):
+    """A `remote-control` bridge hosts many sessions. The rest of its command
+    line, and the path its binary runs from, change nothing, and the word
+    anywhere but the subcommand is not a bridge."""
+    _eq("the bridge", testonly_hosts_sessions("/home/u/.local/bin/claude remote-control --name host"), True)
+    _eq("a session the bridge started", testonly_hosts_sessions(
+        "/home/u/.local/share/claude/versions/2.1.302 --print --session-id cse_01",
+    ), False)
+    _eq("an interactive session", testonly_hosts_sessions("claude"), False)
+    _eq("the daemon, which keeps its own rule", testonly_hosts_sessions("claude daemon"), False)
+    _eq("the word as an argument", testonly_hosts_sessions("claude --resume remote-control"), False)
+
+def _test_a_lease_taken_in_a_bridge_keeps_its_pid_and_names_the_bridge(ctx):
+    """A hook a bridge runs, before the session it is for exists, sees the
+    bridge as its harness. The pid is kept, so liveness reads the bridge, and
+    `host_pid` says it is a bridge's. Any other process gets no `host_pid`."""
+
+    # `sh remote-control`, run where a script of that name waits on stdin: a
+    # live process whose subcommand reads as a bridge's.
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-agent-bridge")
+    ctx.std.fs.write(tmp + "/remote-control", "read x\n")
+    bridge = ctx.std.process.command("sh").args(["remote-control"]).current_dir(tmp) \
+        .stdin("piped").stdout("null").stderr("null").spawn()
+    saved = _clear(ctx)
+    ctx.std.env.set_var("CLAUDECODE", "1")
+    ctx.std.env.set_var("CLAUDE_CODE_SESSION_ID", "bridge-session")
+    ctx.std.env.set_var("CLAUDE_PID", str(bridge.id()))
+    in_bridge = detect(ctx.std, "", "bridge-cse_01")
+    ctx.std.env.set_var("CLAUDE_PID", str(ctx.std.process.id()))
+    in_session = detect(ctx.std, "", "bridge-cse_01")
+    _restore(ctx, saved)
+    bridge.kill()
+    bridge.wait()
+    _eq("the pid is kept", in_bridge.get("pid"), bridge.id())
+    _eq("the bridge is named", in_bridge.get("host_pid"), bridge.id())
+    _eq("the caller's id is kept", in_bridge.get("id"), "bridge-cse_01")
+    _eq("no bridge for another process", in_session.get("host_pid", 0), 0)
+    _eq("its pid is its own", in_session.get("pid"), ctx.std.process.id())
+
 _UNIT_TESTS = [
     _test_a_flag_and_the_environment_combine,
     _test_the_neutral_contract_keeps_the_detected_process,
@@ -607,6 +647,8 @@ _UNIT_TESTS = [
     _test_a_missing_sessions_directory_is_unknown_not_gone,
     _test_claude_config_dir_relocates_the_session_store,
     _test_a_running_process_outranks_the_session_check,
+    _test_a_bridge_is_told_apart_by_its_subcommand,
+    _test_a_lease_taken_in_a_bridge_keeps_its_pid_and_names_the_bridge,
     _test_label_names_an_agent_without_abbreviating_it,
     _test_resume_is_offered_only_where_the_command_is_known,
     _test_every_described_harness_is_a_kind_detection_can_report,

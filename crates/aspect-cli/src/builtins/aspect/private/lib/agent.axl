@@ -208,6 +208,20 @@ _HARNESSES = {
 # rest is not a session identifier.
 _GENERIC_KIND_VAR = "AI_AGENT"
 
+# The subcommand of a harness that runs a long-lived bridge, which starts each
+# session it hosts as a child process and runs that session's hooks itself,
+# before the session exists. A hook run there sees the bridge as its harness.
+_BRIDGE_SUBCOMMANDS = ["remote-control"]
+
+def _hosts_sessions(args: str) -> bool:
+    """Whether a command line, as `ps -o args=` prints it, is a bridge."""
+    argv = args.split()
+    return len(argv) > 1 and argv[1] in _BRIDGE_SUBCOMMANDS
+
+def _is_bridge(std, pid: int) -> bool:
+    """Whether `pid` is a running bridge (`_BRIDGE_SUBCOMMANDS`)."""
+    return pid > 0 and _hosts_sessions(_out(std, ["ps", "-o", "args=", "-p", str(pid)]))
+
 # How far up the process tree to look. An agent shells out through a wrapper or
 # two, not twenty, and the walk stops at pid 1 regardless.
 _ANCESTRY_DEPTH = 12
@@ -226,6 +240,10 @@ def _ancestry(std) -> struct:
     A harness's long-lived `daemon` process serves many sessions at once, so it
     names the kind but not a session: its pid is not returned, or every session
     under it would read as one, and as running for as long as the daemon is.
+
+    A bridge (`_BRIDGE_SUBCOMMANDS`) is returned as `host`, beside its pid: the
+    pid is kept, so a lease taken there lives as long as the bridge does, and
+    `host` lets the session the bridge started adopt it.
     """
     pid = std.process.id()
     for _ in range(_ANCESTRY_DEPTH):
@@ -238,12 +256,15 @@ def _ancestry(std) -> struct:
         parent = int(parts[0]) if parts[0].isdigit() else 0
         name = parts[1].strip().rpartition("/")[2]
         if name in _BINARIES:
-            argv = _out(std, ["ps", "-o", "args=", "-p", str(pid)]).split()
-            return struct(kind = _BINARIES[name], pid = 0 if len(argv) > 1 and argv[1] == "daemon" else pid)
+            args = _out(std, ["ps", "-o", "args=", "-p", str(pid)])
+            argv = args.split()
+            if len(argv) > 1 and argv[1] == "daemon":
+                return struct(kind = _BINARIES[name], pid = 0, host = 0)
+            return struct(kind = _BINARIES[name], pid = pid, host = pid if _hosts_sessions(args) else 0)
         if parent <= 1:
             break
         pid = parent
-    return struct(kind = "", pid = 0)
+    return struct(kind = "", pid = 0, host = 0)
 
 def _generic_kind(std) -> str:
     """The tool segment of `AI_AGENT`, or ""."""
@@ -293,6 +314,10 @@ def _overlay(std, found: dict, explicit_kind: str, explicit_id: str, source: str
         # Captured when the pid was read, so it is carried with it rather than
         # looked up again — `ps` may answer differently a moment later.
         record["pid_start"] = found["pid_start"]
+    if same_harness and found.get("host_pid", 0):
+        # The pid is a bridge's: said, so the session it starts can adopt the
+        # lease (`host_pid` in `worktree.axl`).
+        record["host_pid"] = found["host_pid"]
     if not record["project"] and same_harness:
         record["project"] = found.get("project", "")
 
@@ -320,11 +345,13 @@ def _detected(std) -> dict:
             continue
         pid_raw = (std.env.var(d.pid_var) or "") if d.pid_var else ""
         pid = int(pid_raw) if pid_raw.isdigit() else 0
+        host = pid if pid and _is_bridge(std, pid) else 0
         if not pid:
             # Most harnesses export no pid. Their process is still above this
             # one, and without it a lease could never be shown to have ended.
             found = _ancestry(std)
             pid = found.pid if found.kind == d.kind else 0
+            host = found.host if found.kind == d.kind else 0
 
         # An id that would rewrite the terminal is no id this can print, paste
         # into a resume command, or match on.
@@ -333,11 +360,16 @@ def _detected(std) -> dict:
         record = _record(std, d.kind, named or "", pid, "env")
         if named:
             record["harness_id"] = named
+        if host:
+            record["host_pid"] = host
         return record
 
     found = _ancestry(std)
     if found.kind:
-        return _record(std, found.kind, "", found.pid, "ancestry")
+        record = _record(std, found.kind, "", found.pid, "ancestry")
+        if found.host:
+            record["host_pid"] = found.host
+        return record
 
     generic = _generic_kind(std)
     if generic:
@@ -579,6 +611,7 @@ def resume_hint(agent: dict) -> str:
 # Exposed for agent_test.axl, so the tables can be checked against each other;
 # not part of this module's interface.
 testonly_binaries = _BINARIES
+testonly_hosts_sessions = _hosts_sessions
 testonly_flatten = _flatten
 testonly_env_detectors = _ENV_DETECTORS
 testonly_harnesses = _HARNESSES
