@@ -18,7 +18,6 @@ load(
     "RENDER_META_STANDARD_KEYS",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
-    "SUMMARY_TEMPLATE",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
@@ -28,10 +27,14 @@ load(
     "merged_meta",
     "render_details_or_fallback",
     "render_summary_or_fallback",
+    _SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     bazel_init_data = "init_data",
 )
 load("./result_text.axl", "emoji_for_status")
 load("./text.axl", "pluralize")
+
+# Re-exported so a config can patch the shared summary template from any kind.
+SUMMARY_TEMPLATE = _SUMMARY_TEMPLATE
 
 _DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit (~65535).
 

@@ -18,7 +18,6 @@ load(
     "FIX_COMMANDS_BLOCK",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
-    "SUMMARY_TEMPLATE",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
@@ -26,11 +25,15 @@ load(
     "format_run_date",
     "render_details_or_fallback",
     "render_summary_or_fallback",
+    _SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     bazel_init_data = "init_data",
 )
 load("./repro_commands.axl", "patch_download_cmd")
 load("./result_text.axl", "emoji_for_status")
 load("./text.axl", "pluralize")
+
+# Re-exported so a config can patch the shared summary template from any kind.
+SUMMARY_TEMPLATE = _SUMMARY_TEMPLATE
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

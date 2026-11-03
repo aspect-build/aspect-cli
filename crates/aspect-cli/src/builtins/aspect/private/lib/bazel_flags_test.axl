@@ -4,7 +4,8 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_apply_plan", "testonly_config_names", "testonly_flags_delta", "testonly_plan_sections", "testonly_unscoped_injected")
+load("@aspect//bazel/flags.axl", "testonly_apply_plan", "testonly_config_names", "testonly_flags_delta", "testonly_plan_sections", "testonly_unscoped_injected")
+load("@aspect//bazel.axl", "BazelTrait", "bazel")
 load("./aspect_flags.axl", "flag_text", "omit_flags")
 load("./auth_fakes.axl", "fake_auth")
 load("./deployment_flags.axl", "deployment_auth_flags")

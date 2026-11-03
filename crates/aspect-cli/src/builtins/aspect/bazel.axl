@@ -11,6 +11,9 @@ helpers hang off the `bazel` namespace — stateless functions taking `ctx` and
 deriving the active `BazelTrait` from `ctx.traits` themselves (no `trait`
 argument to pass).
 
+A `load` binds privately, so each top-level re-export is an explicit
+assignment from a `_`-aliased load.
+
 A file that also uses the builtin `bazel` global (e.g. `bazel.execution_log`)
 must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so the two
 `bazel` names don't collide.
@@ -19,11 +22,6 @@ must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so th
 load("@aspect//bazel/exec_log.axl", _exec_log = "exec_log")
 load(
     "@aspect//bazel/flags.axl",
-    "testonly_apply_plan",
-    "testonly_config_names",
-    "testonly_flags_delta",
-    "testonly_plan_sections",
-    "testonly_unscoped_injected",
     _announce = "announce",
     _core_args = "core_args",
     _flags = "flags",
@@ -36,16 +34,26 @@ load(
 load("@aspect//bazel/invocation.axl", _build = "build", _test = "test")
 load(
     "@aspect//bazel/trait.axl",
-    "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
-    "BazelTrait",
-    "DEFAULT_BAZEL_RETRY_ATTEMPTS",
-    "ExecLogHook",
-    "default_retry",
-    "dispatch_bazel_attempt_end",
-    "dispatch_bazel_build_end",
-    "exit_codes",
+    _BAZEL_RETRY_ATTEMPTS_DESCRIPTION = "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
+    _BazelTrait = "BazelTrait",
+    _DEFAULT_BAZEL_RETRY_ATTEMPTS = "DEFAULT_BAZEL_RETRY_ATTEMPTS",
+    _ExecLogHook = "ExecLogHook",
+    _default_retry = "default_retry",
+    _dispatch_bazel_attempt_end = "dispatch_bazel_attempt_end",
+    _dispatch_bazel_build_end = "dispatch_bazel_build_end",
+    _exit_codes = "exit_codes",
 )
-load("./private/lib/runnable.axl", "normalize_label")
+load("./private/lib/runnable.axl", _normalize_label = "normalize_label")
+
+BAZEL_RETRY_ATTEMPTS_DESCRIPTION = _BAZEL_RETRY_ATTEMPTS_DESCRIPTION
+BazelTrait = _BazelTrait
+DEFAULT_BAZEL_RETRY_ATTEMPTS = _DEFAULT_BAZEL_RETRY_ATTEMPTS
+ExecLogHook = _ExecLogHook
+default_retry = _default_retry
+dispatch_bazel_attempt_end = _dispatch_bazel_attempt_end
+dispatch_bazel_build_end = _dispatch_bazel_build_end
+exit_codes = _exit_codes
+normalize_label = _normalize_label
 
 bazel = namespace(
     build = _build,
