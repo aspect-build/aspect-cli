@@ -142,6 +142,29 @@ def _test_absolute_ignores_current_package(ctx):
     """Absolute labels are not rewritten by a non-empty current_package."""
     _eq("//foo/bar:baz with pkg context", apparent_label("//foo/bar:baz", "ignored"), "//foo/bar:baz")
 
+def _test_main_repo_canonical(ctx):
+    """`@@//` is the main repository's canonical name."""
+    _eq("@@//pkg:tgt", apparent_label("@@//pkg:tgt"), "//pkg:tgt")
+    _eq("@@//pkg", apparent_label("@@//pkg"), "//pkg:pkg")
+    _eq("@@//:tgt", apparent_label("@@//:tgt"), "//:tgt")
+
+def _test_main_repo_apparent(ctx):
+    """`@//` is the main repository written with its apparent name."""
+    _eq("@//pkg:tgt", apparent_label("@//pkg:tgt"), "//pkg:tgt")
+    _eq("@//pkg", apparent_label("@//pkg"), "//pkg:pkg")
+
+def _test_bare_repo(ctx):
+    """A label naming only a repository is its root target."""
+    _eq("@repo", apparent_label("@repo"), "@repo//:repo")
+    _eq("@repo//", apparent_label("@repo//"), "@repo//:repo")
+    _eq("@@rules_x+", apparent_label("@@rules_x+"), "@rules_x//:rules_x")
+    _eq("@@rules_python+pip+numpy", apparent_label("@@rules_python+pip+numpy"), "@numpy//:numpy")
+
+def _test_spellings_agree(ctx):
+    """Every spelling of one main-repo target normalizes to the same key."""
+    keys = {apparent_label(l): True for l in ["//pkg", "//pkg:pkg", "@//pkg", "@@//pkg:pkg"]}
+    _eq("one key", list(keys), ["//pkg:pkg"])
+
 # resolve_run_in — `--run-in=<choice>` cwd resolution
 
 def _make_env_ctx(cwd = "/user/cwd", bazel_root = "/repo", aspect_root = "/repo", git_root = "/repo"):
@@ -212,6 +235,10 @@ _UNIT_TESTS = [
     _test_relative_pkg_colon_name_at_root,
     _test_relative_pkg_colon_name_in_nested_package,
     _test_absolute_ignores_current_package,
+    _test_main_repo_canonical,
+    _test_main_repo_apparent,
+    _test_bare_repo,
+    _test_spellings_agree,
     _test_run_in_empty_is_none,
     _test_run_in_runfiles_is_none,
     _test_run_in_cwd,

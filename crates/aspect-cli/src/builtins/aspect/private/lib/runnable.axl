@@ -80,6 +80,10 @@ def apparent_label(label, current_package = ""):
     target name when no `:` is present — yielding a stable key suitable
     for matching user-supplied targets against BES event labels.
 
+    The main repository is always `//pkg:tgt`: `@//pkg:tgt` and `@@//pkg:tgt`
+    normalize to it. A bare repository label is that repository's root target:
+    `@repo` is `@repo//:repo`.
+
     `current_package` is the workspace-relative path of the user's working
     package (e.g. "foo/bar", or "" for the root package). Only relative
     labels consult it; absolute (`//...`) and repo-prefixed (`@repo//...`,
@@ -92,13 +96,21 @@ def apparent_label(label, current_package = ""):
     Canonical → apparent stripping rules (Bazel 7, using `~` separator):
         Module repo:    `@@module~//pkg:tgt`             → `@module//pkg:tgt`
         Extension repo: `@@module~~ext~repo//pkg:tgt`    → `@repo//pkg:tgt`
+
+    The apparent name is derived from the canonical one, so a module
+    depended on under a different `repo_name` comes back under its module
+    name, not that alias.
     """
+    if label.startswith("@") and "//" not in label:
+        label += "//"
+
     if label.startswith("@@"):
         rest = label[2:]
         idx = rest.find("//")
-        if idx >= 0:
-            canonical_repo = rest[:idx]
-
+        canonical_repo = rest[:idx]
+        if not canonical_repo:
+            label = rest[idx:]
+        else:
             # Bazel 7 uses `~` as the bzlmod separator; Bazel 8+ uses `+`.
             # We probe for `~` first because `+` can appear in SemVer build
             # metadata (e.g. `@@foo~1.2.3+meta//...`), which would produce a
@@ -113,6 +125,9 @@ def apparent_label(label, current_package = ""):
             apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
             label = "@" + apparent_repo + rest[idx:]
 
+    if label.startswith("@//"):
+        label = label[1:]
+
     # Relative labels resolve against `current_package` before the
     # no-colon fallback below (which assumes an absolute label).
     if not label.startswith("//") and not label.startswith("@"):
@@ -125,5 +140,7 @@ def apparent_label(label, current_package = ""):
         return "//" + current_package + ":" + label
 
     if ":" not in label:
-        return label + ":" + label.split("/")[-1]
+        repo, _, pkg = label.partition("//")
+        name = pkg.split("/")[-1] if pkg else repo[1:]
+        return label + ":" + name
     return label
