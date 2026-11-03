@@ -236,7 +236,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./private/lib/runnable.axl", "apparent_label")
+load("./private/lib/runnable.axl", "normalize_label")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
 
@@ -470,7 +470,7 @@ UncacheableAction = record(
 
 def collect_blocking_culprits(uncacheable_actions: list, non_hermetic_misses: dict, targets: list) -> dict:
     """Shared uncacheable actions that blocked change-detection hashing, keyed
-    by apparent label → list of action/mnemonic hints.
+    by normalized label → list of action/mnemonic hints.
 
     Combines the BES-reported uncacheable actions (ground truth) with any
     gRPC-log non-cacheable producers that are not themselves deliverables —
@@ -478,10 +478,10 @@ def collect_blocking_culprits(uncacheable_actions: list, non_hermetic_misses: di
     matches deliverable labels, so a shared dependency poisoning many
     deliverables would go unnamed. A deliverable's own miss is left out here
     (its per-row message already carries it). Exported for unit testing."""
-    deliverables = {apparent_label(t): True for t in targets}
+    deliverables = {normalize_label(t): True for t in targets}
     culprits = {}
     for a in uncacheable_actions:
-        hints = culprits.setdefault(apparent_label(a.label), [])
+        hints = culprits.setdefault(normalize_label(a.label), [])
         if a.action and a.action not in hints:
             hints.append(a.action)
     for producer, mnemonics in non_hermetic_misses.items():
@@ -529,7 +529,7 @@ def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
 def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_misses: dict) -> int:
     """Count delivery targets whose digest is missing for an unexplained reason.
 
-    Unresolved = no entry in `output_shas`; explained = its apparent label is
+    Unresolved = no entry in `output_shas`; explained = its normalized label is
     in `non_hermetic_misses` (the post-opt-out set driving the WARN rows).
     Targets with no such entry (own DeliveryHash lookup non-OK, or only a
     declared opt-out) get the generic message and count as unexplained.
@@ -537,7 +537,7 @@ def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_
     return len([
         label
         for label in targets
-        if label not in output_shas and apparent_label(label) not in non_hermetic_misses
+        if label not in output_shas and normalize_label(label) not in non_hermetic_misses
     ])
 
 def should_surface_phase2_stderr(unexplained_unresolved: int, getactionresult_count: int) -> bool:
@@ -828,7 +828,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             mnemonic = bes_get(event.payload, "type", "") or ""
             if mnemonic == _DELIVERY_HASH_MNEMONIC:
                 continue
-            label = apparent_label(bes_get(event.id, "label", "") or "")
+            label = normalize_label(bes_get(event.id, "label", "") or "")
             if not label or label in seen_uncacheable:
                 continue
             seen_uncacheable[label] = True
@@ -848,9 +848,9 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     if dummy:
         stop_dummy_executor(dummy)
 
-    # Normalize targets to apparent form to match the gRPC log's labels
-    # (canonical @@module+// or apparent @module//).
-    apparent_targets = {apparent_label(t): t for t in targets}
+    # Normalize targets to match the gRPC log's labels, which may use
+    # canonical (`@@module+//`) or apparent (`@module//`) repository names.
+    normalized_targets = {normalize_label(t): t for t in targets}
 
     # output_shas: DeliveryHash digest per target (hit or miss).
     # misses_by_producer: non-OK entries for any other mnemonic, keyed by the
@@ -873,11 +873,11 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             continue
         getactionresult_count += 1
         trace.log(entry)
-        entry_label = apparent_label(entry.metadata.target_id)
+        entry_label = normalize_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
         if mnemonic == _DELIVERY_HASH_MNEMONIC:
-            if entry_label in apparent_targets:
-                output_shas[apparent_targets[entry_label]] = entry.details.details.request.action_digest.hash
+            if entry_label in normalized_targets:
+                output_shas[normalized_targets[entry_label]] = entry.details.details.request.action_digest.hash
             continue
 
         # Non-DeliveryHash entry; record only the cache misses.
@@ -1017,11 +1017,11 @@ def _progress(status, data):
 def _fire_target_hook(data, delivery_trait, runnables, label):
     """Enrich the most-recent outcome entry with on-disk paths and fire the
     `delivery_target` hook, merging its returned dict into `entry["custom"]`.
-    `runnables` maps apparent labels to the `Runnable` phase 3 built; a label
+    `runnables` maps normalized labels to the `Runnable` phase 3 built; a label
     missing from it (an early failure, a target that never built) gets
     None/empty path fields."""
     entry = data["delivery"]["deliveries"][-1]
-    ep = runnables.get(apparent_label(label)) if runnables else None
+    ep = runnables.get(normalize_label(label)) if runnables else None
     entry["entrypoint_path"] = ep.path if ep else None
     entry["runfiles_dir"] = ep.runfiles_dir if ep else None
     entry["runfiles_workspace_dir"] = ep.workspace_dir if ep else None
@@ -1425,7 +1425,7 @@ def _delivery_impl(ctx):
     _print_header(color, dd, ci_host, commit_sha, prefix, prefix_source, build_url, redact_flags(rc.expand(command = "build")), targets, forced_targets, mode, dry_run, track_state)
 
     # Phase 3 builds the deliverables for running through `ctx.bazel.run_all`;
-    # each one's `Runnable` lands here by apparent label as it settles, for the
+    # each one's `Runnable` lands here by normalized label as it settles, for the
     # spawn and for the `delivery_target` hook's on-disk fields.
     runnables = {}
 
@@ -1554,8 +1554,8 @@ def _delivery_impl(ctx):
     failed_count = 0
 
     # Row now for targets needing no build (WARN missing-digest, SKIP delivered,
-    # DRY-RUN preview); the rest go to `spawnable`, keyed by apparent label (the
-    # form BES emits), with `spawn_order` holding table order.
+    # DRY-RUN preview); the rest go to `spawnable`, keyed by normalized label,
+    # with `spawn_order` in table order.
     spawnable = {}
     spawn_order = []
     for label in targets:
@@ -1570,7 +1570,7 @@ def _delivery_impl(ctx):
             #    by default; --warn-unresolved-digest downgrades to a warning.
             #  - No uncacheable action at all — it just isn't in the gRPC log
             #    (alias / transitioned / filtered). Keep the historical warning.
-            mnemonics = non_hermetic_misses.get(apparent_label(label), [])
+            mnemonics = non_hermetic_misses.get(normalize_label(label), [])
             blocked = bool(blocking_culprits)
             if mnemonics:
                 detail = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
@@ -1621,7 +1621,7 @@ def _delivery_impl(ctx):
             )
             _fire_target_hook(data, delivery_trait, runnables, label)
         else:
-            spawnable[apparent_label(label)] = (label, is_forced, output_sha or "-")
+            spawnable[normalize_label(label)] = (label, is_forced, output_sha or "-")
             spawn_order.append(label)
 
     build_exit_code = 0
@@ -1744,12 +1744,12 @@ def _delivery_impl(ctx):
                     break
                 settled_label, settled_future = popped
                 settle_err, settle_ep = settled_future.catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()
-                settled[apparent_label(settled_label)] = (settle_err, settle_ep)
+                settled[normalize_label(settled_label)] = (settle_err, settle_ep)
                 if settle_ep != None:
-                    runnables[apparent_label(settled_label)] = settle_ep
+                    runnables[normalize_label(settled_label)] = settle_ep
 
             for label in spawn_order:
-                key = apparent_label(label)
+                key = normalize_label(label)
                 if key in dispatched or key not in settled:
                     continue
                 _, is_forced, output_sha = spawnable[key]

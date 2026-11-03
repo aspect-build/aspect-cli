@@ -49,7 +49,7 @@ use crate::engine::std::process::{Child, Command, stdio_from};
 use crate::engine::std::stream::Writable;
 use crate::engine::store::Env;
 use bazel::command::run::{Dirs, Failure, OnSettled, Outcome, PrepareError, Tracker};
-use bazel::label::apparent_label;
+use bazel::label::normalize_label_from;
 use bazel::runfiles::SymlinksMode;
 
 native_error! {
@@ -426,7 +426,7 @@ fn start<'v>(
     let mut given = HashMap::new();
     let mut keys = Vec::new();
     for target in targets {
-        let key = apparent_label(target, &package);
+        let key = normalize_label_from(target, &package);
         if given.insert(key.clone(), target.clone()).is_none() {
             keys.push(key);
         }
@@ -756,7 +756,7 @@ fn runs_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] label: String,
     ) -> anyhow::Result<FutureOf<'v, Runnable>> {
         let runs = this.downcast_ref_err::<Runs>().into_anyhow_result()?;
-        let key = apparent_label(&label, &runs.package);
+        let key = normalize_label_from(&label, &runs.package);
         let shared = runs.shared.get(&key).ok_or_else(|| {
             anyhow::anyhow!("{label} is not one of the targets this run_all was started with")
         })?;
@@ -926,7 +926,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             &token,
             Some(spec),
         )?;
-        let key = apparent_label(&label, &dirs_from_env(env_).current_package());
+        let key = normalize_label_from(&label, &dirs_from_env(env_).current_package());
         let runnable = started
             .shared
             .get(&key)
@@ -1008,7 +1008,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         let package = dirs.current_package();
         let mut given = HashMap::new();
         for target in &targets.items {
-            given.insert(apparent_label(target, &package), target.clone());
+            given.insert(normalize_label_from(target, &package), target.clone());
         }
         let started = start(
             this,

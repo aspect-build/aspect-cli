@@ -72,7 +72,7 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/cache_selection.axl", "attribution_rc", "select_tests")
 load("./private/lib/environment.axl", "color_enabled", "warn")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
-load("./private/lib/runnable.axl", "apparent_label")
+load("./private/lib/runnable.axl", "normalize_label")
 
 _OUTPUT_DEFAULT = "lines"
 _GRPC_GET_ACTION_RESULT = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
@@ -222,7 +222,7 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
         if not meta or not meta.target_id:
             continue
         entries.append(GetActionResultEntry(
-            label = apparent_label(meta.target_id),
+            label = normalize_label(meta.target_id),
             mnemonic = meta.action_mnemonic,
             code = entry.status.code if entry.status else 0,
         ))
@@ -339,7 +339,7 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
             continue
         cause = {"target": e.label, "mnemonic": e.mnemonic}
         _tq = time.monotonic()
-        dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(json.encode(e.label)), rc = query_rc)]
+        dep_tests = [normalize_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(json.encode(e.label)), rc = query_rc)]
         rdeps_secs += time.monotonic() - _tq
         for label in dep_tests:
             if label in test_set:
