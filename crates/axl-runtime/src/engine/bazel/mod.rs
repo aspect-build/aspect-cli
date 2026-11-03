@@ -122,14 +122,14 @@ fn partition_execution_log(
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Plain flags are always included; conditional flags are
 /// included only when [`constraint_matches`] holds for `version`.
-/// Resolve the Bazel version a `RunCommand` should use for version-gated
+/// Resolve the Bazel version a `Bazelrc` should use for version-gated
 /// options: an explicit `requested` string when given, else the running Bazel
 /// (probed only when `rc` actually carries a gated option, so the common case
 /// pays nothing). A failed probe degrades to `None` (assumed-latest).
 fn resolve_rc_version(
     signals: &Arc<cancellation::Signals>,
     requested: Option<String>,
-    rc: &bazel::rc::BazelRC,
+    rc: &bazel::rc::Bazelrc,
 ) -> anyhow::Result<Option<semver::Version>> {
     if let Some(s) = requested {
         return Ok(semver::Version::parse(&s).ok());
@@ -194,7 +194,7 @@ use bazel::runner::Runner as _;
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<bazel.Bazel>")]
 pub struct Bazel<'v> {
-    /// The active `RunCommand` set by `use_rc` (interior-mutable so `use_rc`
+    /// The active `Bazelrc` set by `use_rc` (interior-mutable so `use_rc`
     /// can swap it across phases). A per-call `rc=` overrides it. The single
     /// source of both command and startup flags for every Bazel invocation.
     #[allocative(skip)]
@@ -290,7 +290,7 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
 
 pub(crate) use bazel::command::stderr_detail;
 
-/// The startup flags for an invocation: sourced from the active `RunCommand`
+/// The startup flags for an invocation: sourced from the active `Bazelrc`
 /// (set by `use_rc`), or empty when none is active.
 fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
     Ok(read_active_rc(this)
@@ -298,7 +298,7 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
         .unwrap_or_default())
 }
 
-/// The active `RunCommand` set via `use_rc`, if any.
+/// The active `Bazelrc` set via `use_rc`, if any.
 /// Gate everything that reaches a Bazel server on the passthrough claim
 /// contract: a flag the task collected and never claimed would be silently
 /// absent from the command line we are about to run, so refuse here rather than
@@ -319,7 +319,7 @@ fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
     }
 }
 
-fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::BazelRC> {
+fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::Bazelrc> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
     } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
@@ -327,23 +327,23 @@ fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::BazelRC> {
     } else {
         None
     };
-    slot.and_then(|v| v.downcast_ref::<bazel::rc::BazelRC>().cloned())
+    slot.and_then(|v| v.downcast_ref::<bazel::rc::Bazelrc>().cloned())
 }
 
-/// Resolve the `RunCommand` in effect for an invocation: a per-call `rc=`
+/// Resolve the `Bazelrc` in effect for an invocation: a per-call `rc=`
 /// overrides the active (`use_rc`) one; `None` means no rc (vanilla passthrough,
 /// Bazel reads its own `.bazelrc`).
 fn effective_rc<'v>(
     this: values::Value<'v>,
     rc_param: NoneOr<values::Value<'v>>,
-) -> Option<bazel::rc::BazelRC> {
+) -> Option<bazel::rc::Bazelrc> {
     if let NoneOr::Other(v) = rc_param {
-        return v.downcast_ref::<bazel::rc::BazelRC>().cloned();
+        return v.downcast_ref::<bazel::rc::Bazelrc>().cloned();
     }
     read_active_rc(this)
 }
 
-/// Assemble `(command_flags, startup_flags)` for `command`: when a `RunCommand`
+/// Assemble `(command_flags, startup_flags)` for `command`: when a `Bazelrc`
 /// is in effect, expand it and append the per-call `flags=` as extras (auto
 /// `--ignore_all_rc_files`); otherwise fall back to raw `flags=` + the legacy
 /// `ctx.bazel.startup_flags` (Bazel reads its own rc).
@@ -379,7 +379,7 @@ fn cancellation_token(
 
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
-    /// The active `RunCommand` set via `use_rc`, or `None` if none is active.
+    /// The active `Bazelrc` set via `use_rc`, or `None` if none is active.
     /// Lets AXL inspect what build/test/query will run with (flags, startup).
     fn active_rc<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<values::Value<'v>>> {
         let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
@@ -395,17 +395,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Set the active `RunCommand` for subsequent `build` / `test` / `query` on
-    /// this context. Callable repeatedly to swap the active run command between
+    /// Set the active `Bazelrc` for subsequent `build` / `test` / `query` on
+    /// this context. Callable repeatedly to swap the active bazelrc between
     /// phases. A per-call `rc=` on an invocation overrides the active one; with
     /// no active and no per-call rc, Bazel runs vanilla (reads its own `.bazelrc`).
     fn use_rc<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] rc: values::Value<'v>,
     ) -> anyhow::Result<NoneType> {
-        if rc.downcast_ref::<bazel::rc::BazelRC>().is_none() {
+        if rc.downcast_ref::<bazel::rc::Bazelrc>().is_none() {
             return Err(anyhow::anyhow!(
-                "use_rc expects a RunCommand (from parse_rc / new_rc), got {}",
+                "use_rc expects a Bazelrc (from parse_rc / new_rc), got {}",
                 rc.get_type()
             ));
         }
@@ -741,7 +741,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// # Arguments
     /// * `expr` - The query expression (e.g. `"deps(//foo)"`, `"kind(cc_*, //...)"`).
-    /// * `rc` - `RunCommand` to resolve under; falls back to the active one
+    /// * `rc` - `Bazelrc` to resolve under; falls back to the active one
     ///   (`use_rc`). With an rc in effect the query self-expands for the
     ///   `query` command (carrying `--ignore_all_rc_files`) so it resolves
     ///   external repos the same way the build does. Without one, Bazel reads
@@ -799,7 +799,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Blocks until the command completes. Raises an error carrying Bazel's own
     /// stderr if it exits non-zero.
     ///
-    /// Runs under the active `RunCommand` (`use_rc`) or the per-call `rc=`,
+    /// Runs under the active `Bazelrc` (`use_rc`) or the per-call `rc=`,
     /// replaying both its startup flags and its `info`-applicable command flags
     /// exactly like `build` / `query`. Those startup flags carry
     /// `--ignore_all_rc_files`, so the command flags are what put the rc's
@@ -811,7 +811,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   actually needed keeps an unknown-key error from a Bazel version that
     ///   dropped some unrelated key out of the picture. The result is keyed
     ///   identically however many keys are requested.
-    /// * `rc`: run command to resolve flags from; overrides the active one.
+    /// * `rc`: bazelrc to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
     ///
@@ -876,7 +876,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
-    /// Shut down the Bazel server for the active run command (`bazel shutdown`),
+    /// Shut down the Bazel server for the active bazelrc (`bazel shutdown`),
     /// returning the exit code. Best-effort: a missing or already-stopped server
     /// is not an error, so callers can run this before mutating the output base
     /// (e.g. wiping it) without first checking whether a server is live.
@@ -1069,7 +1069,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(wrappers::SandboxRecoveryResult::from_outcome(outcome))
     }
 
-    /// Parse `.bazelrc` files rooted at `root` and return a `RunCommand`.
+    /// Parse `.bazelrc` files rooted at `root` and return a `Bazelrc`.
     ///
     /// # Arguments
     /// * `root` - Bazel workspace root directory. Defaults to
@@ -1108,24 +1108,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         skip_config_if_missing: UnpackList<String>,
         #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<bazel::rc::BazelRC> {
+    ) -> anyhow::Result<bazel::rc::Bazelrc> {
         let env = Env::from_eval(eval)?;
         let root = root
             .into_option()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| env.bazel_root_dir.clone());
-        let rc = bazel::rc::BazelRC::new(root, &startup_flags.items, &flags.items)
+        let rc = bazel::rc::Bazelrc::new(root, &startup_flags.items, &flags.items)
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .with_skip_config_if_missing(skip_config_if_missing.items);
         let version = resolve_rc_version(&env.signals, version.into_option(), &rc)?;
         Ok(rc.with_version(version))
     }
 
-    /// Create a blank `RunCommand` that reads no `.bazelrc` on disk — only the
+    /// Create a blank `Bazelrc` that reads no `.bazelrc` on disk — only the
     /// flags you provide. Compose further with `merge`.
     ///
     /// # Arguments
-    /// * `startup_flags` - Startup flags carried by the run command.
+    /// * `startup_flags` - Startup flags carried by the bazelrc.
     /// * `flags` - Command flags, same `str | (str, str) | (str, str, str)` shape as `parse_rc`.
     /// * `version` - Bazel version for evaluating version-gated options.
     fn new_rc<'v>(
@@ -1137,8 +1137,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             bazel::rc::RcOption,
         >,
         #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
-    ) -> anyhow::Result<bazel::rc::BazelRC> {
-        let rc = bazel::rc::BazelRC::blank(&flags.items)
+    ) -> anyhow::Result<bazel::rc::Bazelrc> {
+        let rc = bazel::rc::Bazelrc::blank(&flags.items)
             .with_startup_flags(startup_flags.items)
             .with_version(
                 version
@@ -1148,13 +1148,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(rc)
     }
 
-    /// Render the `--announce-bazel-rc` disclosure for a `RunCommand`: the
+    /// Render the `--announce-bazel-rc` disclosure for a `Bazelrc`: the
     /// options loaded for `command`, grouped by source file, with secrets in
     /// flag values redacted. Replaces the former `rc.announce` method (which
     /// would need workspace-root + redaction context the value can't carry).
     fn announce_rc<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = pos)] rc: &bazel::rc::BazelRC,
+        #[starlark(require = pos)] rc: &bazel::rc::Bazelrc,
         #[starlark(require = named)] command: String,
         #[starlark(require = named, default = false)] ansi: bool,
         #[starlark(require = named, default = 120)] max_width: i64,
@@ -1464,7 +1464,7 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
-    const RunCommand: StarlarkValueAsType<bazel::rc::BazelRC> = StarlarkValueAsType::new();
+    const Bazelrc: StarlarkValueAsType<bazel::rc::Bazelrc> = StarlarkValueAsType::new();
     const HealthCheckResult: StarlarkValueAsType<wrappers::HealthCheckResult> =
         StarlarkValueAsType::new();
     const SandboxRecoveryResult: StarlarkValueAsType<wrappers::SandboxRecoveryResult> =

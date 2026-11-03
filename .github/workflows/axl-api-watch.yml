@@ -10,7 +10,7 @@ name: axl-api-watch
 on:
   push:
     branches: [main]
-    # The surface is contributed by many crates (e.g. bazel.RunCommand from
+    # The surface is contributed by many crates (e.g. bazel.Bazelrc from
     # crates/bazel, std.io.Readable from crates/axl-types), so watch all of
     # them plus the renderer/workflow itself.
     paths:

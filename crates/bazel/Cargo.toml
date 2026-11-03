@@ -10,7 +10,7 @@ readme.workspace = true
 rust-version.workspace = true
 
 [features]
-# `rc::BazelRC` as the Starlark `bazel.RunCommand` value, with its methods.
+# `rc::Bazelrc` as the Starlark `bazel.Bazelrc` value, with its methods.
 starlark = ["dep:allocative", "dep:starlark", "dep:starlark_derive"]
 
 [dependencies]

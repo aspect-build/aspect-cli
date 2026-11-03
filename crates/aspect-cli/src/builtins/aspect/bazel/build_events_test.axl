@@ -34,7 +34,7 @@ def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
     )
 
 def _fake_rc(values):
-    """Stand-in for a `RunCommand`: `bazel_bes_backend` calls only `flag_value`.
+    """Stand-in for a `Bazelrc`: `bazel_bes_backend` calls only `flag_value`.
     `values` maps a flag name to its effective value."""
     return struct(flag_value = lambda name, command: values.get(name))
 
@@ -195,12 +195,12 @@ def _test_grpc_backends_filters_file_sinks(_):
     _eq("no gRPC sinks → empty", grpc_backends([file_sink]), [])
 
 def _test_bazel_bes_backend(_):
-    """The effective Bazel `--bes_backend` is read off the run command; a missing
-    flag or absent run command both mean "Bazel is not uploading"."""
+    """The effective Bazel `--bes_backend` is read off the bazelrc; a missing
+    flag or absent bazelrc both mean "Bazel is not uploading"."""
     rc = _fake_rc({"--bes_backend": "grpcs://bes.acme.aspect.build"})
     _eq("flag set", bazel_bes_backend(rc, "build"), "grpcs://bes.acme.aspect.build")
     _eq("flag unset", bazel_bes_backend(_fake_rc({}), "build"), "")
-    _eq("no run command", bazel_bes_backend(None, "build"), "")
+    _eq("no bazelrc", bazel_bes_backend(None, "build"), "")
 
 def _test_collect_drops_duplicate_backends(_):
     """A `--bes-backend` naming the same endpoint as Bazel's `--bes_backend` is

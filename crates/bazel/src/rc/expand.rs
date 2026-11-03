@@ -1,8 +1,8 @@
-use super::{BazelRC, BazelRcError, RcOption};
+use super::{BazelRcError, Bazelrc, RcOption};
 
 /// Expand all `--config=` flags for the given command, returning a flat ordered list.
 ///
-/// CLI flags are passed during `BazelRC::new` construction and stored as `always` options,
+/// CLI flags are passed during `Bazelrc::new` construction and stored as `always` options,
 /// so they are already included via `options_for`. No separate cli_args parameter is needed.
 ///
 /// Each `RcOption` in the result preserves its `version_condition`. When a version-gated
@@ -12,7 +12,7 @@ use super::{BazelRC, BazelRcError, RcOption};
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
 pub(crate) fn expand_configs(
-    rc: &BazelRC,
+    rc: &Bazelrc,
     command: &str,
     skip_config_if_missing: &[&str],
 ) -> Result<Vec<RcOption>, BazelRcError> {
@@ -73,7 +73,7 @@ fn config_request(args: &[RcOption], index: usize) -> Option<(&str, usize)> {
 /// The invariants of one expansion pass live on [`Expander`]; only the ancestor
 /// chain and the output accumulate as it recurses.
 struct Expander<'a> {
-    rc: &'a BazelRC,
+    rc: &'a Bazelrc,
     command: &'a str,
     /// When true, an undefined config is silently skipped rather than an error.
     /// Used for the synthetic `--config=<os>` injected by

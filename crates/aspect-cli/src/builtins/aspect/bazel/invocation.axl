@@ -82,7 +82,7 @@ def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: st
         cli_targets:      `ctx.args.targets` — never empty (the arg declares
                           `default = ["..."]`, `minimum = 1`).
         own_pattern_file: value of aspect's `--target-pattern-file`, or `""`.
-        rc:               the active `RunCommand`; only `flag_value` is used.
+        rc:               the active `Bazelrc`; only `flag_value` is used.
         command:          Bazel subcommand whose options `rc` resolves.
     """
     if explicit:

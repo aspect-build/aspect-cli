@@ -546,7 +546,7 @@ def _test_flags_empty_defaults(ctx):
 
 def _test_setup_command_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
-      - the returned `RunCommand` is registered as the active rc;
+      - the returned `Bazelrc` is registered as the active rc;
       - the caller's `base_flags` appear in its `build` expansion;
       - the trait's `extra_startup_flags` land on the rc's startup flags;
       - `--ignore_all_rc_files` is present.
@@ -619,7 +619,7 @@ def _test_sibling_rc_transforms_startup(ctx):
 
     # Building the sibling must not disturb the active rc.
     if ctx.bazel.active_rc() != active:
-        fail("sibling_rc — must not change the active run command")
+        fail("sibling_rc — must not change the active bazelrc")
 
 # A test option: accepted by `build` and every command that inherits it, and
 # rejected outright by `query`, so it is the sharp edge of the scoping contract.
@@ -627,7 +627,7 @@ _QUERY_REJECTS = "--flaky_test_attempts=3"
 
 def _test_injected_flags_never_reach_a_query(ctx):
     """Regression: an injected flag `bazel query` does not accept must not reach
-    a task's query — neither off the active run command nor off an rc handed to
+    a task's query — neither off the active bazelrc nor off an rc handed to
     `ctx.bazel.query(rc = ...)` explicitly.
 
     The failure this guards: a repository whose `config.axl` set
@@ -674,7 +674,7 @@ _REACH = {
 }
 
 def _rc_over(ctx, trait, task_base = [], user = []):
-    """A `RunCommand` carrying exactly what `setup_command` would hand
+    """A `Bazelrc` carrying exactly what `setup_command` would hand
     `parse_rc` for `trait`, built with `new_rc` so no `.bazelrc` on disk can
     perturb the expansions.
 
@@ -1171,7 +1171,7 @@ def _test_flags_delta(ctx):
     _eq("empty", testonly_flags_delta(["--a", "--b"], ["--a", "--b"]), [])
 
 def _fake_rc(values = {}):
-    """Stand-in `RunCommand` over a `{flag: value}` map for single-value flags
+    """Stand-in `Bazelrc` over a `{flag: value}` map for single-value flags
     and a `{flag: [values]}` map for repeatable flags. `command`/`version`
     kwargs are accepted and ignored."""
     return struct(
@@ -1362,7 +1362,7 @@ def _test_impl(ctx):
     _test_flags_delta(ctx)
     _test_auth_flags(ctx)
 
-    # Run last: these build real `RunCommand`s off `ctx.bazel`, and the
+    # Run last: these build real `Bazelrc`s off `ctx.bazel`, and the
     # `setup_command` ones register an active rc, so keeping them after the pure
     # subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)

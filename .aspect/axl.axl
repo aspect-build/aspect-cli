@@ -570,7 +570,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 3: cancel_invocation with an active run command targeting a specific output_base (no build running)
+    # Test 3: cancel_invocation with an active bazelrc targeting a specific output_base (no build running)
     info = ctx.bazel.info()
     output_base = info["output_base"]
     ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base]))

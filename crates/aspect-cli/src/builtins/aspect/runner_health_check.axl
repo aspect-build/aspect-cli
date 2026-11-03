@@ -37,7 +37,7 @@ def _impl(ctx: TaskContext) -> int:
         bzl.flags.disclaim_passthrough(ctx)
         return 0
 
-    # Register the active run command before the health check — it carries the
+    # Register the active bazelrc before the health check — it carries the
     # per-runner --output_base that `agent_health_check` requires (see docstring).
     bzl.setup_command(ctx, "build")
 
