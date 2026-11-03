@@ -2,6 +2,14 @@
 
 Creates/updates a GitHub check run for a task's live state. CI-only.
 
+A task concludes its own check, a canceled one included (its `aborted`
+final update lands `failure`). With an App-minted token the check is also
+registered with the Aspect API, whose sweep concludes it as "Disconnected"
+if the process dies first. A check created with `ASPECT_GITHUB_TOKEN` has no
+installation to register under, and the sweep couldn't reach an Enterprise
+host anyway, so a runner killed outright leaves it in progress until a re-run
+posts a newer check of the same name, which GitHub shows in its place.
+
 Rendering is delegated by `task_update.kind` (bazel_results → build/test,
 lint_results → lint, format_results → format, gazelle_results → gazelle,
 delivery_results → delivery). The per-kind dispatch table lives in

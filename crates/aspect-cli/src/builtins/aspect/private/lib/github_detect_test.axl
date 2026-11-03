@@ -1108,6 +1108,45 @@ def _test_explicit_token_and_api_base(ctx):
         False,
     )
 
+    _test_api_host_binding(ctx, ghes, vcs, _bails, logged)
+
+def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
+    """No token goes to an API base off the repository's host or over plain
+    HTTP: the gate bails naming both hosts, and `authenticate` /
+    `preferred_token_pair` return no token (explicit, minted or job-scoped)
+    with an `api-host-mismatch` reason."""
+    other = "https://ghes-b.example.mil/api/v3"
+    for label, vars, needle in [
+        ("Enterprise repo, other Enterprise API", {"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_TOKEN": "t", "ASPECT_GITHUB_API_URL": other}, "'ghes-b.example.mil', but ASPECT_VCS_URL points at 'ghes.example.mil'"),
+        ("github.com repo, Enterprise API", {"ASPECT_VCS_URL": "https://github.com/o/r", "ASPECT_GITHUB_API_URL": ghes}, "but ASPECT_VCS_URL points at 'github.com'"),
+        ("github.com runner, Enterprise API", {"GITHUB_SERVER_URL": "https://github.com", "ASPECT_GITHUB_API_URL": ghes}, "but GITHUB_SERVER_URL points at 'github.com'"),
+        ("plain HTTP API base", {"BUILDKITE": "true", "ASPECT_GITHUB_TOKEN": "t", "ASPECT_GITHUB_API_URL": "http://ghes.example.mil/api/v3"}, "is not an https:// URL"),
+    ]:
+        _eq("host binding: %s — gate bails" % label, bails(vars), True)
+        if needle not in logged[-1] or "not sending a GitHub token there" not in logged[-1]:
+            fail("host binding: %s — message should say %r, got %r" % (label, needle, logged[-1]))
+
+        env = dict(vars, CI = "true", GITHUB_TOKEN = "job-tok")
+        fake = struct(
+            std = struct(env = struct(var = lambda name, env = env: env.get(name, ""))),
+            aspect = struct(auth = fake_auth()),
+            traits = ctx.traits,
+        )
+        reason = {}
+        _eq("host binding: %s — no token" % label, github.authenticate(fake, owner = "o", repo = "r", _reason = reason), None)
+        _eq("host binding: %s — reason kind" % label, reason.get("kind"), "api-host-mismatch")
+        _eq("host binding: %s — no token pair" % label, github.preferred_token_pair(fake, "o", "r"), (None, None, BUCKET_APP))
+
+    for label, vars in [
+        ("Enterprise Server", {"ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_API_URL": ghes}),
+        ("Enterprise runner", {"GITHUB_SERVER_URL": "https://ghes.example.mil", "GITHUB_API_URL": ghes}),
+        ("GHE.com", {"ASPECT_VCS_URL": "https://acme.ghe.com/acme/widgets", "ASPECT_GITHUB_API_URL": "https://api.acme.ghe.com"}),
+        ("host case differs", {"ASPECT_VCS_URL": "https://GHES.example.mil/acme/widgets", "ASPECT_GITHUB_API_URL": ghes}),
+        ("API base names the host", {"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes}),
+        ("default API base", {"ASPECT_VCS_URL": "https://github.com/o/r"}),
+    ]:
+        _eq("host binding: %s — accepted" % label, github.api_host_mismatch(_fake_std(vars).env), "")
+
 def _test_pr_files_bucket_class_routes_observations(ctx):
     """Rate-limit observations from the primary + fallback calls in
     `list_pull_request_files` must land in the buckets implied by

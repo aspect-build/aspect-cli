@@ -20,6 +20,9 @@ Token and host:
     (`ASPECT_GITHUB_API_URL`, then `GITHUB_API_URL`, then api.github.com).
   - An Enterprise host (`_target_host`) needs both the token and a
     non-default API base; `_bail_if_not_public_github` gates on them.
+  - No token goes to a non-default API base unless it is `https://` and on
+    the repository's host (`_api_host_mismatch`): `_authenticate` and
+    `_preferred_token_pair` return none, and the gate logs why.
 """
 
 load("@std//base64.axl", "base64")
@@ -298,6 +301,7 @@ _AUTH_KIND_EXPIRED = "credentials-expired"
 _AUTH_KIND_DENIED = "access-denied"
 _AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
 _AUTH_KIND_API_ERROR = "aspect-api-error"
+_AUTH_KIND_API_HOST_MISMATCH = "api-host-mismatch"
 
 # Fallback for a 404 whose body carried no message. "Not linked" rather than
 # "not installed": the app can be installed on the org and the request still
@@ -396,10 +400,15 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
 
     `_reason` is populated on failure (kind + reason). `existing_app_token`
     skips a redundant mint. An `ASPECT_GITHUB_TOKEN` stands in for the App
-    token (see `_authenticate`). For App-attributed calls (check-runs, comment
+    token (see `_authenticate`). Neither token is returned for an API base
+    `_api_host_mismatch` rejects. For App-attributed calls (check-runs, comment
     create/update), call `_authenticate` directly.
     """
     env = ctx.std.env
+    mismatch = _api_host_mismatch(env)
+    if mismatch:
+        _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, mismatch)
+        return None, None, BUCKET_APP
     env_token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
     local_reason = {}
     app_token = existing_app_token if existing_app_token else _authenticate(
@@ -438,6 +447,9 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     surfaces as a 401 at the first API call, on each feature's existing
     warn-and-skip path.
 
+    No token, explicit or minted, is returned when the API base fails
+    `_api_host_mismatch`, so it can't reach a host other than the repo's.
+
     `_extra`, if a dict, is populated on a mint with `installation_id` +
     `installation_proof` (the comment surface forwards them on the `contribute`
     call). The budget, cadence, and refresh creds the mint also carries are
@@ -459,6 +471,10 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 fail(msg)
 
     explicit = _explicit_token(ctx.std.env)
+    mismatch = _api_host_mismatch(ctx.std.env)
+    if mismatch:
+        _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, mismatch)
+        return None
     if explicit:
         return explicit
 
@@ -1858,6 +1874,30 @@ def _target_host(env):
         return ("", "")
     return (var, _web_host_of_api_base(api_base))
 
+def _api_host_mismatch(env):
+    """Why the configured API base may not receive this run's GitHub token, or
+    "" when it may.
+
+    The default api.github.com always may. Any other base must be `https://`
+    and belong to the repository's host: `ASPECT_VCS_URL`, else
+    `GITHUB_SERVER_URL` (as in `_target_host`), github.com included. With
+    neither set, the API base itself names the host and there is nothing to
+    compare."""
+    var, api_base = _api_base_source(env)
+    if api_base == DEFAULT_GITHUB_API:
+        return ""
+    if not api_base.lower().startswith("https://"):
+        return "%s (%s) is not an https:// URL" % (var, api_base)
+    api_host = _web_host_of_api_base(api_base)
+    for repo_var in ("ASPECT_VCS_URL", "GITHUB_SERVER_URL"):
+        url = env.var(repo_var) or ""
+        if url:
+            repo_host = "github.com" if _is_public_github_url(url) else _extract_host(url).lower()
+            if repo_host != api_host:
+                return "%s (%s) is on '%s', but %s points at '%s'" % (var, api_base, api_host, repo_var, repo_host)
+            return ""
+    return ""
+
 def _bail_if_not_public_github(std, log, skip_label):
     """True (feature should bail) when the run targets a non-github.com host
     (`_target_host`) without the configuration it needs, logging an
@@ -1866,10 +1906,15 @@ def _bail_if_not_public_github(std, log, skip_label):
     Every App-authenticating feature needs this gate. The Aspect App is
     github.com-only, so an Enterprise host needs both `ASPECT_GITHUB_TOKEN`
     and an API base other than api.github.com; without them every call would
-    go to the wrong host or 401. `skip_label` names what won't happen (e.g.
+    go to the wrong host or 401. It also bails on an API base that
+    `_api_host_mismatch` rejects. `skip_label` names what won't happen (e.g.
     "Skipping check-run creation.").
     """
     env = std.env
+    mismatch = _api_host_mismatch(env)
+    if mismatch:
+        log.info(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
+        return True
     var, host = _target_host(env)
     if not host:
         return False
@@ -2519,6 +2564,7 @@ github = struct(
     resolve_api_base = _resolve_api_base,
     web_host = _web_host,
     bail_if_not_public_github = _bail_if_not_public_github,
+    api_host_mismatch = _api_host_mismatch,
     extract_host = _extract_host,
     status_checks = struct(
         create = _status_checks_create,

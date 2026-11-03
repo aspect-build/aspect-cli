@@ -22,7 +22,10 @@ correct comment.
 Coordination is on whenever the run holds Aspect Cloud credentials, whichever
 GitHub token posts the comment; `coordinate = False` opts out. Without a
 coordinator (no credentials, opted out, or the API rejected the contribution)
-the state block is the only coordination (see `coordinator_enabled`).
+the state block is the only coordination (see `coordinator_enabled`): all
+live jobs together read and write it about once per
+`min_poll_interval_seconds`, and each final update re-reads the comment until
+its row is there.
 
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
@@ -171,6 +174,16 @@ _DEDUP_RECHECK_WINDOW_S = 60
 # only a sustained outage falls through to a client-created comment.
 _FALLBACK_CREATE_GRACE_S = 45
 
+# A final update written through the comment's state block re-reads the comment
+# this long after each write, up to this many times, and writes its row again if
+# a sibling's concurrent write dropped it (see `row_landed`). The settle exceeds
+# one sibling's read-to-write latency, so a write that raced ours has landed.
+_FINAL_VERIFY_SETTLE_S = 5
+_FINAL_VERIFY_ROUNDS = 2
+
+# Row statuses that mean the task is still running and will write again.
+_LIVE_ROW_STATUSES = ("running", "failing")
+
 def coordinator_enabled(ctx, coordinate):
     """Whether this run coordinates its PR/MR comment through the Aspect API's
     `contribute` route: by default whenever Aspect Cloud credentials are
@@ -179,8 +192,10 @@ def coordinator_enabled(ctx, coordinate):
     proof rides along when a mint produced one.
 
     Without a coordinator the comment's state block is the only store: no
-    create grace, and nothing stops two jobs' writes crossing. A row lost that
-    way returns on that job's next cycle; a job's final update has none.
+    create grace, reads spread across live jobs (`uncoordinated_interval_s`),
+    and nothing serializes two jobs' writes, so a final update confirms its
+    row landed (`row_landed`) and duplicate comments are merged before they're
+    deleted (`absorb_duplicate_states`).
 
     The lookup is best-effort (`required = False`): an expired login that can't
     refresh leaves the run uncoordinated instead of failing the task."""
@@ -210,6 +225,64 @@ def contribute_scm_fields(installation_id, installation_proof, host):
         fields["installation_id"] = installation_id
         fields["installation_proof"] = installation_proof
     return fields
+
+def uncoordinated_interval_s(min_poll_interval_s, state):
+    """Seconds between one job's mid-run reads of the comment when nothing
+    coordinates it: `min_poll_interval_s` times the live rows in the last-read
+    `state`, so all live jobs together read and write about once per
+    `min_poll_interval_s` instead of once each. Finished rows don't count;
+    with no state yet it is `min_poll_interval_s`."""
+    entries = (state or {}).get("entries", []) or []
+    live = len([e for e in entries if e.get("status") in _LIVE_ROW_STATUSES])
+    return min_poll_interval_s * max(1, live)
+
+def _row_identity(e):
+    return (str(e.get("workflow_run_id", "")), e.get("job", ""), e.get("kind", ""), e.get("name", ""))
+
+def row_landed(state, head_sha, own_entry):
+    """Whether parsed comment `state` holds `own_entry`'s row as written: the
+    state is for push `head_sha`, and the row for its run/job/task carries its
+    status and attempt."""
+    if not state or state.get("head_sha") != head_sha:
+        return False
+    for e in state.get("entries", []) or []:
+        if _row_identity(e) == _row_identity(own_entry):
+            return e.get("status") == own_entry.get("status") and str(e.get("run_attempt", "")) == str(own_entry.get("run_attempt", ""))
+    return False
+
+def absorb_duplicate_states(survivor, duplicates):
+    """Merge the rows of duplicate comments' parsed `duplicates` into the
+    surviving comment's parsed `survivor`, so deleting a duplicate loses no
+    job's row. Only the survivor's push counts; a survivor row wins over a
+    duplicate's for the same run/job/task. Returns `(merged, added)`: the
+    merged state (`survivor` itself when nothing was added) and how many rows
+    it gained."""
+    if not survivor:
+        return (survivor, 0)
+    head = survivor.get("head_sha")
+    entries = list(survivor.get("entries", []) or [])
+    runs = list(survivor.get("workflow_runs", []) or [])
+    seen = {_row_identity(e): True for e in entries}
+    run_ids = {str(r.get("run_id", "")): True for r in runs}
+    added = 0
+    for dup in duplicates:
+        if not dup or dup.get("head_sha") != head:
+            continue
+        for e in dup.get("entries", []) or []:
+            if _row_identity(e) not in seen:
+                seen[_row_identity(e)] = True
+                entries.append(e)
+                added += 1
+        for r in dup.get("workflow_runs", []) or []:
+            if str(r.get("run_id", "")) not in run_ids:
+                run_ids[str(r.get("run_id", ""))] = True
+                runs.append(r)
+    if not added:
+        return (survivor, 0)
+    merged = dict(survivor)
+    merged["entries"] = sorted(entries, key = lambda e: _row_identity(e) + (str(e.get("run_attempt", "")),))
+    merged["workflow_runs"] = sorted(runs, key = lambda r: str(r.get("run_id", "")))
+    return (merged, added)
 
 # Badges keyed by the precomputed `_badge_key`, not raw status:
 #   "failed"  — terminal failed / live failing (error)
@@ -1601,8 +1674,9 @@ def _github_status_comments(ctx: FeatureContext):
 
     def _converge_marker_comments(ctx, token):
         """List the PR's marker comments and converge on the lowest-id
-        survivor, deleting the rest. Returns True once a single comment is
-        observed (stable), False otherwise."""
+        survivor, deleting the rest once their rows are in it
+        (`_absorb_duplicates`). Returns True once a single comment is observed
+        (stable), False otherwise."""
         listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed.get("success"):
             return False
@@ -1610,9 +1684,29 @@ def _github_status_comments(ctx: FeatureContext):
         if survivor == None:
             return _markers_stable(listed["comments"], marker)
         _state["_comment_id"] = survivor
+        bodies = {c["id"]: c.get("body") or "" for c in listed["comments"]}
+        if not _absorb_duplicates(ctx, token, survivor, bodies[survivor], [bodies[i] for i in losers]):
+            return False
         for loser_id in losers:
             github.issues.delete_comment(ctx, token, owner, repo, loser_id)
         return False
+
+    def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
+        """Write the rows only duplicate comments hold into the survivor
+        (`absorb_duplicate_states`), so deleting them loses no job's row: two
+        jobs that both created a comment each hold only their own. Returns
+        False when that write failed, so the duplicates are kept for a later
+        pass."""
+        parsed = _parse_state(survivor_body)
+        merged, added = absorb_duplicate_states(parsed, [_parse_state(b) for b in duplicate_bodies])
+        if not added:
+            return True
+        _stable, body = _render_state(ctx, parsed, merged, epoch_now_s(ctx.std))
+        res = github.issues.update_comment(ctx, token, owner, repo, survivor_id, body)
+        if not res.get("success"):
+            _LOG.warn(ctx.std, "Merging a duplicate comment failed: %s" % res.get("error", "unknown"))
+            return False
+        return True
 
     def _dedup_marker_comments(ctx, token):
         """Create-time duplicate backstop: list immediately and converge; if no
@@ -1621,7 +1715,7 @@ def _github_status_comments(ctx: FeatureContext):
         `_dedup_recheck` on later cycles."""
         for attempt in range(2):
             if attempt:
-                sleep(_DEDUP_SETTLE_S)
+                sleep(_DEDUP_SETTLE_S * 1000)
             if _converge_marker_comments(ctx, token):
                 return
 
@@ -1757,7 +1851,11 @@ def _github_status_comments(ctx: FeatureContext):
         """Seconds between this job's contributions: the server's budget-derived
         cadence (kept fresh by the centralized refresh in `github._do_request`),
         floored by `min_poll_interval_seconds`. The server also sizes this job's
-        post-grant lease from it."""
+        post-grant lease from it. Without a coordinator there is no server
+        cadence: the interval spreads across the live jobs in the last-read
+        comment (`uncoordinated_interval_s`)."""
+        if not _state.get("_coordinator", False):
+            return uncoordinated_interval_s(min_poll_interval_seconds, _state.get("_last_parsed"))
         return max(min_poll_interval_seconds, cadence_seconds(ctx))
 
     def _coordinated():
@@ -1962,10 +2060,35 @@ def _github_status_comments(ctx: FeatureContext):
     def _publish_via_comment_state(ctx, token, own_entry, now_epoch, final):
         """Coordination through the comment's own state block, used when the
         Aspect API is unreachable and as the only path without a coordinator
-        (`_coordinated`). The state block is the shared store. Read the
+        (`_coordinated`). The state block is the shared store: read the
         comment, merge our entry (preserving sibling rows for our run), render,
-        and post under a simple time lease so concurrent jobs don't all PATCH
-        at once.
+        and post (`_comment_state_cycle`).
+
+        Nothing serializes two jobs' read-merge-write, so a write can drop a
+        row a sibling wrote in between. A mid-run row returns on that job's
+        next cycle; a final row has none, so a final update re-reads the
+        comment after each write and writes again until its row is there
+        (`row_landed`, `_FINAL_VERIFY_ROUNDS` times at most). A duplicate
+        comment's rows are merged into the survivor before it is deleted
+        (`_absorb_duplicates`)."""
+        if not _comment_state_cycle(ctx, token, own_entry, now_epoch, final) or not final:
+            return
+        for _ in range(_FINAL_VERIFY_ROUNDS):
+            sleep(_FINAL_VERIFY_SETTLE_S * 1000)
+            body = _fetch_existing_comment_body(ctx, token)
+            if body != None and row_landed(_parse_state(body), head_sha, own_entry):
+                return
+            _comment_state_cycle(ctx, token, own_entry, epoch_now_s(ctx.std), True, force = True)
+        _LOG.trace("final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
+
+    def _comment_state_cycle(ctx, token, own_entry, now_epoch, final, force = False):
+        """One read-merge-write of the comment's state block. Returns True when
+        the comment now carries this render (written, or unchanged since this
+        job's last write), False when this cycle skipped or failed.
+
+        Mid-run it neither reads nor writes while another job's lease, seen on
+        the last read, is still held; a final update always proceeds. `force`
+        writes even an unchanged render, to restore a row a sibling dropped.
 
         To avoid duplicate comments, this path creates one only as a last
         resort. When no marker comment is known or discoverable yet, it will
@@ -1980,27 +2103,41 @@ def _github_status_comments(ctx: FeatureContext):
         Once the API has worked (`_api_ok`), it never creates out-of-band.
         Without a coordinator there is no server to create the comment, so the
         grace is zero and the first job to post creates it."""
+        if not final and now_epoch < _state.get("_lease_until_s", 0):
+            return False
         existing_body = _fetch_existing_comment_body(ctx, token)
         if existing_body == None:
-            return
+            return False
         if "_comment_id" not in _state:
             secs = monotonic() - _state.get("_task_started_at", 0.0)
             grace_s = _FALLBACK_CREATE_GRACE_S if _coordinated() else 0
             if not _should_create_fallback(_state.get("_api_ok", False), final, secs, grace_s):
-                return
+                return False
         parsed = _parse_state(existing_body)
+        _state["_last_parsed"] = parsed
 
         lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
         if not final and _lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
-            return
+            _state["_lease_until_s"] = lease_epoch + min_poll_interval_seconds
+            return False
 
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
+        stable_body, final_body = _render_state(ctx, parsed, new_state, now_epoch)
+        if not force and _state.get("_last_stable_body") == stable_body:
+            return True
+        if not _upsert_comment(ctx, token, final_body):
+            return False
+        _state["_last_stable_body"] = stable_body
+        _state["_lease_until_s"] = now_epoch + min_poll_interval_seconds
+        return True
 
-        # Seed the prior sticky-selection sets from the existing comment so
-        # capped sections don't flip-flop across fallback cycles (the merge
-        # carries only entries/runs). Drop them on a new push, matching the
-        # head_sha reset in `_merge_state`.
-        same_push = bool(parsed) and parsed.get("head_sha") == head_sha
+    def _render_state(ctx, parsed, new_state, now_epoch):
+        """Render `(stable_body, final_body)` for the merged `new_state`,
+        carrying the sticky selections of the comment it was read from
+        (`parsed`) so capped sections don't flip-flop across cycles. They
+        reset on a new push, matching the head_sha reset in `_merge_state`."""
+        new_state = dict(new_state)
+        same_push = bool(parsed) and parsed.get("head_sha") == new_state.get("head_sha", head_sha)
         for k in ("shown_snippets", "shown_repros", "shown_fixes"):
             new_state[k] = parsed.get(k, []) if same_push else []
 
@@ -2008,13 +2145,7 @@ def _github_status_comments(ctx: FeatureContext):
         new_state["shown_snippets"] = sel["shown_snippets"]
         new_state["shown_repros"] = sel["shown_repros"]
         new_state["shown_fixes"] = sel["shown_fixes"]
-
-        stable_body, final_body = _render_comment(ctx, new_state, sel, now_epoch)
-        if _state.get("_last_stable_body") == stable_body:
-            return
-        if not _upsert_comment(ctx, token, final_body):
-            return
-        _state["_last_stable_body"] = stable_body
+        return _render_comment(ctx, new_state, sel, now_epoch)
 
     def _init(ctx):
         # One-time init on first task_update: cache task identity (FeatureContext
@@ -2306,8 +2437,8 @@ GithubStatusComments = feature(
             default = 20,
             description = "Minimum seconds between PR-comment refreshes. Default 20s. The Aspect API " +
                           "decides which job posts each interval so the cost stays flat regardless of how " +
-                          "many jobs run in parallel; this value gates the local fallback lease used when " +
-                          "the API is unreachable. Terminal task verdicts always land immediately.",
+                          "many jobs run in parallel. Without the API, all live jobs together refresh about " +
+                          "once per interval. Terminal task verdicts always land immediately.",
         ),
         # Config-only (set via configure(..., feature_args = {...}) in config.axl).
         "templates": args.custom(
