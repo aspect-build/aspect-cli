@@ -16,10 +16,8 @@ variables alone, without an authenticated API call:
                        the `ASPECT_JOB_URL_CACHE` cache-first short-circuit
                        (so the per-job URL `resolve_build_url` caches is
                        returned here too).
-  - `resolve_build_url` — the off-GitHub-Actions path delegates to
-                       `detect_build_url(env)`. (The GitHub Actions per-job
-                       API upgrade is exercised in `github_detect_test.axl`,
-                       which has the HTTP stubs.)
+  - `resolve_build_url` — delegation off GitHub Actions, cached job URLs,
+                       run-level fallback upgrades, and stale-run rejection.
 
 These exercise real `ctx.std.env` — there's no env-mocking layer in AXL —
 so each subtest snapshots and restores the CI env vars it touches.
@@ -238,9 +236,7 @@ def _test_detect_build_url_cache_first(ctx):
     _restore_env(ctx, snapshot)
 
 def _test_resolve_build_url_off_gha(ctx):
-    """Off GitHub Actions, `resolve_build_url(ctx)` delegates to the
-    env-only `detect_build_url(env)` — no API call. (The GitHub Actions
-    per-job upgrade is covered in `github_detect_test.axl`.)"""
+    """Off GitHub Actions, delegate to env-only resolution without an API call."""
     snapshot = _snapshot_env(ctx)
 
     _clear_env(ctx)
@@ -254,6 +250,58 @@ def _test_resolve_build_url_off_gha(ctx):
     )
 
     _restore_env(ctx, snapshot)
+
+def _test_resolve_build_url_cache(test_ctx):
+    """Reuse resolved job URLs while allowing run-level fallbacks to upgrade."""
+    run_url = "https://github.com/acme/web/actions/runs/1234"
+    next_run_url = "https://github.com/acme/web/actions/runs/1235"
+    snapshot = _snapshot_env(test_ctx)
+    _clear_env(test_ctx)
+    for name, value in {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_REPOSITORY": "acme/web",
+        "GITHUB_RUN_ID": "1234",
+        "GITHUB_JOB": "test",
+    }.items():
+        test_ctx.std.env.set_var(name, value)
+    calls = []
+    responses = [
+        [{"name": "test", "html_url": run_url + "/job/567"}],
+        [],
+        [{"name": "test", "html_url": next_run_url + "/job/568"}],
+    ]
+
+    def _get(url, headers):
+        _eq("resolve — uses supplied app token", headers["Authorization"], "Bearer app-token")
+        jobs = responses[len(calls)]
+        calls.append(url)
+        response = struct(status = 200, body = json.encode({"jobs": jobs}), headers = [])
+        return struct(catch = lambda: struct(block = lambda: (None, response)))
+
+    ctx = struct(
+        std = struct(
+            env = test_ctx.std.env,
+            fs = struct(exists = lambda _path: False),
+            process = struct(id = lambda: 1),
+        ),
+        http = lambda: struct(get = _get),
+    )
+
+    _eq("resolve — env-only lookup caches run URL", detect_build_url(ctx.std.env), run_url)
+    _eq("resolve — run URL upgrades to job URL", resolve_build_url(ctx, existing_app_token = "app-token"), run_url + "/job/567")
+    _eq("resolve — resolved job URL is reused", resolve_build_url(ctx, existing_app_token = "app-token"), run_url + "/job/567")
+    _eq("resolve — repeated lookup makes one jobs request", len(calls), 1)
+
+    ctx.std.env.set_var("GITHUB_RUN_ID", "1235")
+    _eq("resolve — stale job URL is not reused", resolve_build_url(ctx, existing_app_token = "app-token"), next_run_url)
+    _eq("resolve — fallback remains upgradeable", resolve_build_url(ctx, existing_app_token = "app-token"), next_run_url + "/job/568")
+    _eq("resolve — fallback upgrade is cached", resolve_build_url(ctx, existing_app_token = "app-token"), next_run_url + "/job/568")
+    _eq("resolve — jobs requests target the current run", calls, [
+        "https://api.github.com/repos/acme/web/actions/runs/1234/jobs?per_page=100",
+        "https://api.github.com/repos/acme/web/actions/runs/1235/jobs?per_page=100",
+        "https://api.github.com/repos/acme/web/actions/runs/1235/jobs?per_page=100",
+    ])
+    _restore_env(test_ctx, snapshot)
 
 def _test_circleci_artifacts_browse_url(ctx):
     snapshot = _snapshot_env(ctx)
@@ -286,8 +334,9 @@ def _test_impl(ctx):
     _test_detect_build_url_per_host(ctx)
     _test_detect_build_url_cache_first(ctx)
     _test_resolve_build_url_off_gha(ctx)
+    _test_resolve_build_url_cache(ctx)
     _test_circleci_artifacts_browse_url(ctx)
-    print("ci.axl: OK (8 sections)")
+    print("ci.axl: OK (9 sections)")
     return 0
 
 ci_tests = task(
