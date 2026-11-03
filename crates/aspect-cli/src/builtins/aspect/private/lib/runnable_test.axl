@@ -1,169 +1,26 @@
-"""Unit tests for lib/runnable.axl: apparent_label normalization and
-`--run-in` resolution."""
+"""Unit tests for lib/runnable.axl: label normalization and `--run-in`
+resolution."""
 
-load("./runnable.axl", "apparent_label", "resolve_run_in")
+load("./runnable.axl", "normalize_label", "resolve_run_in")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _test_local_label_with_colon(ctx):
-    _eq("local label unchanged", apparent_label("//tools/format:format"), "//tools/format:format")
+_LABEL_CASES = "crates/bazel/src/label_cases.json"
 
-def _test_local_label_without_colon(ctx):
-    _eq("appends :name", apparent_label("//tools/format"), "//tools/format:format")
-
-def _test_external_label_with_colon(ctx):
-    _eq("external label unchanged", apparent_label("@repo//pkg:target"), "@repo//pkg:target")
-
-def _test_external_label_without_colon(ctx):
-    _eq("external label gets :name", apparent_label("@repo//pkg"), "@repo//pkg:pkg")
-
-def _test_root_package_label(ctx):
-    _eq("root package alias", apparent_label("@repo//:alias"), "@repo//:alias")
-
-def _test_bzlmod_no_version(ctx):
-    """@@module+//pkg:tgt — bzlmod canonical form with no version."""
-    _eq(
-        "bzlmod no version",
-        apparent_label("@@buildifier_prebuilt+//buildifier:buildifier"),
-        "@buildifier_prebuilt//buildifier:buildifier",
-    )
-
-def _test_bzlmod_with_version(ctx):
-    """@@module+version//pkg:tgt — bzlmod canonical form with version string."""
-    _eq(
-        "bzlmod with version",
-        apparent_label("@@rules_python+0.40.0//python:python"),
-        "@rules_python//python:python",
-    )
-
-def _test_bzlmod_without_colon(ctx):
-    """@@module+//pkg — bzlmod canonical form that also needs :name appended."""
-    _eq(
-        "bzlmod without colon",
-        apparent_label("@@buildifier_prebuilt+//buildifier"),
-        "@buildifier_prebuilt//buildifier:buildifier",
-    )
-
-def _test_bzlmod_root_alias(ctx):
-    """@@module+//:alias — bzlmod canonical alias in root package."""
-    _eq(
-        "bzlmod root alias",
-        apparent_label("@@buildifier_prebuilt+//:buildifier"),
-        "@buildifier_prebuilt//:buildifier",
-    )
-
-def _test_bzlmod_extension_repo(ctx):
-    """@@module+ext+repo//... — extension-generated repo; apparent name is the last segment."""
-    _eq(
-        "extension repo",
-        apparent_label("@@rules_python+pip+numpy//:pkg"),
-        "@numpy//:pkg",
-    )
-
-def _test_bzlmod_extension_repo_without_colon(ctx):
-    """@@module+ext+repo//pkg — extension repo that also needs :name appended."""
-    _eq(
-        "extension repo without colon",
-        apparent_label("@@rules_python+pip+numpy//numpy"),
-        "@numpy//numpy:numpy",
-    )
-
-def _test_bzlmod_4seg_extension_repo(ctx):
-    """@@a+b+c+d//... — 4-segment canonical form; apparent name is still the last segment."""
-    _eq(
-        "4-segment extension repo",
-        apparent_label("@@rules_python+0.40.0+pip+numpy//numpy:pkg"),
-        "@numpy//numpy:pkg",
-    )
-
-def _test_bzlmod_bazel7_module_repo(ctx):
-    """@@module~//pkg:tgt — Bazel 7 canonical form for a module repo (tilde separator)."""
-    _eq(
-        "bazel7 module repo",
-        apparent_label("@@buildifier_prebuilt~//buildifier:buildifier"),
-        "@buildifier_prebuilt//buildifier:buildifier",
-    )
-
-def _test_bzlmod_bazel7_module_repo_no_colon(ctx):
-    """@@module~//pkg — Bazel 7 canonical form that also needs :name appended."""
-    _eq(
-        "bazel7 module repo without colon",
-        apparent_label("@@buildifier_prebuilt~//buildifier"),
-        "@buildifier_prebuilt//buildifier:buildifier",
-    )
-
-def _test_bzlmod_bazel7_extension_repo(ctx):
-    """@@module~~ext~repo//... — Bazel 7 canonical form for an extension-generated repo."""
-    _eq(
-        "bazel7 extension repo",
-        apparent_label("@@buildifier_prebuilt~~buildifier_prebuilt_deps_extension~buildifier_darwin_arm64//file:buildifier"),
-        "@buildifier_darwin_arm64//file:buildifier",
-    )
-
-def _test_bzlmod_bazel7_version_with_plus_build_metadata(ctx):
-    """@@module~1.2.3+meta//... — Bazel 7 version containing SemVer build metadata.
-
-    `+` appears inside the Bazel 7 version string, not as a Bazel 8+ separator.
-    Probing for `~` first avoids the false-positive split on `+`.
-    """
-    _eq(
-        "bazel7 version with + build metadata",
-        apparent_label("@@foo~1.2.3+meta//pkg:tgt"),
-        "@foo//pkg:tgt",
-    )
-
-# Relative-label resolution
-#
-# `apparent_label` resolves relative labels (`:foo`, bare `foo`, `pkg:foo`)
-# against the caller's `current_package` so `aspect run :foo` works from a
-# subdirectory. Absolute and repo-prefixed labels ignore `current_package`.
-
-def _test_relative_colon_name_at_root(ctx):
-    _eq(":foo at root", apparent_label(":foo", ""), "//:foo")
-
-def _test_relative_colon_name_in_nested_package(ctx):
-    _eq(":foo in examples/deliverable", apparent_label(":foo", "examples/deliverable"), "//examples/deliverable:foo")
-
-def _test_bare_name_at_root(ctx):
-    _eq("foo at root", apparent_label("foo", ""), "//:foo")
-
-def _test_bare_name_in_nested_package(ctx):
-    _eq("foo in examples", apparent_label("foo", "examples"), "//examples:foo")
-
-def _test_relative_pkg_colon_name_at_root(ctx):
-    _eq("sub:foo at root", apparent_label("sub:foo", ""), "//sub:foo")
-
-def _test_relative_pkg_colon_name_in_nested_package(ctx):
-    _eq("sub:foo in foo", apparent_label("sub:foo", "foo"), "//foo/sub:foo")
-
-def _test_absolute_ignores_current_package(ctx):
-    """Absolute labels are not rewritten by a non-empty current_package."""
-    _eq("//foo/bar:baz with pkg context", apparent_label("//foo/bar:baz", "ignored"), "//foo/bar:baz")
-
-def _test_main_repo_canonical(ctx):
-    """`@@//` is the main repository's canonical name."""
-    _eq("@@//pkg:tgt", apparent_label("@@//pkg:tgt"), "//pkg:tgt")
-    _eq("@@//pkg", apparent_label("@@//pkg"), "//pkg:pkg")
-    _eq("@@//:tgt", apparent_label("@@//:tgt"), "//:tgt")
-
-def _test_main_repo_apparent(ctx):
-    """`@//` is the main repository written with its apparent name."""
-    _eq("@//pkg:tgt", apparent_label("@//pkg:tgt"), "//pkg:tgt")
-    _eq("@//pkg", apparent_label("@//pkg"), "//pkg:pkg")
-
-def _test_bare_repo(ctx):
-    """A label naming only a repository is its root target."""
-    _eq("@repo", apparent_label("@repo"), "@repo//:repo")
-    _eq("@repo//", apparent_label("@repo//"), "@repo//:repo")
-    _eq("@@rules_x+", apparent_label("@@rules_x+"), "@rules_x//:rules_x")
-    _eq("@@rules_python+pip+numpy", apparent_label("@@rules_python+pip+numpy"), "@numpy//:numpy")
+def _test_shared_label_cases(ctx):
+    """The cases the runtime's copy in `crates/bazel/src/label.rs` runs too."""
+    cases = json.decode(ctx.std.fs.read_to_string(ctx.std.env.aspect_root_dir() + "/" + _LABEL_CASES))
+    if not cases:
+        fail("no cases in " + _LABEL_CASES)
+    for input, want, description in cases:
+        _eq("%s: %s" % (description, input), normalize_label(input), want)
 
 def _test_spellings_agree(ctx):
-    """Every spelling of one main-repo target normalizes to the same key."""
-    keys = {apparent_label(l): True for l in ["//pkg", "//pkg:pkg", "@//pkg", "@@//pkg:pkg"]}
-    _eq("one key", list(keys), ["//pkg:pkg"])
+    """Every spelling of one main-repo target normalizes to the same label."""
+    labels = {normalize_label(l): True for l in ["//pkg", "//pkg:pkg", "@//pkg", "@@//pkg:pkg"]}
+    _eq("one label", list(labels), ["//pkg:pkg"])
 
 # resolve_run_in — `--run-in=<choice>` cwd resolution
 
@@ -212,32 +69,7 @@ def _test_run_in_relative_dotdot(_ctx):
     )
 
 _UNIT_TESTS = [
-    _test_local_label_with_colon,
-    _test_local_label_without_colon,
-    _test_external_label_with_colon,
-    _test_external_label_without_colon,
-    _test_root_package_label,
-    _test_bzlmod_no_version,
-    _test_bzlmod_with_version,
-    _test_bzlmod_without_colon,
-    _test_bzlmod_root_alias,
-    _test_bzlmod_extension_repo,
-    _test_bzlmod_extension_repo_without_colon,
-    _test_bzlmod_4seg_extension_repo,
-    _test_bzlmod_bazel7_module_repo,
-    _test_bzlmod_bazel7_module_repo_no_colon,
-    _test_bzlmod_bazel7_extension_repo,
-    _test_bzlmod_bazel7_version_with_plus_build_metadata,
-    _test_relative_colon_name_at_root,
-    _test_relative_colon_name_in_nested_package,
-    _test_bare_name_at_root,
-    _test_bare_name_in_nested_package,
-    _test_relative_pkg_colon_name_at_root,
-    _test_relative_pkg_colon_name_in_nested_package,
-    _test_absolute_ignores_current_package,
-    _test_main_repo_canonical,
-    _test_main_repo_apparent,
-    _test_bare_repo,
+    _test_shared_label_cases,
     _test_spellings_agree,
     _test_run_in_empty_is_none,
     _test_run_in_runfiles_is_none,
