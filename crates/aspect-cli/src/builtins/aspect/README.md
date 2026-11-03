@@ -191,59 +191,64 @@ def config(ctx: ConfigContext):
 
 ### Custom delivery scheduling
 
-Set `DeliveryTrait.create_scheduler` to a factory accepting `(ctx, plan)`.
-It runs once after change detection and before the release build, and returns
-`choose_next(ready, outcomes) -> str | None`. With the hook unset, delivery
-uses its existing FIFO order. Neither dry-run mode invokes the factory.
+By default delivery starts each target as soon as its release build output is
+ready, in FIFO order, up to `--max-parallelization` at a time. Set
+`DeliveryTrait.create_scheduler` to choose the order yourself, e.g. to deliver
+a database migration before the services that depend on it.
 
-`DeliveryPlan` contains:
+The factory is called as `create_scheduler(ctx, plan)` once before the release
+build. It is not called under `--dry-run` or when nothing is selected for
+delivery. `plan` is a `DeliveryPlan`:
 
-- `candidates`: all resolved labels before change-detection filtering.
-- `selected`: labels selected for this invocation, including forced deliveries.
-- `release_rc`: the exact `bazel.RunCommand` passed to the release build.
-- `report_progress(message)`: throttled progress and heartbeat reporting for
-  planning work. Call this while polling a long-running planning operation.
+- `candidates`: every resolved target, before change detection.
+- `selected`: the targets this run will deliver, including forced ones.
+- `release_rc`: the `bazel.RunCommand` of the release build (read-only).
+- `report_progress(message)`: show progress on the status surface while the
+  factory does slow work such as a `bazel query`. Throttled; safe to call often.
+- `normalize_label(label)`: convert a label to the form the scheduler uses.
 
-Both label lists are copies. Treat `release_rc` as read-only. Resolve policy
-inputs before returning the selector; the selector itself must not perform
-I/O, spawn processes, or wait for external events.
-
-The selector receives copies of built, runnable, unstarted labels in `ready`
-and native terminal results in `outcomes`. Return one of those labels to
-start it, or `None` when none is eligible. `ok` is published after delivery
-state persistence succeeds; `skip` means the requested digest was already
-delivered in this task's state scope. Missing, `warn`, and `fail` outcomes
-must not satisfy a dependency. A forced delivery has no prior-success shortcut.
-
-For a dependency policy, prepare each target's transitive prerequisites in
-the factory and return a selector with this shape:
+The factory returns a selector `choose_next(ready, outcomes)`. `ready` lists the
+built targets that have not started, and `outcomes` maps finished targets to
+`ok`, `skip`, `warn` or `fail`. Return one label from `ready` to start it, or
+`None` to wait. Every label is in apparent form with an explicit target name
+(`//svc:svc`), so pass the labels of your own graph through
+`plan.normalize_label`. A `skip` means this digest was already delivered;
+`ok` is reported only after delivery state has been saved.
 
 ```python
-def choose_next(ready, outcomes):
-    for label in ready:
-        if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites[label]]):
-            return label
-    return None
+def _create_scheduler(ctx, plan):
+    prerequisites = {}  # label -> labels that must be delivered first
+    for label in plan.selected:
+        plan.report_progress("Querying prerequisites of " + label)
+        deps = ctx.bazel.query("deps({}) intersect set({})".format(label, " ".join(plan.candidates)))
+        names = [plan.normalize_label(t.name) for t in deps]
+        prerequisites[label] = [name for name in names if name != label]
+
+    def choose_next(ready, outcomes):
+        for label in ready:
+            if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites.get(label, [])]):
+                return label
+        return None
+
+    return choose_next
 ```
 
-Keep paths through skipped targets and non-delivery targets when computing
-those prerequisites. Ordering applies within the resolved candidate set;
-an excluded target is not a verified prior-delivery skip. Graph discovery
-belongs to the consumer's factory and is not provided by this hook.
+Do all I/O in the factory: the selector runs inside the dispatch loop and must
+not block. Delivery still owns spawning, logs, state, the manifest and
+`--max-parallelization`, and independent targets still run in parallel.
 
-Native delivery still owns spawning, reaping, logs, state, manifests, and
-`--max-parallelization`. Waiting targets consume no slots. `None` keeps the
-event loop alive while builds or deliveries can progress, and dependents
-can start as soon as their prerequisites finish without a batch barrier.
-Once all build/runnable streams and running processes finish, remaining
-ineligible targets receive `fail` with a `scheduler_blocked` message.
+Failures:
 
-A non-ready label or invalid return type stops new dispatch, drains current
-work, and fails remaining targets. A selector exception follows task error
-handling; deferred cleanup cancels and waits for owned work. Factory errors
-fail before release execution and publish the native final manifest.
+- The factory raises or returns something other than a callable: every
+  selected target fails with `scheduler_planning_failed` and the release build
+  does not run.
+- The selector raises or returns a label that is not in `ready`: no further
+  deliveries start, running ones finish, and the rest fail with
+  `scheduler_error`.
+- Targets the selector never picks fail with `scheduler_blocked` once all
+  builds and deliveries have finished.
 
-Run `aspect dev test-delivery-scheduler` for the extension's unit tests.
+Run `aspect dev test-delivery-scheduler` for the unit tests.
 
 ---
 

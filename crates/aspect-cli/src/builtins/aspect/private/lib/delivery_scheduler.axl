@@ -1,0 +1,134 @@
+"""`DeliveryTrait.create_scheduler` support for `aspect delivery`: the plan and selector types, the factory call, slot filling and cleanup.
+
+Every label a scheduler sees (`DeliveryPlan.candidates` / `selected`, `ready`,
+the keys of `outcomes`) is in `apparent_label` form, the form dispatch keys on.
+A factory runs its own graph labels through `plan.normalize_label` to match.
+"""
+
+load("@aspect//bazel.axl", bzl = "bazel")
+load("./delivery_results.axl", "add_result")
+load("./runnable.axl", "apparent_label")
+
+DeliverySelector = typing.Callable[[list[str], dict[str, str]], str | None]
+
+DeliveryPlan = record(
+    candidates = field(list[str]),
+    selected = field(list[str]),
+    release_rc = field(bazel.RunCommand),
+    report_progress = field(typing.Callable[[str], None]),
+    normalize_label = field(typing.Callable[[str], str], default = apparent_label),
+)
+
+def _unique_labels(labels: list[str]) -> list[str]:
+    return list({apparent_label(label): True for label in labels})
+
+def _new_plan(candidates: list[str], selected: list[str], release_rc: bazel.RunCommand, report_progress: typing.Callable) -> DeliveryPlan:
+    return DeliveryPlan(
+        candidates = _unique_labels(candidates),
+        selected = _unique_labels(selected),
+        release_rc = release_rc,
+        report_progress = report_progress,
+    )
+
+def _create(factory: typing.Callable, ctx: TaskContext, plan: DeliveryPlan) -> tuple:
+    """Call `factory(ctx, plan)`. Returns `(error, selector)`: a `scheduler_planning_failed:` message and None, or "" and the selector."""
+    err, selector = catch(factory, ctx, plan)
+    if err:
+        return ("scheduler_planning_failed: " + err.message, None)
+    if not isinstance(selector, typing.Callable):
+        return ("scheduler_planning_failed: create_scheduler must return a callable", None)
+    return ("", selector)
+
+def _fill(ready: list, running: list, max_par: int, selector: DeliverySelector | None, outcomes: dict, spawn: typing.Callable, is_cancelled: typing.Callable) -> str:
+    """Spawn ready entries into free slots, FIFO or in the order `selector` picks.
+
+    Stops when the slots are full, `ready` is empty, the task is cancelled or the
+    selector returns None. Returns "" or a `scheduler_error:` message for a
+    selector that raised or returned something other than a ready label; nothing
+    more is spawned in that case.
+    """
+    for _ in range(max_par - len(running)):
+        if not ready or is_cancelled():
+            break
+        index = 0
+        if selector != None:
+            keys = [apparent_label(entry[0]) for entry in ready]
+            err, label = catch(selector, list(keys), dict(outcomes))
+            if err != None:
+                return "scheduler_error: choose_next failed: " + err.message
+            if label == None:
+                break
+            if type(label) != "string" or label not in keys:
+                return "scheduler_error: expected a ready label or None, got {}".format(repr(label))
+            index = keys.index(label)
+        if is_cancelled():
+            break
+        running.append(spawn(ready.pop(index)))
+    return ""
+
+def _new_dispatcher(max_par: int, selector: DeliverySelector | None, spawn: typing.Callable, is_cancelled: typing.Callable) -> struct:
+    """Stateful `_fill` for the dispatch loop.
+
+    `fill(ready, running, outcomes)` returns a scheduler error the first time one
+    occurs and "" otherwise; after an error it spawns nothing more, and `error()`
+    returns it. While the selector is waiting, `fill` skips calling it again until
+    `ready`, `outcomes` or `running` changes. Between calls the first two only
+    grow and the last only shrinks, so their lengths identify that state.
+    """
+    state = {"error": "", "waiting_on": None}
+
+    def fill(ready: list, running: list, outcomes: dict) -> str:
+        if state["error"]:
+            return ""
+        snapshot = (len(ready), len(outcomes), len(running))
+        if snapshot == state["waiting_on"]:
+            return ""
+        state["waiting_on"] = None
+        err = _fill(ready, running, max_par, selector, outcomes, spawn, is_cancelled)
+        if err:
+            state["error"] = err
+            return err
+        if selector != None and ready and len(running) < max_par and not is_cancelled():
+            state["waiting_on"] = (len(ready), len(outcomes), len(running))
+        return ""
+
+    return struct(fill = fill, error = lambda: state["error"])
+
+def _record(data: dict, outcomes: dict, label: str, outcome: str, **kwargs) -> None:
+    """Add a manifest result and the terminal outcome the selector reads.
+
+    `outcomes` is kept apart from the manifest entry because `delivery_target` hooks receive that entry and may mutate it.
+    """
+    outcomes[apparent_label(label)] = outcome
+    add_result(data, label, outcome, **kwargs)
+
+def _cleanup(ctx: TaskContext, runs, xl: struct, running: list) -> None:
+    """Deferred cleanup: cancel the release build and running deliveries, drain the exec log, wait, and remove captured output.
+
+    The exec log is drained before the build wait, as `bazel/exec_log.axl`
+    requires. An exec-log error is re-raised only after every wait and file
+    removal has run.
+    """
+    if not runs.done:
+        runs.cancellation.cancel()
+    for entry in running:
+        entry[4].cancellation.cancel()
+    close_error, _ = catch(bzl.exec_log.close, ctx, xl)
+    for entry in running:
+        entry[4].wait()
+    runs.wait()
+    for entry in running:
+        for path in [entry[5], entry[6]]:
+            if path != None and ctx.std.fs.exists(path):
+                ctx.std.fs.remove_file(path)
+    if close_error != None:
+        fail(close_error.message)
+
+delivery_scheduler = struct(
+    new_plan = _new_plan,
+    create = _create,
+    fill = _fill,
+    new_dispatcher = _new_dispatcher,
+    record = _record,
+    cleanup = _cleanup,
+)
