@@ -1,0 +1,8 @@
+"""Example workspace for `DeliveryTrait.create_scheduler`."""
+
+module(
+    name = "delivery_scheduler_example",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_shell", version = "0.7.1")

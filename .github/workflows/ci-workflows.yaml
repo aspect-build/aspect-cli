@@ -563,6 +563,8 @@ jobs:
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      # examples/delivery-scheduler is a second workspace.
+      - uses: ./.github/actions/regenerate-machine-bazelrc
       - uses: ./.github/actions/build-dev-launcher
         with:
           task-name: axl-smoke-gha-bootstrap
@@ -593,6 +595,10 @@ jobs:
           echo "--- aspect run smoke (//examples/deliverable)"
           "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:py_deliverable
           "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:sh_deliverable -- forwarded-arg
+          # $CLI, not $LAUNCHER: the example is its own workspace, with no
+          # .aspect/axl.axl pointing the launcher at this commit's CLI.
+          echo "--- delivery scheduler example (examples/delivery-scheduler)"
+          ./examples/delivery-scheduler/test.sh "$CLI"
           echo "--- aspect help"
           "$LAUNCHER" help
           echo "--- aspect-launcher --version"

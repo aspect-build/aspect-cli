@@ -21,8 +21,12 @@ Up to three Bazel build phases plus a dispatch loop:
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
-  5. Dispatch — `bazel run` each pending target, then `dd.deliver()`
-     (or `dd.delete()` on failure).
+  5. Dispatch — `bazel run` each pending target as soon as it is built, up to
+     `--max-parallelization` at a time, then `dd.deliver()` (or `dd.delete()`
+     on failure). FIFO by default; `DeliveryTrait.create_scheduler` can choose
+     the order instead (`lib/delivery_scheduler.axl`). Targets it never makes
+     eligible fail as `scheduler_blocked`. If the task ends early, a deferred
+     cleanup cancels and reaps the release build and running deliveries.
 
 
 Flags
@@ -227,7 +231,8 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
-load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
+load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
+load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
@@ -247,7 +252,23 @@ DRY_RUN_OFF = "false"
 DRY_RUN_ON = "true"
 DRY_RUN_BUILD = "build"
 
+DeliveryPlan = _DeliveryPlan
+DeliverySelector = _DeliverySelector
+
 DeliveryTrait = trait(
+    create_scheduler = attr(
+        typing.Callable[[TaskContext, DeliveryPlan], DeliverySelector] | None,
+        default = None,
+        description = (
+            "Optional factory for the delivery order, called once before the release build " +
+            "(never under --dry-run or with nothing to deliver). Receives (ctx, DeliveryPlan) " +
+            "and returns choose_next(ready, outcomes) -> label | None: pick one of the built, " +
+            "unstarted labels in `ready`, or None to wait. `outcomes` maps finished labels to " +
+            "ok / skip / warn / fail. All labels are normalized; pass your own labels through " +
+            "normalize_label from @aspect//bazel.axl. The selector must not block. " +
+            "Unset keeps FIFO order."
+        ),
+    ),
     delivery_start = attr(
         typing.Callable[[], None],
         default = lambda: None,
@@ -1035,6 +1056,41 @@ def _fire_target_hook(data, delivery_trait, runnables, label):
     for k, v in extras.items():
         entry["custom"][k] = v
 
+def _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, message) -> int:
+    """Record a FAIL row and result for each `(label, is_forced, output_sha)` in `unstarted`. Returns how many."""
+    for label, is_forced, output_sha in unstarted:
+        rows.append((label, "FAIL", "fail", message, output_sha, "-"))
+        delivery_scheduler.record(data, outcomes, label, "fail", message = message, output_sha = output_sha, is_forced = is_forced)
+        _fire_target_hook(data, delivery_trait, runnables, label)
+    return len(unstarted)
+
+def _planning_progress(ctx, ph, data, had_failure):
+    """Post "Preparing delivery scheduler..." and return the `DeliveryPlan.report_progress` callable.
+
+    The returned callable posts its message as surface progress, at most once per
+    `MIN_HEARTBEAT_INTERVAL_MS`. Its first call always posts.
+    """
+    last_ms = [None]
+
+    def post(message: str) -> None:
+        ph.update(
+            _pick_status(data, had_failure = had_failure, terminal = False),
+            phases.ProgressStyles(body = message),
+            kind = "delivery_results",
+            data = data,
+            priority = False,
+        )
+
+    def report_progress(message: str) -> None:
+        now = now_ms(ctx)
+        if last_ms[0] != None and now - last_ms[0] < MIN_HEARTBEAT_INTERVAL_MS:
+            return
+        last_ms[0] = now
+        post(message)
+
+    post("Preparing delivery scheduler...")
+    return report_progress
+
 def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
 
@@ -1201,6 +1257,7 @@ def _delivery_impl(ctx):
     # Build the data shell up front so an early failure (before phases.setup
     # opens the surface) still has data to render.
     data = delivery_init_data()
+    outcomes = {}
     ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["delivery"]["commit_sha"] = ctx.args.commit_sha
@@ -1445,8 +1502,9 @@ def _delivery_impl(ctx):
 
             # Synthetic warn rows so the check run conveys why it failed.
             for label in targets:
-                delivery_add_result(
+                delivery_scheduler.record(
                     data,
+                    outcomes,
                     label,
                     "warn",
                     message = "build failed (exit {})".format(build_code),
@@ -1585,18 +1643,19 @@ def _delivery_impl(ctx):
             if blocked and not ctx.args.warn_unresolved_digest:
                 failed_count += 1
                 rows.append((label, "FAIL", "fail", msg, "-", "-"))
-                delivery_add_result(data, label, "fail", message = msg, is_forced = is_forced)
+                delivery_scheduler.record(data, outcomes, label, "fail", message = msg, is_forced = is_forced)
             else:
                 pending_count += 1
                 rows.append((label, "WARN", "warn", msg, "-", "-"))
-                delivery_add_result(data, label, "warn", message = msg, is_forced = is_forced)
+                delivery_scheduler.record(data, outcomes, label, "warn", message = msg, is_forced = is_forced)
             _fire_target_hook(data, delivery_trait, runnables, label)
         elif not is_forced and label in delivered:
             skipped_count += 1
             delivered_by = delivered[label] or "-"
             rows.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
-            delivery_add_result(
+            delivery_scheduler.record(
                 data,
+                outcomes,
                 label,
                 "skip",
                 message = delivered_by,
@@ -1611,8 +1670,9 @@ def _delivery_impl(ctx):
             pending_count += 1
             forced_marker = " (FORCED)" if is_forced else ""
             rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha or "-", "-"))
-            delivery_add_result(
+            delivery_scheduler.record(
                 data,
+                outcomes,
                 label,
                 "pending",
                 message = "dry-run" + (" (forced)" if is_forced else ""),
@@ -1625,6 +1685,8 @@ def _delivery_impl(ctx):
             spawn_order.append(label)
 
     build_exit_code = 0
+    planning_error = ""
+    selector = None
     if delivery_targets and not skip_delivery_build:
         # Expand any `--config=NAME` in release_bazel_flags against the rc — the
         # release build reaches Bazel under --ignore_all_rc_files, so an
@@ -1656,6 +1718,20 @@ def _delivery_impl(ctx):
         if delivery_suffix:
             phase3_rc = bzl.sibling_rc(ctx, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
 
+        release_rc = bzl.rc_with_flags(ctx, phase3_rc, phase3_flags)
+        if delivery_trait.create_scheduler != None and not dry_run:
+            report_progress = _planning_progress(ctx, ph, data, had_failure = failed_count > 0)
+            planning_error, selector = delivery_scheduler.create(
+                delivery_trait.create_scheduler,
+                ctx,
+                delivery_scheduler.new_plan(targets, delivery_targets, release_rc, report_progress),
+            )
+            if planning_error:
+                error(ctx.std, planning_error)
+                unstarted = [spawnable[normalize_label(label)] for label in spawn_order]
+                failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, planning_error)
+
+    if delivery_targets and not skip_delivery_build and not planning_error:
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
         # the log is the escape hatch on real failure.
@@ -1680,7 +1756,7 @@ def _delivery_impl(ctx):
             phase3_execution_log = xl.sinks or False
         runs = ctx.bazel.run_all(
             delivery_targets,
-            rc = bzl.rc_with_flags(ctx, phase3_rc, phase3_flags),
+            rc = release_rc,
             build_events = [phase3_events],
             execution_log = phase3_execution_log,
             stdout = None,
@@ -1701,6 +1777,21 @@ def _delivery_impl(ctx):
         settled = {}
         ready = []
         running = []
+        ctx.defer(delivery_scheduler.cleanup, ctx, runs, xl, running)
+        dispatcher = delivery_scheduler.new_dispatcher(
+            max_par,
+            selector,
+            lambda entry: _spawn_deliverable(ctx, color, capture, *entry),
+            lambda: ctx.cancellation.root.cancelled,
+        )
+
+        def fill_slots() -> bool:
+            before = len(running)
+            scheduler_error = dispatcher.fill(ready, running, outcomes)
+            if scheduler_error:
+                error(ctx.std, scheduler_error + "; no further deliveries will start")
+            return len(running) > before or bool(scheduler_error)
+
         total_deliverable = len(spawn_order)
         build_done = False
         last_emit_ms = now_ms(ctx)
@@ -1763,7 +1854,7 @@ def _delivery_impl(ctx):
                     else:
                         warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
                     rows.append((label, "WARN", "warn", warn_msg, output_sha, "-"))
-                    delivery_add_result(data, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 elif ep == None or not ep.runfiles_dir:
                     if ep == None:
@@ -1773,27 +1864,22 @@ def _delivery_impl(ctx):
                     if ctx.args.warn_not_runnable:
                         pending_count += 1
                         rows.append((label, "WARN", "warn", not_runnable_msg, output_sha, "-"))
-                        delivery_add_result(data, label, "warn", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                        delivery_scheduler.record(data, outcomes, label, "warn", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
                     else:
                         failed_count += 1
                         rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha, "-"))
-                        delivery_add_result(data, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                        delivery_scheduler.record(data, outcomes, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 elif dry_run:
                     pending_count += 1
                     forced_marker = " (FORCED)" if is_forced else ""
                     rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
-                    delivery_add_result(data, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 else:
                     ready.append((label, ep, is_forced, output_sha))
 
-            for _ in range(max_par):
-                if not ready or len(running) >= max_par:
-                    break
-                label, ep, is_forced, output_sha = ready.pop(0)
-                running.append(_spawn_deliverable(ctx, color, capture, label, ep, is_forced, output_sha))
-                interesting = True
+            interesting = fill_slots() or interesting
 
             # Harvest finished deliveries out of submission order so a slow head
             # never idles the slots queued behind it: scan for any exited child
@@ -1836,20 +1922,16 @@ def _delivery_impl(ctx):
                         dd.deliver(label, output_sha)
                     success_count += 1
                     rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
-                    delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
                 else:
                     if track_state:
                         dd.delete(output_sha)
                     failed_count += 1
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
-                    delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
                 _fire_target_hook(data, delivery_trait, runnables, label)
                 interesting = True
-                for _ in range(max_par):
-                    if not ready or len(running) >= max_par:
-                        break
-                    nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
-                    running.append(_spawn_deliverable(ctx, color, capture, nlabel, nep, nis_forced, noutput_sha))
+                fill_slots()
 
             # priority=False throttles surface PATCHes; the per-target lines
             # already tick the CLI.
@@ -1868,7 +1950,14 @@ def _delivery_impl(ctx):
             # `runs.done` holds once every target has settled and been pulled,
             # so a settlement that lands a tick after the build's exit code is
             # never left undispatched.
-            if build_done and runs.done and not ready and not running:
+            if build_done and runs.done and not running:
+                if ready:
+                    msg = delivery_scheduler.unstarted_reason(dispatcher.error(), ctx.cancellation.root.cancelled)
+                    if not dispatcher.error():
+                        error(ctx.std, msg)
+                    unstarted = [(label, is_forced, output_sha) for label, _ep, is_forced, output_sha in ready]
+                    failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, msg)
+                    ready.clear()
                 break
 
     # The fused loop appends rows as deliveries complete; sort back to request

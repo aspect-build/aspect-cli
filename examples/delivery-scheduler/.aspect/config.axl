@@ -1,0 +1,43 @@
+"""Order `aspect delivery` with `DeliveryTrait.create_scheduler`.
+
+A deliverable lists the targets that must be delivered first as
+`deliver_after=<label>` tags. The factory reads those tags once, before the
+release build; the selector it returns then starts each built target as soon
+as all of its prerequisites have finished as `ok` or `skip`. Targets with no
+prerequisites, and targets whose prerequisites are already done, still run in
+parallel up to `--max-parallelization`.
+"""
+
+load("@aspect//bazel.axl", "normalize_label")
+load("@aspect//traits.axl", "DeliveryPlan", "DeliveryTrait")
+
+_TAG = "deliver_after="
+
+def _tags(rule) -> list[str]:
+    for attr in rule.attribute:
+        if attr.name == "tags":
+            return list(attr.string_list_value)
+    return []
+
+def _create_scheduler(ctx: TaskContext, plan: DeliveryPlan):
+    plan.report_progress("Reading deliver_after tags")
+    candidates = {label: True for label in plan.candidates}
+
+    # A prerequisite outside this run's candidates can never finish here, so
+    # it is ignored rather than left to block its dependents forever.
+    prerequisites = {}
+    for target in ctx.bazel.query("set({})".format(" ".join(plan.selected))):
+        label = normalize_label(target.name)
+        after = [normalize_label(tag[len(_TAG):]) for tag in _tags(target) if tag.startswith(_TAG)]
+        prerequisites[label] = [dep for dep in after if dep in candidates]
+
+    def choose_next(ready: list[str], outcomes: dict[str, str]) -> str | None:
+        for label in ready:
+            if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites.get(label, [])]):
+                return label
+        return None
+
+    return choose_next
+
+def config(ctx: ConfigContext):
+    ctx.traits[DeliveryTrait].create_scheduler = _create_scheduler
