@@ -250,6 +250,9 @@ Failures:
 - Targets the selector never picks fail with `scheduler_blocked` once all
   builds and deliveries have finished.
 
+A runnable example that orders deliveries by `deliver_after=<label>` tags lives in
+[`examples/delivery-scheduler`](../../../../../examples/delivery-scheduler).
+
 Run `aspect dev test-delivery-scheduler` for the unit tests.
 
 ---

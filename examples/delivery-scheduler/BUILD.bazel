@@ -1,0 +1,51 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# Each deliverable names the targets that must be delivered before it with a
+# `deliver_after=<label>` tag; `.aspect/config.axl` turns those into the order.
+# `worker` has none, so it starts as soon as it is built.
+
+sh_binary(
+    name = "migrate",
+    srcs = ["deliver.sh"],
+    args = [
+        "migrate",
+        "3",
+    ],
+    tags = ["deliverable"],
+)
+
+sh_binary(
+    name = "api",
+    srcs = ["deliver.sh"],
+    args = [
+        "api",
+        "2",
+    ],
+    tags = [
+        "deliver_after=//:migrate",
+        "deliverable",
+    ],
+)
+
+sh_binary(
+    name = "web",
+    srcs = ["deliver.sh"],
+    args = [
+        "web",
+        "1",
+    ],
+    tags = [
+        "deliver_after=//:api",
+        "deliverable",
+    ],
+)
+
+sh_binary(
+    name = "worker",
+    srcs = ["deliver.sh"],
+    args = [
+        "worker",
+        "1",
+    ],
+    tags = ["deliverable"],
+)
