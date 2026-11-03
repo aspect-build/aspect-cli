@@ -605,18 +605,18 @@ def _resolve_flags(ctx) -> list:
 
 def _setup_command(ctx, command: str, base_flags: list = []):
     """Prepare `ctx.bazel` for upcoming `ctx.bazel.<command>` calls and return the
-    active `Bazelrc`.
+    `Bazelrc` it sets with `ctx.bazel.use_rc`.
 
     Resolves startup + command flags, parses the workspace `.bazelrc` into a
     `Bazelrc`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
-    disclosure. Subsequent `ctx.bazel.build`/`test`/`query` use the active run
-    command — each self-expands and adds `--ignore_all_rc_files`. `base_flags`
+    disclosure. Subsequent `ctx.bazel.build`/`test`/`query` run under that rc —
+    each self-expands and adds `--ignore_all_rc_files`. `base_flags`
     are task-injected defaults the user can override via `--bazel-flag=...`;
     `trait.base_flags` (feature-injected defaults) are prepended ahead of them.
 
     Built-in tasks reach this through `phases.setup`, which
     calls it before the Bazel health-check hooks so the check inspects the same
-    active bazelrc every Bazel call uses.
+    rc every Bazel call uses.
     """
     startup_flags = _resolve_startup_flags(ctx)
     flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)

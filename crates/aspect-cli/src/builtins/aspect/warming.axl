@@ -126,8 +126,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # `ctx.bazel.shutdown()` stops that server before wiping `<mount>/output/*`;
     # otherwise the removal would race a live server and poison it. shutdown
     # goes through the same launcher resolution as the health check (honoring
-    # BAZEL_REAL / the tools/bazel wrapper) and replays the active bazelrc's
-    # startup flags, so it targets exactly that server. Best-effort throughout —
+    # BAZEL_REAL / the tools/bazel wrapper) and replays the startup flags
+    # of the rc set by use_rc, so it targets exactly that server. Best-effort throughout —
     # logged for the CLI and recorded in `data["warming"]`, no surface emit.
     mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
     if mount:

@@ -395,10 +395,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Set the active `Bazelrc` for subsequent `build` / `test` / `query` on
-    /// this context. Callable repeatedly to swap the active bazelrc between
-    /// phases. A per-call `rc=` on an invocation overrides the active one; with
-    /// no active and no per-call rc, Bazel runs vanilla (reads its own `.bazelrc`).
+    /// Set the `Bazelrc` that subsequent `build` / `test` / `query` on this
+    /// context run under (read back with `active_rc`). Callable repeatedly to
+    /// swap rcs between phases. A per-call `rc=` on an invocation overrides it;
+    /// with neither, Bazel runs vanilla (reads its own `.bazelrc`).
     fn use_rc<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] rc: values::Value<'v>,
@@ -876,15 +876,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
-    /// Shut down the Bazel server for the active bazelrc (`bazel shutdown`),
+    /// Shut down the Bazel server for the rc set by `use_rc` (`bazel shutdown`),
     /// returning the exit code. Best-effort: a missing or already-stopped server
     /// is not an error, so callers can run this before mutating the output base
     /// (e.g. wiping it) without first checking whether a server is live.
     ///
     /// Goes through the same launcher resolution as `build` / `info` /
     /// `health_check` (honors `BAZEL_REAL` and the `tools/bazel` wrapper via
-    /// `bazel_command`, sets `ASPECT_CLI_RUNNING`) and replays the active run
-    /// command's startup flags (`--output_base`, …), so it targets exactly the
+    /// `bazel_command`, sets `ASPECT_CLI_RUNNING`) and replays that rc's
+    /// startup flags (`--output_base`, …), so it targets exactly the
     /// server those calls started — not whatever a bare `bazel` on PATH would.
     ///
     /// **Examples**

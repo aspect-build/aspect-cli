@@ -102,8 +102,8 @@ def _resolve(ctx, command: str) -> _Invocation:
     # --remote_cache) are prepended by `setup_command` itself.
     base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
-    # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The active run
-    # command drives the health check (in results.setup) and every spawn below.
+    # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The rc set by
+    # use_rc drives the health check (in results.setup) and every spawn below.
     rc = setup_command(ctx, command, base_flags = base_flags)
 
     (announce_version, announce_command) = resolve_announce(ctx)
