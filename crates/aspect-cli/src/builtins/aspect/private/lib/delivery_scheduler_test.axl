@@ -1,6 +1,6 @@
 """Unit tests for `lib/delivery_scheduler.axl`."""
 
-load("@aspect//bazel.axl", "bazel")
+load("@aspect//bazel.axl", "bazel", "normalize_label")
 load("./delivery_scheduler.axl", "delivery_scheduler")
 
 A = "//a:a"
@@ -132,7 +132,7 @@ def _cancellation(ctx: TaskContext) -> None:
     _equal(running, [])
     _equal(_labels(ready), [A])
 
-def _apparent_labels(ctx: TaskContext) -> None:
+def _normalized_labels(ctx: TaskContext) -> None:
     seen = []
 
     def select(labels, outcomes):
@@ -221,7 +221,12 @@ def _plan(ctx: TaskContext) -> None:
     plan = delivery_scheduler.new_plan(["//a", "//a:a", B, "@@rules_x+//c:c"], ["//a"], rc, lambda _message: None)
     _equal(plan.candidates, [A, B, "@rules_x//c:c"])
     _equal(plan.selected, [A])
-    _equal(plan.normalize_label("//svc"), "//svc:svc")
+
+def _public_normalize_label(ctx: TaskContext) -> None:
+    """A factory's labels match the scheduler's once passed through `normalize_label`."""
+    plan = delivery_scheduler.new_plan(["//svc", "@@rules_x+//c:c"], ["//svc"], ctx.bazel.new_rc(), lambda _message: None)
+    _equal(plan.candidates, [normalize_label("//svc:svc"), normalize_label("@@rules_x+//c")])
+    _equal(normalize_label(":tool"), "//:tool")
 
 def _factory_results(ctx: TaskContext) -> None:
     calls = []
@@ -313,13 +318,14 @@ _TESTS = [
     _no_duplicate_dispatch,
     _selector_exception,
     _cancellation,
-    _apparent_labels,
+    _normalized_labels,
     _prerequisite_outcomes,
     _authoritative_outcomes,
     _dispatcher_skips_unchanged_state,
     _dispatcher_reports_error_once,
     _unstarted_reason,
     _plan,
+    _public_normalize_label,
     _factory_results,
     _cleanup,
     _cleanup_after_completion,

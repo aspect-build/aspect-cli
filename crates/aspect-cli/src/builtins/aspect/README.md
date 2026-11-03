@@ -205,23 +205,25 @@ delivery. `plan` is a `DeliveryPlan`:
 - `release_rc`: the `bazel.RunCommand` of the release build (read-only).
 - `report_progress(message)`: show progress on the status surface while the
   factory does slow work such as a `bazel query`. Throttled; safe to call often.
-- `normalize_label(label)`: convert a label to the form the scheduler uses.
 
 The factory returns a selector `choose_next(ready, outcomes)`. `ready` lists the
 built targets that have not started, and `outcomes` maps finished targets to
 `ok`, `skip`, `warn` or `fail`. Return one label from `ready` to start it, or
-`None` to wait. Every label is in apparent form with an explicit target name
-(`//svc:svc`), so pass the labels of your own graph through
-`plan.normalize_label`. A `skip` means this digest was already delivered;
+`None` to wait. Every label is normalized: written as in this workspace, with
+the target name spelled out (`//svc:svc`). Pass the labels of your own graph
+through `normalize_label` from `@aspect//bazel.axl` before comparing them. A
+`skip` means this digest was already delivered;
 `ok` is reported only after delivery state has been saved.
 
 ```python
+load("@aspect//bazel.axl", "normalize_label")
+
 def _create_scheduler(ctx, plan):
     prerequisites = {}  # label -> labels that must be delivered first
     for label in plan.selected:
         plan.report_progress("Querying prerequisites of " + label)
         deps = ctx.bazel.query("deps({}) intersect set({})".format(label, " ".join(plan.candidates)))
-        names = [plan.normalize_label(t.name) for t in deps]
+        names = [normalize_label(t.name) for t in deps]
         prerequisites[label] = [name for name in names if name != label]
 
     def choose_next(ready, outcomes):

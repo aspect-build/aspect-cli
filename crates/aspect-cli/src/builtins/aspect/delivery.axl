@@ -264,8 +264,9 @@ DeliveryTrait = trait(
             "(never under --dry-run or with nothing to deliver). Receives (ctx, DeliveryPlan) " +
             "and returns choose_next(ready, outcomes) -> label | None: pick one of the built, " +
             "unstarted labels in `ready`, or None to wait. `outcomes` maps finished labels to " +
-            "ok / skip / warn / fail. All labels are in apparent form; normalize graph labels " +
-            "with plan.normalize_label. The selector must not block. Unset keeps FIFO order."
+            "ok / skip / warn / fail. All labels are normalized; pass your own labels through " +
+            "normalize_label from @aspect//bazel.axl. The selector must not block. " +
+            "Unset keeps FIFO order."
         ),
     ),
     delivery_start = attr(
@@ -1727,7 +1728,7 @@ def _delivery_impl(ctx):
             )
             if planning_error:
                 error(ctx.std, planning_error)
-                unstarted = [spawnable[apparent_label(label)] for label in spawn_order]
+                unstarted = [spawnable[normalize_label(label)] for label in spawn_order]
                 failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, planning_error)
 
     if delivery_targets and not skip_delivery_build and not planning_error:

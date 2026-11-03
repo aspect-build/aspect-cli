@@ -1,13 +1,14 @@
 """Dispatch support for `aspect delivery`: the `DeliveryTrait.create_scheduler` plan and selector types, the factory call, slot filling, failure messages, and the cleanup every dispatch registers.
 
 Every label a scheduler sees (`DeliveryPlan.candidates` / `selected`, `ready`,
-the keys of `outcomes`) is in `apparent_label` form, the form dispatch keys on.
-A factory runs its own graph labels through `plan.normalize_label` to match.
+the keys of `outcomes`) is in the form `normalize_label` returns, which dispatch
+keys on. A factory runs its own labels through `normalize_label` from
+`@aspect//bazel.axl` to match.
 """
 
 load("@aspect//bazel.axl", bzl = "bazel")
 load("./delivery_results.axl", "add_result")
-load("./runnable.axl", "apparent_label")
+load("./runnable.axl", "normalize_label")
 
 DeliverySelector = typing.Callable[[list[str], dict[str, str]], str | None]
 
@@ -16,11 +17,10 @@ DeliveryPlan = record(
     selected = field(list[str]),
     release_rc = field(bazel.RunCommand),
     report_progress = field(typing.Callable[[str], None]),
-    normalize_label = field(typing.Callable[[str], str], default = apparent_label),
 )
 
 def _unique_labels(labels: list[str]) -> list[str]:
-    return list({apparent_label(label): True for label in labels})
+    return list({normalize_label(label): True for label in labels})
 
 def _new_plan(candidates: list[str], selected: list[str], release_rc: bazel.RunCommand, report_progress: typing.Callable) -> DeliveryPlan:
     return DeliveryPlan(
@@ -52,7 +52,7 @@ def _fill(ready: list, running: list, max_par: int, selector: DeliverySelector |
             break
         index = 0
         if selector != None:
-            keys = [apparent_label(entry[0]) for entry in ready]
+            keys = [normalize_label(entry[0]) for entry in ready]
             err, label = catch(selector, list(keys), dict(outcomes))
             if err != None:
                 return "scheduler_error: choose_next failed: " + err.message
@@ -107,7 +107,7 @@ def _record(data: dict, outcomes: dict, label: str, outcome: str, **kwargs) -> N
 
     `outcomes` is kept apart from the manifest entry because `delivery_target` hooks receive that entry and may mutate it.
     """
-    outcomes[apparent_label(label)] = outcome
+    outcomes[normalize_label(label)] = outcome
     add_result(data, label, outcome, **kwargs)
 
 def _cleanup(ctx: TaskContext, runs, xl: struct, running: list) -> None:
