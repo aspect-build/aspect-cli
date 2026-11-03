@@ -211,6 +211,11 @@ def _dispatcher_reports_error_once(ctx: TaskContext) -> None:
     _equal(dispatcher.error(), first)
     _equal(running, [])
 
+def _unstarted_reason(ctx: TaskContext) -> None:
+    _equal(delivery_scheduler.unstarted_reason("scheduler_error: x", True), "scheduler_error: x")
+    _equal(delivery_scheduler.unstarted_reason("", True), "cancelled: delivery did not start")
+    _equal(delivery_scheduler.unstarted_reason("", False).startswith("scheduler_blocked:"), True)
+
 def _plan(ctx: TaskContext) -> None:
     rc = ctx.bazel.new_rc()
     plan = delivery_scheduler.new_plan(["//a", "//a:a", B, "@@rules_x+//c:c"], ["//a"], rc, lambda _message: None)
@@ -313,6 +318,7 @@ _TESTS = [
     _authoritative_outcomes,
     _dispatcher_skips_unchanged_state,
     _dispatcher_reports_error_once,
+    _unstarted_reason,
     _plan,
     _factory_results,
     _cleanup,

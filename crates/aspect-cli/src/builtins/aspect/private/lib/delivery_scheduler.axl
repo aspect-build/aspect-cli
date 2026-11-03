@@ -1,4 +1,4 @@
-"""`DeliveryTrait.create_scheduler` support for `aspect delivery`: the plan and selector types, the factory call, slot filling and cleanup.
+"""`DeliveryTrait.create_scheduler` support for `aspect delivery`: the plan and selector types, the factory call, slot filling, failure messages and cleanup.
 
 Every label a scheduler sees (`DeliveryPlan.candidates` / `selected`, `ready`,
 the keys of `outcomes`) is in `apparent_label` form, the form dispatch keys on.
@@ -94,6 +94,14 @@ def _new_dispatcher(max_par: int, selector: DeliverySelector | None, spawn: typi
 
     return struct(fill = fill, error = lambda: state["error"])
 
+def _unstarted_reason(scheduler_error: str, cancelled: bool) -> str:
+    """The failure message for targets still in `ready` once nothing else can run."""
+    if scheduler_error:
+        return scheduler_error
+    if cancelled:
+        return "cancelled: delivery did not start"
+    return "scheduler_blocked: the scheduler did not select this target before every other build and delivery finished"
+
 def _record(data: dict, outcomes: dict, label: str, outcome: str, **kwargs) -> None:
     """Add a manifest result and the terminal outcome the selector reads.
 
@@ -129,6 +137,7 @@ delivery_scheduler = struct(
     create = _create,
     fill = _fill,
     new_dispatcher = _new_dispatcher,
+    unstarted_reason = _unstarted_reason,
     record = _record,
     cleanup = _cleanup,
 )

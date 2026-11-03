@@ -1054,6 +1054,14 @@ def _fire_target_hook(data, delivery_trait, runnables, label):
     for k, v in extras.items():
         entry["custom"][k] = v
 
+def _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, message) -> int:
+    """Record a FAIL row and result for each `(label, is_forced, output_sha)` in `unstarted`. Returns how many."""
+    for label, is_forced, output_sha in unstarted:
+        rows.append((label, "FAIL", "fail", message, output_sha, "-"))
+        delivery_scheduler.record(data, outcomes, label, "fail", message = message, output_sha = output_sha, is_forced = is_forced)
+        _fire_target_hook(data, delivery_trait, runnables, label)
+    return len(unstarted)
+
 def _planning_progress(ctx, ph, data, had_failure):
     """Post "Preparing delivery scheduler..." and return the `DeliveryPlan.report_progress` callable.
 
@@ -1718,12 +1726,8 @@ def _delivery_impl(ctx):
             )
             if planning_error:
                 error(ctx.std, planning_error)
-                for label in spawn_order:
-                    _, is_forced, output_sha = spawnable[apparent_label(label)]
-                    failed_count += 1
-                    rows.append((label, "FAIL", "fail", planning_error, output_sha, "-"))
-                    delivery_scheduler.record(data, outcomes, label, "fail", message = planning_error, output_sha = output_sha, is_forced = is_forced)
-                    _fire_target_hook(data, delivery_trait, runnables, label)
+                unstarted = [spawnable[apparent_label(label)] for label in spawn_order]
+                failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, planning_error)
 
     if delivery_targets and not skip_delivery_build and not planning_error:
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
@@ -1947,18 +1951,11 @@ def _delivery_impl(ctx):
             # never left undispatched.
             if build_done and runs.done and not running:
                 if ready:
-                    msg = dispatcher.error()
-                    if not msg:
-                        if ctx.cancellation.root.cancelled:
-                            msg = "cancelled: delivery did not start"
-                        else:
-                            msg = "scheduler_blocked: no target eligible after all builds and deliveries finished; inspect unsuccessful prerequisites and the scheduler policy"
+                    msg = delivery_scheduler.unstarted_reason(dispatcher.error(), ctx.cancellation.root.cancelled)
+                    if not dispatcher.error():
                         error(ctx.std, msg)
-                    for label, _ep, is_forced, output_sha in ready:
-                        failed_count += 1
-                        rows.append((label, "FAIL", "fail", msg, output_sha, "-"))
-                        delivery_scheduler.record(data, outcomes, label, "fail", message = msg, output_sha = output_sha, is_forced = is_forced)
-                        _fire_target_hook(data, delivery_trait, runnables, label)
+                    unstarted = [(label, is_forced, output_sha) for label, _ep, is_forced, output_sha in ready]
+                    failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, msg)
                     ready.clear()
                 break
 
