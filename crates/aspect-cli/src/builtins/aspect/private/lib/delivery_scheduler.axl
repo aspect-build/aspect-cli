@@ -1,4 +1,4 @@
-"""`DeliveryTrait.create_scheduler` support for `aspect delivery`: the plan and selector types, the factory call, slot filling, failure messages and cleanup.
+"""Dispatch support for `aspect delivery`: the `DeliveryTrait.create_scheduler` plan and selector types, the factory call, slot filling, failure messages, and the cleanup every dispatch registers.
 
 Every label a scheduler sees (`DeliveryPlan.candidates` / `selected`, `ready`,
 the keys of `outcomes`) is in `apparent_label` form, the form dispatch keys on.
@@ -111,7 +111,10 @@ def _record(data: dict, outcomes: dict, label: str, outcome: str, **kwargs) -> N
     add_result(data, label, outcome, **kwargs)
 
 def _cleanup(ctx: TaskContext, runs, xl: struct, running: list) -> None:
-    """Deferred cleanup: cancel the release build and running deliveries, drain the exec log, wait, and remove captured output.
+    """Deferred cleanup for every dispatch: cancel the release build and running deliveries, drain the exec log, wait, and remove captured output.
+
+    After a normal finish the build has ended and `running` is empty, so this
+    only drains the already-closed exec log and repeats the build wait.
 
     The exec log is drained before the build wait, as `bazel/exec_log.axl`
     requires. An exec-log error is re-raised only after every wait and file

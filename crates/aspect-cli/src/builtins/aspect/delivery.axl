@@ -25,7 +25,8 @@ Up to three Bazel build phases plus a dispatch loop:
      `--max-parallelization` at a time, then `dd.deliver()` (or `dd.delete()`
      on failure). FIFO by default; `DeliveryTrait.create_scheduler` can choose
      the order instead (`lib/delivery_scheduler.axl`). Targets it never makes
-     eligible fail as `scheduler_blocked`.
+     eligible fail as `scheduler_blocked`. If the task ends early, a deferred
+     cleanup cancels and reaps the release build and running deliveries.
 
 
 Flags
@@ -1775,8 +1776,7 @@ def _delivery_impl(ctx):
         settled = {}
         ready = []
         running = []
-        if selector != None:
-            ctx.defer(delivery_scheduler.cleanup, ctx, runs, xl, running)
+        ctx.defer(delivery_scheduler.cleanup, ctx, runs, xl, running)
         dispatcher = delivery_scheduler.new_dispatcher(
             max_par,
             selector,
