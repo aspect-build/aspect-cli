@@ -183,7 +183,7 @@ Symbols can be exported via `testonly_` prefix for writing unit tests.
 **§12 Use traits to inject behavior**: Tasks are supposed to stay generic, eg build task should not know about Workflows deployments
 but should provide necessary injection points via traits to allow external `feature()` to inject behavior. 
 
-For instance build.axl task uses BazelTrait to allow features to inspect final form of `BazelRc` object to decide whether to add `--remote_header` 
+For instance build.axl task uses BazelTrait to allow features to inspect final form of `bazel.Bazelrc` object to decide whether to add `--remote_header` 
 for the configured RE or BES backend.
 
 

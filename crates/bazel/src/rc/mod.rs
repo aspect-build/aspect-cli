@@ -104,7 +104,7 @@ impl fmt::Display for RcOption {
 
 /// Errors that can occur when loading or using a `Bazelrc`.
 #[derive(Debug, Error)]
-pub enum BazelRcError {
+pub enum BazelrcError {
     #[error("import target not found: {path}")]
     ImportNotFound { path: PathBuf },
 
@@ -204,7 +204,7 @@ impl Bazelrc {
         root: impl AsRef<Path>,
         startup_flags: &[S1],
         flags: &[RcOption],
-    ) -> Result<Self, BazelRcError> {
+    ) -> Result<Self, BazelrcError> {
         let root = root.as_ref();
         let rc_files = discover::discover_rc_files(root, startup_flags)?;
 
@@ -666,7 +666,7 @@ impl Bazelrc {
         &self,
         command: &str,
         skip_config_if_missing: &[&str],
-    ) -> Result<Vec<RcOption>, BazelRcError> {
+    ) -> Result<Vec<RcOption>, BazelrcError> {
         expand::expand_configs(self, command, skip_config_if_missing)
     }
 
@@ -1996,7 +1996,7 @@ mod tests {
         let mut stack = Vec::new();
         let err =
             parse::parse_file(&a, root, None, &mut sources, &mut options, &mut stack).unwrap_err();
-        assert!(matches!(err, BazelRcError::ImportCycle { .. }));
+        assert!(matches!(err, BazelrcError::ImportCycle { .. }));
     }
 
     #[test]
@@ -2374,7 +2374,7 @@ build:b --config=a
 
         let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
         let err = rc.expand_configs("build", &[]).unwrap_err();
-        assert!(matches!(err, BazelRcError::ConfigCycle { .. }));
+        assert!(matches!(err, BazelrcError::ConfigCycle { .. }));
     }
 
     /// Bazel accepts `--config NAME` as readily as `--config=NAME`, and the
@@ -2461,7 +2461,7 @@ build:b --config=a
         let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config", "loop"])).unwrap();
         assert!(matches!(
             rc.expand_configs("build", &[]).unwrap_err(),
-            BazelRcError::ConfigCycle { .. }
+            BazelrcError::ConfigCycle { .. }
         ));
 
         let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config", "absent"])).unwrap();
@@ -2478,7 +2478,7 @@ build:b --config=a
 
         let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=nonexistent"])).unwrap();
         let err = rc.expand_configs("build", &[]).unwrap_err();
-        assert!(matches!(err, BazelRcError::UndefinedConfig { .. }));
+        assert!(matches!(err, BazelrcError::UndefinedConfig { .. }));
     }
 
     #[test]
@@ -2498,7 +2498,7 @@ build:b --config=a
         );
         let err = rc.expand_configs("query", &[]).unwrap_err();
         assert!(
-            matches!(err, BazelRcError::UndefinedConfig { .. }),
+            matches!(err, BazelrcError::UndefinedConfig { .. }),
             "got: {err:?}"
         );
     }
@@ -3162,7 +3162,7 @@ import {}
         let root = dir.path();
 
         let err = Bazelrc::new(root, &["--bazelrc=/nonexistent/missing.bazelrc"], &[]).unwrap_err();
-        assert!(matches!(err, BazelRcError::BazelrcNotFound { .. }));
+        assert!(matches!(err, BazelrcError::BazelrcNotFound { .. }));
     }
 
     // ── Error cases ───────────────────────────────────────────────────────────
@@ -3174,7 +3174,7 @@ import {}
         fs::write(root.join(".bazelrc"), "import foo bar\n").unwrap();
 
         let err = Bazelrc::new(root, ISOLATE, &[]).unwrap_err();
-        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+        assert!(matches!(err, BazelrcError::InvalidImportArgs { .. }));
     }
 
     #[test]
@@ -3184,7 +3184,7 @@ import {}
         fs::write(root.join(".bazelrc"), "try-import foo bar\n").unwrap();
 
         let err = Bazelrc::new(root, ISOLATE, &[]).unwrap_err();
-        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+        assert!(matches!(err, BazelrcError::InvalidImportArgs { .. }));
     }
 
     // ── Config expansion ──────────────────────────────────────────────────────
