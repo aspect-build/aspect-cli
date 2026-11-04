@@ -76,7 +76,7 @@ fn render_property(name: &str, prop: &DocProperty) -> String {
     format!("{name}: {}", prop.typ)
 }
 
-/// `@bazel//bazel.Bazel.query(expr: str, /, *, rc: RunCommand = None) -> bazel.query.Query`
+/// `@bazel//bazel.Bazel.query(expr: str, /, *, rc: Bazelrc = None) -> bazel.query.Query`
 fn render_function(name: &str, f: &DocFunction) -> String {
     let render_param = |p: &DocParam| match &p.default_value {
         Some(default) => format!("{}: {} = {}", p.name, p.typ, default),

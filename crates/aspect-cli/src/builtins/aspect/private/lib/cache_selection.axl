@@ -96,7 +96,7 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
     return tests
 
 # Negative filter values are valid Bazel argv values even though they start
-# with '-'. Other two-token pairs use the same non-flag guard as BazelRC.
+# with '-'. Other two-token pairs use the same non-flag guard as Bazelrc.
 _NEGATIVE_FILTER_FLAGS = ["--test_tag_filters", "--test_size_filters", "--test_timeout_filters", "--test_lang_filters", "--test_filter"]
 
 def testonly_attribution_flags(flags: list) -> list:

@@ -313,7 +313,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     rc = ph.setup(ctx.args.formatter_target, "format_results")
     announce_version, announce_command = bzl.announce.resolve(ctx)
 
-    # The run command is the build's only input: per-invocation endpoint auth
+    # The bazelrc is the build's only input: per-invocation endpoint auth
     # joins it rather than riding alongside as flags.
     rc = bzl.rc_with_flags(ctx, rc, bzl.rc_flags(ctx, rc, "build"))
 

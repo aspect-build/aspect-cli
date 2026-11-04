@@ -402,7 +402,7 @@ fn start<'v>(
     targets: &[String],
     build_events: (bool, Vec<super::build::BuildEventSink>, Vec<BuildEventIter>),
     execution_log: (bool, Vec<ExecLogSink>, Vec<super::iter::ExecLogIter>),
-    rc: Option<bazel::rc::BazelRC>,
+    rc: Option<bazel::rc::Bazelrc>,
     directory: Option<String>,
     (build_stdout, build_stderr): (Stdio, Stdio),
     announce: super::build::AnnounceSpawn,
@@ -846,7 +846,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     /// * `cwd` - Working directory; the runfiles workspace directory when omitted.
     /// * `stdin`, `stdout`, `stderr` - `"inherit"` (the default), `"piped"`,
     ///   `"null"`, or a writable file stream from `ctx.std.fs.create(...)`.
-    /// * `rc` - The `RunCommand` the build runs under; the active one from
+    /// * `rc` - The `Bazelrc` the build runs under; the active one from
     ///   `use_rc` when omitted.
     /// * `directory`, `build_events`, `execution_log`, `announce_version`,
     ///   `announce_command` - As on `ctx.bazel.build`. The build's own
@@ -882,7 +882,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::Bazelrc>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -956,7 +956,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     /// # Arguments
     ///
     /// * `targets` - The labels to build.
-    /// * `rc` - The `RunCommand` the build runs under; the active one from
+    /// * `rc` - The `Bazelrc` the build runs under; the active one from
     ///   `use_rc` when omitted.
     /// * `stdout`, `stderr`, `stdio` - The build's streams, as on
     ///   `ctx.bazel.build`; nothing is spawned here, so these are Bazel's.
@@ -988,7 +988,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<ExecLogSink, super::iter::ExecLogIter>>,
         >,
-        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::BazelRC>,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<&'v bazel::rc::Bazelrc>,
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<

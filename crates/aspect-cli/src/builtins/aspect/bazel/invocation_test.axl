@@ -96,7 +96,7 @@ def _test_attempt_dispatch_does_not_fire_build_end(ctx: TaskContext) -> None:
     _eq("build_end not fired", recorder["build_end"], [])
 
 def _fake_rc(values = {}):
-    """Stand-in for a `RunCommand`: `target_patterns` calls only `flag_value`.
+    """Stand-in for a `Bazelrc`: `target_patterns` calls only `flag_value`.
     Same shape as the fakes in `bazel_flags_test.axl` /
     `deployment_flags_test.axl`, keyed `{command: {flag: value}}` so a test can
     pin that the lookup is command-scoped. The real last-wins / `=`-form /

@@ -202,7 +202,7 @@ delivery. `plan` is a `DeliveryPlan`:
 
 - `candidates`: every resolved target, before change detection.
 - `selected`: the targets this run will deliver, including forced ones.
-- `release_rc`: the `bazel.RunCommand` of the release build (read-only).
+- `release_rc`: the `bazel.Bazelrc` of the release build (read-only).
 - `report_progress(message)`: show progress on the status surface while the
   factory does slow work such as a `bazel query`. Throttled; safe to call often.
 

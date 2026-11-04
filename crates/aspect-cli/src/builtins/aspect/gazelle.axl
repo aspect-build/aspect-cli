@@ -473,7 +473,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         data["gazelle"]["no_changed_dirs"] = True
         return 0
 
-    # The run command is the build's only input: per-invocation endpoint auth
+    # The bazelrc is the build's only input: per-invocation endpoint auth
     # joins it rather than riding alongside as flags.
     rc = bzl.rc_with_flags(ctx, rc, endpoint_auth_flags)
 

@@ -940,8 +940,8 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
       base_flags:  default flags for `bazel.setup_command`; ignored sans BazelTrait.
 
     Returns:
-      RunCommand | None: the active run command when `BazelTrait` is declared
-      (also registered via `ctx.bazel.use_rc`), else `None`. Does not return
+      Bazelrc | None: the parsed rc when `BazelTrait` is declared
+      (also set with `ctx.bazel.use_rc`), else `None`. Does not return
       when a health check fails (step 4).
     """
     append_runner_job_history(ctx)
@@ -967,7 +967,7 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
     )
 
     # Bazel rc parse + use_rc (building tasks only). Must precede the health
-    # checks, which inspect the active run command's startup flags.
+    # checks, which inspect that rc's startup flags.
     rc = None
     if BazelTrait in ctx.traits:
         rc = bazel.setup_command(ctx, command, base_flags = base_flags)
@@ -984,7 +984,7 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
 def _setup_surface(ctx, surface, subject, kind, data):
     """Surface half of `_setup`: everything except the Bazel rc parse.
 
-    For tasks that resolve the active `RunCommand` themselves BEFORE the
+    For tasks that resolve the active `Bazelrc` themselves BEFORE the
     lifecycle surface opens — e.g. the `bazel.build(ctx)` / `bazel.test(ctx)`
     invocation handle owns the flag → `parse_rc` → `use_rc` pipeline, then hands
     the live rc here. Runs, in order:
@@ -992,14 +992,14 @@ def _setup_surface(ctx, surface, subject, kind, data):
       1. `append_runner_job_history`.
       2. Open the `🔧 Setup` phase mark (the task's first `phases.update`, so
          surfaces self-init and render their first body from `data`).
-      3. `health_check` hooks — they read the ALREADY-active run command
-         (`ctx.bazel.active_rc()`, set by the caller's rc pipeline), so this
+      3. `health_check` hooks — they read the rc the caller ALREADY set
+         (`ctx.bazel.active_rc()`, from the caller's rc pipeline), so this
          must run after the caller has `use_rc`'d. On unhealthy, concludes the
          surface and ends the task with the message and no traceback — never
          returns.
 
     Unlike `_setup`, this never touches `ctx.bazel` flags itself; the caller
-    owns the rc so the same active run command drives both the health check and
+    owns the rc so the same rc drives both the health check and
     every subsequent spawn.
     """
     append_runner_job_history(ctx)
@@ -1066,7 +1066,7 @@ def _new(ctx, data):
     Methods:
       ph.ctx  — the bound TaskContext (for helpers that also need ctx directly).
       ph.data — the bound data dict. Kept a stable reference across `reset`.
-      ph.setup(subject, kind, command="build", base_flags=[]) -> RunCommand|None
+      ph.setup(subject, kind, command="build", base_flags=[]) -> Bazelrc|None
       ph.update(status, progress, kind="", data=None, priority=True, phase=None,
                 final=False, conclusion="", exit_code=0, subject="")
                 — `data=None` uses the held dict; pass `data={}` for a data-less

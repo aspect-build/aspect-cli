@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{BazelRcError, RcOption, preprocess, tokenize};
+use super::{BazelrcError, RcOption, preprocess, tokenize};
 
 /// Recursively parse a bazelrc file, resolving imports.
 ///
@@ -16,8 +16,8 @@ pub(crate) fn parse_file(
     sources: &mut Vec<PathBuf>,
     options: &mut HashMap<String, Vec<RcOption>>,
     import_stack: &mut Vec<PathBuf>,
-) -> Result<(), BazelRcError> {
-    let canonical = path.canonicalize().map_err(|e| BazelRcError::Io {
+) -> Result<(), BazelrcError> {
+    let canonical = path.canonicalize().map_err(|e| BazelrcError::Io {
         file: path.to_path_buf(),
         source: e,
     })?;
@@ -29,14 +29,14 @@ pub(crate) fn parse_file(
             .map(|p| p.display().to_string())
             .chain(std::iter::once(canonical.display().to_string()))
             .collect();
-        return Err(BazelRcError::ImportCycle { chain });
+        return Err(BazelrcError::ImportCycle { chain });
     }
 
     import_stack.push(canonical.clone());
     let source_index = sources.len();
     sources.push(canonical.clone());
 
-    let content = std::fs::read_to_string(&canonical).map_err(|e| BazelRcError::Io {
+    let content = std::fs::read_to_string(&canonical).map_err(|e| BazelrcError::Io {
         file: canonical.clone(),
         source: e,
     })?;
@@ -52,13 +52,13 @@ pub(crate) fn parse_file(
         match tokens[0].as_str() {
             "import" => {
                 if tokens.len() != 2 {
-                    return Err(BazelRcError::InvalidImportArgs {
+                    return Err(BazelrcError::InvalidImportArgs {
                         directive: line.clone(),
                     });
                 }
                 let import_path = resolve_import_path(&tokens[1], workspace_root);
                 if !import_path.exists() {
-                    return Err(BazelRcError::ImportNotFound { path: import_path });
+                    return Err(BazelrcError::ImportNotFound { path: import_path });
                 }
                 parse_file(
                     &import_path,
@@ -71,7 +71,7 @@ pub(crate) fn parse_file(
             }
             "try-import" => {
                 if tokens.len() != 2 {
-                    return Err(BazelRcError::InvalidImportArgs {
+                    return Err(BazelrcError::InvalidImportArgs {
                         directive: line.clone(),
                     });
                 }
@@ -89,7 +89,7 @@ pub(crate) fn parse_file(
             }
             "try-import-if-bazel-version" => {
                 if tokens.len() != 3 {
-                    return Err(BazelRcError::InvalidImportArgs {
+                    return Err(BazelrcError::InvalidImportArgs {
                         directive: line.clone(),
                     });
                 }
@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn parse(path: &Path, root: &Path) -> Result<HashMap<String, Vec<RcOption>>, BazelRcError> {
+    fn parse(path: &Path, root: &Path) -> Result<HashMap<String, Vec<RcOption>>, BazelrcError> {
         let mut sources = Vec::new();
         let mut options = HashMap::new();
         let mut stack = Vec::new();
@@ -172,7 +172,7 @@ mod tests {
         let rc = root.join("test.bazelrc");
         fs::write(&rc, "import foo bar\n").unwrap();
         let err = parse(&rc, root).unwrap_err();
-        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+        assert!(matches!(err, BazelrcError::InvalidImportArgs { .. }));
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         let rc = root.join("test.bazelrc");
         fs::write(&rc, "try-import foo bar\n").unwrap();
         let err = parse(&rc, root).unwrap_err();
-        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+        assert!(matches!(err, BazelrcError::InvalidImportArgs { .. }));
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         let rc = root.join("test.bazelrc");
         fs::write(&rc, "try-import-if-bazel-version >=8\n").unwrap();
         let err = parse(&rc, root).unwrap_err();
-        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+        assert!(matches!(err, BazelrcError::InvalidImportArgs { .. }));
     }
 
     // ── %workspace% path resolution ───────────────────────────────────────────
@@ -259,6 +259,6 @@ mod tests {
         fs::write(&a, format!("import {}\n", b.display())).unwrap();
 
         let err = parse(&a, root).unwrap_err();
-        assert!(matches!(err, BazelRcError::ImportCycle { .. }));
+        assert!(matches!(err, BazelrcError::ImportCycle { .. }));
     }
 }

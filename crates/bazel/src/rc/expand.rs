@@ -1,8 +1,8 @@
-use super::{BazelRC, BazelRcError, RcOption};
+use super::{Bazelrc, BazelrcError, RcOption};
 
 /// Expand all `--config=` flags for the given command, returning a flat ordered list.
 ///
-/// CLI flags are passed during `BazelRC::new` construction and stored as `always` options,
+/// CLI flags are passed during `Bazelrc::new` construction and stored as `always` options,
 /// so they are already included via `options_for`. No separate cli_args parameter is needed.
 ///
 /// Each `RcOption` in the result preserves its `version_condition`. When a version-gated
@@ -12,10 +12,10 @@ use super::{BazelRC, BazelRcError, RcOption};
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
 pub(crate) fn expand_configs(
-    rc: &BazelRC,
+    rc: &Bazelrc,
     command: &str,
     skip_config_if_missing: &[&str],
-) -> Result<Vec<RcOption>, BazelRcError> {
+) -> Result<Vec<RcOption>, BazelrcError> {
     let mut base: Vec<RcOption> = rc.options_for(command).into_iter().cloned().collect();
 
     // Check for --enable_platform_specific_config
@@ -73,7 +73,7 @@ fn config_request(args: &[RcOption], index: usize) -> Option<(&str, usize)> {
 /// The invariants of one expansion pass live on [`Expander`]; only the ancestor
 /// chain and the output accumulate as it recurses.
 struct Expander<'a> {
-    rc: &'a BazelRC,
+    rc: &'a Bazelrc,
     command: &'a str,
     /// When true, an undefined config is silently skipped rather than an error.
     /// Used for the synthetic `--config=<os>` injected by
@@ -88,7 +88,7 @@ impl Expander<'_> {
         args: &[RcOption],
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
-    ) -> Result<(), BazelRcError> {
+    ) -> Result<(), BazelrcError> {
         let mut index = 0;
         while index < args.len() {
             let Some((config_name, span)) = config_request(args, index) else {
@@ -119,11 +119,11 @@ impl Expander<'_> {
         parent_condition: Option<&str>,
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
-    ) -> Result<(), BazelRcError> {
+    ) -> Result<(), BazelrcError> {
         if ancestor_chain.iter().any(|seen| seen == config_name) {
             let mut cycle = ancestor_chain.clone();
             cycle.push(config_name.to_owned());
-            return Err(BazelRcError::ConfigCycle { cycle });
+            return Err(BazelrcError::ConfigCycle { cycle });
         }
 
         // Every section the command reads contributes its `{section}:{config}` block.
@@ -148,7 +148,7 @@ impl Expander<'_> {
             if is_implicit_platform || self.skip_config_if_missing.contains(&config_name) {
                 return Ok(());
             }
-            return Err(BazelRcError::UndefinedConfig {
+            return Err(BazelrcError::UndefinedConfig {
                 command: self.command.to_owned(),
                 name: config_name.to_owned(),
             });

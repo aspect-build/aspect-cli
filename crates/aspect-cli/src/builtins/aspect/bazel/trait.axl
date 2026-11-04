@@ -166,7 +166,7 @@ BazelTrait = trait(
     task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time. Scoped to the `build` rc section like extra_flags, with the same per-entry opt-out: a hook that needs another section returns a `(flag, version, command)` tuple for that flag. That is strictly more expressive than a field would be — a hook can pick the section per flag and at task time — so there are deliberately no build_task_flags/test_task_flags siblings"),
 
     # For flags that depend on the resolved rc rather than the CLI args. `rc` is
-    # the builtin RunCommand (unmodelable here), so it's typed loosely.
+    # the builtin Bazelrc (unmodelable here), so it's typed loosely.
     rc_flags = attr(list[typing.Callable[[TaskContext, typing.Any, str], list[str]]], default = [], description = "Hooks called with (ctx, resolved rc, command) after rc parse; return flags appended to each spawn"),
 
     # Lifecycle hooks — lists of callables; callers close over their own state

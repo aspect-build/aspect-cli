@@ -619,7 +619,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
 
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
-    # Phase-1 extras layered on the active run command. Force `=minimal`:
+    # Phase-1 extras layered on the rc from setup. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk. State is kept (no
     # `--nokeep_state_after_build`) so the runner's shared analysis stays warm
     # for build/test jobs — phase 2 forces its own re-evaluation via the aspect
@@ -778,7 +778,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         dummy = start_dummy_executor()
         phase2_executor_uri = dummy.grpc_uri
 
-    # Phase-2 extras on the active run command. Force `=minimal`: phase 2 reads
+    # Phase-2 extras on the rc from setup. Force `=minimal`: phase 2 reads
     # digests from the gRPC log, not disk. The aspect rides `aspects=` below.
     phase2_flags = endpoint_auth_flags + [
         "--remote_executor=" + phase2_executor_uri,
@@ -1287,7 +1287,7 @@ def _delivery_impl(ctx):
     delivery_suffix = sanitize_filename(ctx.args.workflows_runner_delivery_output_base_suffix)
 
     # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
-    # returns the active RunCommand. A failed health check fails the task inside.
+    # returns the Bazelrc it set with use_rc. A failed health check fails the task inside.
     rc = ph.setup(
         targets_subject,
         "delivery_results",
@@ -1374,7 +1374,7 @@ def _delivery_impl(ctx):
     # Delivery needs a remote cache (may arrive from any rc section, incl. a
     # common --remote_cache=...). A real --remote_executor is tracked separately
     # (used directly by phase 2; else phase 2 uses a dummy, so no real RBE is
-    # required). The run command resolves both regardless of source section.
+    # required). The bazelrc resolves both regardless of source section.
     remote_cache_uri = rc.flag_value("--remote_cache", command = "build")
     user_remote_executor_uri = rc.flag_value("--remote_executor", command = "build")
 
@@ -1418,7 +1418,7 @@ def _delivery_impl(ctx):
         # Echo the query so the resolved set (or failure) is attributable to it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
 
-        # The query runs off the active run command, self-expanded for the
+        # The query runs under the rc set by use_rc, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
         # external repos the way the build does — an rc-set `--noenable_bzlmod`
         # is honored, and so is an injected `--repo_env` or `--registry`, which
@@ -1694,8 +1694,8 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = bzl.flags.expand_config(ctx, ctx.args.release_bazel_flags)
 
-        # Flag order (last-wins): active run command, then these per-call extras,
-        # folded into the run command `run_all` builds under. `run_all` itself
+        # Flag order (last-wins): the rc set by use_rc, then these per-call extras,
+        # folded into the bazelrc `run_all` builds under. `run_all` itself
         # adds what building-to-run needs: the runinfo aspect so each deliverable's
         # `args`/env replay like `bazel run`, and the `--remote_download_outputs=toplevel`
         # floor when the rc resolves to `=minimal`. release_flags
