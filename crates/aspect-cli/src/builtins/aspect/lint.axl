@@ -707,11 +707,11 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
 def _lint_fix_flag(ctx: TaskContext) -> str:
     """rules_lint's fix flag, under the name the root module sees rules_lint by.
 
-    Falls back to the old aspect_rules_lint name when MODULE.bazel names neither,
-    as in a WORKSPACE build.
+    Falls back to the old aspect_rules_lint name without a repository mapping,
+    as in a WORKSPACE build. Must run after `phases.setup`, so the lookup reaches
+    the build's server.
     """
-    root = ctx.std.env.aspect_root_dir()
-    repo = rules_lint_repo_name(lambda path: ctx.std.fs.try_read_to_string(root + "/" + path))
+    repo = rules_lint_repo_name(ctx.bazel.repo_mapping() or {})
     return "--@%s//lint:fix" % (repo or "aspect_rules_lint")
 
 # buildifier: disable=function-docstring
@@ -740,7 +740,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     fix_produce = fix_apply or bool(lint_trait.lint_patch)
     if fix_produce:
         base_flags.append("--output_groups=rules_lint_patch")
-        base_flags.append(_lint_fix_flag(ctx))
 
     # rules_lint_human / rules_lint_machine are separate action sets (requesting
     # both runs each linter twice): human = colored terminal output, machine =
@@ -756,6 +755,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
     announce_version, announce_command = bzl.announce.resolve(ctx)
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
+    build_flags = endpoint_auth_flags + ([_lint_fix_flag(ctx)] if fix_produce else [])
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
@@ -831,7 +831,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,
-        flags = endpoint_auth_flags,
+        flags = build_flags,
         *ctx.args.targets
     )
 

@@ -294,6 +294,25 @@ impl Bazelrc {
         }
     }
 
+    /// A copy without the flags the caller passed on the command line, except
+    /// their `--config=` references. A sidecar command such as `mod` rejects the
+    /// build-only flags a task passes, but still needs the rc files' own
+    /// sections and the requested configs.
+    pub fn without_command_line_flags(&self) -> BazelRC {
+        let mut rc = self.clone();
+        let cli: Vec<usize> = rc
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.as_path() == std::path::Path::new("<command line>"))
+            .map(|(i, _)| i)
+            .collect();
+        if let Some(always) = rc.options.get_mut("always") {
+            always.retain(|o| !cli.contains(&o.source_index) || o.value.starts_with("--config"));
+        }
+        rc
+    }
+
     /// The ordered list of source files that were loaded.
     pub fn sources(&self) -> &[PathBuf] {
         &self.sources
@@ -2230,6 +2249,33 @@ build:opt --compilation_mode=opt
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
+    }
+
+    #[test]
+    fn without_command_line_flags_keeps_rc_sections_and_configs() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            &root.join(".bazelrc"),
+            "common --registry=https://example.com\ncommon:ci --lockfile_mode=off\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(
+            root,
+            ISOLATE,
+            &flags(&["--aspects=//:a.bzl%a", "--config=ci"]),
+        )
+        .unwrap()
+        .without_command_line_flags();
+        let (_startup, command_flags) = rc.resolve_for_command("mod").unwrap();
+        assert_eq!(
+            command_flags,
+            vec![
+                "--default_override=0:common=--registry=https://example.com".to_string(),
+                "--default_override=0:common=--lockfile_mode=off".to_string(),
+            ],
+        );
     }
 
     #[test]

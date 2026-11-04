@@ -664,7 +664,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
 
-    # Finds rules_lint under its old or new name (or a repo_name) in MODULE.bazel
+    # Finds rules_lint under its old or new name (or a repo_name) in the repo mapping
     # so `lint --fix` sets a fix flag whose label resolves.
     # Run with: aspect dev test-lint-repo-name
     ctx.tasks.add(rules_lint_repo_name_tests)

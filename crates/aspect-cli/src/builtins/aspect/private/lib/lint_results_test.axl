@@ -6,7 +6,7 @@ Snapshot tests for template rendering and the annotation pipeline:
 Pure-function tests for the PR auto-detect routing contract:
   aspect dev test-lint-annotation-plan
 
-Pure-function tests for finding rules_lint's name in MODULE.bazel:
+Pure-function tests for finding rules_lint's name in a repository mapping:
   aspect dev test-lint-repo-name
 
 Scenarios:
@@ -1069,32 +1069,18 @@ detect_lint_tool_tests = task(
 )
 
 def _test_rules_lint_repo_name(ctx):
-    def name(files):
-        return rules_lint_repo_name(lambda path: files.get(path))
-
-    _eq("renamed module", name({"MODULE.bazel": 'bazel_dep(name = "rules_lint", version = "3.0.0")'}), "rules_lint")
-    _eq("old module", name({"MODULE.bazel": 'bazel_dep(name = "aspect_rules_lint", version = "2.5.2")'}), "aspect_rules_lint")
+    _eq("renamed module", rules_lint_repo_name({"": "", "rules_lint": "rules_lint+"}), "rules_lint")
+    _eq("old module", rules_lint_repo_name({"aspect_rules_lint": "aspect_rules_lint+"}), "aspect_rules_lint")
+    _eq("Bazel 7 canonical name", rules_lint_repo_name({"aspect_rules_lint": "aspect_rules_lint~"}), "aspect_rules_lint")
+    _eq("repo_name override", rules_lint_repo_name({"lint": "rules_lint+"}), "lint")
+    _eq("multiple_version_override", rules_lint_repo_name({"rules_lint": "rules_lint+3.0.0"}), "rules_lint")
+    _eq("rules_lint as the main repository", rules_lint_repo_name({"": "", "rules_lint": ""}), "rules_lint")
     _eq(
-        "multi-line call with repo_name",
-        name({"MODULE.bazel": 'bazel_dep(\n    name = "rules_lint",\n    version = "3.0.0",\n    repo_name = "lint",\n    dev_dependency = True,\n)\n'}),
-        "lint",
+        "other lint modules are skipped",
+        rules_lint_repo_name({"rules_lint_rust": "rules_lint_rust+", "rules_go": "rules_go+"}),
+        None,
     )
-    _eq("repo_name = None is not visible", name({"MODULE.bazel": 'bazel_dep(name = "rules_lint", repo_name = None)'}), None)
-    _eq(
-        "comments and other lint modules are skipped",
-        name({"MODULE.bazel": '# bazel_dep(name = "aspect_rules_lint")\nbazel_dep(name = "rules_lint_rust")\nbazel_dep(name = "rules_lint")  # linters\n'}),
-        "rules_lint",
-    )
-    _eq(
-        "dep in an included file",
-        name({
-            "MODULE.bazel": 'include("//tools/lint:deps.MODULE.bazel")',
-            "tools/lint/deps.MODULE.bazel": 'bazel_dep(name = "rules_lint", version = "3.0.0")',
-        }),
-        "rules_lint",
-    )
-    _eq("no dep", name({"MODULE.bazel": 'bazel_dep(name = "rules_go")'}), None)
-    _eq("no MODULE.bazel", name({}), None)
+    _eq("no mapping", rules_lint_repo_name({}), None)
 
     print("lint_results.axl::rules_lint_repo_name: all cases OK")
     return 0

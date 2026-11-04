@@ -876,6 +876,71 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
+    /// Run `bazel mod dump_repo_mapping <repo>` and return that repository's
+    /// mapping as a dict from apparent to canonical repository name.
+    ///
+    /// `repo` defaults to `""`, the root module, which labels in command-line
+    /// flags resolve against. Returns `None` when the command fails, as it does
+    /// without Bzlmod or on Bazel older than 7.1.
+    ///
+    /// Runs under the startup flags and rc-file options of the active
+    /// `RunCommand` (`use_rc`) or the per-call `rc=`, so it reaches the same
+    /// server and module resolution as the build. Flags the task added on the
+    /// command line are left out (`--config=` aside), since `mod` rejects
+    /// build-only ones such as `--aspects`.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _impl(ctx):
+    ///     mapping = ctx.bazel.repo_mapping() or {}
+    ///     print(mapping.get("rules_lint"))   # "rules_lint+"
+    /// ```
+    fn repo_mapping<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos, default = String::new())] repo: String,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneOr<SmallMap<String, String>>> {
+        require_claimed_flags(this)?;
+        let (startup_flags, command_flags) = match effective_rc(this, rc) {
+            Some(rc) => rc.without_command_line_flags().resolve_for_command("mod")?,
+            None => (read_startup_flags(this)?, Vec::new()),
+        };
+
+        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
+        cmd.args(&startup_flags);
+        cmd.args(["mod", "dump_repo_mapping"]);
+        cmd.args(&command_flags);
+        cmd.arg(&repo);
+        if let Some(dir) = directory.into_option() {
+            cmd.current_dir(dir);
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.stdin(Stdio::null());
+        // Bound to the root, so a cancel reaches it and the wait is a safe point.
+        let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
+            .wait_with_output()
+            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
+
+        if !output.status.success() {
+            return Ok(NoneOr::None);
+        }
+        let mapping: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                anyhow::anyhow!("failed to parse bazel mod dump_repo_mapping output: {}", e)
+            })?;
+        Ok(NoneOr::Other(
+            mapping
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned())))
+                .collect(),
+        ))
+    }
+
     /// Shut down the Bazel server for the rc set by `use_rc` (`bazel shutdown`),
     /// returning the exit code. Best-effort: a missing or already-stopped server
     /// is not an error, so callers can run this before mutating the output base
