@@ -21,8 +21,12 @@ Up to three Bazel build phases plus a dispatch loop:
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
-  5. Dispatch — `bazel run` each pending target, then `dd.deliver()`
-     (or `dd.delete()` on failure).
+  5. Dispatch — `bazel run` each pending target as soon as it is built, up to
+     `--max-parallelization` at a time, then `dd.deliver()` (or `dd.delete()`
+     on failure). FIFO by default; `DeliveryTrait.create_scheduler` can choose
+     the order instead (`lib/delivery_scheduler.axl`). Targets it never makes
+     eligible fail as `scheduler_blocked`. If the task ends early, a deferred
+     cleanup cancels and reaps the release build and running deliveries.
 
 
 Flags
@@ -227,7 +231,8 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
 load("./private/lib/ci.axl", "resolve_build_url")
-load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
+load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
+load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
@@ -236,7 +241,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./private/lib/runnable.axl", "apparent_label")
+load("./private/lib/runnable.axl", "normalize_label")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
 
@@ -247,7 +252,23 @@ DRY_RUN_OFF = "false"
 DRY_RUN_ON = "true"
 DRY_RUN_BUILD = "build"
 
+DeliveryPlan = _DeliveryPlan
+DeliverySelector = _DeliverySelector
+
 DeliveryTrait = trait(
+    create_scheduler = attr(
+        typing.Callable[[TaskContext, DeliveryPlan], DeliverySelector] | None,
+        default = None,
+        description = (
+            "Optional factory for the delivery order, called once before the release build " +
+            "(never under --dry-run or with nothing to deliver). Receives (ctx, DeliveryPlan) " +
+            "and returns choose_next(ready, outcomes) -> label | None: pick one of the built, " +
+            "unstarted labels in `ready`, or None to wait. `outcomes` maps finished labels to " +
+            "ok / skip / warn / fail. All labels are normalized; pass your own labels through " +
+            "normalize_label from @aspect//bazel.axl. The selector must not block. " +
+            "Unset keeps FIFO order."
+        ),
+    ),
     delivery_start = attr(
         typing.Callable[[], None],
         default = lambda: None,
@@ -470,7 +491,7 @@ UncacheableAction = record(
 
 def collect_blocking_culprits(uncacheable_actions: list, non_hermetic_misses: dict, targets: list) -> dict:
     """Shared uncacheable actions that blocked change-detection hashing, keyed
-    by apparent label → list of action/mnemonic hints.
+    by normalized label → list of action/mnemonic hints.
 
     Combines the BES-reported uncacheable actions (ground truth) with any
     gRPC-log non-cacheable producers that are not themselves deliverables —
@@ -478,10 +499,10 @@ def collect_blocking_culprits(uncacheable_actions: list, non_hermetic_misses: di
     matches deliverable labels, so a shared dependency poisoning many
     deliverables would go unnamed. A deliverable's own miss is left out here
     (its per-row message already carries it). Exported for unit testing."""
-    deliverables = {apparent_label(t): True for t in targets}
+    deliverables = {normalize_label(t): True for t in targets}
     culprits = {}
     for a in uncacheable_actions:
-        hints = culprits.setdefault(apparent_label(a.label), [])
+        hints = culprits.setdefault(normalize_label(a.label), [])
         if a.action and a.action not in hints:
             hints.append(a.action)
     for producer, mnemonics in non_hermetic_misses.items():
@@ -529,7 +550,7 @@ def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
 def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_misses: dict) -> int:
     """Count delivery targets whose digest is missing for an unexplained reason.
 
-    Unresolved = no entry in `output_shas`; explained = its apparent label is
+    Unresolved = no entry in `output_shas`; explained = its normalized label is
     in `non_hermetic_misses` (the post-opt-out set driving the WARN rows).
     Targets with no such entry (own DeliveryHash lookup non-OK, or only a
     declared opt-out) get the generic message and count as unexplained.
@@ -537,7 +558,7 @@ def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_
     return len([
         label
         for label in targets
-        if label not in output_shas and apparent_label(label) not in non_hermetic_misses
+        if label not in output_shas and normalize_label(label) not in non_hermetic_misses
     ])
 
 def should_surface_phase2_stderr(unexplained_unresolved: int, getactionresult_count: int) -> bool:
@@ -598,7 +619,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
 
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
-    # Phase-1 extras layered on the active run command. Force `=minimal`:
+    # Phase-1 extras layered on the rc from setup. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk. State is kept (no
     # `--nokeep_state_after_build`) so the runner's shared analysis stays warm
     # for build/test jobs — phase 2 forces its own re-evaluation via the aspect
@@ -757,7 +778,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         dummy = start_dummy_executor()
         phase2_executor_uri = dummy.grpc_uri
 
-    # Phase-2 extras on the active run command. Force `=minimal`: phase 2 reads
+    # Phase-2 extras on the rc from setup. Force `=minimal`: phase 2 reads
     # digests from the gRPC log, not disk. The aspect rides `aspects=` below.
     phase2_flags = endpoint_auth_flags + [
         "--remote_executor=" + phase2_executor_uri,
@@ -828,7 +849,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             mnemonic = bes_get(event.payload, "type", "") or ""
             if mnemonic == _DELIVERY_HASH_MNEMONIC:
                 continue
-            label = apparent_label(bes_get(event.id, "label", "") or "")
+            label = normalize_label(bes_get(event.id, "label", "") or "")
             if not label or label in seen_uncacheable:
                 continue
             seen_uncacheable[label] = True
@@ -848,9 +869,9 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     if dummy:
         stop_dummy_executor(dummy)
 
-    # Normalize targets to apparent form to match the gRPC log's labels
-    # (canonical @@module+// or apparent @module//).
-    apparent_targets = {apparent_label(t): t for t in targets}
+    # Normalize targets to match the gRPC log's labels, which may use
+    # canonical (`@@module+//`) or apparent (`@module//`) repository names.
+    normalized_targets = {normalize_label(t): t for t in targets}
 
     # output_shas: DeliveryHash digest per target (hit or miss).
     # misses_by_producer: non-OK entries for any other mnemonic, keyed by the
@@ -873,11 +894,11 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             continue
         getactionresult_count += 1
         trace.log(entry)
-        entry_label = apparent_label(entry.metadata.target_id)
+        entry_label = normalize_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
         if mnemonic == _DELIVERY_HASH_MNEMONIC:
-            if entry_label in apparent_targets:
-                output_shas[apparent_targets[entry_label]] = entry.details.details.request.action_digest.hash
+            if entry_label in normalized_targets:
+                output_shas[normalized_targets[entry_label]] = entry.details.details.request.action_digest.hash
             continue
 
         # Non-DeliveryHash entry; record only the cache misses.
@@ -1017,11 +1038,11 @@ def _progress(status, data):
 def _fire_target_hook(data, delivery_trait, runnables, label):
     """Enrich the most-recent outcome entry with on-disk paths and fire the
     `delivery_target` hook, merging its returned dict into `entry["custom"]`.
-    `runnables` maps apparent labels to the `Runnable` phase 3 built; a label
+    `runnables` maps normalized labels to the `Runnable` phase 3 built; a label
     missing from it (an early failure, a target that never built) gets
     None/empty path fields."""
     entry = data["delivery"]["deliveries"][-1]
-    ep = runnables.get(apparent_label(label)) if runnables else None
+    ep = runnables.get(normalize_label(label)) if runnables else None
     entry["entrypoint_path"] = ep.path if ep else None
     entry["runfiles_dir"] = ep.runfiles_dir if ep else None
     entry["runfiles_workspace_dir"] = ep.workspace_dir if ep else None
@@ -1034,6 +1055,41 @@ def _fire_target_hook(data, delivery_trait, runnables, label):
         fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
     for k, v in extras.items():
         entry["custom"][k] = v
+
+def _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, message) -> int:
+    """Record a FAIL row and result for each `(label, is_forced, output_sha)` in `unstarted`. Returns how many."""
+    for label, is_forced, output_sha in unstarted:
+        rows.append((label, "FAIL", "fail", message, output_sha, "-"))
+        delivery_scheduler.record(data, outcomes, label, "fail", message = message, output_sha = output_sha, is_forced = is_forced)
+        _fire_target_hook(data, delivery_trait, runnables, label)
+    return len(unstarted)
+
+def _planning_progress(ctx, ph, data, had_failure):
+    """Post "Preparing delivery scheduler..." and return the `DeliveryPlan.report_progress` callable.
+
+    The returned callable posts its message as surface progress, at most once per
+    `MIN_HEARTBEAT_INTERVAL_MS`. Its first call always posts.
+    """
+    last_ms = [None]
+
+    def post(message: str) -> None:
+        ph.update(
+            _pick_status(data, had_failure = had_failure, terminal = False),
+            phases.ProgressStyles(body = message),
+            kind = "delivery_results",
+            data = data,
+            priority = False,
+        )
+
+    def report_progress(message: str) -> None:
+        now = now_ms(ctx)
+        if last_ms[0] != None and now - last_ms[0] < MIN_HEARTBEAT_INTERVAL_MS:
+            return
+        last_ms[0] = now
+        post(message)
+
+    post("Preparing delivery scheduler...")
+    return report_progress
 
 def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
@@ -1201,6 +1257,7 @@ def _delivery_impl(ctx):
     # Build the data shell up front so an early failure (before phases.setup
     # opens the surface) still has data to render.
     data = delivery_init_data()
+    outcomes = {}
     ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["delivery"]["commit_sha"] = ctx.args.commit_sha
@@ -1230,7 +1287,7 @@ def _delivery_impl(ctx):
     delivery_suffix = sanitize_filename(ctx.args.workflows_runner_delivery_output_base_suffix)
 
     # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
-    # returns the active RunCommand. A failed health check fails the task inside.
+    # returns the Bazelrc it set with use_rc. A failed health check fails the task inside.
     rc = ph.setup(
         targets_subject,
         "delivery_results",
@@ -1317,7 +1374,7 @@ def _delivery_impl(ctx):
     # Delivery needs a remote cache (may arrive from any rc section, incl. a
     # common --remote_cache=...). A real --remote_executor is tracked separately
     # (used directly by phase 2; else phase 2 uses a dummy, so no real RBE is
-    # required). The run command resolves both regardless of source section.
+    # required). The bazelrc resolves both regardless of source section.
     remote_cache_uri = rc.flag_value("--remote_cache", command = "build")
     user_remote_executor_uri = rc.flag_value("--remote_executor", command = "build")
 
@@ -1361,7 +1418,7 @@ def _delivery_impl(ctx):
         # Echo the query so the resolved set (or failure) is attributable to it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
 
-        # The query runs off the active run command, self-expanded for the
+        # The query runs under the rc set by use_rc, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
         # external repos the way the build does — an rc-set `--noenable_bzlmod`
         # is honored, and so is an injected `--repo_env` or `--registry`, which
@@ -1425,7 +1482,7 @@ def _delivery_impl(ctx):
     _print_header(color, dd, ci_host, commit_sha, prefix, prefix_source, build_url, redact_flags(rc.expand(command = "build")), targets, forced_targets, mode, dry_run, track_state)
 
     # Phase 3 builds the deliverables for running through `ctx.bazel.run_all`;
-    # each one's `Runnable` lands here by apparent label as it settles, for the
+    # each one's `Runnable` lands here by normalized label as it settles, for the
     # spawn and for the `delivery_target` hook's on-disk fields.
     runnables = {}
 
@@ -1445,8 +1502,9 @@ def _delivery_impl(ctx):
 
             # Synthetic warn rows so the check run conveys why it failed.
             for label in targets:
-                delivery_add_result(
+                delivery_scheduler.record(
                     data,
+                    outcomes,
                     label,
                     "warn",
                     message = "build failed (exit {})".format(build_code),
@@ -1554,8 +1612,8 @@ def _delivery_impl(ctx):
     failed_count = 0
 
     # Row now for targets needing no build (WARN missing-digest, SKIP delivered,
-    # DRY-RUN preview); the rest go to `spawnable`, keyed by apparent label (the
-    # form BES emits), with `spawn_order` holding table order.
+    # DRY-RUN preview); the rest go to `spawnable`, keyed by normalized label,
+    # with `spawn_order` in table order.
     spawnable = {}
     spawn_order = []
     for label in targets:
@@ -1570,7 +1628,7 @@ def _delivery_impl(ctx):
             #    by default; --warn-unresolved-digest downgrades to a warning.
             #  - No uncacheable action at all — it just isn't in the gRPC log
             #    (alias / transitioned / filtered). Keep the historical warning.
-            mnemonics = non_hermetic_misses.get(apparent_label(label), [])
+            mnemonics = non_hermetic_misses.get(normalize_label(label), [])
             blocked = bool(blocking_culprits)
             if mnemonics:
                 detail = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
@@ -1585,18 +1643,19 @@ def _delivery_impl(ctx):
             if blocked and not ctx.args.warn_unresolved_digest:
                 failed_count += 1
                 rows.append((label, "FAIL", "fail", msg, "-", "-"))
-                delivery_add_result(data, label, "fail", message = msg, is_forced = is_forced)
+                delivery_scheduler.record(data, outcomes, label, "fail", message = msg, is_forced = is_forced)
             else:
                 pending_count += 1
                 rows.append((label, "WARN", "warn", msg, "-", "-"))
-                delivery_add_result(data, label, "warn", message = msg, is_forced = is_forced)
+                delivery_scheduler.record(data, outcomes, label, "warn", message = msg, is_forced = is_forced)
             _fire_target_hook(data, delivery_trait, runnables, label)
         elif not is_forced and label in delivered:
             skipped_count += 1
             delivered_by = delivered[label] or "-"
             rows.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
-            delivery_add_result(
+            delivery_scheduler.record(
                 data,
+                outcomes,
                 label,
                 "skip",
                 message = delivered_by,
@@ -1611,8 +1670,9 @@ def _delivery_impl(ctx):
             pending_count += 1
             forced_marker = " (FORCED)" if is_forced else ""
             rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha or "-", "-"))
-            delivery_add_result(
+            delivery_scheduler.record(
                 data,
+                outcomes,
                 label,
                 "pending",
                 message = "dry-run" + (" (forced)" if is_forced else ""),
@@ -1621,10 +1681,12 @@ def _delivery_impl(ctx):
             )
             _fire_target_hook(data, delivery_trait, runnables, label)
         else:
-            spawnable[apparent_label(label)] = (label, is_forced, output_sha or "-")
+            spawnable[normalize_label(label)] = (label, is_forced, output_sha or "-")
             spawn_order.append(label)
 
     build_exit_code = 0
+    planning_error = ""
+    selector = None
     if delivery_targets and not skip_delivery_build:
         # Expand any `--config=NAME` in release_bazel_flags against the rc — the
         # release build reaches Bazel under --ignore_all_rc_files, so an
@@ -1632,8 +1694,8 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = bzl.flags.expand_config(ctx, ctx.args.release_bazel_flags)
 
-        # Flag order (last-wins): active run command, then these per-call extras,
-        # folded into the run command `run_all` builds under. `run_all` itself
+        # Flag order (last-wins): the rc set by use_rc, then these per-call extras,
+        # folded into the bazelrc `run_all` builds under. `run_all` itself
         # adds what building-to-run needs: the runinfo aspect so each deliverable's
         # `args`/env replay like `bazel run`, and the `--remote_download_outputs=toplevel`
         # floor when the rc resolves to `=minimal`. release_flags
@@ -1656,6 +1718,20 @@ def _delivery_impl(ctx):
         if delivery_suffix:
             phase3_rc = bzl.sibling_rc(ctx, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
 
+        release_rc = bzl.rc_with_flags(ctx, phase3_rc, phase3_flags)
+        if delivery_trait.create_scheduler != None and not dry_run:
+            report_progress = _planning_progress(ctx, ph, data, had_failure = failed_count > 0)
+            planning_error, selector = delivery_scheduler.create(
+                delivery_trait.create_scheduler,
+                ctx,
+                delivery_scheduler.new_plan(targets, delivery_targets, release_rc, report_progress),
+            )
+            if planning_error:
+                error(ctx.std, planning_error)
+                unstarted = [spawnable[normalize_label(label)] for label in spawn_order]
+                failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, planning_error)
+
+    if delivery_targets and not skip_delivery_build and not planning_error:
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
         # the log is the escape hatch on real failure.
@@ -1680,7 +1756,7 @@ def _delivery_impl(ctx):
             phase3_execution_log = xl.sinks or False
         runs = ctx.bazel.run_all(
             delivery_targets,
-            rc = bzl.rc_with_flags(ctx, phase3_rc, phase3_flags),
+            rc = release_rc,
             build_events = [phase3_events],
             execution_log = phase3_execution_log,
             stdout = None,
@@ -1701,6 +1777,21 @@ def _delivery_impl(ctx):
         settled = {}
         ready = []
         running = []
+        ctx.defer(delivery_scheduler.cleanup, ctx, runs, xl, running)
+        dispatcher = delivery_scheduler.new_dispatcher(
+            max_par,
+            selector,
+            lambda entry: _spawn_deliverable(ctx, color, capture, *entry),
+            lambda: ctx.cancellation.root.cancelled,
+        )
+
+        def fill_slots() -> bool:
+            before = len(running)
+            scheduler_error = dispatcher.fill(ready, running, outcomes)
+            if scheduler_error:
+                error(ctx.std, scheduler_error + "; no further deliveries will start")
+            return len(running) > before or bool(scheduler_error)
+
         total_deliverable = len(spawn_order)
         build_done = False
         last_emit_ms = now_ms(ctx)
@@ -1744,12 +1835,12 @@ def _delivery_impl(ctx):
                     break
                 settled_label, settled_future = popped
                 settle_err, settle_ep = settled_future.catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()
-                settled[apparent_label(settled_label)] = (settle_err, settle_ep)
+                settled[normalize_label(settled_label)] = (settle_err, settle_ep)
                 if settle_ep != None:
-                    runnables[apparent_label(settled_label)] = settle_ep
+                    runnables[normalize_label(settled_label)] = settle_ep
 
             for label in spawn_order:
-                key = apparent_label(label)
+                key = normalize_label(label)
                 if key in dispatched or key not in settled:
                     continue
                 _, is_forced, output_sha = spawnable[key]
@@ -1763,7 +1854,7 @@ def _delivery_impl(ctx):
                     else:
                         warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
                     rows.append((label, "WARN", "warn", warn_msg, output_sha, "-"))
-                    delivery_add_result(data, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 elif ep == None or not ep.runfiles_dir:
                     if ep == None:
@@ -1773,27 +1864,22 @@ def _delivery_impl(ctx):
                     if ctx.args.warn_not_runnable:
                         pending_count += 1
                         rows.append((label, "WARN", "warn", not_runnable_msg, output_sha, "-"))
-                        delivery_add_result(data, label, "warn", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                        delivery_scheduler.record(data, outcomes, label, "warn", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
                     else:
                         failed_count += 1
                         rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha, "-"))
-                        delivery_add_result(data, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                        delivery_scheduler.record(data, outcomes, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 elif dry_run:
                     pending_count += 1
                     forced_marker = " (FORCED)" if is_forced else ""
                     rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
-                    delivery_add_result(data, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
                     _fire_target_hook(data, delivery_trait, runnables, label)
                 else:
                     ready.append((label, ep, is_forced, output_sha))
 
-            for _ in range(max_par):
-                if not ready or len(running) >= max_par:
-                    break
-                label, ep, is_forced, output_sha = ready.pop(0)
-                running.append(_spawn_deliverable(ctx, color, capture, label, ep, is_forced, output_sha))
-                interesting = True
+            interesting = fill_slots() or interesting
 
             # Harvest finished deliveries out of submission order so a slow head
             # never idles the slots queued behind it: scan for any exited child
@@ -1836,20 +1922,16 @@ def _delivery_impl(ctx):
                         dd.deliver(label, output_sha)
                     success_count += 1
                     rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
-                    delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
                 else:
                     if track_state:
                         dd.delete(output_sha)
                     failed_count += 1
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
-                    delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(data, outcomes, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
                 _fire_target_hook(data, delivery_trait, runnables, label)
                 interesting = True
-                for _ in range(max_par):
-                    if not ready or len(running) >= max_par:
-                        break
-                    nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
-                    running.append(_spawn_deliverable(ctx, color, capture, nlabel, nep, nis_forced, noutput_sha))
+                fill_slots()
 
             # priority=False throttles surface PATCHes; the per-target lines
             # already tick the CLI.
@@ -1868,7 +1950,14 @@ def _delivery_impl(ctx):
             # `runs.done` holds once every target has settled and been pulled,
             # so a settlement that lands a tick after the build's exit code is
             # never left undispatched.
-            if build_done and runs.done and not ready and not running:
+            if build_done and runs.done and not running:
+                if ready:
+                    msg = delivery_scheduler.unstarted_reason(dispatcher.error(), ctx.cancellation.root.cancelled)
+                    if not dispatcher.error():
+                        error(ctx.std, msg)
+                    unstarted = [(label, is_forced, output_sha) for label, _ep, is_forced, output_sha in ready]
+                    failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, msg)
+                    ready.clear()
                 break
 
     # The fused loop appends rows as deliveries complete; sort back to request

@@ -100,7 +100,7 @@ injected flag — dropping it rather than shadowing it. The exception is a
 there an rc entry or a typed flag simply wins. `aspect query` and the
 sidecar queries read the `query` column; `ctx.bazel.info` reads the `info` one.
 
-Two wrinkles in that table are artifacts of how a run command is rendered rather
+Two wrinkles in that table are artifacts of how a bazelrc is rendered rather
 than of Bazel's own order:
 
 * ranks 1 and 2 are swapped relative to vanilla Bazel, which applies `always`
@@ -605,18 +605,18 @@ def _resolve_flags(ctx) -> list:
 
 def _setup_command(ctx, command: str, base_flags: list = []):
     """Prepare `ctx.bazel` for upcoming `ctx.bazel.<command>` calls and return the
-    active `RunCommand`.
+    `Bazelrc` it sets with `ctx.bazel.use_rc`.
 
     Resolves startup + command flags, parses the workspace `.bazelrc` into a
-    `RunCommand`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
-    disclosure. Subsequent `ctx.bazel.build`/`test`/`query` use the active run
-    command — each self-expands and adds `--ignore_all_rc_files`. `base_flags`
+    `Bazelrc`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
+    disclosure. Subsequent `ctx.bazel.build`/`test`/`query` run under that rc —
+    each self-expands and adds `--ignore_all_rc_files`. `base_flags`
     are task-injected defaults the user can override via `--bazel-flag=...`;
     `trait.base_flags` (feature-injected defaults) are prepended ahead of them.
 
     Built-in tasks reach this through `phases.setup`, which
     calls it before the Bazel health-check hooks so the check inspects the same
-    active run command every Bazel call uses.
+    rc every Bazel call uses.
     """
     startup_flags = _resolve_startup_flags(ctx)
     flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
@@ -636,7 +636,7 @@ def _setup_command(ctx, command: str, base_flags: list = []):
     return rc
 
 def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list = []):
-    """A `RunCommand` mirroring `setup_command`'s flag composition, but with the
+    """A `Bazelrc` mirroring `setup_command`'s flag composition, but with the
     resolved startup flags run through `startup_transform` (a `list -> list`).
 
     For a phase that needs its own Bazel server within a task — e.g. delivery
@@ -691,7 +691,7 @@ def _flags_delta(base_flags: list, full_flags: list) -> list:
 def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list:
     """Expand the `--config=NAME` references in `extra_flags` against the rc.
 
-    A `RunCommand` in effect adds `--ignore_all_rc_files`, so a `--config=NAME` in
+    A `Bazelrc` in effect adds `--ignore_all_rc_files`, so a `--config=NAME` in
     a per-call `flags = [...]` extras list would otherwise hit Bazel un-expanded
     and fail. This resolves it exactly as the task's own flags do. Returns ONLY
     the options `extra_flags` contributes (the `flags_delta` between expansions
@@ -723,7 +723,7 @@ def _resolve_rc_flags(ctx, rc, command: str) -> list:
 def _rc_with_flags(ctx, rc, flags: list[str]):
     """`rc` with `flags` layered on top as command-line extras.
 
-    The run command is the only build input `ctx.bazel.run` and `run_all`
+    The bazelrc is the only build input `ctx.bazel.run` and `run_all`
     take, so per-invocation extras (endpoint auth from `rc_flags`, a release
     build's `--release-bazel-flag`s) reach the build by becoming part of it.
     The merged command expands `flags` after everything the rc files say, so

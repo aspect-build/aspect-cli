@@ -5188,7 +5188,7 @@ def _results_new(ctx, command, report_uploader = None):
         m["last_monotonic"] = time.monotonic()
 
     def setup(targets, rc, bazel_streams_bes = False, results_url = ""):
-        # `rc` is the live run command the invocation handle already registered
+        # `rc` is the live bazelrc the invocation handle already registered
         # (`use_rc`); the health checks in setup_surface read it via ctx.bazel.
         _ = rc
 

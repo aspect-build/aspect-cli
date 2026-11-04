@@ -5,4 +5,4 @@ examples/large_bes
 examples/slow_build
 examples/cache-diff
 examples/py_runnable
-.claude/
+.claude/examples/delivery-scheduler

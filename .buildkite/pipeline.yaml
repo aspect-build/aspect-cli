@@ -124,12 +124,14 @@ steps:
       )
       echo "--- :aspect: aspect run smoke (//examples/deliverable)"
       # Exercises the run task end-to-end and verifies trailing args are
-      # forwarded to the spawned binary. Run from the repo root with absolute
-      # labels now that examples/deliverable is a package in this workspace
-      # rather than its own; the relative/bare label-form coverage lives in
-      # the apparent_label unit tests (runnable_test.axl).
+      # forwarded to the spawned binary. Relative label forms are covered by
+      # the tests in crates/bazel/src/label.rs.
       $$LAUNCHER run //examples/deliverable:py_deliverable
       $$LAUNCHER run //examples/deliverable:sh_deliverable -- forwarded-arg
+      # $$CLI, not $$LAUNCHER: the example is its own workspace, with no
+      # .aspect/axl.axl pointing the launcher at this commit's CLI.
+      echo "--- :aspect: delivery scheduler example (examples/delivery-scheduler)"
+      ./examples/delivery-scheduler/test.sh "$$CLI"
       echo "--- :aspect: aspect help"
       $$LAUNCHER help
       echo "--- :aspect: aspect-launcher --version"

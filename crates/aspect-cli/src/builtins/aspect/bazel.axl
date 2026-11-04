@@ -3,9 +3,10 @@
 `BazelTrait` interface, the Bazel exit codes, and the retry constants so existing
 `load("@aspect//bazel.axl", ...)` call sites are unchanged.
 
-`BazelTrait`, `ExecLogHook`, `exit_codes`, and the retry constants stay
-top-level (tasks index `ctx.traits[BazelTrait]`, features construct
-`ExecLogHook`, and both read the constants directly). The flag/rc/auth
+`BazelTrait`, `ExecLogHook`, `exit_codes`, the retry constants and
+`normalize_label` stay top-level (tasks index `ctx.traits[BazelTrait]`, features
+construct `ExecLogHook`, both read the constants directly, and any AXL matching
+labels against the ones tasks report calls `normalize_label`). The flag/rc/auth
 helpers hang off the `bazel` namespace — stateless functions taking `ctx` and
 deriving the active `BazelTrait` from `ctx.traits` themselves (no `trait`
 argument to pass).
@@ -44,6 +45,7 @@ load(
     "dispatch_bazel_build_end",
     "exit_codes",
 )
+load("./private/lib/runnable.axl", "normalize_label")
 
 bazel = namespace(
     build = _build,

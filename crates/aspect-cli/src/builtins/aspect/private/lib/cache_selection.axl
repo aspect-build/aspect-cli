@@ -1,6 +1,6 @@
 """Resolve cache-diff test scope through Bazel's test loading phase."""
 
-load("./runnable.axl", "apparent_label")
+load("./runnable.axl", "normalize_label")
 
 def testonly_selected_tests(events: list, exit_code: int) -> list[str] | None:
     """Accept only a complete, successful loading-only test selection."""
@@ -35,7 +35,7 @@ def testonly_selected_tests(events: list, exit_code: int) -> list[str] | None:
             finished = True
     if not complete or not finished or expansions != 1 or labels != aborted:
         return None
-    return sorted({apparent_label(label): None for label in labels})
+    return sorted({normalize_label(label): None for label in labels})
 
 def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | None = None, endpoint_auth_flags: list = [], announce_version: bool = False, announce_command: bool = False) -> list[str] | None:
     """Load the original patterns with test-command RC and filtering semantics."""
@@ -96,7 +96,7 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
     return tests
 
 # Negative filter values are valid Bazel argv values even though they start
-# with '-'. Other two-token pairs use the same non-flag guard as BazelRC.
+# with '-'. Other two-token pairs use the same non-flag guard as Bazelrc.
 _NEGATIVE_FILTER_FLAGS = ["--test_tag_filters", "--test_size_filters", "--test_timeout_filters", "--test_lang_filters", "--test_filter"]
 
 def testonly_attribution_flags(flags: list) -> list:

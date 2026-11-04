@@ -60,9 +60,9 @@ _DUPLICATE_MSG = ("Not streaming build events to %s from the CLI: Bazel is alrea
 def bazel_bes_backend(rc, command: str) -> str:
     """The effective `--bes_backend` Bazel itself will upload to, or `""`.
 
-    Reads through the run command, so it sees the flag wherever it came from —
+    Reads through the bazelrc, so it sees the flag wherever it came from —
     `--bazel-flag=--bes_backend=…`, a `.bazelrc`, or an expanded `--config`.
-    `rc` may be `None` for a caller with no run command to consult.
+    `rc` may be `None` for a caller with no bazelrc to consult.
 
     Public so `build_events_test.axl` can assert the resolution.
     """

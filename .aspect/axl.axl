@@ -31,7 +31,6 @@ load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
-load("@aspect//private/lib/runnable.axl", "apparent_label")
 load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
 load("@aspect//private/lib/tips.axl", "tips")
@@ -571,7 +570,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 3: cancel_invocation with an active run command targeting a specific output_base (no build running)
+    # Test 3: cancel_invocation with no build running, after use_rc sets an --output_base startup flag
     info = ctx.bazel.info()
     output_base = info["output_base"]
     ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base]))
@@ -3160,27 +3159,6 @@ def test_json_try_decode(tc: int) -> int:
 
     return tc
 
-def test_apparent_label(tc: int) -> int:
-    """Coverage for runnable.apparent_label — Bazel label normalization."""
-    cases = [
-        ("//foo", "//foo:foo", "//foo → //foo:foo"),
-        ("//foo:bar", "//foo:bar", "explicit target unchanged"),
-        ("//foo/bar", "//foo/bar:bar", "deep path → leaf as target"),
-        ("//foo/bar/baz", "//foo/bar/baz:baz", "deeper path"),
-        ("//foo/bar:baz", "//foo/bar:baz", "explicit target with deep path"),
-        ("//", "//:", "root-only edge case"),
-        ("@repo//foo", "@repo//foo:foo", "repo-prefixed label"),
-        ("@repo//foo:bar", "@repo//foo:bar", "repo-prefixed with target"),
-        ("//foo:", "//foo:", "empty target name kept (caller error, not normalized)"),
-        ("@@buildifier_prebuilt+//buildifier:buildifier", "@buildifier_prebuilt//buildifier:buildifier", "bzlmod no-version"),
-        ("@@rules_python+0.40.0//python:python", "@rules_python//python:python", "bzlmod with-version"),
-        ("@@rules_python+pip+numpy//:pkg", "@numpy//:pkg", "bzlmod extension repo"),
-    ]
-    for (input, expected, desc) in cases:
-        got = apparent_label(input)
-        tc = test_case(tc, got == expected, "apparent_label: %s → %r (got %r)" % (desc, expected, got))
-    return tc
-
 def test_color_enabled(ctx: TaskContext, tc: int) -> int:
     """color_enabled: should return True on a TTY OR a recognized CI host."""
     env = ctx.std.env
@@ -4113,7 +4091,6 @@ def impl(ctx: TaskContext) -> int:
     tc = test_file_uri_to_path(ctx, tc)
     tc = test_bb_clientd_root(ctx, tc)
     tc = test_json_try_decode(tc)
-    tc = test_apparent_label(tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
     tc = test_parse_patch_hunks(tc)

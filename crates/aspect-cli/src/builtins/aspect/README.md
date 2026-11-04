@@ -189,6 +189,72 @@ def config(ctx: ConfigContext):
         ctx.traits[DeliveryState].connect = redis_state.connect
 ```
 
+### Custom delivery scheduling
+
+By default delivery starts each target as soon as its release build output is
+ready, in FIFO order, up to `--max-parallelization` at a time. Set
+`DeliveryTrait.create_scheduler` to choose the order yourself, e.g. to deliver
+a database migration before the services that depend on it.
+
+The factory is called as `create_scheduler(ctx, plan)` once before the release
+build. It is not called under `--dry-run` or when nothing is selected for
+delivery. `plan` is a `DeliveryPlan`:
+
+- `candidates`: every resolved target, before change detection.
+- `selected`: the targets this run will deliver, including forced ones.
+- `release_rc`: the `bazel.Bazelrc` of the release build (read-only).
+- `report_progress(message)`: show progress on the status surface while the
+  factory does slow work such as a `bazel query`. Throttled; safe to call often.
+
+The factory returns a selector `choose_next(ready, outcomes)`. `ready` lists the
+built targets that have not started, and `outcomes` maps finished targets to
+`ok`, `skip`, `warn` or `fail`. Return one label from `ready` to start it, or
+`None` to wait. Every label is normalized: written as in this workspace, with
+the target name spelled out (`//svc:svc`). Pass the labels of your own graph
+through `normalize_label` from `@aspect//bazel.axl` before comparing them. A
+`skip` means this digest was already delivered;
+`ok` is reported only after delivery state has been saved.
+
+```python
+load("@aspect//bazel.axl", "normalize_label")
+
+def _create_scheduler(ctx, plan):
+    prerequisites = {}  # label -> labels that must be delivered first
+    for label in plan.selected:
+        plan.report_progress("Querying prerequisites of " + label)
+        deps = ctx.bazel.query("deps({}) intersect set({})".format(label, " ".join(plan.candidates)))
+        names = [normalize_label(t.name) for t in deps]
+        prerequisites[label] = [name for name in names if name != label]
+
+    def choose_next(ready, outcomes):
+        for label in ready:
+            if all([outcomes.get(dep) in ["ok", "skip"] for dep in prerequisites.get(label, [])]):
+                return label
+        return None
+
+    return choose_next
+```
+
+Do all I/O in the factory: the selector runs inside the dispatch loop and must
+not block. Delivery still owns spawning, logs, state, the manifest and
+`--max-parallelization`, and independent targets still run in parallel.
+
+Failures:
+
+- The factory raises or returns something other than a callable: every
+  selected target fails with `scheduler_planning_failed` and the release build
+  does not run.
+- The selector raises or returns a label that is not in `ready`: no further
+  deliveries start, running ones finish, and the rest fail with
+  `scheduler_error`.
+- Targets the selector never picks fail with `scheduler_blocked` once all
+  builds and deliveries have finished.
+
+A runnable example that orders deliveries by `deliver_after=<label>` tags lives in
+[`examples/delivery-scheduler`](../../../../../examples/delivery-scheduler).
+
+Run `aspect dev test-delivery-scheduler` for the unit tests.
+
 ---
 
 ## Cross-cutting features

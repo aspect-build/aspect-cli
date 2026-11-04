@@ -13,7 +13,7 @@ use axl_proto::build_event_stream::build_event::Payload;
 use axl_proto::build_event_stream::build_event_id::Id;
 use axl_proto::build_event_stream::{BuildEvent, NamedSetOfFiles};
 
-use crate::label::apparent_label;
+use crate::label::normalize_label;
 
 /// Bound on fileset nesting when walking BES `named_set_of_files` references.
 const FILESET_DEPTH: usize = 32;
@@ -33,7 +33,7 @@ struct TargetState {
 /// A target whose outputs are all known.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Ready {
-    /// The target's apparent label.
+    /// The target's normalized label.
     pub key: String,
     /// The files of its default output group.
     pub default_files: Vec<PathBuf>,
@@ -62,7 +62,7 @@ pub struct Outputs {
 }
 
 impl Outputs {
-    /// Follow `pending` (apparent labels). A target is ready once its default
+    /// Follow `pending` (normalized labels). A target is ready once its default
     /// group and `extra_group` are both complete; `workspace_name` stands
     /// until the stream reports one.
     pub fn new(
@@ -102,7 +102,7 @@ impl Outputs {
                     .collect()
             }
             (Some(Payload::Completed(tc)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
+                let key = normalize_label(&tid.label);
                 if !self.pending.contains(&key) {
                     return vec![];
                 }
@@ -119,7 +119,7 @@ impl Outputs {
                 self.check_ready(&key).into_iter().collect()
             }
             (Some(Payload::Aborted(_)), Some(Id::TargetCompleted(tid))) => {
-                let key = apparent_label(&tid.label, "");
+                let key = normalize_label(&tid.label);
                 if self.pending.contains(&key) {
                     self.targets.entry(key).or_default().failed = true;
                 }

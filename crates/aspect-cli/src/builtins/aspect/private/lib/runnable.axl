@@ -1,12 +1,11 @@
-"""Label normalization and `--run-in` resolution for the tasks that run
-targets through `ctx.bazel.run` / `ctx.bazel.run_all`.
+"""Label normalization, for every task that matches labels, and `--run-in`
+resolution, for the tasks that run targets through `ctx.bazel.run` /
+`ctx.bazel.run_all`.
 
-The build-then-spawn machinery that used to live here (the runinfo aspect,
-BES fileset tracking, entrypoint selection, runfiles materialization, the
-`--remote_download_outputs` floor) is the runtime's now: `ctx.bazel.run_all`
-returns a `bazel.run.Runnable` per target and `runnable.command(...)` is the
-process `bazel run` would start. What remains is the pure string logic the
-tasks still share.
+`normalize_label` mirrors `normalize_label` in `crates/bazel/src/label.rs`,
+which the runtime uses to match requested targets against what Bazel reports.
+The two must agree on every label; both test suites run the cases in
+`crates/bazel/src/label_cases.json`.
 """
 
 _RUN_IN_NAMED_MODES = ["runfiles", "cwd", "bazel-root", "aspect-root", "git-root"]
@@ -67,63 +66,75 @@ def resolve_run_in(ctx, choice: str) -> str | None:
     fail("--run-in: expected one of %s, an absolute path, or a ./relative path; got %r" %
          (_RUN_IN_NAMED_MODES, choice))
 
-def apparent_label(label, current_package = ""):
-    """Normalize any Bazel label form to apparent form with an explicit target name.
+def normalize_label(label):
+    """Return the standard spelling of a Bazel label.
 
-    Bazel surfaces two label forms depending on context:
-    - Apparent:   `@module//pkg:tgt`      — what users write; what BES emits for WORKSPACE repos
-    - Canonical:  `@@module+ver//pkg:tgt` — what BES emits for bzlmod repos (Bazel 8+)
-    - Canonical:  `@@module~//pkg:tgt`    — what BES emits for bzlmod repos (Bazel 7)
+    That is the label as you'd write it in this workspace, with the target
+    name spelled out. Two labels name the same target exactly when their
+    normalized forms are equal, so tasks key targets by this form and match
+    every label they see (the command line, `--query`, BES events, `bazel
+    query` output) through it:
 
-    Converts either to apparent form, resolves relative labels (`:foo`,
-    `foo`, `pkg:foo`) against `current_package`, and appends the implicit
-    target name when no `:` is present — yielding a stable key suitable
-    for matching user-supplied targets against BES event labels.
+        normalize_label("//svc")                  # "//svc:svc"
+        normalize_label("@//svc:svc")             # "//svc:svc"
+        normalize_label("@@//svc:svc")            # "//svc:svc"
+        normalize_label("@@rules_go+//go:def")    # "@rules_go//go:def"
+        normalize_label("@repo")                  # "@repo//:repo"
+        normalize_label(":tool")                  # "//:tool"
 
-    `current_package` is the workspace-relative path of the user's working
-    package (e.g. "foo/bar", or "" for the root package). Only relative
-    labels consult it; absolute (`//...`) and repo-prefixed (`@repo//...`,
-    `@@...`) labels ignore it.
+    Bazel has two ways to name a repository in a label. The *apparent* name is
+    the short name a `MODULE.bazel` gives a dependency (`@rules_go`), and it is
+    what people write. The *canonical* name is the unique name Bazel assigns
+    each repository, written with `@@`, and it can carry a version or an
+    extension name (`@@rules_go+`, `@@rules_python++pip+numpy`); BES events and
+    `bazel query` output often use it. The normalized form uses apparent names
+    for other repositories and writes the main repository as `//`, with no
+    name, so `@//svc:svc` and `@@//svc:svc` both become `//svc:svc`. See
+    https://bazel.build/external/overview#apparent-repo-name,
+    https://bazel.build/external/overview#canonical-repo-name and
+    https://bazel.build/concepts/labels.
 
-    Canonical → apparent stripping rules (Bazel 8+, using `+` separator):
-        Module repo:    `@@module+version//pkg:tgt`      → `@module//pkg:tgt`
-        Extension repo: `@@module+ext+repo//pkg:tgt`     → `@repo//pkg:tgt`
+    A canonical name maps to an apparent one by its shape, not by Bazel's
+    repository mapping:
+        Module repo:    `@@module+version//pkg:tgt`, `@@module~//pkg:tgt`  → `@module//pkg:tgt`
+        Extension repo: `@@module++ext+repo//pkg:tgt`, `@@module~~ext~repo//pkg:tgt` → `@repo//pkg:tgt`
+    so a dependency declared with a different `repo_name` comes back under its
+    module name.
 
-    Canonical → apparent stripping rules (Bazel 7, using `~` separator):
-        Module repo:    `@@module~//pkg:tgt`             → `@module//pkg:tgt`
-        Extension repo: `@@module~~ext~repo//pkg:tgt`    → `@repo//pkg:tgt`
+    A label with no `:` gets its implicit target name: the last package
+    segment, or the repository name for a bare repository label.
+
+    A relative label (`:foo`, `foo`, `pkg:foo`) is read as relative to the
+    root package, the way a BUILD file there would read it: `foo` is `//:foo`.
+    What a relative label means from another working directory depends on
+    which directories are packages, which this function cannot see; resolve
+    such a label to an absolute one before normalizing it.
     """
+    if label.startswith("@") and "//" not in label:
+        label += "//"
+
     if label.startswith("@@"):
         rest = label[2:]
         idx = rest.find("//")
-        if idx >= 0:
-            canonical_repo = rest[:idx]
-
-            # Bazel 7 uses `~` as the bzlmod separator; Bazel 8+ uses `+`.
-            # We probe for `~` first because `+` can appear in SemVer build
-            # metadata (e.g. `@@foo~1.2.3+meta//...`), which would produce a
-            # false-positive split on `+` inside a Bazel 7 version string.
-            # `~` is not valid in SemVer versions, so its presence is an
-            # unambiguous signal that we are in Bazel 7 canonical form.
+        canonical_repo = rest[:idx]
+        if not canonical_repo:
+            label = rest[idx:]
+        else:
+            # `~` (Bazel 7) never appears in a version; `+` can, in semver
+            # build metadata.
             sep = "~" if "~" in canonical_repo else "+"
             parts = canonical_repo.split(sep)
-
-            # Module repos:    module+version or module~  → apparent name is parts[0]
-            # Extension repos: module+ext+repo or module~~ext~repo → apparent name is parts[-1]
             apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
             label = "@" + apparent_repo + rest[idx:]
 
-    # Relative labels resolve against `current_package` before the
-    # no-colon fallback below (which assumes an absolute label).
+    if label.startswith("@//"):
+        label = label[1:]
+
     if not label.startswith("//") and not label.startswith("@"):
-        if label.startswith(":"):
-            return "//" + current_package + label
-        if ":" in label:
-            pkg, _, name = label.partition(":")
-            joined = current_package + "/" + pkg if current_package else pkg
-            return "//" + joined + ":" + name
-        return "//" + current_package + ":" + label
+        return "//" + label if ":" in label else "//:" + label
 
     if ":" not in label:
-        return label + ":" + label.split("/")[-1]
+        repo, _, pkg = label.partition("//")
+        name = pkg.split("/")[-1] if pkg else repo[1:]
+        return label + ":" + name
     return label

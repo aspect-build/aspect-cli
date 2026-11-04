@@ -323,7 +323,7 @@ pub type OnSettled = Box<dyn FnOnce(Result<&Runnable, &Failure>) + Send>;
 
 /// What the tracker thread does with each target the BES stream settles.
 pub struct Tracker {
-    /// Apparent key → label as the caller wrote it.
+    /// Normalized label → label as the caller wrote it.
     given: HashMap<String, String>,
     outputs: Outputs,
     senders: HashMap<String, oneshot::Sender<Outcome>>,
@@ -333,7 +333,7 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Follow `keys` (apparent labels), settling each one's slot in `senders`
+    /// Follow `keys` (normalized labels), settling each one's slot in `senders`
     /// and announcing it on `completed`. `on_settled`, when given, is called
     /// for the first target to settle.
     pub fn new(

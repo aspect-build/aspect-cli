@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::BazelRcError;
+use super::BazelrcError;
 
 /// Discover the ordered list of bazelrc files to load.
 pub(crate) fn discover_rc_files(
     workspace_root: &Path,
     startup_flags: &[impl AsRef<str>],
-) -> Result<Vec<PathBuf>, BazelRcError> {
+) -> Result<Vec<PathBuf>, BazelrcError> {
     let mut no_system_rc = false;
     let mut no_workspace_rc = false;
     let mut no_home_rc = false;
@@ -63,7 +63,7 @@ pub(crate) fn discover_rc_files(
                 let p = PathBuf::from(part.trim());
                 if !p.as_os_str().is_empty() {
                     if !p.exists() {
-                        return Err(BazelRcError::BazelrcNotFound { path: p });
+                        return Err(BazelrcError::BazelrcNotFound { path: p });
                     }
                     candidates.push(p);
                 }
@@ -75,7 +75,7 @@ pub(crate) fn discover_rc_files(
     if !ignore_all_rc {
         for p in explicit_bazelrcs {
             if !p.exists() {
-                return Err(BazelRcError::BazelrcNotFound { path: p });
+                return Err(BazelrcError::BazelrcNotFound { path: p });
             }
             candidates.push(p);
         }

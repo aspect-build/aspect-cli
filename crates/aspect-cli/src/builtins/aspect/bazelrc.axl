@@ -243,10 +243,10 @@ def _write(ctx: TaskContext, path: str, content: str) -> None:
 
 def _resolve(ctx: TaskContext, flags: list, bazel_version: str | None) -> list:
     """Resolve the version-gated `(flag, constraint)` tuples in `flags` against the
-    detected Bazel version via the bazelrc runtime: a blank RunCommand whose
+    detected Bazel version via the bazelrc runtime: a blank Bazelrc whose
     `common` bucket holds every flag, expanded assumed-latest when the version is
     unknown. Config chain entries are kept verbatim ahead of the rest — the blank
-    RunCommand has no section for them to expand into. Command scopes are
+    Bazelrc has no section for them to expand into. Command scopes are
     dropped: the rc writes every flag under `common`, which Bazel applies only
     where the option is accepted."""
     chain = [f for f in flags if is_config_chain(f)]
