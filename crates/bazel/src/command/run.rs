@@ -92,9 +92,8 @@ pub struct Dirs {
 }
 
 impl Dirs {
-    /// Resolves the labels a command run from `directory` is given, the way
-    /// the Bazel it spawns reads them. A relative `directory` is taken from
-    /// `cwd`; with none, labels resolve from `cwd`.
+    /// A [`LabelResolver`] for a Bazel command spawned in `directory`
+    /// (relative to `cwd`), or in `cwd` when none is given.
     pub fn labels(&self, directory: Option<&str>) -> LabelResolver {
         let working_dir = directory.map_or_else(|| self.cwd.clone(), |d| self.cwd.join(d));
         LabelResolver::new(&self.bazel_root, &working_dir)

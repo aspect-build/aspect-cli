@@ -394,6 +394,8 @@ struct Started {
     completed: mpsc::Receiver<String>,
     done: Arc<AtomicBool>,
     labels: LabelResolver,
+    /// Each target's key, mapped to the spelling it was asked for by.
+    given: HashMap<String, String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,7 +490,7 @@ fn start<'v>(
         })
     });
     let tracker = Tracker::new(
-        given,
+        given.clone(),
         keys.iter().cloned(),
         senders,
         completed_tx,
@@ -506,6 +508,7 @@ fn start<'v>(
         completed: completed_rx,
         done,
         labels,
+        given,
     })
 }
 
@@ -1022,15 +1025,10 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             &token,
             None,
         )?;
-        let given = targets
-            .items
-            .iter()
-            .map(|target| (started.labels.normalize(target), target.clone()))
-            .collect();
         Ok(Runs {
             build: started.build,
             shared: started.shared,
-            given,
+            given: started.given,
             completed: Mutex::new(started.completed),
             queue: RefCell::new(VecDeque::new()),
             done: started.done,
