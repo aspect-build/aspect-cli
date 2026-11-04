@@ -2,7 +2,7 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -81,7 +81,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    bz = bzl.test(ctx)
+    bz = bazel_invocation.test(ctx)
     rs = results.test(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
         ctx,
         data,
@@ -145,7 +145,7 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-    } | bzl.targets_arg("test") | bzl.core_args("the test invocation") | repro_flavor_args(),
+    } | bazel_invocation.targets_arg("test") | bazel_invocation.args("the test invocation") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

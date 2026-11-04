@@ -21,10 +21,10 @@ and a stale entry only matters if someone types it.
 
 A repo can replace the list for its own wrapper flags:
 
-    load("@aspect//bazel.axl", bzl = "bazel")
+    load("@aspect//bazel.axl", "bazel_flags")
 
     def config(ctx):
-        ctx.tasks["build"].args.bazel_value_flags = bzl.flags.BAZEL_VALUE_FLAGS + ["--my_wrapper_flag"]
+        ctx.tasks["build"].args.bazel_value_flags = bazel_flags.VALUE_FLAGS + ["--my_wrapper_flag"]
 
 Label-shaped flags (`--//pkg:flag`) are absent on purpose: Bazel requires `=`
 for those, so accepting a space-separated value would diverge from Bazel and

@@ -1,9 +1,7 @@
-"""Everything about Bazel flags: the `--bazel-flag` / `--bazel-startup-flag` /
-`announce-bazel-*` CLI args, the two `args.passthrough()` buckets that let a
-plain Bazel flag be typed directly on an aspect command line, the task-facing
-arg bundles (`core_args` / `targets_arg`), startup+command flag composition,
-`.bazelrc` parsing (`setup_command` / `sibling_rc`), `--config` expansion, and
-the post-rc `rc_flags` hook seam.
+"""`bazel_flags`: the `--bazel-flag` / `--bazel-startup-flag` CLI args, the two
+`args.passthrough()` buckets that let a plain Bazel flag be typed directly on an
+aspect command line, startup and command flag composition, and `--config`
+expansion. `bazel/rc.axl` parses the `.bazelrc` with what this resolves.
 
 A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the
@@ -131,66 +129,19 @@ deliberate.
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
 
-load("@aspect//bazel/build_events.axl", "bes_args")
-load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel/trait.axl", "BazelTrait")
 load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
-load("../private/lib/environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name: str) -> None:
     """Fail with a clear contract error when a helper's required CLI arg is
     missing from the calling task."""
     if not hasattr(ctx.args, name):
         fail(
-            ("Task is missing required `%s` arg. Tasks that use the `bazel` " +
-             "flag helpers must declare bazel_flags, bazel_startup_flags, " +
+            ("Task is missing required `%s` arg. Tasks that use the " +
+             "`@aspect//bazel.axl` flag helpers must declare bazel_flags, bazel_startup_flags, " +
              "announce_bazel_rc, announce_bazel_version, and " +
              "announce_bazel_command on the task definition.") % name,
         )
-
-def _announce_value(ctx, value: str) -> bool:
-    """Resolve one `"auto" | "true" | "false"` announce flag to a bool. `"auto"`
-    is on under CI and off locally; `"true"`/`"false"` force it."""
-    if value == "auto":
-        return bool(detect_ci(ctx.std.env))
-    return value == "true"
-
-def _resolve_announce(ctx) -> tuple:
-    """Resolve the per-spawn announce flags to `(version, command)` bools, passed
-    to `ctx.bazel.build`/`.test` as `announce_version=`/`announce_command=`."""
-    _require_arg(ctx, "announce_bazel_version")
-    _require_arg(ctx, "announce_bazel_command")
-    return (
-        _announce_value(ctx, ctx.args.announce_bazel_version),
-        _announce_value(ctx, ctx.args.announce_bazel_command),
-    )
-
-_ANNOUNCE_AUTO = "'auto' (default) prints on a recognized CI host and is quiet locally."
-_ANNOUNCE_VALUES = ["auto", "true", "false"]
-
-def _announce_args(rc_phrase: str) -> dict:
-    """The three `announce_bazel_*` CLI args every Bazel-spawning task declares.
-    Splat into a task's `args = {...}`; `rc_phrase` names the thing being run
-    (e.g. `"the build"`, `"the lint build"`)."""
-    return {
-        "announce_bazel_rc": args.string(
-            default = "auto",
-            values = _ANNOUNCE_VALUES,
-            long = "announce-bazel-rc",
-            description = "Print the resolved Bazel `.bazelrc` flags before running %s. %s ASPECT_DEBUG=1 logs the same disclosure regardless." % (rc_phrase, _ANNOUNCE_AUTO),
-        ),
-        "announce_bazel_version": args.string(
-            default = "auto",
-            values = _ANNOUNCE_VALUES,
-            long = "announce-bazel-version",
-            description = "Print the detected Bazel version before each bazel spawn. %s" % _ANNOUNCE_AUTO,
-        ),
-        "announce_bazel_command": args.string(
-            default = "auto",
-            values = _ANNOUNCE_VALUES,
-            long = "announce-bazel-command",
-            description = "Print the exact bazel command line before each bazel spawn. %s" % _ANNOUNCE_AUTO,
-        ),
-    }
 
 # The passthrough arg names, shared by the declarations below and every helper
 # that reads a bucket, so a rename cannot leave one of them behind.
@@ -205,7 +156,7 @@ def _passthrough_args(post_note: str = "") -> dict:
     directly, plus the two lists they read arities from — command flags for the
     post-command bucket, startup options for the pre-command one.
 
-    Splat into a task's `args = {...}`. Included in `flags.args`, and exposed
+    Splat into a task's `args = {...}`. Included in `bazel_flags.args`, and exposed
     separately for a task that declares its own `bazel_flags` /
     `bazel_startup_flags` with wording of its own (see `delivery`). `post_note`
     appends a sentence to the post-command bucket's help, for a task whose
@@ -251,37 +202,6 @@ def _flag_args(build_phrase: str) -> dict:
             description = "Additional Bazel startup flags. Rarely needed — type the startup flag before the task name (`aspect --host_jvm_args=-Xmx2g build`) and it is forwarded as-is. This wrapper is the way out when a startup flag collides with one of this task's own flags. Repeat to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     } | _passthrough_args()
-
-def _core_args(phrase: str) -> dict:
-    """The command-agnostic CLI args every Bazel-spawning task registers (splat
-    into `task(args)`): the flag/startup/announce args, the BES args, and the
-    target-pattern-file / retry / cancel controls."""
-    return _flag_args(phrase) | _announce_args(phrase) | bes_args() | {
-        "target_pattern_file": args.string(
-            default = "",
-            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
-        "bazel_retry_attempts": args.int(
-            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
-        ),
-        "cancel": args.boolean(
-            default = False,
-            description = "Cancel any running Bazel invocation before starting.",
-        ),
-    }
-
-def _targets_arg(verb: str) -> dict:
-    """The positional target-pattern arg, with command-specific help. Splat into
-    a task's `args = {...}` alongside `core_args`."""
-    return {
-        "targets": args.positional(
-            default = ["..."],
-            minimum = 1,
-            maximum = 512,
-            description = "Bazel target patterns to %s. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect %s -- //... -//experimental/...`." % (verb, verb),
-        ),
-    }
 
 def _claim_bucket(ctx, bucket: str) -> list:
     """Claim the flags the CLI parser could not attribute to a declared arg and
@@ -603,55 +523,6 @@ def _resolve_flags(ctx) -> list:
         flags = bazel_trait.flags(flags)
     return _apply_plan(flags, plan)
 
-def _setup_command(ctx, command: str, base_flags: list = []):
-    """Prepare `ctx.bazel` for upcoming `ctx.bazel.<command>` calls and return the
-    `Bazelrc` it sets with `ctx.bazel.use_rc`.
-
-    Resolves startup + command flags, parses the workspace `.bazelrc` into a
-    `Bazelrc`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
-    disclosure. Subsequent `ctx.bazel.build`/`test`/`query` run under that rc —
-    each self-expands and adds `--ignore_all_rc_files`. `base_flags`
-    are task-injected defaults the user can override via `--bazel-flag=...`;
-    `trait.base_flags` (feature-injected defaults) are prepended ahead of them.
-
-    Built-in tasks reach this through `phases.setup`, which
-    calls it before the Bazel health-check hooks so the check inspects the same
-    rc every Bazel call uses.
-    """
-    startup_flags = _resolve_startup_flags(ctx)
-    flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
-    rc = ctx.bazel.parse_rc(
-        startup_flags = startup_flags,
-        flags = flags,
-        skip_config_if_missing = _requested_config_names(flags),
-    )
-    ctx.bazel.use_rc(rc)
-    trace.event("bazel.flags", fields = {"command": command, "flags": flags, "startup_flags": startup_flags})
-
-    _require_arg(ctx, "announce_bazel_rc")
-    if _announce_value(ctx, ctx.args.announce_bazel_rc):
-        print(ctx.bazel.announce_rc(rc, command = command, ansi = color_enabled(ctx.std)))
-    trace.log(ctx.bazel.announce_rc(rc, command = command, ansi = False))
-
-    return rc
-
-def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list = []):
-    """A `Bazelrc` mirroring `setup_command`'s flag composition, but with the
-    resolved startup flags run through `startup_transform` (a `list -> list`).
-
-    For a phase that needs its own Bazel server within a task — e.g. delivery
-    routing its checksum phase and its release build to separate `--output_base`s.
-    Unlike `setup_command`, this neither registers the rc via `use_rc` nor emits
-    the disclosure — pass the returned rc as a per-call `rc=` on `ctx.bazel.build`.
-    """
-    startup_flags = startup_transform(_resolve_startup_flags(ctx))
-    flags = _filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + _resolve_flags(ctx)
-    return ctx.bazel.parse_rc(
-        startup_flags = startup_flags,
-        flags = flags,
-        skip_config_if_missing = _requested_config_names(flags),
-    )
-
 _CONFIG_FLAG = "--config"
 _CONFIG_PREFIX = _CONFIG_FLAG + "="
 
@@ -711,59 +582,24 @@ def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list
 
     return _flags_delta(base, full)
 
-def _resolve_rc_flags(ctx, rc, command: str) -> list:
-    """Fire the trait's post-rc `rc_flags` hooks against the resolved `rc` and
-    concatenate the flags they return. Applied by every bazel-driving task after
-    resolving its rc."""
-    out = []
-    for hook in ctx.traits[BazelTrait].rc_flags:
-        out.extend(hook(ctx, rc, command))
-    return out
-
-def _rc_with_flags(ctx, rc, flags: list[str]):
-    """`rc` with `flags` layered on top as command-line extras.
-
-    The bazelrc is the only build input `ctx.bazel.run` and `run_all`
-    take, so per-invocation extras (endpoint auth from `rc_flags`, a release
-    build's `--release-bazel-flag`s) reach the build by becoming part of it.
-    The merged command expands `flags` after everything the rc files say, so
-    they win under Bazel's last-wins rule. `rc` comes back unchanged when
-    `flags` is empty."""
-    if not flags:
-        return rc
-    extras = ctx.bazel.new_rc(flags = list(flags))
-    if rc == None:
-        return extras
-    return rc.merge(extras)
-
-flags = namespace(
-    BAZEL_VALUE_FLAGS = BAZEL_VALUE_FLAGS,
-    BAZEL_STARTUP_VALUE_FLAGS = BAZEL_STARTUP_VALUE_FLAGS,
+bazel_flags = namespace(
+    VALUE_FLAGS = BAZEL_VALUE_FLAGS,
+    STARTUP_VALUE_FLAGS = BAZEL_STARTUP_VALUE_FLAGS,
+    args = _flag_args,
     passthrough_args = _passthrough_args,
     resolve = _resolve_flags,
     resolve_startup = _resolve_startup_flags,
-    args = _flag_args,
-    disclaim_passthrough = _disclaim_passthrough,
     expand_config = _expand_config_flags,
+    disclaim_passthrough = _disclaim_passthrough,
 )
 
-announce = namespace(
-    args = _announce_args,
-    resolve = _resolve_announce,
-)
+# Shared with the rest of `bazel/`, which composes them into the rc and the
+# announce args.
+require_arg = _require_arg
+filter_injected = _filter_injected
+requested_config_names = _requested_config_names
 
-# Surfaced for the facade namespace, the invocation handle, and direct unit
-# tests. `_`-private to task authors, who reach these through the assembled
-# `bazel` namespace.
-setup_command = _setup_command
-resolve_rc_flags = _resolve_rc_flags
-rc_with_flags = _rc_with_flags
-sibling_rc = _sibling_rc
-resolve_announce = _resolve_announce
-core_args = _core_args
-targets_arg = _targets_arg
 testonly_flags_delta = _flags_delta
-testonly_config_names = _requested_config_names
 
 # Exported for the unit tests: the per-entry section rule is only reachable from
 # AXL through a `task_flags` hook (the `extra_*_flags` fields are `list[str]`, so

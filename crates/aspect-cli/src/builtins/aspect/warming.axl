@@ -27,7 +27,7 @@ output base, and isn't a surface phase of its own. See `_impl`.)
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
@@ -115,8 +115,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
     rc = ph.setup(data["target_pattern"], _KIND, "build")
-    announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
+    announce_version, announce_command = bazel_announce.resolve(ctx)
+    endpoint_auth_flags = bazel_rc.hook_flags(ctx, rc, "build")
 
     # Clean the prior Bazel state under the runner storage mount AFTER
     # `phases.setup` — the health check must run first (the Workflows
@@ -161,7 +161,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    xl = bzl.exec_log.open(bazel_trait)
+    xl = bazel_exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(
         flags = ["--nobuild"] + endpoint_auth_flags,
@@ -190,7 +190,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
-        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
+        bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -210,7 +210,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if events.done:
             break
 
-    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+    bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = build.wait()
     for sink in bes_sinks:
         sink.wait()
@@ -286,5 +286,5 @@ warming = task(
             default = ["..."],
             description = "Bazel target patterns to warm. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
         ),
-    } | bzl.flags.args("the warming build") | bzl.announce.args("the warming build") | bes_args(),
+    } | bazel_flags.args("the warming build") | bazel_announce.args("the warming build") | bes_args(),
 )
