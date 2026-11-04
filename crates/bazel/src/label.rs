@@ -129,7 +129,7 @@ impl LabelResolver {
     /// [`resolve_relative_label`] against this workspace's packages.
     pub fn resolve(&self, label: &str) -> String {
         resolve_relative_label(label, &self.current_package, |pkg| {
-            is_package(&self.workspace_root, pkg)
+            has_build_file(&self.workspace_root, pkg)
         })
     }
 
@@ -141,7 +141,7 @@ impl LabelResolver {
 
 /// Whether the workspace-relative directory `package` holds a `BUILD.bazel`
 /// or `BUILD` file. `.bazelignore` and `--deleted_packages` are not consulted.
-pub fn is_package(workspace_root: &Path, package: &str) -> bool {
+fn has_build_file(workspace_root: &Path, package: &str) -> bool {
     let dir = workspace_root.join(package);
     ["BUILD.bazel", "BUILD"]
         .iter()
@@ -177,24 +177,19 @@ pub fn resolve_relative_label(
         return format!("//{}:{name}", join_package(current_package, pkg));
     }
     let path = join_package(current_package, label);
-    let mut package = path.as_str();
-    loop {
-        if is_package(package) {
-            return if package == path {
-                let name = path.rsplit('/').next().unwrap_or(&path);
-                format!("//{path}:{name}")
-            } else {
-                let rest = path[package.len()..].trim_start_matches('/');
-                format!("//{package}:{rest}")
-            };
+    let mut ancestors = std::iter::successors(Some(path.as_str()), |dir| {
+        (!dir.is_empty()).then(|| dir.rsplit_once('/').map_or("", |(parent, _)| parent))
+    });
+    match ancestors.find(|dir| is_package(dir)) {
+        Some(package) if package != path => {
+            let rest = path[package.len()..].trim_start_matches('/');
+            format!("//{package}:{rest}")
         }
-        if package.is_empty() {
-            break;
+        _ => {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            format!("//{path}:{name}")
         }
-        package = package.rsplit_once('/').map_or("", |(parent, _)| parent);
     }
-    let name = path.rsplit('/').next().unwrap_or(&path);
-    format!("//{path}:{name}")
 }
 
 fn join_package(current: &str, rel: &str) -> String {
@@ -294,6 +289,21 @@ mod tests {
             LabelResolver::new(root, root).normalize("@@//foo"),
             "//foo:foo"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workspace_root_still_contains_the_working_directory() {
+        let ws = tempfile::tempdir().unwrap();
+        let real = ws.path().join("real");
+        std::fs::create_dir_all(real.join("foo")).unwrap();
+        std::fs::write(real.join("foo/BUILD"), "").unwrap();
+        let link = ws.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let labels = LabelResolver::new(&link, &real.join("foo"));
+        assert_eq!(labels.current_package(), "foo");
+        assert_eq!(labels.resolve("tool"), "//foo:tool");
     }
 
     #[test]
