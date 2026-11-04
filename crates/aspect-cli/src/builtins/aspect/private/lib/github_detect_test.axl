@@ -106,6 +106,11 @@ def _fake_process(vars, real = None):
 
     return struct(command = command, id = real.id if real else (lambda: 0))
 
+def _github_checkout(vars):
+    """`vars` with a github.com `origin` remote unless it names one, as in a
+    real checkout, so the token issuers can establish the repository's host."""
+    return vars if _ORIGIN in vars else dict(vars, **{_ORIGIN: "https://github.com/o/r.git"})
+
 def _fake_std(vars, files = {}):
     """Stub std with env + fs + process:
       env.var(name)           → vars.get(name, "")
@@ -642,7 +647,7 @@ def _test_impl(ctx):
     # `existing_app_token` parameter bypasses the mint for tests.
 
     def _ctx_with_env(env_vars):
-        return struct(std = struct(env = struct(var = lambda name: env_vars.get(name, "")), process = _fake_process(env_vars)))
+        return struct(std = struct(env = struct(var = lambda name: env_vars.get(name, "")), process = _fake_process(_github_checkout(env_vars))))
 
     _eq(
         "preferred_token_pair: App token primary; GITHUB_TOKEN is fallback",
@@ -878,7 +883,7 @@ def _stub_ctx(ctx, env_vars, http_client):
             # file-pattern libraries (rate-limit, checkrun) embed
             # `ctx.std.process.id()` in the per-task state file path — but
             # with the `origin` remote from `env_vars`.
-            process = _fake_process(env_vars, ctx.std.process),
+            process = _fake_process(_github_checkout(env_vars), ctx.std.process),
         ),
         http = lambda: http_client,
         traits = ctx.traits,
@@ -900,7 +905,7 @@ def _test_aspect_api_token_tip_gate(ctx):
         # Stub ctx where `aspect.auth.credentials(...)` returns None so
         # `_authenticate` short-circuits before any HTTP call.
         return struct(
-            std = struct(env = struct(var = lambda name: env_vars.get(name, "")), process = _fake_process(env_vars)),
+            std = struct(env = struct(var = lambda name: env_vars.get(name, "")), process = _fake_process(_github_checkout(env_vars))),
             aspect = struct(auth = fake_auth()),
             traits = ctx.traits,
         )
@@ -1078,7 +1083,7 @@ def _test_explicit_token_and_api_base(ctx):
     tips._reset_for_test(ctx)
     explicit_env = {"CI": "true", "GITHUB_ACTIONS": "true", "ASPECT_GITHUB_TOKEN": " pat-tok\n"}
     no_creds = struct(
-        std = struct(env = struct(var = lambda name: explicit_env.get(name, "")), process = _fake_process(explicit_env)),
+        std = struct(env = struct(var = lambda name: explicit_env.get(name, "")), process = _fake_process(_github_checkout(explicit_env))),
         aspect = struct(auth = fake_auth()),
         traits = ctx.traits,
     )
@@ -1122,7 +1127,7 @@ def _test_explicit_token_and_api_base(ctx):
     log = struct(info = lambda std, msg: logged.append(msg))
 
     def _bails(vars):
-        return github.bail_if_not_public_github(_fake_std(vars), log, "Skipping.")
+        return github.bail_if_not_public_github(_fake_std(_github_checkout(vars)), log, "Skipping.")
 
     _eq("gate: unset", _bails({}), False)
     _eq("gate: github.com", _bails({"ASPECT_VCS_URL": "https://github.com/o/r"}), False)
@@ -1148,11 +1153,11 @@ def _test_explicit_token_and_api_base(ctx):
     _eq("gate: github.com runner", _bails({"GITHUB_SERVER_URL": "https://github.com"}), False)
     _eq("gate: github.com runner's own GITHUB_API_URL", _bails({"GITHUB_API_URL": "https://api.github.com/"}), False)
 
-    # Off Actions only the API base names the Enterprise host.
-    _eq("gate: Enterprise API base, no token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes}), True)
+    # Off Actions with no remote, only the API base names the Enterprise host.
+    _eq("gate: Enterprise API base, no token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes, _ORIGIN: ""}), True)
     if not logged[-1].startswith("ASPECT_GITHUB_API_URL points at 'ghes.example.mil'"):
         fail("gate: message should name ASPECT_GITHUB_API_URL, got %r" % logged[-1])
-    _eq("gate: Enterprise API base, token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes, "ASPECT_GITHUB_TOKEN": "t"}), False)
+    _eq("gate: Enterprise origin and API base, token", _bails({"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes, "ASPECT_GITHUB_TOKEN": "t", _ORIGIN: "git@ghes.example.mil:o/r.git"}), False)
     _eq(
         "gate: ASPECT_VCS_URL on github.com wins over the runner's server",
         _bails({"ASPECT_VCS_URL": "https://github.com/o/r", "GITHUB_SERVER_URL": "https://ghes.example.mil"}),
@@ -1194,6 +1199,24 @@ def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
             "but the origin remote points at 'ghes.example.mil'",
             "the origin remote points at 'ghes.example.mil', not github.com",
         ),
+        (
+            "GITHUB_REPOSITORY, github.com origin, Enterprise API",
+            {"GITHUB_REPOSITORY": "o/r", _ORIGIN: "git@github.com:o/r.git", "ASPECT_GITHUB_API_URL": "https://ghes.example/api/v3"},
+            "is on 'ghes.example', but the origin remote points at 'github.com'; set ASPECT_VCS_URL",
+            not_sent,
+        ),
+        (
+            "nothing names the repo host, Enterprise API",
+            {"BUILDKITE": "true", "ASPECT_GITHUB_TOKEN": "t", "ASPECT_GITHUB_API_URL": ghes, _ORIGIN: ""},
+            "nothing names the repository's host",
+            not_sent,
+        ),
+        (
+            "GITHUB_REPOSITORY alone, default API",
+            {"GITHUB_REPOSITORY": "o/r", "ASPECT_GITHUB_TOKEN": "t", _ORIGIN: ""},
+            "nothing names the repository's host",
+            not_sent,
+        ),
     ]:
         _eq("host binding: %s — gate bails" % label, bails(vars), True)
         if gate_says not in logged[-1]:
@@ -1213,11 +1236,10 @@ def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
         ("Enterprise runner", {"GITHUB_SERVER_URL": "https://ghes.example.mil", "GITHUB_API_URL": ghes}),
         ("GHE.com", {"ASPECT_VCS_URL": "https://acme.ghe.com/acme/widgets", "ASPECT_GITHUB_API_URL": "https://api.acme.ghe.com"}),
         ("host case differs", {"ASPECT_VCS_URL": "https://GHES.example.mil/acme/widgets", "ASPECT_GITHUB_API_URL": ghes}),
-        ("API base names the host", {"BUILDKITE": "true", "ASPECT_GITHUB_API_URL": ghes}),
         ("default API base", {"ASPECT_VCS_URL": "https://github.com/o/r"}),
         ("github.com origin, default API", {"BUILDKITE": "true", _ORIGIN: "git@github.com:o/r.git"}),
         ("Enterprise origin, its API", {"BUILDKITE": "true", _ORIGIN: "git@ghes.example.mil:o/r.git", "ASPECT_GITHUB_API_URL": ghes}),
-        ("GITHUB_REPOSITORY names no host", {"GITHUB_REPOSITORY": "o/r", _ORIGIN: "git@github.com:o/r.git", "ASPECT_GITHUB_API_URL": ghes}),
+        ("GITHUB_REPOSITORY, origin on its API host", {"GITHUB_REPOSITORY": "o/r", _ORIGIN: "git@ghes.example.mil:o/r.git", "ASPECT_GITHUB_API_URL": ghes}),
     ]:
         _eq("host binding: %s — accepted" % label, github.api_host_mismatch(_fake_std(vars)), "")
 

@@ -24,8 +24,8 @@ Token and host:
     being `_authenticate` and `_preferred_token_pair`. Neither returns a token
     unless the API base, default included, is `https://` and on the
     repository's host (`_api_host_mismatch`: `ASPECT_VCS_URL`, then
-    `GITHUB_SERVER_URL`, then the `origin` remote), and a minted App token
-    only for api.github.com. The gate logs why a feature skips.
+    `GITHUB_SERVER_URL`, then the `origin` remote; none at all fails closed),
+    and a minted App token only for api.github.com. The gate logs why a feature skips.
 """
 
 load("@std//base64.axl", "base64")
@@ -1883,17 +1883,14 @@ def _repo_host_source(std):
     """`(source, host)` for the repository's host, lowercased and `github.com`
     for public GitHub, or `("", "")` when nothing names it.
 
-    Follows `detect_github_repo`'s order: `ASPECT_VCS_URL`, then
-    `GITHUB_SERVER_URL` (set beside `GITHUB_REPOSITORY` on Actions), then the
-    `origin` remote. A `GITHUB_REPOSITORY` without `GITHUB_SERVER_URL` names
-    no host, so the remote isn't consulted for it."""
+    `ASPECT_VCS_URL`, then `GITHUB_SERVER_URL` (set beside `GITHUB_REPOSITORY`
+    on Actions), then the `origin` remote. `GITHUB_REPOSITORY` names no host,
+    so without `GITHUB_SERVER_URL` the remote still decides it."""
     env = std.env
     for var in ("ASPECT_VCS_URL", "GITHUB_SERVER_URL"):
         url = env.var(var) or ""
         if url:
             return (var, "github.com" if _is_public_github_url(url) else _extract_host(url).lower())
-    if env.var("GITHUB_REPOSITORY"):
-        return ("", "")
     url = _origin_url(std)
     if not url:
         return ("", "")
@@ -1919,17 +1916,20 @@ def _api_host_mismatch(std):
     it may.
 
     The base, api.github.com by default, must be `https://` and on the
-    repository's host (`_repo_host_source`). When nothing names that host the
-    API base itself does, so there is nothing to compare. The Aspect App's
-    minted tokens are further limited to api.github.com in `_authenticate`."""
+    repository's host (`_repo_host_source`). When nothing names that host it
+    fails closed: no token goes anywhere. The Aspect App's minted tokens are
+    further limited to api.github.com in `_authenticate`."""
     var, api_base = _api_base_source(std.env)
     label = var or "The default API base"
     if not api_base.lower().startswith("https://"):
         return "%s (%s) is not an https:// URL" % (label, api_base)
     api_host = _web_host_of_api_base(api_base)
     source, repo_host = _repo_host_source(std)
-    if repo_host and repo_host != api_host:
-        return "%s (%s) is on '%s', but %s points at '%s'" % (label, api_base, api_host, source, repo_host)
+    if not repo_host:
+        return "nothing names the repository's host (ASPECT_VCS_URL, GITHUB_SERVER_URL or an origin remote), so %s (%s) can't be checked against it; set ASPECT_VCS_URL to the repository's URL" % (label, api_base)
+    if repo_host != api_host:
+        hint = "; set ASPECT_VCS_URL to the repository's URL" if source == _ORIGIN_SOURCE else ""
+        return "%s (%s) is on '%s', but %s points at '%s'%s" % (label, api_base, api_host, source, repo_host, hint)
     return ""
 
 def _bail_if_not_public_github(std, log, skip_label):
