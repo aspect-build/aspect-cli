@@ -20,9 +20,12 @@ Token and host:
     (`ASPECT_GITHUB_API_URL`, then `GITHUB_API_URL`, then api.github.com).
   - An Enterprise host (`_target_host`) needs both the token and a
     non-default API base; `_bail_if_not_public_github` gates on them.
-  - No token goes to a non-default API base unless it is `https://` and on
-    the repository's host (`_api_host_mismatch`): `_authenticate` and
-    `_preferred_token_pair` return none, and the gate logs why.
+  - Tokens are bound to the host they are issued for, the only two issuers
+    being `_authenticate` and `_preferred_token_pair`. Neither returns a token
+    unless the API base, default included, is `https://` and on the
+    repository's host (`_api_host_mismatch`: `ASPECT_VCS_URL`, then
+    `GITHUB_SERVER_URL`, then the `origin` remote), and a minted App token
+    only for api.github.com. The gate logs why a feature skips.
 """
 
 load("@std//base64.axl", "base64")
@@ -401,11 +404,12 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     `_reason` is populated on failure (kind + reason). `existing_app_token`
     skips a redundant mint. An `ASPECT_GITHUB_TOKEN` stands in for the App
     token (see `_authenticate`). Neither token is returned for an API base
-    `_api_host_mismatch` rejects. For App-attributed calls (check-runs, comment
-    create/update), call `_authenticate` directly.
+    `_api_host_mismatch` rejects, not even `existing_app_token`. For
+    App-attributed calls (check-runs, comment create/update), call
+    `_authenticate` directly.
     """
     env = ctx.std.env
-    mismatch = _api_host_mismatch(env)
+    mismatch = _api_host_mismatch(ctx.std)
     if mismatch:
         _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, mismatch)
         return None, None, BUCKET_APP
@@ -449,6 +453,8 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
 
     No token, explicit or minted, is returned when the API base fails
     `_api_host_mismatch`, so it can't reach a host other than the repo's.
+    Nothing is minted for an API base other than api.github.com, the only
+    host the Aspect App's tokens are for.
 
     `_extra`, if a dict, is populated on a mint with `installation_id` +
     `installation_proof` (the comment surface forwards them on the `contribute`
@@ -471,12 +477,20 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 fail(msg)
 
     explicit = _explicit_token(ctx.std.env)
-    mismatch = _api_host_mismatch(ctx.std.env)
+    mismatch = _api_host_mismatch(ctx.std)
     if mismatch:
         _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, mismatch)
         return None
     if explicit:
         return explicit
+    var, api_base = _api_base_source(ctx.std.env)
+    if api_base != DEFAULT_GITHUB_API:
+        _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, "the Aspect GitHub App's tokens are for github.com, but %s points at '%s'; set %s to a token for that host" % (
+            var,
+            _web_host_of_api_base(api_base),
+            _EXPLICIT_TOKEN_ENV,
+        ))
+        return None
 
     creds = aspect_cloud_credentials(ctx, profile = profile)
     if not creds:
@@ -1856,87 +1870,105 @@ def _is_public_github_url(url):
     h = _extract_host(url).lower()
     return h == "github.com" or h == "www.github.com"
 
-def _target_host(env):
-    """`(var, host)` for the GitHub host this run targets when it isn't
-    github.com, else `("", "")`.
+_ORIGIN_SOURCE = "the origin remote"
 
-    `ASPECT_VCS_URL` wins over GitHub Actions' `GITHUB_SERVER_URL`, so a
-    mirror can point elsewhere. With neither set (Buildkite, CircleCI), a
-    non-default API base names the host instead."""
+def _origin_url(std):
+    """`git remote get-url origin`, or "" when there is none."""
+    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ""
+    return result.stdout.strip()
+
+def _repo_host_source(std):
+    """`(source, host)` for the repository's host, lowercased and `github.com`
+    for public GitHub, or `("", "")` when nothing names it.
+
+    Follows `detect_github_repo`'s order: `ASPECT_VCS_URL`, then
+    `GITHUB_SERVER_URL` (set beside `GITHUB_REPOSITORY` on Actions), then the
+    `origin` remote. A `GITHUB_REPOSITORY` without `GITHUB_SERVER_URL` names
+    no host, so the remote isn't consulted for it."""
+    env = std.env
     for var in ("ASPECT_VCS_URL", "GITHUB_SERVER_URL"):
         url = env.var(var) or ""
         if url:
-            if _is_public_github_url(url):
-                return ("", "")
-            return (var, _extract_host(url))
-    var, api_base = _api_base_source(env)
+            return (var, "github.com" if _is_public_github_url(url) else _extract_host(url).lower())
+    if env.var("GITHUB_REPOSITORY"):
+        return ("", "")
+    url = _origin_url(std)
+    if not url:
+        return ("", "")
+    return (_ORIGIN_SOURCE, "github.com" if _is_public_github_url(url) else _extract_host(url).lower())
+
+def _target_host(std):
+    """`(source, host)` for the GitHub host this run targets when it isn't
+    github.com, else `("", "")`.
+
+    The repository's host (`_repo_host_source`) wins, so a mirror can point
+    elsewhere. When nothing names it, a non-default API base names the host
+    instead."""
+    source, host = _repo_host_source(std)
+    if host:
+        return ("", "") if host == "github.com" else (source, host)
+    var, api_base = _api_base_source(std.env)
     if api_base == DEFAULT_GITHUB_API:
         return ("", "")
     return (var, _web_host_of_api_base(api_base))
 
-def _api_host_mismatch(env):
-    """Why the configured API base may not receive this run's GitHub token, or
-    "" when it may.
+def _api_host_mismatch(std):
+    """Why the API base may not receive this run's GitHub token, or "" when
+    it may.
 
-    The default api.github.com always may. Any other base must be `https://`
-    and belong to the repository's host: `ASPECT_VCS_URL`, else
-    `GITHUB_SERVER_URL` (as in `_target_host`), github.com included. With
-    neither set, the API base itself names the host and there is nothing to
-    compare."""
-    var, api_base = _api_base_source(env)
-    if api_base == DEFAULT_GITHUB_API:
-        return ""
+    The base, api.github.com by default, must be `https://` and on the
+    repository's host (`_repo_host_source`). When nothing names that host the
+    API base itself does, so there is nothing to compare. The Aspect App's
+    minted tokens are further limited to api.github.com in `_authenticate`."""
+    var, api_base = _api_base_source(std.env)
+    label = var or "The default API base"
     if not api_base.lower().startswith("https://"):
-        return "%s (%s) is not an https:// URL" % (var, api_base)
+        return "%s (%s) is not an https:// URL" % (label, api_base)
     api_host = _web_host_of_api_base(api_base)
-    for repo_var in ("ASPECT_VCS_URL", "GITHUB_SERVER_URL"):
-        url = env.var(repo_var) or ""
-        if url:
-            repo_host = "github.com" if _is_public_github_url(url) else _extract_host(url).lower()
-            if repo_host != api_host:
-                return "%s (%s) is on '%s', but %s points at '%s'" % (var, api_base, api_host, repo_var, repo_host)
-            return ""
+    source, repo_host = _repo_host_source(std)
+    if repo_host and repo_host != api_host:
+        return "%s (%s) is on '%s', but %s points at '%s'" % (label, api_base, api_host, source, repo_host)
     return ""
 
 def _bail_if_not_public_github(std, log, skip_label):
     """True (feature should bail) when the run targets a non-github.com host
-    (`_target_host`) without the configuration it needs, logging an
-    actionable info() first.
+    (`_target_host`) without the configuration it needs, or its API base
+    fails `_api_host_mismatch`, logging an actionable info() first.
 
     Every App-authenticating feature needs this gate. The Aspect App is
     github.com-only, so an Enterprise host needs both `ASPECT_GITHUB_TOKEN`
     and an API base other than api.github.com; without them every call would
-    go to the wrong host or 401. It also bails on an API base that
-    `_api_host_mismatch` rejects. `skip_label` names what won't happen (e.g.
+    go to the wrong host or 401. `skip_label` names what won't happen (e.g.
     "Skipping check-run creation.").
     """
     env = std.env
-    mismatch = _api_host_mismatch(env)
+    var, host = _target_host(std)
+    missing = []
+    if host:
+        if not _explicit_token(env):
+            missing.append(_EXPLICIT_TOKEN_ENV)
+        if _resolve_api_base(env) == DEFAULT_GITHUB_API:
+            missing.append(_API_URL_ENV)
+    if missing:
+        log.info(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
+                       "for that host in %s and its API base (e.g. %s) in %s; " +
+                       "missing %s. %s") % (
+            var,
+            host,
+            _EXPLICIT_TOKEN_ENV,
+            _api_base_of_web_host(host),
+            _API_URL_ENV,
+            " and ".join(missing),
+            skip_label,
+        ))
+        return True
+    mismatch = _api_host_mismatch(std)
     if mismatch:
         log.info(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
         return True
-    var, host = _target_host(env)
-    if not host:
-        return False
-    missing = []
-    if not _explicit_token(env):
-        missing.append(_EXPLICIT_TOKEN_ENV)
-    if _resolve_api_base(env) == DEFAULT_GITHUB_API:
-        missing.append(_API_URL_ENV)
-    if not missing:
-        return False
-    log.info(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
-                   "for that host in %s and its API base (e.g. %s) in %s; " +
-                   "missing %s. %s") % (
-        var,
-        host,
-        _EXPLICIT_TOKEN_ENV,
-        _api_base_of_web_host(host),
-        _API_URL_ENV,
-        " and ".join(missing),
-        skip_label,
-    ))
-    return True
+    return False
 
 def _api_base_of_web_host(host):
     """The likely API base for an Enterprise web host, the inverse of
@@ -2037,10 +2069,7 @@ def detect_github_repo(std):
         if len(parts) == 2 and parts[0] and parts[1]:
             return (parts[0], parts[1])
 
-    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
-    if result.status.code != 0:
-        return ("", "")
-    return _extract_github_owner_repo_from_url(result.stdout.strip(), _enterprise_hosts(env))
+    return _extract_github_owner_repo_from_url(_origin_url(std), _enterprise_hosts(env))
 
 # Issue Comments (PR comments use the issues endpoint)
 
