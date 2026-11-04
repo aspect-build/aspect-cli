@@ -48,9 +48,6 @@ never copied into a Starlark value here. When no snippet is rendered, the
 surface still shows the failing label + action mnemonics + the CI link.
 """
 
-# `exit_codes` is defined in `bazel/trait.axl` and imported from there rather
-# than through the `@aspect//bazel.axl` facade, whose `bazel` export would
-# shadow the builtin `bazel` global for anything added to this file later.
 load("@aspect//bazel/trait.axl", "exit_codes")
 load("@std//time.axl", "time")
 load("./ci.axl", "detect_ci_host", "resolve_build_url")
@@ -4993,7 +4990,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 # and own every surface interaction a bazel build/test task makes: the live
 # progress emit gate, per-attempt phase rows + retry archiving, the terminal
 # emit, and repro-command production. A task that wants none of this simply
-# doesn't construct a handle — the `bazel.build(ctx)` invocation handle runs
+# doesn't construct a handle — the `bazel_invocation.build(ctx)` invocation handle runs
 # fine without it. The status/progress text helpers below moved here verbatim
 # from the old `bazel_runner.axl` (they were always results logic).
 

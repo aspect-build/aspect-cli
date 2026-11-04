@@ -1,4 +1,5 @@
-"""Tests for the `bazel` flag/rc/auth helpers (in @aspect//bazel.axl).
+"""Tests for the `bazel_flags`, `bazel_announce` and `bazel_rc` helpers
+(`@aspect//bazel.axl`).
 
 Run with:
   aspect dev test-bazel-flags
@@ -555,40 +556,40 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
     for a dev test."""
     sentinel = "/tmp/test-setup-command-sentinel"
 
-    # Inject a real trait into the live trait map and let setup_command read it
+    # Inject a real trait into the live trait map and let `bazel_rc.setup` read it
     # back via ctx.traits[BazelTrait] — exercises the production (no-override) path.
     ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + sentinel])
 
     rc = bazel_rc.setup(ctx, "build", base_flags = ["--from-base"])
 
     if rc != ctx.bazel.active_rc():
-        fail("setup_command — returned rc not registered as active")
+        fail("bazel_rc.setup — returned rc not registered as active")
     if "--from-base" not in rc.expand(command = "build"):
-        fail("setup_command — base_flag not in build expansion: %r" % rc.expand(command = "build"))
+        fail("bazel_rc.setup — base_flag not in build expansion: %r" % rc.expand(command = "build"))
 
     startup = list(rc.startup_flags())
     if ("--output_base=" + sentinel) not in startup:
-        fail("setup_command — trait --output_base not on rc startup flags: %r" % startup)
+        fail("bazel_rc.setup — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
-        fail("setup_command — --ignore_all_rc_files not present: %r" % startup)
+        fail("bazel_rc.setup — --ignore_all_rc_files not present: %r" % startup)
 
 def _test_setup_command_trait_base_flags(ctx):
-    """`trait.base_flags` (feature-injected defaults) enter setup_command's
+    """`trait.base_flags` (feature-injected defaults) enter `bazel_rc.setup`'s
     composition ahead of the caller's base flags, so later flags still win
     last-wins."""
     ctx.traits[BazelTrait] = _trait(base = ["--trait-base"])
     rc = bazel_rc.setup(ctx, "build", base_flags = ["--from-base"])
     expanded = rc.expand(command = "build")
     if "--trait-base" not in expanded:
-        fail("setup_command — trait base_flag not in build expansion: %r" % expanded)
+        fail("bazel_rc.setup — trait base_flag not in build expansion: %r" % expanded)
     if expanded.index("--trait-base") > expanded.index("--from-base"):
-        fail("setup_command — trait base_flags must precede caller base_flags: %r" % expanded)
+        fail("bazel_rc.setup — trait base_flags must precede caller base_flags: %r" % expanded)
 
 def _test_setup_command_skips_empty_fields(ctx):
-    """`setup_command` is the only caller that filters `base_flags`, and it skips
+    """`bazel_rc.setup` is the only caller that filters `base_flags`, and it skips
     an empty one: with nothing injected anywhere, no filter runs.
 
-    Asserted through the real `setup_command` rather than a helper, because the
+    Asserted through the real `bazel_rc.setup` rather than a helper, because the
     `base_flags` and `extra_startup_flags` call sites are reachable no other way
     — a test driving `bazel_flags.resolve` alone cannot see either."""
     calls = []
@@ -602,7 +603,7 @@ def _test_setup_command_skips_empty_fields(ctx):
     _eq("nothing injected, no filter call", calls, [])
 
 def _test_sibling_rc_transforms_startup(ctx):
-    """`bazel_rc.sibling` mirrors setup_command's flags but runs the startup
+    """`bazel_rc.sibling` mirrors `bazel_rc.setup`'s flags but runs the startup
     flags through the transform, and does NOT register itself as active."""
     base = "/tmp/test-sibling-rc-base"
     ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
@@ -612,15 +613,15 @@ def _test_sibling_rc_transforms_startup(ctx):
 
     startup = list(sib.startup_flags())
     if ("--output_base=" + base + "-checksum") not in startup:
-        fail("sibling_rc — transform not applied to startup: %r" % startup)
+        fail("bazel_rc.sibling — transform not applied to startup: %r" % startup)
     if ("--output_base=" + base) in startup:
-        fail("sibling_rc — untransformed --output_base leaked: %r" % startup)
+        fail("bazel_rc.sibling — untransformed --output_base leaked: %r" % startup)
     if "--from-extra" not in sib.expand(command = "build"):
-        fail("sibling_rc — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
+        fail("bazel_rc.sibling — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
 
     # Building the sibling must not disturb the active rc.
     if ctx.bazel.active_rc() != active:
-        fail("sibling_rc — must not change ctx.bazel.active_rc()")
+        fail("bazel_rc.sibling — must not change ctx.bazel.active_rc()")
 
 # A test option: accepted by `build` and every command that inherits it, and
 # rejected outright by `query`, so it is the sharp edge of the scoping contract.
@@ -675,15 +676,15 @@ _REACH = {
 }
 
 def _rc_over(ctx, trait, task_base = [], user = []):
-    """A `Bazelrc` carrying exactly what `setup_command` would hand
+    """A `Bazelrc` carrying exactly what `bazel_rc.setup` would hand
     `parse_rc` for `trait`, built with `new_rc` so no `.bazelrc` on disk can
     perturb the expansions.
 
-    Composed the way `setup_command` composes it — `trait.base_flags`, then the
+    Composed the way `bazel_rc.setup` composes it — `trait.base_flags`, then the
     task's `base_flags=`, then `bazel_flags.resolve` — over a `_fake_ctx` so the
     user's `--bazel-flag` slot is settable from a test. That mirror is the one
     thing here production also does; `_test_setup_command_trait_base_flags`
-    pins the same two base slots through the real `setup_command`."""
+    pins the same two base slots through the real `bazel_rc.setup`."""
     resolved = bazel_flags.resolve(_fake_ctx(bazel_flags = user, trait = trait))
     return ctx.bazel.new_rc(flags = list(trait.base_flags) + list(task_base) + resolved)
 
@@ -1098,7 +1099,7 @@ def _test_injected_flag_filters_skip_the_empty_startup_field(ctx):
     parsed before the command name, so a command flag added there is a hard
     error rather than a misplaced option — and a filter that ADDS is exactly
     what finds an unguarded call site. `_test_setup_command_skips_empty_fields`
-    covers the `base_flags` slot, which only `setup_command` filters."""
+    covers the `base_flags` slot, which only `bazel_rc.setup` filters."""
     calls = []
 
     def add_one(flags):
@@ -1364,7 +1365,7 @@ def _test_impl(ctx):
     _test_auth_flags(ctx)
 
     # Run last: these build real `Bazelrc`s off `ctx.bazel`, and the
-    # `setup_command` ones register an active rc, so keeping them after the pure
+    # `bazel_rc.setup` ones register an active rc, so keeping them after the pure
     # subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_setup_command_trait_base_flags(ctx)

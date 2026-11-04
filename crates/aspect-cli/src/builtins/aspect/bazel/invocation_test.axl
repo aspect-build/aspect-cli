@@ -1,4 +1,4 @@
-"""Tests for the `bazel.build(ctx)` invocation-handle seams.
+"""Tests for the `bazel_invocation.build(ctx)` invocation-handle seams.
 
 Exercises the public dispatch helpers, which are the seam every
 task that drives its own spawn loop calls after `build.wait()` /

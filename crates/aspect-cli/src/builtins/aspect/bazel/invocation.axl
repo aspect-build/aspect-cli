@@ -1,4 +1,5 @@
-"""The high-level invocation handle: `bazel.build(ctx)` / `bazel.test(ctx)`.
+"""`bazel_invocation`: the high-level `build(ctx)` / `test(ctx)` invocation
+handles, and the `args` / `targets_arg` bundles a Bazel-spawning task declares.
 
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
 (`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
@@ -41,8 +42,7 @@ load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait
 # results heartbeat without a separate sleep loop.
 _TICK_MS = 250
 
-# Immutable, resolved-once config for one high-level bazel run. Replaces the old
-# mutable `state = {"invocation": None, "index": 0}` dict: nothing here is
+# Immutable, resolved-once config for one high-level bazel run: nothing here is
 # reassigned, and the live invocation + attempt index are threaded as values
 # rather than stored. `ctx` is carried so the `_do_*` verbs need neither a
 # per-call `ctx` (§7) nor a closure over one. `trait`/`rc`/`sinks` are runtime
@@ -341,7 +341,7 @@ def _args(phrase: str) -> dict:
 
 def _targets_arg(verb: str) -> dict:
     """The positional target-pattern arg, with command-specific help. Splat into
-    a task's `args = {...}` alongside `args`."""
+    a task's `args = {...}` alongside `bazel_invocation.args`."""
     return {
         "targets": args.positional(
             default = ["..."],

@@ -8,7 +8,7 @@ complete, prints the last runner health check and warming status, then probes th
 runner's Bazel server (`ctx.bazel.health_check()`), signaling the runner unhealthy
 if the server is wedged.
 
-Like every Bazel-calling task it resolves its flags through `bazel.setup_command`,
+Like every Bazel-calling task it resolves its flags through `bazel_rc.setup`,
 which folds in the Workflows runner metadata — notably the per-runner
 `--output_base` that `agent_health_check` requires so the probe targets the
 project-specific Bazel server (see `assert_ctx_bazel_ready_for_health_check` in
