@@ -283,7 +283,7 @@ User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
@@ -867,7 +867,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         output_groups = ["delivery_hash"],
     )
 
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
+    endpoint_auth_flags = bazel_rc.hook_flags(ctx, rc, "build")
 
     # Phase-1 extras layered on the rc from setup. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk. State is kept (no
@@ -876,7 +876,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     # nonce instead of discarding the graph.
     phase1_flags = ["--remote_download_outputs=minimal"] + endpoint_auth_flags
     _t_phase1 = time.monotonic()
-    announce_version, announce_command = bzl.announce.resolve(ctx)
+    announce_version, announce_command = bazel_announce.resolve(ctx)
 
     # Snapshot pre-loop state so retries reset BES counters without re-running
     # setup. Restored via clear+update to keep the caller's `data` ref valid.
@@ -906,7 +906,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.name)
 
         # Per attempt, since a handle binds to one build.
-        xl = bzl.exec_log.open(bazel_trait)
+        xl = bazel_exec_log.open(bazel_trait)
         phase1_execlog_sinks = xl.sinks + [bazel.execution_log.file(path = phase1_execlog_path)]
 
         # Emit the phase header before spawning bazel so it precedes the
@@ -960,7 +960,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         bb_root = usable_bb_clientd_root(ctx.std)
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
-            bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
+            bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
             for _ in range(10000):
                 event = events.try_pop()
                 if event == None:
@@ -975,7 +975,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             if events.done:
                 break
 
-        bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+        bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
         status = build.wait()
 
         # Flush the CLI-streamed BES sinks before any retry — re-binding a
@@ -1582,7 +1582,7 @@ def _delivery_impl(ctx):
         "delivery_results",
         "build",
     )
-    announce_version, announce_command = bzl.announce.resolve(ctx)
+    announce_version, announce_command = bazel_announce.resolve(ctx)
 
     delivery_trait = ctx.traits[DeliveryTrait]
     err, _ = catch(delivery_trait.delivery_start)
@@ -2039,7 +2039,7 @@ def _delivery_impl(ctx):
         # release build reaches Bazel under --ignore_all_rc_files, so an
         # unexpanded `--config=release` would fail with "Config value not
         # defined" (the task's own expanded_flags already went through this).
-        release_flags = bzl.flags.expand_config(ctx, ctx.args.release_bazel_flags)
+        release_flags = bazel_flags.expand_config(ctx, ctx.args.release_bazel_flags)
 
         # Flag order (last-wins): the rc set by use_rc, then these per-call extras,
         # folded into the bazelrc `run_all` builds under. `run_all` itself
@@ -2052,7 +2052,7 @@ def _delivery_impl(ctx):
         # honoured (the floor is a minimum, not a ceiling).
         # `--noremote_upload_local_results` keeps release artifacts out of the
         # shared remote cache (delivery-specific).
-        phase3_flags = list(release_flags) + bzl.rc_flags(ctx, rc, "build") + [
+        phase3_flags = list(release_flags) + bazel_rc.hook_flags(ctx, rc, "build") + [
             "--noremote_upload_local_results",
         ]
 
@@ -2063,9 +2063,9 @@ def _delivery_impl(ctx):
         # server. `--output_user_root` stays shared.
         phase3_rc = rc
         if delivery_suffix:
-            phase3_rc = bzl.sibling_rc(ctx, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
+            phase3_rc = bazel_rc.sibling(ctx, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
 
-        release_rc = bzl.rc_with_flags(ctx, phase3_rc, phase3_flags)
+        release_rc = bazel_rc.with_flags(ctx, phase3_rc, phase3_flags)
         if delivery_trait.create_scheduler != None and not dry_run:
             report_progress = _planning_progress(ctx, ph, data, had_failure = failed_count > 0)
             planning_error, selector = delivery_scheduler.create(
@@ -2096,7 +2096,7 @@ def _delivery_impl(ctx):
         # Phase 3 makes one attempt, so one handle; `build_start` fired ahead of
         # the task's first invocation, which is what a hook registered there
         # needs — `open` has to read the trait after it, never before.
-        xl = bzl.exec_log.open(bazel_trait)
+        xl = bazel_exec_log.open(bazel_trait)
         if phase_1_2_runs:
             phase3_execution_log = [xl.entries] if xl.entries != None else False
         else:
@@ -2163,13 +2163,13 @@ def _delivery_impl(ctx):
             # capture the build exit. Guarded by `build_done` so nothing here
             # touches a stream the `close` below has already run to the end.
             if not build_done:
-                bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
+                bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
                 for _ in range(10000):
                     event = phase3_events.try_pop()
                     if event == None:
                         break
                 if phase3_events.done:
-                    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+                    bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
                     status = runs.wait()
                     dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
 
@@ -2548,9 +2548,9 @@ Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, 
             maximum = 1000000000,
             description = "Bazel target labels to deliver.",
         ),
-    } | bzl.flags.passthrough_args(
+    } | bazel_flags.passthrough_args(
         post_note = " A forwarded flag applies to every build phase, change detection included — so one that adds non-determinism to release artifacts (--stamp, --workspace_status_command) belongs in --release-bazel-flag instead.",
-    ) | bzl.announce.args("the delivery build phases") | bes_args(),
+    ) | bazel_announce.args("the delivery build phases") | bes_args(),
     traits = [
         BazelTrait,
         DeliveryTrait,

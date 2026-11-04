@@ -1,7 +1,7 @@
 """A default 'run' task that builds a target with `bazel build` and runs the resulting binary."""
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event", "usable_bb_clientd_root")
@@ -62,7 +62,7 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    xl = bzl.exec_log.open(bazel_trait)
+    xl = bazel_exec_log.open(bazel_trait)
     execution_log = list(xl.sinks)
     if execution_log_path != None:
         execution_log.append(bazel.execution_log.file(path = execution_log_path))
@@ -78,7 +78,7 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
 
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
-        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
+        bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -89,7 +89,7 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
         if events.done:
             break
 
-    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+    bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
@@ -311,11 +311,11 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     # contain options Bazel's `build` command rejects as unrecognized (e.g.
     # `--script_path`).
     rc = ph.setup(target, "bazel_results", "build")
-    announce_version, announce_command = bzl.announce.resolve(ctx)
+    announce_version, announce_command = bazel_announce.resolve(ctx)
 
     # The bazelrc is the build's only input: per-invocation endpoint auth
     # joins it rather than riding alongside as flags.
-    rc = bzl.rc_with_flags(ctx, rc, bzl.rc_flags(ctx, rc, "build"))
+    rc = bazel_rc.with_flags(ctx, rc, bazel_rc.hook_flags(ctx, rc, "build"))
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -361,7 +361,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     # belong to.
     announce_bes_sinks(ctx, bes_sinks)
 
-    xl = bzl.exec_log.open(bazel_trait)
+    xl = bazel_exec_log.open(bazel_trait)
 
     # Build for running: the runtime captures what `bazel run` would set up
     # (executable, `args` attribute, `RunEnvironmentInfo`) and materializes the
@@ -377,7 +377,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     bb_root = usable_bb_clientd_root(ctx.std)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
-        bzl.exec_log.pump(ctx, xl)  # exec_log_event hooks
+        bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -388,7 +388,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         if events.done:
             break
 
-    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+    bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     build_status = runs.wait()
     for sink in bes_sinks:
         sink.wait()
@@ -455,7 +455,7 @@ run = task(
             default = False,
             description = "Stay running after the first build, watching the workspace and rebuilding the target after each settled batch of changes. Targets tagged `ibazel_notify_changes` receive ibazel notifications. Otherwise, targets that connect to the incremental build protocol receive changes in place; add the `supports_incremental_build_protocol` target tag to require that connection on supported platforms. Windows does not support IBP and falls back to process restarts. Required connections wait %d milliseconds by default, configurable with `ASPECT_WATCH_CONNECTION_TIMEOUT_MS`. Untagged targets are detected opportunistically, and others restart when their runfiles change. A failed rebuild leaves the current process running. Stop with Ctrl-C." % incremental_build_protocol_host.DEFAULT_CONNECTION_TIMEOUT_MS,
         ),
-    } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
+    } | bazel_flags.args("the build") | bazel_announce.args("the build") | bes_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

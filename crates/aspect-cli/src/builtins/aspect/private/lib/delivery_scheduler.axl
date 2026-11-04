@@ -6,7 +6,7 @@ keys on. A factory runs its own labels through `normalize_label` from
 `@aspect//bazel.axl` to match.
 """
 
-load("@aspect//bazel.axl", bzl = "bazel")
+load("@aspect//bazel.axl", "bazel_exec_log")
 load("./delivery_results.axl", "add_result")
 load("./runnable.axl", "normalize_label")
 
@@ -124,7 +124,7 @@ def _cleanup(ctx: TaskContext, runs, xl: struct, running: list) -> None:
         runs.cancellation.cancel()
     for entry in running:
         entry[4].cancellation.cancel()
-    close_error, _ = catch(bzl.exec_log.close, ctx, xl)
+    close_error, _ = catch(bazel_exec_log.close, ctx, xl)
     for entry in running:
         entry[4].wait()
     runs.wait()

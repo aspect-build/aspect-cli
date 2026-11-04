@@ -19,7 +19,7 @@ Exits non-zero when the Bazel server is unhealthy. Off an Aspect Workflows runne
 there is no runner to check, so it prints an informational line and exits 0.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_flags", "bazel_rc")
 load(
     "./private/lib/environment.axl",
     "error",
@@ -34,12 +34,12 @@ def _impl(ctx: TaskContext) -> int:
         info(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
 
         # Nothing spawns Bazel here, so nothing forwards the routed flags.
-        bzl.flags.disclaim_passthrough(ctx)
+        bazel_flags.disclaim_passthrough(ctx)
         return 0
 
     # Set the rc with use_rc before the health check — it carries the
     # per-runner --output_base that `agent_health_check` requires (see docstring).
-    bzl.setup_command(ctx, "build")
+    bazel_rc.setup(ctx, "build")
 
     health_error = agent_health_check(ctx, environment)
     if health_error != None:
@@ -56,5 +56,5 @@ runner_health_check = task(
         BazelTrait,
         HealthCheckTrait,
     ],
-    args = bzl.flags.args("the health check") | bzl.announce.args("the health check"),
+    args = bazel_flags.args("the health check") | bazel_announce.args("the health check"),
 )

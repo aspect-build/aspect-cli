@@ -23,7 +23,8 @@ Run with:
   aspect dev test-bazel-exec-log
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook", bzl = "bazel")
+load("@aspect//bazel/exec_log.axl", "testonly_fire", "testonly_is_exact", "testonly_union_kinds", "testonly_wanted_kinds", "testonly_wants")
+load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook", "bazel_exec_log")
 
 def _eq(label, got, want):
     if got != want:
@@ -53,7 +54,7 @@ _ENTRY_KIND = type(_ENTRY.type)
 
 def _test_union_of_one_hook(_ctx):
     hook = _recorder([], "a", kinds = ["spawn"])
-    _eq("single hook", bzl.exec_log.testonly_union_kinds([hook]), ["spawn"])
+    _eq("single hook", testonly_union_kinds([hook]), ["spawn"])
 
 def _test_union_merges_and_sorts(_ctx):
     hooks = [
@@ -62,7 +63,7 @@ def _test_union_merges_and_sorts(_ctx):
     ]
     _eq(
         "deduplicated and sorted",
-        bzl.exec_log.testonly_union_kinds(hooks),
+        testonly_union_kinds(hooks),
         ["file", "input_set", "spawn"],
     )
 
@@ -73,28 +74,28 @@ def _test_one_unfiltered_hook_widens_the_union_to_everything(_ctx):
     This fixture is carried through all three helpers in
     `_test_mixed_hooks_compose_from_union_through_exact_into_fire`."""
     hooks = [_recorder([], "a", kinds = ["spawn"]), _recorder([], "b")]
-    _eq("None wins", bzl.exec_log.testonly_union_kinds(hooks), None)
+    _eq("None wins", testonly_union_kinds(hooks), None)
 
     # Also when the unfiltered hook registered first.
     hooks = [_recorder([], "b"), _recorder([], "a", kinds = ["spawn"])]
-    _eq("order does not matter", bzl.exec_log.testonly_union_kinds(hooks), None)
+    _eq("order does not matter", testonly_union_kinds(hooks), None)
 
 def _test_no_hooks_means_no_filter(_ctx):
-    _eq("empty", bzl.exec_log.testonly_union_kinds([]), None)
+    _eq("empty", testonly_union_kinds([]), None)
 
 def _test_exact_when_no_hook_filters(_ctx):
     """Every hook is unfiltered, so nothing was filtered out and there is nothing
     to re-check in AXL. Contrast the mixed case below."""
     hooks = [_recorder([], "a"), _recorder([], "b")]
-    _eq("no filter", bzl.exec_log.testonly_is_exact(hooks, None), True)
+    _eq("no filter", testonly_is_exact(hooks, None), True)
 
 def _test_exact_when_every_hook_asked_for_the_same_kinds(_ctx):
     hooks = [
         _recorder([], "a", kinds = ["spawn", "file"]),
         _recorder([], "b", kinds = ["file", "spawn"]),
     ]
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
-    _eq("same set, different order", bzl.exec_log.testonly_is_exact(hooks, kinds), True)
+    kinds = testonly_union_kinds(hooks)
+    _eq("same set, different order", testonly_is_exact(hooks, kinds), True)
 
 def _test_not_exact_when_hooks_disagree(_ctx):
     """The union over-delivers for the narrower hook, so dispatch has to re-check."""
@@ -102,8 +103,8 @@ def _test_not_exact_when_hooks_disagree(_ctx):
         _recorder([], "a", kinds = ["spawn"]),
         _recorder([], "b", kinds = ["spawn", "file"]),
     ]
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
-    _eq("disagreement", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
+    kinds = testonly_union_kinds(hooks)
+    _eq("disagreement", testonly_is_exact(hooks, kinds), False)
 
 def _test_not_exact_when_one_hook_is_unfiltered_beside_a_narrow_one(_ctx):
     """The case `kinds == None` makes easy to get wrong: one unfiltered hook is
@@ -111,9 +112,9 @@ def _test_not_exact_when_one_hook_is_unfiltered_beside_a_narrow_one(_ctx):
     asked for a subset. Treating None as "nobody filters" would hand that hook
     every file and input-set entry in the build unchecked."""
     hooks = [_recorder([], "auditor"), _recorder([], "spawns", kinds = ["spawn"])]
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    kinds = testonly_union_kinds(hooks)
     _eq("union is every kind", kinds, None)
-    _eq("but the narrow hook needs the re-check", bzl.exec_log.testonly_is_exact(hooks, kinds), False)
+    _eq("but the narrow hook needs the re-check", testonly_is_exact(hooks, kinds), False)
 
 def _test_fire_routes_by_kind_when_hooks_disagree(ctx):
     """The `exact = False` branch: an unfiltered hook fires, a hook that asked for
@@ -124,7 +125,7 @@ def _test_fire_routes_by_kind_when_hooks_disagree(ctx):
         _recorder(seen, "matching", kinds = [_ENTRY_KIND]),
         _recorder(seen, "other", kinds = ["a kind this entry is not"]),
     ]
-    bzl.exec_log.testonly_fire(ctx, _handle(hooks, False), _ENTRY)
+    testonly_fire(ctx, _handle(hooks, False), _ENTRY)
     _eq(
         "unfiltered and matching fire, in order; the third is filtered out",
         [name for name, _ in seen],
@@ -142,12 +143,12 @@ def _test_mixed_hooks_compose_from_union_through_exact_into_fire(ctx):
     seen = []
     hooks = [_recorder(seen, "auditor"), _recorder(seen, "narrow", kinds = ["spawn"])]
 
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
-    exact = bzl.exec_log.testonly_is_exact(hooks, kinds)
+    kinds = testonly_union_kinds(hooks)
+    exact = testonly_is_exact(hooks, kinds)
     _eq("one unfiltered hook widens the union to every kind", kinds, None)
     _eq("so the narrow hook still needs the re-check", exact, False)
 
-    bzl.exec_log.testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
+    testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
     _eq("the narrow hook is not handed a kind it never asked for", [n for n, _ in seen], ["auditor"])
 
 def _test_agreeing_hooks_compose_onto_the_fast_path(ctx):
@@ -160,13 +161,13 @@ def _test_agreeing_hooks_compose_onto_the_fast_path(ctx):
         _recorder(seen, "second", kinds = ["file", "spawn"]),
     ]
 
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
-    exact = bzl.exec_log.testonly_is_exact(hooks, kinds)
+    kinds = testonly_union_kinds(hooks)
+    exact = testonly_is_exact(hooks, kinds)
     _eq("union is what both asked for", kinds, ["file", "spawn"])
     _eq("nothing left to re-check", exact, True)
 
     # Delivered under the fast path, so the entry's own kind is never consulted.
-    bzl.exec_log.testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
+    testonly_fire(ctx, _handle(hooks, exact), _ENTRY)
     _eq("both fire, in order", [n for n, _ in seen], ["first", "second"])
 
 def _test_a_hook_repeating_a_kind_still_matches_the_union(_ctx):
@@ -178,36 +179,36 @@ def _test_a_hook_repeating_a_kind_still_matches_the_union(_ctx):
         _recorder([], "a", kinds = ["spawn", "spawn", "file"]),
         _recorder([], "b", kinds = ["file", "spawn"]),
     ]
-    kinds = bzl.exec_log.testonly_union_kinds(hooks)
+    kinds = testonly_union_kinds(hooks)
     _eq("union is deduplicated", kinds, ["file", "spawn"])
-    _eq("duplicates do not look like disagreement", bzl.exec_log.testonly_is_exact(hooks, kinds), True)
-    _eq("per-hook kinds deduplicate too", bzl.exec_log.testonly_wanted_kinds(hooks[0]), ["file", "spawn"])
+    _eq("duplicates do not look like disagreement", testonly_is_exact(hooks, kinds), True)
+    _eq("per-hook kinds deduplicate too", testonly_wanted_kinds(hooks[0]), ["file", "spawn"])
 
 def _test_fire_delivers_to_every_hook_in_registration_order(ctx):
     seen = []
     hooks = [_recorder(seen, "first", kinds = ["spawn"]), _recorder(seen, "second", kinds = ["spawn"])]
-    bzl.exec_log.testonly_fire(ctx, _handle(hooks, True), "entry-1")
+    testonly_fire(ctx, _handle(hooks, True), "entry-1")
     _eq("both, in order", seen, [("first", "entry-1"), ("second", "entry-1")])
 
 def _test_fire_with_no_hooks_is_a_noop(ctx):
-    bzl.exec_log.testonly_fire(ctx, _handle([], True), "entry-1")
+    testonly_fire(ctx, _handle([], True), "entry-1")
 
 def _test_wants_filters_a_narrow_hook(_ctx):
     """The AXL-side re-check used only when hooks disagree."""
     narrow = _recorder([], "a", kinds = ["spawn"])
-    _eq("asked for it", bzl.exec_log.testonly_wants(narrow, "spawn"), True)
-    _eq("did not ask for it", bzl.exec_log.testonly_wants(narrow, "file"), False)
+    _eq("asked for it", testonly_wants(narrow, "spawn"), True)
+    _eq("did not ask for it", testonly_wants(narrow, "file"), False)
 
 def _test_wants_passes_everything_to_an_unfiltered_hook(_ctx):
     everything = _recorder([], "a")
-    _eq("spawn", bzl.exec_log.testonly_wants(everything, "spawn"), True)
-    _eq("file", bzl.exec_log.testonly_wants(everything, "file"), True)
-    _eq("even an unknown kind", bzl.exec_log.testonly_wants(everything, "whatever"), True)
+    _eq("spawn", testonly_wants(everything, "spawn"), True)
+    _eq("file", testonly_wants(everything, "file"), True)
+    _eq("even an unknown kind", testonly_wants(everything, "whatever"), True)
 
 def _test_open_without_hooks_leaves_the_log_off(_ctx):
     """No hooks and no sinks: the sink list must be falsy so the caller's
     `xl.sinks or False` turns the execution log off entirely."""
-    h = bzl.exec_log.open(BazelTrait())
+    h = bazel_exec_log.open(BazelTrait())
     _eq("no handle", h.entries, None)
     _eq("no hooks", h.hooks, [])
     _eq("falsy sinks", bool(h.sinks), False)
@@ -216,7 +217,7 @@ def _test_open_without_hooks_still_forwards_the_traits_sinks(_ctx):
     """A feature that registered a `CompactFile` sink must keep working whether
     or not anything subscribed to `exec_log_event`."""
     sink = bazel.execution_log.compact_file(path = "/tmp/exec.binpb.zst")
-    h = bzl.exec_log.open(BazelTrait(execution_log_sinks = [sink]))
+    h = bazel_exec_log.open(BazelTrait(execution_log_sinks = [sink]))
     _eq("sink forwarded", len(h.sinks), 1)
     _eq("no handle", h.entries, None)
 
@@ -226,7 +227,7 @@ def _test_open_with_a_hook_adds_a_handle_alongside_the_sinks(_ctx):
         execution_log_sinks = [sink],
         exec_log_event = [_recorder([], "a", kinds = ["spawn"])],
     )
-    h = bzl.exec_log.open(trait)
+    h = bazel_exec_log.open(trait)
     _eq("sink + handle", len(h.sinks), 2)
     _eq("handle is the last element", h.sinks[1], h.entries)
     _eq("hooks carried", len(h.hooks), 1)
@@ -237,13 +238,13 @@ def _test_open_reads_the_trait_when_called(_ctx):
     `exec_log_event` subscription, so it has to read the trait at call time rather
     than reflect a view taken earlier in the invocation."""
     trait = BazelTrait()
-    before = bzl.exec_log.open(trait)
+    before = bazel_exec_log.open(trait)
     _eq("nothing registered yet", before.entries, None)
     _eq("and no hooks", before.hooks, [])
 
     trait.exec_log_event.append(_recorder([], "late", kinds = ["spawn"]))
 
-    after = bzl.exec_log.open(trait)
+    after = bazel_exec_log.open(trait)
     if after.entries == None:
         fail("open() must see a hook registered after an earlier call")
     _eq("and carry it", len(after.hooks), 1)
@@ -252,8 +253,8 @@ def _test_open_is_fresh_per_call(_ctx):
     """A handle binds to exactly one build, so each attempt must get its own —
     two calls returning the same handle would fail the second spawn."""
     trait = BazelTrait(exec_log_event = [_recorder([], "a", kinds = ["spawn"])])
-    first = bzl.exec_log.open(trait)
-    second = bzl.exec_log.open(trait)
+    first = bazel_exec_log.open(trait)
+    second = bazel_exec_log.open(trait)
     if first.entries == second.entries:
         fail("open() must mint a fresh iterator handle per invocation")
 
@@ -262,15 +263,15 @@ def _test_open_with_disagreeing_hooks_is_not_exact(_ctx):
         _recorder([], "a", kinds = ["spawn"]),
         _recorder([], "b", kinds = ["file"]),
     ])
-    h = bzl.exec_log.open(trait)
+    h = bazel_exec_log.open(trait)
     _eq("re-check needed", h.exact, False)
 
 def _test_pump_and_close_are_noops_without_a_handle(ctx):
     """Every call site calls both unconditionally, so neither may care whether a
     hook was registered."""
-    h = bzl.exec_log.open(BazelTrait())
-    _eq("nothing dispatched", bzl.exec_log.pump(ctx, h), 0)
-    bzl.exec_log.close(ctx, h)
+    h = bazel_exec_log.open(BazelTrait())
+    _eq("nothing dispatched", bazel_exec_log.pump(ctx, h), 0)
+    bazel_exec_log.close(ctx, h)
 
 _UNIT_TESTS = [
     _test_union_of_one_hook,

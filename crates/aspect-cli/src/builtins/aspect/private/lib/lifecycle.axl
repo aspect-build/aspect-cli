@@ -39,7 +39,7 @@ message the task ended on, so no surface is left on "running".
 # the bottom is the task-facing surface, and `traits.axl` re-exports the
 # trait + repro records for user `config.axl` files.
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "bazel_rc")
 load("./ansi.axl", "ansi")
 load("./environment.axl", "color_enabled", "detect_ci", "feature_logger")
 load("./health_check.axl", "HealthCheckTrait", "run_health_checks")
@@ -920,7 +920,7 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
          self-init (GHSC check run / BK annotation) and render the first
          surface body from `data`. Runs before the steps that can fail
          (rc parse, health check) so failures surface on a created check run.
-      3. Bazel setup (only when `BazelTrait` is declared): `bazel.setup_command`
+      3. Bazel setup (only when `BazelTrait` is declared): `bazel_rc.setup`
          resolves flags, parses `.bazelrc`, populates
          `ctx.bazel.startup_flags`, and returns the flag list. Else `None`.
       4. `health_check` hooks (only when `HealthCheckTrait` is declared) — must
@@ -937,7 +937,7 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
       data:        results dict (from `init_data()`); rendered on the first
                    surface body and the health-failure terminal.
       command:     rc sections to expand ("build"/"test"); ignored sans BazelTrait.
-      base_flags:  default flags for `bazel.setup_command`; ignored sans BazelTrait.
+      base_flags:  default flags for `bazel_rc.setup`; ignored sans BazelTrait.
 
     Returns:
       Bazelrc | None: the parsed rc when `BazelTrait` is declared
@@ -970,7 +970,7 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
     # checks, which inspect that rc's startup flags.
     rc = None
     if BazelTrait in ctx.traits:
-        rc = bazel.setup_command(ctx, command, base_flags = base_flags)
+        rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
 
     # Health checks last. A non-None result is fatal: concludes the surface
     # and fails the task — never returns.
@@ -985,7 +985,7 @@ def _setup_surface(ctx, surface, subject, kind, data):
     """Surface half of `_setup`: everything except the Bazel rc parse.
 
     For tasks that resolve the active `Bazelrc` themselves BEFORE the
-    lifecycle surface opens — e.g. the `bazel.build(ctx)` / `bazel.test(ctx)`
+    lifecycle surface opens — e.g. the `bazel_invocation.build(ctx)` / `bazel_invocation.test(ctx)`
     invocation handle owns the flag → `parse_rc` → `use_rc` pipeline, then hands
     the live rc here. Runs, in order:
 
