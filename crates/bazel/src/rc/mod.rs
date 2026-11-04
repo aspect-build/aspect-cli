@@ -1033,6 +1033,48 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
     value
 }
 
+/// The effective value of a boolean `--name` on a rendered Bazel command line for
+/// `command`, or `None` if unset. Reads `--name`, `--noname` and `--name=<bool>`
+/// with [`last_flag_value`]'s precedence: a literal occurrence beats a
+/// `--default_override` payload, and among equals the last one wins.
+pub fn last_bool_flag_value(args: &[String], name: &str, command: &str) -> Option<bool> {
+    let set = format!("--{name}");
+    let unset = format!("--no{name}");
+    let eq_prefix = format!("--{name}=");
+    let value = |tokens: &[&str]| {
+        tokens.iter().rev().find_map(|token| {
+            if *token == set {
+                Some(true)
+            } else if *token == unset {
+                Some(false)
+            } else {
+                token
+                    .strip_prefix(&eq_prefix)
+                    .map(|v| matches!(v, "true" | "1" | "yes"))
+            }
+        })
+    };
+    let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(literal) = value(&tokens) {
+        return Some(literal);
+    }
+    let chunks = override_chunks(&tokens);
+    let mut found = None;
+    for section in sections_for(command) {
+        for chunk in &chunks {
+            let payloads: Vec<&str> = chunk
+                .iter()
+                .filter(|(scope, _)| *scope == section)
+                .map(|(_, option)| *option)
+                .collect();
+            if let Some(v) = value(&payloads) {
+                found = Some(v);
+            }
+        }
+    }
+    found
+}
+
 /// All values of a repeatable `--name` option among `opts`, in order, by the
 /// rules [`flag_values_in`] documents.
 /// Whether a semver `constraint` is satisfied by the running Bazel `version`.
@@ -2249,6 +2291,28 @@ build:opt --compilation_mode=opt
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
+    }
+
+    #[test]
+    fn last_bool_flag_value_reads_every_form() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let read = |a: &[&str]| last_bool_flag_value(&args(a), "enable_bzlmod", "mod");
+        assert_eq!(read(&[]), None);
+        assert_eq!(read(&["--noenable_bzlmod"]), Some(false));
+        assert_eq!(read(&["--enable_bzlmod=false"]), Some(false));
+        assert_eq!(read(&["--noenable_bzlmod", "--enable_bzlmod"]), Some(true));
+        assert_eq!(
+            read(&["--default_override=0:common=--noenable_bzlmod"]),
+            Some(false)
+        );
+        // A literal flag beats an rc-sourced override.
+        assert_eq!(
+            read(&[
+                "--enable_bzlmod",
+                "--default_override=0:common=--noenable_bzlmod"
+            ]),
+            Some(true)
+        );
     }
 
     #[test]

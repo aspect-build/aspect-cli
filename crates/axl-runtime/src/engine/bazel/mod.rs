@@ -880,8 +880,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// mapping as a dict from apparent to canonical repository name.
     ///
     /// `repo` defaults to `""`, the root module, which labels in command-line
-    /// flags resolve against. Returns `None` when the command fails, as it does
-    /// without Bzlmod or on Bazel older than 7.1.
+    /// flags resolve against. Returns `None` on Bazel older than 7.1, which has
+    /// no `dump_repo_mapping`, and when the run command disables Bzlmod
+    /// (`--noenable_bzlmod`). Raises with Bazel's stderr if the command fails.
     ///
     /// Runs under the startup flags and rc-file options of the active
     /// `RunCommand` (`use_rc`) or the per-call `rc=`, so it reaches the same
@@ -904,12 +905,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<SmallMap<String, String>>> {
         require_claimed_flags(this)?;
+        let signals = Env::from_eval(eval)?.signals.clone();
+        if runner::release_version(&signals).is_some_and(|v| (v.major, v.minor) < (7, 1)) {
+            return Ok(NoneOr::None);
+        }
         let (startup_flags, command_flags) = match effective_rc(this, rc) {
-            Some(rc) => rc.without_command_line_flags().resolve_for_command("mod")?,
+            Some(rc) => {
+                let (_, all_flags) = rc.resolve_for_command("mod")?;
+                if bazel::rc::last_bool_flag_value(&all_flags, "enable_bzlmod", "mod")
+                    == Some(false)
+                {
+                    return Ok(NoneOr::None);
+                }
+                rc.without_command_line_flags().resolve_for_command("mod")?
+            }
             None => (read_startup_flags(this)?, Vec::new()),
         };
 
-        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
+        let mut cmd = runner::SignalRunner(&signals).command();
         cmd.args(&startup_flags);
         cmd.args(["mod", "dump_repo_mapping"]);
         cmd.args(&command_flags);
@@ -921,13 +934,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
         // Bound to the root, so a cancel reaches it and the wait is a safe point.
-        let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
+        let output = children::spawn_bazel(&mut cmd, &signals)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
             .wait_with_output()
             .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
 
         if !output.status.success() {
-            return Ok(NoneOr::None);
+            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "bazel mod dump_repo_mapping failed with exit code {:?}{detail}",
+                output.status.code()
+            );
         }
         let mapping: serde_json::Map<String, serde_json::Value> =
             serde_json::from_slice(&output.stdout).map_err(|e| {
