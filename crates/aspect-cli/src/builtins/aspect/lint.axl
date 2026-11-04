@@ -14,6 +14,8 @@ Usage:
     aspect lint -- //path/to:targets -//not:this_one
     # Fix lint violations, where the underlying linter provides fixes
     aspect lint --fix
+    # Fix with rules_lint under its new module name (default: @aspect_rules_lint//lint:fix)
+    aspect lint --fix --rules-lint-fix-flag=@rules_lint//lint:fix
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
@@ -704,6 +706,18 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
             exit_nonzero = exit_nonzero or file_exit_nonzero
     return (still_pending, interesting, exit_nonzero)
 
+_DEFAULT_RULES_LINT_FIX_FLAG = "@aspect_rules_lint//lint:fix"
+
+def _rules_lint_fix_flag_error(fix_flag):
+    """Explains a fix build that failed because Bazel rejected the `rules_lint_fix_flag` label."""
+    suggested = "@rules_lint//lint:fix" if fix_flag == _DEFAULT_RULES_LINT_FIX_FLAG else "<rules_lint's fix flag label>"
+    return (
+        "Bazel rejected the rules_lint fix flag --%s. " % fix_flag +
+        "Set the label for your rules_lint version with " +
+        "`ctx.tasks[\"lint\"].args.rules_lint_fix_flag = \"%s\"` in .aspect/config.axl, " % suggested +
+        "or pass --rules-lint-fix-flag=%s." % suggested
+    )
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
@@ -730,7 +744,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     fix_produce = fix_apply or bool(lint_trait.lint_patch)
     if fix_produce:
         base_flags.append("--output_groups=rules_lint_patch")
-        base_flags.append("--@aspect_rules_lint//lint:fix")
+        base_flags.append("--" + ctx.args.rules_lint_fix_flag)
 
     # rules_lint_human / rules_lint_machine are separate action sets (requesting
     # both runs each linter twice): human = colored terminal output, machine =
@@ -859,6 +873,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
 
+    # Set when Bazel rejects the `rules_lint_fix_flag` label. Bazel reports each cause
+    # (repo, package or target missing, or not a flag) as `ERROR: <label> :: <reason>`.
+    fix_flag_load_error = "%s :: " % ctx.args.rules_lint_fix_flag
+    fix_flag_rejected = False
+
     # bytestream:// URIs resolve through bb_clientd only when this runner has
     # a usable mount (declared by env and actually mounted); bb_root None
     # routes them to the output-tree fallback instead (see local_output_path).
@@ -900,6 +919,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 handler(ctx, event)
             if process_event(data, event, bb_root):
                 interesting = True
+            if fix_produce and not fix_flag_rejected and event.kind == "progress":
+                fix_flag_rejected = fix_flag_load_error in bes_get(event.payload, "stderr", "")
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
                     filepath = local_output_path(file, bb_root)
@@ -982,6 +1003,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         warn(ctx.std, "Skipped %s: no local path can serve them (no bb_clientd mount and no output-tree path)" % pluralize(skipped_remote_files, "lint output file"))
 
     build_failed = not build_status.success
+    if build_failed and fix_flag_rejected:
+        error(ctx.std, _rules_lint_fix_flag_error(ctx.args.rules_lint_fix_flag))
     data["lint"]["build_failed"] = build_failed
     data["lint"]["linter_exit_code"] = linter_exit_code
     if not data.get("finish_time_ms"):
@@ -1075,7 +1098,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if rc.flag_values("--aspects", command = "build"):
             error(ctx.std, (
                 "Lint aspect(s) configured but produced no rules_lint output. " +
-                "Verify the configured aspect is from aspect_rules_lint and " +
+                "Verify the configured aspect is from rules_lint and " +
                 "that your target pattern includes lintable targets."
             ))
         else:
@@ -1172,6 +1195,16 @@ lint = task(
                 "turns each hunk into a PR review comment with a " +
                 "`suggestion` block) — it just doesn't apply them " +
                 "locally. Pass `--fix` to apply on top of producing."
+            ),
+        ),
+        "rules_lint_fix_flag": args.string(
+            default = _DEFAULT_RULES_LINT_FIX_FLAG,
+            description = (
+                "Label of the rules_lint build flag that makes linters produce " +
+                "fix patches, passed to Bazel as `--<label>`. Set it to " +
+                "`@rules_lint//lint:fix` when depending on rules_lint under its " +
+                "new module name, or to match a `repo_name` override or a " +
+                "renamed flag."
             ),
         ),
         "strategy": args.string(
