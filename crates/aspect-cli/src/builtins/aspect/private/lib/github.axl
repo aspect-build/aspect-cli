@@ -1844,7 +1844,11 @@ def print_changed_files_listing(ctx, detect_result):
         print("No changed files detected.")
 
 def _extract_host(url):
-    """Extract host from a git remote URL (SSH or HTTPS)."""
+    """Extract host from a git remote URL (SSH or HTTPS).
+
+    The authority ends at the first `/`, `?`, `#` or `\\`, and user-info is
+    everything up to its last `@`, as a WHATWG URL parser splits it, so an
+    `@` in a query can't stand in for the host."""
     if not url:
         return ""
     if url.startswith("git@"):
@@ -1855,12 +1859,13 @@ def _extract_host(url):
     if scheme_end < 0:
         return ""
     rest = url[scheme_end + 3:]
-    at = rest.find("@")
-    slash = rest.find("/")
-    if at >= 0 and (slash < 0 or at < slash):
-        rest = rest[at + 1:]
-    slash = rest.find("/")
-    return rest[:slash] if slash >= 0 else rest
+    end = len(rest)
+    for c in ("/", "?", "#", "\\"):
+        i = rest.find(c)
+        if i >= 0 and i < end:
+            end = i
+    authority = rest[:end]
+    return authority[authority.rfind("@") + 1:]
 
 def _is_public_github_url(url):
     """True when url's host is exactly github.com (not Enterprise)."""
@@ -1915,14 +1920,16 @@ def _api_host_mismatch(std):
     """Why the API base may not receive this run's GitHub token, or "" when
     it may.
 
-    The base, api.github.com by default, must be `https://` and on the
+    The base, api.github.com by default, must be a plain `https://` host and
+    path (`_api_base_host`) whose web host (`_web_host_of_api_base`) is the
     repository's host (`_repo_host_source`). When nothing names that host it
     fails closed: no token goes anywhere. The Aspect App's minted tokens are
     further limited to api.github.com in `_authenticate`."""
     var, api_base = _api_base_source(std.env)
     label = var or "The default API base"
-    if not api_base.lower().startswith("https://"):
-        return "%s (%s) is not an https:// URL" % (label, api_base)
+    _, problem = _api_base_host(api_base)
+    if problem:
+        return "%s (%s) %s" % (label, api_base, problem)
     api_host = _web_host_of_api_base(api_base)
     source, repo_host = _repo_host_source(std)
     if not repo_host:
@@ -1978,13 +1985,44 @@ def _api_base_of_web_host(host):
         return "https://" + _GHE_API_SUBDOMAIN + host
     return "https://" + host + _GHES_API_PATH
 
+_API_HOST_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789.-:"
+
+def _api_base_host(api_base):
+    """`(host, problem)` for the host an API base's requests actually reach,
+    lowercased, with `problem` "" when the base is usable.
+
+    A base is `https://`, a host and an optional path, nothing else. User-info,
+    a query, a fragment, a backslash or whitespace is refused rather than
+    parsed, so the host compared is the one the request goes to."""
+    if not api_base.lower().startswith("https://"):
+        return ("", "is not an https:// URL")
+    for c in ("@", "?", "#", "\\", " ", "\t", "\n"):
+        if c in api_base:
+            return ("", "contains %r; an API base is an https:// host and path only" % c)
+    rest = api_base[len("https://"):]
+    slash = rest.find("/")
+    host = (rest if slash < 0 else rest[:slash]).lower()
+    if not host or [c for c in host.elems() if c not in _API_HOST_CHARS]:
+        return ("", "has no valid host")
+    return (host, "")
+
 def _web_host_of_api_base(api_base):
-    """The web host an API base belongs to: `https://<host>/api/v3`
-    (Enterprise Server) → `<host>`, `https://api.<host>` (GHE.com) → `<host>`."""
-    h = _extract_host(api_base).lower()
-    if not api_base.endswith(_GHES_API_PATH) and h.startswith(_GHE_API_SUBDOMAIN):
-        h = h[len(_GHE_API_SUBDOMAIN):]
-    return h
+    """The web host an API base belongs to, or "" for an unusable base
+    (`_api_base_host`).
+
+    Only GitHub's own layouts serve the API on a separate `api.` host:
+    `https://api.github.com` → `github.com` and `https://api.<tenant>.ghe.com`
+    → `<tenant>.ghe.com`. Every other base, Enterprise Server's
+    `https://<host>/api/v3` included, belongs to its own host exactly."""
+    host, problem = _api_base_host(api_base)
+    if problem:
+        return ""
+    if host == "api.github.com":
+        return "github.com"
+    web = host[len(_GHE_API_SUBDOMAIN):]
+    if host.startswith(_GHE_API_SUBDOMAIN) and web.endswith(_GHE_COM_SUFFIX) and len(web) > len(_GHE_COM_SUFFIX):
+        return web
+    return host
 
 def _web_host(env):
     """The web host of the GitHub instance the API base points at:
@@ -2000,8 +2038,9 @@ def _enterprise_hosts(env):
     if server and not _is_public_github_url(server):
         hosts.append(_extract_host(server).lower())
     api_base = _resolve_api_base(env)
-    if api_base != DEFAULT_GITHUB_API:
-        hosts.append(_web_host_of_api_base(api_base))
+    web = _web_host_of_api_base(api_base) if api_base != DEFAULT_GITHUB_API else ""
+    if web:
+        hosts.append(web)
     return hosts
 
 def _extract_github_owner_repo_from_url(url, extra_hosts = []):
