@@ -6,8 +6,10 @@
 //! which the AXL tasks use for the same matching; the two must agree on every
 //! label; both test suites run the cases in `label_cases.json`.
 //! [`resolve_relative_label`] turns a label written relative to a working
-//! directory into an absolute one first, and [`normalize_label_from`] does
-//! both.
+//! directory into an absolute one first, the way Bazel's command line does,
+//! and [`LabelResolver`] does both against a workspace on disk.
+
+use std::path::{Path, PathBuf};
 
 /// Return the standard spelling of a Bazel label: as written in this
 /// workspace, with the target name spelled out. Two labels name the same
@@ -38,8 +40,8 @@
 /// A relative label (`:tool`, `tool`, `pkg:tool`) is read as relative to the
 /// root package, as a BUILD file there would read it: `tool` is `//:tool`.
 /// From another working directory its meaning depends on which directories
-/// are packages, which this function cannot see; resolve it first, as
-/// [`resolve_relative_label`] does.
+/// are packages, which this function cannot see; resolve it first with
+/// [`LabelResolver`].
 pub fn normalize_label(label: &str) -> String {
     let mut label = label.to_owned();
     if label.starts_with('@') && !label.contains("//") {
@@ -94,33 +96,105 @@ pub fn normalize_label(label: &str) -> String {
     format!("{repo}//{path}:{name}")
 }
 
+/// Resolves labels the way Bazel reads them on the command line: relative to
+/// the directory it was invoked from, in one workspace.
+#[derive(Debug, Clone)]
+pub struct LabelResolver {
+    workspace_root: PathBuf,
+    current_package: String,
+}
+
+impl LabelResolver {
+    /// A resolver for a command run from `working_dir`. Outside the
+    /// workspace, relative labels resolve against the root package.
+    pub fn new(workspace_root: &Path, working_dir: &Path) -> Self {
+        let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
+        let workspace_root = canonical(workspace_root);
+        let current_package = match canonical(working_dir).strip_prefix(&workspace_root) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Err(_) => String::new(),
+        };
+        Self {
+            workspace_root,
+            current_package,
+        }
+    }
+
+    /// The workspace-relative directory relative labels resolve against,
+    /// `""` for the root.
+    pub fn current_package(&self) -> &str {
+        &self.current_package
+    }
+
+    /// [`resolve_relative_label`] against this workspace's packages.
+    pub fn resolve(&self, label: &str) -> String {
+        resolve_relative_label(label, &self.current_package, |pkg| {
+            is_package(&self.workspace_root, pkg)
+        })
+    }
+
+    /// [`normalize_label`] of [`Self::resolve`].
+    pub fn normalize(&self, label: &str) -> String {
+        normalize_label(&self.resolve(label))
+    }
+}
+
+/// Whether the workspace-relative directory `package` holds a `BUILD.bazel`
+/// or `BUILD` file. `.bazelignore` and `--deleted_packages` are not consulted.
+pub fn is_package(workspace_root: &Path, package: &str) -> bool {
+    let dir = workspace_root.join(package);
+    ["BUILD.bazel", "BUILD"]
+        .iter()
+        .any(|name| dir.join(name).is_file())
+}
+
 /// Resolve a label written relative to `current_package`, the
-/// workspace-relative directory the task was invoked from (`""` for the
-/// root), into an absolute label; an absolute label is returned unchanged.
-/// `:tool` and `sub:tool` name a target in `current_package` and in
-/// `current_package/sub`. A bare name is read as a package, so `tool` is
-/// `//<current_package>/tool:tool`. That is Bazel's reading when
-/// `current_package/tool` is a package; when it is not, Bazel picks the
-/// nearest enclosing package instead, which this function cannot see.
-pub fn resolve_relative_label(label: &str, current_package: &str) -> String {
+/// workspace-relative directory a command runs from (`""` for the root), into
+/// an absolute label, following Bazel's target-pattern rule
+/// (<https://bazel.build/run/build#specifying-build-targets>). An absolute
+/// label is returned unchanged.
+///
+/// - `:tool` names a target in `current_package`, `sub:tool` one in
+///   `current_package/sub`.
+/// - A label with no `:` names a path, `current_package/<label>`. If that
+///   path is a package, the label is its implicit target (`//foo/tool:tool`).
+///   Otherwise it names a target in the longest enclosing package, which may
+///   lie above `current_package`: `x` from `foo/bar` is `//foo:bar/x` when
+///   only `foo` is a package.
+/// - When no enclosing directory is a package, Bazel rejects the label; it
+///   resolves as if the path were a package.
+///
+/// `is_package` answers whether a workspace-relative directory is a package.
+pub fn resolve_relative_label(
+    label: &str,
+    current_package: &str,
+    is_package: impl Fn(&str) -> bool,
+) -> String {
     if label.starts_with("//") || label.starts_with('@') {
         return label.to_owned();
-    }
-    if label.starts_with(':') {
-        return format!("//{current_package}{label}");
     }
     if let Some((pkg, name)) = label.split_once(':') {
         return format!("//{}:{name}", join_package(current_package, pkg));
     }
-    let full = join_package(current_package, label);
-    let name = full.rsplit('/').next().unwrap_or(&full).to_owned();
-    format!("//{full}:{name}")
-}
-
-/// [`normalize_label`] of a label written relative to `current_package`; see
-/// [`resolve_relative_label`].
-pub fn normalize_label_from(label: &str, current_package: &str) -> String {
-    normalize_label(&resolve_relative_label(label, current_package))
+    let path = join_package(current_package, label);
+    let mut package = path.as_str();
+    loop {
+        if is_package(package) {
+            return if package == path {
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                format!("//{path}:{name}")
+            } else {
+                let rest = path[package.len()..].trim_start_matches('/');
+                format!("//{package}:{rest}")
+            };
+        }
+        if package.is_empty() {
+            break;
+        }
+        package = package.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    format!("//{path}:{name}")
 }
 
 fn join_package(current: &str, rel: &str) -> String {
@@ -133,7 +207,7 @@ fn join_package(current: &str, rel: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_label, normalize_label_from, resolve_relative_label};
+    use super::{LabelResolver, normalize_label, resolve_relative_label};
 
     /// The cases the AXL copy's tests run too.
     #[test]
@@ -153,28 +227,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn relative_labels_resolve_against_the_working_package() {
-        assert_eq!(resolve_relative_label(":tool", "foo/bar"), "//foo/bar:tool");
-        assert_eq!(
-            resolve_relative_label("tool", "foo/bar"),
-            "//foo/bar/tool:tool"
-        );
-        assert_eq!(resolve_relative_label("sub:tool", "foo"), "//foo/sub:tool");
-        assert_eq!(resolve_relative_label(":tool", ""), "//:tool");
-        assert_eq!(resolve_relative_label("tool", ""), "//tool:tool");
-        assert_eq!(resolve_relative_label("@repo//pkg", "foo"), "@repo//pkg");
-        assert_eq!(resolve_relative_label("//pkg", "foo"), "//pkg");
+    /// The scratch layout the cases below were checked against with Bazel
+    /// 9.0.1 (`bazel query <label>` from each working directory).
+    const PACKAGES: &[&str] = &["", "foo", "foo/sub"];
+
+    fn resolve(label: &str, current_package: &str) -> String {
+        resolve_relative_label(label, current_package, |p| PACKAGES.contains(&p))
     }
 
     #[test]
-    fn normalize_label_from_resolves_then_normalizes() {
-        assert_eq!(normalize_label_from(":tool", "foo"), "//foo:tool");
-        assert_eq!(normalize_label_from("tool", "foo"), "//foo/tool:tool");
-        assert_eq!(normalize_label_from("@@//pkg", "foo"), "//pkg:pkg");
+    fn relative_labels_resolve_as_bazel_reads_them() {
+        for (cwd, label, expected) in [
+            ("", "tool", "//:tool"),
+            ("", "a/deep", "//:a/deep"),
+            ("a", "deep", "//:a/deep"),
+            ("", "foo/sub", "//foo/sub:sub"),
+            ("", "foo/bar/x", "//foo:bar/x"),
+            ("foo", "tool", "//foo:tool"),
+            ("foo", "sub", "//foo/sub:sub"),
+            ("foo", "bar/x", "//foo:bar/x"),
+            ("foo", "sub:t", "//foo/sub:t"),
+            ("foo", ":tool", "//foo:tool"),
+            ("foo/bar", "x", "//foo:bar/x"),
+            ("foo/bar", ":x", "//foo/bar:x"),
+            ("foo/sub", "t", "//foo/sub:t"),
+        ] {
+            assert_eq!(resolve(label, cwd), expected, "{label} from {cwd:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_labels_are_unchanged() {
+        assert_eq!(resolve("@repo//pkg", "foo"), "@repo//pkg");
+        assert_eq!(resolve("//pkg", "foo"), "//pkg");
+    }
+
+    #[test]
+    fn a_label_outside_every_package_resolves_as_a_package() {
+        let none = |_: &str| false;
         assert_eq!(
-            normalize_label_from("@@rules_go+//go", "foo"),
-            "@rules_go//go:go"
+            resolve_relative_label("tool", "foo", none),
+            "//foo/tool:tool"
         );
+        assert_eq!(resolve_relative_label("tool", "", none), "//tool:tool");
+    }
+
+    #[test]
+    fn the_resolver_probes_build_files_in_the_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::create_dir_all(root.join("foo/bar")).unwrap();
+        std::fs::create_dir_all(root.join("foo/sub")).unwrap();
+        std::fs::write(root.join("foo/BUILD.bazel"), "").unwrap();
+        std::fs::write(root.join("foo/sub/BUILD"), "").unwrap();
+        // A directory named BUILD does not make a package.
+        std::fs::create_dir_all(root.join("foo/bar/BUILD")).unwrap();
+
+        let labels = LabelResolver::new(root, &root.join("foo/bar"));
+        assert_eq!(labels.current_package(), "foo/bar");
+        assert_eq!(labels.resolve("x"), "//foo:bar/x");
+        assert_eq!(
+            LabelResolver::new(root, &root.join("foo")).normalize("sub"),
+            "//foo/sub:sub"
+        );
+        assert_eq!(
+            LabelResolver::new(root, root).normalize("@@//foo"),
+            "//foo:foo"
+        );
+    }
+
+    #[test]
+    fn outside_the_workspace_labels_resolve_against_the_root() {
+        let ws = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let labels = LabelResolver::new(ws.path(), elsewhere.path());
+        assert_eq!(labels.current_package(), "");
+        assert_eq!(labels.resolve(":tool"), "//:tool");
     }
 }
