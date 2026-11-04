@@ -14,6 +14,8 @@ Usage:
     aspect lint -- //path/to:targets -//not:this_one
     # Fix lint violations, where the underlying linter provides fixes
     aspect lint --fix
+    # Fix with rules_lint under its new module name (default: aspect_rules_lint)
+    aspect lint --fix --rules-lint-repo=rules_lint
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
@@ -28,7 +30,6 @@ load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
-load("./private/lib/repo_mapping.axl", "apparent_repo_name")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
@@ -705,20 +706,15 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
             exit_nonzero = exit_nonzero or file_exit_nonzero
     return (still_pending, interesting, exit_nonzero)
 
-# rules_lint's module names, newest first: it was published as aspect_rules_lint
-# before its rename.
-_RULES_LINT_MODULES = ("rules_lint", "aspect_rules_lint")
-
-def _lint_fix_flag(ctx: TaskContext) -> str:
-    """`--@<repo>//lint:fix`, naming rules_lint the way the root module does.
-
-    Without a repository mapping (no Bzlmod, or Bazel older than 7.1) it uses the
-    old name. Must run after `phases.setup`, so the lookup reaches the build's
-    server.
-    """
-    mapping = ctx.bazel.repo_mapping() or {}
-    repo = apparent_repo_name(mapping, _RULES_LINT_MODULES) or _RULES_LINT_MODULES[-1]
-    return "--@%s//lint:fix" % repo
+def _repo_not_visible_error(repo):
+    """Explains a fix build that failed because rules_lint isn't visible as `@<repo>`."""
+    suggested = "rules_lint" if repo == "aspect_rules_lint" else "<the name your bazel_dep on rules_lint uses>"
+    return (
+        "rules_lint is not visible as @%s, so the fix flag --@%s//lint:fix failed. " % (repo, repo) +
+        "Set the repository name the root module uses for rules_lint with " +
+        "`ctx.tasks[\"lint\"].args.rules_lint_repo = \"%s\"` in .aspect/config.axl, " % suggested +
+        "or pass --rules-lint-repo=%s." % suggested
+    )
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -746,6 +742,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     fix_produce = fix_apply or bool(lint_trait.lint_patch)
     if fix_produce:
         base_flags.append("--output_groups=rules_lint_patch")
+        base_flags.append("--@%s//lint:fix" % ctx.args.rules_lint_repo)
 
     # rules_lint_human / rules_lint_machine are separate action sets (requesting
     # both runs each linter twice): human = colored terminal output, machine =
@@ -761,7 +758,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
     announce_version, announce_command = bzl.announce.resolve(ctx)
     endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
-    build_flags = endpoint_auth_flags + ([_lint_fix_flag(ctx)] if fix_produce else [])
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
@@ -837,7 +833,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,
-        flags = build_flags,
+        flags = endpoint_auth_flags,
         *ctx.args.targets
     )
 
@@ -874,6 +870,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
+
+    # Set when Bazel rejects the fix flag because `rules_lint_repo` names no visible repo.
+    not_visible = "No repository visible as '@%s'" % ctx.args.rules_lint_repo
+    fix_repo_not_visible = False
 
     # bytestream:// URIs resolve through bb_clientd only when this runner has
     # a usable mount (declared by env and actually mounted); bb_root None
@@ -916,6 +916,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 handler(ctx, event)
             if process_event(data, event, bb_root):
                 interesting = True
+            if fix_produce and not fix_repo_not_visible and event.kind == "progress":
+                fix_repo_not_visible = not_visible in bes_get(event.payload, "stderr", "")
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
                     filepath = local_output_path(file, bb_root)
@@ -998,6 +1000,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         warn(ctx.std, "Skipped %s: no local path can serve them (no bb_clientd mount and no output-tree path)" % pluralize(skipped_remote_files, "lint output file"))
 
     build_failed = not build_status.success
+    if build_failed and fix_repo_not_visible:
+        error(ctx.std, _repo_not_visible_error(ctx.args.rules_lint_repo))
     data["lint"]["build_failed"] = build_failed
     data["lint"]["linter_exit_code"] = linter_exit_code
     if not data.get("finish_time_ms"):
@@ -1188,6 +1192,15 @@ lint = task(
                 "turns each hunk into a PR review comment with a " +
                 "`suggestion` block) — it just doesn't apply them " +
                 "locally. Pass `--fix` to apply on top of producing."
+            ),
+        ),
+        "rules_lint_repo": args.string(
+            default = "aspect_rules_lint",
+            description = (
+                "The repository name the root module uses for rules_lint, which " +
+                "names the `--@<repo>//lint:fix` flag that produces fix patches. " +
+                "Set it to `rules_lint` when depending on rules_lint under its " +
+                "new module name, or to a `repo_name` override."
             ),
         ),
         "strategy": args.string(

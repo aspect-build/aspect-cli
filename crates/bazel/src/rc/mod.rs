@@ -294,35 +294,6 @@ impl Bazelrc {
         }
     }
 
-    /// A copy without the flags the caller passed on the command line, except
-    /// their `--config` references. A sidecar command such as `mod` rejects the
-    /// build-only flags a task passes, but still needs the rc files' own
-    /// sections and the requested configs.
-    pub fn without_command_line_flags(&self) -> Self {
-        let mut rc = self.clone();
-        let cli: Vec<usize> = rc
-            .sources
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.as_path() == Path::new("<command line>"))
-            .map(|(i, _)| i)
-            .collect();
-        if let Some(always) = rc.options.get_mut("always") {
-            // A bare `--config` takes the next token as its value.
-            let mut keep_value = false;
-            always.retain(|o| {
-                let from_cli = cli.contains(&o.source_index);
-                let keep = !from_cli
-                    || keep_value
-                    || o.value == "--config"
-                    || o.value.starts_with("--config=");
-                keep_value = from_cli && o.value == "--config";
-                keep
-            });
-        }
-        rc
-    }
-
     /// The ordered list of source files that were loaded.
     pub fn sources(&self) -> &[PathBuf] {
         &self.sources
@@ -1022,40 +993,8 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 /// pair. It matters because this function is `pub` and is the single authority on "has this
 /// flag been requested?", so it must not read a value out of a shape Bazel would reject.
 pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<String> {
-    last_flag_by(args, command, |tokens| flag_values_in(tokens, name).pop())
-}
-
-/// The effective value of a boolean `--name` on a rendered Bazel command line for
-/// `command`, or `None` if unset. Reads `--name`, `--no<name>` and
-/// `--name=<bool>`, with [`last_flag_value`]'s precedence.
-pub fn last_bool_flag_value(args: &[String], name: &str, command: &str) -> Option<bool> {
-    let negated = format!("--no{}", name.trim_start_matches('-'));
-    let eq_prefix = format!("{name}=");
-    last_flag_by(args, command, |tokens| {
-        tokens.iter().rev().find_map(|token| {
-            if *token == name {
-                Some(true)
-            } else if *token == negated {
-                Some(false)
-            } else {
-                token
-                    .strip_prefix(&eq_prefix)
-                    .map(|v| matches!(v, "true" | "1" | "yes"))
-            }
-        })
-    })
-}
-
-/// Apply `read`, which returns the last value it finds among some tokens, with
-/// the precedence [`last_flag_value`] documents: literal tokens first, then the
-/// `--default_override` payloads section by section and bucket by bucket.
-fn last_flag_by<T>(
-    args: &[String],
-    command: &str,
-    read: impl Fn(&[&str]) -> Option<T>,
-) -> Option<T> {
     let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
-    if let Some(literal) = read(&tokens) {
+    if let Some(literal) = flag_values_in(&tokens, name).pop() {
         return Some(literal);
     }
     let chunks = override_chunks(&tokens);
@@ -1067,7 +1006,7 @@ fn last_flag_by<T>(
                 .filter(|(scope, _)| *scope == section)
                 .map(|(_, option)| *option)
                 .collect();
-            if let Some(found) = read(&payloads) {
+            if let Some(found) = flag_values_in(&payloads, name).pop() {
                 value = Some(found);
             }
         }
@@ -2291,60 +2230,6 @@ build:opt --compilation_mode=opt
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
-    }
-
-    #[test]
-    fn last_bool_flag_value_reads_every_form() {
-        let read = |a: &[&str]| {
-            let args: Vec<String> = a.iter().map(|s| s.to_string()).collect();
-            last_bool_flag_value(&args, "--enable_bzlmod", "mod")
-        };
-        assert_eq!(read(&[]), None);
-        assert_eq!(read(&["--enable_bzlmod"]), Some(true));
-        assert_eq!(read(&["--noenable_bzlmod"]), Some(false));
-        assert_eq!(read(&["--enable_bzlmod=false"]), Some(false));
-        assert_eq!(read(&["--enable_bzlmod=1"]), Some(true));
-        assert_eq!(read(&["--noenable_bzlmod", "--enable_bzlmod"]), Some(true));
-        assert_eq!(
-            read(&["--default_override=0:common=--noenable_bzlmod"]),
-            Some(false)
-        );
-        // A literal flag beats an rc-sourced override.
-        assert_eq!(
-            read(&[
-                "--enable_bzlmod",
-                "--default_override=0:common=--noenable_bzlmod"
-            ]),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn without_command_line_flags_keeps_rc_sections_and_configs() {
-        let dir = make_workspace();
-        let root = dir.path();
-        fs::write(
-            &root.join(".bazelrc"),
-            "common --registry=https://example.com\ncommon:ci --lockfile_mode=off\ncommon:fast --jobs=8\n",
-        )
-        .unwrap();
-
-        let rc = Bazelrc::new(
-            root,
-            ISOLATE,
-            &flags(&["--aspects=//:a.bzl%a", "--config=ci", "--config", "fast"]),
-        )
-        .unwrap()
-        .without_command_line_flags();
-        let (_startup, command_flags) = rc.resolve_for_command("mod").unwrap();
-        assert_eq!(
-            command_flags,
-            vec![
-                "--default_override=0:common=--registry=https://example.com".to_string(),
-                "--default_override=0:common=--lockfile_mode=off".to_string(),
-                "--default_override=0:common=--jobs=8".to_string(),
-            ],
-        );
     }
 
     #[test]
