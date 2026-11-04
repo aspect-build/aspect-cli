@@ -26,7 +26,8 @@ Run with:
   aspect dev test-ci
 """
 
-load("./ci.axl", "ci_identity", "detect_artifacts_browse_url", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
+load("./ci.axl", "ci_identity", "detect_artifacts_browse_url", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "resolve_build_url")
+load("./github.axl", "github_actions_run_url")
 
 # Every CI-host marker + the per-job cache, snapshotted/restored around
 # each subtest so the harness's own CI environment can't leak in.

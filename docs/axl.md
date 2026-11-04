@@ -180,6 +180,18 @@ Only export constants/functions/types if they are required in the public api.
 
 Symbols can be exported via `testonly_` prefix for writing unit tests. 
 
+A `load` binds names privately to the loading file: loading `foo` does not let
+another file load `foo` from you. To re-export, load it under a private alias
+and bind the public name, as Bazel and Buck2 require:
+
+```python
+load("./trait.axl", _BazelTrait = "BazelTrait")
+
+BazelTrait = _BazelTrait
+```
+
+Load a name from the file that defines it, not from a file that happens to load it.
+
 **§12 Use traits to inject behavior**: Tasks are supposed to stay generic, eg build task should not know about Workflows deployments
 but should provide necessary injection points via traits to allow external `feature()` to inject behavior. 
 
