@@ -372,7 +372,7 @@ def _impl(ctx: TaskContext) -> int:
     bazel_trait = ctx.traits[BazelTrait]
     startup_flags = bazel_flags.resolve_startup(ctx)
 
-    # Trait base flags first — same composition as `bazel.setup_command`.
+    # Trait base flags first — same composition as `bazel_rc.setup`.
     flags = list(bazel_trait.base_flags) + bazel_flags.resolve(ctx)
     announce_version, announce_command = bazel_announce.resolve(ctx)
 

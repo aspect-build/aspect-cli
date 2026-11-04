@@ -93,19 +93,19 @@ setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
   └─ hc_trait.health_check                        # Workflows env table / server health check
 bazel_trait.build_start
   └─ Workflows prints `--- :bazel: Running bazel <task> [<task-name>] <targets>`
-xl = bazel_exec_log.open(bazel_trait)              # after build_start, before the spawn
+xl = bazel_exec_log.open(bazel_trait)            # after build_start, before the spawn
 events = bazel.build_events.iterator(tick_ms=…)  # create handle BEFORE the spawn
 ctx.bazel.build(..., build_events = [events], execution_log = xl.sinks or False)
 data["sink_invocation_id"] = build.sink_invocation_id
 lifecycle.task_update(running)                   # link surfaces in the annotation
 bb_root = usable_bb_clientd_root(ctx.std)     # once per task: maps log URIs to paths
 for event in events:                             # `None` on a quiet tick_ms tick
-    bazel_exec_log.pump(ctx, xl)                   # exec_log_event hooks, every tick
+    bazel_exec_log.pump(ctx, xl)                 # exec_log_event hooks, every tick
     if event != None:
         bazel_trait.build_event(ctx, event)      # ArtifactUpload records testlog paths
         if process_event(data, event, bb_root):
             lifecycle.task_update(running)       # streamed metadata + targets
-bazel_exec_log.close(ctx, xl)                      # the rest of the log; before wait()
+bazel_exec_log.close(ctx, xl)                    # the rest of the log; before wait()
 build_status = build.wait()
 bazel_trait.build_end(ctx, build_status.code)    # ArtifactUpload uploads
 ... task-specific work (run formatter, parse SARIF, etc.) ...
@@ -885,7 +885,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #     that feeds it. Opened after `build_start` (which can register one) and
     #     before the spawn (the only thing that subscribes a handle), freshly per
     #     attempt since a handle is single-use. Tasks driving the
-    #     `bazel.build(ctx)` handle get all of this from it instead.
+    #     `bazel_invocation.build(ctx)` handle get all of this from it instead.
     xl = bazel_exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(flags = flags, build_events = build_events,
@@ -907,7 +907,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #    bazel state and stream metadata into the live annotation.
     bb_root = usable_bb_clientd_root(ctx.std)
     for event in events:
-        bazel_exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
+        bazel_exec_log.pump(ctx, xl)        # exec_log_event hooks, non-blocking
         if event == None:
             continue
         for handler in bazel_trait.build_event:

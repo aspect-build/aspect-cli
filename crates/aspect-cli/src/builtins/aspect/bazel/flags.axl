@@ -138,9 +138,9 @@ def _require_arg(ctx, name: str) -> None:
     if not hasattr(ctx.args, name):
         fail(
             ("Task is missing required `%s` arg. Tasks that use the " +
-             "`@aspect//bazel.axl` flag helpers must declare bazel_flags, bazel_startup_flags, " +
-             "announce_bazel_rc, announce_bazel_version, and " +
-             "announce_bazel_command on the task definition.") % name,
+             "`@aspect//bazel.axl` helpers declare their args with " +
+             "`bazel_invocation.args(...)`, or with `bazel_flags.args(...)` " +
+             "and `bazel_announce.args(...)`.") % name,
         )
 
 # The passthrough arg names, shared by the declarations below and every helper
