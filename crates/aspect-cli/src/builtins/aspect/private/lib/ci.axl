@@ -182,6 +182,12 @@ def resolve_build_url(ctx, existing_app_token: str | None = None) -> str:
     """
     if not ctx.std.env.var("GITHUB_ACTIONS"):
         return detect_build_url(ctx.std.env)
+    cached = ctx.std.env.var(_JOB_URL_CACHE_ENV) or ""
+    run_url = github_actions_run_url(ctx.std.env)
+
+    # A run-level fallback must remain eligible for the per-job upgrade.
+    if run_url and cached.startswith(run_url + "/job/"):
+        return cached
     url = detect_github_actions_build_url(ctx, existing_app_token = existing_app_token)
     if url:
         ctx.std.env.set_var(_JOB_URL_CACHE_ENV, url)
