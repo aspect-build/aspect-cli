@@ -7,6 +7,7 @@ Parallel to `bazel_results.axl` but driven by lint diagnostic events. Feature-fa
   render_check_output(ctx, data, status, …)    → {title, summary, text}
   lint_annotation_plan(destination, has_pr)    → (enabled, include_fix_bearing)
   compute_annotations(data, …)                 → list of annotation dicts
+  rules_lint_repo_name(read_file)              → rules_lint's apparent name, or None
 
 Summary metadata rows reuse `bazel_results.build_summary_data` wholesale; the
 body is lint-specific (by-severity / by-tool counts + per-severity finding table).
@@ -391,6 +392,49 @@ def detect_lint_tool(filename):
     if end < 0 or end == start:
         return ""
     return filename[start:end]
+
+_RULES_LINT_MODULES = ("rules_lint", "aspect_rules_lint")
+
+def _bazel_calls(text, function):
+    """The argument text of each `function(...)` call in a MODULE.bazel file,
+    ignoring `#` comments. Good enough for the flat calls MODULE.bazel holds."""
+    code = "\n".join([line.partition("#")[0] for line in text.split("\n")])
+    return [chunk.partition(")")[0] for chunk in code.split(function + "(")[1:]]
+
+def _string_kwargs(args):
+    kwargs = {}
+    for part in args.split(","):
+        key, eq, value = part.partition("=")
+        if eq:
+            kwargs[key.strip()] = value.strip().strip("\"'")
+    return kwargs
+
+def rules_lint_repo_name(read_file):
+    """The name the root module sees rules_lint by, or None if it has no
+    `bazel_dep` on it. rules_lint was published as aspect_rules_lint before its
+    rename, and `repo_name` can rename it again.
+
+    `read_file(path)` returns the text of a workspace-relative file, or a
+    falsy value when it can't be read.
+    Reads `MODULE.bazel` and the files it `include()`s.
+    """
+    root = read_file("MODULE.bazel")
+    if not root:
+        return None
+    texts = [root]
+    for args in _bazel_calls(root, "include"):
+        label = args.strip().strip("\"'")
+        if label.startswith("//"):
+            text = read_file(label[2:].replace(":", "/").lstrip("/"))
+            if text:
+                texts.append(text)
+    for text in texts:
+        for args in _bazel_calls(text, "bazel_dep"):
+            kwargs = _string_kwargs(args)
+            if kwargs.get("name") in _RULES_LINT_MODULES:
+                repo_name = kwargs.get("repo_name", kwargs["name"])
+                return None if repo_name == "None" else repo_name
+    return None
 
 def linter_rows(data):
     """Per-linter aggregate rows `{tool: {errors, warnings, infos, fixes}}`.

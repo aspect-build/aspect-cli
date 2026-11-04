@@ -6,6 +6,9 @@ Snapshot tests for template rendering and the annotation pipeline:
 Pure-function tests for the PR auto-detect routing contract:
   aspect dev test-lint-annotation-plan
 
+Pure-function tests for finding rules_lint's name in MODULE.bazel:
+  aspect dev test-lint-repo-name
+
 Scenarios:
   1. clean-passed    — no diagnostics, build succeeded
   2. mixed-findings  — errors + warnings + info across multiple tools
@@ -37,6 +40,7 @@ load(
     "linter_rows",
     "linter_summaries",
     "render_check_output",
+    "rules_lint_repo_name",
 )
 load("./template_presets.axl", "template_presets")
 
@@ -1061,5 +1065,44 @@ detect_lint_tool_tests = task(
     kind = "test-lint-detect-tool",
     group = ["dev"],
     implementation = _test_detect_lint_tool,
+    args = {},
+)
+
+def _test_rules_lint_repo_name(ctx):
+    def name(files):
+        return rules_lint_repo_name(lambda path: files.get(path))
+
+    _eq("renamed module", name({"MODULE.bazel": 'bazel_dep(name = "rules_lint", version = "3.0.0")'}), "rules_lint")
+    _eq("old module", name({"MODULE.bazel": 'bazel_dep(name = "aspect_rules_lint", version = "2.5.2")'}), "aspect_rules_lint")
+    _eq(
+        "multi-line call with repo_name",
+        name({"MODULE.bazel": 'bazel_dep(\n    name = "rules_lint",\n    version = "3.0.0",\n    repo_name = "lint",\n    dev_dependency = True,\n)\n'}),
+        "lint",
+    )
+    _eq("repo_name = None is not visible", name({"MODULE.bazel": 'bazel_dep(name = "rules_lint", repo_name = None)'}), None)
+    _eq(
+        "comments and other lint modules are skipped",
+        name({"MODULE.bazel": '# bazel_dep(name = "aspect_rules_lint")\nbazel_dep(name = "rules_lint_rust")\nbazel_dep(name = "rules_lint")  # linters\n'}),
+        "rules_lint",
+    )
+    _eq(
+        "dep in an included file",
+        name({
+            "MODULE.bazel": 'include("//tools/lint:deps.MODULE.bazel")',
+            "tools/lint/deps.MODULE.bazel": 'bazel_dep(name = "rules_lint", version = "3.0.0")',
+        }),
+        "rules_lint",
+    )
+    _eq("no dep", name({"MODULE.bazel": 'bazel_dep(name = "rules_go")'}), None)
+    _eq("no MODULE.bazel", name({}), None)
+
+    print("lint_results.axl::rules_lint_repo_name: all cases OK")
+    return 0
+
+rules_lint_repo_name_tests = task(
+    summary = "Run the rules_lint repo name AXL unit tests.",
+    kind = "test-lint-repo-name",
+    group = ["dev"],
+    implementation = _test_rules_lint_repo_name,
     args = {},
 )

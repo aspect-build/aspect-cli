@@ -57,7 +57,7 @@ load("@aspect//private/lib/incremental_build_protocol_test.axl", "incremental_bu
 load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
-load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
+load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests", "rules_lint_repo_name_tests")
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
@@ -663,6 +663,11 @@ def config(ctx: ConfigContext):
     # zero-aspect safeguard keys off so unrelated outputs can't bypass the check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
+
+    # Finds rules_lint under its old or new name (or a repo_name) in MODULE.bazel
+    # so `lint --fix` sets a fix flag whose label resolves.
+    # Run with: aspect dev test-lint-repo-name
+    ctx.tasks.add(rules_lint_repo_name_tests)
 
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)
