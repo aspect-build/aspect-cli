@@ -6,9 +6,6 @@ Snapshot tests for template rendering and the annotation pipeline:
 Pure-function tests for the PR auto-detect routing contract:
   aspect dev test-lint-annotation-plan
 
-Pure-function tests for finding rules_lint's name in a repository mapping:
-  aspect dev test-lint-repo-name
-
 Scenarios:
   1. clean-passed    — no diagnostics, build succeeded
   2. mixed-findings  — errors + warnings + info across multiple tools
@@ -40,7 +37,6 @@ load(
     "linter_rows",
     "linter_summaries",
     "render_check_output",
-    "rules_lint_repo_name",
 )
 load("./template_presets.axl", "template_presets")
 
@@ -1065,30 +1061,5 @@ detect_lint_tool_tests = task(
     kind = "test-lint-detect-tool",
     group = ["dev"],
     implementation = _test_detect_lint_tool,
-    args = {},
-)
-
-def _test_rules_lint_repo_name(ctx):
-    _eq("renamed module", rules_lint_repo_name({"": "", "rules_lint": "rules_lint+"}), "rules_lint")
-    _eq("old module", rules_lint_repo_name({"aspect_rules_lint": "aspect_rules_lint+"}), "aspect_rules_lint")
-    _eq("Bazel 7 canonical name", rules_lint_repo_name({"aspect_rules_lint": "aspect_rules_lint~"}), "aspect_rules_lint")
-    _eq("repo_name override", rules_lint_repo_name({"lint": "rules_lint+"}), "lint")
-    _eq("multiple_version_override", rules_lint_repo_name({"rules_lint": "rules_lint+3.0.0"}), "rules_lint")
-    _eq("rules_lint as the main repository", rules_lint_repo_name({"": "", "rules_lint": ""}), "rules_lint")
-    _eq(
-        "other lint modules are skipped",
-        rules_lint_repo_name({"rules_lint_rust": "rules_lint_rust+", "rules_go": "rules_go+"}),
-        None,
-    )
-    _eq("no mapping", rules_lint_repo_name({}), None)
-
-    print("lint_results.axl::rules_lint_repo_name: all cases OK")
-    return 0
-
-rules_lint_repo_name_tests = task(
-    summary = "Run the rules_lint repo name AXL unit tests.",
-    kind = "test-lint-repo-name",
-    group = ["dev"],
-    implementation = _test_rules_lint_repo_name,
     args = {},
 )

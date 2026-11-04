@@ -7,7 +7,6 @@ Parallel to `bazel_results.axl` but driven by lint diagnostic events. Feature-fa
   render_check_output(ctx, data, status, …)    → {title, summary, text}
   lint_annotation_plan(destination, has_pr)    → (enabled, include_fix_bearing)
   compute_annotations(data, …)                 → list of annotation dicts
-  rules_lint_repo_name(mapping)                → rules_lint's apparent name, or None
 
 Summary metadata rows reuse `bazel_results.build_summary_data` wholesale; the
 body is lint-specific (by-severity / by-tool counts + per-severity finding table).
@@ -392,23 +391,6 @@ def detect_lint_tool(filename):
     if end < 0 or end == start:
         return ""
     return filename[start:end]
-
-_RULES_LINT_MODULES = ("rules_lint", "aspect_rules_lint")
-
-def rules_lint_repo_name(mapping):
-    """The apparent name rules_lint has in `mapping`, a repository mapping from
-    `ctx.bazel.repo_mapping()`, or None if it has none. rules_lint was published
-    as aspect_rules_lint before its rename, and `repo_name` can rename it again,
-    so this matches on the canonical name: `rules_lint+` (Bazel 8+) or
-    `rules_lint~` (Bazel 7), or `""` when rules_lint is the main repository.
-    """
-    for apparent, canonical in mapping.items():
-        if canonical == "":
-            if apparent in _RULES_LINT_MODULES:
-                return apparent
-        elif canonical.replace("~", "+").partition("+")[0] in _RULES_LINT_MODULES:
-            return apparent
-    return None
 
 def linter_rows(data):
     """Per-linter aggregate rows `{tool: {errors, warnings, infos, fixes}}`.

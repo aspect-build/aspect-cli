@@ -1,0 +1,29 @@
+"""Helpers for repository mappings from `ctx.bazel.repo_mapping()`.
+
+  - `apparent_repo_name(mapping, modules)` — the name the mapping gives one of
+    `modules`, so a label in a command-line flag can name a module whatever its
+    `bazel_dep` calls it.
+"""
+
+def _module_of(canonical):
+    """The module a canonical repo name belongs to: `rules_lint+` (Bazel 8+),
+    `rules_lint~` (Bazel 7) and `rules_lint+3.0.0` (multiple_version_override)
+    all give `rules_lint`."""
+    return canonical.replace("~", "+").partition("+")[0]
+
+def apparent_repo_name(mapping, modules):
+    """The apparent name `mapping` gives the first of `modules` it contains, or
+    None. Matches on the canonical name, so a `repo_name` override is followed,
+    and on the apparent name for the main repository, whose canonical name is
+    `""`.
+
+    `modules` lists alternative names of one module, newest first, such as a
+    renamed module and its old name.
+    """
+    for module in modules:
+        for apparent, canonical in mapping.items():
+            if canonical == "" and apparent == module:
+                return apparent
+            if canonical and _module_of(canonical) == module:
+                return apparent
+    return None

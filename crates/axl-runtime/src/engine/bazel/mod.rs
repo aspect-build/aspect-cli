@@ -119,6 +119,44 @@ fn partition_execution_log(
     }
 }
 
+/// Run `bazel <startup_flags> <args>` to completion and return its stdout,
+/// raising with Bazel's stderr on a non-zero exit. `directory` selects the
+/// workspace / server (default: the parent process cwd).
+///
+/// The child is bound to the run's root, so a cancel reaches it even while the
+/// daemon is busy, and the wait is a safe point.
+fn run_bazel_captured(
+    signals: &Arc<cancellation::Signals>,
+    startup_flags: &[String],
+    args: &[String],
+    directory: Option<String>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut cmd = runner::SignalRunner(signals).command();
+    cmd.args(startup_flags);
+    cmd.args(args);
+    if let Some(dir) = directory {
+        cmd.current_dir(dir);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(Stdio::null());
+    let output = children::spawn_bazel(&mut cmd, signals)
+        .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
+        .wait_with_output()
+        // Context, not a string: a wait that was cancelled has to reach
+        // `TaskExit::from_anyhow` intact.
+        .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
+    if !output.status.success() {
+        let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
+        let command = args.first().map(String::as_str).unwrap_or_default();
+        anyhow::bail!(
+            "bazel {command} failed with exit code {:?}{detail}",
+            output.status.code()
+        );
+    }
+    Ok(output.stdout)
+}
+
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Plain flags are always included; conditional flags are
 /// included only when [`constraint_matches`] holds for `version`.
@@ -840,37 +878,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         };
 
         let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
-
-        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
-        cmd.args(&startup_flags);
-        cmd.arg("info");
-        cmd.args(&command_flags);
-        cmd.args(&requested);
-        if let Some(dir) = directory.into_option() {
-            cmd.current_dir(dir);
-        }
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.stdin(Stdio::null());
-        // Bound to the root, so a cancel reaches this `bazel info` even
-        // while the daemon is busy, and the wait is a safe point.
-        let output = children::spawn_bazel(&mut cmd, &Env::from_eval(eval)?.signals)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
-            .wait_with_output()
-            // Context, not a string: a wait that was cancelled has to reach
-            // `TaskExit::from_anyhow` intact.
-            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
-
-        if !output.status.success() {
-            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
-            anyhow::bail!(
-                "bazel info failed with exit code {:?}{detail}",
-                output.status.code()
-            );
-        }
+        let args: Vec<String> = std::iter::once("info".to_owned())
+            .chain(command_flags)
+            .chain(requested.iter().map(|k| k.to_string()))
+            .collect();
+        let stdout = run_bazel_captured(
+            &Env::from_eval(eval)?.signals,
+            &startup_flags,
+            &args,
+            directory.into_option(),
+        )?;
 
         Ok(
-            bazel::server::info::parse_output(&String::from_utf8_lossy(&output.stdout), &requested)
+            bazel::server::info::parse_output(&String::from_utf8_lossy(&stdout), &requested)
                 .into_iter()
                 .collect(),
         )
@@ -879,16 +899,22 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Run `bazel mod dump_repo_mapping <repo>` and return that repository's
     /// mapping as a dict from apparent to canonical repository name.
     ///
-    /// `repo` defaults to `""`, the root module, which labels in command-line
-    /// flags resolve against. Returns `None` on Bazel older than 7.1, which has
-    /// no `dump_repo_mapping`, and when the run command disables Bzlmod
-    /// (`--noenable_bzlmod`). Raises with Bazel's stderr if the command fails.
+    /// Runs under the startup flags and rc-file options of the rc set by
+    /// `use_rc` (or the per-call `rc=`), so it reaches the same server and
+    /// module resolution as the build. Flags passed on the command line are left
+    /// out, `--config` aside, because `mod` rejects build-only ones such as
+    /// `--aspects`.
     ///
-    /// Runs under the startup flags and rc-file options of the active
-    /// `RunCommand` (`use_rc`) or the per-call `rc=`, so it reaches the same
-    /// server and module resolution as the build. Flags the task added on the
-    /// command line are left out (`--config=` aside), since `mod` rejects
-    /// build-only ones such as `--aspects`.
+    /// Returns `None` where there is no mapping to dump: on Bazel older than 7.1
+    /// (probed like `version()`), and when the rc disables Bzlmod. Raises with
+    /// Bazel's stderr if the command fails.
+    ///
+    /// # Arguments
+    /// * `repo`: canonical name of the repository to dump (default: `""`, the
+    ///   root module, which labels in command-line flags resolve against).
+    /// * `rc`: bazelrc to resolve flags from; overrides the active one.
+    /// * `directory`: working directory to run `bazel mod` in; selects the
+    ///   workspace / server (default: the parent process cwd).
     ///
     /// **Examples**
     ///
@@ -912,7 +938,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let (startup_flags, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
                 let (_, all_flags) = rc.resolve_for_command("mod")?;
-                if bazel::rc::last_bool_flag_value(&all_flags, "enable_bzlmod", "mod")
+                if bazel::rc::last_bool_flag_value(&all_flags, "--enable_bzlmod", "mod")
                     == Some(false)
                 {
                     return Ok(NoneOr::None);
@@ -922,34 +948,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None => (read_startup_flags(this)?, Vec::new()),
         };
 
-        let mut cmd = runner::SignalRunner(&signals).command();
-        cmd.args(&startup_flags);
-        cmd.args(["mod", "dump_repo_mapping"]);
-        cmd.args(&command_flags);
-        cmd.arg(&repo);
-        if let Some(dir) = directory.into_option() {
-            cmd.current_dir(dir);
-        }
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.stdin(Stdio::null());
-        // Bound to the root, so a cancel reaches it and the wait is a safe point.
-        let output = children::spawn_bazel(&mut cmd, &signals)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?
-            .wait_with_output()
-            .map_err(|e| anyhow::Error::new(e).context("failed to wait on bazel"))?;
-
-        if !output.status.success() {
-            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
-            anyhow::bail!(
-                "bazel mod dump_repo_mapping failed with exit code {:?}{detail}",
-                output.status.code()
-            );
-        }
-        let mapping: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_slice(&output.stdout).map_err(|e| {
-                anyhow::anyhow!("failed to parse bazel mod dump_repo_mapping output: {}", e)
-            })?;
+        let args: Vec<String> = ["mod".to_owned(), "dump_repo_mapping".to_owned()]
+            .into_iter()
+            .chain(command_flags)
+            .chain(std::iter::once(repo))
+            .collect();
+        let stdout = run_bazel_captured(&signals, &startup_flags, &args, directory.into_option())?;
+        let mapping: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&stdout)
+            .map_err(|e| {
+            anyhow::anyhow!("failed to parse bazel mod dump_repo_mapping output: {}", e)
+        })?;
         Ok(NoneOr::Other(
             mapping
                 .into_iter()

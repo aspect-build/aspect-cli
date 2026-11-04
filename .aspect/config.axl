@@ -57,7 +57,7 @@ load("@aspect//private/lib/incremental_build_protocol_test.axl", "incremental_bu
 load("@aspect//private/lib/init_test.axl", "init_tests")
 load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
-load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests", "rules_lint_repo_name_tests")
+load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
@@ -66,6 +66,7 @@ load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/redis_state_test.axl", "redis_state_tests")
 load("@aspect//private/lib/redis_test.axl", "redis_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
+load("@aspect//private/lib/repo_mapping_test.axl", "repo_mapping_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/resp_test.axl", "resp_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
@@ -534,6 +535,10 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-path-utils
     ctx.tasks.add(path_utils_tests)
 
+    # Repository mapping lookups (module name → apparent name).
+    # Run with: aspect dev test-repo-mapping
+    ctx.tasks.add(repo_mapping_tests)
+
     # Shared text helpers (padding, pluralize, number formatting).
     # Run with: aspect dev test-text
     ctx.tasks.add(text_tests)
@@ -663,11 +668,6 @@ def config(ctx: ConfigContext):
     # zero-aspect safeguard keys off so unrelated outputs can't bypass the check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
-
-    # Finds rules_lint under its old or new name (or a repo_name) in the repo mapping
-    # so `lint --fix` sets a fix flag whose label resolves.
-    # Run with: aspect dev test-lint-repo-name
-    ctx.tasks.add(rules_lint_repo_name_tests)
 
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)

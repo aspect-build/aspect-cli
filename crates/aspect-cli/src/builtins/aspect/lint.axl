@@ -27,7 +27,8 @@ load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "wa
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
-load("./private/lib/lint_results.axl", "detect_lint_tool", "rules_lint_repo_name", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
+load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
+load("./private/lib/repo_mapping.axl", "apparent_repo_name")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
@@ -704,15 +705,20 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
             exit_nonzero = exit_nonzero or file_exit_nonzero
     return (still_pending, interesting, exit_nonzero)
 
-def _lint_fix_flag(ctx: TaskContext) -> str:
-    """rules_lint's fix flag, under the name the root module sees rules_lint by.
+# rules_lint's module names, newest first: it was published as aspect_rules_lint
+# before its rename.
+_RULES_LINT_MODULES = ("rules_lint", "aspect_rules_lint")
 
-    Falls back to the old aspect_rules_lint name without a repository mapping,
-    as in a WORKSPACE build. Must run after `phases.setup`, so the lookup reaches
-    the build's server.
+def _lint_fix_flag(ctx: TaskContext) -> str:
+    """`--@<repo>//lint:fix`, naming rules_lint the way the root module does.
+
+    Without a repository mapping (no Bzlmod, or Bazel older than 7.1) it uses the
+    old name. Must run after `phases.setup`, so the lookup reaches the build's
+    server.
     """
-    repo = rules_lint_repo_name(ctx.bazel.repo_mapping() or {})
-    return "--@%s//lint:fix" % (repo or "aspect_rules_lint")
+    mapping = ctx.bazel.repo_mapping() or {}
+    repo = apparent_repo_name(mapping, _RULES_LINT_MODULES) or _RULES_LINT_MODULES[-1]
+    return "--@%s//lint:fix" % repo
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:

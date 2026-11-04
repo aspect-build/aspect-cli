@@ -413,6 +413,17 @@ def test_bazel_info(ctx: TaskContext, tc: int) -> int:
 
     return tc
 
+def test_bazel_repo_mapping(ctx: TaskContext, tc: int) -> int:
+    mapping = ctx.bazel.repo_mapping()
+    tc = test_case(tc, type(mapping) == "dict", "bazel.repo_mapping() should return a dict")
+    tc = test_case(tc, mapping.get("") == "", "the root module should map to the main repository")
+    tc = test_case(tc, mapping.get("bazel_tools") == "bazel_tools", "bazel_tools should be visible to the root module")
+
+    # A direct bazel_dep of this repo's MODULE.bazel maps to its module's canonical repo.
+    lint = mapping.get("aspect_rules_lint", "")
+    tc = test_case(tc, lint.startswith("aspect_rules_lint"), "aspect_rules_lint should map to its canonical repo, got %r" % lint)
+    return tc
+
 def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test HTTP download with integrity/sha256 verification
     # Using a well-known static file: LICENSE from this repo's GitHub
@@ -4073,6 +4084,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_large_bes(ctx, tc, temp_dir)
     tc = test_http(ctx, tc, temp_dir)
     tc = test_bazel_info(ctx, tc)
+    tc = test_bazel_repo_mapping(ctx, tc)
     tc = test_http_get_post(ctx, tc, temp_dir)
     tc = test_conditional_flags(ctx, tc)
     tc = test_query_flags(ctx, tc)
