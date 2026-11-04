@@ -9,6 +9,7 @@ Run with:
   aspect dev test-bazel-facade
 """
 
+load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
 load(
     "@aspect//bazel.axl",
     "BazelTrait",
@@ -20,7 +21,6 @@ load(
     "bazel_rc",
     "normalize_label",
 )
-load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
 
 _MEMBERS = {
     "bazel_announce": (bazel_announce, ["args", "resolve"]),
