@@ -259,6 +259,7 @@ def _test_resolve_build_url_cache(test_ctx):
     _clear_env(test_ctx)
     for name, value in {
         "GITHUB_ACTIONS": "true",
+        "GITHUB_SERVER_URL": "https://github.com",
         "GITHUB_REPOSITORY": "acme/web",
         "GITHUB_RUN_ID": "1234",
         "GITHUB_JOB": "test",
