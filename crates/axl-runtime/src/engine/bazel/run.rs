@@ -49,7 +49,7 @@ use crate::engine::std::process::{Child, Command, stdio_from};
 use crate::engine::std::stream::Writable;
 use crate::engine::store::Env;
 use bazel::command::run::{Dirs, Failure, OnSettled, Outcome, PrepareError, Tracker};
-use bazel::label::normalize_label_from;
+use bazel::label::LabelResolver;
 use bazel::runfiles::SymlinksMode;
 
 native_error! {
@@ -393,6 +393,7 @@ struct Started {
     shared: HashMap<String, SharedOutcome>,
     completed: mpsc::Receiver<String>,
     done: Arc<AtomicBool>,
+    labels: LabelResolver,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,11 +423,11 @@ fn start<'v>(
     let mode = prepare_flags(&env.signals, &mut flags, &startup_flags)?;
 
     let dirs = dirs_from_env(env);
-    let package = dirs.current_package();
+    let labels = dirs.labels(directory.as_deref());
     let mut given = HashMap::new();
     let mut keys = Vec::new();
     for target in targets {
-        let key = normalize_label_from(target, &package);
+        let key = labels.normalize(target);
         if given.insert(key.clone(), target.clone()).is_none() {
             keys.push(key);
         }
@@ -504,6 +505,7 @@ fn start<'v>(
         shared,
         completed: completed_rx,
         done,
+        labels,
     })
 }
 
@@ -677,7 +679,7 @@ pub struct Runs {
     #[allocative(skip)]
     status: RefCell<Option<BuildStatus>>,
     #[allocative(skip)]
-    package: String,
+    labels: LabelResolver,
     #[allocative(skip)]
     signals: Arc<Signals>,
     #[allocative(skip)]
@@ -756,7 +758,7 @@ fn runs_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] label: String,
     ) -> anyhow::Result<FutureOf<'v, Runnable>> {
         let runs = this.downcast_ref_err::<Runs>().into_anyhow_result()?;
-        let key = normalize_label_from(&label, &runs.package);
+        let key = runs.labels.normalize(&label);
         let shared = runs.shared.get(&key).ok_or_else(|| {
             anyhow::anyhow!("{label} is not one of the targets this run_all was started with")
         })?;
@@ -926,7 +928,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             &token,
             Some(spec),
         )?;
-        let key = normalize_label_from(&label, &dirs_from_env(env_).current_package());
+        let key = started.labels.normalize(&label);
         let runnable = started
             .shared
             .get(&key)
@@ -1004,12 +1006,6 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<Runs> {
         let env: &Env = Env::from_eval(eval)?;
         let token = super::cancellation_token(&env.signals, cancellation);
-        let dirs = dirs_from_env(env);
-        let package = dirs.current_package();
-        let mut given = HashMap::new();
-        for target in &targets.items {
-            given.insert(normalize_label_from(target, &package), target.clone());
-        }
         let started = start(
             this,
             env,
@@ -1026,6 +1022,11 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             &token,
             None,
         )?;
+        let given = targets
+            .items
+            .iter()
+            .map(|target| (started.labels.normalize(target), target.clone()))
+            .collect();
         Ok(Runs {
             build: started.build,
             shared: started.shared,
@@ -1034,7 +1035,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             queue: RefCell::new(VecDeque::new()),
             done: started.done,
             status: RefCell::new(None),
-            package,
+            labels: started.labels,
             signals: env.signals.clone(),
             popped: Cell::new(0),
         })
