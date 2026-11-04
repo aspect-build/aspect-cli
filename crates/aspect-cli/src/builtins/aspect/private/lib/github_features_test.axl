@@ -1,8 +1,6 @@
 """Tests for GitHub status-check mappings and lint review comments.
 
-Sibling of `gitlab_features_test.axl`: exercises the mapping functions the
-feature exposes as public test hooks, without standing up auth, the check-runs
-API, or the render pipeline.
+Exercises pure mappings and the real feature callbacks with captured HTTP.
 
   * `conclusion_for(status, final)` — Aspect task status → GitHub check-run
     conclusion, or "" when the update lands none.
@@ -147,6 +145,188 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
     _eq("multiline comment starts at finding", posted[2]["start_line"], 1)
     _eq("multiline comment ends at range end", posted[2]["line"], 3)
 
+def _test_check_progress_dedup(ctx):
+    """Drive the real feature with captured HTTP; leave rendering and hooks active."""
+    root = ctx.std.fs.mkdtemp(prefix = "github-check-dedup-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+
+    # A released CLI can exercise a source checkout instead of its embedded builtins.
+    builtins = ctx.std.env.var("ASPECT_TEST_BUILTINS_DIR")
+    module = 'axl_local_dep(name = "aspect", path = %s)\n' % json.encode(builtins) if builtins else ""
+    ctx.std.fs.write(root + "/MODULE.aspect", module)
+    ctx.std.fs.write(root + "/.aspect/config.axl", """
+load("@aspect//feature/artifacts.axl", "ArtifactUpload")
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_lint_comments.axl", "GithubLintComments")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+load("@aspect//feature/telemetry.axl", "Telemetry")
+load("@aspect//traits.axl", "Phases", "surface_replace")
+
+def _send(ctx, capture, method, **kwargs):
+    url = kwargs["url"]
+    payload = json.decode(kwargs["data"]) if kwargs.get("data") else {}
+    status = 200
+    if "/github/token" in url:
+        response = {"token": "fixture-token", "installation_id": "fixture", "installation_proof": "fixture"}
+    elif url.endswith("/rate_limit") or url.endswith("/github/budget"):
+        response = {}
+    elif url.endswith("/status-checks/register"):
+        capture["registrations"].append(payload)
+        response = {}
+    elif "/actions/runs/" in url:
+        response = {"jobs": [{"name": "fixture", "id": 1, "html_url": "https://github.com/fixture/repo/actions/runs/1/job/1"}]}
+    elif url.endswith("/check-runs") and method == "post":
+        response = {"id": 42, "html_url": "https://github.com/fixture/repo/runs/42"}
+    elif url.endswith("/check-runs/42") and method == "patch":
+        capture["patches"].append(payload)
+        status = 422 if capture.pop("fail_next", False) else 200
+        response = {"message": "fixture failure"} if status != 200 else {}
+    else:
+        fail("Unexpected HTTP request: " + method + " " + url)
+    return struct(catch = lambda: struct(block = lambda: (None, struct(status = status, body = json.encode(response), headers = []))))
+
+def _proxy(ctx, capture):
+    fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["http"] = lambda: struct(
+        get = lambda **kwargs: _send(ctx, capture, "get", **kwargs),
+        post = lambda **kwargs: _send(ctx, capture, "post", **kwargs),
+        patch = lambda **kwargs: _send(ctx, capture, "patch", **kwargs),
+    )
+    fields["aspect"] = struct(auth = struct(
+        credentials = lambda **_kwargs: struct(access_token = "fixture-token"),
+        aspect_cloud_api_url = "https://api.aspect.build",
+        aspect_cloud_deployment = "fixture",
+    ))
+    return struct(**fields)
+
+def _install(ctx, capture):
+    if capture.get("callbacks"):
+        return
+    ctx.std.env.set_var("GITHUB_REPOSITORY", "fixture/repo")
+    handlers = ctx.traits[Phases].task_update
+    wrapped = [lambda task_ctx, update, handler = handler: handler(_proxy(task_ctx, capture), update) for handler in list(handlers) if "/feature/github_status_checks.axl" in str(handler)]
+    if not wrapped:
+        return
+    if len(wrapped) != 1:
+        fail("Expected one real GitHub status-check callback: %r" % handlers)
+    handlers.clear()
+    handlers.extend(wrapped)
+    capture["callbacks"] = wrapped
+    handlers.append(lambda task_ctx, update: update.data.update({"capture": capture}) if update.kind == "fixture" else None)
+
+def _surface(ctx, info, capture):
+    capture["hooks"] += 1
+    return surface_replace(info.body + capture["suffix"], style = capture["style"])
+
+def config(ctx):
+    capture = {"patches": [], "registrations": [], "hooks": 0, "suffix": "", "style": None, "fail_next": False}
+    for feature in [ArtifactUpload, Deployment, GithubLintComments, GithubStatusComments, Telemetry]:
+        ctx.features[feature].enabled = False
+    ctx.features[GithubStatusChecks].enabled = True
+    ctx.features[GithubStatusChecks].args.min_update_interval_seconds = 1
+    ctx.features[GithubStatusChecks].args.templates = {"title": "Fixture", "summary": "Progress {{ last_update }}", "details": "Details"}
+    ctx.traits[Phases].status_surface_update.append(lambda task_ctx, info: _surface(task_ctx, info, capture))
+    for name, value in {
+        "CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_RUN_ID": "1",
+        "GITHUB_RUN_ATTEMPT": "1", "GITHUB_WORKFLOW": "fixture", "GITHUB_JOB": "fixture",
+        "GITHUB_REPOSITORY": "", "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_SHA": "head", "ASPECT_GITHUB_PR_NUMBER": "1",
+        "ASPECT_VCS_URL": "https://github.com/fixture/repo",
+    }.items():
+        ctx.std.env.set_var(name, value)
+    ctx.hooks.pre_task(lambda task_ctx: _install(task_ctx, capture))
+""")
+    ctx.std.fs.write(root + "/.aspect/probe.axl", """
+load("@std//time.axl", "sleep")
+load("@aspect//traits.axl", "LintTrait", "Phases", "TaskUpdate")
+load("@aspect//private/lib/lifecycle.axl", "phases")
+load("@aspect//private/lib/tips.axl", "tips")
+load("@aspect//private/lib/rate_limit.axl", "BUCKET_APP", "record_token_budget")
+load("@aspect//private/feature/test_fixtures.axl", "make_lint_failed_errors")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _impl(ctx):
+    exchange = {}
+    for callback in list(ctx.traits[Phases].task_update):
+        callback(ctx, TaskUpdate(kind = "fixture", data = exchange))
+    capture = exchange["capture"]
+    def emit(progress = "same", status = "running", final = False, priority = False, kind = "bazel_results", data = {}):
+        update = TaskUpdate(progress = phases.ProgressStyles(body = progress), status = status, final = final, priority = priority, kind = kind, data = data)
+        for callback in capture["callbacks"]:
+            callback(ctx, update)
+
+    def next_tick(**kwargs):
+        # The production throttle uses the native clock, with a one-second minimum.
+        sleep(1010)
+        emit(**kwargs)
+
+    _eq("initial output is always sent", len(capture["patches"]), 1)
+    emit(progress = "", priority = True)
+    _eq("first progress is sent", len(capture["patches"]), 2)
+    _eq("initial output does not seed progress dedup", capture["patches"][1]["output"], capture["patches"][0]["output"])
+    hooks = capture["hooks"]
+    next_tick(progress = "")
+    _eq("identical live output is skipped", len(capture["patches"]), 2)
+    _eq("hook still runs before dedup", capture["hooks"], hooks + 1)
+    next_tick(progress = "changed")
+    _eq("changed progress is sent", len(capture["patches"]), 3)
+    capture["suffix"] = " hook edit"
+    next_tick(progress = "changed")
+    _eq("hook body edit is sent", len(capture["patches"]), 4)
+    _eq("hook edit reaches GitHub", capture["patches"][-1]["output"]["text"], "Details hook edit")
+
+    capture["fail_next"] = True
+    next_tick(progress = "failed write")
+    next_tick(progress = "failed write")
+    _eq("identical failed output is retried", len(capture["patches"]), 6)
+    capture["fail_next"] = True
+    next_tick(progress = "ambiguous write")
+    next_tick(progress = "failed write")
+    _eq("failure invalidates an earlier successful snapshot", len(capture["patches"]), 8)
+
+    record_token_budget(ctx, BUCKET_APP, 0)
+    next_tick(progress = "budget retry")
+    _eq("budget gate skips transport", len(capture["patches"]), 8)
+    record_token_budget(ctx, BUCKET_APP, 10000)
+    next_tick(progress = "budget retry")
+    _eq("budget-skipped identical output is retried", len(capture["patches"]), 9)
+
+    capture["style"] = "neutral"
+    next_tick(progress = "budget retry")
+    _eq("hook conclusion is not deduplicated", capture["patches"][-1]["conclusion"], "neutral")
+    capture["style"] = None
+    next_tick(progress = "budget retry")
+    _eq("conclusion invalidates the progress snapshot", len(capture["patches"]), 11)
+    emit(status = "failing")
+    _eq("early failure is sent", capture["patches"][-1]["conclusion"], "failure")
+    emit(status = "passed", final = True)
+    _eq("final success is sent", capture["patches"][-1]["conclusion"], "success")
+    patches = len(capture["patches"])
+    emit(status = "passed", final = True)
+    _eq("same-conclusion final output is sent", len(capture["patches"]), patches + 1)
+    _eq("terminal conclusion deregisters", capture["registrations"][-1]["final"], True)
+
+    ctx.traits[LintTrait].findings_destination = "annotations"
+    data = make_lint_failed_errors()
+    emit(status = "failed", final = True, kind = "lint_results", data = data)
+    _eq("annotations accompany conclusion", len(capture["patches"][-1]["output"]["annotations"]), 3)
+    patches = len(capture["patches"])
+    emit(status = "failed", final = True, kind = "lint_results", data = data)
+    _eq("annotation append is never deduplicated", len(capture["patches"]), patches + 1)
+    _eq("same annotations still reach GitHub", len(capture["patches"][-1]["output"]["annotations"]), 3)
+    return 0
+
+probe = task(kind = "probe", summary = "Exercise native GitHub check update deduplication.", implementation = _impl, traits = [Phases, LintTrait] + tips.TRAITS)
+""")
+    output = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not output.status.success:
+        fail(output.stdout + output.stderr)
+
 def _test_impl(ctx):
     # Early-fail concludes `failure` before the terminal update, so a broken
     # build turns the check red without waiting for build.wait().
@@ -175,6 +355,7 @@ def _test_impl(ctx):
 
     _test_registration_request()
     _test_lint_comment_identity(ctx)
+    _test_check_progress_dedup(ctx)
 
     print("github features test: OK")
     return 0

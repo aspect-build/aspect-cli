@@ -1,6 +1,8 @@
 """GitHub Status Check feature for Aspect tasks.
 
 Creates/updates a GitHub check run for a task's live state. CI-only.
+Identical nonterminal output is skipped after a successful progress write.
+Terminal updates and annotation batches bypass this comparison.
 
 Rendering is delegated by `task_update.kind` (bazel_results → build/test,
 lint_results → lint, format_results → format, gazelle_results → gazelle,
@@ -442,6 +444,7 @@ def _github_status_checks(ctx: FeatureContext):
 
         current = _state.get("_gh_conclusion")
         if desired and desired != current:
+            _state.pop("_last_progress_output", None)
             label = "early" if status == "failing" else "final"
             _LOG.trace("setting conclusion=%s on run %s (%s)" %
                        (desired, check_run_id, label))
@@ -472,7 +475,14 @@ def _github_status_checks(ctx: FeatureContext):
 
         # Mid-run progress PATCH (keeps the existing conclusion) — skippable
         # under budget pressure; the conclusion-setting calls above always land.
-        github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output, skippable = True)
+        progress_output = json.encode(output)
+
+        # Annotation batches append, so identical batches must still be sent.
+        can_skip = not final and not (output or {}).get("annotations")
+        if can_skip and _state.get("_last_progress_output") == progress_output:
+            return
+        result = github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output, skippable = True)
+        _state["_last_progress_output"] = progress_output if result["success"] and can_skip else None
 
     # Phases hooks
 
