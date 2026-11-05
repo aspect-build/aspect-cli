@@ -17,8 +17,8 @@ CircleCI) since coordination no longer depends on CI artifacts.
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
 render → post under a local time lease), so a single job still renders a
-correct comment. A job from a run older than the block's, on another SHA,
-skips the fallback post (see `_superseded`).
+correct comment. A late job from an older push skips that post rather than
+resetting the comment (see `_superseded`).
 
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
@@ -1392,21 +1392,23 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     }
 
 def _superseded(existing_state, head_sha, run_id):
-    """True when `existing_state` holds a newer run on another `head_sha`.
+    """True when `existing_state` holds a run newer than `run_id` on another SHA.
 
-    That makes `run_id` a late update from an older push or a re-run of an
-    older commit, which must not reset the comment. GitHub Actions and GitLab
-    run ids increase across runs and a re-run keeps its id, so a fresh push
-    (including one back to an earlier SHA) still resets. Only numeric ids
-    compare; a non-numeric id never supersedes."""
+    Such a writer is a late or cancelled job from an older push, or a re-run of
+    an older commit, and must not reset the comment. GitHub Actions run ids
+    increase across every workflow in a repo, GitLab pipeline ids across an
+    instance, and a re-run keeps its id, so a fresh push (even back to an
+    earlier SHA) still resets. Only numeric ids compare: a non-numeric id
+    (Buildkite, CircleCI, a local run) neither supersedes nor is superseded.
+    Mirrors the Aspect API's merge rule."""
     if not existing_state or existing_state.get("head_sha") == head_sha:
         return False
-    if not str(run_id or "").isdigit():
+    mine = str(run_id or "")
+    if not mine.isdigit():
         return False
-    mine = _run_id_sort_key(run_id)
     for r in existing_state.get("workflow_runs", []) or []:
         rid = str(r.get("run_id", ""))
-        if rid.isdigit() and _run_id_sort_key(rid) > mine:
+        if rid.isdigit() and int(rid) > int(mine):
             return True
     return False
 
@@ -1942,6 +1944,7 @@ def _github_status_comments(ctx: FeatureContext):
             return
 
         if _superseded(parsed, head_sha, run_id):
+            _LOG.trace("Run %s is older than the comment's, on another SHA; skipping the fallback post." % run_id)
             return
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
 
