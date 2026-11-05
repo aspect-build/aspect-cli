@@ -381,6 +381,24 @@ def _emit_aspect_api_token_tip(ctx):
         return
     _emit_tip_if_ready(ctx, tip_add_aspect_api_token, host = host)
 
+def _job_token(env):
+    """The job-scoped `GITHUB_TOKEN` / `GH_TOKEN`, or "" when it can't be
+    shown to belong to the API base's host.
+
+    The token belongs to the host that issued it: on Actions the runner's
+    `GITHUB_SERVER_URL`, elsewhere github.com, as these variables are for the
+    gh CLI (Enterprise uses `GH_ENTERPRISE_TOKEN`). A github.com runner
+    building an Enterprise mirror therefore keeps its token off the
+    Enterprise host."""
+    token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
+    if not token:
+        return ""
+    server = env.var("GITHUB_SERVER_URL") or ""
+    issuer = "github.com" if _is_public_github_url(server) else _extract_host(server).lower()
+    if issuer != _web_host_of_api_base(_resolve_api_base(env)):
+        return ""
+    return token
+
 def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existing_app_token = None, _reason = None):
     """Resolve `(primary_token, fallback_token, primary_bucket)` for
     supporting GitHub API calls, preferring the App's installation token
@@ -404,7 +422,8 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     `_reason` is populated on failure (kind + reason). `existing_app_token`
     skips a redundant mint. An `ASPECT_GITHUB_TOKEN` stands in for the App
     token (see `_authenticate`). Neither token is returned for an API base
-    `_api_host_mismatch` rejects, not even `existing_app_token`. For
+    `_api_host_mismatch` rejects, not even `existing_app_token`, and the
+    job token only goes to the host that issued it (`_job_token`). For
     App-attributed calls (check-runs, comment create/update), call
     `_authenticate` directly.
     """
@@ -413,7 +432,7 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     if mismatch:
         _set_auth_reason(_reason, _AUTH_KIND_API_HOST_MISMATCH, mismatch)
         return None, None, BUCKET_APP
-    env_token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
+    env_token = _job_token(env)
     local_reason = {}
     app_token = existing_app_token if existing_app_token else _authenticate(
         ctx,

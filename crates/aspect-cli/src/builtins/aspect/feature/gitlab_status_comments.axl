@@ -346,12 +346,13 @@ def _gitlab_status_comments(ctx: FeatureContext):
         return False
 
     def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
-        """Write the rows only duplicate notes hold into the survivor
-        (`absorb_duplicate_states`), so deleting them loses no task's row.
+        """Write the rows duplicate notes hold newer than the survivor's into
+        it (`absorb_duplicate_states`, a retry's attempt included), so
+        deleting them loses no task's row.
         Returns False when that write failed, so the duplicates are kept for a
         later pass."""
-        merged, added = absorb_duplicate_states(parse_state(survivor_body), [parse_state(b) for b in duplicate_bodies])
-        if not added:
+        merged, changed = absorb_duplicate_states(parse_state(survivor_body), [parse_state(b) for b in duplicate_bodies])
+        if not changed:
             return True
         _stable, body = _render_note(ctx, merged, epoch_now_s(ctx.std))
         res = gitlab.notes.update(

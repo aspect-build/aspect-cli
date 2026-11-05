@@ -250,39 +250,49 @@ def row_landed(state, head_sha, own_entry):
             return e.get("status") == own_entry.get("status") and str(e.get("run_attempt", "")) == str(own_entry.get("run_attempt", ""))
     return False
 
+def _absorb_rank(e):
+    """Which of two rows for one run/job/task is newer: the higher attempt,
+    then a finished row over a live one of the same attempt."""
+    return (_run_attempt_int(e), 0 if e.get("status", "running") in _LIVE_ROW_STATUSES else 1)
+
 def absorb_duplicate_states(survivor, duplicates):
     """Merge the rows of duplicate comments' parsed `duplicates` into the
     surviving comment's parsed `survivor`, so deleting a duplicate loses no
-    job's row. Only the survivor's push counts; a survivor row wins over a
-    duplicate's for the same run/job/task. Returns `(merged, added)`: the
-    merged state (`survivor` itself when nothing was added) and how many rows
-    it gained."""
+    job's row. Only the survivor's push counts. For the same run/job/task the
+    newer row wins (`_absorb_rank`: a rerun's attempt, else a finished row),
+    the survivor's on a tie. Returns `(merged, changed)`: the merged state
+    (`survivor` itself when nothing changed) and how many rows it gained or
+    replaced."""
     if not survivor:
         return (survivor, 0)
     head = survivor.get("head_sha")
     entries = list(survivor.get("entries", []) or [])
     runs = list(survivor.get("workflow_runs", []) or [])
-    seen = {_row_identity(e): True for e in entries}
+    index = {_row_identity(e): i for i, e in enumerate(entries)}
     run_ids = {str(r.get("run_id", "")): True for r in runs}
-    added = 0
+    changed = 0
     for dup in duplicates:
         if not dup or dup.get("head_sha") != head:
             continue
         for e in dup.get("entries", []) or []:
-            if _row_identity(e) not in seen:
-                seen[_row_identity(e)] = True
+            i = index.get(_row_identity(e))
+            if i == None:
+                index[_row_identity(e)] = len(entries)
                 entries.append(e)
-                added += 1
+                changed += 1
+            elif _absorb_rank(e) > _absorb_rank(entries[i]):
+                entries[i] = e
+                changed += 1
         for r in dup.get("workflow_runs", []) or []:
             if str(r.get("run_id", "")) not in run_ids:
                 run_ids[str(r.get("run_id", ""))] = True
                 runs.append(r)
-    if not added:
+    if not changed:
         return (survivor, 0)
     merged = dict(survivor)
     merged["entries"] = sorted(entries, key = lambda e: _row_identity(e) + (str(e.get("run_attempt", "")),))
     merged["workflow_runs"] = sorted(runs, key = lambda r: str(r.get("run_id", "")))
-    return (merged, added)
+    return (merged, changed)
 
 # Badges keyed by the precomputed `_badge_key`, not raw status:
 #   "failed"  — terminal failed / live failing (error)
@@ -1692,14 +1702,15 @@ def _github_status_comments(ctx: FeatureContext):
         return False
 
     def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
-        """Write the rows only duplicate comments hold into the survivor
-        (`absorb_duplicate_states`), so deleting them loses no job's row: two
-        jobs that both created a comment each hold only their own. Returns
+        """Write the rows duplicate comments hold newer than the survivor's
+        into it (`absorb_duplicate_states`), so deleting them loses no job's
+        row: two jobs that both created a comment each hold only their own,
+        and a rerun's attempt may land in either. Returns
         False when that write failed, so the duplicates are kept for a later
         pass."""
         parsed = _parse_state(survivor_body)
-        merged, added = absorb_duplicate_states(parsed, [_parse_state(b) for b in duplicate_bodies])
-        if not added:
+        merged, changed = absorb_duplicate_states(parsed, [_parse_state(b) for b in duplicate_bodies])
+        if not changed:
             return True
         _stable, body = _render_state(ctx, parsed, merged, epoch_now_s(ctx.std))
         res = github.issues.update_comment(ctx, token, owner, repo, survivor_id, body)

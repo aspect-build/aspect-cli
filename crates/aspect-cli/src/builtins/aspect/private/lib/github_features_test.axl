@@ -545,15 +545,37 @@ def _test_coordination_helpers():
 
     sib = dict(own, job = "sibling")
     survivor = {"head_sha": "h", "entries": [stale], "workflow_runs": [{"run_id": "11"}]}
-    merged, added = absorb_duplicate_states(survivor, [
+    merged, changed = absorb_duplicate_states(survivor, [
         {"head_sha": "h", "entries": [own, sib], "workflow_runs": [{"run_id": "11"}, {"run_id": "12"}]},
         {"head_sha": "old", "entries": [dict(own, job = "old-push")], "workflow_runs": []},
         None,
     ])
-    _eq("absorb — adds only missing rows of the same push", added, 1)
-    _eq("absorb — survivor's row wins", [(e["job"], e["status"]) for e in merged["entries"]], [("build", "running"), ("sibling", "passed")])
+    _eq("absorb — same push only: a finished row replaces a live one, a missing row is added", changed, 2)
+    _eq("absorb — merged rows", [(e["job"], e["status"]) for e in merged["entries"]], [("build", "passed"), ("sibling", "passed")])
     _eq("absorb — runs unioned", [r["run_id"] for r in merged["workflow_runs"]], ["11", "12"])
     _eq("absorb — nothing to add", absorb_duplicate_states(survivor, [survivor]), (survivor, 0))
+
+    # A duplicate created during a rerun: whichever comment holds the newer
+    # attempt's row, that row survives the merge.
+    def _absorbed(survivor_row, duplicate_row):
+        merged, _ = absorb_duplicate_states(
+            {"head_sha": "h", "entries": [survivor_row], "workflow_runs": []},
+            [{"head_sha": "h", "entries": [duplicate_row], "workflow_runs": []}],
+        )
+        return [(e["status"], e["run_attempt"]) for e in merged["entries"]]
+
+    first_failed = dict(own, status = "failed")
+    rerun_passed = dict(own, status = "passed", run_attempt = "2")
+    rerun_running = dict(own, status = "running", run_attempt = "2")
+    _eq("absorb — rerun in the duplicate wins", _absorbed(first_failed, rerun_passed), [("passed", "2")])
+    _eq("absorb — a live rerun wins over a finished first attempt", _absorbed(first_failed, rerun_running), [("running", "2")])
+    _eq("absorb — rerun in the survivor wins", _absorbed(rerun_running, first_failed), [("running", "2")])
+    _eq("absorb — equal finished rows keep the survivor's", _absorbed(own, first_failed), [("passed", "1")])
+    _eq(
+        "absorb — GitLab's zero-based retry index",
+        _absorbed(dict(own, status = "failed", run_attempt = "0"), dict(own, status = "passed", run_attempt = "1")),
+        [("passed", "1")],
+    )
 
 def _test_impl(ctx):
     # Early-fail concludes `failure` before the terminal update, so a broken

@@ -1291,6 +1291,38 @@ def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
         fail("host binding: no App mint reason, got %r" % reason.get("reason"))
     _eq("host binding: Enterprise runner keeps its job token", github.preferred_token_pair(_fake_auth_ctx(ctx, env), "o", "r"), ("job-tok", None, BUCKET_ENV))
 
+    # A job token goes only to the host that issued it: the runner's
+    # GITHUB_SERVER_URL on Actions, github.com elsewhere.
+    mirror = {
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "ASPECT_VCS_URL": vcs,
+        "ASPECT_GITHUB_API_URL": ghes,
+        "GITHUB_TOKEN": "public-job-tok",
+    }
+    _eq(
+        "job token: github.com runner's token isn't the fallback for an Enterprise mirror",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, dict(mirror, ASPECT_GITHUB_TOKEN = "ghes-pat")), "o", "r"),
+        ("ghes-pat", None, BUCKET_APP),
+    )
+    _eq(
+        "job token: nor the primary without ASPECT_GITHUB_TOKEN",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, mirror), "o", "r"),
+        (None, None, BUCKET_APP),
+    )
+    off_actions = {"CI": "true", "BUILDKITE": "true", "ASPECT_VCS_URL": vcs, "ASPECT_GITHUB_API_URL": ghes, "ASPECT_GITHUB_TOKEN": "ghes-pat", "GH_TOKEN": "gh-tok"}
+    _eq(
+        "job token: off Actions GH_TOKEN is github.com's, not the Enterprise host's",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, off_actions), "o", "r"),
+        ("ghes-pat", None, BUCKET_APP),
+    )
+    _eq(
+        "job token: github.com runner keeps it as the fallback on github.com",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, {"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_TOKEN": "job-tok"}), "o", "r", existing_app_token = "app-tok"),
+        ("app-tok", "job-tok", BUCKET_APP),
+    )
+
 def _fake_auth_ctx(ctx, env):
     """A ctx with `env` (`_ORIGIN` as the `origin` remote) and no Aspect
     credentials, so `_authenticate` never reaches the network."""
