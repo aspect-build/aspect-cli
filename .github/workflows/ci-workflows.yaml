@@ -63,7 +63,7 @@ jobs:
         if: env.ASPECT_HAS_API_TOKEN == 'true'
         working-directory: ${{ runner.temp }}
         env:
-          TOKEN: ${{ secrets.ASPECT_OSS_API_TOKEN }}
+          TOKEN: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
         run: printf '%s' "$TOKEN" | aspect auth login --with-api-token
       - name: Pre-build CLI
         run: |
