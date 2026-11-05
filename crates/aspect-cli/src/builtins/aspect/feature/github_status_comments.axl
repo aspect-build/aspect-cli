@@ -12,22 +12,33 @@ on BES events), throttled to the server's budget-derived `desired_cadence_s`
 contribute rate; the GitHub API spend (the elected poster's comment PATCH) is
 bounded separately by the per-token call budget enforced in
 `github._do_request`. Works on any supported CI host (GitHub Actions, Buildkite,
-CircleCI) since coordination no longer depends on CI artifacts.
+CircleCI) since coordination doesn't depend on CI artifacts.
 
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
 render → post under a local time lease), so a single job still renders a
 correct comment.
 
+Coordination is on whenever the run holds Aspect Cloud credentials, whichever
+GitHub token posts the comment; `coordinate = False` opts out. Without a
+coordinator (no credentials, opted out, or the API rejected the contribution)
+the state block is the only coordination (see `coordinator_enabled`): all
+live jobs together read and write it about once per
+`min_poll_interval_seconds`, and each final update re-reads the comment until
+its row is there.
+
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
 `retry_terminal_post`). A terminal post is then confirmed straight away, which
 releases the grant before the job exits (see `resettle_after_terminal_post`).
 
-Requires the Aspect GitHub App with `prs.write` (issue-comment
-POST/PATCH/DELETE/GET) and Aspect credentials (ASPECT_API_TOKEN) for the
-contribute call. On GitHub Actions it additionally requests `actions.read`
-for the job deep-link (gated so non-GHA hosts don't require it).
+Posts with a token from the Aspect GitHub App, minted with `prs.write`
+(issue-comment POST/PATCH/DELETE/GET) and, on GitHub Actions, `actions.read`
+for the job deep-link (gated so non-GHA hosts don't require it), or with
+`ASPECT_GITHUB_TOKEN`, a token with pull-request write access that the CI
+config supplies (which is also how GitHub Enterprise Server works; see
+`lib/github.axl`). Coordinating additionally needs Aspect credentials
+(ASPECT_API_TOKEN) carrying `prs.write`; the minted path needs them anyway.
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
@@ -78,6 +89,7 @@ Body-template variables:
 
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "monotonic", "sleep")
+load("../private/lib/aspect_cloud_api.axl", "aspect_cloud_credentials")
 load(
     "../private/lib/bazel_results.axl",
     "extract_failure_snippets",
@@ -161,6 +173,126 @@ _DEDUP_RECHECK_WINDOW_S = 60
 # the API recover so the server's single-poster election creates the one comment;
 # only a sustained outage falls through to a client-created comment.
 _FALLBACK_CREATE_GRACE_S = 45
+
+# A final update written through the comment's state block re-reads the comment
+# this long after each write, up to this many times, and writes its row again if
+# a sibling's concurrent write dropped it (see `row_landed`). The settle exceeds
+# one sibling's read-to-write latency, so a write that raced ours has landed.
+_FINAL_VERIFY_SETTLE_S = 5
+_FINAL_VERIFY_ROUNDS = 2
+
+# Row statuses that mean the task is still running and will write again.
+_LIVE_ROW_STATUSES = ("running", "failing")
+
+def coordinator_enabled(ctx, coordinate):
+    """Whether this run coordinates its PR/MR comment through the Aspect API's
+    `contribute` route: by default whenever Aspect Cloud credentials are
+    present, never with `coordinate = False`. The SCM token that posts the
+    comment (minted or CI-supplied) doesn't enter into it; the installation
+    proof rides along when a mint produced one.
+
+    Without a coordinator the comment's state block is the only store: no
+    create grace, reads spread across live jobs (`uncoordinated_interval_s`),
+    and nothing serializes two jobs' writes, so a final update confirms its
+    row landed (`row_landed`) and duplicate comments are merged before they're
+    deleted (`absorb_duplicate_states`).
+
+    The lookup is best-effort (`required = False`): an expired login that can't
+    refresh leaves the run uncoordinated instead of failing the task."""
+    return bool(coordinate) and aspect_cloud_credentials(ctx, required = False) != None
+
+def contribute_rejected(result):
+    """True when a failed `contribute` is a deterministic rejection (4xx other
+    than timeout or rate limit: bad credentials, a missing permission, or a
+    request the server can't accept), which no retry this run will change."""
+    status = result.get("status", 0)
+    return status >= 400 and status < 500 and status not in (408, 429)
+
+def coordination_declined_message(result, surface):
+    """The one line logged when `contribute_rejected(result)` ends coordination
+    for the run; `surface` names what the run coordinates through instead."""
+    return "Aspect API declined status-comment coordination (HTTP %d: %s); coordinating through the %s for the rest of this run." % (
+        result.get("status", 0),
+        result.get("error", ""),
+        surface,
+    )
+
+def contribute_scm_fields(installation_id, installation_proof, host):
+    """The SCM identity fields of a `contribute` request: the SCM's web
+    `host`, plus the installation id and proof when a mint produced them."""
+    fields = {"host": host}
+    if installation_id and installation_proof:
+        fields["installation_id"] = installation_id
+        fields["installation_proof"] = installation_proof
+    return fields
+
+def uncoordinated_interval_s(min_poll_interval_s, state):
+    """Seconds between one job's mid-run reads of the comment when nothing
+    coordinates it: `min_poll_interval_s` times the live rows in the last-read
+    `state`, so all live jobs together read and write about once per
+    `min_poll_interval_s` instead of once each. Finished rows don't count;
+    with no state yet it is `min_poll_interval_s`."""
+    entries = (state or {}).get("entries", []) or []
+    live = len([e for e in entries if e.get("status") in _LIVE_ROW_STATUSES])
+    return min_poll_interval_s * max(1, live)
+
+def _row_identity(e):
+    return (str(e.get("workflow_run_id", "")), e.get("job", ""), e.get("kind", ""), e.get("name", ""))
+
+def row_landed(state, head_sha, own_entry):
+    """Whether parsed comment `state` holds `own_entry`'s row as written: the
+    state is for push `head_sha`, and the row for its run/job/task carries its
+    status and attempt."""
+    if not state or state.get("head_sha") != head_sha:
+        return False
+    for e in state.get("entries", []) or []:
+        if _row_identity(e) == _row_identity(own_entry):
+            return e.get("status") == own_entry.get("status") and str(e.get("run_attempt", "")) == str(own_entry.get("run_attempt", ""))
+    return False
+
+def _absorb_rank(e):
+    """Which of two rows for one run/job/task is newer: the higher attempt,
+    then a finished row over a live one of the same attempt."""
+    return (_run_attempt_int(e), 0 if e.get("status", "running") in _LIVE_ROW_STATUSES else 1)
+
+def absorb_duplicate_states(survivor, duplicates):
+    """Merge the rows of duplicate comments' parsed `duplicates` into the
+    surviving comment's parsed `survivor`, so deleting a duplicate loses no
+    job's row. Only the survivor's push counts. For the same run/job/task the
+    newer row wins (`_absorb_rank`: a rerun's attempt, else a finished row),
+    the survivor's on a tie. Returns `(merged, changed)`: the merged state
+    (`survivor` itself when nothing changed) and how many rows it gained or
+    replaced."""
+    if not survivor:
+        return (survivor, 0)
+    head = survivor.get("head_sha")
+    entries = list(survivor.get("entries", []) or [])
+    runs = list(survivor.get("workflow_runs", []) or [])
+    index = {_row_identity(e): i for i, e in enumerate(entries)}
+    run_ids = {str(r.get("run_id", "")): True for r in runs}
+    changed = 0
+    for dup in duplicates:
+        if not dup or dup.get("head_sha") != head:
+            continue
+        for e in dup.get("entries", []) or []:
+            i = index.get(_row_identity(e))
+            if i == None:
+                index[_row_identity(e)] = len(entries)
+                entries.append(e)
+                changed += 1
+            elif _absorb_rank(e) > _absorb_rank(entries[i]):
+                entries[i] = e
+                changed += 1
+        for r in dup.get("workflow_runs", []) or []:
+            if str(r.get("run_id", "")) not in run_ids:
+                run_ids[str(r.get("run_id", ""))] = True
+                runs.append(r)
+    if not changed:
+        return (survivor, 0)
+    merged = dict(survivor)
+    merged["entries"] = sorted(entries, key = lambda e: _row_identity(e) + (str(e.get("run_attempt", "")),))
+    merged["workflow_runs"] = sorted(runs, key = lambda r: str(r.get("run_id", "")))
+    return (merged, changed)
 
 # Badges keyed by the precomputed `_badge_key`, not raw status:
 #   "failed"  — terminal failed / live failing (error)
@@ -1419,8 +1551,7 @@ def _github_status_comments(ctx: FeatureContext):
     if mode == "local-only" and is_ci:
         return
 
-    # Works on any supported CI host (GitHub Actions, Buildkite, CircleCI):
-    # cross-job coordination goes through the Aspect API, not CI artifacts.
+    # Any supported CI host works: coordination never depends on CI artifacts.
     host = detect_ci_host(ctx.std.env)
     if host == None:
         return
@@ -1454,6 +1585,7 @@ def _github_status_comments(ctx: FeatureContext):
     # `_state["_ci_link_url"]`, which the render path prefers over this value.
     ci_run_url = _ci_run_url(ctx.std.env) if host["marker"] == "GITHUB_ACTIONS" else ""
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
+    coordinate = ctx.args.coordinate
 
     # args.custom(dict, ...) hands None at runtime, not the declared default.
     templates = ctx.args.templates or {}
@@ -1552,8 +1684,9 @@ def _github_status_comments(ctx: FeatureContext):
 
     def _converge_marker_comments(ctx, token):
         """List the PR's marker comments and converge on the lowest-id
-        survivor, deleting the rest. Returns True once a single comment is
-        observed (stable), False otherwise."""
+        survivor, deleting the rest once their rows are in it
+        (`_absorb_duplicates`). Returns True once a single comment is observed
+        (stable), False otherwise."""
         listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed.get("success"):
             return False
@@ -1561,9 +1694,30 @@ def _github_status_comments(ctx: FeatureContext):
         if survivor == None:
             return _markers_stable(listed["comments"], marker)
         _state["_comment_id"] = survivor
+        bodies = {c["id"]: c.get("body") or "" for c in listed["comments"]}
+        if not _absorb_duplicates(ctx, token, survivor, bodies[survivor], [bodies[i] for i in losers]):
+            return False
         for loser_id in losers:
             github.issues.delete_comment(ctx, token, owner, repo, loser_id)
         return False
+
+    def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
+        """Write the rows duplicate comments hold newer than the survivor's
+        into it (`absorb_duplicate_states`), so deleting them loses no job's
+        row: two jobs that both created a comment each hold only their own,
+        and a rerun's attempt may land in either. Returns
+        False when that write failed, so the duplicates are kept for a later
+        pass."""
+        parsed = _parse_state(survivor_body)
+        merged, changed = absorb_duplicate_states(parsed, [_parse_state(b) for b in duplicate_bodies])
+        if not changed:
+            return True
+        _stable, body = _render_state(ctx, parsed, merged, epoch_now_s(ctx.std))
+        res = github.issues.update_comment(ctx, token, owner, repo, survivor_id, body)
+        if not res.get("success"):
+            _LOG.warn(ctx.std, "Merging a duplicate comment failed: %s" % res.get("error", "unknown"))
+            return False
+        return True
 
     def _dedup_marker_comments(ctx, token):
         """Create-time duplicate backstop: list immediately and converge; if no
@@ -1572,7 +1726,7 @@ def _github_status_comments(ctx: FeatureContext):
         `_dedup_recheck` on later cycles."""
         for attempt in range(2):
             if attempt:
-                sleep(_DEDUP_SETTLE_S)
+                sleep(_DEDUP_SETTLE_S * 1000)
             if _converge_marker_comments(ctx, token):
                 return
 
@@ -1708,11 +1862,23 @@ def _github_status_comments(ctx: FeatureContext):
         """Seconds between this job's contributions: the server's budget-derived
         cadence (kept fresh by the centralized refresh in `github._do_request`),
         floored by `min_poll_interval_seconds`. The server also sizes this job's
-        post-grant lease from it."""
+        post-grant lease from it. Without a coordinator there is no server
+        cadence: the interval spreads across the live jobs in the last-read
+        comment (`uncoordinated_interval_s`)."""
+        if not _state.get("_coordinator", False):
+            return uncoordinated_interval_s(min_poll_interval_seconds, _state.get("_last_parsed"))
         return max(min_poll_interval_seconds, cadence_seconds(ctx))
+
+    def _coordinated():
+        """Whether this run still has a coordinator: set in `_init` from
+        `coordinator_enabled`, cleared once the API rejects a contribution."""
+        return _state.get("_coordinator", False)
 
     def _publish(ctx, final = False):
         """Contribute this task's entry and post the comment if granted.
+
+        Without a coordinator (`_coordinated`) every cycle goes straight to the
+        comment-state path instead.
 
         Mid-run this is one attempt; a withheld post waits for the next tick.
         A terminal publish has no next tick: it retries a withheld post, then
@@ -1724,6 +1890,9 @@ def _github_status_comments(ctx: FeatureContext):
             return
 
         own_entry = _own_payload(ctx)
+        if not _coordinated():
+            _publish_via_comment_state(ctx, token, own_entry, epoch_now_s(ctx.std), final)
+            return
         if not final:
             _publish_once(ctx, token, own_entry, False)
             return
@@ -1763,8 +1932,6 @@ def _github_status_comments(ctx: FeatureContext):
         """
         request = {
             "scm": "github",
-            "installation_id": _state.get("_installation_id", ""),
-            "installation_proof": _state.get("_installation_proof", ""),
             "owner": owner,
             "repo": repo,
             "pr_number": pr_number,
@@ -1778,6 +1945,11 @@ def _github_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": _post_interval_s(ctx),
         }
+        request.update(contribute_scm_fields(
+            _state.get("_installation_id", ""),
+            _state.get("_installation_proof", ""),
+            github.web_host(ctx.std.env),
+        ))
 
         # Peek, don't pop: a failed contribute must not lose the confirmation.
         pending = _state.get("_pending_post")
@@ -1823,6 +1995,11 @@ def _github_status_comments(ctx: FeatureContext):
         """
         now_epoch = epoch_now_s(ctx.std)
         result, sel = _contribute(ctx, own_entry, final)
+        if sel == None and contribute_rejected(result):
+            _state["_coordinator"] = False
+            _LOG.info(ctx.std, coordination_declined_message(result, "comment"))
+            _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
+            return (TERMINAL_DONE, 0)
         if sel == None:
             if final:
                 _LOG.warn(ctx.std, dropped_terminal_contribute_warning(
@@ -1892,10 +2069,37 @@ def _github_status_comments(ctx: FeatureContext):
         return bodies
 
     def _publish_via_comment_state(ctx, token, own_entry, now_epoch, final):
-        """Fallback coordination when the Aspect API is unreachable: the
-        comment's own state block is the shared store. Read the comment, merge
-        our entry (preserving sibling rows for our run), render, and post under
-        a simple time lease so concurrent jobs don't all PATCH at once.
+        """Coordination through the comment's own state block, used when the
+        Aspect API is unreachable and as the only path without a coordinator
+        (`_coordinated`). The state block is the shared store: read the
+        comment, merge our entry (preserving sibling rows for our run), render,
+        and post (`_comment_state_cycle`).
+
+        Nothing serializes two jobs' read-merge-write, so a write can drop a
+        row a sibling wrote in between. A mid-run row returns on that job's
+        next cycle; a final row has none, so a final update re-reads the
+        comment after each write and writes again until its row is there
+        (`row_landed`, `_FINAL_VERIFY_ROUNDS` times at most). A duplicate
+        comment's rows are merged into the survivor before it is deleted
+        (`_absorb_duplicates`)."""
+        if not _comment_state_cycle(ctx, token, own_entry, now_epoch, final) or not final:
+            return
+        for _ in range(_FINAL_VERIFY_ROUNDS):
+            sleep(_FINAL_VERIFY_SETTLE_S * 1000)
+            body = _fetch_existing_comment_body(ctx, token)
+            if body != None and row_landed(_parse_state(body), head_sha, own_entry):
+                return
+            _comment_state_cycle(ctx, token, own_entry, epoch_now_s(ctx.std), True, force = True)
+        _LOG.trace("final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
+
+    def _comment_state_cycle(ctx, token, own_entry, now_epoch, final, force = False):
+        """One read-merge-write of the comment's state block. Returns True when
+        the comment now carries this render (written, or unchanged since this
+        job's last write), False when this cycle skipped or failed.
+
+        Mid-run it neither reads nor writes while another job's lease, seen on
+        the last read, is still held; a final update always proceeds. `force`
+        writes even an unchanged render, to restore a row a sibling dropped.
 
         To avoid duplicate comments, this path creates one only as a last
         resort. When no marker comment is known or discoverable yet, it will
@@ -1907,27 +2111,44 @@ def _github_status_comments(ctx: FeatureContext):
         its completed status even before the grace elapses; the convergent dedup
         collapses any rare duplicate. Otherwise it defers (a sibling's server
         grant, or this job's own recovered API call, creates the one comment).
-        Once the API has worked (`_api_ok`), it never creates out-of-band."""
+        Once the API has worked (`_api_ok`), it never creates out-of-band.
+        Without a coordinator there is no server to create the comment, so the
+        grace is zero and the first job to post creates it."""
+        if not final and now_epoch < _state.get("_lease_until_s", 0):
+            return False
         existing_body = _fetch_existing_comment_body(ctx, token)
         if existing_body == None:
-            return
+            return False
         if "_comment_id" not in _state:
             secs = monotonic() - _state.get("_task_started_at", 0.0)
-            if not _should_create_fallback(_state.get("_api_ok", False), final, secs, _FALLBACK_CREATE_GRACE_S):
-                return
+            grace_s = _FALLBACK_CREATE_GRACE_S if _coordinated() else 0
+            if not _should_create_fallback(_state.get("_api_ok", False), final, secs, grace_s):
+                return False
         parsed = _parse_state(existing_body)
+        _state["_last_parsed"] = parsed
 
         lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
         if not final and _lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
-            return
+            _state["_lease_until_s"] = lease_epoch + min_poll_interval_seconds
+            return False
 
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
+        stable_body, final_body = _render_state(ctx, parsed, new_state, now_epoch)
+        if not force and _state.get("_last_stable_body") == stable_body:
+            return True
+        if not _upsert_comment(ctx, token, final_body):
+            return False
+        _state["_last_stable_body"] = stable_body
+        _state["_lease_until_s"] = now_epoch + min_poll_interval_seconds
+        return True
 
-        # Seed the prior sticky-selection sets from the existing comment so
-        # capped sections don't flip-flop across fallback cycles (the merge
-        # carries only entries/runs). Drop them on a new push, matching the
-        # head_sha reset in `_merge_state`.
-        same_push = bool(parsed) and parsed.get("head_sha") == head_sha
+    def _render_state(ctx, parsed, new_state, now_epoch):
+        """Render `(stable_body, final_body)` for the merged `new_state`,
+        carrying the sticky selections of the comment it was read from
+        (`parsed`) so capped sections don't flip-flop across cycles. They
+        reset on a new push, matching the head_sha reset in `_merge_state`."""
+        new_state = dict(new_state)
+        same_push = bool(parsed) and parsed.get("head_sha") == new_state.get("head_sha", head_sha)
         for k in ("shown_snippets", "shown_repros", "shown_fixes"):
             new_state[k] = parsed.get(k, []) if same_push else []
 
@@ -1935,19 +2156,11 @@ def _github_status_comments(ctx: FeatureContext):
         new_state["shown_snippets"] = sel["shown_snippets"]
         new_state["shown_repros"] = sel["shown_repros"]
         new_state["shown_fixes"] = sel["shown_fixes"]
-
-        stable_body, final_body = _render_comment(ctx, new_state, sel, now_epoch)
-        if _state.get("_last_stable_body") == stable_body:
-            return
-        if not _upsert_comment(ctx, token, final_body):
-            return
-        _state["_last_stable_body"] = stable_body
+        return _render_comment(ctx, new_state, sel, now_epoch)
 
     def _init(ctx):
         # One-time init on first task_update: cache task identity (FeatureContext
-        # has no ctx.task), then mint the GitHub App token used to post the
-        # comment. (Cross-job coordination uses the Aspect JWT directly in
-        # `github.status_comment_contribute`, not this token.)
+        # has no ctx.task), then resolve the GitHub token that posts the comment.
         _state["_task_kind"] = ctx.task.kind
         _state["_task_name"] = ctx.task.name
 
@@ -1975,13 +2188,13 @@ def _github_status_comments(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Installation identity + ownership proof for the `contribute` call (see
-        # `_publish`). The budget refresh that also uses them is centralized in
-        # `github._do_request`, seeded from the same mint.
+        # Installation identity + ownership proof for `contribute`; empty for
+        # an `ASPECT_GITHUB_TOKEN`.
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
+        _state["_coordinator"] = coordinator_enabled(ctx, coordinate)
 
-        # Re-resolve with the App token; cache-hits if a sibling already did.
+        # Re-resolve with this token; cache-hits if a sibling already did.
         upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
@@ -2225,12 +2438,18 @@ GithubStatusComments = feature(
             values = ["ci-only", "local-only", "always"],
             description = "When to post PR comments: ci-only (default), local-only, or always.",
         ),
+        "coordinate": args.boolean(
+            default = True,
+            description = "Coordinate the comment across jobs through the Aspect API when Aspect " +
+                          "credentials are present (default). False keeps every job's entry out of the " +
+                          "API and coordinates only through the comment's own state block.",
+        ),
         "min_poll_interval_seconds": args.int(
             default = 20,
             description = "Minimum seconds between PR-comment refreshes. Default 20s. The Aspect API " +
                           "decides which job posts each interval so the cost stays flat regardless of how " +
-                          "many jobs run in parallel; this value gates the local fallback lease used when " +
-                          "the API is unreachable. Terminal task verdicts always land immediately.",
+                          "many jobs run in parallel. Without the API, all live jobs together refresh about " +
+                          "once per interval. Terminal task verdicts always land immediately.",
         ),
         # Config-only (set via configure(..., feature_args = {...}) in config.axl).
         "templates": args.custom(

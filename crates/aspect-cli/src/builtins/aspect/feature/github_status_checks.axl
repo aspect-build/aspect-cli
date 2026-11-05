@@ -2,6 +2,14 @@
 
 Creates/updates a GitHub check run for a task's live state. CI-only.
 
+A task concludes its own check, a canceled one included (its `aborted`
+final update lands `failure`). With an App-minted token the check is also
+registered with the Aspect API, whose sweep concludes it as "Disconnected"
+if the process dies first. A check created with `ASPECT_GITHUB_TOKEN` has no
+installation to register under, and the sweep couldn't reach an Enterprise
+host anyway, so a runner killed outright leaves it in progress until a re-run
+posts a newer check of the same name, which GitHub shows in its place.
+
 Rendering is delegated by `task_update.kind` (bazel_results → build/test,
 lint_results → lint, format_results → format, gazelle_results → gazelle,
 delivery_results → delivery). The per-kind dispatch table lives in
@@ -319,8 +327,8 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
 
-        # Re-resolve with the just-minted App token to upgrade the GHA run
-        # URL to the per-job URL; cache-hits on the typical path.
+        # Re-resolve with this token to upgrade the GHA run URL to the per-job
+        # URL; cache-hits on the typical path.
         _ci_links_base["ci_url"] = resolve_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
 

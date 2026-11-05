@@ -1,4 +1,4 @@
-"""Tests for GitHub status-check mappings and lint review comments.
+"""Tests for GitHub status-check mappings, status-comment coordination, and lint review comments.
 
 Sibling of `gitlab_features_test.axl`: exercises the mapping functions the
 feature exposes as public test hooks, without standing up auth, the check-runs
@@ -8,12 +8,32 @@ API, or the render pipeline.
     conclusion, or "" when the update lands none.
   * `registration_request(...)` — the orphan-cleanup register body, keyed by
     the CI host's run identity; `None` when a required field is missing.
+  * `coordinator_enabled`, `contribute_rejected`, `contribute_scm_fields`,
+    `uncoordinated_interval_s`, `row_landed`, `absorb_duplicate_states` — the
+    status-comment coordination helpers both comment surfaces share.
+
+Subprocess suites drive a feature end to end through a probe task with a
+stubbed `ctx.http()`: lint review comments, and the PR status comment on a
+GitHub Enterprise runner with `ASPECT_GITHUB_TOKEN`, with and without Aspect
+credentials and with coordination opted out, and against a fake sibling job
+racing it through the comment (an overwrite, a duplicate comment); and a
+status check created with `ASPECT_GITHUB_TOKEN` and then canceled.
 
 Run with:
   aspect dev test-github-features
 """
 
 load("@aspect//feature/github_status_checks.axl", "conclusion_for", "registration_request")
+load(
+    "@aspect//feature/github_status_comments.axl",
+    "absorb_duplicate_states",
+    "contribute_rejected",
+    "contribute_scm_fields",
+    "coordinator_enabled",
+    "parse_state",
+    "row_landed",
+    "uncoordinated_interval_s",
+)
 load("./lint_comments.axl", "parse_marker")
 
 def _eq(label, got, want):
@@ -147,6 +167,416 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
     _eq("multiline comment starts at finding", posted[2]["start_line"], 1)
     _eq("multiline comment ends at range end", posted[2]["line"], 3)
 
+_STATUS_COMMENT_PROBE = """
+load("@std//base64.axl", "base64")
+load("@aspect//tips.axl", "tips")
+load("@aspect//traits.axl", "Phases", "TaskUpdate")
+
+_API = "https://ghes.example.mil/api/v3/repos/fixture/repo/"
+_ASPECT_API = "https://api.aspect.build"
+_STATE_OPEN = "<!-- aspect-ci-status-state-v1:"
+
+def _with_rows(body, mutate):
+    # The comment `body` with its state block's entries replaced by `mutate(entries)`.
+    i = body.find(_STATE_OPEN) + len(_STATE_OPEN)
+    j = body.find(" -->", i)
+    state = json.decode(str(base64.decode(body[i:j])))
+    state["entries"] = mutate(state["entries"])
+    return body[:i] + base64.encode(json.encode(state)) + body[j:]
+
+def _sibling_rows(rows):
+    # A sibling job's finished row, shaped like ours.
+    return [dict(e, job = "sibling", status = "passed") for e in rows]
+
+def _impl(ctx):
+    comments = {}
+    calls = []
+    contributions = []
+    contribute_status = int(ctx.std.env.var("PROBE_CONTRIBUTE_STATUS") or "0")
+
+    # A sibling job racing this one through the comment's state block:
+    # "overwrite" writes, right after our final write, the comment it read just
+    # before it, plus its own row; "duplicate" creates its own comment, holding
+    # only its row, just before ours.
+    sibling = ctx.std.env.var("PROBE_SIBLING") or ""
+    raced = []
+
+    def _send(method, **kwargs):
+        url = kwargs["url"]
+        if contribute_status and url == _ASPECT_API + "/status-comments/contribute":
+            contributions.append(json.decode(kwargs["data"]))
+            body = json.encode({"error": "rejected"})
+            return struct(catch = lambda: struct(block = lambda: (None, struct(status = contribute_status, body = body, headers = []))))
+        calls.append({"method": method, "url": url, "auth": kwargs["headers"].get("Authorization", "")})
+        if not url.startswith(_API):
+            fail("Unexpected HTTP request: " + method + " " + url)
+        path = url.removeprefix(_API).split("?")[0]
+        status = 200
+        if path.startswith("actions/runs/"):
+            payload = {"jobs": []}
+        elif method == "get" and path == "issues/1/comments":
+            payload = [{"id": int(i), "body": b} for i, b in comments.items()] if "page=1" in url else []
+        elif method == "post" and path == "issues/1/comments":
+            body = json.decode(kwargs["data"])["body"]
+            if sibling == "duplicate" and not raced:
+                raced.append(True)
+                comments[str(len(comments) + 1)] = _with_rows(body, _sibling_rows)
+            cid = str(len(comments) + 1)
+            comments[cid] = body
+            payload = {"id": int(cid), "body": comments[cid]}
+            status = 201
+        elif path.startswith("issues/comments/") and path.removeprefix("issues/comments/") in comments:
+            cid = path.removeprefix("issues/comments/")
+            payload = {"id": int(cid), "body": comments[cid]}
+            if method == "patch":
+                read_by_sibling = comments[cid]
+                comments[cid] = json.decode(kwargs["data"])["body"]
+                payload = {"id": int(cid), "body": comments[cid]}
+                if sibling == "overwrite" and not raced:
+                    raced.append(True)
+                    comments[cid] = _with_rows(read_by_sibling, lambda rows: rows + _sibling_rows(rows))
+            elif method == "delete":
+                comments.pop(cid)
+        elif path.startswith("issues/comments/"):
+            status = 404
+            payload = {"message": "Not Found"}
+        else:
+            fail("Unexpected HTTP request: " + method + " " + url)
+        return struct(catch = lambda: struct(block = lambda: (None, struct(status = status, body = json.encode(payload), headers = []))))
+
+    fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["http"] = lambda: struct(**{m: (lambda m = m: lambda **kwargs: _send(m, **kwargs))() for m in ["get", "post", "patch", "delete"]})
+    creds = struct(access_token = "aspect-tok") if contribute_status else None
+    fields["aspect"] = struct(auth = struct(
+        credentials = lambda **_kwargs: creds,
+        aspect_cloud_api_url = _ASPECT_API,
+        aspect_cloud_deployment = "fixture",
+    ))
+    proxy = struct(**fields)
+
+    first = []
+    for update in [
+        TaskUpdate(status = "running", priority = True),
+        TaskUpdate(status = "passed", priority = True, final = True, conclusion = "12/12 passed"),
+    ]:
+        for handler in ctx.traits[Phases].task_update:
+            handler(proxy, update)
+        if not first:
+            first.append(dict(comments))
+    ctx.std.fs.write("result.json", json.encode({"calls": calls, "contributions": contributions, "after_first": first[0], "comments": comments}))
+    return 0
+
+probe = task(kind = "probe", summary = "Drive status-comment updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+"""
+
+# The probe calls every `task_update` handler, so every other feature that
+# registers one is off: on a Buildkite or GitLab host running this suite, they
+# would otherwise act on the real build.
+_STATUS_COMMENT_CONFIG = """
+load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+load("@aspect//feature/gitlab_commit_statuses.axl", "GitlabCommitStatuses")
+load("@aspect//feature/gitlab_status_comments.axl", "GitlabStatusComments")
+
+def config(ctx):
+    for f in [BuildkiteAnnotations, Deployment, GithubStatusChecks, GitlabCommitStatuses, GitlabStatusComments]:
+        ctx.features[f].enabled = False
+    ctx.features[GithubStatusComments].args.coordinate = %s
+"""
+
+# A GitHub Enterprise Actions runner: the host is named only by
+# GITHUB_SERVER_URL and the API base by GITHUB_API_URL.
+_GHES_RUNNER_ENV = {
+    "CI": "true",
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_RUN_ID": "11",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_JOB": "build",
+    "GITHUB_WORKFLOW": "ci",
+    "GITHUB_REPOSITORY": "fixture/repo",
+    "GITHUB_SERVER_URL": "https://ghes.example.mil",
+    "GITHUB_API_URL": "https://ghes.example.mil/api/v3",
+    "GITHUB_REF": "refs/pull/1/merge",
+    "GITHUB_SHA": "head",
+    "RUNNER_NAME": "r1",
+    "ASPECT_GITHUB_TOKEN": "pat-tok",
+}
+
+# Ambient variables that would change what the probe detects or how it
+# authenticates; removed so the result doesn't depend on the host running it.
+_STRIPPED_ENV = [
+    "ASPECT_API_TOKEN",
+    "ASPECT_GITHUB_API_URL",
+    "ASPECT_GITHUB_PR_NUMBER",
+    "ASPECT_VCS_URL",
+    "BUILDKITE",
+    "CIRCLECI",
+    "GITHUB_BASE_REF",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_HEAD_REF",
+    "GITHUB_TOKEN",
+    "GITLAB_CI",
+]
+
+def _run_status_comment_probe(ctx, contribute_status = 0, coordinate = True, sibling = ""):
+    """Run the status-comment probe on an Enterprise runner with only
+    `ASPECT_GITHUB_TOKEN` for GitHub and no Aspect credentials, or with a
+    non-zero `contribute_status`, credentials and every contribute answered
+    with that status. `sibling` names a racing sibling job the fake GitHub
+    plays (see `PROBE_SIBLING` in the probe).
+    Returns the probe's `result.json`."""
+    root = ctx.std.fs.mkdtemp(prefix = "github-status-comments-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", _STATUS_COMMENT_CONFIG % coordinate)
+    ctx.std.fs.write(root + "/.aspect/probe.axl", _STATUS_COMMENT_PROBE)
+
+    cmd = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root)
+    for name in _STRIPPED_ENV:
+        cmd = cmd.env(name, None)
+    for name, value in _GHES_RUNNER_ENV.items():
+        cmd = cmd.env(name, value)
+    cmd = cmd.env("PROBE_CONTRIBUTE_STATUS", str(contribute_status))
+    cmd = cmd.env("PROBE_SIBLING", sibling)
+    output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not output.status.success:
+        fail(output.stdout + output.stderr)
+    return json.decode(ctx.std.fs.read_to_string(root + "/result.json"))
+
+def _assert_uncoordinated_comment(label, result):
+    """The comment is created on the first update (no create grace) and
+    edited by the final one, with every GitHub call on the Enterprise API
+    carrying the explicit token."""
+    calls = result["calls"]
+    _eq(label + " — every call carries the explicit token", [c["auth"] for c in calls if c["auth"] != "Bearer pat-tok"], [])
+    _eq(label + " — created on the first update", len(result["after_first"]), 1)
+    _eq(label + " — one comment overall", list(result["comments"].keys()), ["1"])
+    _eq(label + " — one create", len([c for c in calls if c["method"] == "post"]), 1)
+    _eq(label + " — final update edits it", len([c for c in calls if c["method"] == "patch"]), 1)
+    body = result["comments"]["1"]
+    _eq(label + " — carries the marker", body.startswith("<!-- aspect-ci-status:pr-1 -->"), True)
+    _eq(label + " — final status rendered", "✅" in body, True)
+    _eq(label + " — links to the Enterprise host", "https://ghes.example.mil/fixture/repo/actions/runs/11" in body, True)
+
+def _test_status_comment_coordination(ctx):
+    """Coordination follows Aspect credentials, not the GitHub token.
+
+    Without credentials nothing goes to Aspect (`_send` fails on any other
+    URL). With them the first update contributes, carrying the host and no
+    installation fields; a rejection drops the run to the comment's state
+    block for good. `coordinate = False` keeps a credentialed run off the API."""
+    result = _run_status_comment_probe(ctx)
+    _eq("no credentials — no contribution", result["contributions"], [])
+    _assert_uncoordinated_comment("no credentials", result)
+
+    result = _run_status_comment_probe(ctx, contribute_status = 400)
+    contributions = result["contributions"]
+    _eq("rejected — one contribution, then none", len(contributions), 1)
+    _eq("rejected — contribution names the Enterprise host", contributions[0].get("host"), "ghes.example.mil")
+    _eq("rejected — no installation fields without a mint", "installation_id" in contributions[0] or "installation_proof" in contributions[0], False)
+    _assert_uncoordinated_comment("rejected", result)
+
+    result = _run_status_comment_probe(ctx, contribute_status = 400, coordinate = False)
+    _eq("opted out — no contribution", result["contributions"], [])
+    _assert_uncoordinated_comment("opted out", result)
+
+_STATUS_CHECK_PROBE = """
+load("@aspect//tips.axl", "tips")
+load("@aspect//traits.axl", "Phases", "TaskUpdate")
+
+_API = "https://ghes.example.mil/api/v3/repos/fixture/repo/"
+
+def _impl(ctx):
+    calls = []
+
+    def _send(method, **kwargs):
+        url = kwargs["url"]
+        calls.append({"method": method, "url": url, "data": json.decode(kwargs["data"]) if kwargs.get("data") else None})
+        if not url.startswith(_API):
+            fail("Unexpected HTTP request: " + method + " " + url)
+        path = url.removeprefix(_API).split("?")[0]
+        if path.startswith("actions/runs/"):
+            payload = {"jobs": []}
+        elif method == "post" and path == "check-runs":
+            payload = {"id": 7, "html_url": "https://ghes.example.mil/fixture/repo/runs/7"}
+        elif method == "patch" and path == "check-runs/7":
+            payload = {"id": 7}
+        else:
+            fail("Unexpected HTTP request: " + method + " " + url)
+        return struct(catch = lambda: struct(block = lambda: (None, struct(status = 200, body = json.encode(payload), headers = []))))
+
+    fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["http"] = lambda: struct(**{m: (lambda m = m: lambda **kwargs: _send(m, **kwargs))() for m in ["get", "post", "patch"]})
+    fields["aspect"] = struct(auth = struct(
+        credentials = lambda **_kwargs: None,
+        aspect_cloud_api_url = "https://api.aspect.build",
+        aspect_cloud_deployment = "fixture",
+    ))
+    proxy = struct(**fields)
+    for update in [
+        TaskUpdate(kind = "bazel_results", status = "running", priority = True),
+        TaskUpdate(kind = "bazel_results", status = "aborted", priority = True, final = True, conclusion = "canceled"),
+    ]:
+        for handler in ctx.traits[Phases].task_update:
+            handler(proxy, update)
+    ctx.std.fs.write("result.json", json.encode({"calls": calls}))
+    return 0
+
+probe = task(kind = "probe", summary = "Drive status-check updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+"""
+
+_STATUS_CHECK_CONFIG = """
+load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+load("@aspect//feature/gitlab_commit_statuses.axl", "GitlabCommitStatuses")
+load("@aspect//feature/gitlab_status_comments.axl", "GitlabStatusComments")
+
+def config(ctx):
+    for f in [BuildkiteAnnotations, Deployment, GithubStatusComments, GitlabCommitStatuses, GitlabStatusComments]:
+        ctx.features[f].enabled = False
+"""
+
+def _test_status_check_cancellation(ctx):
+    """A check run created with `ASPECT_GITHUB_TOKEN` is concluded by the
+    task's own `aborted` final update, the one a canceled task emits, so a
+    graceful cancel never leaves it in progress. Nothing goes to Aspect:
+    without a mint there is no installation proof, so no orphan-cleanup
+    registration (the probe fails on any non-Enterprise URL)."""
+    root = ctx.std.fs.mkdtemp(prefix = "github-status-checks-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", _STATUS_CHECK_CONFIG)
+    ctx.std.fs.write(root + "/.aspect/probe.axl", _STATUS_CHECK_PROBE)
+    cmd = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root)
+    for name in _STRIPPED_ENV:
+        cmd = cmd.env(name, None)
+    for name, value in _GHES_RUNNER_ENV.items():
+        cmd = cmd.env(name, value)
+    output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not output.status.success:
+        fail(output.stdout + output.stderr)
+    calls = json.decode(ctx.std.fs.read_to_string(root + "/result.json"))["calls"]
+    creates = [c for c in calls if c["method"] == "post"]
+    _eq("canceled check — created in progress", [c["data"].get("status") for c in creates], ["in_progress"])
+    concluded = [c["data"]["conclusion"] for c in calls if c["method"] == "patch" and c["data"].get("conclusion")]
+    _eq("canceled check — concluded by the task", concluded, ["failure"])
+
+def _rows_by_job(body):
+    return {e["job"]: e["status"] for e in parse_state(body)["entries"]}
+
+def _test_status_comment_races(ctx):
+    """Two jobs sharing the comment with no coordinator keep both final rows.
+
+    A sibling that read the comment before our final write and wrote after it
+    drops our final row: our re-read finds our row stale and writes it again,
+    keeping the sibling's. A sibling that created its own comment just before
+    ours: ours is deleted, but only after our row is merged into the
+    survivor."""
+    result = _run_status_comment_probe(ctx, sibling = "overwrite")
+    _eq("overwrite — one comment", list(result["comments"].keys()), ["1"])
+    _eq("overwrite — both final rows", _rows_by_job(result["comments"]["1"]), {"build": "passed", "sibling": "passed"})
+    _eq("overwrite — final row written again", len([c for c in result["calls"] if c["method"] == "patch"]), 2)
+
+    result = _run_status_comment_probe(ctx, sibling = "duplicate")
+    _eq("duplicate — the lower-id comment survives", list(result["comments"].keys()), ["1"])
+    _eq("duplicate — both final rows", _rows_by_job(result["comments"]["1"]), {"build": "passed", "sibling": "passed"})
+    deletes = [c["url"] for c in result["calls"] if c["method"] == "delete"]
+    _eq("duplicate — ours deleted once", [u.rsplit("/", 1)[1] for u in deletes], ["2"])
+    _eq("duplicate — our row merged before the delete", "build" in _rows_by_job(result["after_first"]["1"]), True)
+
+def _test_coordination_helpers():
+    """The shared status-comment coordination helpers, both surfaces' source
+    of truth: the credential lookup is best-effort, `coordinate = False` wins,
+    only deterministic 4xx end coordination, and installation fields ride
+    along only as a pair."""
+    asked = []
+
+    def _ctx(creds):
+        def _credentials(deployment = None, profile = None, required = True):
+            asked.append(required)
+            return creds
+
+        return struct(aspect = struct(auth = struct(
+            credentials = _credentials,
+            aspect_cloud_deployment = "fixture",
+            aspect_cloud_api_url = "https://api.aspect.build",
+        )))
+
+    creds = struct(access_token = "t")
+    _eq("coordinator — credentials present", coordinator_enabled(_ctx(creds), True), True)
+    _eq("coordinator — lookup is best-effort", asked, [False])
+    _eq("coordinator — no credentials", coordinator_enabled(_ctx(None), True), False)
+    _eq("coordinator — opted out", coordinator_enabled(_ctx(creds), False), False)
+
+    for status, want in [(0, False), (400, True), (401, True), (403, True), (408, False), (429, False), (500, False), (503, False)]:
+        _eq("rejected — HTTP %d" % status, contribute_rejected({"success": False, "status": status}), want)
+
+    _eq("scm fields — host only", contribute_scm_fields("", "", "ghes.example.mil"), {"host": "ghes.example.mil"})
+    _eq("scm fields — id without proof", contribute_scm_fields("9", "", "github.com"), {"host": "github.com"})
+    _eq(
+        "scm fields — minted",
+        contribute_scm_fields("9", "p", "github.com"),
+        {"host": "github.com", "installation_id": "9", "installation_proof": "p"},
+    )
+
+    # A 100-job burst with no coordinator: each job reads every 100 × 20 s, so
+    # together they read about once per 20 s; finished rows don't count.
+    def _state(statuses):
+        return {"entries": [{"job": "j%d" % i, "status": st} for i, st in enumerate(statuses)]}
+
+    _eq("interval — no state yet", uncoordinated_interval_s(20, None), 20)
+    _eq("interval — 100 live jobs", uncoordinated_interval_s(20, _state(["running"] * 99 + ["failing"])), 2000)
+    _eq("interval — finished rows don't count", uncoordinated_interval_s(20, _state(["running"] * 3 + ["passed"] * 97)), 60)
+    _eq("interval — all finished", uncoordinated_interval_s(20, _state(["passed", "failed"])), 20)
+
+    own = {"workflow_run_id": "11", "job": "build", "kind": "build", "name": "build", "status": "passed", "run_attempt": "1"}
+    stale = dict(own, status = "running")
+    _eq("landed — row as written", row_landed({"head_sha": "h", "entries": [own]}, "h", own), True)
+    _eq("landed — stale row", row_landed({"head_sha": "h", "entries": [stale]}, "h", own), False)
+    _eq("landed — row missing", row_landed({"head_sha": "h", "entries": []}, "h", own), False)
+    _eq("landed — other push", row_landed({"head_sha": "old", "entries": [own]}, "h", own), False)
+    _eq("landed — no state", row_landed(None, "h", own), False)
+
+    sib = dict(own, job = "sibling")
+    survivor = {"head_sha": "h", "entries": [stale], "workflow_runs": [{"run_id": "11"}]}
+    merged, changed = absorb_duplicate_states(survivor, [
+        {"head_sha": "h", "entries": [own, sib], "workflow_runs": [{"run_id": "11"}, {"run_id": "12"}]},
+        {"head_sha": "old", "entries": [dict(own, job = "old-push")], "workflow_runs": []},
+        None,
+    ])
+    _eq("absorb — same push only: a finished row replaces a live one, a missing row is added", changed, 2)
+    _eq("absorb — merged rows", [(e["job"], e["status"]) for e in merged["entries"]], [("build", "passed"), ("sibling", "passed")])
+    _eq("absorb — runs unioned", [r["run_id"] for r in merged["workflow_runs"]], ["11", "12"])
+    _eq("absorb — nothing to add", absorb_duplicate_states(survivor, [survivor]), (survivor, 0))
+
+    # A duplicate created during a rerun: whichever comment holds the newer
+    # attempt's row, that row survives the merge.
+    def _absorbed(survivor_row, duplicate_row):
+        merged, _ = absorb_duplicate_states(
+            {"head_sha": "h", "entries": [survivor_row], "workflow_runs": []},
+            [{"head_sha": "h", "entries": [duplicate_row], "workflow_runs": []}],
+        )
+        return [(e["status"], e["run_attempt"]) for e in merged["entries"]]
+
+    first_failed = dict(own, status = "failed")
+    rerun_passed = dict(own, status = "passed", run_attempt = "2")
+    rerun_running = dict(own, status = "running", run_attempt = "2")
+    _eq("absorb — rerun in the duplicate wins", _absorbed(first_failed, rerun_passed), [("passed", "2")])
+    _eq("absorb — a live rerun wins over a finished first attempt", _absorbed(first_failed, rerun_running), [("running", "2")])
+    _eq("absorb — rerun in the survivor wins", _absorbed(rerun_running, first_failed), [("running", "2")])
+    _eq("absorb — equal finished rows keep the survivor's", _absorbed(own, first_failed), [("passed", "1")])
+    _eq(
+        "absorb — GitLab's zero-based retry index",
+        _absorbed(dict(own, status = "failed", run_attempt = "0"), dict(own, status = "passed", run_attempt = "1")),
+        [("passed", "1")],
+    )
+
 def _test_impl(ctx):
     # Early-fail concludes `failure` before the terminal update, so a broken
     # build turns the check red without waiting for build.wait().
@@ -174,7 +604,11 @@ def _test_impl(ctx):
     _eq("unknown status", conclusion_for("bogus", True), "")
 
     _test_registration_request()
+    _test_coordination_helpers()
     _test_lint_comment_identity(ctx)
+    _test_status_comment_coordination(ctx)
+    _test_status_comment_races(ctx)
+    _test_status_check_cancellation(ctx)
 
     print("github features test: OK")
     return 0

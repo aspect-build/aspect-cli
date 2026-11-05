@@ -13,13 +13,19 @@ stores GitHub PRs and GitLab MRs in disjoint state keyed by `scm`) and gets
 back the merged set of all tasks' entries plus a directive on whether *it*
 should post the note this cycle. The server owns
 the merge + post throttle; this feature only renders the returned state and
-upserts the GitLab MR note (with the GitLab App token).
+upserts the GitLab MR note (with the GitLab App token, or `ASPECT_GITLAB_TOKEN`).
 
 When the Aspect API is unreachable, it falls back to coordinating through the
 note's own embedded state block: read the note, merge our entry via
 `merge_comment_only_state` (all tasks in a pipeline share one
 `workflow_run_id` / CI_PIPELINE_ID, so it preserves sibling rows), render, and
 upsert under a time lease.
+
+As on GitHub, coordination is on whenever the run holds Aspect Cloud
+credentials, whichever GitLab token posts the note (`ASPECT_GITLAB_TOKEN`
+included); `coordinate = False` opts out. Without a coordinator the state block
+is the only store and the first task creates the note (see
+`coordinator_enabled` in `github_status_comments.axl`).
 
 ## Marker
 
@@ -49,7 +55,12 @@ load(
     "@aspect//feature/github_status_comments.axl",
     "DEFAULT_BODY_TEMPLATE",
     "DEFAULT_STATUS_BADGES",
+    "absorb_duplicate_states",
     "bucket_entries",
+    "contribute_rejected",
+    "contribute_scm_fields",
+    "coordination_declined_message",
+    "coordinator_enabled",
     "dedup_survivor",
     "lease_held",
     "markers_stable",
@@ -59,7 +70,9 @@ load(
     "rehydrate_entries",
     "render_body",
     "results_subset",
+    "row_landed",
     "should_create_fallback",
+    "uncoordinated_interval_s",
 )
 load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
@@ -89,6 +102,11 @@ _DEDUP_SETTLE_S = 3
 # Window for re-checking duplicates on later cycles after a create — see the
 # GitHub feature's `_DEDUP_RECHECK_WINDOW_S`.
 _DEDUP_RECHECK_WINDOW_S = 60
+
+# Re-reads after a final note-state write — see the GitHub feature's
+# `_FINAL_VERIFY_SETTLE_S`.
+_FINAL_VERIFY_SETTLE_S = 5
+_FINAL_VERIFY_ROUNDS = 2
 
 # Grace before the note-state fallback will CREATE a note when the Aspect API
 # has never succeeded and no marker note exists — see the GitHub feature's
@@ -176,6 +194,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
     # host for an MR note) when off a recognized host (e.g. local-sim).
     ci_host = detect_ci_host(env) or {"label": "GitLab CI", "icon": "🦊"}
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
+    coordinate = ctx.args.coordinate
 
     templates = ctx.args.templates or {}
     body_template = (templates.get("body") or
@@ -217,9 +236,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
         _state["_auth_kind"] = auth_kind
 
         # Installation-ownership proof echoed to the contribute endpoint so the
-        # server can isolate this installation's coordination state.
+        # server can isolate this installation's coordination state; empty for
+        # an `ASPECT_GITLAB_TOKEN`.
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
+        _state["_coordinator"] = coordinator_enabled(ctx, coordinate)
         return True
 
     def _fetch_existing_note_body(ctx, token):
@@ -298,7 +319,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
     def _converge_notes(ctx, token):
         """List the MR's marker notes and converge on the lowest-id survivor,
-        deleting the rest. Returns True once a single marker note is observed."""
+        deleting the rest once their rows are in it (`_absorb_duplicates`).
+        Returns True once a single marker note is observed."""
         listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = _state["_auth_kind"])
         if not listed["success"]:
             return False
@@ -306,6 +328,9 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if survivor == None:
             return markers_stable(listed["notes"], marker)
         _state["_note_id"] = survivor
+        bodies = {n["id"]: n.get("body") or "" for n in listed["notes"]}
+        if not _absorb_duplicates(ctx, token, survivor, bodies[survivor], [bodies[i] for i in losers]):
+            return False
         for loser_id in losers:
             del_res = gitlab.notes.delete(
                 ctx,
@@ -320,13 +345,38 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
         return False
 
+    def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
+        """Write the rows duplicate notes hold newer than the survivor's into
+        it (`absorb_duplicate_states`, a retry's attempt included), so
+        deleting them loses no task's row.
+        Returns False when that write failed, so the duplicates are kept for a
+        later pass."""
+        merged, changed = absorb_duplicate_states(parse_state(survivor_body), [parse_state(b) for b in duplicate_bodies])
+        if not changed:
+            return True
+        _stable, body = _render_note(ctx, merged, epoch_now_s(ctx.std))
+        res = gitlab.notes.update(
+            ctx,
+            token = token,
+            project = project_path,
+            mr_iid = mr_iid,
+            note_id = survivor_id,
+            body = body,
+            api_base = api_base,
+            auth_kind = _state["_auth_kind"],
+        )
+        if not res["success"]:
+            _LOG.warn(ctx.std, "Merging a duplicate note failed: %s" % res.get("error", "unknown"))
+            return False
+        return True
+
     def _dedup_notes(ctx, token):
         """Create-time duplicate backstop: list immediately and converge; if no
         sibling is visible yet, wait `_DEDUP_SETTLE_S` once and re-list.
         Stragglers beyond this are handled by `_dedup_recheck` on later cycles."""
         for attempt in range(2):
             if attempt:
-                sleep(_DEDUP_SETTLE_S)
+                sleep(_DEDUP_SETTLE_S * 1000)
             if _converge_notes(ctx, token):
                 return
 
@@ -356,14 +406,18 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
         return (_body(True), _body(False))
 
-    def _post(ctx, token, state, now_epoch):
-        """Render the merged `state` and upsert the MR note if it changed."""
+    def _post(ctx, token, state, now_epoch, force = False):
+        """Render the merged `state` and upsert the MR note if it changed, or
+        regardless with `force`. Returns True when the note carries this
+        render."""
         stable_body, final_body = _render_note(ctx, state, now_epoch)
-        if _state.get("_last_stable_body") == stable_body:
-            return
+        if not force and _state.get("_last_stable_body") == stable_body:
+            return True
         if not _upsert_note(ctx, token, final_body):
-            return
+            return False
         _state["_last_stable_body"] = stable_body
+        _state["_lease_until_s"] = now_epoch + min_poll_interval_seconds
+        return True
 
     def _publish(ctx, final = False):
         token = _state.get("_gitlab_token")
@@ -372,14 +426,15 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
         own_entry = _own_entry(ctx, _state, run_id, run_attempt, job_name)
         now_epoch = epoch_now_s(ctx.std)
+        if not _state.get("_coordinator", False):
+            _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
+            return
 
         # Contribute to the Aspect API, which merges our entry with every
         # sibling job's and tells us whether to post this cycle (same
         # coordination path as GitHub; `scm` keeps GitLab's state disjoint).
         request = {
             "scm": "gitlab",
-            "installation_id": _state.get("_installation_id", ""),
-            "installation_proof": _state.get("_installation_proof", ""),
             "owner": project_path,
             "repo": str(mr_iid),
             "pr_number": mr_iid,
@@ -390,6 +445,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": min_poll_interval_seconds,
         }
+        request.update(contribute_scm_fields(
+            _state.get("_installation_id", ""),
+            _state.get("_installation_proof", ""),
+            github.extract_host(api_base).lower(),
+        ))
 
         # Peek (don't pop) — a failed contribute must not lose the pending
         # confirmation, or the server never learns the post landed.
@@ -398,6 +458,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             request["posted"] = pending
 
         result = github.status_comment_contribute(ctx, request)
+        if not result.get("success") and contribute_rejected(result):
+            _state["_coordinator"] = False
+            _LOG.info(ctx.std, coordination_declined_message(result, "note"))
+            _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
+            return
         if not result.get("success"):
             _LOG.trace("status-comment API unavailable (%s); using note-state fallback" % result.get("error", ""))
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
@@ -433,10 +498,33 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _state["_pending_post"] = {"comment_id": str(_state.get("_note_id", ""))}
 
     def _publish_via_note_state(ctx, token, own_entry, now_epoch, final):
-        """Fallback when the Aspect API is unreachable: the MR note's own state
-        block is the shared store. Read the note, merge our entry (preserving
-        sibling rows for our pipeline), render, and post under a time lease so
-        concurrent tasks don't all PATCH at once.
+        """Coordination through the MR note's own state block, used when the
+        Aspect API is unreachable and as the only path without a coordinator.
+        The state block is the shared store: read the note, merge our entry
+        (preserving sibling rows for our pipeline), render, and post
+        (`_note_state_cycle`).
+
+        As on GitHub, nothing serializes two tasks' read-merge-write, so a
+        final update re-reads the note after each write and writes again until
+        its row is there (`row_landed`, `_FINAL_VERIFY_ROUNDS` times at most),
+        and a duplicate note's rows are merged into the survivor before it is
+        deleted (`_absorb_duplicates`)."""
+        if not _note_state_cycle(ctx, token, own_entry, now_epoch, final) or not final:
+            return
+        for _ in range(_FINAL_VERIFY_ROUNDS):
+            sleep(_FINAL_VERIFY_SETTLE_S * 1000)
+            body = _fetch_existing_note_body(ctx, token)
+            if body != None and row_landed(parse_state(body), head_sha, own_entry):
+                return
+            _note_state_cycle(ctx, token, own_entry, epoch_now_s(ctx.std), True, force = True)
+        _LOG.trace("final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
+
+    def _note_state_cycle(ctx, token, own_entry, now_epoch, final, force = False):
+        """One read-merge-write of the note's state block. Returns True when
+        the note now carries this render, False when this cycle skipped or
+        failed. Mid-run it neither reads nor writes while another task's lease,
+        seen on the last read, is still held; `force` writes even an unchanged
+        render.
 
         To avoid duplicate notes, this path creates one only as a last resort:
         when no marker note is known or discoverable, it creates only if the
@@ -446,22 +534,29 @@ def _gitlab_status_comments(ctx: FeatureContext):
         a quick job's completed status still surfaces during an outage — it's
         the last lifecycle emit, so there's no later retry; the convergent dedup
         collapses any rare duplicate. Otherwise it defers. Once the API has
-        worked (`_api_ok`), it never creates out-of-band."""
+        worked (`_api_ok`), it never creates out-of-band. Without a coordinator
+        there is no server to create the note, so the grace is zero and the
+        first task to post creates it."""
+        if not final and now_epoch < _state.get("_lease_until_s", 0):
+            return False
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
-            return
+            return False
         if _state.get("_note_id") == None:
             secs = now_epoch - _state.get("_task_started_at_s", 0)
-            if not should_create_fallback(_state.get("_api_ok", False), final, secs, _FALLBACK_CREATE_GRACE_S):
-                return
+            grace_s = _FALLBACK_CREATE_GRACE_S if _state.get("_coordinator", False) else 0
+            if not should_create_fallback(_state.get("_api_ok", False), final, secs, grace_s):
+                return False
         parsed = parse_state(existing_body)
+        _state["_last_parsed"] = parsed
 
         lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
         if not final and lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
-            return
+            _state["_lease_until_s"] = lease_epoch + min_poll_interval_seconds
+            return False
 
         new_state = merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
-        _post(ctx, token, new_state, now_epoch)
+        return _post(ctx, token, new_state, now_epoch, force = force)
 
     def _earliest_start_ms(entries):
         ms_values = [e.get("start_time_ms", 0) for e in entries if e.get("start_time_ms", 0) > 0]
@@ -527,7 +622,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # (spawn-label flip); otherwise pace contributes to the Aspect API by
         # `min_poll_interval_seconds`, mirroring `GithubStatusComments`. The
         # server still gates the actual note PATCH. GitLab has no budget-derived
-        # cadence, so the configured floor is the interval.
+        # cadence, so the configured floor is the interval; uncoordinated, it
+        # spreads across live tasks (`uncoordinated_interval_s`).
         is_initial = update.priority and not _state.get("_saw_priority", False)
         if update.priority:
             _state["_saw_priority"] = True
@@ -546,7 +642,10 @@ def _gitlab_status_comments(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
+                interval_s = min_poll_interval_seconds
+                if not _state.get("_coordinator", False):
+                    interval_s = uncoordinated_interval_s(min_poll_interval_seconds, _state.get("_last_parsed"))
+                if now - _state.get("_last_publish_s", 0.0) < interval_s:
                     return
                 _state["_last_publish_s"] = now
 
@@ -568,12 +667,18 @@ GitlabStatusComments = feature(
             values = ["ci-only", "local-only", "always"],
             description = "When to post MR comments: ci-only (default), local-only, or always.",
         ),
+        "coordinate": args.boolean(
+            default = True,
+            description = "Coordinate the note across tasks through the Aspect API when Aspect " +
+                          "credentials are present (default). False keeps every task's entry out of the " +
+                          "API and coordinates only through the note's own state block.",
+        ),
         "min_poll_interval_seconds": args.int(
             default = 20,
             description = "Minimum seconds between MR-note refreshes. Default 20s. The Aspect API " +
-                          "decides which task posts each interval so the cost stays flat regardless of " +
-                          "how many tasks run in parallel; this value gates the local fallback lease used " +
-                          "when the API is unreachable. Terminal task verdicts always land immediately.",
+                          "decides which task posts each interval so the cost stays flat regardless of how " +
+                          "many tasks run in parallel. Without the API, all live tasks together refresh about " +
+                          "once per interval. Terminal task verdicts always land immediately.",
         ),
         "templates": args.custom(
             dict,

@@ -21,12 +21,18 @@ What's GL-specific and tested below:
   * `MARKER_FMT` — the rolling note's marker format. `mr-<iid>` not
     `pr-<n>` (the GH marker shape) so notes from the two features
     can't conflict on a repo mirrored to both.
+  * Status-note coordination, end to end through a probe task with a
+    stubbed `ctx.http()` on a self-hosted instance with
+    `ASPECT_GITLAB_TOKEN`: with and without Aspect credentials, with
+    coordination opted out, and against a fake sibling task racing it
+    through the note (an overwrite, a duplicate note).
 
 Run with:
   aspect dev test-gitlab-features
 """
 
 load("@aspect//bazel/trait.axl", "exit_codes")
+load("@aspect//feature/github_status_comments.axl", "parse_state")
 load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
 load("@aspect//feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
 load("./bazel_results.axl", "init_data", "pick_status", "process_event")
@@ -34,6 +40,227 @@ load("./bazel_results.axl", "init_data", "pick_status", "process_event")
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+_STATUS_NOTE_PROBE = """
+load("@std//base64.axl", "base64")
+load("@aspect//tips.axl", "tips")
+load("@aspect//traits.axl", "Phases", "TaskUpdate")
+
+_API = "https://gitlab.example.mil/api/v4/projects/acme%2Fwidgets/merge_requests/1/"
+_ASPECT_API = "https://api.aspect.build"
+_STATE_OPEN = "<!-- aspect-ci-status-state-v1:"
+
+def _with_rows(body, mutate):
+    # The note `body` with its state block's entries replaced by `mutate(entries)`.
+    i = body.find(_STATE_OPEN) + len(_STATE_OPEN)
+    j = body.find(" -->", i)
+    state = json.decode(str(base64.decode(body[i:j])))
+    state["entries"] = mutate(state["entries"])
+    return body[:i] + base64.encode(json.encode(state)) + body[j:]
+
+def _sibling_rows(rows):
+    # A sibling task's finished row, shaped like ours.
+    return [dict(e, job = "sibling", status = "passed") for e in rows]
+
+def _impl(ctx):
+    notes = {}
+    calls = []
+    contributions = []
+    contribute_status = int(ctx.std.env.var("PROBE_CONTRIBUTE_STATUS") or "0")
+
+    # A sibling task racing this one through the note's state block, as in the
+    # GitHub probe: "overwrite" or "duplicate".
+    sibling = ctx.std.env.var("PROBE_SIBLING") or ""
+    raced = []
+
+    def _send(method, **kwargs):
+        url = kwargs["url"]
+        if contribute_status and url == _ASPECT_API + "/status-comments/contribute":
+            contributions.append(json.decode(kwargs["data"]))
+            body = json.encode({"error": "rejected"})
+            return struct(catch = lambda: struct(block = lambda: (None, struct(status = contribute_status, body = body, headers = []))))
+        calls.append({"method": method, "url": url, "auth": kwargs["headers"].get("PRIVATE-TOKEN", "")})
+        if not url.startswith(_API):
+            fail("Unexpected HTTP request: " + method + " " + url)
+        path = url.removeprefix(_API).split("?")[0]
+        status = 200
+        if method == "get" and path == "notes":
+            payload = [{"id": int(i), "body": b} for i, b in notes.items()] if "page=1&" in url else []
+        elif method == "post" and path == "notes":
+            body = json.decode(kwargs["data"])["body"]
+            if sibling == "duplicate" and not raced:
+                raced.append(True)
+                notes[str(len(notes) + 1)] = _with_rows(body, _sibling_rows)
+            nid = str(len(notes) + 1)
+            notes[nid] = body
+            payload = {"id": int(nid), "body": notes[nid]}
+            status = 201
+        elif method == "put" and path.removeprefix("notes/") in notes:
+            nid = path.removeprefix("notes/")
+            read_by_sibling = notes[nid]
+            notes[nid] = json.decode(kwargs["data"])["body"]
+            payload = {"id": int(nid), "body": notes[nid]}
+            if sibling == "overwrite" and not raced:
+                raced.append(True)
+                notes[nid] = _with_rows(read_by_sibling, lambda rows: rows + _sibling_rows(rows))
+        elif method == "delete" and path.removeprefix("notes/") in notes:
+            notes.pop(path.removeprefix("notes/"))
+            payload = {}
+        else:
+            fail("Unexpected HTTP request: " + method + " " + url)
+        return struct(catch = lambda: struct(block = lambda: (None, struct(status = status, body = json.encode(payload), headers = []))))
+
+    fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["http"] = lambda: struct(**{m: (lambda m = m: lambda **kwargs: _send(m, **kwargs))() for m in ["get", "post", "put", "delete"]})
+    creds = struct(access_token = "aspect-tok") if contribute_status else None
+    fields["aspect"] = struct(auth = struct(
+        credentials = lambda **_kwargs: creds,
+        aspect_cloud_api_url = _ASPECT_API,
+        aspect_cloud_deployment = "fixture",
+    ))
+    proxy = struct(**fields)
+
+    first = []
+    for update in [
+        TaskUpdate(status = "running", priority = True),
+        TaskUpdate(status = "passed", priority = True, final = True, conclusion = "12/12 passed"),
+    ]:
+        for handler in ctx.traits[Phases].task_update:
+            handler(proxy, update)
+        if not first:
+            first.append(dict(notes))
+    ctx.std.fs.write("result.json", json.encode({"calls": calls, "contributions": contributions, "after_first": first[0], "notes": notes}))
+    return 0
+
+probe = task(kind = "probe", summary = "Drive status-note updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+"""
+
+# The probe calls every `task_update` handler, so every other feature that
+# registers one is off: on a Buildkite or GitHub host running this suite, they
+# would otherwise act on the real build.
+_STATUS_NOTE_CONFIG = """
+load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+load("@aspect//feature/gitlab_commit_statuses.axl", "GitlabCommitStatuses")
+load("@aspect//feature/gitlab_status_comments.axl", "GitlabStatusComments")
+
+def config(ctx):
+    for f in [BuildkiteAnnotations, Deployment, GithubStatusChecks, GithubStatusComments, GitlabCommitStatuses]:
+        ctx.features[f].enabled = False
+    ctx.features[GitlabStatusComments].args.coordinate = %s
+"""
+
+# A self-hosted GitLab MR pipeline with a CI-supplied token.
+_SELF_HOSTED_ENV = {
+    "CI": "true",
+    "GITLAB_CI": "true",
+    "CI_API_V4_URL": "https://gitlab.example.mil/api/v4",
+    "CI_MERGE_REQUEST_IID": "1",
+    "CI_PROJECT_PATH": "acme/widgets",
+    "CI_COMMIT_SHA": "head",
+    "CI_PIPELINE_ID": "11",
+    "CI_JOB_NAME": "build",
+    "ASPECT_GITLAB_TOKEN": "pat-tok",
+}
+
+# Ambient variables that would change what the probe detects or how it
+# authenticates; removed so the result doesn't depend on the host running it.
+_STRIPPED_ENV = [
+    "ASPECT_API_TOKEN",
+    "ASPECT_GITLAB_API_URL",
+    "ASPECT_GITLAB_MR_IID",
+    "ASPECT_GITLAB_PIPELINE_ID",
+    "ASPECT_GITLAB_JOB_NAME",
+    "ASPECT_GITLAB_PROJECT_PATH",
+    "ASPECT_GITLAB_SHA",
+    "BUILDKITE",
+    "CI_MERGE_REQUEST_PROJECT_ID",
+    "CI_MERGE_REQUEST_PROJECT_PATH",
+    "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA",
+    "CI_PROJECT_ID",
+    "CIRCLECI",
+    "GITHUB_ACTIONS",
+]
+
+def _run_status_note_probe(ctx, contribute_status = 0, coordinate = True, sibling = ""):
+    """Run the status-note probe on a self-hosted MR pipeline with only
+    `ASPECT_GITLAB_TOKEN` and no Aspect credentials, or with a non-zero
+    `contribute_status`, credentials and every contribute answered with that
+    status. `sibling` names a racing sibling task the fake GitLab plays.
+    Returns the probe's `result.json`."""
+    root = ctx.std.fs.mkdtemp(prefix = "gitlab-status-comments-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", _STATUS_NOTE_CONFIG % coordinate)
+    ctx.std.fs.write(root + "/.aspect/probe.axl", _STATUS_NOTE_PROBE)
+
+    cmd = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root)
+    for name in _STRIPPED_ENV:
+        cmd = cmd.env(name, None)
+    for name, value in _SELF_HOSTED_ENV.items():
+        cmd = cmd.env(name, value)
+    cmd = cmd.env("PROBE_CONTRIBUTE_STATUS", str(contribute_status))
+    cmd = cmd.env("PROBE_SIBLING", sibling)
+    output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not output.status.success:
+        fail(output.stdout + output.stderr)
+    return json.decode(ctx.std.fs.read_to_string(root + "/result.json"))
+
+def _assert_uncoordinated_note(label, result):
+    """The note is created on the first update (no create grace) and edited
+    by the final one, with every GitLab call carrying the explicit token."""
+    calls = result["calls"]
+    _eq(label + " — every call carries the explicit token", [c["auth"] for c in calls if c["auth"] != "pat-tok"], [])
+    _eq(label + " — created on the first update", len(result["after_first"]), 1)
+    _eq(label + " — one note overall", list(result["notes"].keys()), ["1"])
+    _eq(label + " — one create", len([c for c in calls if c["method"] == "post"]), 1)
+    _eq(label + " — final update edits it", len([c for c in calls if c["method"] == "put"]), 1)
+    _eq(label + " — carries the marker", result["notes"]["1"].startswith(_MARKER_FMT % 1), True)
+
+def _test_status_note_coordination(ctx):
+    """Coordination follows Aspect credentials, not the GitLab token.
+
+    Without credentials nothing goes to Aspect (`_send` fails on any other
+    URL). With them the first update contributes, carrying the host and no
+    installation fields; a rejection drops the run to the note's state block
+    for good. `coordinate = False` keeps a credentialed run off the API."""
+    result = _run_status_note_probe(ctx)
+    _eq("no credentials — no contribution", result["contributions"], [])
+    _assert_uncoordinated_note("no credentials", result)
+
+    result = _run_status_note_probe(ctx, contribute_status = 400)
+    contributions = result["contributions"]
+    _eq("rejected — one contribution, then none", len(contributions), 1)
+    _eq("rejected — contribution names the instance host", contributions[0].get("host"), "gitlab.example.mil")
+    _eq("rejected — no installation fields without a mint", "installation_id" in contributions[0] or "installation_proof" in contributions[0], False)
+    _assert_uncoordinated_note("rejected", result)
+
+    result = _run_status_note_probe(ctx, contribute_status = 400, coordinate = False)
+    _eq("opted out — no contribution", result["contributions"], [])
+    _assert_uncoordinated_note("opted out", result)
+
+def _rows_by_job(body):
+    return {e["job"]: e["status"] for e in parse_state(body)["entries"]}
+
+def _test_status_note_races(ctx):
+    """Two tasks sharing the note with no coordinator keep both final rows:
+    an overwritten final row is written again, and a duplicate note is
+    deleted only after its row is merged into the survivor (see the GitHub
+    suite's `_test_status_comment_races`)."""
+    result = _run_status_note_probe(ctx, sibling = "overwrite")
+    _eq("overwrite — one note", list(result["notes"].keys()), ["1"])
+    _eq("overwrite — both final rows", _rows_by_job(result["notes"]["1"]), {"build": "passed", "sibling": "passed"})
+    _eq("overwrite — final row written again", len([c for c in result["calls"] if c["method"] == "put"]), 2)
+
+    result = _run_status_note_probe(ctx, sibling = "duplicate")
+    _eq("duplicate — the lower-id note survives", list(result["notes"].keys()), ["1"])
+    _eq("duplicate — both final rows", _rows_by_job(result["notes"]["1"]), {"build": "passed", "sibling": "passed"})
+    deletes = [c["url"] for c in result["calls"] if c["method"] == "delete"]
+    _eq("duplicate — ours deleted once", [u.split("?")[0].rsplit("/", 1)[1] for u in deletes], ["2"])
+    _eq("duplicate — our row merged before the delete", "build" in _rows_by_job(result["after_first"]["1"]), True)
 
 def _test_impl(ctx):
     # ── state_for ──────────────────────────────────────────────────
@@ -126,6 +353,9 @@ def _test_impl(ctx):
         fail("marker should not contain 'pr-' (GH convention): %r" % _MARKER_FMT)
     if "mr-" not in _MARKER_FMT:
         fail("marker should contain 'mr-' (GL convention): %r" % _MARKER_FMT)
+
+    _test_status_note_coordination(ctx)
+    _test_status_note_races(ctx)
 
     print("gitlab features test: OK")
     return 0
