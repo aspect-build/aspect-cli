@@ -1775,6 +1775,72 @@ def config(ctx):
         })
         .unwrap();
     }
+
+    /// Runs a project config that loads `GREETING` through `facade.axl` and
+    /// returns the config errors. `facade.axl` itself loads `GREETING` from
+    /// `greeting.axl`; `facade` is the rest of its source.
+    fn config_errors_loading_through(facade: &str) -> Vec<String> {
+        let proj = tempfile::tempdir().unwrap();
+        let script = proj.path().join("hello.axl");
+        std::fs::write(
+            &script,
+            "def _impl(ctx):\n    pass\n\nhello = task(implementation = _impl, args = {})\n",
+        )
+        .unwrap();
+        std::fs::write(proj.path().join("greeting.axl"), r#"GREETING = "hi""#).unwrap();
+        std::fs::write(proj.path().join("facade.axl"), facade).unwrap();
+        let config = proj.path().join("config.axl");
+        std::fs::write(
+            &config,
+            "load(\"./facade.axl\", \"GREETING\")\n\ndef config(ctx):\n    print(GREETING)\n",
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let modules: Vec<Mod> = vec![];
+        let root_mod = Mod::new(
+            proj.path().to_path_buf(),
+            "_root".to_string(),
+            proj.path().to_path_buf(),
+        );
+        ModuleEnv::with(|env| -> anyhow::Result<Vec<String>> {
+            let loader = Loader::new(
+                "test".to_string(),
+                proj.path().to_path_buf(),
+                proj.path().to_path_buf(),
+                None,
+                &modules,
+            );
+            let mut mpe = MultiPhaseEval::new(env, &loader);
+            assert!(mpe.eval(&[script], &root_mod, &modules).is_empty());
+            let failures = mpe.execute_configs(&[(config.as_path(), &root_mod)]);
+            let mut errors: Vec<String> = failures.files.iter().map(|f| format!("{f:?}")).collect();
+            errors.extend(failures.ended.iter().map(|e| format!("{e:?}")));
+            Ok(errors)
+        })
+        .unwrap()
+    }
+
+    /// A `load` binds privately, as in Bazel and Buck2: a name a file only
+    /// loads cannot be loaded from it.
+    #[test]
+    fn a_loaded_name_is_not_reexported() {
+        let errors = config_errors_loading_through(r#"load("./greeting.axl", "GREETING")"#);
+        assert!(
+            errors.iter().any(|e| e.contains("GREETING")),
+            "expected a load error naming GREETING, got {errors:?}"
+        );
+    }
+
+    /// Re-exporting takes an explicit top-level binding of a private alias.
+    #[test]
+    fn an_explicit_binding_reexports_a_loaded_name() {
+        let errors = config_errors_loading_through(
+            "load(\"./greeting.axl\", _GREETING = \"GREETING\")\n\nGREETING = _GREETING\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
 }
 
 pub struct FinishedEval;

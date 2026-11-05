@@ -40,7 +40,7 @@ pub fn dialect() -> Dialect {
         enable_def: true,
         enable_lambda: true,
         enable_load: true,
-        enable_load_reexport: true,
+        enable_load_reexport: false,
         enable_keyword_only_arguments: true,
         enable_positional_only_arguments: true,
         enable_types: DialectTypes::Enable,
