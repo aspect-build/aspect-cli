@@ -147,9 +147,11 @@ load(
     "RUNNER_HEADER",
     "RcConfig",
     "command_sections",
+    "config_chains",
     "defined_configs",
     "ensure_import",
     "import_line",
+    "imports_rc",
     "is_config_chain",
     "prune_configs",
     "rc_paths",
@@ -197,30 +199,31 @@ def _workspace(ctx: TaskContext) -> str:
         ctx.std.process.exit(1, "No Bazel workspace above %s (no MODULE.bazel, REPO.bazel, or WORKSPACE), so there is no .bazelrc for vanilla bazel to read. Run this from inside the workspace, or pass --output=<path> and --import-into=<rc>." % ctx.std.env.current_dir())
     return root
 
-def _repo_defined_configs(ctx: TaskContext) -> list:
-    """The `--config` sections this checkout already defines for itself, or `[]`
-    where it defines none.
+def _repo_rc(ctx: TaskContext) -> str | None:
+    """The checkout's own generated rc, or `None` where it carries none.
 
     A checkout that carries its own generated rc — its `.bazelrc` imports
-    `%workspace%/.aspect/bazelrc` and that file is there — has already said what
-    `bazel` can reach here, in a file the repository committed and is free to have
-    edited. Both halves are required: a `try-import` whose file is missing
-    configures nothing.
+    `%workspace%/.aspect/bazelrc`, by `try-import` or `import`, and that file is
+    there — has already said what `bazel` can reach here, in a file the
+    repository committed and is free to have edited. Both halves are required: a
+    `try-import` whose file is missing configures nothing.
 
-    What comes back is read from that file rather than assumed. A machine's rc
-    that merely *enables* one of these sections adds nothing to override, which
-    is how the two rcs stay out of each other's way — but Bazel fails outright on
-    a `--config` no rc defines, so enabling a section has to be founded on
-    knowing it is there."""
+    What the caller enables is read from this file rather than assumed. A
+    machine's rc that merely *enables* one of its sections adds nothing to
+    override, which is how the two rcs stay out of each other's way — but Bazel
+    fails outright on a `--config` no rc defines, so enabling a section has to be
+    founded on knowing it is there. Missing an `import` here is costly the other
+    way: the machine's rc then redefines every section the checkout's still
+    defines, and Bazel merges the two, so each flag appears twice."""
     workspace = _find_workspace(ctx)
     if not workspace:
-        return []
+        return None
     importer = workspace + "/" + IMPORTING_RC
     if not ctx.std.fs.exists(workspace + "/" + GENERATED_RC) or not ctx.std.fs.exists(importer):
-        return []
-    if import_line("%workspace%/" + GENERATED_RC) not in ctx.std.fs.read_to_string(importer).split("\n"):
-        return []
-    return defined_configs(ctx.std.fs.read_to_string(workspace + "/" + GENERATED_RC))
+        return None
+    if not imports_rc(ctx.std.fs.read_to_string(importer), "%workspace%/" + GENERATED_RC):
+        return None
+    return ctx.std.fs.read_to_string(workspace + "/" + GENERATED_RC)
 
 def _create_generated_dir(ctx: TaskContext, dir: str, gitignore: bool) -> list:
     """Create `dir`, the execution log's parent, which Bazel will not create
@@ -436,12 +439,16 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     # so nothing here can override what the repository edited. Not where the
     # endpoints are this machine's: a runner's services are nowhere in a
     # checkout, and are meant to win.
-    repo_defines = [] if on_runner or env_deployment or ctx.args.output else _repo_defined_configs(ctx)
+    repo_rc = None if on_runner or env_deployment or ctx.args.output else _repo_rc(ctx)
+    repo_defines = defined_configs(repo_rc)
     chain_to_repo = []
     if home_mode and default != None and repo_defines:
         wanted = _sections_to_enable(default, spec)
         if GROUP_COMMON in repo_defines and all([w in repo_defines for w in wanted]):
-            chain_to_repo = [GROUP_COMMON] + wanted
+            # A generated section already chains `aspect-common`; enabling it
+            # beside one would expand it twice, which Bazel warns about.
+            common_chained = wanted and all([GROUP_COMMON in config_chains(repo_rc, w) for w in wanted])
+            chain_to_repo = ([] if common_chained else [GROUP_COMMON]) + wanted
         elif wanted:
             info(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
                           ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))

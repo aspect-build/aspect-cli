@@ -779,6 +779,66 @@ fn a_checkout_that_defines_its_own_sections_is_enabled_not_restated() {
     );
 }
 
+/// A generated `aspect-cloud` already chains `aspect-common`, so the machine's
+/// rc enables only the section: enabling `aspect-common` beside it would expand
+/// it twice, which Bazel warns about on every call.
+#[test]
+fn a_checkout_section_that_chains_common_is_not_enabled_beside_it() {
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    checkout_owning_its_rc(workspace.path());
+    std::fs::write(
+        workspace.path().join(".aspect/bazelrc"),
+        "common:aspect-common --heap_dump_on_oom\ncommon:aspect-cloud --config=aspect-common\ncommon:aspect-cloud --remote_cache=grpcs://cache.aspect.build\n",
+    )
+    .expect(".aspect/bazelrc");
+
+    let out = unconfigured_cmd(home.path(), workspace.path(), true, &[])
+        .env("ASPECT_API_TOKEN", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&out);
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert_eq!(
+        enabled_groups(&rc),
+        vec!["aspect-github-actions", "aspect-cloud"],
+        "in:\n{rc}"
+    );
+}
+
+/// A checkout that pulls its rc in with `import` rather than the generated
+/// `try-import` still owns its sections. Missing that, the machine's rc
+/// redefined every one of them and Bazel merged the two definitions, so each
+/// flag — the execution log among them — appeared twice.
+#[test]
+fn a_checkout_that_imports_its_rc_is_enabled_not_restated() {
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    checkout_owning_its_rc(workspace.path());
+    std::fs::write(
+        workspace.path().join(".bazelrc"),
+        "import %workspace%/.aspect/bazelrc\n\ncommon --config=ruleset\n",
+    )
+    .expect(".bazelrc");
+
+    let out = unconfigured_cmd(home.path(), workspace.path(), true, &[])
+        .env("ASPECT_API_TOKEN", "client:secret")
+        .output()
+        .expect("running `aspect setup bazelrc`");
+    assert_success(&out);
+
+    let rc = read(&home.path().join(".aspect/bazelrc"));
+    assert!(
+        enabled_under(&rc, "aspect-cloud") == Some("build"),
+        "the checkout's own section is enabled:\n{rc}"
+    );
+    assert!(
+        !rc.contains("common:aspect-common ") && !rc.contains("common:aspect-cloud "),
+        "the checkout's own sections must not be redefined:\n{rc}"
+    );
+}
+
 /// Chaining to the checkout's sections is no way around `auto`'s credential
 /// check: enabling the checkout's `aspect-cloud` names the same helper, which
 /// fails every action with no token to give. A fork PR, which CI gives no

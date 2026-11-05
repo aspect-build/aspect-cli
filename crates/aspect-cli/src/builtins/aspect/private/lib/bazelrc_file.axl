@@ -233,6 +233,32 @@ def defined_configs(content: str | None) -> list:
             names.append(name)
     return names
 
+def imports_rc(content: str | None, path: str) -> bool:
+    """Whether `content` pulls in `path`, by `try-import` or by `import`. Both
+    count: a repository may well have written `import` for a file it commits,
+    and Bazel reads the sections the same either way."""
+    for raw in (content or "").split("\n"):
+        parts = raw.strip().split()
+        if len(parts) == 2 and parts[0] in ["import", "try-import"] and parts[1] == path:
+            return True
+    return False
+
+def config_chains(content: str | None, name: str) -> list:
+    """The `--config` names section `name` chains to in `content`, in order, once
+    each — what enabling `name` also enables, so a caller does not enable it a
+    second time and have Bazel warn that the config was expanded twice."""
+    chains = []
+    for raw in (content or "").split("\n"):
+        parts = raw.strip().split()
+        if len(parts) < 2 or raw.strip().startswith("#") or ":" not in parts[0]:
+            continue
+        if parts[0].split(":", 1)[1] != name:
+            continue
+        for flag in parts[1:]:
+            if is_config_chain(flag) and flag[len("--config="):] not in chains:
+                chains.append(flag[len("--config="):])
+    return chains
+
 def ensure_import(existing: str | None, line: str) -> ImportResult:
     """The rc content with `line` present exactly once: unchanged when it is
     already there, otherwise placed at the top under `IMPORT_COMMENT`, a blank
@@ -240,11 +266,13 @@ def ensure_import(existing: str | None, line: str) -> ImportResult:
     own lines come after the imported ones and win where they disagree — Bazel
     takes the last value of a flag — which is how a repository overrides a
     recommendation, say a shorter `--remote_timeout`.
+    A file that already pulls the rc in, by `try-import` or a hand-written
+    `import`, is left alone: a second import would read every section twice.
     `None`/empty `existing` is a new file."""
     block = IMPORT_COMMENT + "\n" + line + "\n"
     if not existing:
         return ImportResult(content = block, action = ImportAction("created"))
-    if line in existing.split("\n"):
+    if imports_rc(existing, line.split(" ", 1)[1]):
         return ImportResult(content = existing, action = ImportAction("unchanged"))
     content = block + ("\n" + existing.lstrip("\n") if existing.strip() else "")
     return ImportResult(content = content, action = ImportAction("prepended"))

@@ -1,6 +1,7 @@
 """Unit tests for `bazelrc_file.axl`: `rc_paths` (where each file goes),
 `command_sections`, `render_bazelrc`, `prune_configs`, `startup_flags_for_rc`,
-`import_line` and `ensure_import` (the one-time `try-import` block).
+`import_line` and `ensure_import` (the one-time `try-import` block), and the
+`defined_configs` / `config_chains` / `imports_rc` readers of an existing rc.
 Run with: aspect dev test-bazelrc-file
 """
 
@@ -11,9 +12,11 @@ load(
     "ImportAction",
     "RcConfig",
     "command_sections",
+    "config_chains",
     "defined_configs",
     "ensure_import",
     "import_line",
+    "imports_rc",
     "prune_configs",
     "rc_paths",
     "render_bazelrc",
@@ -185,6 +188,37 @@ def _test_ensure_import_appends_once(_ctx):
     _eq("unchanged", second.action, ImportAction("unchanged"))
     _eq("mid-file", _ensure(_LINE + "\nbuild --later\n").action, ImportAction("unchanged"))
 
+    # A hand-written `import` of the same file already reads it; a second,
+    # `try-import`, line would read every section twice.
+    by_import = _ensure("import %workspace%/.aspect/bazelrc\nbuild --later\n")
+    _eq("import counts", by_import.action, ImportAction("unchanged"))
+    _eq("import kept as is", by_import.content, "import %workspace%/.aspect/bazelrc\nbuild --later\n")
+
+def _test_imports_rc(_ctx):
+    _eq("try-import", imports_rc("try-import %workspace%/.aspect/bazelrc\n", "%workspace%/.aspect/bazelrc"), True)
+    _eq("import", imports_rc("import %workspace%/.aspect/bazelrc", "%workspace%/.aspect/bazelrc"), True)
+    _eq("indented", imports_rc("  import   %workspace%/.aspect/bazelrc  ", "%workspace%/.aspect/bazelrc"), True)
+    _eq("another file", imports_rc("import %workspace%/tools/preset.bazelrc", "%workspace%/.aspect/bazelrc"), False)
+    _eq("commented out", imports_rc("# import %workspace%/.aspect/bazelrc", "%workspace%/.aspect/bazelrc"), False)
+    _eq("missing", imports_rc(None, "%workspace%/.aspect/bazelrc"), False)
+
+def _test_config_chains(_ctx):
+    rc = "\n".join([
+        "common:aspect-common --heap_dump_on_oom",
+        "common:aspect-cloud --config=aspect-common",
+        "common:aspect-cloud --config=aspect-cache",
+        "common:aspect-cloud --config=aspect-common",
+        "common:aspect-cloud --remote_cache=grpcs://c",
+        "# common:aspect-cloud --config=aspect-exec",
+        "common:aspect-cloud-exec --config=aspect-cloud",
+        "common --config=aspect-bes",
+    ])
+    _eq("in order, once each", config_chains(rc, "aspect-cloud"), ["aspect-common", "aspect-cache"])
+    _eq("its own section only", config_chains(rc, "aspect-cloud-exec"), ["aspect-cloud"])
+    _eq("no chains", config_chains(rc, "aspect-common"), [])
+    _eq("undefined", config_chains(rc, "aspect-other"), [])
+    _eq("missing", config_chains(None, "aspect-cloud"), [])
+
 def _test_defined_configs(_ctx):
     # Read off the `<command>:<name>` heads, in order, once each.
     rc = "\n".join([
@@ -223,6 +257,8 @@ _UNIT_TESTS = [
     _test_ensure_import_new_file,
     _test_ensure_import_appends_once,
     _test_defined_configs,
+    _test_imports_rc,
+    _test_config_chains,
 ]
 
 def _test_impl(ctx):
