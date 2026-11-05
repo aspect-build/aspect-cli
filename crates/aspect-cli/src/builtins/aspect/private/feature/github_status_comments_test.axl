@@ -1177,7 +1177,8 @@ def _check_superseded():
     """A newer numeric run on another SHA supersedes the writer.
 
     That covers a late update from an older push and a re-run of an older
-    commit. A newer run (fresh push) and a non-numeric id never are."""
+    commit. An equal or newer run (a fresh push) and non-numeric ids never
+    supersede."""
     parsed = {
         "head_sha": "shaB",
         "workflow_runs": [
@@ -1187,10 +1188,23 @@ def _check_superseded():
         "entries": [],
     }
     _eq("superseded — older run on another SHA", superseded(parsed, "shaA", "100"), True)
-    _eq("superseded — same SHA never", superseded(parsed, "shaB", "100"), False)
-    _eq("superseded — newer run resets", superseded(parsed, "shaA", "300"), False)
-    _eq("superseded — non-numeric run id", superseded(parsed, "shaA", "bk-build-1"), False)
+    _eq("superseded — older run on the same SHA", superseded(parsed, "shaB", "100"), False)
+    _eq("superseded — newer run (fresh push)", superseded(parsed, "shaA", "300"), False)
+    _eq("superseded — equal run id", superseded(parsed, "shaA", "201"), False)
+    _eq("superseded — non-numeric writer", superseded(parsed, "shaA", "bk-build-1"), False)
     _eq("superseded — no prior state", superseded(None, "shaA", "100"), False)
+
+    # Numeric compare, not lexical: "99" < "100" as runs.
+    _eq("superseded — numeric order", superseded({"head_sha": "shaB", "workflow_runs": [{"run_id": "100"}]}, "shaA", "99"), True)
+
+    # Non-numeric stored slots don't count; a numeric one among them does.
+    bk_only = {"head_sha": "shaB", "workflow_runs": [{"run_id": "bk-build-9"}]}
+    _eq("superseded — non-numeric stored runs", superseded(bk_only, "shaA", "100"), False)
+    mixed = {"head_sha": "shaB", "workflow_runs": [{"run_id": "bk-build-9"}, {"run_id": "200"}]}
+    _eq("superseded — numeric run among non-numeric", superseded(mixed, "shaA", "100"), True)
+
+    # A hand-edited block may carry an int run_id.
+    _eq("superseded — int-typed stored run_id", superseded({"head_sha": "shaB", "workflow_runs": [{"run_id": 200}]}, "shaA", "100"), True)
 
 def _check_merge_state_two_workflows_with_fresh_refresh():
     """Cross-workflow: workflow A reads existing comment with B's slot
