@@ -387,13 +387,14 @@ def _job_token(env):
 
     The token belongs to the host that issued it: on Actions the runner's
     `GITHUB_SERVER_URL`, elsewhere github.com, as these variables are for the
-    gh CLI (Enterprise uses `GH_ENTERPRISE_TOKEN`). A github.com runner
-    building an Enterprise mirror therefore keeps its token off the
-    Enterprise host."""
+    gh CLI (Enterprise uses `GH_ENTERPRISE_TOKEN`). Off Actions
+    `GITHUB_SERVER_URL` says nothing about who issued the token, so it isn't
+    consulted. A github.com runner building an Enterprise mirror, or any
+    other CI host, therefore keeps the token off the Enterprise host."""
     token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
     if not token:
         return ""
-    server = env.var("GITHUB_SERVER_URL") or ""
+    server = (env.var("GITHUB_SERVER_URL") or "") if env.var("GITHUB_ACTIONS") else ""
     issuer = "github.com" if _is_public_github_url(server) else _extract_host(server).lower()
     if issuer != _web_host_of_api_base(_resolve_api_base(env)):
         return ""

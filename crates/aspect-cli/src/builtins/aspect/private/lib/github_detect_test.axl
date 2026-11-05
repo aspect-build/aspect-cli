@@ -1283,7 +1283,7 @@ def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
 
     # The Aspect App's tokens are for github.com: an Enterprise runner without
     # ASPECT_GITHUB_TOKEN mints nothing, and falls back to its own job token.
-    env = {"CI": "true", "GITHUB_SERVER_URL": "https://ghes.example.mil", "GITHUB_API_URL": ghes, "GITHUB_TOKEN": "job-tok"}
+    env = {"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_SERVER_URL": "https://ghes.example.mil", "GITHUB_API_URL": ghes, "GITHUB_TOKEN": "job-tok"}
     reason = {}
     _eq("host binding: no App mint for Enterprise", github.authenticate(_fake_auth_ctx(ctx, env), owner = "o", repo = "r", _reason = reason), None)
     _eq("host binding: no App mint for Enterprise — reason kind", reason.get("kind"), "api-host-mismatch")
@@ -1316,6 +1316,24 @@ def _test_api_host_binding(ctx, ghes, vcs, bails, logged):
         "job token: off Actions GH_TOKEN is github.com's, not the Enterprise host's",
         github.preferred_token_pair(_fake_auth_ctx(ctx, off_actions), "o", "r"),
         ("ghes-pat", None, BUCKET_APP),
+    )
+    buildkite_ghes = {
+        "CI": "true",
+        "BUILDKITE": "true",
+        "GITHUB_SERVER_URL": "https://ghes.example.mil",
+        "ASPECT_VCS_URL": vcs,
+        "ASPECT_GITHUB_API_URL": ghes,
+        "GH_TOKEN": "public-gh-tok",
+    }
+    _eq(
+        "job token: off Actions GITHUB_SERVER_URL doesn't make GH_TOKEN the Enterprise fallback",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, dict(buildkite_ghes, ASPECT_GITHUB_TOKEN = "ghes-pat")), "o", "r"),
+        ("ghes-pat", None, BUCKET_APP),
+    )
+    _eq(
+        "job token: nor the Enterprise primary",
+        github.preferred_token_pair(_fake_auth_ctx(ctx, buildkite_ghes), "o", "r"),
+        (None, None, BUCKET_APP),
     )
     _eq(
         "job token: github.com runner keeps it as the fallback on github.com",
