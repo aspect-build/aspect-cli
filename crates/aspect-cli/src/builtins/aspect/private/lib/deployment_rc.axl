@@ -23,10 +23,9 @@ Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
 chains the `rc_groups.axl` tuning groups its endpoints justify (`aspect-cache`,
-`aspect-bes`) rather than repeating flags. A section chains nothing that
-presumes no endpoint: the always-on flags are plain lines at the top of every rc,
-and the CI host's group is enabled by the machine's rc that defines it, so
-naming a section never expands a group a second time. Remote execution is never
+`aspect-bes`) rather than repeating flags. It does not chain the CI host's
+group, which the machine's rc that defines it enables itself, so naming a
+section never expands a group a second time. Remote execution is never
 part of the base section: it relocates every action, so it is only ever reached
 by naming `-exec`, mirroring `--remote=exec` on `aspect <task>`.
 

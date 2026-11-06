@@ -7,7 +7,7 @@ features that own their situation — `Workflows` on a runner, `Deployment` for
 one home whatever injects: `--bazel-flags:omit=<flag>` on any task, or once per
 repo in `config.axl`:
 
-    ctx.features[BazelFlags].args.omit = ["--heap_dump_on_oom"]
+    ctx.features[BazelFlags].args.omit = ["--remote_timeout"]
 
 It registers the omission on `BazelTrait.injected_flag_filters`, which the spawn
 path applies to every injected flag and never to the user's own. The rc
@@ -34,7 +34,7 @@ BazelFlags = feature(
     args = {
         "omit": args.string_list(
             description = "A Bazel flag Aspect would otherwise set on this task's Bazel call that you do not want, " +
-                          "named as Aspect spells it (e.g. --bazel-flags:omit=--heap_dump_on_oom; a value after `=` " +
+                          "named as Aspect spells it (e.g. --bazel-flags:omit=--remote_timeout; a value after `=` " +
                           "is ignored). Repeat for several. Applies to what Aspect injects, never to your own flags; " +
                           "set it once per repo in config.axl via ctx.features[BazelFlags].args.omit. Endpoints, " +
                           "credentials, and the runner's output paths cannot be omitted. The rc written by " +

@@ -64,9 +64,6 @@ RcConfig = record(
 # import reads as ours next to whatever else the file holds.
 IMPORT_COMMENT = "# Aspect's rc for vanilla `bazel`, maintained by `aspect setup bazelrc`."
 
-# The comment above the always-on lines `render_bazelrc` writes.
-ALWAYS_ON_COMMENT = "Recommended flags, always on."
-
 # What `ensure_import` did to the user rc.
 ImportAction = enum("created", "unchanged", "prepended")
 
@@ -155,12 +152,10 @@ def command_sections(bazel_version: str | None) -> list:
         return ["common"]
     return _PRE_COMMON_COMMANDS
 
-def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: list, configs: list, header: str = GENERATED_HEADER, always_on_flags: list = []) -> str:
-    """Render the rc: `header`, a `startup` line per startup flag,
-    `always_on_flags` as plain lines under `ALWAYS_ON_COMMENT` (once per entry in
-    `command_sections`, set whatever else is or is not enabled), the
-    `--config` lines that turn groups on, then each `RcConfig` in `configs` as
-    a commented `<section>:<name>` group.
+def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: list, configs: list, header: str = GENERATED_HEADER) -> str:
+    """Render the rc: `header`, a `startup` line per startup flag, the
+    `--config` lines that turn groups on, then each `RcConfig` in `configs` as a
+    commented `<section>:<name>` group.
 
     `enable_lines` pairs each enabled group with the command sections that
     enable it (`rc_groups.enable_lines`), since a group carrying an endpoint is
@@ -173,24 +168,14 @@ def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: li
     lines = [
         header,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
-        "# The recommended flags are always on. Every other flag is grouped by what it",
-        "# presumes: the groups that apply here are enabled at the top, the rest reached by chaining",
-        "# or by name. A group naming an endpoint is enabled for `build`, which Bazel applies to",
-        "# test/run/coverage/cquery/aquery but not to `query`.",
+        "# Flags are grouped by what they presume; the groups that apply here are enabled at the",
+        "# top, the rest reached by chaining or by name. A group naming an endpoint is enabled for",
+        "# `build`, which Bazel applies to test/run/coverage/cquery/aquery but not to `query`.",
         "# `bazel build --announce_rc` shows which group set what.",
         "",
     ]
     for flag in startup_flags:
         lines.append("startup " + flag_text(flag))
-    if always_on_flags:
-        if startup_flags:
-            lines.append("")
-        lines.append("# " + ALWAYS_ON_COMMENT)
-        for flag in always_on_flags:
-            for section in command_sections:
-                lines.append(section + " " + flag_text(flag))
-        if enable_lines:
-            lines.append("")
     for (group, sections) in enable_lines:
         for section in sections:
             lines.append(section + " --config=" + group)

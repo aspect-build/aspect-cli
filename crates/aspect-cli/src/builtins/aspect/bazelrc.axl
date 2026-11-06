@@ -55,13 +55,12 @@ how a recommendation is overridden.
 Whatever the importing rc already holds is kept, below the import, where
 Bazel's last-wins gives it the final say over what it imports.
 
-What an rc turns on. Every rc sets the recommended always-on flags
-(`independent_flags`, which presume no endpoint) as plain lines at its top:
-they are wanted on every call, whatever else is on. Beyond that only a machine's rc enables anything; a
-checkout's is shared by every host that builds the repository, so its endpoints
-stay behind a `--config` until something names one. A machine's rc enables the
-CI host's group and then whichever endpoints `--remote` selects, so a plain
-`bazel build` on CI is cached and reports without naming a `--config`.
+What an rc turns on. Only a machine's rc enables anything; a checkout's is
+shared by every host that builds the repository, so it stays inert until a
+`--config` names something. A machine's rc enables the CI host's group and then
+whichever endpoints `--remote` selects, so a plain `bazel build` on CI is cached
+and reports without naming a `--config`. Flags that need no Aspect service are
+the repository's to set, so no rc sets any.
 
 Reusing the checkout's sections. On CI the checkout usually carries its own
 generated rc, imported from its `.bazelrc` by `try-import` or a hand-written
@@ -140,7 +139,6 @@ output is supported — there is no stdout mode.
 load("./private/lib/aspect_endpoint_auth.axl", "can_authenticate")
 load(
     "./private/lib/aspect_flags.axl",
-    "independent_flags",
     "omit_flags",
     "protected_omissions",
     "runner_exec_log_path",
@@ -490,7 +488,6 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     bazel_version = ctx.bazel.version()
     startup_flags = omit_flags(startup_flags, omitted)
-    always_on_flags = _resolve(ctx, omit_flags(independent_flags(), omitted), bazel_version)
     configs = [
         RcConfig(name = c.name, source = c.source, comment = c.comment, flags = _resolve(ctx, omit_flags(c.flags, omitted), bazel_version))
         for c in configs
@@ -508,7 +505,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not kept:
         header = RUNNER_HEADER if on_runner else (HOME_HEADER if home_mode else GENERATED_HEADER)
         sections = command_sections(bazel_version)
-        _write(ctx, paths.output, render_bazelrc(startup_flags, enable_lines(enabled, sections), sections, configs, header = header, always_on_flags = always_on_flags))
+        _write(ctx, paths.output, render_bazelrc(startup_flags, enable_lines(enabled, sections), sections, configs, header = header))
     written.insert(0, paths.output)
     verb = "Kept" if kept else "Wrote"
 
@@ -613,14 +610,14 @@ _BAZELRC_ARGS = {
     ),
     "omit_bazel_flags": args.string_list(
         long = "omit-bazel-flag",
-        description = "A Bazel flag this rc would otherwise set that you do not want, named as Aspect spells it (e.g. --omit-bazel-flag=--heap_dump_on_oom; a value after `=` is ignored). Repeat for several. Set it once per repo in config.axl via ctx.tasks[\"setup/bazelrc\"].args.omit_bazel_flags. Endpoints, credentials, and the runner's output paths cannot be omitted. Tasks have their own knob, --bazel-flags:omit.",
+        description = "A Bazel flag this rc would otherwise set that you do not want, named as Aspect spells it (e.g. --omit-bazel-flag=--remote_timeout; a value after `=` is ignored). Repeat for several. Set it once per repo in config.axl via ctx.tasks[\"setup/bazelrc\"].args.omit_bazel_flags. Endpoints, credentials, and the runner's output paths cannot be omitted. Tasks have their own knob, --bazel-flags:omit.",
     ),
 }
 
 bazelrc = task(
     group = ["setup"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Off CI the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. On CI the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, never committed, so nothing of this machine's lands in a checkout a job may commit from. That is --home's `auto`; --home=false writes the checkout's rc on CI even so. The recommended always-on flags are set unconditionally at the top of every rc; every other flag sits in a named `--config` group — `aspect-cache`, `aspect-bes`, `aspect-exec-log`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that adds a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the tuning its endpoints justify: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Off CI the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. On CI the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, never committed, so nothing of this machine's lands in a checkout a job may commit from. That is --home's `auto`; --home=false writes the checkout's rc on CI even so. Every flag sits in a named `--config` group — `aspect-cache`, `aspect-bes`, `aspect-exec-log`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that adds a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the tuning its endpoints justify: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
     implementation = _bazelrc_impl,
     args = _BAZELRC_ARGS,
 )

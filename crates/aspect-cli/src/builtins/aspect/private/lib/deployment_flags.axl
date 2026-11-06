@@ -96,7 +96,7 @@ and the `--build_metadata` the Web UI reads — the same flags the
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
-load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "independent_flags", "temp_exec_log_flags")
+load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "temp_exec_log_flags")
 load("./deployment_rc.axl", "credential_helper_flag")
 load("./environment.axl", "detect_ci", "env_names_deployment", "info")
 
@@ -419,13 +419,10 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     )
 
 def deployment_tuning_flags(flags: DeploymentFlags) -> list:
-    """The `aspect_flags.axl` flags the wired capabilities justify: the
-    endpoint-independent ones plus cache tuning, BES enrichment, and the
-    keepalive as applicable. Empty when nothing was wired. Public so
-    `deployment_flags_test.axl` can assert the pairing."""
-    if not flags.wired:
-        return []
-    return independent_flags() + endpoint_flags(
+    """The `aspect_flags.axl` flags the wired capabilities justify: cache
+    tuning, BES enrichment, and the keepalive as applicable. Empty when nothing
+    was wired. Public so `deployment_flags_test.axl` can assert the pairing."""
+    return endpoint_flags(
         cache = "cache" in flags.wired,
         bes = "bes" in flags.wired,
         exec = "exec" in flags.wired,

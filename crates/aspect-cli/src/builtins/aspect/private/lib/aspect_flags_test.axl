@@ -1,5 +1,5 @@
 """Unit tests for `aspect_flags.axl`: which catalog flags each endpoint justifies
-(`independent_flags` / `endpoint_flags`), the `env_flags` / `runner_flags` /
+(`endpoint_flags`), the `env_flags` / `runner_flags` /
 `runner_diagnostics_flags` compositions and the runner pieces the rc groups are
 assembled from, `apply_output_base_suffix`, the opt-out (`omit_flags`,
 `protected_omissions`), and how a task takes them (`add_task_flags`,
@@ -21,7 +21,6 @@ load(
     "env_task_flags",
     "exec_log_flags",
     "flag_name",
-    "independent_flags",
     "omit_flags",
     "protected_omissions",
     "runner_bes_flags",
@@ -59,16 +58,13 @@ _RUNNER_ONLY_FRAGMENTS = ["--repository_cache=", "--output_base=", "--output_use
 
 _CACHE_TUNING = ["--remote_accept_cached", "--remote_timeout=3600", "--remote_retries=360"]
 _BES_ENRICHMENT = ["--generate_json_trace_profile", "--noslim_profile", "--experimental_profile_include_target_label", "--experimental_profile_include_primary_output", "--legacy_important_outputs"]
-_INDEPENDENT = ["--heap_dump_on_oom", "--experimental_repository_cache_hardlinks"]
 _CHANNEL = ["--grpc_keepalive_time=330s", "--grpc_keepalive_timeout=30s"]
 
 _WITH_BES = WorkflowsEnvironment(build_events = BuildEvents(backend = "grpcs://b"))
 
 def _test_endpoint_flags_follow_endpoints(_ctx):
-    # No endpoint: nothing. The endpoint-independent flags are a separate group
-    # so each surface places them once.
+    # No endpoint: nothing.
     _eq("nothing wired", endpoint_flags(cache = False, bes = False), [])
-    _eq("independent", sorted(_texts(independent_flags())), sorted(_INDEPENDENT))
 
     # A cache brings its tuning and the channel keepalive, nothing BES-shaped.
     cache = endpoint_flags(cache = True, bes = False)
@@ -90,8 +86,9 @@ def _test_endpoint_flags_follow_endpoints(_ctx):
     for want in _CACHE_TUNING + _CHANNEL:
         _has("exec has " + want, exec_only, want)
 
-    # Every catalog entry is reachable between the two groups.
-    _eq("catalog covered", len(independent_flags()) + len(endpoint_flags(True, True, True)), len(CATALOG))
+    # Every catalog entry presumes an endpoint: a flag that needs no Aspect
+    # service is the repository's to set.
+    _eq("catalog covered", len(endpoint_flags(True, True, True)), len(CATALOG))
 
 def _test_env_flags_follow_the_environment(_ctx):
     # Nothing in the env: nothing unconditional, so an imported rc is inert.
@@ -103,7 +100,6 @@ def _test_env_flags_follow_the_environment(_ctx):
     _has("remote_cache", flags, "--remote_cache=unix:///x/grpc")
     _has("bytestream prefix", flags, "--remote_bytestream_uri_prefix=aw-remote.example")
     _has("cache tuning", flags, "--remote_timeout=3600")
-    _lacks("independent flags are not the env's", flags, "--heap_dump_on_oom")
     for frag in _RUNNER_ONLY_FRAGMENTS:
         _lacks("no runner-only " + frag, flags, frag)
 
@@ -115,7 +111,7 @@ def _test_env_task_flags(_ctx):
     # Off a runner a hand-set env gets what a runner's task gets minus its mounts;
     # a silent env gets nothing at all.
     env = WorkflowsEnvironment(remote_cache = RemoteCache(endpoint = "grpc://c"), build_events = BuildEvents(backend = "grpc://b"))
-    _eq("independent + env", env_task_flags(env), independent_flags() + env_flags(env))
+    _eq("env", env_task_flags(env), env_flags(env))
     for fragment in _RUNNER_ONLY_FRAGMENTS:
         _lacks("no runner-only " + fragment, env_task_flags(env), fragment)
     _eq("silent env", env_task_flags(WorkflowsEnvironment(ci = CI(host = "github"))), [])
@@ -128,9 +124,7 @@ def _test_runner_flags(_ctx):
     )
     startup, build = runner_flags(env, "/work/repo")
 
-    # The independent flags, the env's tuning, the Workflows-cache specifics, and
-    # the repository cache.
-    _has("independent", build, "--heap_dump_on_oom")
+    # The env's tuning, the Workflows-cache specifics, and the repository cache.
     _has("tuning", build, "--remote_timeout=3600")
     _has("enrichment", build, "--noslim_profile")
     _has("repository cache", build, "--repository_cache=/mnt/caches/repository")
@@ -184,7 +178,7 @@ def _test_runner_pieces(_ctx):
     cache = runner_cache_flags(env)
     _has("repository cache", cache, "--repository_cache=/mnt/r")
     _has("disk cache reset", cache, "--disk_cache=")
-    _eq("build = independent + env + cache", _texts(build), _texts(independent_flags() + env_flags(env) + cache))
+    _eq("build = env + cache", _texts(build), _texts(env_flags(env) + cache))
     _eq("no env cache → only the repository cache", runner_cache_flags(WorkflowsEnvironment(runner = Runner(repository_cache_dir = "/mnt/r"))), ["--repository_cache=/mnt/r"])
     _eq("cache = specifics + repository cache", cache, workflows_cache_flags(env) + runner_repository_cache_flags(env))
     _has("specifics carry the disk-cache reset", workflows_cache_flags(env), "--disk_cache=")
@@ -268,9 +262,10 @@ def _test_add_task_flags_defers_the_keepalive(_ctx):
 
     # Nothing deferring: no hook.
     plain = _fake_trait()
-    add_task_flags(plain, independent_flags())
+    direct = ["--noslim_profile", "--legacy_important_outputs"]
+    add_task_flags(plain, direct)
     _eq("no hook", plain.rc_flags, [])
-    _eq("all direct", plain.extra_flags, independent_flags())
+    _eq("all direct", plain.extra_flags, direct)
 
 def _test_unset_flags(_ctx):
     rc = _ctx.bazel.new_rc(flags = ["--remote_timeout=60", "--disk_cache="])
@@ -310,10 +305,10 @@ def _test_exec_log_flags(_ctx):
     _eq("7.3", _texts(_ctx.bazel.new_rc(flags = exec_log_flags("/x/e.zstd"), version = "7.3.2").expand(command = "test")), [])
 
 def _test_omit_flags(_ctx):
-    flags = ["--heap_dump_on_oom", "--remote_timeout=3600", ("--noremote_cache_compression", ">=8.0.0"), "--remote_cache=grpcs://c"]
+    flags = ["--legacy_important_outputs", "--remote_timeout=3600", ("--noremote_cache_compression", ">=8.0.0"), "--remote_cache=grpcs://c"]
 
     # Matched by name, with or without a value on either side; tuples included.
-    got = omit_flags(flags, ["--heap_dump_on_oom", "--remote_timeout=999", "--noremote_cache_compression"])
+    got = omit_flags(flags, ["--legacy_important_outputs", "--remote_timeout=999", "--noremote_cache_compression"])
     _eq("omitted", got, ["--remote_cache=grpcs://c"])
     _eq("untouched when nothing omitted", omit_flags(flags, []), flags)
     _eq("unknown name is a no-op", omit_flags(flags, ["--not_ours"]), flags)
@@ -322,8 +317,8 @@ def _test_omit_flags(_ctx):
     _eq("no-form is distinct", len(omit_flags(["--noslim_profile"], ["--slim_profile"])), 1)
 
 def _test_protected_omissions(_ctx):
-    _eq("allowed", protected_omissions(["--heap_dump_on_oom", "--remote_timeout"]), [])
-    _eq("blocked, as spelled", protected_omissions(["--heap_dump_on_oom", "--remote_cache=x", "--output_base"]), ["--remote_cache=x", "--output_base"])
+    _eq("allowed", protected_omissions(["--legacy_important_outputs", "--remote_timeout"]), [])
+    _eq("blocked, as spelled", protected_omissions(["--legacy_important_outputs", "--remote_cache=x", "--output_base"]), ["--remote_cache=x", "--output_base"])
 
     # Every endpoint, credential, chain, and runner-path flag the generators can
     # write is protected — otherwise an opt-out could point a build nowhere.

@@ -71,7 +71,6 @@ def _test_cloud_section(_ctx):
     _eq("chains", [f for f in flags if _texts([f])[0].startswith("--config=")], ["--config=aspect-cache", "--config=aspect-bes"])
     _lacks("no inlined tuning", flags, "--remote_timeout")
     _lacks("no inlined enrichment", flags, "--legacy_important_outputs")
-    _lacks("no host tuning", flags, "--heap_dump_on_oom")
 
     # Each section says what it wires and how it authenticates.
     _eq("comment", configs["aspect-cloud"].comment.startswith("Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN"), True)

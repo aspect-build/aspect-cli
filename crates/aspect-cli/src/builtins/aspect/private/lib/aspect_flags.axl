@@ -40,7 +40,10 @@ load("./environment.axl", "WorkflowsEnvironment", "sanitize_filename")
 
 # What a flag presumes before it is worth setting. `cache` is satisfied by a
 # remote executor as well: Bazel routes CAS/AC through `--remote_executor` when
-# no `--remote_cache` is set. `channel` is any gRPC endpoint at all.
+# no `--remote_cache` is set. `channel` is any gRPC endpoint at all. `nothing`
+# is for the tables selected wholesale rather than by endpoint; every `CATALOG`
+# entry presumes one, since a flag that needs no Aspect service is the
+# repository's to set, not ours.
 Needs = enum("nothing", "cache", "bes", "channel")
 
 InjectedFlag = record(
@@ -61,14 +64,6 @@ def _entry(flag: str, why: str, needs: str = "nothing", bazel: str = "", defers:
 
 # The tuning and reporting flags Aspect sets wherever their endpoint is wired.
 CATALOG = [
-    _entry(
-        "--heap_dump_on_oom",
-        "A heap dump when the server runs out of memory. CI OOMs cannot be reproduced interactively; the dump is the only post-mortem.",
-    ),
-    _entry(
-        "--experimental_repository_cache_hardlinks",
-        "Hardlink archives out of the repository cache instead of copying them; saves disk and time on every external fetch.",
-    ),
     _entry(
         "--remote_accept_cached",
         "Reuse cached action results; stated explicitly so a workspace rc cannot leave the cache write-only.",
@@ -224,17 +219,10 @@ def unscoped(flag):
 def _as_flag(entry: InjectedFlag):
     return (entry.flag, entry.bazel) if entry.bazel else entry.flag
 
-def independent_flags() -> list:
-    """The `CATALOG` flags that presume no endpoint. Kept apart from
-    `endpoint_flags` so each surface places them once: the head of a task's
-    injected flags, the unconditional lines at the top of the rc."""
-    return [_as_flag(e) for e in CATALOG if e.needs == Needs("nothing")]
-
 def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:
     """The `CATALOG` flags the wired endpoints justify: cache tuning with a cache
     or an executor, BES enrichment with a BES backend, channel tuning with any of
-    the three. Nothing when none is wired; `independent_flags` are separate so
-    each surface places them once."""
+    the three. Nothing when none is wired."""
     satisfied = {
         Needs("nothing"): False,
         Needs("cache"): cache or exec,
@@ -323,13 +311,13 @@ def env_flags(environment: WorkflowsEnvironment) -> list:
 
 def env_task_flags(environment: WorkflowsEnvironment) -> list:
     """The task flags a hand-set `ASPECT_WORKFLOWS_*` environment justifies off a
-    runner: the endpoint-independent flags and `env_flags`, the same set a
-    runner's task gets minus what its mounts add. Empty when the env names no
+    runner: `env_flags`, the same set a runner's task gets minus what its
+    mounts add. Empty when the env names no
     cache and no BES, so plain CI and developer machines get nothing. On a
     runner `runner_flags` covers this."""
     if environment.remote_cache == None and environment.build_events == None:
         return []
-    return independent_flags() + env_flags(environment)
+    return env_flags(environment)
 
 def runner_bes_flags(environment: WorkflowsEnvironment) -> list:
     """The BES backend the runner environment names, for vanilla `bazel` on the
@@ -419,12 +407,11 @@ def runner_startup_flags(environment: WorkflowsEnvironment, aspect_root_dir: str
 
 def runner_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
     """The full flag set the Workflows feature injects into a task on a runner:
-    the endpoint-independent flags, `env_flags`, and `runner_cache_flags` as
-    build flags, and `runner_startup_flags` as startup flags. Caller must have
+    `env_flags` and `runner_cache_flags` as build flags, and `runner_startup_flags` as startup flags. Caller must have
     verified `environment.runner != None`. Returns `(startup_flags, build_flags)`."""
     return (
         runner_startup_flags(environment, aspect_root_dir),
-        independent_flags() + env_flags(environment) + runner_cache_flags(environment),
+        env_flags(environment) + runner_cache_flags(environment),
     )
 
 _OUTPUT_BASE_FLAG_PREFIX = _OUTPUT_BASE + "="
