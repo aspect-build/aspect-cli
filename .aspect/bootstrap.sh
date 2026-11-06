@@ -29,7 +29,7 @@ if [ -z "${ASPECT_WORKFLOWS_RUNNER:-}" ] && [ "${ASPECT_HAS_API_TOKEN:-}" = "tru
     HELPER_DIR="$(mktemp -d)"
     printf '#!/bin/sh\ncd "%s" && exec "%s" "$@"\n' "${HELPER_DIR}" "$(command -v aspect)" >"${HELPER_DIR}/credential-helper"
     chmod +x "${HELPER_DIR}/credential-helper"
-    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-common --config=aspect-cache --config=aspect-bes"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-cache --config=aspect-bes"
     BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=grpcs://cache.aspect.build --bes_backend=grpcs://bes.aspect.build --bes_results_url=https://app.aspect.build/i/"
     BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --credential_helper=cache.aspect.build=${HELPER_DIR}/credential-helper --credential_helper=bes.aspect.build=${HELPER_DIR}/credential-helper"
 fi

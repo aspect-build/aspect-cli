@@ -41,10 +41,14 @@ load("./environment.axl", "WorkflowsEnvironment", "sanitize_filename")
 # What a flag presumes before it is worth setting. `cache` is satisfied by a
 # remote executor as well: Bazel routes CAS/AC through `--remote_executor` when
 # no `--remote_cache` is set. `channel` is any gRPC endpoint at all. `nothing`
-# is for the tables selected wholesale rather than by endpoint; every `CATALOG`
-# entry presumes one, since a flag that needs no Aspect service is the
-# repository's to set, not ours.
+# is for the tables selected wholesale rather than by endpoint.
 Needs = enum("nothing", "cache", "bes", "channel")
+
+# The `Needs` a `CATALOG` entry may carry: the endpoints `endpoint_flags` selects
+# by. Never `nothing` — a flag that needs no Aspect service is the repository's
+# to set, not ours.
+_CATALOG_NEED_NAMES = ["cache", "bes", "channel"]
+CATALOG_NEEDS = [Needs(n) for n in _CATALOG_NEED_NAMES]
 
 InjectedFlag = record(
     flag = field(str),
@@ -62,62 +66,71 @@ InjectedFlag = record(
 def _entry(flag: str, why: str, needs: str = "nothing", bazel: str = "", defers: bool = False) -> InjectedFlag:
     return InjectedFlag(flag = flag, why = why, needs = Needs(needs), bazel = bazel, defers = defers)
 
+def _catalog_entry(flag: str, why: str, needs: str, bazel: str = "", defers: bool = False) -> InjectedFlag:
+    """A `CATALOG` entry: `needs` is required and must be one of `CATALOG_NEEDS`,
+    failing at load otherwise, since an entry no endpoint selects would silently
+    never be set."""
+    entry = _entry(flag, why, needs = needs, bazel = bazel, defers = defers)
+    if entry.needs not in CATALOG_NEEDS:
+        fail("CATALOG entry %s: needs = %r, but must be one of %s." % (flag, needs, ", ".join(_CATALOG_NEED_NAMES)))
+    return entry
+
 # The tuning and reporting flags Aspect sets wherever their endpoint is wired.
 CATALOG = [
-    _entry(
+    _catalog_entry(
         "--remote_accept_cached",
         "Reuse cached action results; stated explicitly so a workspace rc cannot leave the cache write-only.",
         needs = "cache",
     ),
-    _entry(
+    _catalog_entry(
         "--remote_timeout=3600",
         "Bazel's 60s default fails large artifacts on slow links mid-transfer.",
         needs = "cache",
     ),
-    _entry(
+    _catalog_entry(
         "--remote_retries=360",
         "Ride out cache restarts and network blips instead of failing the build; Bazel defaults to 5.",
         needs = "cache",
     ),
-    _entry(
+    _catalog_entry(
         "--grpc_keepalive_time=330s",
         "Ping a channel that has a call pending. Bazel sends no pings by default and then ignores --grpc_keepalive_timeout. Above 5 minutes because gRPC servers by default answer more frequent pings with a too_many_pings GOAWAY, which resets the connection. A repository that knows its server allows faster pings sets its own value, which a task keeps.",
         needs = "channel",
         defers = True,
     ),
-    _entry(
+    _catalog_entry(
         "--grpc_keepalive_timeout=30s",
         "Drop and reopen a channel a load balancer or NAT silently killed, rather than hang on it until the kernel abandons the connection (~15 minutes on Linux).",
         needs = "channel",
         defers = True,
     ),
-    _entry(
+    _catalog_entry(
         "--generate_json_trace_profile",
         "The JSON trace profile the Aspect backend analyzes.",
         needs = "bes",
     ),
-    _entry(
+    _catalog_entry(
         "--noslim_profile",
         "Keep every profile event; the slim profile merges short ones and loses the per-action detail the backend needs.",
         needs = "bes",
     ),
-    _entry(
+    _catalog_entry(
         "--experimental_profile_include_target_label",
         "Attribute profile time to targets.",
         needs = "bes",
     ),
-    _entry(
+    _catalog_entry(
         "--experimental_profile_include_primary_output",
         "Tell apart the several actions of one target in the profile.",
         needs = "bes",
     ),
-    _entry(
+    _catalog_entry(
         "--experimental_profile_include_target_configuration",
         "Separate the exec- and target-configuration builds of one label in the profile.",
         needs = "bes",
         bazel = ">=8.0.0",
     ),
-    _entry(
+    _catalog_entry(
         "--legacy_important_outputs",
         "Keep `important_output` on TargetComplete events, which the Aspect Web UI reads and Bazel intends to stop emitting by default.",
         needs = "bes",
@@ -222,9 +235,8 @@ def _as_flag(entry: InjectedFlag):
 def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:
     """The `CATALOG` flags the wired endpoints justify: cache tuning with a cache
     or an executor, BES enrichment with a BES backend, channel tuning with any of
-    the three. Nothing when none is wired."""
+    the three. Nothing when none is wired. Decides each of `CATALOG_NEEDS`."""
     satisfied = {
-        Needs("nothing"): False,
         Needs("cache"): cache or exec,
         Needs("bes"): bes,
         Needs("channel"): cache or bes or exec,

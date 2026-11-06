@@ -12,6 +12,8 @@ assert the tuples carry the right constraints. Run with: aspect dev test-aspect-
 load(
     "./aspect_flags.axl",
     "CATALOG",
+    "CATALOG_NEEDS",
+    "Needs",
     "PROTECTED_FLAGS",
     "add_task_flags",
     "apply_output_base_suffix",
@@ -89,6 +91,28 @@ def _test_endpoint_flags_follow_endpoints(_ctx):
     # Every catalog entry presumes an endpoint: a flag that needs no Aspect
     # service is the repository's to set.
     _eq("catalog covered", len(endpoint_flags(True, True, True)), len(CATALOG))
+
+def _test_catalog_needs(_ctx):
+    # Every `CATALOG` entry carries one of `CATALOG_NEEDS`, never `nothing`.
+    _eq("nothing is not a catalog need", Needs("nothing") in CATALOG_NEEDS, False)
+    for e in CATALOG:
+        _eq(e.flag + " needs an endpoint", e.needs in CATALOG_NEEDS, True)
+
+    # Each need selects its entries alone: `endpoint_flags` decides every one of
+    # `CATALOG_NEEDS`, so none can be added without saying when it is wired.
+    for need, wired in [
+        (Needs("cache"), {"cache": True, "bes": False}),
+        (Needs("bes"), {"cache": False, "bes": True}),
+    ]:
+        selected = _texts(endpoint_flags(**wired))
+        for e in CATALOG:
+            if e.needs == need:
+                _eq(e.flag + " selected by " + str(wired), e.flag in selected, True)
+    channel = [e.flag for e in CATALOG if e.needs == Needs("channel")]
+    for wired in [{"cache": True, "bes": False}, {"cache": False, "bes": True}, {"cache": False, "bes": False, "exec": True}]:
+        selected = _texts(endpoint_flags(**wired))
+        for flag in channel:
+            _eq(flag + " selected by " + str(wired), flag in selected, True)
 
 def _test_env_flags_follow_the_environment(_ctx):
     # Nothing in the env: nothing unconditional, so an imported rc is inert.
@@ -332,6 +356,7 @@ def _test_protected_omissions(_ctx):
 
 _UNIT_TESTS = [
     _test_endpoint_flags_follow_endpoints,
+    _test_catalog_needs,
     _test_env_flags_follow_the_environment,
     _test_env_task_flags,
     _test_runner_flags,
