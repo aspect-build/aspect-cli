@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -eu
 
-# Skip if bazel is not installed
-if ! command -v bazel >/dev/null 2>&1; then
-  echo "bazel not found, skipping"
+# Only bootstrap on Aspect Workflows runners; the pipeline-upload agent has bazel on PATH too.
+if [ -z "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
+  echo "Not an Aspect Workflows runner, skipping"
   exit 0
 fi
 
