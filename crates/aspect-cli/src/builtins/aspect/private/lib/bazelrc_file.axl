@@ -64,6 +64,9 @@ RcConfig = record(
 # import reads as ours next to whatever else the file holds.
 IMPORT_COMMENT = "# Aspect's rc for vanilla `bazel`, maintained by `aspect setup bazelrc`."
 
+# The comment above the unconditional tuning lines `render_bazelrc` writes.
+TUNING_COMMENT = "Tuning that presumes no endpoint."
+
 # What `ensure_import` did to the user rc.
 ImportAction = enum("created", "unchanged", "prepended")
 
@@ -152,10 +155,12 @@ def command_sections(bazel_version: str | None) -> list:
         return ["common"]
     return _PRE_COMMON_COMMANDS
 
-def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: list, configs: list, header: str = GENERATED_HEADER) -> str:
-    """Render the rc: `header`, a `startup` line per startup flag, the
-    `--config` lines that turn groups on, then each `RcConfig` in `configs` as a
-    commented `<section>:<name>` group.
+def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: list, configs: list, header: str = GENERATED_HEADER, tuning_flags: list = []) -> str:
+    """Render the rc: `header`, a `startup` line per startup flag,
+    `tuning_flags` as plain lines under `TUNING_COMMENT` (once per entry in
+    `command_sections`, set whatever else is or is not enabled), the
+    `--config` lines that turn groups on, then each `RcConfig` in `configs` as
+    a commented `<section>:<name>` group.
 
     `enable_lines` pairs each enabled group with the command sections that
     enable it (`rc_groups.enable_lines`), since a group carrying an endpoint is
@@ -168,14 +173,24 @@ def render_bazelrc(startup_flags: list, enable_lines: list, command_sections: li
     lines = [
         header,
         "# Configures vanilla `bazel` calls to use Aspect services and recommended optimizations.",
-        "# Flags are grouped by what they presume; the groups that apply here are enabled at the",
-        "# top, the rest reached by chaining or by name. A group naming an endpoint is enabled for",
-        "# `build`, which Bazel applies to test/run/coverage/cquery/aquery but not to `query`.",
+        "# Tuning that presumes no endpoint is always on. Every other flag is grouped by what it",
+        "# presumes: the groups that apply here are enabled at the top, the rest reached by chaining",
+        "# or by name. A group naming an endpoint is enabled for `build`, which Bazel applies to",
+        "# test/run/coverage/cquery/aquery but not to `query`.",
         "# `bazel build --announce_rc` shows which group set what.",
         "",
     ]
     for flag in startup_flags:
         lines.append("startup " + flag_text(flag))
+    if tuning_flags:
+        if startup_flags:
+            lines.append("")
+        lines.append("# " + TUNING_COMMENT)
+        for flag in tuning_flags:
+            for section in command_sections:
+                lines.append(section + " " + flag_text(flag))
+        if enable_lines:
+            lines.append("")
     for (group, sections) in enable_lines:
         for section in sections:
             lines.append(section + " --config=" + group)
@@ -243,36 +258,19 @@ def imports_rc(content: str | None, path: str) -> bool:
             return True
     return False
 
-def config_chains(content: str | None, name: str) -> list:
-    """The `--config` names section `name` chains to in `content`, in order, once
-    each — what enabling `name` also enables, so a caller does not enable it a
-    second time and have Bazel warn that the config was expanded twice."""
-    chains = []
-    for raw in (content or "").split("\n"):
-        parts = raw.strip().split()
-        if len(parts) < 2 or raw.strip().startswith("#") or ":" not in parts[0]:
-            continue
-        if parts[0].split(":", 1)[1] != name:
-            continue
-        for flag in parts[1:]:
-            if is_config_chain(flag) and flag[len("--config="):] not in chains:
-                chains.append(flag[len("--config="):])
-    return chains
-
-def ensure_import(existing: str | None, line: str) -> ImportResult:
-    """The rc content with `line` present exactly once: unchanged when it is
-    already there, otherwise placed at the top under `IMPORT_COMMENT`, a blank
-    line apart from whatever the file already holds. At the top so the file's
-    own lines come after the imported ones and win where they disagree — Bazel
-    takes the last value of a flag — which is how a repository overrides a
-    recommendation, say a shorter `--remote_timeout`.
-    A file that already pulls the rc in, by `try-import` or a hand-written
-    `import`, is left alone: a second import would read every section twice.
-    `None`/empty `existing` is a new file."""
-    block = IMPORT_COMMENT + "\n" + line + "\n"
+def ensure_import(existing: str | None, imported: str) -> ImportResult:
+    """The rc content pulling in `imported` exactly once: unchanged when it
+    already does, by `try-import` or a hand-written `import` (a second line
+    would read every section twice), otherwise with `import_line(imported)`
+    placed at the top under `IMPORT_COMMENT`, a blank line apart from whatever
+    the file already holds. At the top so the file's own lines come after the
+    imported ones and win where they disagree — Bazel takes the last value of a
+    flag — which is how a repository overrides a recommendation, say a shorter
+    `--remote_timeout`. `None`/empty `existing` is a new file."""
+    block = IMPORT_COMMENT + "\n" + import_line(imported) + "\n"
     if not existing:
         return ImportResult(content = block, action = ImportAction("created"))
-    if imports_rc(existing, line.split(" ", 1)[1]):
+    if imports_rc(existing, imported):
         return ImportResult(content = existing, action = ImportAction("unchanged"))
     content = block + ("\n" + existing.lstrip("\n") if existing.strip() else "")
     return ImportResult(content = content, action = ImportAction("prepended"))

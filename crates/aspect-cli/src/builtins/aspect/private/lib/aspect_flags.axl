@@ -227,7 +227,7 @@ def _as_flag(entry: InjectedFlag):
 def independent_flags() -> list:
     """The `CATALOG` flags that presume no endpoint. Kept apart from
     `endpoint_flags` so each surface places them once: the head of a task's
-    injected flags, the `aspect-common` group of the rc."""
+    injected flags, the unconditional lines at the top of the rc."""
     return [_as_flag(e) for e in CATALOG if e.needs == Needs("nothing")]
 
 def endpoint_flags(cache: bool, bes: bool, exec: bool = False) -> list:

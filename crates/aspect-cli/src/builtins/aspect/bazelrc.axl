@@ -55,12 +55,21 @@ how a recommendation is overridden.
 Whatever the importing rc already holds is kept, below the import, where
 Bazel's last-wins gives it the final say over what it imports.
 
-What a machine's rc turns on. Only a machine's rc enables anything; a checkout's
-is shared by every host that builds the repository, so it stays inert until a
-`--config` names something. A machine's enables the tuning that presumes no
-endpoint — `aspect-common` and the CI host's group — and then whichever endpoints
-`--remote` selects, so a plain `bazel build` on CI is cached and reports without
-naming a `--config`.
+What an rc turns on. Every rc sets the tuning that presumes no endpoint
+(`independent_flags`) as plain lines at its top: it is wanted on every call,
+whatever else is on. Beyond that only a machine's rc enables anything; a
+checkout's is shared by every host that builds the repository, so its endpoints
+stay behind a `--config` until something names one. A machine's rc enables the
+CI host's group and then whichever endpoints `--remote` selects, so a plain
+`bazel build` on CI is cached and reports without naming a `--config`.
+
+Reusing the checkout's sections. On CI the checkout usually carries its own
+generated rc, imported from its `.bazelrc` by `try-import` or a hand-written
+`import`. A machine's rc then enables that rc's deployment section by name
+rather than restating it: Bazel merges every definition of a `--config` name
+across rc files, so a second definition would apply each flag twice and let the
+machine's values override the ones the repository committed. Where the checkout
+lacks a section the machine's rc needs, it carries its own definitions instead.
 
 `--remote` is the grammar `aspect build --remote` already uses: bare for the
 cache and BES, `exec` to add remote execution, `no-cache` / `no-bes` / `no-exec`
@@ -131,6 +140,7 @@ output is supported — there is no stdout mode.
 load("./private/lib/aspect_endpoint_auth.axl", "can_authenticate")
 load(
     "./private/lib/aspect_flags.axl",
+    "independent_flags",
     "omit_flags",
     "protected_omissions",
     "runner_exec_log_path",
@@ -147,10 +157,8 @@ load(
     "RUNNER_HEADER",
     "RcConfig",
     "command_sections",
-    "config_chains",
     "defined_configs",
     "ensure_import",
-    "import_line",
     "imports_rc",
     "is_config_chain",
     "prune_configs",
@@ -161,7 +169,7 @@ load(
 load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "parse_remote")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
-load("./private/lib/rc_groups.axl", "GROUP_COMMON", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups", "section_chains")
+load("./private/lib/rc_groups.axl", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups")
 
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
 
@@ -199,31 +207,36 @@ def _workspace(ctx: TaskContext) -> str:
         ctx.std.process.exit(1, "No Bazel workspace above %s (no MODULE.bazel, REPO.bazel, or WORKSPACE), so there is no .bazelrc for vanilla bazel to read. Run this from inside the workspace, or pass --output=<path> and --import-into=<rc>." % ctx.std.env.current_dir())
     return root
 
-def _repo_rc(ctx: TaskContext) -> str | None:
-    """The checkout's own generated rc, or `None` where it carries none.
-
-    A checkout that carries its own generated rc — its `.bazelrc` imports
-    `%workspace%/.aspect/bazelrc`, by `try-import` or `import`, and that file is
-    there — has already said what `bazel` can reach here, in a file the
-    repository committed and is free to have edited. Both halves are required: a
-    `try-import` whose file is missing configures nothing.
-
-    What the caller enables is read from this file rather than assumed. A
-    machine's rc that merely *enables* one of its sections adds nothing to
-    override, which is how the two rcs stay out of each other's way — but Bazel
-    fails outright on a `--config` no rc defines, so enabling a section has to be
-    founded on knowing it is there. Missing an `import` here is costly the other
-    way: the machine's rc then redefines every section the checkout's still
-    defines, and Bazel merges the two, so each flag appears twice."""
+def _repo_defined_configs(ctx: TaskContext) -> list:
+    """The `--config` sections this checkout's own generated rc defines, or `[]`
+    where it carries none: where `.aspect/bazelrc` is missing, or the root
+    `.bazelrc` does not pull it in by `try-import` or `import`. Read from the
+    file rather than assumed, since Bazel fails outright on a `--config` no rc
+    defines."""
     workspace = _find_workspace(ctx)
     if not workspace:
-        return None
+        return []
     importer = workspace + "/" + IMPORTING_RC
     if not ctx.std.fs.exists(workspace + "/" + GENERATED_RC) or not ctx.std.fs.exists(importer):
-        return None
+        return []
     if not imports_rc(ctx.std.fs.read_to_string(importer), "%workspace%/" + GENERATED_RC):
-        return None
-    return ctx.std.fs.read_to_string(workspace + "/" + GENERATED_RC)
+        return []
+    return defined_configs(ctx.std.fs.read_to_string(workspace + "/" + GENERATED_RC))
+
+def _reused_sections(ctx: TaskContext, default, spec, repo_defines: list) -> list | None:
+    """The checkout's deployment sections a machine's rc enables by name in
+    place of its own (the module docstring's "Reusing the checkout's
+    sections"), or `None` where the checkout lacks one of the sections `spec`
+    wants and the machine's rc must carry its own. Empty where `spec` wants nothing but the
+    checkout defines the default deployment's section, so the machine's rc
+    still restates none of it."""
+    wanted = _sections_to_enable(default, spec)
+    if all([w in repo_defines for w in (wanted or [config_name(default)])]):
+        return wanted
+    if wanted:
+        info(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
+                      ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
+    return None
 
 def _create_generated_dir(ctx: TaskContext, dir: str, gitignore: bool) -> list:
     """Create `dir`, the execution log's parent, which Bazel will not create
@@ -372,8 +385,8 @@ def _credential_helper(ctx: TaskContext) -> str:
 
 def _sections(deployments: list, helper: str, groups: list) -> list:
     """The `--config` sections for this machine's configured deployments, each
-    chaining `section_chains(groups)` first and, with a BES, `bes_chains(groups)`."""
-    return deployment_configs(deployments, helper, section_chains(groups), bes_chains(groups))
+    chaining, with a BES, `bes_chains(groups)`."""
+    return deployment_configs(deployments, helper, bes_chains(groups))
 
 def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     omitted = ctx.args.omit_bazel_flags
@@ -435,26 +448,14 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
         info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
                       (default.name, login_hint(default), config_name(default)))
 
-    # A checkout that defines its own sections is enabled rather than restated,
-    # so nothing here can override what the repository edited. Not where the
-    # endpoints are this machine's: a runner's services are nowhere in a
-    # checkout, and are meant to win.
-    repo_rc = None if on_runner or env_deployment or ctx.args.output else _repo_rc(ctx)
-    repo_defines = defined_configs(repo_rc)
-    chain_to_repo = []
-    if home_mode and default != None and repo_defines:
-        wanted = _sections_to_enable(default, spec)
-        if GROUP_COMMON in repo_defines and all([w in repo_defines for w in wanted]):
-            # A generated section already chains `aspect-common`; enabling it
-            # beside one would expand it twice, which Bazel warns about.
-            common_chained = wanted and all([GROUP_COMMON in config_chains(repo_rc, w) for w in wanted])
-            chain_to_repo = ([] if common_chained else [GROUP_COMMON]) + wanted
-        elif wanted:
-            info(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
-                          ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
+    # A runner's endpoints are its own and meant to win, so never reuse there.
+    reused = None
+    if home_mode and default != None and not (on_runner or env_deployment or ctx.args.output):
+        repo_defines = _repo_defined_configs(ctx)
+        if repo_defines:
+            reused = _reused_sections(ctx, default, spec, repo_defines)
+    chain_to_repo = reused != None
 
-    # Nothing to fill where the checkout's own sections carry the endpoints and
-    # this rc only names them.
     endpoint_env = environment
     auth = {}
     if default != None and not chain_to_repo:
@@ -472,11 +473,9 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     (groups, enabled) = _groups(ctx, endpoint_env, on_runner, machine_rc, spec.on, auth, paths.exec_log)
     if chain_to_repo:
-        # `aspect-common` and the endpoint groups are the checkout's; keep only
-        # the host group, which a committed rc never holds, and enable what the
-        # checkout defines alongside it.
+        # Only the host group is this machine's; a committed rc never holds one.
         groups = [g for g in groups if g.name in HOST_GROUPS.values()]
-        enabled = [g.name for g in groups] + chain_to_repo
+        enabled = [g.name for g in groups] + reused
     sections = [] if env_deployment or chain_to_repo else _sections(deployments, helper, groups)
 
     # A backstop: the built-in Aspect Cloud entry states its own endpoints, so
@@ -491,6 +490,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     bazel_version = ctx.bazel.version()
     startup_flags = omit_flags(startup_flags, omitted)
+    tuning_flags = _resolve(ctx, omit_flags(independent_flags(), omitted), bazel_version)
     configs = [
         RcConfig(name = c.name, source = c.source, comment = c.comment, flags = _resolve(ctx, omit_flags(c.flags, omitted), bazel_version))
         for c in configs
@@ -508,14 +508,14 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not kept:
         header = RUNNER_HEADER if on_runner else (HOME_HEADER if home_mode else GENERATED_HEADER)
         sections = command_sections(bazel_version)
-        _write(ctx, paths.output, render_bazelrc(startup_flags, enable_lines(enabled, sections), sections, configs, header = header))
+        _write(ctx, paths.output, render_bazelrc(startup_flags, enable_lines(enabled, sections), sections, configs, header = header, tuning_flags = tuning_flags))
     written.insert(0, paths.output)
     verb = "Kept" if kept else "Wrote"
 
     import_result = None
     if paths.importer:
         existing = ctx.std.fs.read_to_string(paths.importer) if ctx.std.fs.exists(paths.importer) else None
-        import_result = ensure_import(existing, import_line(paths.imported))
+        import_result = ensure_import(existing, paths.imported)
         if import_result.action != ImportAction("unchanged"):
             _write(ctx, paths.importer, import_result.content)
 
@@ -620,7 +620,7 @@ _BAZELRC_ARGS = {
 bazelrc = task(
     group = ["setup"],
     summary = "Write a Bazel rc that points vanilla `bazel` calls at Aspect's remote services and recommended optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Off CI the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. On CI the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, never committed, so nothing of this machine's lands in a checkout a job may commit from. That is --home's `auto`; --home=false writes the checkout's rc on CI even so. Every flag sits in a named `--config` group — `aspect-common`, `aspect-cache`, `aspect-bes`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables at the top the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that is the recommended tuning plus a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the common and CI-host tuning with it: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same configuration that `aspect <task>` injects. Off CI the rc goes to `<workspace>/.aspect/bazelrc` and the workspace `.bazelrc` gains `try-import %workspace%/.aspect/bazelrc` at its top under a comment, added once, so the repository's own lines override — commit both. On CI the same pair is written under the home directory instead (`~/.aspect/bazelrc`, imported by `~/.bazelrc`): the machine's own rc, never committed, so nothing of this machine's lands in a checkout a job may commit from. That is --home's `auto`; --home=false writes the checkout's rc on CI even so. Tuning that presumes no endpoint is set unconditionally at the top of every rc; every other flag sits in a named `--config` group — `aspect-cache`, `aspect-bes`, `aspect-exec-log`, `aspect-<ci host>`, `aspect-runner`, and the opt-in `aspect-exec` — and a machine's rc enables the groups that apply on this host (`bazel build --announce_rc` shows which group set what). On CI that is the recommended tuning plus a remote cache and BES — the runner's own where the `ASPECT_WORKFLOWS_*` environment names them, the default deployment's otherwise — while remote execution waits to be named, since a cluster may serve it where most jobs still want their actions local. --remote picks among them in the same grammar as `aspect build --remote` (bare, `exec`, `no-cache` / `no-bes` / `no-exec`, `none`); its default, `auto`, is that CI behavior and nothing off CI. Deployment sections let a call name a deployment other than the default, each bringing the tuning its endpoints justify: `--config=aspect-cloud` for Aspect Cloud's remote cache + BES, `--config=aspect-<name>` for a configured deployment (`aspect auth status`), and `--config=aspect-<name>-exec` to add its remote execution — authenticated through the `aspect get` credential helper. No section names the default deployment, which `aspect auth use` could change under a committed file. `aspect ci bazelrc` is an alias.",
     implementation = _bazelrc_impl,
     args = _BAZELRC_ARGS,
 )

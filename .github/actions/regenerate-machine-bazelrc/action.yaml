@@ -4,7 +4,7 @@ description: |
   project, examples/large_bes).
 
   On a GitHub-hosted runner, setup-aspect generates `~/.aspect/bazelrc` from
-  this checkout. That rc only *enables* aspect-common and aspect-cloud, whose
+  this checkout. That rc only *enables* sections such as aspect-cloud, whose
   definitions are in the checkout's own committed rc, so `bazel` in any other
   workspace fails on a `--config` nothing there defines. Regenerating it from
   outside any workspace leaves it carrying its own definitions, valid in both.

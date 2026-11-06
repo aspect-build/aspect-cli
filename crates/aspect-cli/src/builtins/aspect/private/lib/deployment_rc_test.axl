@@ -76,21 +76,21 @@ def _test_cloud_section(_ctx):
     # Each section says what it wires and how it authenticates.
     _eq("comment", configs["aspect-cloud"].comment.startswith("Aspect Cloud: remote cache + BES; auth via ASPECT_API_TOKEN"), True)
 
-def _test_host_groups_chained_first(_ctx):
-    # The rc that carries sections enables nothing, so every section opens by
-    # chaining what the env shape would have enabled; aliases chain a section.
-    configs = _by_name(deployment_configs([_SILO, _summary("e", exec = "exec.e")], _HELPER, host_groups = ["aspect-common", "aspect-github-actions"]))
-    _eq("base opens with host groups", configs["aspect-silo-gcp"].flags[:2], ["--config=aspect-common", "--config=aspect-github-actions"])
-    _eq("exec chains its base only", configs["aspect-silo-gcp-exec"].flags[0], "--config=aspect-silo-gcp")
-    _lacks("exec does not repeat them", configs["aspect-silo-gcp-exec"].flags, "--config=aspect-common")
-    _eq("standalone exec opens with them", configs["aspect-e-exec"].flags[:3], ["--config=aspect-common", "--config=aspect-github-actions", "--config=aspect-cache"])
+def _test_sections_chain_only_endpoint_tuning(_ctx):
+    # A section chains nothing that presumes no endpoint: that tuning is plain
+    # lines and the host group is enabled by the rc that defines it, so naming a
+    # section never expands either a second time.
+    configs = _by_name(deployment_configs([_SILO, _summary("e", exec = "exec.e")], _HELPER))
+    chains = lambda name: [f for f in _texts(configs[name].flags) if f.startswith("--config=")]
+    _eq("base chains its endpoints' tuning", chains("aspect-silo-gcp"), ["--config=aspect-cache", "--config=aspect-bes"])
+    _eq("exec chains its base only", chains("aspect-silo-gcp-exec"), ["--config=aspect-silo-gcp"])
+    _eq("standalone exec chains the cache tuning", chains("aspect-e-exec"), ["--config=aspect-cache"])
 
     # A BES-wired section chains the groups the rc defines for a BES, so the
     # execution log rides along where the rc has one and is absent where not.
     with_log = _by_name(deployment_configs([_CLOUD], _HELPER, bes_groups = ["aspect-bes", "aspect-exec-log"]))["aspect-cloud"].flags
     _eq("bes chains", [f for f in with_log if _texts([f])[0] in ["--config=aspect-bes", "--config=aspect-exec-log"]], ["--config=aspect-bes", "--config=aspect-exec-log"])
     _lacks("default chains bes alone", deployment_configs([_CLOUD], _HELPER)[0].flags, "exec-log")
-    _eq("none by default", [f for f in deployment_configs([_SILO], _HELPER)[0].flags if f == "--config=aspect-common"], [])
 
 def _test_exec_section(_ctx):
     configs = _by_name(deployment_configs([_SILO], _HELPER))
@@ -206,7 +206,7 @@ def _test_deployment_group_auth(_ctx):
 _UNIT_TESTS = [
     _test_config_name,
     _test_cloud_section,
-    _test_host_groups_chained_first,
+    _test_sections_chain_only_endpoint_tuning,
     _test_exec_section,
     _test_partial_deployments,
     _test_no_default_alias,
