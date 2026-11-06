@@ -543,6 +543,9 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       # test_large_bes builds examples/large_bes, a second workspace.
       - uses: ./.github/actions/regenerate-machine-bazelrc
+      # GitHub-hosted runners drop gRPC connections silently; at aspect-cloud's 330s a dead one stalls the BES close ~6 min.
+      - name: Detect dead gRPC channels within a minute
+        run: echo 'build --grpc_keepalive_time=30s' >> ~/.bazelrc
       - uses: ./.github/actions/build-dev-launcher
         with:
           task-name: axl-tests-gha-bootstrap
