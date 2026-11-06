@@ -311,7 +311,7 @@ fn unconfigured_cmd(home: &Path, cwd: &Path, ci: bool, args: &[&str]) -> Command
 }
 
 /// The `--config=<group>` names the rc turns on, whichever command section
-/// enables them: the endpointless tuning under `common`, the groups carrying an
+/// enables them: the endpoint-free groups under `common`, the groups carrying an
 /// endpoint under `build`, which Bazel applies to build-like commands but not to
 /// `query` (see `rc_groups.enable_sections`).
 fn enabled_groups(rc: &str) -> Vec<&str> {
@@ -777,7 +777,7 @@ fn a_checkout_that_defines_its_own_sections_is_enabled_not_restated() {
     );
 }
 
-/// A checkout rc generated while the endpoint-free tuning was still an
+/// A checkout rc generated while the always-on flags were still an
 /// `aspect-common` group, chained from `aspect-cloud`: the machine's rc enables
 /// the section alone, so the group is expanded once and Bazel does not warn.
 #[test]
@@ -1062,7 +1062,7 @@ fn a_checkout_rc_enables_nothing_even_on_ci() {
     assert_eq!(enabled_groups(&rc), Vec::<&str>::new(), "in:\n{rc}");
     assert!(
         rc.lines().any(|l| l == "common --heap_dump_on_oom") && !rc.contains("aspect-common"),
-        "the endpoint-free tuning is plain lines, not a group:\n{rc}"
+        "the always-on flags are plain lines, not a group:\n{rc}"
     );
     assert!(
         !rc.contains("aspect-github-actions"),
@@ -1076,10 +1076,10 @@ fn a_checkout_rc_enables_nothing_even_on_ci() {
     );
 }
 
-/// The endpoint-free tuning lines go through the same `--omit-bazel-flag`
+/// The always-on lines go through the same `--omit-bazel-flag`
 /// filter as the groups' flags.
 #[test]
-fn an_omitted_tuning_flag_is_not_written() {
+fn an_omitted_always_on_flag_is_not_written() {
     let home = tempfile::tempdir().expect("temp home");
     let cwd = tempfile::tempdir().expect("temp cwd");
 
@@ -1096,7 +1096,7 @@ fn an_omitted_tuning_flag_is_not_written() {
     assert!(
         rc.lines()
             .any(|l| l == "common --experimental_repository_cache_hardlinks"),
-        "the rest of the tuning stays in:\n{rc}"
+        "the other always-on flag stays in:\n{rc}"
     );
 }
 
@@ -1113,7 +1113,7 @@ fn home_mode_enables_the_endpointless_tuning_and_says_the_files_are_this_machine
     let rc = read(&home.path().join(".aspect/bazelrc"));
     assert!(
         rc.lines().any(|l| l == "common --heap_dump_on_oom"),
-        "the endpointless tuning should be on for every call in:\n{rc}"
+        "the always-on flags should be on for every call in:\n{rc}"
     );
     assert!(
         enabled_under(&rc, "aspect-cloud").is_none(),

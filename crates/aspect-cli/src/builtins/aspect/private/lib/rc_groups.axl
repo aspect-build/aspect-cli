@@ -6,9 +6,9 @@ file. The rc uses that to say what it does in Bazel's own vocabulary: each flag
 sits in the group named for what it presumes, the groups that apply on this host
 are enabled at the top, and `--announce_rc` names the group every flag came from.
 Two kinds of flag sit outside any group: the startup options, since Bazel gives
-them no `--config`, and the tuning that presumes no endpoint
-(`independent_flags`), which every rc sets unconditionally as plain lines at
-its top (`bazelrc_file.render_bazelrc`), being wanted whatever else is on.
+them no `--config`, and the recommended always-on flags (`independent_flags`,
+which presume no endpoint), which every rc sets unconditionally as plain lines
+at its top (`bazelrc_file.render_bazelrc`).
 
     aspect-cache      the cache — its endpoint where the env names one — and the tuning a cache justifies
     aspect-bes        the BES — its endpoint where the env names one — and the tuning a BES justifies
@@ -176,11 +176,11 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     them it enables with `common --config=<group>` lines.
 
     `machine_rc` — a runner's rc or a `--home` one — is what admits the CI host's
-    group and lets any group be enabled at all: the host group goes on, being
-    tuning that presumes no endpoint, and the endpoint groups follow per
+    group and lets any group be enabled at all: the host group goes on, since
+    it presumes no endpoint, and the endpoint groups follow per
     `remote_on`. A checkout's rc is shared by every host that builds it, so it
     defines no host group and enables none, leaving the deployment sections to
-    chain what they need. The endpoint-free tuning is not a group: the caller
+    chain what they need. The always-on flags are not a group: the caller
     writes `independent_flags` as unconditional lines.
 
     `remote_on` is a `RemoteSpec.on` — capability name to whether to enable it —

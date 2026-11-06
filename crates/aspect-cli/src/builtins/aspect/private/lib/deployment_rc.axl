@@ -24,7 +24,7 @@ Each section wires the endpoints the deployment advertises (`--remote_cache`,
 through the `aspect get` credential helper scoped to each distinct host, and
 chains the `rc_groups.axl` tuning groups its endpoints justify (`aspect-cache`,
 `aspect-bes`) rather than repeating flags. A section chains nothing that
-presumes no endpoint: that tuning is unconditional lines at the top of every rc,
+presumes no endpoint: the always-on flags are plain lines at the top of every rc,
 and the CI host's group is enabled by the machine's rc that defines it, so
 naming a section never expands a group a second time. Remote execution is never
 part of the base section: it relocates every action, so it is only ever reached

@@ -11,7 +11,7 @@ load(
     "IMPORT_COMMENT",
     "ImportAction",
     "RcConfig",
-    "TUNING_COMMENT",
+    "ALWAYS_ON_COMMENT",
     "command_sections",
     "defined_configs",
     "ensure_import",
@@ -101,7 +101,7 @@ def _test_render_group_section(_ctx):
     _eq("group flag", "common:aspect-host --color=yes" in lines, True)
     _eq("enable before definition", lines.index("common --config=aspect-host") < lines.index("common:aspect-host --color=yes"), True)
     _eq("no unscoped flag", "common --color=yes" in lines, False)
-    _eq("no tuning block by default", "# " + TUNING_COMMENT in lines, False)
+    _eq("no always-on block by default", "# " + ALWAYS_ON_COMMENT in lines, False)
     _eq("no common startup_flag", "common --output_base=/mnt/output" in lines, False)
     _eq("trailing newline", out.endswith("\n"), True)
 
@@ -132,8 +132,8 @@ def _test_render_enable_sections(_ctx):
     _eq("and not for every command", "common --config=aspect-x" in lines, False)
     _eq("definition stays common", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
 
-def _test_render_tuning_flags(_ctx):
-    """Endpoint-free tuning is written as plain lines under its comment, after
+def _test_render_always_on_flags(_ctx):
+    """The always-on flags are written as plain lines under their comment, after
     the startup lines and before any enable line, once per command section, and
     whatever is or is not enabled."""
     lines = render_bazelrc(
@@ -141,21 +141,21 @@ def _test_render_tuning_flags(_ctx):
         [("aspect-x", ["build"])],
         ["common"],
         [_SECTION],
-        tuning_flags = ["--heap_dump_on_oom", ("--experimental_repository_cache_hardlinks", ">=6.0.0")],
+        always_on_flags = ["--heap_dump_on_oom", ("--experimental_repository_cache_hardlinks", ">=6.0.0")],
     ).split("\n")
-    _eq("comment", "# " + TUNING_COMMENT in lines, True)
+    _eq("comment", "# " + ALWAYS_ON_COMMENT in lines, True)
     _eq("plain line", "common --heap_dump_on_oom" in lines, True)
     _eq("tuple unwrapped", "common --experimental_repository_cache_hardlinks" in lines, True)
     _eq("after startup", lines.index("startup --output_base=/o") < lines.index("common --heap_dump_on_oom"), True)
     _eq("before enable lines", lines.index("common --heap_dump_on_oom") < lines.index("build --config=aspect-x"), True)
     _eq("not a group", any([ln.startswith("common:") and "heap_dump" in ln for ln in lines]), False)
 
-    old = render_bazelrc([], [], ["build", "query"], [], tuning_flags = ["--heap_dump_on_oom"]).split("\n")
+    old = render_bazelrc([], [], ["build", "query"], [], always_on_flags = ["--heap_dump_on_oom"]).split("\n")
     _eq("pre-6.3 build", "build --heap_dump_on_oom" in old, True)
     _eq("pre-6.3 query", "query --heap_dump_on_oom" in old, True)
 
-    # A checkout's rc enables nothing; the tuning still applies.
-    inert = render_bazelrc([], [], ["common"], [_SECTION], tuning_flags = ["--heap_dump_on_oom"]).split("\n")
+    # A checkout's rc enables nothing; the always-on flags still apply.
+    inert = render_bazelrc([], [], ["common"], [_SECTION], always_on_flags = ["--heap_dump_on_oom"]).split("\n")
     _eq("on with nothing enabled", "common --heap_dump_on_oom" in inert, True)
     _eq("no doubled blank line", any([inert[i] == "" and inert[i + 1] == "" for i in range(len(inert) - 1)]), False)
 
@@ -262,7 +262,7 @@ _UNIT_TESTS = [
     _test_render_group_section,
     _test_render_pre_common_sections,
     _test_render_enable_sections,
-    _test_render_tuning_flags,
+    _test_render_always_on_flags,
     _test_render_configs,
     _test_prune_configs,
     _test_import_line,
