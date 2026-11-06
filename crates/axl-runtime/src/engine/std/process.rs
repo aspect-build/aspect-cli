@@ -3,9 +3,6 @@ use std::process;
 use std::process::Stdio;
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
@@ -309,8 +306,6 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         if group < 0 {
             return Err(anyhow!("process group must be non-negative, got {group}"));
         }
-        #[cfg(unix)]
-        cmd.inner.borrow_mut().process_group(group);
         cmd.process_group.set(Some(group));
         Ok(this)
     }
@@ -825,6 +820,66 @@ mod tests {
         assert!(err_msg.contains(program));
         assert!(!err_msg.contains("--user"));
         assert!(!err_msg.contains("fake-secret-key"));
+    }
+
+    /// `Command::from_std(_, true)` is how `Runnable.command()` hands AXL a
+    /// command. Cancelling it must reach what the child started, not only
+    /// the child.
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_assembled_command_is_stopped_with_its_descendants() {
+        use bazel::process::signal::{Target, is_running};
+        use nix::unistd::{Pid, getpgid};
+        use std::time::Instant;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut inner = process::Command::new("sh");
+        inner
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$PID_FILE\"; wait")
+            .env("PID_FILE", &pid_file)
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null());
+        let child = Command::from_std(inner, true)
+            .try_spawn(&Signals::new(), NoneOr::None)
+            .unwrap();
+        let pid = child.inner.borrow().as_ref().unwrap().id() as i32;
+        assert_eq!(
+            getpgid(Some(Pid::from_raw(pid))).unwrap(),
+            Pid::from_raw(pid)
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let descendant: i32 = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse()
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the shell never started its sleeper"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        child.bound.token().cancel();
+        child
+            .wait_status(Some(Duration::from_secs(5)))
+            .unwrap()
+            .expect("the shell exits");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while is_running(Target::Pid(descendant as u32)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !is_running(Target::Pid(descendant as u32)),
+            "`sleep 30` survived"
+        );
     }
 
     #[test]

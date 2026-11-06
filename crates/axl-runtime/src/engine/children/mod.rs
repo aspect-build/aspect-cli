@@ -310,8 +310,9 @@ pub fn bind(
 }
 
 /// Spawn `cmd` bound to `parent`: the runtime's spawn-time configuration,
-/// then [`bind`]. `group` is the process group the command was configured
-/// to lead, if any.
+/// then [`bind`]. `group` is the process group to spawn the command into, if
+/// any, with `0` meaning a new group the child leads. It is applied here, so
+/// the group the stop sequence signals is always the one the child is in.
 pub fn spawn(
     cmd: &mut Command,
     signals: &Arc<Signals>,
@@ -320,6 +321,11 @@ pub fn spawn(
     kind: Kind,
 ) -> io::Result<(Child, Bound)> {
     os::creation_flags(cmd);
+    #[cfg(unix)]
+    if let Some(group) = group {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(group);
+    }
     let child = cmd.spawn()?;
     let group = group.map(|g| if g == 0 { child.id() as i32 } else { g });
     let bound = bind(signals, parent, child.id(), group, kind);
@@ -563,11 +569,12 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            {
-                use std::os::unix::process::CommandExt;
-                cmd.process_group(0);
-            }
             let (child, bound) = spawn(&mut cmd, &signals, &token, Some(0), Kind::Process).unwrap();
+            assert_eq!(
+                nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(child.id() as i32))).unwrap(),
+                nix::unistd::Pid::from_raw(child.id() as i32),
+                "spawn put the child in a new group it leads"
+            );
             let deadline = Instant::now() + Duration::from_secs(2);
             while !pid_file.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
