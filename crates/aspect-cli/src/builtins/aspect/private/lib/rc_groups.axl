@@ -7,7 +7,6 @@ sits in the group named for what it presumes, the groups that apply on this host
 are enabled at the top, and `--announce_rc` names the group every flag came from.
 The startup options are the exception, since Bazel gives them no `--config`.
 
-    aspect-common     tuning that presumes no endpoint
     aspect-cache      the cache — its endpoint where the env names one — and the tuning a cache justifies
     aspect-bes        the BES — its endpoint where the env names one — and the tuning a BES justifies
     aspect-exec-log   the compact execution log the Web UI reads; apart so a repo can drop it
@@ -18,11 +17,12 @@ The startup options are the exception, since Bazel gives them no `--config`.
 Two things shape the rc. `machine_rc` is whether the file belongs to this machine
 — a runner's or a `--home` rc, never committed — or to the checkout, shared by
 every host that builds it. Only a machine's rc may hold the host group and may
-enable anything: `section_chains` (`aspect-common`, and the host group where
-there is one) goes on at the top, since that tuning presumes no endpoint, and the
-endpoint groups follow. A checkout's rc defines no host group and enables
-nothing, leaving the opt-in deployment sections of `deployment_rc.axl` to chain
-what they need — which is what makes it safe to commit and share.
+enable a group: the host group goes on at the top, since it presumes no
+endpoint, and the endpoint groups follow. A checkout's rc defines no host group
+and enables no group, leaving the opt-in deployment sections of
+`deployment_rc.axl` to chain the tuning their endpoints justify — which is what
+makes it safe to commit and share. No group is enabled from two places, so
+Bazel never expands one twice.
 
 `remote_on` is which endpoints a machine's rc enables, a `RemoteSpec.on` from the
 task's `--remote`. A group is only ever enabled when `environment` gave it an
@@ -47,7 +47,6 @@ load(
     "endpoint_flags",
     "env_endpoint_flags",
     "exec_log_flags",
-    "independent_flags",
     "runner_bes_flags",
     "runner_executor_endpoint",
     "runner_profile_flags",
@@ -57,7 +56,6 @@ load(
 load("./bazelrc_file.axl", "RcConfig")
 load("./environment.axl", "WorkflowsEnvironment")
 
-GROUP_COMMON = "aspect-common"
 GROUP_CACHE = "aspect-cache"
 GROUP_BES = "aspect-bes"
 GROUP_RUNNER = "aspect-runner"
@@ -75,7 +73,7 @@ HOST_GROUPS = {
 # The groups that presume no endpoint, and so stay enabled for every command:
 # a `bazel query` wants the same heap and repository-cache settings a build gets.
 # Everything else carries an endpoint or a build-only artifact.
-_ENDPOINTLESS_GROUPS = [GROUP_COMMON, GROUP_RUNNER] + list(HOST_GROUPS.values())
+_ENDPOINTLESS_GROUPS = [GROUP_RUNNER] + list(HOST_GROUPS.values())
 
 def enable_sections(group: str, sections: list) -> list:
     """The rc command sections whose `--config=<group>` line turns `group` on.
@@ -175,10 +173,10 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     them it enables with `common --config=<group>` lines.
 
     `machine_rc` — a runner's rc or a `--home` one — is what admits the CI host's
-    group and lets anything be enabled at all: `section_chains` goes on, being
-    tuning that presumes no endpoint, and the endpoint groups follow per
+    group and lets any group be enabled at all: the host group goes on, since
+    it presumes no endpoint, and the endpoint groups follow per
     `remote_on`. A checkout's rc is shared by every host that builds it, so it
-    defines no host group and enables nothing, leaving the deployment sections to
+    defines no host group and enables none, leaving the deployment sections to
     chain what they need.
 
     `remote_on` is a `RemoteSpec.on` — capability name to whether to enable it —
@@ -187,7 +185,7 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
     on a stock CI runner, so which of the two is behind an endpoint makes no
     difference here. `auth` carries the credential-helper flags the latter needs,
     keyed by group name. Returns `(groups, enabled)`."""
-    groups = [_group(GROUP_COMMON, "Tuning that presumes no endpoint.", independent_flags())]
+    groups = []
     if machine_rc:
         groups.extend(host_group(environment, misdetects_color))
     groups.extend(runner_group(environment, on_runner))
@@ -199,7 +197,7 @@ def rc_groups(environment: WorkflowsEnvironment, on_runner: bool, misdetects_col
 
     if not machine_rc:
         return (groups, [])
-    enabled = section_chains(groups)
+    enabled = [g.name for g in groups if g.name in HOST_GROUPS.values()]
     enabled.extend([g.name for g in groups if g.name == GROUP_RUNNER])
     if remote_on.get("cache") and environment.remote_cache != None:
         enabled.append(GROUP_CACHE)
@@ -214,9 +212,3 @@ def bes_chains(groups: list) -> list:
     """The groups a BES-wired deployment section chains: `aspect-bes`, and
     `aspect-exec-log` when `groups` defines it."""
     return [g.name for g in groups if g.name in [GROUP_BES, GROUP_EXEC_LOG]]
-
-def section_chains(groups: list) -> list:
-    """The groups every deployment section chains first, so a section brings
-    them along where nothing is enabled: `aspect-common`, and a host group if
-    `groups` defines one."""
-    return [g.name for g in groups if g.name == GROUP_COMMON or g.name in HOST_GROUPS.values()]

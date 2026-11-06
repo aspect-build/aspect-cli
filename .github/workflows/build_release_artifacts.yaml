@@ -79,7 +79,7 @@ jobs:
           printf '#!/bin/sh\ncd "%s" && exec "%s" "$@"\n' "${helper_dir}" "$(command -v aspect)" >"${helper_dir}/credential-helper"
           chmod +x "${helper_dir}/credential-helper"
           cat >>"${HOME}/.bazelrc" <<EOF
-          common --config=aspect-common --config=aspect-cache --config=aspect-bes
+          common --config=aspect-cache --config=aspect-bes
           common --remote_cache=grpcs://cache.aspect.build
           common --bes_backend=grpcs://bes.aspect.build
           common --bes_results_url=https://app.aspect.build/i/

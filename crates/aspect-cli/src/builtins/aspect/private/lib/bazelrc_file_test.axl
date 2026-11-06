@@ -1,6 +1,7 @@
 """Unit tests for `bazelrc_file.axl`: `rc_paths` (where each file goes),
 `command_sections`, `render_bazelrc`, `prune_configs`, `startup_flags_for_rc`,
-`import_line` and `ensure_import` (the one-time `try-import` block).
+`import_line` and `ensure_import` (the one-time `try-import` block), and the
+`defined_configs` / `imports_rc` readers of an existing rc.
 Run with: aspect dev test-bazelrc-file
 """
 
@@ -14,6 +15,7 @@ load(
     "defined_configs",
     "ensure_import",
     "import_line",
+    "imports_rc",
     "prune_configs",
     "rc_paths",
     "render_bazelrc",
@@ -87,28 +89,28 @@ def _test_command_sections(_ctx):
     for v in ["6.2.1", "6.0.0", "5.4.0"]:
         _eq("%s -> build/query" % v, command_sections(v), ["build", "query"])
 
-_COMMON = RcConfig(name = "aspect-common", source = "common", comment = "Common tuning.", flags = ["--heap_dump_on_oom"])
+_HOST = RcConfig(name = "aspect-host", source = "host", comment = "Host tuning.", flags = ["--color=yes"])
 
-def _test_render_common_section(_ctx):
-    out = render_bazelrc(["--output_base=/mnt/output"], [("aspect-common", ["common"])], ["common"], [_COMMON])
+def _test_render_group_section(_ctx):
+    out = render_bazelrc(["--output_base=/mnt/output"], [("aspect-host", ["common"])], ["common"], [_HOST])
     lines = out.split("\n")
     _eq("header first", lines[0], GENERATED_HEADER)
     _eq("startup line", "startup --output_base=/mnt/output" in lines, True)
-    _eq("enable line", "common --config=aspect-common" in lines, True)
-    _eq("group flag", "common:aspect-common --heap_dump_on_oom" in lines, True)
-    _eq("enable before definition", lines.index("common --config=aspect-common") < lines.index("common:aspect-common --heap_dump_on_oom"), True)
-    _eq("no unscoped flag", "common --heap_dump_on_oom" in lines, False)
+    _eq("enable line", "common --config=aspect-host" in lines, True)
+    _eq("group flag", "common:aspect-host --color=yes" in lines, True)
+    _eq("enable before definition", lines.index("common --config=aspect-host") < lines.index("common:aspect-host --color=yes"), True)
+    _eq("no unscoped flag", "common --color=yes" in lines, False)
     _eq("no common startup_flag", "common --output_base=/mnt/output" in lines, False)
     _eq("trailing newline", out.endswith("\n"), True)
 
 def _test_render_pre_common_sections(_ctx):
     # < 6.3.0: each enable and group line is emitted once per section (build +
     # query); startup flags are emitted once regardless of the command sections.
-    lines = render_bazelrc(["--output_base=/o"], [("aspect-common", ["build", "query"])], ["build", "query"], [_COMMON]).split("\n")
-    _eq("build enable", "build --config=aspect-common" in lines, True)
-    _eq("query enable", "query --config=aspect-common" in lines, True)
-    _eq("build group", "build:aspect-common --heap_dump_on_oom" in lines, True)
-    _eq("query group", "query:aspect-common --heap_dump_on_oom" in lines, True)
+    lines = render_bazelrc(["--output_base=/o"], [("aspect-host", ["build", "query"])], ["build", "query"], [_HOST]).split("\n")
+    _eq("build enable", "build --config=aspect-host" in lines, True)
+    _eq("query enable", "query --config=aspect-host" in lines, True)
+    _eq("build group", "build:aspect-host --color=yes" in lines, True)
+    _eq("query group", "query:aspect-host --color=yes" in lines, True)
     _eq("no common", any([ln.startswith("common") for ln in lines]), False)
     _eq("startup once", len([ln for ln in lines if ln == "startup --output_base=/o"]), 1)
 
@@ -119,11 +121,11 @@ def _test_render_enable_sections(_ctx):
     a `--config` naming one by hand works whatever the command."""
     lines = render_bazelrc(
         [],
-        [("aspect-common", ["common"]), ("aspect-x", ["build"])],
+        [("aspect-host", ["common"]), ("aspect-x", ["build"])],
         ["common"],
-        [_COMMON, _SECTION],
+        [_HOST, _SECTION],
     ).split("\n")
-    _eq("tuning enabled everywhere", "common --config=aspect-common" in lines, True)
+    _eq("tuning enabled everywhere", "common --config=aspect-host" in lines, True)
     _eq("endpoints enabled for build", "build --config=aspect-x" in lines, True)
     _eq("and not for every command", "common --config=aspect-x" in lines, False)
     _eq("definition stays common", "common:aspect-x --remote_cache=grpcs://x" in lines, True)
@@ -143,20 +145,20 @@ def _test_prune_configs(_ctx):
     cache = RcConfig(name = "aspect-cache", source = "g", flags = [])
     exec = RcConfig(name = "aspect-exec", source = "e", flags = ["--config=aspect-cache", "--remote_executor=grpcs://e"])
     alias = RcConfig(name = "aspect", source = "a", flags = ["--config=aspect-cache"])
-    (configs, enabled) = prune_configs([_COMMON, cache, exec, alias], ["aspect-common", "aspect-cache"])
+    (configs, enabled) = prune_configs([_HOST, cache, exec, alias], ["aspect-host", "aspect-cache"])
 
     # The emptied group goes, with its enable line and every chain to it; a
     # section that only chained to it empties in turn and goes too.
-    _eq("survivors", [c.name for c in configs], ["aspect-common", "aspect-exec"])
+    _eq("survivors", [c.name for c in configs], ["aspect-host", "aspect-exec"])
     _eq("chain dropped", configs[1].flags, ["--remote_executor=grpcs://e"])
-    _eq("enable dropped", enabled, ["aspect-common"])
-    _eq("nothing to prune", prune_configs([_COMMON], ["aspect-common"]), ([_COMMON], ["aspect-common"]))
+    _eq("enable dropped", enabled, ["aspect-host"])
+    _eq("nothing to prune", prune_configs([_HOST], ["aspect-host"]), ([_HOST], ["aspect-host"]))
 
 _LINE = import_line("%workspace%/.aspect/bazelrc")
 _BLOCK = IMPORT_COMMENT + "\n" + _LINE + "\n"
 
 def _ensure(existing):
-    return ensure_import(existing, _LINE)
+    return ensure_import(existing, "%workspace%/.aspect/bazelrc")
 
 def _test_import_line(_ctx):
     # `try-import`, so a generated file that later disappears is not fatal.
@@ -185,20 +187,34 @@ def _test_ensure_import_appends_once(_ctx):
     _eq("unchanged", second.action, ImportAction("unchanged"))
     _eq("mid-file", _ensure(_LINE + "\nbuild --later\n").action, ImportAction("unchanged"))
 
+    # A hand-written `import` of the same file already reads it; a second,
+    # `try-import`, line would read every section twice.
+    by_import = _ensure("import %workspace%/.aspect/bazelrc\nbuild --later\n")
+    _eq("import counts", by_import.action, ImportAction("unchanged"))
+    _eq("import kept as is", by_import.content, "import %workspace%/.aspect/bazelrc\nbuild --later\n")
+
+def _test_imports_rc(_ctx):
+    _eq("try-import", imports_rc("try-import %workspace%/.aspect/bazelrc\n", "%workspace%/.aspect/bazelrc"), True)
+    _eq("import", imports_rc("import %workspace%/.aspect/bazelrc", "%workspace%/.aspect/bazelrc"), True)
+    _eq("indented", imports_rc("  import   %workspace%/.aspect/bazelrc  ", "%workspace%/.aspect/bazelrc"), True)
+    _eq("another file", imports_rc("import %workspace%/tools/preset.bazelrc", "%workspace%/.aspect/bazelrc"), False)
+    _eq("commented out", imports_rc("# import %workspace%/.aspect/bazelrc", "%workspace%/.aspect/bazelrc"), False)
+    _eq("missing", imports_rc(None, "%workspace%/.aspect/bazelrc"), False)
+
 def _test_defined_configs(_ctx):
     # Read off the `<command>:<name>` heads, in order, once each.
     rc = "\n".join([
         "# a comment",
         "startup --output_base=/o",
         "common --config=aspect-cloud",
-        "common:aspect-common --heap_dump_on_oom",
+        "common:aspect-host --color=yes",
         "common:aspect-cloud --remote_cache=grpcs://c",
         "common:aspect-cloud --bes_backend=grpcs://b",
         "build:aspect-cloud-exec --remote_executor=grpcs://e",
         "try-import %workspace%/.aspect/bazelrc",
         "build --flag_alias=x=//y:z",
     ])
-    _eq("names", defined_configs(rc), ["aspect-common", "aspect-cloud", "aspect-cloud-exec"])
+    _eq("names", defined_configs(rc), ["aspect-host", "aspect-cloud", "aspect-cloud-exec"])
 
     # An enable line names a config but does not define one, and neither does a
     # flag whose *value* holds a colon.
@@ -214,7 +230,7 @@ _UNIT_TESTS = [
     _test_rc_paths_overrides,
     _test_startup_flags_for_rc,
     _test_command_sections,
-    _test_render_common_section,
+    _test_render_group_section,
     _test_render_pre_common_sections,
     _test_render_enable_sections,
     _test_render_configs,
@@ -223,6 +239,7 @@ _UNIT_TESTS = [
     _test_ensure_import_new_file,
     _test_ensure_import_appends_once,
     _test_defined_configs,
+    _test_imports_rc,
 ]
 
 def _test_impl(ctx):

@@ -233,18 +233,29 @@ def defined_configs(content: str | None) -> list:
             names.append(name)
     return names
 
-def ensure_import(existing: str | None, line: str) -> ImportResult:
-    """The rc content with `line` present exactly once: unchanged when it is
-    already there, otherwise placed at the top under `IMPORT_COMMENT`, a blank
-    line apart from whatever the file already holds. At the top so the file's
-    own lines come after the imported ones and win where they disagree — Bazel
-    takes the last value of a flag — which is how a repository overrides a
-    recommendation, say a shorter `--remote_timeout`.
-    `None`/empty `existing` is a new file."""
-    block = IMPORT_COMMENT + "\n" + line + "\n"
+def imports_rc(content: str | None, path: str) -> bool:
+    """Whether `content` pulls in `path`, by `try-import` or by `import`. Both
+    count: a repository may well have written `import` for a file it commits,
+    and Bazel reads the sections the same either way."""
+    for raw in (content or "").split("\n"):
+        parts = raw.strip().split()
+        if len(parts) == 2 and parts[0] in ["import", "try-import"] and parts[1] == path:
+            return True
+    return False
+
+def ensure_import(existing: str | None, imported: str) -> ImportResult:
+    """The rc content pulling in `imported` exactly once: unchanged when it
+    already does, by `try-import` or a hand-written `import` (a second line
+    would read every section twice), otherwise with `import_line(imported)`
+    placed at the top under `IMPORT_COMMENT`, a blank line apart from whatever
+    the file already holds. At the top so the file's own lines come after the
+    imported ones and win where they disagree — Bazel takes the last value of a
+    flag — which is how a repository overrides a recommendation, say a shorter
+    `--remote_timeout`. `None`/empty `existing` is a new file."""
+    block = IMPORT_COMMENT + "\n" + import_line(imported) + "\n"
     if not existing:
         return ImportResult(content = block, action = ImportAction("created"))
-    if line in existing.split("\n"):
+    if imports_rc(existing, imported):
         return ImportResult(content = existing, action = ImportAction("unchanged"))
     content = block + ("\n" + existing.lstrip("\n") if existing.strip() else "")
     return ImportResult(content = content, action = ImportAction("prepended"))

@@ -22,14 +22,12 @@ a deployment with neither gets nothing.
 Each section wires the endpoints the deployment advertises (`--remote_cache`,
 `--bes_backend`, `--bes_results_url`, `--remote_executor`), authenticates
 through the `aspect get` credential helper scoped to each distinct host, and
-chains `rc_groups.axl` groups rather than repeating flags: first the groups that
-presume no endpoint (`aspect-common`, the CI host's), which a checkout's rc does
-not enable — so naming a section is what turns anything on there — then the
-tuning groups its endpoints justify (`aspect-cache`, `aspect-bes`). A machine's
-rc enables that first pair itself; chaining it again costs nothing, every flag
-in it being a last-wins `--flag=value`. Remote execution is never part of the base section: it relocates
-every action, so it is only ever reached by naming `-exec`, mirroring
-`--remote=exec` on `aspect <task>`.
+chains the `rc_groups.axl` tuning groups its endpoints justify (`aspect-cache`,
+`aspect-bes`) rather than repeating flags. It does not chain the CI host's
+group, which the machine's rc that defines it enables itself, so naming a
+section never expands a group a second time. Remote execution is never
+part of the base section: it relocates every action, so it is only ever reached
+by naming `-exec`, mirroring `--remote=exec` on `aspect <task>`.
 
 Two deployments can land on one section name (one named `cloud`, or `silo`
 beside `silo-exec`); Bazel would merge such sections and route the build to
@@ -137,11 +135,11 @@ def login_hint(deployment) -> str:
         return "auth via " + deployment.api_token_env + " or `" + login + "`"
     return "auth via `" + login + "`"
 
-def _base_config(d, name: str, credential_helper: str, host_groups: list, bes_groups: list) -> RcConfig:
+def _base_config(d, name: str, credential_helper: str, bes_groups: list) -> RcConfig:
     """`--config=<name>`: the deployment's remote cache and/or BES, the credential
-    helper for their hosts, and the groups it chains — `host_groups` first, then
-    the tuning groups those endpoints justify (`bes_groups` for a BES)."""
-    flags = ["--config=" + g for g in host_groups]
+    helper for their hosts, and the tuning groups those endpoints justify
+    (`aspect-cache` for a cache, `bes_groups` for a BES)."""
+    flags = []
     wired = []
     if d.cache:
         flags.append("--remote_cache=" + _SCHEME + d.cache)
@@ -163,17 +161,17 @@ def _base_config(d, name: str, credential_helper: str, host_groups: list, bes_gr
         flags = flags,
     )
 
-def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_groups: list) -> RcConfig:
+def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConfig:
     """`--config=<name>-exec`: the base section plus the deployment's executor. An
     executor-only deployment has no base to chain to, so its section stands alone
-    and chains `host_groups` and the tuning an executor justifies (it doubles as
-    the cache). A credential helper is added for the exec host only when the base
-    section's don't cover it."""
+    and chains the tuning an executor justifies (it doubles as the cache). A
+    credential helper is added for the exec host only when the base section's
+    don't cover it."""
     if has_base:
         flags = ["--config=" + name]
         covered = _unique_hosts([d.cache, d.bes])
     else:
-        flags = ["--config=" + g for g in host_groups] + ["--config=" + GROUP_CACHE]
+        flags = ["--config=" + GROUP_CACHE]
         covered = []
     flags.append("--remote_executor=" + _SCHEME + d.exec)
     exec_host = endpoint_host(d.exec)
@@ -186,17 +184,14 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool, host_grou
         flags = flags,
     )
 
-def deployment_configs(deployments: list, credential_helper: str, host_groups: list = [], bes_groups: list = [GROUP_BES]) -> list:
+def deployment_configs(deployments: list, credential_helper: str, bes_groups: list = [GROUP_BES]) -> list:
     """The sections for every deployment in `deployments` (rows of
     `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
     `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
     fields), in order. `credential_helper` is the name or path Bazel invokes as
-    `<helper> get`. Every section starts by chaining
-    `host_groups` — the rc's `aspect-common` and CI-host groups, which the
-    deployment shape of the rc leaves unenabled so the file is inert until a
-    section is named — then the tuning groups its endpoints justify, a BES
-    chaining `bes_groups` (`aspect-bes`, plus `aspect-exec-log` where the rc
-    defines it); all are `rc_groups.axl` groups the rc defines alongside."""
+    `<helper> get`. Every section chains the tuning groups its endpoints justify,
+    a BES chaining `bes_groups` (`aspect-bes`, plus `aspect-exec-log` where the
+    rc defines it); all are `rc_groups.axl` groups the rc defines alongside."""
     configs = []
     for d in deployments:
         has_base = bool(d.cache or d.bes)
@@ -204,9 +199,9 @@ def deployment_configs(deployments: list, credential_helper: str, host_groups: l
             continue
         name = config_name(d)
         if has_base:
-            configs.append(_base_config(d, name, credential_helper, host_groups, bes_groups))
+            configs.append(_base_config(d, name, credential_helper, bes_groups))
         if d.exec:
-            configs.append(_exec_config(d, name, credential_helper, has_base, host_groups))
+            configs.append(_exec_config(d, name, credential_helper, has_base))
     return configs
 
 def config_collisions(configs: list) -> list:

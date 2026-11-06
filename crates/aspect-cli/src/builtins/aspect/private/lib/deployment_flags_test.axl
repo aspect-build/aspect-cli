@@ -320,7 +320,6 @@ def _test_tuning_follows_wired_capabilities(ctx):
 
     both = deployment_tuning_flags(deployment_endpoint_flags(_ctx(_ALL, remote = BARE)))
     texts = [f[0] if type(f) == "tuple" else f for f in both]
-    _eq("independent", "--heap_dump_on_oom" in texts, True)
     _eq("cache tuning", "--remote_timeout=3600" in texts, True)
     _eq("bes enrichment", "--noslim_profile" in texts, True)
 
