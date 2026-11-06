@@ -22,6 +22,7 @@ common:aspect-bes --experimental_profile_include_target_label
 common:aspect-bes --experimental_profile_include_primary_output
 common:aspect-bes --experimental_profile_include_target_configuration
 common:aspect-bes --legacy_important_outputs
+common:aspect-bes --workspace_status_command="aspect setup workspace-data"
 
 # The compact execution log, uploaded to the remote cache for per-action data in the Web UI. Slow on a thin link: remove this group and the --config lines naming it to skip it.
 common:aspect-exec-log --execution_log_compact_file=%workspace%/.aspect/generated/exec.log.zstd
