@@ -35,3 +35,4 @@ common:aspect-cloud --bes_backend=grpcs://bes.aspect.build
 common:aspect-cloud --bes_results_url=https://app.aspect.build/i/
 common:aspect-cloud --credential_helper=cache.aspect.build=aspect
 common:aspect-cloud --credential_helper=bes.aspect.build=aspect
+common:aspect-cloud --workspace_status_command="aspect setup workspace-data"
