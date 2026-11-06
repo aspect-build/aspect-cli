@@ -16,8 +16,8 @@ The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
 `aspect_endpoint_auth.axl` for the host gate and best-effort credential
 resolution. (The companion case — BES routed through Bazel via
-`--bazel-flag=--bes_backend` — is handled by `bes_backend_auth_flags` in
-`bazel/flags.axl` instead.)
+`--bazel-flag=--bes_backend` — is handled by `deployment_auth_flags`, an
+`rc_flags` hook in `private/lib/deployment_flags.axl`.)
 """
 
 load("@std//time.axl", "monotonic")
@@ -28,9 +28,7 @@ load("../private/lib/text.axl", "join_url")
 def build_events_iterator(kinds = None, tick_ms = None):
     """Fresh CLI-side BES event iterator (`bazel.build_events.iterator`).
 
-    Exposed here because this file already binds the builtin `bazel` global,
-    while `bazel.axl` cannot (its own exported `bazel` namespace shadows the
-    builtin). `kinds` is a list of payload names — the string `type(event.payload)`
+    `kinds` is a list of payload names — the string `type(event.payload)`
     reports — or None for every kind. The older spellings (`action_completed`,
     `action`, …) are still accepted, and a mistyped kind is an error naming
     every one there is.

@@ -3584,7 +3584,7 @@ mod tests {
     }
 
     /// `routing_task` plus a post-command bucket that reads flag arities from a
-    /// config-only sibling arg — the shape `bzl.flags.args()` produces.
+    /// config-only sibling arg — the shape `bazel_flags.args()` produces.
     fn value_flag_task(value_flags: &[&str]) -> StubTask {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
         args.insert("targets".to_owned(), arg_positional());

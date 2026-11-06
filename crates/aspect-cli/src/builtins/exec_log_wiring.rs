@@ -45,7 +45,7 @@ fn spawn_lines(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Lines holding a call to `name(`, ignoring the `bzl.`/bare import spellings
+/// Lines holding a call to `name(`, ignoring the namespace prefix
 /// and anything inside prose.
 fn calls(source: &str, name: &str) -> Vec<usize> {
     let needle = format!("exec_log.{name}(");

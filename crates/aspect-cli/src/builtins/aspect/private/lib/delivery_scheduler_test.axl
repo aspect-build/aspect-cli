@@ -1,6 +1,6 @@
 """Unit tests for `lib/delivery_scheduler.axl`."""
 
-load("@aspect//bazel.axl", "bazel", "normalize_label")
+load("@aspect//bazel.axl", "bazel_exec_log", "normalize_label")
 load("./delivery_scheduler.axl", "delivery_scheduler")
 
 A = "//a:a"
@@ -262,7 +262,7 @@ def _runs(events, done = False, wait = None):
     )
 
 def _xl(on_entry):
-    return struct(entries = [struct(type = "spawn")], hooks = [bazel.exec_log.Hook(on_entry = on_entry)], exact = True)
+    return struct(entries = [struct(type = "spawn")], hooks = [bazel_exec_log.Hook(on_entry = on_entry)], exact = True)
 
 def _cleanup(ctx: TaskContext) -> None:
     events = []

@@ -2,7 +2,7 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -16,7 +16,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # immutable record. Deployment endpoints/auth are injected by the Deployment
     # feature through the trait (see `feature/deployment.axl`). The whole flow is
     # visible below as thin verbs over the handle.
-    bz = bzl.build(ctx)
+    bz = bazel_invocation.build(ctx)
     rs = results.build(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
         ctx,
         data,
@@ -46,7 +46,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return rs.conclude(w, bz.targets)
 
 build = task(
-    args = bzl.targets_arg("build") | bzl.core_args("the build") | repro_flavor_args(),
+    args = bazel_invocation.targets_arg("build") | bazel_invocation.args("the build") | repro_flavor_args(),
     show_task_options = True,
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [

@@ -93,19 +93,19 @@ setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
   └─ hc_trait.health_check                        # Workflows env table / server health check
 bazel_trait.build_start
   └─ Workflows prints `--- :bazel: Running bazel <task> [<task-name>] <targets>`
-xl = bzl.exec_log.open(bazel_trait)              # after build_start, before the spawn
+xl = bazel_exec_log.open(bazel_trait)            # after build_start, before the spawn
 events = bazel.build_events.iterator(tick_ms=…)  # create handle BEFORE the spawn
 ctx.bazel.build(..., build_events = [events], execution_log = xl.sinks or False)
 data["sink_invocation_id"] = build.sink_invocation_id
 lifecycle.task_update(running)                   # link surfaces in the annotation
 bb_root = usable_bb_clientd_root(ctx.std)     # once per task: maps log URIs to paths
 for event in events:                             # `None` on a quiet tick_ms tick
-    bzl.exec_log.pump(ctx, xl)                   # exec_log_event hooks, every tick
+    bazel_exec_log.pump(ctx, xl)                 # exec_log_event hooks, every tick
     if event != None:
         bazel_trait.build_event(ctx, event)      # ArtifactUpload records testlog paths
         if process_event(data, event, bb_root):
             lifecycle.task_update(running)       # streamed metadata + targets
-bzl.exec_log.close(ctx, xl)                      # the rest of the log; before wait()
+bazel_exec_log.close(ctx, xl)                    # the rest of the log; before wait()
 build_status = build.wait()
 bazel_trait.build_end(ctx, build_status.code)    # ArtifactUpload uploads
 ... task-specific work (run formatter, parse SARIF, etc.) ...
@@ -885,8 +885,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #     that feeds it. Opened after `build_start` (which can register one) and
     #     before the spawn (the only thing that subscribes a handle), freshly per
     #     attempt since a handle is single-use. Tasks driving the
-    #     `bazel.build(ctx)` handle get all of this from it instead.
-    xl = bzl.exec_log.open(bazel_trait)
+    #     `bazel_invocation.build(ctx)` handle get all of this from it instead.
+    xl = bazel_exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(flags = flags, build_events = build_events,
                             execution_log = xl.sinks or False, *ctx.args.targets)
@@ -907,7 +907,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #    bazel state and stream metadata into the live annotation.
     bb_root = usable_bb_clientd_root(ctx.std)
     for event in events:
-        bzl.exec_log.pump(ctx, xl)          # exec_log_event hooks, non-blocking
+        bazel_exec_log.pump(ctx, xl)        # exec_log_event hooks, non-blocking
         if event == None:
             continue
         for handler in bazel_trait.build_event:
@@ -918,7 +918,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # 6. Wait for bazel, then fire build_end hooks (ArtifactUpload uploads).
     #    `exec_log.close` MUST precede `wait()`: a bound hook handle is a
     #    subscriber the log producer blocks for, and `wait()` joins that producer.
-    bzl.exec_log.close(ctx, xl)
+    bazel_exec_log.close(ctx, xl)
     build_status = build.wait()
     for hook in bazel_trait.build_end:
         hook(ctx, build_status.code)
@@ -1037,8 +1037,8 @@ When writing a new task, feature, or library, sanity-check:
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
 - [ ] Emit a terminal `task_update` with `final=True` and a terminal `status` (`"passed"` / `"failed"` / `"warning"` / `"aborted"`) on every `return` path, and return the `TaskConclusion` it hands back. There is no separate `task_complete` hook.
 - [ ] If a feature subscribes to `bazel_trait.build_event`, your BES loop must call those hooks per event — otherwise `_on_build_event` callbacks never run.
-- [ ] For tasks that retry the bazel invocation, create a fresh `iterator()` handle per attempt — handles are single-use. The same applies to `bzl.exec_log.open(...)`.
-- [ ] Wire the execution log through `bzl.exec_log` — `open` before the spawn, `execution_log = xl.sinks or False`, `pump` in the drain loop, `close` **before** `wait()`. Do not iterate `bazel_trait.exec_log_event` by hand and do not pass `bazel_trait.execution_log_sinks` directly; `open` already carries them.
+- [ ] For tasks that retry the bazel invocation, create a fresh `iterator()` handle per attempt — handles are single-use. The same applies to `bazel_exec_log.open(...)`.
+- [ ] Wire the execution log through `bazel_exec_log` — `open` before the spawn, `execution_log = xl.sinks or False`, `pump` in the drain loop, `close` **before** `wait()`. Do not iterate `bazel_trait.exec_log_event` by hand and do not pass `bazel_trait.execution_log_sinks` directly; `open` already carries them.
 
 **State management** — see [State management: patterns and rules](#state-management-patterns-and-rules)
 

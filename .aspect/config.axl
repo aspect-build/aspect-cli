@@ -3,6 +3,7 @@ load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
 load("@aspect//bazel/exec_log_test.axl", "exec_log_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
+load("@aspect//bazel_test.axl", "bazel_facade_tests")
 load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
@@ -556,6 +557,10 @@ def config(ctx: ConfigContext):
     # Bazel flag-resolution helper unit tests.
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
+
+    # @aspect//bazel.axl: the exact member set of each public namespace.
+    # Run with: aspect dev test-bazel-facade
+    ctx.tasks.add(bazel_facade_tests)
 
     # bazel/invocation.axl: the bazel_attempt_end/build_end dispatch seam, plus
     # target_patterns (when the `targets` default is suppressed).

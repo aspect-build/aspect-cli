@@ -1,4 +1,5 @@
-"""The high-level invocation handle: `bazel.build(ctx)` / `bazel.test(ctx)`.
+"""`bazel_invocation`: the high-level `build(ctx)` / `test(ctx)` invocation
+handles, and the `args` / `targets_arg` bundles a Bazel-spawning task declares.
 
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
 (`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
@@ -16,12 +17,14 @@ same way. `on_event` hangs off that struct rather than the handle for the same
 reason — it dispatches both BES events and execution log entries, and only the
 attempt knows which log it is reading."""
 
+load("@aspect//bazel/announce.axl", "bazel_announce")
 load(
     "@aspect//bazel/build_events.axl",
     "advertised_results_url",
     "announce_bes_results_url",
     "announce_bes_sinks",
     "announce_dropped_bes_sinks",
+    "bes_args",
     "bes_results_url_flag",
     "bes_streamed_by_bazel",
     "build_events_iterator",
@@ -29,17 +32,17 @@ load(
     "dropped_bes_backends",
     "summarize_bes_upload",
 )
-load("@aspect//bazel/exec_log.axl", "exec_log")
-load("@aspect//bazel/flags.axl", "resolve_announce", "resolve_rc_flags", "setup_command")
-load("@aspect//bazel/trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
+load("@aspect//bazel/flags.axl", "bazel_flags")
+load("@aspect//bazel/rc.axl", "bazel_rc")
+load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
 # results heartbeat without a separate sleep loop.
 _TICK_MS = 250
 
-# Immutable, resolved-once config for one high-level bazel run. Replaces the old
-# mutable `state = {"invocation": None, "index": 0}` dict: nothing here is
+# Immutable, resolved-once config for one high-level bazel run: nothing here is
 # reassigned, and the live invocation + attempt index are threaded as values
 # rather than stored. `ctx` is carried so the `_do_*` verbs need neither a
 # per-call `ctx` (§7) nor a closure over one. `trait`/`rc`/`sinks` are runtime
@@ -99,14 +102,14 @@ def _resolve(ctx, command: str) -> _Invocation:
 
     # Base (default) flags, prepended so user --bazel-flag overrides win: the
     # TTY signal. Feature-injected `trait.base_flags` (e.g. a deployment's
-    # --remote_cache) are prepended by `setup_command` itself.
+    # --remote_cache) are prepended by `bazel_rc.setup` itself.
     base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
     # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The rc set by
     # use_rc drives the health check (in results.setup) and every spawn below.
-    rc = setup_command(ctx, command, base_flags = base_flags)
+    rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
 
-    (announce_version, announce_command) = resolve_announce(ctx)
+    (announce_version, announce_command) = bazel_announce.resolve(ctx)
 
     # `dropped` names the endpoints Bazel uploads to itself, which
     # `collect_bes_sinks` has already left out, for the spawn-time disclosure.
@@ -115,7 +118,7 @@ def _resolve(ctx, command: str) -> _Invocation:
 
     # Post-rc flag hooks: features (e.g. deployment auth) inject flags computed
     # from the resolved rc; appended to each spawn after rc expansion.
-    rc_flags = resolve_rc_flags(ctx, rc, command)
+    rc_flags = bazel_rc.hook_flags(ctx, rc, command)
 
     # aspect's own `--target-pattern-file` is a per-invocation flag, not rc
     # material — keeping it out of the parsed rc is what lets `target_patterns`
@@ -204,7 +207,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # Read the trait after `build_start`, which is a hook that may register an
     # `exec_log_event` subscription of its own, and freshly per attempt, since a
     # handle binds to exactly one build.
-    xl = exec_log.open(inv.trait)
+    xl = bazel_exec_log.open(inv.trait)
 
     if inv.command == "test":
         handle = inv.ctx.bazel.test(
@@ -249,7 +252,7 @@ def _do_wait(inv: _Invocation, handle, xl: struct):
     `exec_log_event` handle is a subscriber the log reader blocks for, and
     `handle.wait()` joins that reader. Waiting first would join a thread that is
     waiting on us."""
-    exec_log.close(inv.ctx, xl)
+    bazel_exec_log.close(inv.ctx, xl)
     status = handle.wait()
     for sink in inv.sinks:
         sink.wait()
@@ -271,7 +274,7 @@ def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
     path that runs once per BES event.
     """
     if xl.entries != None:
-        exec_log.pump(inv.ctx, xl)
+        bazel_exec_log.pump(inv.ctx, xl)
     if event == None:
         return
     for handler in inv.trait.build_event:
@@ -309,10 +312,48 @@ def _handle(ctx, command: str):
         finish = lambda w: _do_finish(inv, w),
     )
 
-def build(ctx):
+def _build(ctx):
     """High-level `bazel build` invocation handle. See module docstring."""
     return _handle(ctx, "build")
 
-def test(ctx):
+def _test(ctx):
     """High-level `bazel test` invocation handle. See module docstring."""
     return _handle(ctx, "test")
+
+def _args(phrase: str) -> dict:
+    """The command-agnostic CLI args every Bazel-spawning task registers (splat
+    into `task(args)`): the flag/startup/announce args, the BES args, and the
+    target-pattern-file / retry / cancel controls."""
+    return bazel_flags.args(phrase) | bazel_announce.args(phrase) | bes_args() | {
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
+        ),
+        "bazel_retry_attempts": args.int(
+            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
+        ),
+        "cancel": args.boolean(
+            default = False,
+            description = "Cancel any running Bazel invocation before starting.",
+        ),
+    }
+
+def _targets_arg(verb: str) -> dict:
+    """The positional target-pattern arg, with command-specific help. Splat into
+    a task's `args = {...}` alongside `bazel_invocation.args`."""
+    return {
+        "targets": args.positional(
+            default = ["..."],
+            minimum = 1,
+            maximum = 512,
+            description = "Bazel target patterns to %s. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect %s -- //... -//experimental/...`." % (verb, verb),
+        ),
+    }
+
+bazel_invocation = namespace(
+    build = _build,
+    test = _test,
+    args = _args,
+    targets_arg = _targets_arg,
+)
