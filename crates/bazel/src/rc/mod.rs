@@ -344,10 +344,13 @@ impl Bazelrc {
     /// One exception to "caller flags win": a caller flag that names the `common` section
     /// itself. `resolve_for_command` renders a `common`-section option as
     /// `--default_override=0:common=…`, which Bazel applies ahead of everything on the command
-    /// line, so such a flag loses to a literal rc-file `build` entry despite being emitted
-    /// after it here. Nothing in-tree does that — callers name a command section or leave the
-    /// flag unscoped (`always`) — and the same rendering is why `options_for("always")`
-    /// out-ranks `options_for("common")` in practice.
+    /// line, so such a flag loses to an rc-file entry in a more specific section — both parse
+    /// at rc priority, where `build` beats `common` — despite being emitted after it here.
+    /// Nothing in-tree does that — callers name a command section or leave the flag unscoped
+    /// (`always`). An unscoped caller flag stays literal on the rendered command line, so it
+    /// still out-ranks a `common` override; an rc-file `always` entry rides the override
+    /// transport too and so loses to `common`, which is the `always`-then-`common` order this
+    /// method keeps.
     ///
     /// For example, `options_for("test")` returns:
     ///   `always` + `common` + `build` + `test` (rc-file) + `always` + `build` + `test` (caller)
@@ -356,11 +359,7 @@ impl Bazelrc {
         // input), so match on the path rather than a single index; each bucket preserves
         // insertion order, so a merged overlay's caller flags follow the base's and win under
         // last-write-wins.
-        let is_cli = |o: &RcOption| {
-            self.sources
-                .get(o.source_index)
-                .is_some_and(|p| p.as_path() == std::path::Path::new("<command line>"))
-        };
+        let is_cli = |o: &RcOption| self.is_command_line(o);
 
         let sections = sections_for(command);
         let mut result = Vec::new();
@@ -672,18 +671,30 @@ impl Bazelrc {
 
     /// Assemble the `(startup_flags, command_flags)` to run `command` with this
     /// bazelrc. `command_flags` are the config-expanded, version-filtered
-    /// options (common-section ones rendered as `--default_override=0:common=…`);
+    /// options — rc-file ones rendered as `--default_override=0:<section>=…`
+    /// tokens, caller-supplied ones literal (`common`-scoped caller flags ride
+    /// the override transport too — see [`partition_expand_all`]);
     /// `startup_flags` are the user startup flags plus the rc-file `startup`
     /// section plus `--ignore_all_rc_files` (the on-disk rc is already absorbed).
     pub fn resolve_for_command(&self, command: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let opts = self.applicable_options(command, None)?;
-        let (overrides, regular) = partition_expand_all(&opts);
+        let (overrides, regular) = partition_expand_all(&opts, |o| self.is_command_line(o));
         let command_flags: Vec<String> = overrides
             .into_iter()
             .map(|(v, _)| v)
             .chain(regular.into_iter().map(|(v, _)| v))
             .collect();
         Ok((self.invocation_startup_flags(), command_flags))
+    }
+
+    /// Whether `opt` is caller-supplied (synthetic source `"<command line>"`)
+    /// rather than an entry read from an rc file. A merged Bazelrc can carry
+    /// more than one such source — one per merged input — so the check is on
+    /// the source path, not a single index.
+    fn is_command_line(&self, opt: &RcOption) -> bool {
+        self.sources
+            .get(opt.source_index)
+            .is_some_and(|p| p.as_path() == std::path::Path::new("<command line>"))
     }
 
     /// The startup flags Bazel runs with when this bazelrc is in effect:
@@ -768,11 +779,15 @@ impl Bazelrc {
 /// Bazel's `--default_override=<rc index>:<command>=<option>` token: one rc-file option,
 /// restated on the command line under the section it was written in.
 ///
-/// It is how a `common`-section option survives `--ignore_all_rc_files`, which the CLI always
+/// It is how an rc-file option survives `--ignore_all_rc_files`, which the CLI always
 /// passes: a literal `--option` on the command line would be rejected by any command that
-/// does not accept it, whereas Bazel applies an override only to the commands its section
-/// covers. Bazel also parses overrides at rc priority — ahead of everything literal on the
-/// command line — so an override never outranks a flag the user or a task passed directly.
+/// does not accept it — or, before that, by a `bazel` wrapper in front of the real client
+/// that registers the flag itself (#1632) — whereas Bazel applies an override only to the
+/// commands its section covers. `common` covers all of them leniently; a command name
+/// covers that command and everything inheriting from it. This is the transport Bazel's
+/// own client uses to hand rc entries to the server. Bazel also parses overrides at rc
+/// priority — ahead of everything literal on the command line — so an override never
+/// outranks a flag the user or a task passed directly.
 ///
 /// One type for both directions: [`partition_expand_all`] renders these and
 /// [`last_flag_value`] reads them back, so the wire form is written down once.
@@ -782,9 +797,10 @@ struct DefaultOverride<'a> {
     /// always emits [`SOLE_SOURCE`](Self::SOLE_SOURCE); the field exists because the file it
     /// names is what delimits a parse bucket (see [`override_chunks`]).
     index: u32,
-    /// The section the option is scoped to, e.g. `common`. Rendered without a `:config`
-    /// qualifier — `expand_configs` has already decided which config sections apply. The
-    /// invariant holds in that direction only: [`parse`](Self::parse) will read a qualified
+    /// The section the option is scoped to, e.g. `common`, `build`, `always`. Rendered
+    /// without a `:config` qualifier — `expand_configs` has already decided which config
+    /// sections apply. The invariant holds in that direction only: [`parse`](Self::parse)
+    /// will read a qualified
     /// section back out of foreign input. It is ignored, and safely: `expand_configs`
     /// consumes every `--config=` request, so no config is active on the command line Bazel
     /// receives for a `{section}:{config}` override to key off.
@@ -865,14 +881,29 @@ fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
 
 /// Split an expanded option list into `(default_override_flags, regular_flags)`.
 ///
-/// `common`-section options become [`DefaultOverride`] tokens, returned first so they precede
-/// user flags, which Bazel applies after them either way: override payloads parse at rc
-/// priority and the command line after them. Each entry keeps its `version_condition` so
-/// version-gated options aren't silently promoted to unconditional.
+/// Options read from rc files become [`DefaultOverride`] tokens rendered under the base
+/// section they were written in (`common`, `build`, `always`, …), returned first so they
+/// precede user flags, which Bazel applies after them either way: override payloads parse
+/// at rc priority and the command line after them. This is the wire form Bazel's own
+/// client restates rc entries in, and it is load-bearing for more than fidelity: a
+/// literal `build`-section flag on the command line can be one a `bazel` wrapper in
+/// front of the real client registers as its own — Aspect Workflows' agent wrapper
+/// registers `--experimental_convenience_symlinks` as a boolean and rejects the enum
+/// value `normal` before Bazel runs (#1632) — whereas an override token names no flag
+/// the wrapper knows and passes through untouched.
+///
+/// Caller-supplied flags (`is_caller`, the synthetic `"<command line>"` source) stay
+/// literal, keeping the command-line priority Bazel gives them over every rc entry: an
+/// override payload would demote a caller flag back to rc priority, where a more
+/// specific rc section beats it. One exception: a caller flag scoped to `common` rides
+/// the transport too — a literal `--option` is rejected by any command that does not
+/// accept it, and `common`'s every-command applicability is the only way it reaches the
+/// commands that do. Each entry keeps its `version_condition` so version-gated options
+/// aren't silently promoted to unconditional.
 ///
 /// A two-token option (`--flag value`, parsed as a bare-flag `RcOption` followed by its value
 /// `RcOption`) is folded into the canonical `--flag=value` form for its single
-/// `--default_override=0:common=--flag=value` entry. Bazel parses each override value as one
+/// `--default_override=0:<section>=--flag=value` entry. Bazel parses each override value as one
 /// option token and does not re-split it on whitespace, so a space-joined `--flag value`
 /// payload is rejected as a single unrecognized option. Two payloads *do* pair when they land
 /// in one parse bucket — a run of override tokens sharing an rc index, read a section at a
@@ -883,14 +914,15 @@ fn override_chunks<'a>(tokens: &[&'a str]) -> Vec<Vec<(&'a str, &'a str)>> {
 ///
 /// Accepted trade-off: a bare token following a boolean flag is folded as if it were the flag's
 /// value, even when it is really a non-option argument. Bazel's bazelrc supports non-option args
-/// in rc lines (e.g. `common --keep_going //:all`, where `//:all` is a default target prepended
+/// in rc lines (e.g. `build --keep_going //:all`, where `//:all` is a default target prepended
 /// to the command line); under this fold that becomes `--keep_going=//:all` and the target is
 /// lost. Telling the two apart needs a per-flag "takes a value" registry we don't have, and the
-/// value-flag case (`--remote_download_outputs minimal`) is by far the common one — so we do not
-/// support non-option arguments in `common`-section rc lines. Put default targets on the command
-/// line or in a `build`-section (non-`common`) rc line, which passes through untouched.
+/// value-flag case (`--remote_download_outputs minimal`) is by far the common one — so we do
+/// not support non-option arguments in rc lines that ride the override transport. Put default
+/// targets on the command line; a caller flag (which stays literal) can still carry one.
 fn partition_expand_all(
     opts: &[RcOption],
+    is_caller: impl Fn(&RcOption) -> bool,
 ) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
     let mut overrides = Vec::new();
     let mut flags = Vec::new();
@@ -898,7 +930,18 @@ fn partition_expand_all(
     while i < opts.len() {
         let opt = &opts[i];
         let base = opt.command.split(':').next().unwrap_or(&opt.command);
-        if base == "common" {
+        // `common` rides the override transport whatever its source: a literal
+        // `--option` is rejected by any command that does not accept it, so the
+        // transport's per-section applicability is the only way a `common`-scoped
+        // flag reaches every command that does. Every other rc-file option rides
+        // the same transport under its own base section, so a `build`-section
+        // flag never reaches the command line as a literal a wrapper in front of
+        // Bazel may reject before Bazel sees it. Caller flags stay literal:
+        // Bazel applies command-line flags after every override payload, and an
+        // override would demote them back to rc priority, where a more specific
+        // rc section could beat them.
+        let rides_override = base == "common" || !is_caller(opt);
+        if rides_override {
             let mut value = opt.value.clone();
             if let Some(next) = opts.get(i + 1) {
                 if is_two_token_pair(opt, next) {
@@ -909,7 +952,7 @@ fn partition_expand_all(
             overrides.push((
                 DefaultOverride {
                     index: DefaultOverride::SOLE_SOURCE,
-                    command: "common",
+                    command: base,
                     option: &value,
                 }
                 .to_string(),
@@ -930,7 +973,7 @@ fn partition_expand_all(
 ///
 /// Purely positional — it cannot tell a value-taking flag from a boolean flag trailed by a
 /// non-option argument, so `--keep_going //:all` also matches. See `partition_expand_all` for
-/// why that trade-off is accepted (non-option args in `common` rc lines are unsupported).
+/// why that trade-off is accepted (non-option args cannot ride the override transport).
 fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
     flag.value.starts_with('-')
         && !flag.value.contains('=')
@@ -969,8 +1012,9 @@ pub fn flag_values_in(tokens: &[&str], name: &str) -> Vec<String> {
 ///
 /// Reads both forms the CLI renders rc content in, because it runs Bazel with
 /// `--ignore_all_rc_files` and restates that content itself: a literal token, and a
-/// `DefaultOverride` carrying an option from a section — `common` — that cannot be passed
-/// literally. Reading only literals makes a `common`-scoped flag invisible, so a caller asking
+/// `DefaultOverride` carrying an rc-file option restated under its own section. Reading
+/// only literals makes an rc-file flag invisible — before every section rode the
+/// override transport, a `common`-scoped one was; now they all are — so a caller asking
 /// "has this been requested already?" adds its own and silently outranks the user's.
 ///
 /// A literal occurrence beats an override whatever the textual order, because Bazel parses
@@ -1268,8 +1312,9 @@ fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
     }
 
     /// Expand `--config=` flags for `command`, split into
-    /// `(startup_flags, flags)` where `common`-section options are rendered as
-    /// `--default_override=0:common=...` startup-side entries.
+    /// `(startup_flags, flags)` where rc-file options are rendered as
+    /// `--default_override=0:<section>=...` entries in `flags` and caller-supplied
+    /// ones stay literal.
     ///
     /// Like `expand`, the command flags are filtered to the resolved Bazel
     /// version so version-gated options report accurately.
@@ -1286,7 +1331,7 @@ fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
             .map(|opt| alloc_flag(eval, opt))
             .collect();
 
-        let (overrides, regular) = partition_expand_all(&opts);
+        let (overrides, regular) = partition_expand_all(&opts, |o| this.is_command_line(o));
         let flags: Vec<Value<'v>> = overrides
             .iter()
             .chain(regular.iter())
@@ -1733,8 +1778,8 @@ mod runcommand_tests {
     }
 
     #[test]
-    fn partition_routes_common_to_overrides() {
-        let mut common = RcOption {
+    fn partition_routes_rc_sections_to_overrides() {
+        let common = RcOption {
             value: "--remote_cache=x".to_string(),
             command: "common".to_string(),
             ..RcOption::default()
@@ -1744,7 +1789,73 @@ mod runcommand_tests {
             command: "build".to_string(),
             ..RcOption::default()
         };
-        let (overrides, flags) = partition_expand_all(&[common.clone(), build]);
+        // No source distinguishes caller from rc-file here: everything is
+        // rc-file (`|_| false`), so every section rides the transport.
+        let (overrides, flags) = partition_expand_all(&[common, build], |_| false);
+        assert_eq!(
+            overrides,
+            vec![
+                (
+                    "--default_override=0:common=--remote_cache=x".to_string(),
+                    None
+                ),
+                ("--default_override=0:build=--jobs=4".to_string(), None),
+            ]
+        );
+        assert!(
+            flags.is_empty(),
+            "rc-file entries never ride the literal command line: {flags:?}"
+        );
+
+        // A config-qualified section renders its base: `common:ci` → `common`.
+        let ci = RcOption {
+            value: "--remote_cache=y".to_string(),
+            command: "common:ci".to_string(),
+            ..RcOption::default()
+        };
+        let (overrides, _) = partition_expand_all(&[ci], |_| false);
+        assert_eq!(overrides.len(), 1, "common:config base routes to overrides");
+        assert_eq!(
+            overrides[0].0, "--default_override=0:common=--remote_cache=y",
+            "the override carries the base section"
+        );
+
+        // `always` rides under `always` — a pseudo-command Bazel accepts.
+        let always = RcOption {
+            value: "--keep_going".to_string(),
+            command: "always".to_string(),
+            ..RcOption::default()
+        };
+        let (overrides, _) = partition_expand_all(&[always], |_| false);
+        assert_eq!(
+            overrides,
+            vec![("--default_override=0:always=--keep_going".to_string(), None)]
+        );
+    }
+
+    /// Caller flags stay literal — Bazel applies command-line flags after every
+    /// override payload, and demoting them to overrides would let a more
+    /// specific rc section beat them. `common`-scoped caller flags are the
+    /// exception: a literal `--option` is rejected by any command that does
+    /// not accept it, so they ride the transport like their rc-file peers.
+    #[test]
+    fn partition_keeps_caller_flags_literal_except_common() {
+        let build = RcOption {
+            value: "--jobs=4".to_string(),
+            command: "build".to_string(),
+            ..RcOption::default()
+        };
+        let always = RcOption {
+            value: "--keep_going".to_string(),
+            command: "always".to_string(),
+            ..RcOption::default()
+        };
+        let common = RcOption {
+            value: "--remote_cache=x".to_string(),
+            command: "common".to_string(),
+            ..RcOption::default()
+        };
+        let (overrides, flags) = partition_expand_all(&[build, always, common], |_| true);
         assert_eq!(
             overrides,
             vec![(
@@ -1752,10 +1863,35 @@ mod runcommand_tests {
                 None
             )]
         );
-        assert_eq!(flags, vec![("--jobs=4".to_string(), None)]);
-        common.command = "common:ci".to_string();
-        let (overrides, _) = partition_expand_all(&[common]);
-        assert_eq!(overrides.len(), 1, "common:config base routes to overrides");
+        assert_eq!(
+            flags,
+            vec![
+                ("--jobs=4".to_string(), None),
+                ("--keep_going".to_string(), None),
+            ]
+        );
+    }
+
+    /// The two-token fold covers the new sections too: `build:ci --flag value`
+    /// must become one `=`-form override under `build`, the same as `common`.
+    #[test]
+    fn partition_folds_two_token_build_override_to_eq_form() {
+        let build_ci: Vec<RcOption> = ["--experimental_convenience_symlinks", "normal"]
+            .iter()
+            .map(|v| RcOption {
+                value: v.to_string(),
+                command: "build:ci".to_string(),
+                ..RcOption::default()
+            })
+            .collect();
+        let (overrides, _) = partition_expand_all(&build_ci, |_| false);
+        assert_eq!(
+            overrides,
+            vec![(
+                "--default_override=0:build=--experimental_convenience_symlinks=normal".to_string(),
+                None
+            )]
+        );
     }
 
     /// Build the two `RcOption`s a `common:ci --flag value` rc line parses into.
@@ -1775,8 +1911,10 @@ mod runcommand_tests {
         // `common:ci --remote_download_outputs minimal` must become ONE override in
         // the canonical `=` form — Bazel does not re-split the override value on
         // whitespace, so two overrides (or a space-joined one) are both rejected.
-        let (overrides, _) =
-            partition_expand_all(&common_ci(&["--remote_download_outputs", "minimal"]));
+        let (overrides, _) = partition_expand_all(
+            &common_ci(&["--remote_download_outputs", "minimal"]),
+            |_| false,
+        );
         assert_eq!(
             overrides,
             vec![(
@@ -1789,10 +1927,10 @@ mod runcommand_tests {
     #[test]
     fn partition_does_not_join_canonical_eq_common_override() {
         // `--flag=value` carries its own value; the next token is a separate flag.
-        let (overrides, _) = partition_expand_all(&common_ci(&[
-            "--remote_download_outputs=minimal",
-            "--jobs=4",
-        ]));
+        let (overrides, _) = partition_expand_all(
+            &common_ci(&["--remote_download_outputs=minimal", "--jobs=4"]),
+            |_| false,
+        );
         assert_eq!(
             overrides,
             vec![
@@ -1808,10 +1946,10 @@ mod runcommand_tests {
     #[test]
     fn partition_does_not_join_bool_flag_before_another_flag() {
         // A bare boolean flag followed by another flag is not a two-token pair.
-        let (overrides, _) = partition_expand_all(&common_ci(&[
-            "--remote_local_fallback",
-            "--remote_timeout=3600",
-        ]));
+        let (overrides, _) = partition_expand_all(
+            &common_ci(&["--remote_local_fallback", "--remote_timeout=3600"]),
+            |_| false,
+        );
         assert_eq!(
             overrides,
             vec![
@@ -1830,10 +1968,11 @@ mod runcommand_tests {
     #[test]
     fn partition_folds_bool_flag_with_trailing_target_accepted_tradeoff() {
         // Documented limitation: a boolean flag trailed by a non-option target arg
-        // is folded as `--flag=target`, losing the target. Non-option args in
-        // `common` rc lines are unsupported (see `partition_expand_all`). Locks the
+        // is folded as `--flag=target`, losing the target. Non-option args cannot
+        // ride the override transport (see `partition_expand_all`). Locks the
         // behavior in so a future "fix" is a conscious decision, not a surprise.
-        let (overrides, _) = partition_expand_all(&common_ci(&["--keep_going", "//:all"]));
+        let (overrides, _) =
+            partition_expand_all(&common_ci(&["--keep_going", "//:all"]), |_| false);
         assert_eq!(
             overrides,
             vec![(
@@ -1859,7 +1998,7 @@ mod runcommand_tests {
             version_condition: None,
             ..RcOption::default()
         };
-        let (overrides, _) = partition_expand_all(&[flag, value]);
+        let (overrides, _) = partition_expand_all(&[flag, value], |_| false);
         assert_eq!(
             overrides.len(),
             2,
@@ -2255,6 +2394,52 @@ build:opt --compilation_mode=opt
         );
     }
 
+    /// #1632: a `build`-section rc entry must not reach the command line as a
+    /// literal. On Aspect Workflows the `bazel` on PATH is the agent's
+    /// wrapper, which registers `--experimental_convenience_symlinks` as its
+    /// own boolean flag and rejects the enum value `normal` — Go's flag
+    /// parser error, before real Bazel runs. The override token names no flag
+    /// the wrapper knows, so it passes through untouched.
+    #[test]
+    fn build_section_rc_options_never_ride_the_literal_command_line() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build --experimental_convenience_symlinks=normal\n\
+             build --remote_timeout=3600\n\
+             common --announce_rc\n",
+        )
+        .unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &[]).unwrap();
+        let (_, command_flags) = rc.resolve_for_command("build").unwrap();
+        assert_eq!(
+            command_flags,
+            vec![
+                "--default_override=0:common=--announce_rc".to_string(),
+                "--default_override=0:build=--experimental_convenience_symlinks=normal".to_string(),
+                "--default_override=0:build=--remote_timeout=3600".to_string(),
+            ],
+            "every rc-file option rides the transport, in section order"
+        );
+        assert!(
+            command_flags
+                .iter()
+                .all(|flag| flag.starts_with("--default_override=")),
+            "no rc-derived flag may reach the literal command line: {command_flags:?}",
+        );
+        assert_eq!(
+            last_flag_value(
+                &command_flags,
+                "--experimental_convenience_symlinks",
+                "build"
+            ),
+            Some("normal".to_string()),
+            "the reader must see what the writer renders",
+        );
+    }
+
     /// The two readers of a resolved rc agree about a `common`-section flag.
     ///
     /// `rc.flag_value` asks the option model, where `common` is a section by name;
@@ -2262,8 +2447,10 @@ build:opt --compilation_mode=opt
     /// a `--default_override`. For a `common`-section flag — the shape that broke — a
     /// caller that reuses a path the run already asks for has to get the same answer
     /// whichever reader it holds, or it adds a second `--execution_log_compact_file`
-    /// over the user's. The readers are not interchangeable in general: see
-    /// `the_two_readers_diverge_on_an_always_section_flag`.
+    /// over the user's. The readers are not interchangeable in general — a caller
+    /// flag scoped to `common` rides the transport while the model still reads it as
+    /// a plain option — but every rc-file section now renders, so they agree on
+    /// all of them: see `the_two_readers_agree_on_an_always_section_flag`.
     #[test]
     fn both_readers_see_a_common_scoped_flag() {
         let dir = make_workspace();
@@ -2289,21 +2476,16 @@ build:opt --compilation_mode=opt
         );
     }
 
-    /// Pinned divergence: an `always` entry that `common` also sets reads differently
-    /// from the two readers, and the rendering is why.
+    /// An `always` entry that `common` also sets reads the same from both readers.
     ///
-    /// Rendering an `always` section literally promotes it from rc priority to
-    /// command-line priority, so on the command line the literal out-ranks the `common`
-    /// override — the inverse of the `always`-then-`common` order the option model keeps,
-    /// as [`Bazelrc::options_for`] documents. It is only this pair: `always`-vs-`build` and
-    /// `common`-vs-`build` both agree, because a `build` entry is a literal either way.
-    ///
-    /// Pre-existing, and unreachable through caller flags alone — an unscoped caller flag is
-    /// an `always` entry (`push_caller_flags`), but a caller reads before it writes, so it
-    /// cannot be the `always` entry that inverts its own answer. Pinned so a change in the
-    /// rendering surfaces here rather than in a caller.
+    /// `always` rides the override transport like every other rc-file section, so
+    /// the rendered command line ranks it exactly as the option model does: Bazel
+    /// parses sections `always`-then-`common`, last-write-wins, so `common` wins
+    /// from both readers. (Before rc `always` entries rode the transport, the
+    /// literal outranked the `common` override — the inverse of the model — which
+    /// is why this pair was pinned as a divergence.)
     #[test]
-    fn the_two_readers_diverge_on_an_always_section_flag() {
+    fn the_two_readers_agree_on_an_always_section_flag() {
         let dir = make_workspace();
         let root = dir.path();
         fs::write(
@@ -2322,8 +2504,8 @@ build:opt --compilation_mode=opt
         );
         assert_eq!(
             last_flag_value(&rc.resolve_for_command("build").unwrap().1, name, "build"),
-            Some("/tmp/always".to_string()),
-            "rendered, `always` is a literal flag and out-ranks the `common` override",
+            Some("/tmp/common".to_string()),
+            "rendered, both are overrides and `common` parses after `always`",
         );
     }
 
@@ -2353,8 +2535,8 @@ build:opt --compilation_mode=opt
             "`common` options must reach info, not just build: {command_flags:?}",
         );
         assert!(
-            command_flags.contains(&"--show_make_env".to_string()),
-            "`info`-section options must reach info: {command_flags:?}",
+            command_flags.contains(&"--default_override=0:info=--show_make_env".to_string()),
+            "`info`-section options must reach info as an override: {command_flags:?}",
         );
     }
 
@@ -2641,17 +2823,19 @@ build --jobs=2
         )
         .unwrap();
 
-        // Last wins, so the caller's `--jobs=3` trailing both rc-file sections is what
-        // `--jobs` resolves to for a build.
+        // The rc-file sections ride the override transport; the caller's flags
+        // stay literal, and Bazel applies the command line after every override
+        // payload — so the caller's `--jobs=3` is what `--jobs` resolves to for
+        // a build however the sections are scoped.
         assert_eq!(
             rc.resolve_for_command("build").unwrap().1,
             vec![
                 "--default_override=0:common=--jobs=1",
-                "--jobs=2",
+                "--default_override=0:build=--jobs=2",
                 "--keep_going",
                 "--jobs=3"
             ],
-            "rc-file sections first, then the caller's: unscoped, then build-scoped"
+            "rc-file sections as overrides, then the caller's: unscoped, then build-scoped"
         );
         assert_eq!(
             rc.resolve_for_command("query").unwrap().1,
