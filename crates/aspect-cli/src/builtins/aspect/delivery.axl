@@ -346,7 +346,7 @@ DeliveryTrait = trait(
     delivery_end = attr(
         typing.Callable[[], None],
         default = lambda: None,
-        description = "Hook called once at the end of a delivery run, after all targets are delivered.",
+        description = "Hook called once at the end of a delivery run, after all targets are delivered. Not called when the task exits early, such as on a failed build.",
     ),
     delivery_target = attr(
         typing.Callable[[dict], dict],
@@ -1350,6 +1350,18 @@ def _hook_error(label: str, err) -> str:
     """The error line for a `delivery_target` hook that raised for `label`."""
     return "DeliveryTrait.delivery_target raised for {}: {}".format(label, err.message)
 
+def _record_build_failure(data, outcomes, delivery_trait, targets, build_code: int) -> list:
+    """Record a WARN row for each target of a failed change-detection build, so
+    the check run says why, and fire the `delivery_target` hook on each. A hook
+    that raises doesn't stop the rest; returns the error lines of those that did."""
+    hook_errors = []
+    for label in targets:
+        delivery_scheduler.record(data, outcomes, label, "warn", message = "build failed (exit {})".format(build_code))
+        err, _ = catch(_fire_target_hook, data, delivery_trait, None, label)
+        if err:
+            hook_errors.append(_hook_error(label, err))
+    return hook_errors
+
 def _fail_unstarted(data, outcomes, rows, unstarted, message, fire_hook) -> int:
     """Record a FAIL row and result for each `(label, is_forced, output_sha)` in
     `unstarted`, calling `fire_hook(label)` after each. Returns how many."""
@@ -1811,18 +1823,8 @@ def _delivery_impl(ctx):
         if build_code != 0:
             error(ctx.std, "Build failed with exit code {}.".format(build_code))
 
-            # Synthetic warn rows so the check run conveys why it failed.
-            for label in targets:
-                delivery_scheduler.record(
-                    data,
-                    outcomes,
-                    label,
-                    "warn",
-                    message = "build failed (exit {})".format(build_code),
-                )
-                err, _ = catch(_fire_target_hook, data, delivery_trait, None, label)
-                if err:
-                    error(ctx.std, _hook_error(label, err))
+            for hook_error in _record_build_failure(data, outcomes, delivery_trait, targets, build_code):
+                error(ctx.std, hook_error)
             return _emit_final(ph, exit_code = build_code)
     else:
         output_shas = {}
@@ -2579,3 +2581,4 @@ testonly_record_outcome = _record_outcome
 testonly_delivered_dict = _delivered_dict
 testonly_metadata_to_store = _metadata_to_store
 testonly_fire_target_hook = _fire_target_hook
+testonly_record_build_failure = _record_build_failure
