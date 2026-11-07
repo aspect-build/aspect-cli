@@ -15,9 +15,11 @@ API, or the render pipeline.
 Subprocess suites drive a feature end to end through a probe task with a
 stubbed `ctx.http()`: lint review comments, and the PR status comment on a
 GitHub Enterprise runner with `ASPECT_GITHUB_TOKEN`, with and without Aspect
-credentials and with coordination opted out, and against a fake sibling job
-racing it through the comment (an overwrite, a duplicate comment); and a
-status check created with `ASPECT_GITHUB_TOKEN` and then canceled.
+credentials and with coordination opted out, against a fake sibling job
+racing it through the comment (an overwrite, a duplicate comment), and
+against another push's comment (a newer push's is left alone, an older
+push's is reset); and a status check created with `ASPECT_GITHUB_TOKEN` and
+then canceled.
 
 Run with:
   aspect dev test-github-features
@@ -188,6 +190,18 @@ def _sibling_rows(rows):
     # A sibling job's finished row, shaped like ours.
     return [dict(e, job = "sibling", status = "passed") for e in rows]
 
+def _seeded_comment(seed):
+    # A marker comment whose state block holds one finished "seeded" row from
+    # run `<run_id>` on push `<head_sha>`, for `seed` = "<head_sha>:<run_id>".
+    head_sha, run_id = seed.split(":")
+    state = {
+        "head_sha": head_sha,
+        "last_upsert_epoch_s": 0,
+        "workflow_runs": [{"run_id": run_id, "workflow_name": "ci"}],
+        "entries": [{"workflow_run_id": run_id, "job": "seeded", "kind": "build", "name": "build", "run_attempt": "1", "status": "passed"}],
+    }
+    return "<!-- aspect-ci-status:pr-1 -->\\n" + _STATE_OPEN + base64.encode(json.encode(state)) + " -->"
+
 def _impl(ctx):
     comments = {}
     calls = []
@@ -200,6 +214,11 @@ def _impl(ctx):
     # only its row, just before ours.
     sibling = ctx.std.env.var("PROBE_SIBLING") or ""
     raced = []
+
+    # An existing comment from another push (see `_seeded_comment`).
+    seed = ctx.std.env.var("PROBE_SEED") or ""
+    if seed:
+        comments["1"] = _seeded_comment(seed)
 
     def _send(method, **kwargs):
         url = kwargs["url"]
@@ -321,12 +340,13 @@ _STRIPPED_ENV = [
     "GITLAB_CI",
 ]
 
-def _run_status_comment_probe(ctx, contribute_status = 0, coordinate = True, sibling = ""):
+def _run_status_comment_probe(ctx, contribute_status = 0, coordinate = True, sibling = "", seed = ""):
     """Run the status-comment probe on an Enterprise runner with only
     `ASPECT_GITHUB_TOKEN` for GitHub and no Aspect credentials, or with a
     non-zero `contribute_status`, credentials and every contribute answered
     with that status. `sibling` names a racing sibling job the fake GitHub
-    plays (see `PROBE_SIBLING` in the probe).
+    plays (see `PROBE_SIBLING` in the probe); `seed` ("<head_sha>:<run_id>")
+    pre-creates another push's comment (see `PROBE_SEED`).
     Returns the probe's `result.json`."""
     root = ctx.std.fs.mkdtemp(prefix = "github-status-comments-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
@@ -342,6 +362,7 @@ def _run_status_comment_probe(ctx, contribute_status = 0, coordinate = True, sib
         cmd = cmd.env(name, value)
     cmd = cmd.env("PROBE_CONTRIBUTE_STATUS", str(contribute_status))
     cmd = cmd.env("PROBE_SIBLING", sibling)
+    cmd = cmd.env("PROBE_SEED", seed)
     output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
     if not output.status.success:
         fail(output.stdout + output.stderr)
@@ -490,6 +511,23 @@ def _test_status_comment_races(ctx):
     _eq("duplicate — ours deleted once", [u.rsplit("/", 1)[1] for u in deletes], ["2"])
     _eq("duplicate — our row merged before the delete", "build" in _rows_by_job(result["after_first"]["1"]), True)
 
+def _test_status_comment_superseded(ctx):
+    """A late job from an older push leaves a newer push's comment alone.
+
+    The probe's job is run 11 on push `head`. Against a comment from run 12 on
+    another push it neither creates nor edits a comment; against one from run
+    10 it is the newer push and resets the comment to its own row."""
+    result = _run_status_comment_probe(ctx, seed = "other:12")
+    writes = [c["method"] for c in result["calls"] if c["method"] in ("post", "patch", "delete")]
+    _eq("newer push's comment — no writes", writes, [])
+    _eq("newer push's comment — rows kept", _rows_by_job(result["comments"]["1"]), {"seeded": "passed"})
+    _eq("newer push's comment — push kept", parse_state(result["comments"]["1"])["head_sha"], "other")
+
+    result = _run_status_comment_probe(ctx, seed = "other:10")
+    _eq("older push's comment — one comment", list(result["comments"].keys()), ["1"])
+    _eq("older push's comment — reset to our row", _rows_by_job(result["comments"]["1"]), {"build": "passed"})
+    _eq("older push's comment — reset to our push", parse_state(result["comments"]["1"])["head_sha"], "head")
+
 def _test_coordination_helpers():
     """The shared status-comment coordination helpers, both surfaces' source
     of truth: the credential lookup is best-effort, `coordinate = False` wins,
@@ -608,6 +646,7 @@ def _test_impl(ctx):
     _test_lint_comment_identity(ctx)
     _test_status_comment_coordination(ctx)
     _test_status_comment_races(ctx)
+    _test_status_comment_superseded(ctx)
     _test_status_check_cancellation(ctx)
 
     print("github features test: OK")

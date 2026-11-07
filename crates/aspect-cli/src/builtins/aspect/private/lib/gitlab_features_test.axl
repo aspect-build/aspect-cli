@@ -24,8 +24,9 @@ What's GL-specific and tested below:
   * Status-note coordination, end to end through a probe task with a
     stubbed `ctx.http()` on a self-hosted instance with
     `ASPECT_GITLAB_TOKEN`: with and without Aspect credentials, with
-    coordination opted out, and against a fake sibling task racing it
-    through the note (an overwrite, a duplicate note).
+    coordination opted out, against a fake sibling task racing it through
+    the note (an overwrite, a duplicate note), and against another push's
+    note (a newer push's is left alone, an older push's is reset).
 
 Run with:
   aspect dev test-gitlab-features
@@ -62,6 +63,18 @@ def _sibling_rows(rows):
     # A sibling task's finished row, shaped like ours.
     return [dict(e, job = "sibling", status = "passed") for e in rows]
 
+def _seeded_note(seed):
+    # A marker note whose state block holds one finished "seeded" row from
+    # pipeline `<run_id>` on push `<head_sha>`, for `seed` = "<head_sha>:<run_id>".
+    head_sha, run_id = seed.split(":")
+    state = {
+        "head_sha": head_sha,
+        "last_upsert_epoch_s": 0,
+        "workflow_runs": [{"run_id": run_id, "workflow_name": "ci"}],
+        "entries": [{"workflow_run_id": run_id, "job": "seeded", "kind": "build", "name": "build", "run_attempt": "1", "status": "passed"}],
+    }
+    return "<!-- aspect-ci-status:mr-1 -->\\n" + _STATE_OPEN + base64.encode(json.encode(state)) + " -->"
+
 def _impl(ctx):
     notes = {}
     calls = []
@@ -72,6 +85,11 @@ def _impl(ctx):
     # GitHub probe: "overwrite" or "duplicate".
     sibling = ctx.std.env.var("PROBE_SIBLING") or ""
     raced = []
+
+    # An existing note from another push (see `_seeded_note`).
+    seed = ctx.std.env.var("PROBE_SEED") or ""
+    if seed:
+        notes["1"] = _seeded_note(seed)
 
     def _send(method, **kwargs):
         url = kwargs["url"]
@@ -184,11 +202,12 @@ _STRIPPED_ENV = [
     "GITHUB_ACTIONS",
 ]
 
-def _run_status_note_probe(ctx, contribute_status = 0, coordinate = True, sibling = ""):
+def _run_status_note_probe(ctx, contribute_status = 0, coordinate = True, sibling = "", seed = ""):
     """Run the status-note probe on a self-hosted MR pipeline with only
     `ASPECT_GITLAB_TOKEN` and no Aspect credentials, or with a non-zero
     `contribute_status`, credentials and every contribute answered with that
-    status. `sibling` names a racing sibling task the fake GitLab plays.
+    status. `sibling` names a racing sibling task the fake GitLab plays;
+    `seed` ("<head_sha>:<run_id>") pre-creates another push's note.
     Returns the probe's `result.json`."""
     root = ctx.std.fs.mkdtemp(prefix = "gitlab-status-comments-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
@@ -204,6 +223,7 @@ def _run_status_note_probe(ctx, contribute_status = 0, coordinate = True, siblin
         cmd = cmd.env(name, value)
     cmd = cmd.env("PROBE_CONTRIBUTE_STATUS", str(contribute_status))
     cmd = cmd.env("PROBE_SIBLING", sibling)
+    cmd = cmd.env("PROBE_SEED", seed)
     output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
     if not output.status.success:
         fail(output.stdout + output.stderr)
@@ -261,6 +281,23 @@ def _test_status_note_races(ctx):
     deletes = [c["url"] for c in result["calls"] if c["method"] == "delete"]
     _eq("duplicate — ours deleted once", [u.split("?")[0].rsplit("/", 1)[1] for u in deletes], ["2"])
     _eq("duplicate — our row merged before the delete", "build" in _rows_by_job(result["after_first"]["1"]), True)
+
+def _test_status_note_superseded(ctx):
+    """A late task from an older push leaves a newer push's note alone.
+
+    The probe's task is pipeline 11 on push `head`: it leaves pipeline 12's
+    note on another push untouched and resets pipeline 10's (see the GitHub
+    suite's `_test_status_comment_superseded`)."""
+    result = _run_status_note_probe(ctx, seed = "other:12")
+    writes = [c["method"] for c in result["calls"] if c["method"] in ("post", "put", "delete")]
+    _eq("newer push's note — no writes", writes, [])
+    _eq("newer push's note — rows kept", _rows_by_job(result["notes"]["1"]), {"seeded": "passed"})
+    _eq("newer push's note — push kept", parse_state(result["notes"]["1"])["head_sha"], "other")
+
+    result = _run_status_note_probe(ctx, seed = "other:10")
+    _eq("older push's note — one note", list(result["notes"].keys()), ["1"])
+    _eq("older push's note — reset to our row", _rows_by_job(result["notes"]["1"]), {"build": "passed"})
+    _eq("older push's note — reset to our push", parse_state(result["notes"]["1"])["head_sha"], "head")
 
 def _test_impl(ctx):
     # ── state_for ──────────────────────────────────────────────────
@@ -356,6 +393,7 @@ def _test_impl(ctx):
 
     _test_status_note_coordination(ctx)
     _test_status_note_races(ctx)
+    _test_status_note_superseded(ctx)
 
     print("gitlab features test: OK")
     return 0

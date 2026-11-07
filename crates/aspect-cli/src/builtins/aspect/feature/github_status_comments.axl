@@ -17,8 +17,7 @@ CircleCI) since coordination doesn't depend on CI artifacts.
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
 render → post under a local time lease), so a single job still renders a
-correct comment. A late job from an older push skips that post rather than
-resetting the comment (see `_superseded`).
+correct comment.
 
 Coordination is on whenever the run holds Aspect Cloud credentials, whichever
 GitHub token posts the comment; `coordinate = False` opts out. Without a
@@ -26,7 +25,8 @@ coordinator (no credentials, opted out, or the API rejected the contribution)
 the state block is the only coordination (see `coordinator_enabled`): all
 live jobs together read and write it about once per
 `min_poll_interval_seconds`, and each final update re-reads the comment until
-its row is there.
+its row is there. A late job from an older push never resets the state block
+(see `_superseded`).
 
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
@@ -2155,8 +2155,8 @@ def _github_status_comments(ctx: FeatureContext):
             return False
 
         if _superseded(parsed, head_sha, run_id):
-            _LOG.trace("Run %s is older than the comment's, on another SHA; skipping the fallback post." % run_id)
-            return
+            _LOG.trace("Run %s is older than the comment's, on another SHA; skipping the state-block post." % run_id)
+            return False
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         stable_body, final_body = _render_state(ctx, parsed, new_state, now_epoch)
         if not force and _state.get("_last_stable_body") == stable_body:
