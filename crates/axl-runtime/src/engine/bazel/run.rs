@@ -844,7 +844,9 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ///
     /// # Arguments
     ///
-    /// * `target` - The label to run.
+    /// * `target` - The label to run. A relative label resolves from
+    ///   `directory`, else the directory the task was invoked from, as
+    ///   Bazel's command line reads it.
     /// * `args` - Arguments appended after the target's own `args` attribute.
     /// * `env` - Variables set on the process after everything `bazel run`
     ///   sets; `None` removes one.
@@ -960,7 +962,8 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ///
     /// # Arguments
     ///
-    /// * `targets` - The labels to build.
+    /// * `targets` - The labels to build; relative ones resolve as on
+    ///   `ctx.bazel.run`.
     /// * `rc` - The `Bazelrc` the build runs under; the active one from
     ///   `use_rc` when omitted.
     /// * `stdout`, `stderr`, `stdio` - The build's streams, as on

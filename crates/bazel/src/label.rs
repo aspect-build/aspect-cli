@@ -139,13 +139,15 @@ impl LabelResolver {
     }
 }
 
-/// Whether the workspace-relative directory `package` holds a `BUILD.bazel`
-/// or `BUILD` file. `.bazelignore` and `--deleted_packages` are not consulted.
+/// The file names that make a directory a package, in Bazel's lookup order.
+const BUILD_FILE_NAMES: &[&str] = &["BUILD.bazel", "BUILD"];
+
+/// Whether the workspace-relative directory `package` holds one of
+/// [`BUILD_FILE_NAMES`]. `.bazelignore` and `--deleted_packages` are not
+/// consulted.
 fn has_build_file(workspace_root: &Path, package: &str) -> bool {
     let dir = workspace_root.join(package);
-    ["BUILD.bazel", "BUILD"]
-        .iter()
-        .any(|name| dir.join(name).is_file())
+    BUILD_FILE_NAMES.iter().any(|name| dir.join(name).is_file())
 }
 
 /// Resolve a label written relative to `current_package`, the
