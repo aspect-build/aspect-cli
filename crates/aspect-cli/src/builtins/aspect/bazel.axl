@@ -16,9 +16,10 @@ Each is a set of stateless functions taking `ctx` and deriving the active
 load them beside the builtin `bazel` global (`bazel.execution_log`, …) without
 an alias.
 
-`BazelTrait`, `ExecLogHook`, `exit_codes`, the retry constants and
-`normalize_label` stay top-level: tasks index `ctx.traits[BazelTrait]`,
-features construct `ExecLogHook`, both read the constants directly, and any AXL
+`BazelTrait`, `ExecLogHook`, `exit_codes`, the retry constants, the
+`dispatch_bazel_*` hook dispatchers and `normalize_label` stay top-level: tasks
+index `ctx.traits[BazelTrait]`, features construct `ExecLogHook`, tasks driving
+their own attempts fire the trait's hooks through `dispatch_bazel_*`, and any AXL
 matching labels against the ones tasks report calls `normalize_label`.
 
 A `load` binds privately, so each re-export is an explicit assignment from a

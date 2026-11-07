@@ -488,7 +488,7 @@ def _test_passthrough_args_shape(ctx):
 
 def _test_passthrough_args_is_the_opt_in_subset(ctx):
     """`passthrough_args` is what a task with its own `--bazel-flag` wording
-    splats (delivery does); `flags.args` is that plus those two flags."""
+    splats (delivery does); `bazel_flags.args` is that plus those two flags."""
     pa = bazel_flags.passthrough_args()
     _eq(
         "passthrough arg keys",
@@ -503,7 +503,7 @@ def _test_passthrough_args_is_the_opt_in_subset(ctx):
     fa = bazel_flags.args("the build")
     for key in pa.keys():
         if key not in fa:
-            fail("flags.args must include %s" % key)
+            fail("bazel_flags.args must include %s" % key)
 
 def _test_startup_value_flags_cover_the_pre_command_slot(ctx):
     """Startup options are their own slot and their own list, so
@@ -546,7 +546,7 @@ def _test_flags_empty_defaults(ctx):
         [],
     )
 
-def _test_setup_command_applies_to_ctx_bazel(ctx):
+def _test_rc_setup_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
       - the returned `Bazelrc` is registered as the active rc;
       - the caller's `base_flags` appear in its `build` expansion;
@@ -573,7 +573,7 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
     if "--ignore_all_rc_files" not in startup:
         fail("bazel_rc.setup — --ignore_all_rc_files not present: %r" % startup)
 
-def _test_setup_command_trait_base_flags(ctx):
+def _test_rc_setup_trait_base_flags(ctx):
     """`trait.base_flags` (feature-injected defaults) enter `bazel_rc.setup`'s
     composition ahead of the caller's base flags, so later flags still win
     last-wins."""
@@ -585,7 +585,7 @@ def _test_setup_command_trait_base_flags(ctx):
     if expanded.index("--trait-base") > expanded.index("--from-base"):
         fail("bazel_rc.setup — trait base_flags must precede caller base_flags: %r" % expanded)
 
-def _test_setup_command_skips_empty_fields(ctx):
+def _test_rc_setup_skips_empty_fields(ctx):
     """`bazel_rc.setup` is the only caller that filters `base_flags`, and it skips
     an empty one: with nothing injected anywhere, no filter runs.
 
@@ -602,7 +602,7 @@ def _test_setup_command_skips_empty_fields(ctx):
     bazel_rc.setup(ctx, "build")
     _eq("nothing injected, no filter call", calls, [])
 
-def _test_sibling_rc_transforms_startup(ctx):
+def _test_rc_sibling_transforms_startup(ctx):
     """`bazel_rc.sibling` mirrors `bazel_rc.setup`'s flags but runs the startup
     flags through the transform, and does NOT register itself as active."""
     base = "/tmp/test-sibling-rc-base"
@@ -622,6 +622,38 @@ def _test_sibling_rc_transforms_startup(ctx):
     # Building the sibling must not disturb the active rc.
     if ctx.bazel.active_rc() != active:
         fail("bazel_rc.sibling — must not change ctx.bazel.active_rc()")
+
+def _test_rc_hook_flags_concatenates_hooks(ctx):
+    """`bazel_rc.hook_flags` calls each `rc_flags` hook in order with the rc and
+    command it was given, and concatenates what they return."""
+    seen = []
+
+    def first(_ctx, rc, command):
+        seen.append(("first", rc, command))
+        return ["--a"]
+
+    def second(_ctx, rc, command):
+        seen.append(("second", rc, command))
+        return ["--b", "--c"]
+
+    fake = _fake_ctx(trait = BazelTrait(rc_flags = [first, second]))
+    _eq("hook flags", bazel_rc.hook_flags(fake, "rc", "test"), ["--a", "--b", "--c"])
+    _eq("hook calls", seen, [("first", "rc", "test"), ("second", "rc", "test")])
+    _eq("no hooks", bazel_rc.hook_flags(_fake_ctx(), "rc", "build"), [])
+
+def _test_rc_with_flags_layers_last(ctx):
+    """`bazel_rc.with_flags` returns `rc` itself for no flags, a fresh rc for no
+    `rc`, and otherwise expands the extras after the rc's own flags."""
+    rc = ctx.bazel.new_rc(flags = ["--from-rc"])
+    if bazel_rc.with_flags(ctx, rc, []) != rc:
+        fail("bazel_rc.with_flags — empty flags must return the rc unchanged")
+    if "--extra" not in bazel_rc.with_flags(ctx, None, ["--extra"]).expand(command = "build"):
+        fail("bazel_rc.with_flags — no rc must yield one carrying the flags")
+    expanded = list(bazel_rc.with_flags(ctx, rc, ["--extra"]).expand(command = "build"))
+    if "--from-rc" not in expanded or "--extra" not in expanded:
+        fail("bazel_rc.with_flags — merged expansion lost a flag: %r" % expanded)
+    if expanded.index("--from-rc") > expanded.index("--extra"):
+        fail("bazel_rc.with_flags — extras must expand after the rc: %r" % expanded)
 
 # A test option: accepted by `build` and every command that inherits it, and
 # rejected outright by `query`, so it is the sharp edge of the scoping contract.
@@ -683,7 +715,7 @@ def _rc_over(ctx, trait, task_base = [], user = []):
     Composed the way `bazel_rc.setup` composes it — `trait.base_flags`, then the
     task's `base_flags=`, then `bazel_flags.resolve` — over a `_fake_ctx` so the
     user's `--bazel-flag` slot is settable from a test. That mirror is the one
-    thing here production also does; `_test_setup_command_trait_base_flags`
+    thing here production also does; `_test_rc_setup_trait_base_flags`
     pins the same two base slots through the real `bazel_rc.setup`."""
     resolved = bazel_flags.resolve(_fake_ctx(bazel_flags = user, trait = trait))
     return ctx.bazel.new_rc(flags = list(trait.base_flags) + list(task_base) + resolved)
@@ -1098,7 +1130,7 @@ def _test_injected_flag_filters_skip_the_empty_startup_field(ctx):
     The startup slot is the sharp one. It is a separate Bazel argv position,
     parsed before the command name, so a command flag added there is a hard
     error rather than a misplaced option — and a filter that ADDS is exactly
-    what finds an unguarded call site. `_test_setup_command_skips_empty_fields`
+    what finds an unguarded call site. `_test_rc_setup_skips_empty_fields`
     covers the `base_flags` slot, which only `bazel_rc.setup` filters."""
     calls = []
 
@@ -1363,14 +1395,16 @@ def _test_impl(ctx):
     _test_config_names(ctx)
     _test_flags_delta(ctx)
     _test_auth_flags(ctx)
+    _test_rc_hook_flags_concatenates_hooks(ctx)
 
     # Run last: these build real `Bazelrc`s off `ctx.bazel`, and the
     # `bazel_rc.setup` ones register an active rc, so keeping them after the pure
     # subtests prevents bleed-through.
-    _test_setup_command_applies_to_ctx_bazel(ctx)
-    _test_setup_command_trait_base_flags(ctx)
-    _test_setup_command_skips_empty_fields(ctx)
-    _test_sibling_rc_transforms_startup(ctx)
+    _test_rc_setup_applies_to_ctx_bazel(ctx)
+    _test_rc_setup_trait_base_flags(ctx)
+    _test_rc_setup_skips_empty_fields(ctx)
+    _test_rc_sibling_transforms_startup(ctx)
+    _test_rc_with_flags_layers_last(ctx)
     _test_injected_flags_never_reach_a_query(ctx)
     _test_per_command_fields_reach_exactly_their_command(ctx)
     _test_build_rejected_flags_have_a_home(ctx)
@@ -1380,7 +1414,7 @@ def _test_impl(ctx):
     _test_injected_config_expands_per_command(ctx)
     _test_injected_config_expands_at_the_unscoped_rank(ctx)
 
-    print("bazel_flags_test.axl: OK (46 sections)")
+    print("bazel_flags_test.axl: OK (48 sections)")
     return 0
 
 bazel_flags_tests = task(

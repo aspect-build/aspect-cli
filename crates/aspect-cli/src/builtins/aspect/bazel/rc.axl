@@ -41,8 +41,8 @@ def _setup(ctx, command: str, base_flags: list = []):
     Each later `ctx.bazel.build` / `test` / `query` self-expands that rc and adds
     `--ignore_all_rc_files`. `base_flags` are the task's defaults, which a
     `--bazel-flag` overrides (see `_parse`). Built-in tasks reach this through
-    `phases.setup`, before the health-check hooks, so the check inspects the rc
-    every Bazel call uses."""
+    `phases.setup` or the `bazel_invocation` handles, before the health-check
+    hooks, so the check inspects the rc every Bazel call uses."""
     startup_flags = bazel_flags.resolve_startup(ctx)
     (rc, flags) = _parse(ctx, startup_flags, base_flags)
     ctx.bazel.use_rc(rc)

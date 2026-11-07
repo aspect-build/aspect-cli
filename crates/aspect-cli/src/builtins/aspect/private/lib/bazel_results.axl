@@ -4990,9 +4990,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 # and own every surface interaction a bazel build/test task makes: the live
 # progress emit gate, per-attempt phase rows + retry archiving, the terminal
 # emit, and repro-command production. A task that wants none of this simply
-# doesn't construct a handle — the `bazel_invocation.build(ctx)` invocation handle runs
-# fine without it. The status/progress text helpers below moved here verbatim
-# from the old `bazel_runner.axl` (they were always results logic).
+# doesn't construct a handle — the `bazel_invocation.build(ctx)` handle runs
+# fine without it.
 
 # BES event kinds `process_event` consumes. Passed as `kinds=` to the results
 # iterator so the send-side filter drops the noisy unconsumed kinds (`progress`,

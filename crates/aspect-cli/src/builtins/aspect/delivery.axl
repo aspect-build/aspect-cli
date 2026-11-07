@@ -1057,7 +1057,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     # actionable signal is the gRPC log below. The file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.name)
 
-    # No `exec_log.open` here, deliberately — the one spawn in the built-in tree
+    # No `bazel_exec_log.open` here, deliberately — the one spawn in the built-in tree
     # that runs an ordinary build and is left without an `exec_log_event` handle
     # anyway (recorded, with this reason, in `builtins/exec_log_wiring.rs`; the
     # other handle-less spawns execute nothing at all, denied by

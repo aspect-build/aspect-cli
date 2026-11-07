@@ -756,7 +756,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         base_flags.append("--output_groups=rules_lint_machine")
 
     # Pre-task setup phase (status surface, rc parse, health checks); returns
-    # resolved flags (a failed health check fails the task inside phases.setup).
+    # the rc (a failed health check fails the task inside phases.setup).
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
     announce_version, announce_command = bazel_announce.resolve(ctx)
     endpoint_auth_flags = bazel_rc.hook_flags(ctx, rc, "build")

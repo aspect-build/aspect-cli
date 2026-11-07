@@ -906,8 +906,8 @@ def pick_task_status(data, kind_key, had_failure, terminal):
     return "passed" if terminal else "running"
 
 def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []):
-    """Run the `setup` phase — all pre-task work — and return the resolved
-    Bazel command flags (or `None` for a non-building task).
+    """Run the `setup` phase — all pre-task work — and return the task's
+    `Bazelrc` (or `None` for a non-building task).
 
     Every built-in task opens with this as the first thing in `_impl`. The
     `Phases`, `HealthCheckTrait`, and `BazelTrait` traits are read from
@@ -921,8 +921,8 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
          surface body from `data`. Runs before the steps that can fail
          (rc parse, health check) so failures surface on a created check run.
       3. Bazel setup (only when `BazelTrait` is declared): `bazel_rc.setup`
-         resolves flags, parses `.bazelrc`, populates
-         `ctx.bazel.startup_flags`, and returns the flag list. Else `None`.
+         resolves flags, parses `.bazelrc`, sets the result with
+         `ctx.bazel.use_rc`, and returns it. Else `None`.
       4. `health_check` hooks (only when `HealthCheckTrait` is declared) — must
          run after step 3 (they read its startup flags). On unhealthy, concludes
          the surface ("Health check failed") and ends the task with the
@@ -985,8 +985,8 @@ def _setup_surface(ctx, surface, subject, kind, data):
     """Surface half of `_setup`: everything except the Bazel rc parse.
 
     For tasks that resolve the active `Bazelrc` themselves BEFORE the
-    lifecycle surface opens — e.g. the `bazel_invocation.build(ctx)` / `bazel_invocation.test(ctx)`
-    invocation handle owns the flag → `parse_rc` → `use_rc` pipeline, then hands
+    lifecycle surface opens — e.g. the `bazel_invocation.build(ctx)` /
+    `bazel_invocation.test(ctx)` invocation handle owns the flag → `parse_rc` → `use_rc` pipeline, then hands
     the live rc here. Runs, in order:
 
       1. `append_runner_job_history`.

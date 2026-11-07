@@ -309,7 +309,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["format"]["severity_resolved"] = severity_resolved
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
-    # returns resolved flags (a failed health check fails the task inside).
+    # returns the rc (a failed health check fails the task inside).
     rc = ph.setup(ctx.args.formatter_target, "format_results")
     announce_version, announce_command = bazel_announce.resolve(ctx)
 

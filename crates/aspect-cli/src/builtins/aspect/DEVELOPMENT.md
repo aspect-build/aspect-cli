@@ -659,7 +659,7 @@ data = {
 
 **Reading conventions:**
 
-- `process_event(data, event, bb_root)` writes BES events into `data["bazel"][...]`. Task code that drives bazel (`bazel_runner.run_bazel_task`, `lint._impl`, etc.) calls `process_event` for each BES event.
+- `process_event(data, event, bb_root)` writes BES events into `data["bazel"][...]`. Task code that drives bazel (`run._run_impl`, `lint._impl`, etc.) calls `process_event` for each BES event.
 - Renderers (`build_summary_data`, `build_details_data`, `build_invocation_rows`, `_build_invocation_stats`, …) read primarily from `data["bazel"][...]`. The `<task>_results.axl` libraries delegate to those for the shared sections and add their own per-kind data on top.
 - Status surface handlers (`feature/buildkite_annotations.axl`, `feature/github_status_checks.axl`, `feature/github_status_comments.axl`) receive the dict via `update.data` and pass it through to renderers — they don't read individual keys themselves except for severity/conclusion classification, which uses a small, well-known set of `bazel.*` counters.
 
@@ -916,7 +916,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data)
 
     # 6. Wait for bazel, then fire build_end hooks (ArtifactUpload uploads).
-    #    `exec_log.close` MUST precede `wait()`: a bound hook handle is a
+    #    `bazel_exec_log.close` MUST precede `wait()`: a bound hook handle is a
     #    subscriber the log producer blocks for, and `wait()` joins that producer.
     bazel_exec_log.close(ctx, xl)
     build_status = build.wait()
