@@ -250,6 +250,10 @@ Failure modes
                                                     start; running ones are
                                                     recorded; unstarted FAIL
                                                     as hook_error; exit 1
+  DeliveryTrait.delivery_target raises after a
+    failed build                                  error; the other targets'
+                                                    hooks still fire; exits
+                                                    with Bazel's exit code
   --query matches no targets                      prints "No targets to
                                                     deliver" and returns 0
   --query fails (bad expr, BUILD error)           propagates Bazel's stderr
@@ -715,7 +719,7 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 _DELIVER_DIR_PREFIX = "aspect-delivery-deliver-"
 
 # Appended to a startup error the state backend caused.
-_UNTRACKED_HINT = " (Pass --mode=always --track-state=false, with --dry-run for a preview, to run without delivery state.)"
+_UNTRACKED_HINT = " (Pass --mode=always --track-state=false --dry-run to preview without delivery state; without --dry-run, that delivers every target.)"
 
 # The FAIL message of a target left unstarted because a `delivery_target` hook raised.
 _HOOK_UNSTARTED = "hook_error: DeliveryTrait.delivery_target raised, so delivery did not start"
