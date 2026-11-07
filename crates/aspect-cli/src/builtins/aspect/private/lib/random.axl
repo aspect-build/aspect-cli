@@ -1,0 +1,11 @@
+"""Random identifiers from the OS entropy source.
+
+  - `random_hex(ctx, n_bytes = 16)` — `2 * n_bytes` lowercase hex characters
+    read from /dev/urandom.
+"""
+
+_HEX = "0123456789abcdef"
+
+def random_hex(ctx, n_bytes: int = 16) -> str:
+    b = ctx.std.fs.open("/dev/urandom").read(n_bytes)
+    return "".join([_HEX[b[i] >> 4] + _HEX[b[i] & 0x0F] for i in range(n_bytes)])

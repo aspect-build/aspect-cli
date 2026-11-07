@@ -10,3 +10,13 @@ if [[ ! -f "$payload" ]]; then
     exit 1
 fi
 echo "Delivering Aspect CLI! payload=$payload contents=$(cat "$payload") extra_args=${*:2}"
+# The delivery task stores this metadata with the delivery and returns it when
+# a later run reuses it.
+json_string() {
+    local s="${1//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "${s//$'\n'/\\n}"
+}
+if [[ -n "${ASPECT_DELIVERY_METADATA_JSON_FILE:-}" ]]; then
+    printf '{"payload": %s, "contents": %s}\n' "$(json_string "$payload")" "$(json_string "$(cat "$payload")")" >"$ASPECT_DELIVERY_METADATA_JSON_FILE"
+fi

@@ -25,11 +25,13 @@ BAZEL_REMOTE_FLAGS=""
 # --config=aspect-cloud's endpoints rather than naming it, because its `aspect`
 # credential helper runs in the workspace, where a released CLI cannot load
 # this commit's .aspect config. The wrapper runs it from outside the checkout.
+# For the same reason the repo's own status script replaces aspect-bes's
+# `aspect setup workspace-data`, which must run in the workspace to read git.
 if [ -z "${ASPECT_WORKFLOWS_RUNNER:-}" ] && [ "${ASPECT_HAS_API_TOKEN:-}" = "true" ] && command -v aspect >/dev/null; then
     HELPER_DIR="$(mktemp -d)"
     printf '#!/bin/sh\ncd "%s" && exec "%s" "$@"\n' "${HELPER_DIR}" "$(command -v aspect)" >"${HELPER_DIR}/credential-helper"
     chmod +x "${HELPER_DIR}/credential-helper"
-    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-cache --config=aspect-bes"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --config=aspect-cache --config=aspect-bes --workspace_status_command=tools/githooks/check-config.sh"
     BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=grpcs://cache.aspect.build --bes_backend=grpcs://bes.aspect.build --bes_results_url=https://app.aspect.build/i/"
     BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --credential_helper=cache.aspect.build=${HELPER_DIR}/credential-helper --credential_helper=bes.aspect.build=${HELPER_DIR}/credential-helper"
 fi

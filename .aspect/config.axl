@@ -3,7 +3,7 @@ load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
 load("@aspect//bazel/exec_log_test.axl", "exec_log_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
-load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+load("@aspect//delivery_state.axl", "DeliveryState", "deliveryd", "redis_state")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -31,6 +31,7 @@ load("@aspect//private/lib/changedetector_test.axl", "changedetector_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/confirm_test.axl", "confirm_tests")
+load("@aspect//private/lib/delivery_api_test.axl", "delivery_api_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_default_preset_snapshot_tests", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/delivery_scheduler_test.axl", "delivery_scheduler_tests")
 load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
@@ -51,6 +52,7 @@ load("@aspect//private/lib/gitlab_features_test.axl", "gitlab_features_tests")
 load("@aspect//private/lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
 load("@aspect//private/lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//private/lib/health_check_ready_test.axl", "health_check_ready_tests")
+load("@aspect//private/lib/http_headers_test.axl", "http_headers_tests")
 load("@aspect//private/lib/ibazel_strategy_test.axl", "ibazel_strategy_tests")
 load("@aspect//private/lib/incremental_build_protocol_host_test.axl", "incremental_build_protocol_host_tests")
 load("@aspect//private/lib/incremental_build_protocol_test.axl", "incremental_build_protocol_tests")
@@ -61,6 +63,7 @@ load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "li
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
+load("@aspect//private/lib/random_test.axl", "random_tests")
 load("@aspect//private/lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//private/lib/rc_groups_test.axl", "rc_groups_tests")
 load("@aspect//private/lib/redis_state_test.axl", "redis_state_tests")
@@ -74,6 +77,7 @@ load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/table_test.axl", "table_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/text_test.axl", "text_tests")
+load("@aspect//private/lib/timestamp_test.axl", "timestamp_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_default_preset_snapshot_tests", "warming_template_snapshot_tests")
 load("@aspect//private/lib/watch_supervisor_test.axl", "watch_supervisor_tests")
@@ -206,16 +210,18 @@ def _runfiles_path(entry, suffix):
         return "{}/{}/{}{}".format(rwd, package, target_name, suffix)
     return "{}/{}{}".format(rwd, target_name, suffix)
 
-# Jinja2 YAML side-artifact: successfully-delivered images + digest/layer-path
-# from per-target enrichment. Entries without `custom.image_digest` (non-OCI,
-# dry-run, failed) are filtered out. `is defined` guards satisfy minijinja's
-# strict-undefined check on entries lacking the optional fields.
+# Jinja2 YAML side-artifact: delivered and reused images + digest/layer file
+# from their metadata. Entries without `delivered` or without
+# `metadata.image_digest` (non-OCI, dry-run, failed) are filtered out. A
+# missing key renders empty, but reading a field of one (`d.delivered.build_url`
+# with no `delivered`) is an error, hence the `is defined` guards.
 _DELIVERY_IMAGES_YAML = """\
 images:
-{% for d in deliveries %}{% if d.outcome == "ok" and d.custom.image_digest is defined %}
+{% for d in deliveries %}{% if d.delivered is defined and d.metadata.image_digest is defined %}
   - label: {{ d.label }}
-    image_digest: {{ d.custom.image_digest }}
-    {% if d.custom.layer_path is defined %}layer_path: {{ d.custom.layer_path }}{% endif %}
+    image_digest: {{ d.metadata.image_digest }}
+    delivered_by: {{ d.delivered.build_url or "" }}
+    {% if d.metadata.layer_file is defined %}layer_file: {{ d.metadata.layer_file }}{% endif %}
 {% endif %}{% endfor %}
 """
 
@@ -517,6 +523,18 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-duration
     ctx.tasks.add(duration_tests)
 
+    # timestamp.axl: RFC 3339 formatting across leap years and day ends.
+    # Run with: aspect dev test-timestamp
+    ctx.tasks.add(timestamp_tests)
+
+    # HTTP response headers: case-insensitive lookup and Retry-After.
+    # Run with: aspect dev test-http-headers
+    ctx.tasks.add(http_headers_tests)
+
+    # Random hex identifiers from /dev/urandom.
+    # Run with: aspect dev test-random
+    ctx.tasks.add(random_tests)
+
     # JUnit/log failure snippets for status checks and PR comments.
     # Run with: aspect dev test-log-snippet
     ctx.tasks.add(log_snippet_tests)
@@ -582,6 +600,10 @@ def config(ctx: ConfigContext):
     # deliveryd.axl: the startup probe and the wire shape of each verb.
     # Run with: aspect dev test-deliveryd
     ctx.tasks.add(deliveryd_tests)
+
+    # delivery_api.axl: the delivery API client's wire shape and error reporting.
+    # Run with: aspect dev test-delivery-api
+    ctx.tasks.add(delivery_api_tests)
 
     # resp.axl: RESP2 encoding, reply parsing across read boundaries, pipelining.
     # Run with: aspect dev test-resp
@@ -760,9 +782,11 @@ def config(ctx: ConfigContext):
 
         # Pattern 2: sibling default output NOT in runfiles — scan
         # default_outputs (every file BES reported) by suffix for `.layer`.
+        # The metadata is stored with the delivery and read back on other
+        # machines, so record the file name rather than this runner's path.
         for path in entry.get("default_outputs", []):
             if path.endswith(".layer"):
-                extras["layer_path"] = path
+                extras["layer_file"] = path.rpartition("/")[2]
                 break
 
         return extras if extras else None
@@ -791,8 +815,13 @@ def config(ctx: ConfigContext):
     ctx.traits[DeliveryTrait].delivery_manifest = _on_delivery_manifest
     ctx.traits[DeliveryTrait].upload_manifest = _on_upload_manifest
 
-    # Delivery state straight from Redis when a runner provides one; otherwise
-    # the deliveryd default stands, so local runs behave as before.
+    # Jobs on Aspect Workflows runners (Buildkite, and the CI - Workflows
+    # Runners workflow) keep the runner's deliveryd, so CI covers both
+    # backends: the GitHub-hosted jobs run the delivery API default.
+    if DeliveryState in ctx.traits and ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"):
+        ctx.traits[DeliveryState].connect = deliveryd.connect
+
+    # Delivery state straight from Redis when a runner provides one.
     if DeliveryState in ctx.traits and ctx.std.env.var(redis_state.ENDPOINT_ENV):
         ctx.traits[DeliveryState].connect = redis_state.connect
 

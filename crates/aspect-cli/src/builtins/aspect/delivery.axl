@@ -16,17 +16,19 @@ Up to three Bazel build phases plus a dispatch loop:
      `lib/remote_executor.axl`.
   3. State record/query — record (label, digest) pairs, query per-prefix
      state through the `DeliveryState` backend (`lib/delivery_state.axl`).
-     The default is deliveryd over HTTP (`lib/deliveryd.axl`);
-     `lib/redis_state.axl` talks to Redis directly and needs no record step.
+     The default is Aspect's delivery API (`lib/delivery_api.axl`), which
+     needs no record step; deliveryd (`lib/deliveryd.axl`) records first.
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
   5. Dispatch — `bazel run` each pending target as soon as it is built, up to
-     `--max-parallelization` at a time, then `dd.deliver()` (or `dd.delete()`
-     on failure). FIFO by default; `DeliveryTrait.create_scheduler` can choose
-     the order instead (`lib/delivery_scheduler.axl`). Targets it never makes
-     eligible fail as `scheduler_blocked`. If the task ends early, a deferred
-     cleanup cancels and reaps the release build and running deliveries.
+     `--max-parallelization` at a time, read its metadata file, fire
+     `delivery_target`, then `dd.deliver()` with the entry's `metadata` (or
+     `dd.record_failure()` / `dd.delete()` on failure). FIFO by default;
+     `DeliveryTrait.create_scheduler` can choose the order instead
+     (`lib/delivery_scheduler.axl`). Targets it never makes eligible fail as
+     `scheduler_blocked`. If the task ends early, a deferred cleanup cancels
+     and reaps the release build and running deliveries.
 
 
 Flags
@@ -66,17 +68,58 @@ State backend
 -------------
 
 The task gets its backend from `DeliveryState.connect` (`lib/delivery_state.axl`).
-Unset, that is `deliveryd`: the Unix-socket HTTP daemon Aspect Workflows
-runners start and expose via `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`. A
-config.axl can point it at Redis directly instead, which reads
-`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`,
-`_REDIS_LEGACY_TTL_SECONDS`):
+Unset, that is Aspect's delivery API (`lib/delivery_api.axl`), authenticated
+with the Aspect Cloud credential. It keeps each target's latest delivery and
+each digest's, with their metadata, and records every attempt, failures
+included, in the target's history. A job that cannot use it
+(no credential, a refused one, an unreachable API) fails at startup; it never
+switches backend on its own. A deployment without access to the API, such as
+an air-gapped one, keeps the runner's deliveryd explicitly:
 
-    load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+    load("@aspect//delivery_state.axl", "DeliveryState", "deliveryd")
     if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = redis_state.connect
+        ctx.traits[DeliveryState].connect = deliveryd.connect
 
-Both backends share one key scheme, so they interoperate against one Redis.
+deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start and
+expose via `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`. It keeps the delivered-by
+URL alone, and the task warns once when `metadata` it could not store is
+lost. `redis_state.connect` reads `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`
+(plus `_REDIS_CA_FILE`, `_REDIS_AUTH`, `_REDIS_LEGACY_TTL_SECONDS`), shares
+deliveryd's key scheme and stores `metadata`. Neither tracks a target's
+latest delivery.
+
+
+Skip policy
+-----------
+
+Each target is skipped by one of two policies:
+
+  when_changed     (default) skipped while its digest equals the target's
+                   latest successful delivery, so a revert to an earlier
+                   digest is delivered again
+  once_per_digest  skipped once its digest was ever delivered in the scope,
+                   for publish-style targets whose artifacts are immutable
+
+A target opts into `once_per_digest` with the Bazel tag
+`delivery:once_per_digest`, read from the phase-1 build's `target_configured`
+events. `DeliveryTrait.skip_policy` has the final word. On a backend that does
+not track latest deliveries (deliveryd, `redis_state`), every target behaves
+as `once_per_digest`.
+
+
+Metadata
+--------
+
+A target writes a JSON object to the path in
+`ASPECT_DELIVERY_METADATA_JSON_FILE`; that object becomes the entry's
+`metadata`, and whatever `delivery_target` returns merges on top. When the
+target is delivered, the metadata is stored with the delivery and comes back on
+every later run that skips it, with the entry's `delivered` (the delivering
+target's `label`, its build's `build_url` and `commit_sha`, and `at`). Under
+`once_per_digest` a skip may reuse another target's delivery of the same
+digest; `delivered.label` names it. A failed, previewed or untracked run's
+metadata is never returned on a later run (the delivery API keeps a failure's
+in that target's history). `custom` is the same dict as `metadata`.
 
 
 Output base isolation
@@ -170,12 +213,14 @@ Failure modes
 
   --mode=selective --track-state=false            hard fail() at startup
   --track-state=true and the state backend is
-    not configured or unreachable                 error + exit 1 at startup
+    not configured or unreachable, or read-only
+    without --dry-run                             error + exit 1 at startup
   --track-state=true with --commit-sha unset and
     no CI env var exposing one (GITHUB_SHA,
     BUILDKITE_COMMIT, CIRCLE_SHA1, CI_COMMIT_SHA) hard fail() at startup
-    (commit-sha is the state-key; off-runner runs
-    with --track-state=false skip the check)
+    (deliveryd keys state by commit-sha, the other
+    backends record it; --track-state=false skips
+    the check)
   --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
     contains a label not in the resolved
     delivery set (from --query / positional)      hard fail() at startup
@@ -188,8 +233,16 @@ Failure modes
   Per-target runtime failure (bazel run != 0)     recorded as FAIL; loop
                                                     continues; on
                                                     --track-state=true also
-                                                    rolls back the recorded
-                                                    artifact
+                                                    clears the target's
+                                                    stored delivery
+  State record or query fails before delivery,
+    or DeliveryTrait.skip_policy raises           error + exit 1
+  State write fails after a target ran            warned; loop continues;
+                                                    exit 1
+  DeliveryTrait.delivery_target raises            no further deliveries
+                                                    start; running ones are
+                                                    recorded; unstarted FAIL
+                                                    as hook_error; exit 1
   --query matches no targets                      prints "No targets to
                                                     deliver" and returns 0
   --query fails (bad expr, BUILD error)           propagates Bazel's stderr
@@ -230,19 +283,21 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
-load("./private/lib/ci.axl", "resolve_build_url")
+load("./private/lib/ci.axl", "detect_repository", "resolve_build_url")
+load("./private/lib/delivery_api.axl", "delivery_api")
 load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
-load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
+load("./private/lib/random.axl", "random_hex")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "normalize_label")
-load("./private/lib/text.axl", "pluralize")
+load("./private/lib/text.axl", "pluralize", "utf8_len")
+load("./private/lib/timestamp.axl", "rfc3339_utc")
 load("./private/lib/tips.axl", "tips")
 
 # `--dry-run`'s three states. `false` delivers; `true` (what a bare --dry-run
@@ -254,6 +309,12 @@ DRY_RUN_BUILD = "build"
 
 DeliveryPlan = _DeliveryPlan
 DeliverySelector = _DeliverySelector
+
+# The skip policies; see "Skip policy" above.
+WHEN_CHANGED = "when_changed"
+ONCE_PER_DIGEST = "once_per_digest"
+SKIP_POLICIES = [WHEN_CHANGED, ONCE_PER_DIGEST]
+ONCE_PER_DIGEST_TAG = "delivery:once_per_digest"
 
 DeliveryTrait = trait(
     create_scheduler = attr(
@@ -285,14 +346,40 @@ DeliveryTrait = trait(
         description = (
             "Hook called once per delivery target with its terminal outcome " +
             "(ok / skip / warn / fail / pending). Receives a dict with " +
-            "{label, outcome, message, output_sha, is_forced, custom, " +
-            "entrypoint_path, runfiles_dir, runfiles_workspace_dir, " +
-            "default_outputs}. The runfiles tree at `runfiles_dir` is " +
-            "materialized to disk before this hook fires, so files declared " +
-            "via `data =` are readable at `runfiles_workspace_dir/<package>/<filename>`. " +
-            "Return a dict to enrich entry['custom'] (e.g. " +
+            "{label, outcome, message, output_sha, is_forced, skip_policy, " +
+            "metadata, custom, delivered, entrypoint_path, runfiles_dir, " +
+            "runfiles_workspace_dir, default_outputs}. `metadata` holds what " +
+            "the target wrote to $ASPECT_DELIVERY_METADATA_JSON_FILE (on " +
+            "skip: what was stored when it was delivered); `custom` is the " +
+            "same dict. `delivered` ({label, build_url, commit_sha, at}) is " +
+            "present on ok and skip; its label is the delivering target's, " +
+            "another target's when once_per_digest reuses a shared digest. " +
+            "Return a dict to merge into metadata (e.g. " +
             "{'image_digest': ctx.std.fs.read_to_string(path).strip()}), " +
-            "or None to skip enrichment."
+            "or None to leave it as is. On ok the hook fires before the " +
+            "delivery is recorded, and the merged metadata is stored with it " +
+            "and returned on every later run that reuses the delivery, so it " +
+            "must encode as JSON. A hook that raises, or leaves metadata JSON " +
+            "cannot encode, starts no further deliveries and fails the task " +
+            "once the running ones are recorded. The " +
+            "runfiles tree at `runfiles_dir` is materialized to disk before " +
+            "this hook fires, so files declared via `data =` are readable at " +
+            "`runfiles_workspace_dir/<package>/<filename>`."
+        ),
+    ),
+    skip_policy = attr(
+        typing.Callable[[dict], str | None],
+        default = lambda target: None,
+        description = (
+            "Hook that picks each target's skip policy, called once per target " +
+            "before any is skipped or delivered (also under --mode=always or " +
+            "--track-state=false, where the policy only labels the entry). " +
+            "Receives {label, tags, policy}, where `policy` is what the target's " +
+            "tags resolved to: `once_per_digest` with the tag " +
+            "`delivery:once_per_digest`, else `when_changed`. Return " +
+            "`when_changed` (deliver when the digest differs from the target's " +
+            "latest delivery), `once_per_digest` (deliver a digest at most once), " +
+            "or None to keep `policy`."
         ),
     ),
     delivery_manifest = attr(
@@ -386,26 +473,162 @@ def _print_captured_output(label, exit_code, stdout, stderr, color):
         print(combined)
     print(ansi.style(sep, ansi.BOLD, color))
 
-def _spawn_deliverable(ctx, color, capture, label, ep, is_forced, output_sha):
+def _spawn_deliverable(ctx, color, capture, deliver_dir, seq, label, ep, is_forced, output_sha):
     """Spawn one deliverable from its `Runnable` `ep`, print its `Delivering`
     line, and return the running-tuple `(label, is_forced, output_sha, t_start,
-    child, stdout_path, stderr_path)`. When capturing, the child's stdout/stderr
-    are redirected to per-target temp files so the reap loop polls `try_wait()`
-    and reads them after exit instead of draining a pipe (the path fields are
-    None otherwise)."""
+    child, stdout_path, stderr_path, metadata_path)`. When capturing, the child's
+    stdout/stderr are redirected to per-target files in `deliver_dir` so the
+    reap loop polls `try_wait()` and reads them after exit instead of draining
+    a pipe (the path fields are None otherwise). The child finds its metadata
+    path in `METADATA_JSON_FILE_ENV`. Paths start with `seq`, the spawn's
+    number in this run, so concurrent targets whose sanitized labels collide
+    never share a file, and a target that writes no metadata never inherits
+    one."""
     forced_marker = " (FORCED)" if is_forced else ""
     print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
+    stem = "{}/{}-{}".format(deliver_dir, seq, sanitize_filename(label))
+    metadata_path = stem + ".metadata.json"
+    cmd = ep.command(env = {METADATA_JSON_FILE_ENV: metadata_path})
     stdout_path = None
     stderr_path = None
     if capture:
-        stdout_path = _DELIVER_STDOUT_PATH.format(ctx.task.name, sanitize_filename(label))
-        stderr_path = _DELIVER_STDERR_PATH.format(ctx.task.name, sanitize_filename(label))
-        child = ep.command().stdout(ctx.std.fs.create(stdout_path)).stderr(ctx.std.fs.create(stderr_path)).spawn()
-    else:
-        child = ep.command().spawn()
-    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path)
+        stdout_path = stem + ".stdout"
+        stderr_path = stem + ".stderr"
+        cmd = cmd.stdout(ctx.std.fs.create(stdout_path)).stderr(ctx.std.fs.create(stderr_path))
+    child = cmd.spawn()
+    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path, metadata_path)
 
-_HEX = "0123456789abcdef"
+def _read_capped(ctx, path: str) -> str | None:
+    """`path`'s text, or None when it is over `METADATA_MAX_BYTES`."""
+    return ctx.std.fs.read_to_string(path) if ctx.std.fs.metadata(path).size <= METADATA_MAX_BYTES else None
+
+def _read_metadata_file(ctx, label: str, path: str) -> dict:
+    """The JSON object a target wrote to its metadata file, then delete the
+    file. A missing file is no metadata; an unreadable (non-UTF-8, a
+    directory, no permission), oversized or non-object one is warned about and
+    read as none, since the delivery itself still stands."""
+    if not ctx.std.fs.exists(path):
+        return {}
+    err, content = catch(_read_capped, ctx, path)
+    catch(ctx.std.fs.remove_file, path)
+    if err:
+        warn(ctx.std, "{}: cannot read the metadata file ({}); ignoring it.".format(label, err.message))
+        return {}
+    if content == None:
+        warn(ctx.std, "{}: metadata file is over the {}-byte limit; ignoring it.".format(label, METADATA_MAX_BYTES))
+        return {}
+    if not content.strip():
+        return {}
+    metadata = json.try_decode(content, None)
+    if type(metadata) != "dict":
+        warn(ctx.std, "{}: metadata file must hold a JSON object; ignoring it.".format(label))
+        return {}
+    return metadata
+
+def _prior_deliveries(answer) -> delivery_state.PriorDeliveries:
+    """One `query` answer as `PriorDeliveries`. A backend outside this repo may
+    answer with a bare `Delivery`, or the delivering build URL alone: either is
+    the digest's delivery. Metadata JSON cannot encode reads as none."""
+    if type(answer) == "string":
+        return delivery_state.PriorDeliveries(digest_delivery = delivery_state.Delivery(build_url = answer or None))
+    if isinstance(answer, delivery_state.Delivery):
+        return delivery_state.PriorDeliveries(digest_delivery = _json_safe(answer))
+    return delivery_state.PriorDeliveries(
+        latest_delivery = _json_safe(answer.latest_delivery),
+        digest_delivery = _json_safe(answer.digest_delivery),
+    )
+
+def _json_safe(delivery):
+    """`delivery`, with its metadata dropped when JSON cannot encode it."""
+    if delivery == None or not catch(json.encode, delivery.metadata)[0]:
+        return delivery
+    return delivery_state.Delivery(
+        build_url = delivery.build_url,
+        commit_sha = delivery.commit_sha,
+        at = delivery.at,
+        label = delivery.label,
+        digest = delivery.digest,
+    )
+
+def _resolve_skip_policy(delivery_trait, label: str, tags: list) -> str:
+    """The target's skip policy: its tag's, then `DeliveryTrait.skip_policy`'s."""
+    policy = ONCE_PER_DIGEST if ONCE_PER_DIGEST_TAG in tags else WHEN_CHANGED
+    chosen = delivery_trait.skip_policy({"label": label, "tags": list(tags), "policy": policy})
+    if chosen == None:
+        return policy
+    if chosen not in SKIP_POLICIES:
+        fail("DeliveryTrait.skip_policy must return one of {} or None, got {!r} for {}".format(SKIP_POLICIES, chosen, label))
+    return chosen
+
+def _resolve_skip_policies(delivery_trait, targets: list, target_tags: dict) -> dict:
+    """`{label: skip policy}` for `targets`, from the tags phase 1's
+    `target_configured` events carried (`target_tags`)."""
+    tags_by_label = {normalize_label(k): v for k, v in target_tags.items()}
+    return {
+        label: _resolve_skip_policy(delivery_trait, label, tags_by_label.get(normalize_label(label), []))
+        for label in targets
+    }
+
+def _record_digests(dd, targets: list, output_shas: dict) -> None:
+    """`dd.record` each target's digest, which deliveryd needs before `query`
+    (it keys state by commit); the other backends record nothing."""
+    for label in targets:
+        if label in output_shas:
+            dd.record(label, output_shas[label])
+
+def _query_prior(dd, output_shas: dict) -> dict:
+    """`dd.query` for `output_shas`, each answer as `PriorDeliveries`."""
+    return {label: _prior_deliveries(answer) for label, answer in dd.query(output_shas).items()}
+
+def _skip_delivery(policy: str, prior, digest: str, tracks_latest: bool):
+    """The delivery that makes the target skippable under `policy`, or None to
+    deliver it. Without latest tracking every policy reads as once_per_digest."""
+    if prior == None:
+        return None
+    if policy == WHEN_CHANGED and tracks_latest:
+        latest = prior.latest_delivery
+        return latest if latest and latest.digest == digest else None
+    return prior.digest_delivery
+
+def _record_outcome(ctx, dd, label: str, digest: str, delivered: bool, metadata: dict, file_metadata: dict) -> None:
+    """Write one ran target's outcome to the state backend: `deliver` on
+    success; on failure `record_failure` or `delete`, which clear the digest's
+    delivery (and `record_failure` the target's latest delivery, when it has
+    that digest) so the next run delivers it again under either skip policy.
+    Raises what the backend raises."""
+    stored = _metadata_to_store(ctx, label, metadata, file_metadata) if dd.stores_metadata else {}
+    if delivered:
+        dd.deliver(label, digest, stored)
+    elif dd.record_failure:
+        dd.record_failure(label, digest, stored)
+    else:
+        dd.delete(digest)
+
+def _delivered_dict(delivery: delivery_state.Delivery) -> dict:
+    """An entry's `delivered`, from the delivery that put the digest out."""
+    return {
+        "label": delivery_state.known_or_none(delivery.label),
+        "build_url": delivery.build_url,
+        "commit_sha": delivery.commit_sha,
+        "at": delivery.at,
+    }
+
+def _metadata_to_store(ctx, label: str, metadata: dict, file_metadata: dict) -> dict:
+    """What `deliver` stores as the delivery's metadata: the merged metadata
+    while it fits in `METADATA_MAX_BYTES` as UTF-8 JSON, else the target's own
+    file contents alone, else none. A top-level `__proto__` key, which the
+    delivery API rejects, is dropped with a warning."""
+    if "__proto__" in metadata or "__proto__" in file_metadata:
+        warn(ctx.std, "{}: metadata key \"__proto__\" is reserved; dropping it.".format(label))
+        metadata = {k: v for k, v in metadata.items() if k != "__proto__"}
+        file_metadata = {k: v for k, v in file_metadata.items() if k != "__proto__"}
+    if utf8_len(json.encode(metadata)) <= METADATA_MAX_BYTES:
+        return metadata
+    if utf8_len(json.encode(file_metadata)) <= METADATA_MAX_BYTES:
+        warn(ctx.std, "{}: metadata exceeds {} bytes once delivery_target's additions are merged; storing the metadata file's contents only.".format(label, METADATA_MAX_BYTES))
+        return file_metadata
+    warn(ctx.std, "{}: metadata exceeds {} bytes as JSON; storing none.".format(label, METADATA_MAX_BYTES))
+    return {}
 
 def _delivery_nonce(ctx) -> str:
     """Fresh per-invocation token (32 hex chars) from /dev/urandom, passed to the
@@ -418,8 +641,7 @@ def _delivery_nonce(ctx) -> str:
     run re-issues the remote `GetActionResult` lookup that carries the digest.
     Execution requirements are not part of the REv2 action digest, so the
     change-detection digest itself is unchanged."""
-    b = ctx.std.fs.open("/dev/urandom").read(16)
-    return "".join([_HEX[b[i] >> 4] + _HEX[b[i] & 0x0F] for i in range(16)])
+    return random_hex(ctx)
 
 # Source of the change-detection aspect. Applied via `ctx.bazel.aspect(...)`,
 # which materializes it into `@bazel_tools` (already in the repo graph) — so the
@@ -465,13 +687,24 @@ _PHASE2_LOG_PATH = "/tmp/aspect-delivery-phase2-{}.log"
 _PHASE3_LOG_PATH = "/tmp/aspect-delivery-phase3-{}.log"
 _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 
-# Per-target capture files for the parallel dispatch path. Each deliverable
-# redirects its stdout/stderr straight to these (via `cmd.stdout(fs.create(...))`)
-# so reaping polls `try_wait()` and reads the files after exit — never draining
-# a live pipe. Formatted with `(task name, sanitized label)`; deleted per target
-# as it is reaped.
-_DELIVER_STDOUT_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stdout"
-_DELIVER_STDERR_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stderr"
+# Per-target files for the parallel dispatch path, in a mode-0700 directory
+# made per run (`mkdtemp`), so another user on the host can neither read nor
+# plant them. Each deliverable redirects its stdout/stderr straight to these
+# (via `cmd.stdout(fs.create(...))`) so reaping polls `try_wait()` and reads the
+# files after exit — never draining a live pipe — and writes its metadata to
+# one. Named `<spawn number>-<sanitized label>` with a `.stdout`, `.stderr` or
+# `.metadata.json` extension; deleted per target as it is reaped, and the
+# directory when the task ends.
+_DELIVER_DIR_PREFIX = "aspect-delivery-deliver-"
+
+# The FAIL message of a target left unstarted because a `delivery_target` hook raised.
+_HOOK_UNSTARTED = "hook_error: DeliveryTrait.delivery_target raised, so delivery did not start"
+
+# The variable a deliverable reads for the path to write its metadata JSON to.
+METADATA_JSON_FILE_ENV = "ASPECT_DELIVERY_METADATA_JSON_FILE"
+
+# Cap on a metadata file, and on the metadata stored per delivery.
+METADATA_MAX_BYTES = 64 * 1024
 
 # Mnemonic of the per-target action our hashsum aspect registers; the gRPC
 # log uses it to find the change-detection digest entries. Any other non-OK
@@ -1035,33 +1268,71 @@ def _progress(status, data):
         return phases.terminal_progress("Delivery", "aborted")
     return ""
 
-def _fire_target_hook(data, delivery_trait, runnables, label):
-    """Enrich the most-recent outcome entry with on-disk paths and fire the
-    `delivery_target` hook, merging its returned dict into `entry["custom"]`.
+def _same_dict(a: dict, b: dict) -> bool:
+    """Whether `a` and `b` are one dict, not two equal ones. Starlark has no
+    `is`, so a key set on `b`, which must be mutable, is looked for in `a`."""
+    if a != b:
+        return False
+    probe = "\0same-dict-probe"
+    b[probe] = True
+    same = probe in a
+    b.pop(probe)
+    return same
+
+def _fire_target_hook(data, delivery_trait, runnables, label, skip_policies = {}):
+    """Enrich the most-recent outcome entry with its skip policy and on-disk
+    paths, and fire the `delivery_target` hook, merging its returned dict into
+    `entry["metadata"]`. A hook that rebinds `entry["metadata"]` (or its alias
+    `entry["custom"]`) to a new dict replaces the metadata with a copy of it,
+    so a rebind can drop keys; `metadata` wins when both are rebound. Both are
+    re-pointed at the result, which must encode as JSON: it is stored and
+    written to the manifest. A hook that raises, returns something else, or
+    leaves metadata JSON cannot encode fails here, with the entry's metadata
+    put back as it was before the hook ran.
     `runnables` maps normalized labels to the `Runnable` phase 3 built; a label
     missing from it (an early failure, a target that never built) gets
-    None/empty path fields."""
+    None/empty path fields. `skip_policy` is None before policies are known."""
     entry = data["delivery"]["deliveries"][-1]
+    entry["skip_policy"] = skip_policies.get(label)
     ep = runnables.get(normalize_label(label)) if runnables else None
     entry["entrypoint_path"] = ep.path if ep else None
     entry["runfiles_dir"] = ep.runfiles_dir if ep else None
     entry["runfiles_workspace_dir"] = ep.workspace_dir if ep else None
     entry["default_outputs"] = list(ep.default_outputs) if ep else []
 
-    extras = delivery_trait.delivery_target(entry)
-    if extras == None:
-        return
-    if type(extras) != "dict":
-        fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
-    for k, v in extras.items():
-        entry["custom"][k] = v
+    original = entry["metadata"]
+    before = json.decode(json.encode(original))
+    err, metadata = catch(_run_target_hook, delivery_trait, entry, original)
+    if err:
+        entry["metadata"] = before
+        entry["custom"] = before
+        fail(err.message)
+    entry["metadata"] = metadata
+    entry["custom"] = metadata
 
-def _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, message) -> int:
-    """Record a FAIL row and result for each `(label, is_forced, output_sha)` in `unstarted`. Returns how many."""
+def _run_target_hook(delivery_trait, entry: dict, original: dict) -> dict:
+    """`_fire_target_hook`'s call into the hook: the entry's metadata after it."""
+    extras = delivery_trait.delivery_target(entry)
+    metadata = original
+    for rebound in [entry.get("custom"), entry.get("metadata")]:
+        if type(rebound) == "dict" and not _same_dict(rebound, original):
+            metadata = dict(rebound)
+    if extras != None:
+        if type(extras) != "dict":
+            fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
+        metadata.update(extras)
+    encode_err, _ = catch(json.encode, metadata)
+    if encode_err:
+        fail("DeliveryTrait.delivery_target left metadata that is not JSON: {}".format(encode_err.message))
+    return metadata
+
+def _fail_unstarted(data, outcomes, rows, unstarted, message, fire_hook) -> int:
+    """Record a FAIL row and result for each `(label, is_forced, output_sha)` in
+    `unstarted`, calling `fire_hook(label)` after each. Returns how many."""
     for label, is_forced, output_sha in unstarted:
         rows.append((label, "FAIL", "fail", message, output_sha, "-"))
         delivery_scheduler.record(data, outcomes, label, "fail", message = message, output_sha = output_sha, is_forced = is_forced)
-        _fire_target_hook(data, delivery_trait, runnables, label)
+        fire_hook(label)
     return len(unstarted)
 
 def _planning_progress(ctx, ph, data, had_failure):
@@ -1094,10 +1365,11 @@ def _planning_progress(ctx, ph, data, had_failure):
 def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
 
-    For data-only refreshes during phase-1 BES streaming: an empty
-    `update.progress` keeps the surface's latched phase label, so `data`
-    updates without disturbing the "Last update" line. Phase transitions go
-    through `task_update()`."""
+    For data-only refreshes, during phase-1 BES streaming and as the state
+    backend's heartbeat while it waits to retry: an empty `update.progress`
+    keeps the surface's latched phase label, so `data` updates without
+    disturbing the "Last update" line. Phase transitions go through
+    `task_update()`."""
     data = ph.data
     status = _pick_status(data, had_failure = had_failure, terminal = False)
     ph.dispatch(phases.Update(
@@ -1119,7 +1391,7 @@ def _emit_final(ph, exit_code):
         data["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
     # Local-repro command pinned to `--mode=always --dry-run
-    # --track-state=false` (the only combo that runs off a Workflows runner).
+    # --track-state=false`, so a repro neither reads nor writes delivery state.
     # Skipped when zero targets resolved.
     targets_total = (data.get("delivery", {}) or {}).get("targets_total", 0) or 0
     if targets_total > 0:
@@ -1348,16 +1620,28 @@ def _delivery_impl(ctx):
     # identical across salt namespaces, hiding the per-salt separation.
     data["delivery"]["prefix"] = prefix
 
-    # The state backend, from the trait hook or the deliveryd default.
-    # Connecting probes reachability (and, for deliveryd, negotiates the API
-    # version), so a dead or unconfigured backend fails here rather than midway
-    # through the first record.
+    # The state backend, from the trait hook or the delivery API default.
+    # Connecting probes reachability, so a dead or unconfigured backend fails
+    # here rather than midway through the first record.
     dd = None
     if track_state:
-        connect = ctx.traits[DeliveryState].connect or deliveryd.connect
-        dd = connect(ctx, delivery_state.Params(host = ci_host, prefix = prefix, commit = commit_sha, signature = build_url))
+        connect = ctx.traits[DeliveryState].connect or delivery_api.connect
+        err, dd = catch(connect, ctx, delivery_state.Params(
+            host = ci_host,
+            repo = detect_repository(ctx.std.env),
+            prefix = prefix,
+            commit = commit_sha,
+            signature = build_url,
+            heartbeat = lambda: _emit_update(ph, had_failure = data["delivery"]["counts"].get("fail", 0) > 0),
+        ))
+        if err:
+            error(ctx.std, "Delivery state backend is unavailable: {} (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)".format(err.message))
+            return _emit_final(ph, exit_code = 1)
         if not dd.status.ok:
             error(ctx.std, "Delivery state backend is unavailable ({}): {} (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)".format(dd.endpoint or dd.describe, dd.status.error))
+            return _emit_final(ph, exit_code = 1)
+        if dd.read_only and not dry_run:
+            error(ctx.std, "Delivery state backend cannot record deliveries ({}): {} (A --dry-run can use it as is.)".format(dd.endpoint or dd.describe, dd.read_only))
             return _emit_final(ph, exit_code = 1)
 
     # iter handles are created per attempt inside the retry loop. The
@@ -1529,7 +1813,7 @@ def _delivery_impl(ctx):
     if phase_1_2_runs and unresolved_deliverables and blocking_culprits:
         _report_blocking_culprits(ctx, blocking_culprits, len(unresolved_deliverables), failing = not ctx.args.warn_unresolved_digest)
 
-    # Record each target's digest with deliveryd. Skipped when --track-state=false.
+    # Record each target's digest with the state backend. Skipped when --track-state=false.
     if track_state:
         status = _pick_status(data, had_failure = False, terminal = False)
         ph.update(
@@ -1542,11 +1826,12 @@ def _delivery_impl(ctx):
             data = data,
             phase = phases.Phase(name = "record", description = "Record delivery digests", emoji = "📝"),
         )
-        for label in targets:
-            if label in output_shas:
-                dd.record(label, output_shas[label])
+        err, _ = catch(_record_digests, dd, targets, output_shas)
+        if err:
+            error(ctx.std, "Recording delivery digests in {} failed: {}".format(dd.describe, err.message))
+            return _emit_final(ph, exit_code = 1)
 
-    # Change detection: query deliveryd for prior-delivery state, filtered
+    # Change detection: query the state backend for prior deliveries, filtered
     # below to changed targets. Skipped when --track-state=false (no endpoint)
     # or --mode=always (every target is a candidate).
     if track_state and mode != "always":
@@ -1561,9 +1846,44 @@ def _delivery_impl(ctx):
             data = data,
             phase = phases.Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
         )
-        delivered = dd.query(output_shas)
+        err, prior = catch(_query_prior, dd, output_shas)
+        if err:
+            error(ctx.std, "Querying {} for prior deliveries failed: {}".format(dd.describe, err.message))
+            return _emit_final(ph, exit_code = 1)
     else:
-        delivered = {}
+        prior = {}
+
+    # Each target's skip policy, then the delivery that makes it skippable
+    # under that policy.
+    err, skip_policies = catch(_resolve_skip_policies, delivery_trait, targets, data["bazel"]["target_tags"])
+    if err:
+        error(ctx.std, err.message)
+        return _emit_final(ph, exit_code = 1)
+    unrecorded = []
+    hook_errors = []
+    delivered = {}
+    for label, p in prior.items():
+        reusable = _skip_delivery(skip_policies.get(label, WHEN_CHANGED), p, output_shas.get(label) or "", dd.tracks_latest)
+        if reusable:
+            delivered[label] = reusable
+
+    # The release build once started (`runs`), so a hook error can cancel it,
+    # and whether one did.
+    release_build = {"runs": None, "cancelled": False}
+
+    def fire_hook(label) -> typing.Any:
+        """`_fire_target_hook`, returning what it raised. A raising hook
+        starts no further deliveries and cancels the release build; the ones
+        running are still reaped and recorded, and the task fails after them."""
+        err, _ = catch(_fire_target_hook, data, delivery_trait, runnables, label, skip_policies)
+        if err:
+            if not hook_errors:
+                error(ctx.std, "{}: DeliveryTrait.delivery_target raised ({}); no further deliveries will start".format(label, err.message))
+                if release_build["runs"] and not release_build["runs"].done:
+                    release_build["runs"].cancellation.cancel()
+                    release_build["cancelled"] = True
+            hook_errors.append("DeliveryTrait.delivery_target raised for {}: {}".format(label, err.message))
+        return err
 
     # Phase 3: fused download + delivery. Bazel lands a target's outputs +
     # runfiles on disk before its `target_completed` fires (current-Bazel
@@ -1648,10 +1968,11 @@ def _delivery_impl(ctx):
                 pending_count += 1
                 rows.append((label, "WARN", "warn", msg, "-", "-"))
                 delivery_scheduler.record(data, outcomes, label, "warn", message = msg, is_forced = is_forced)
-            _fire_target_hook(data, delivery_trait, runnables, label)
+            fire_hook(label)
         elif not is_forced and label in delivered:
             skipped_count += 1
-            delivered_by = delivered[label] or "-"
+            prior_delivery = delivered[label]
+            delivered_by = prior_delivery.build_url or "-"
             rows.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
             delivery_scheduler.record(
                 data,
@@ -1661,8 +1982,10 @@ def _delivery_impl(ctx):
                 message = delivered_by,
                 output_sha = output_sha,
                 is_forced = is_forced,
+                metadata = prior_delivery.metadata,
+                delivered = _delivered_dict(prior_delivery),
             )
-            _fire_target_hook(data, delivery_trait, runnables, label)
+            fire_hook(label)
         elif skip_delivery_build:
             # Phase 3 was skipped, so there is no build event to spawn off:
             # preview directly. Nothing was built for running, so the hook's
@@ -1679,15 +2002,19 @@ def _delivery_impl(ctx):
                 output_sha = output_sha or "-",
                 is_forced = is_forced,
             )
-            _fire_target_hook(data, delivery_trait, runnables, label)
+            fire_hook(label)
         else:
             spawnable[normalize_label(label)] = (label, is_forced, output_sha or "-")
             spawn_order.append(label)
 
+    if hook_errors:
+        unstarted = [spawnable[normalize_label(label)] for label in spawn_order]
+        failed_count += _fail_unstarted(data, outcomes, rows, unstarted, _HOOK_UNSTARTED, fire_hook)
+
     build_exit_code = 0
     planning_error = ""
     selector = None
-    if delivery_targets and not skip_delivery_build:
+    if delivery_targets and not skip_delivery_build and not hook_errors:
         # Expand any `--config=NAME` in release_bazel_flags against the rc — the
         # release build reaches Bazel under --ignore_all_rc_files, so an
         # unexpanded `--config=release` would fail with "Config value not
@@ -1729,9 +2056,9 @@ def _delivery_impl(ctx):
             if planning_error:
                 error(ctx.std, planning_error)
                 unstarted = [spawnable[normalize_label(label)] for label in spawn_order]
-                failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, planning_error)
+                failed_count += _fail_unstarted(data, outcomes, rows, unstarted, planning_error, fire_hook)
 
-    if delivery_targets and not skip_delivery_build and not planning_error:
+    if delivery_targets and not skip_delivery_build and not planning_error and not hook_errors:
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
         # the log is the escape hatch on real failure.
@@ -1764,6 +2091,7 @@ def _delivery_impl(ctx):
             announce_version = announce_version,
             announce_command = announce_command,
         )
+        release_build["runs"] = runs
 
         # `running` holds spawned deliveries; finished ones are reaped out of
         # submission order so a slow head can't idle the slots queued behind it.
@@ -1777,12 +2105,23 @@ def _delivery_impl(ctx):
         settled = {}
         ready = []
         running = []
+
+        # Defers run last-registered first: this one, after `cleanup` has
+        # stopped the children writing into the directory.
+        deliver_dir = ctx.std.fs.mkdtemp(prefix = _DELIVER_DIR_PREFIX)
+        ctx.defer(catch, ctx.std.fs.remove_dir_all, deliver_dir)
         ctx.defer(delivery_scheduler.cleanup, ctx, runs, xl, running)
+        spawns = [0]
+
+        def spawn(entry):
+            spawns[0] += 1
+            return _spawn_deliverable(ctx, color, capture, deliver_dir, spawns[0], *entry)
+
         dispatcher = delivery_scheduler.new_dispatcher(
             max_par,
             selector,
-            lambda entry: _spawn_deliverable(ctx, color, capture, *entry),
-            lambda: ctx.cancellation.root.cancelled,
+            spawn,
+            lambda: ctx.cancellation.root.cancelled or bool(hook_errors),
         )
 
         def fill_slots() -> bool:
@@ -1795,6 +2134,7 @@ def _delivery_impl(ctx):
         total_deliverable = len(spawn_order)
         build_done = False
         last_emit_ms = now_ms(ctx)
+        warned_unstored_metadata = False
 
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
@@ -1811,14 +2151,16 @@ def _delivery_impl(ctx):
                 if phase3_events.done:
                     bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
                     status = runs.wait()
-                    build_exit_code = status.code
                     dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
 
                     # phase 1/2 skipped → phase 3 is the only build; else the
                     # caller already fired `build_end`.
                     if not phase_1_2_runs:
                         dispatch_bazel_build_end(ctx, bazel_trait, status.code)
-                    if status.code != 0:
+                    if status.code != 0 and release_build["cancelled"]:
+                        info(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
+                    elif status.code != 0:
+                        build_exit_code = status.code
                         error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
                         _surface_phase_stderr(ctx, 3, phase3_log_path)
                     else:
@@ -1847,6 +2189,10 @@ def _delivery_impl(ctx):
                 dispatched[key] = True
                 interesting = True
                 settle_err, ep = settled[key]
+                if hook_errors:
+                    # Left unstarted, and failed as such once the build ends.
+                    ready.append((label, ep, is_forced, output_sha))
+                    continue
                 if ep == None and not isinstance(settle_err, bazel.run.NotRunnable):
                     pending_count += 1
                     if build_exit_code:
@@ -1855,7 +2201,7 @@ def _delivery_impl(ctx):
                         warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
                     rows.append((label, "WARN", "warn", warn_msg, output_sha, "-"))
                     delivery_scheduler.record(data, outcomes, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
-                    _fire_target_hook(data, delivery_trait, runnables, label)
+                    fire_hook(label)
                 elif ep == None or not ep.runfiles_dir:
                     if ep == None:
                         not_runnable_msg = "tagged 'deliverable' but not runnable: {}".format(settle_err.message)
@@ -1869,13 +2215,13 @@ def _delivery_impl(ctx):
                         failed_count += 1
                         rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha, "-"))
                         delivery_scheduler.record(data, outcomes, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
-                    _fire_target_hook(data, delivery_trait, runnables, label)
+                    fire_hook(label)
                 elif dry_run:
                     pending_count += 1
                     forced_marker = " (FORCED)" if is_forced else ""
                     rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
                     delivery_scheduler.record(data, outcomes, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
-                    _fire_target_hook(data, delivery_trait, runnables, label)
+                    fire_hook(label)
                 else:
                     ready.append((label, ep, is_forced, output_sha))
 
@@ -1897,7 +2243,7 @@ def _delivery_impl(ctx):
                         break
                 if reap_idx == None:
                     break
-                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
+                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path, metadata_path = running.pop(reap_idx)
                 if capture:
                     # Output was redirected to files, so wait() has no pipe to
                     # drain; read them after exit, print atomically, upload as
@@ -1917,19 +2263,55 @@ def _delivery_impl(ctx):
                     exit_code = child.wait().code
                 duration = fmt_elapsed(time.monotonic() - t_start)
                 forced_marker = " (FORCED)" if is_forced else ""
+                file_metadata = _read_metadata_file(ctx, label, metadata_path)
                 if exit_code == 0:
-                    if track_state:
-                        dd.deliver(label, output_sha)
                     success_count += 1
                     rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
-                    delivery_scheduler.record(data, outcomes, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
+                    delivery_scheduler.record(
+                        data,
+                        outcomes,
+                        label,
+                        "ok",
+                        message = build_url,
+                        output_sha = output_sha,
+                        is_forced = is_forced,
+                        metadata = file_metadata,
+                        delivered = _delivered_dict(delivery_state.Delivery(
+                            label = label,
+                            build_url = delivery_state.known_or_none(build_url),
+                            commit_sha = delivery_state.known_or_none(commit_sha),
+                            at = rfc3339_utc(time.now_ms() // 1000),
+                        )),
+                    )
                 else:
-                    if track_state:
-                        dd.delete(output_sha)
                     failed_count += 1
                     rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
-                    delivery_scheduler.record(data, outcomes, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
-                _fire_target_hook(data, delivery_trait, runnables, label)
+                    delivery_scheduler.record(data, outcomes, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced, metadata = file_metadata)
+
+                # The hook runs before the state write so its additions are
+                # stored with the delivery; one that raises leaves the file's.
+                hook_err = fire_hook(label)
+                if track_state:
+                    metadata = file_metadata if hook_err else data["delivery"]["deliveries"][-1]["metadata"]
+                    if exit_code == 0 and metadata and not dd.stores_metadata and not warned_unstored_metadata:
+                        warn(ctx.std, "The delivery state backend ({}) does not store delivery metadata; a later run that reuses these deliveries will show only who delivered them.".format(dd.describe))
+                        warned_unstored_metadata = True
+                    state_err, _ = catch(
+                        _record_outcome,
+                        ctx,
+                        dd,
+                        label,
+                        output_sha,
+                        exit_code == 0,
+                        metadata,
+                        file_metadata,
+                    )
+                    if state_err:
+                        unrecorded.append(label)
+                        if exit_code == 0:
+                            warn(ctx.std, "{}: delivered, but recording it failed ({}); the next run delivers it again.".format(label, state_err.message))
+                        else:
+                            warn(ctx.std, "{}: recording its failure failed ({}); the next run may skip it.".format(label, state_err.message))
                 interesting = True
                 fill_slots()
 
@@ -1952,11 +2334,14 @@ def _delivery_impl(ctx):
             # never left undispatched.
             if build_done and runs.done and not running:
                 if ready:
-                    msg = delivery_scheduler.unstarted_reason(dispatcher.error(), ctx.cancellation.root.cancelled)
+                    if hook_errors:
+                        msg = _HOOK_UNSTARTED
+                    else:
+                        msg = delivery_scheduler.unstarted_reason(dispatcher.error(), ctx.cancellation.root.cancelled)
                     if not dispatcher.error():
                         error(ctx.std, msg)
                     unstarted = [(label, is_forced, output_sha) for label, _ep, is_forced, output_sha in ready]
-                    failed_count += _fail_unstarted(data, outcomes, rows, delivery_trait, runnables, unstarted, msg)
+                    failed_count += _fail_unstarted(data, outcomes, rows, unstarted, msg, fire_hook)
                     ready.clear()
                 break
 
@@ -2027,17 +2412,23 @@ def _delivery_impl(ctx):
 
     delivery_trait.delivery_end()
 
+    if unrecorded:
+        warn(ctx.std, "{} not recorded in {}: {}.".format(pluralize(len(unrecorded), "outcome"), dd.describe, ", ".join(unrecorded)))
+
+    for hook_error in hook_errors:
+        error(ctx.std, hook_error)
+
     # A failed build fails the task even though its targets are WARN, not FAIL.
-    exit_code = build_exit_code or (1 if failed_count > 0 else 0)
+    exit_code = build_exit_code or (1 if failed_count > 0 or unrecorded or hook_errors else 0)
     return _emit_final(ph, exit_code = exit_code)
 
 delivery = task(
     show_task_options = True,
     kind = "delivery",
-    summary = "Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.",
-    description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
+    summary = "Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered.",
+    description = """Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered, unless forced: by default a target's latest delivery, or any delivery of its digest under `delivery:once_per_digest`.
 
-Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
+Delivery state is kept in Aspect's delivery API, authenticated with `aspect auth login` or ASPECT_API_TOKEN. See https://aspect.build/docs/cli/guides/delivery-manifest.""",
     args = {
         "ci_host": args.string(
             default = "bk",
@@ -2045,7 +2436,7 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
         ),
         "commit_sha": args.string(
             default = "",
-            description = "Git commit SHA being delivered. Used as the change-detection key. Auto-detected from CI env vars (GITHUB_SHA / BUILDKITE_COMMIT / CIRCLE_SHA1 / CI_COMMIT_SHA, with PR-head resolution for GitHub Actions pull_request events) when unset or empty; pass a non-empty value to override.",
+            description = "Git commit SHA being delivered, recorded with each delivery (deliveryd also keys its state by it). Auto-detected from CI env vars (GITHUB_SHA / BUILDKITE_COMMIT / CIRCLE_SHA1 / CI_COMMIT_SHA, with PR-head resolution for GitHub Actions pull_request events) when unset or empty; pass a non-empty value to override.",
         ),
         "build_url": args.string(
             default = "",
@@ -2090,7 +2481,7 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
         "force_targets": args.string_list(
             long = "force-target",
             default = [],
-            description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated. Each label must already be in the resolved delivery set (from --query or positional args) — force-target only flips the change-detection skip, it does not add labels; an unmatched label hard-fails at startup so typos are caught early. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
+            description = "Re-deliver these targets even if their skip policy finds their digest already delivered. Use as a break-glass override when a previous delivery needs to be repeated. Each label must already be in the resolved delivery set (from --query or positional args) — force-target only flips the change-detection skip, it does not add labels; an unmatched label hard-fails at startup so typos are caught early. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
         ),
         "mode": args.string(
             default = "selective",
@@ -2146,3 +2537,13 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
     ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _delivery_impl,
 )
+
+testonly_read_metadata_file = _read_metadata_file
+testonly_prior_deliveries = _prior_deliveries
+testonly_resolve_skip_policy = _resolve_skip_policy
+testonly_resolve_skip_policies = _resolve_skip_policies
+testonly_skip_delivery = _skip_delivery
+testonly_record_outcome = _record_outcome
+testonly_delivered_dict = _delivered_dict
+testonly_metadata_to_store = _metadata_to_store
+testonly_fire_target_hook = _fire_target_hook

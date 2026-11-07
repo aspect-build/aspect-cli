@@ -77,7 +77,7 @@ load("./private/lib/duration.axl", "compact_ms", "phrase_ms")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/table.axl", "Column", "render", "tilde")
-load("./private/lib/text.axl", "display_width", "has_unsafe_chars", "pad_right", "pluralize", "printable")
+load("./private/lib/text.axl", "display_width", "has_unsafe_chars", "pad_right", "pluralize", "printable", "utf8_len")
 load(
     "./private/lib/worktree.axl",
     "FORCE_REMOVE",
@@ -297,14 +297,6 @@ _HOOK_SCORE_LIMIT = HOOK_SCORE_LIMIT
 # of APFS and ext4, where git stores loose refs, less the `.lock` it writes
 # beside a ref while it updates it.
 _MAX_REF_COMPONENT = 250
-
-def _utf8_len(s: str) -> int:
-    """`s`'s length in UTF-8 bytes, which is what a file name limit counts."""
-    n = 0
-    for ch in s.elems():
-        c = ord(ch)
-        n += 1 if c < 0x80 else 2 if c < 0x800 else 3 if c < 0x10000 else 4
-    return n
 
 def _bad_branch_name(ctx: TaskContext, name: str, why: str) -> TaskConclusion:
     """A branch git will not create, said before git is asked.
@@ -3166,7 +3158,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
                                            "--create=" + name + "`")
     if not run_git(ctx.std, ["check-ref-format", "--branch", name], pool["git_common_dir"]).ok:
         return _bad_branch_name(ctx, name, "git rejects it — see `git help check-ref-format`")
-    if [part for part in name.split("/") if _utf8_len(part) > _MAX_REF_COMPONENT]:
+    if [part for part in name.split("/") if utf8_len(part) > _MAX_REF_COMPONENT]:
         return _bad_branch_name(ctx, name, ("a part of it is longer than %d bytes: git stores each branch as a " +
                                             "file, named for that part plus `.lock` while it writes") % _MAX_REF_COMPONENT)
 
@@ -5458,7 +5450,6 @@ testonly_score_slot = _score_slot
 testonly_hook_view = _hook_view
 testonly_capped = _capped
 testonly_indented = _indented
-testonly_utf8_len = _utf8_len
 testonly_release_grade = _release_grade
 testonly_release_all_plan = _release_all_plan
 testonly_collected_refusal = _collected_refusal

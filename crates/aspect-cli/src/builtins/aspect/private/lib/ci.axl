@@ -1,11 +1,12 @@
 """Cross-CI host, run-identity, and URL helpers.
 
-`detect_ci_host` names the running host and `ci_identity` resolves its
-per-run identity (run id, workflow, job, attempt) for the status surfaces
-that key state by run. `detect_build_url` and `detect_artifacts_browse_url`
-centralize the URL shapes status surfaces, build metadata, and the runner
-job history all need. Each CI host yields a job-scoped URL when one is
-available so links land on the specific execution, not the build root.
+`detect_ci_host` names the running host, `detect_repository` its repository,
+and `ci_identity` resolves its per-run identity (run id, workflow, job,
+attempt) for the status surfaces that key state by run.
+`detect_build_url` and `detect_artifacts_browse_url` centralize the URL shapes
+status surfaces, build metadata, and the runner job history all need. Each CI
+host yields a job-scoped URL when one is available so links land on the
+specific execution, not the build root.
 
 Shapes by host:
 
@@ -58,6 +59,37 @@ def detect_ci_host(env: std.Env) -> dict | None:
         if env.var(host["marker"]):
             return host
     return None
+
+def repository_from_git_url(url: str) -> str:
+    """`owner/name` (with nested groups, `group/sub/name`) from an HTTPS or SSH
+    git remote URL, else `""`."""
+    rest = url.strip()
+    scheme_end = rest.find("://")
+    if scheme_end >= 0:
+        rest = rest[scheme_end + 3:]
+        slash = rest.find("/")
+        path = rest[slash + 1:] if slash >= 0 else ""
+    elif ":" in rest:
+        path = rest.split(":", 1)[1]
+    else:
+        return ""
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-len(".git")]
+    return path if "/" in path else ""
+
+def detect_repository(env: std.Env) -> str:
+    """The running CI job's repository as `owner/name`, or `""` when the host
+    does not say."""
+    if env.var("GITHUB_REPOSITORY"):
+        return env.var("GITHUB_REPOSITORY")
+    if env.var("BUILDKITE_REPO"):
+        return repository_from_git_url(env.var("BUILDKITE_REPO"))
+    if env.var("CIRCLE_PROJECT_USERNAME") and env.var("CIRCLE_PROJECT_REPONAME"):
+        return env.var("CIRCLE_PROJECT_USERNAME") + "/" + env.var("CIRCLE_PROJECT_REPONAME")
+    if env.var("CI_PROJECT_PATH"):
+        return env.var("CI_PROJECT_PATH")
+    return ""
 
 def ci_host_link_label(label: str) -> str:
     """The short link label for the host whose `label` is given, e.g.

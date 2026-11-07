@@ -1,10 +1,11 @@
-name: CI - Workflows
+name: CI
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-    # `labeled` so adding ci:workflows-runners starts a run; see runner-smoke.
+    # `labeled` so adding ci:workflows-runners starts a run; see
+    # dispatch-workflows-runners.
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 permissions:
@@ -56,9 +57,6 @@ jobs:
         with:
           bazelrc-generate: false
           disk-cache: true
-      # The released CLI doing this login understands only the bare
-      # `client_id:secret` pair, so it keeps the OSS token. Switch it to
-      # ASPECT_CLOUD_API_TOKEN once a release carries Web UI token support.
       - name: Log in to Aspect Cloud
         if: env.ASPECT_HAS_API_TOKEN == 'true'
         working-directory: ${{ runner.temp }}
@@ -78,7 +76,7 @@ jobs:
           path: target/ci/aspect-cli
           retention-days: 1
           if-no-files-found: error
-  # Kick off ci-workflows-delivery.yaml as its OWN workflow run, immediately
+  # Kick off ci-workflows-runners.yaml as its OWN workflow run, immediately
   # after pre-build. We dispatch via the API (rather than a reusable
   # `uses:` call) on purpose: a reusable workflow nests its jobs inside this
   # run, whereas a dispatch produces a separate workflow run in the GitHub UI.
@@ -86,23 +84,23 @@ jobs:
   # genuine cross-workflow case to merge tasks from.
   #
   # We dispatch on the PR head ref (or branch for push) so the dispatched run
-  # executes *this* commit's delivery workflow, and we hand it `prebuild_run_id`
-  # so the delivery jobs reuse the binary pre-build just uploaded instead of
-  # rebuilding from source.
+  # executes *this* commit's runner workflow, and we hand it `prebuild_run_id`
+  # so its jobs reuse the binary pre-build just uploaded instead of rebuilding
+  # from source.
   #
   # A workflow_dispatch run carries NO PR context (event_name is
-  # workflow_dispatch, not pull_request) — so without help the delivery run is
+  # workflow_dispatch, not pull_request) — so without help the runner run is
   # orphaned: it shows no status check on the PR and the Aspect PR-summary
   # comment can't merge its tasks. We pass the triggering PR's number and head
-  # SHA through so the delivery run can reconstruct that context:
+  # SHA through so the runner run can reconstruct that context:
   #   pr_number -> ASPECT_GITHUB_PR_NUMBER (github.axl detect_pr override)
   #   head_sha  -> GITHUB_SHA              (so the check-run attaches to the PR
   #                                         head commit, not the merge commit)
-  # On push (no PR) both resolve to empty and delivery behaves as a branch run.
+  # On push (no PR) both resolve to empty and the run behaves as a branch run.
   #
-  # Delivery runs on self-hosted Aspect Workflows runners, so it is opt-in:
+  # Its jobs run on self-hosted Aspect Workflows runners, so it is opt-in:
   # workflow_dispatch, or a PR carrying the ci:workflows-runners label.
-  dispatch-delivery:
+  dispatch-workflows-runners:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:workflows-runners')
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -111,14 +109,14 @@ jobs:
       actions: write # required to dispatch another workflow
       contents: read
     steps:
-      - name: Dispatch CI - Delivery
+      - name: Dispatch CI - Workflows Runners
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF: ${{ github.head_ref || github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh workflow run ci-workflows-delivery.yaml \
+          gh workflow run ci-workflows-runners.yaml \
             --repo "${{ github.repository }}" \
             --ref "$REF" \
             --field "force_targets=" \
@@ -452,67 +450,6 @@ jobs:
       - name: Cache Diff Task (ASPECT_DEBUG=1)
         if: env.ASPECT_HAS_API_TOKEN == 'true'
         run: ASPECT_DEBUG=1 aspect cache diff --task:name cache-diff-gha-debug
-  # Workflows runner smoke test: the freshly-built CLI starts, prints version /
-  # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
-  # Runs on a self-hosted runner because the ASPECT_WORKFLOWS_RUNNER_* values it
-  # dumps only exist there, so it is opt-in like dispatch-delivery:
-  # workflow_dispatch, or a PR carrying the ci:workflows-runners label.
-  runner-smoke:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:workflows-runners')
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
-    needs: [pre-build]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
-        with:
-          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
-      - name: Runner smoke test
-        run: |
-          aspect --version
-          aspect version
-          aspect help
-          echo "ASPECT_* env var names present:"
-          env | grep -o '^ASPECT_[^=]*' | sort | sed 's/^/  /'
-          echo "ASPECT_WORKFLOWS_* values:"
-          for var in \
-            ASPECT_WORKFLOWS_BES_BACKEND \
-            ASPECT_WORKFLOWS_BES_RESULTS_URL \
-            ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT \
-            ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX \
-            ASPECT_WORKFLOWS_REMOTE_CACHE \
-            ASPECT_WORKFLOWS_RUNNER \
-            ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION \
-            ASPECT_WORKFLOWS_RUNNER_AZ \
-            ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR \
-            ASPECT_WORKFLOWS_RUNNER_BIN_DIR \
-            ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION \
-            ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT \
-            ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER \
-            ASPECT_WORKFLOWS_RUNNER_DATA_DIR \
-            ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE \
-            ASPECT_WORKFLOWS_RUNNER_IMAGE_ID \
-            ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID \
-            ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME \
-            ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE \
-            ASPECT_WORKFLOWS_RUNNER_GROUP_NAME \
-            ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE \
-            ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE \
-            ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR \
-            ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE \
-            ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE \
-            ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR \
-            ASPECT_WORKFLOWS_RUNNER_REGION \
-            ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR \
-            ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH \
-            ASPECT_WORKFLOWS_RUNNER_VERSION \
-            ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE \
-            ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE \
-            ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED \
-          ; do
-            val=$(printenv "$var") && echo "  $var=$val" || true
-          done
   # The AXL suite + the CLI/launcher smoke commands were a single Buildkite
   # `axl-tests` step. On GitHub Actions they are split into jobs that run in
   # parallel — `axl-tests` (the ~3min `aspect tests axl` suite), `axl-smoke`
@@ -641,7 +578,7 @@ jobs:
             if [ "$code" -eq 124 ]; then
               echo "ERROR: $label hung until the 180s timeout instead of failing"; exit 1
             fi
-            echo "$out" | grep -q "Unrecognized option" \
+            grep -q "Unrecognized option" <<<"$out" \
               || { echo "ERROR: $label must fail with Bazel's own error"; exit 1; }
           }
           echo "--- flag rejected by Bazel (--bazel-flag)"
@@ -752,6 +689,206 @@ jobs:
             --coverage-tool=cat --coverage-tool-arg='{report}' \
             //examples/test_states:always_pass
           rm -f "$REPORT"
+  # Delivery against Aspect Cloud: the delivery API (the default state backend)
+  # and Aspect Cloud's remote cache for change detection. A fork PR gets no
+  # secrets, so each job's delivery step is skipped there.
+  delivery-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Delivery Task
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        # --force-target re-delivers every run so the manifest always
+        # carries at least one `ok` outcome to exercise the per-target
+        # enrichment hook in //.aspect/config.axl.
+        # --warn-unresolved-digest: this deliverable set includes py_deliverable,
+        # a stamped py_binary whose PyWriteBuildData action is uncacheable and so
+        # never resolves a digest — a known, tolerated missing digest here, so
+        # keep it a warning rather than the default hard failure.
+        run: aspect delivery --task:name delivery-gha --warn-not-runnable --warn-unresolved-digest --force-target=//examples/deliverable:deliverable_with_digest
+  delivery-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Delivery Task (ASPECT_DEBUG=1)
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        # --warn-unresolved-digest for the same reason as delivery-gha: the
+        # deliverable set includes the stamped, uncacheable py_deliverable.
+        run: ASPECT_DEBUG=1 aspect delivery --task:name delivery-gha-debug --warn-unresolved-digest --force-target=//examples/deliverable:deliverable_with_digest
+  # Regression guard for the silent-warn bug where an unhashable deliverable
+  # passed green and was never delivered. //examples/deliverable:py_deliverable
+  # is a stamped py_binary whose PyWriteBuildData action is uncacheable, so it
+  # never resolves a change-detection digest. Delivery must HARD-FAIL by default
+  # — naming the culprit target + action and the fix — and DOWNGRADE to a
+  # warning (exit 0) under --warn-unresolved-digest. (The default delivery query
+  # `attr(tags, deliverable, //...)` from config.axl takes precedence over
+  # positional targets, so we assert against this in-tree deliverable rather
+  # than a bespoke target the query would skip.)
+  delivery-uncacheable-digest-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Delivery unresolvable-digest must hard-fail
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        run: |
+          set -uo pipefail
+          # This job deliberately makes delivery fail, so suppress its GitHub
+          # check run — a red "aspect / delivery-uncacheable" check on the PR
+          # would be noise, not a real signal.
+          common="--track-state=false --mode=always --dry-run --github-status-checks:enabled=false"
+
+          echo "== Expect HARD FAILURE (default: no --warn-unresolved-digest) =="
+          out="$(aspect delivery --task:name delivery-uncacheable $common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::delivery succeeded but must hard-fail when a digest can't be resolved"; exit 1
+          fi
+          grep -q "py_deliverable" <<<"$out" \
+            || { echo "::error::failure did not name the uncacheable target py_deliverable"; exit 1; }
+          grep -q "PyWriteBuildData" <<<"$out" \
+            || { echo "::error::failure did not name the uncacheable action PyWriteBuildData"; exit 1; }
+          grep -Eq "no-remote|local" <<<"$out" \
+            || { echo "::error::failure did not surface the no-remote / local remediation"; exit 1; }
+
+          echo "== Expect WARNING downgrade (exit 0) with --warn-unresolved-digest =="
+          aspect delivery --task:name delivery-uncacheable-warn --warn-unresolved-digest $common
+  # Regression guard for the no-remote-exec deliverable whose digest resolved on
+  # the first run and silently vanished on every later one. Bazel propagates a
+  # target's tags into the actions an aspect registers on it, so
+  # //examples/deliverable:no_remote_exec_deliverable yields a DeliveryHash probe
+  # that may run LOCALLY. A probe that runs successfully lands in Bazel's local
+  # action cache, so the next checksum phase skips the spawn, issues no
+  # GetActionResult, and resolves no digest — dropping the target from delivery.
+  # Catching that takes TWO consecutive runs sharing one output base (the first
+  # always passes), which is why both run in a single job on one runner. No
+  # --warn-unresolved-digest here: an unresolved digest must hard-fail.
+  delivery-no-remote-exec-digest-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: no-remote-exec deliverable must resolve a digest on every run
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        run: |
+          set -uo pipefail
+          # --query scopes this to the fixture: config.axl's default delivery
+          # query takes precedence over positional targets. Two sequential runs
+          # under one --task:name would post duplicate check-runs, so suppress
+          # them — the job's own status is the signal.
+          common="--track-state=false --mode=always --dry-run --github-status-checks:enabled=false --query=//examples/deliverable:no_remote_exec_deliverable"
+
+          for run in 1 2; do
+            echo "== Run $run: expect a resolved digest =="
+            out="$(aspect delivery --task:name delivery-no-remote-exec $common 2>&1)" && code=0 || code=$?
+            echo "$out"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::run $run failed (exit $code): a no-remote-exec deliverable must resolve a change-detection digest"
+              exit 1
+            fi
+            # Exit 0 alone is not enough — assert the digest actually resolved
+            # rather than the phase being skipped for want of a remote cache.
+            grep -q "Resolved digests for all" <<<"$out" \
+              || { echo "::error::run $run resolved no digest for no_remote_exec_deliverable (local action cache likely served the DeliveryHash probe)"; exit 1; }
+          done
+  # Regression guard for the dry-run that performed the full stamped release
+  # build of every pending target and then dispatched nothing. --dry-run must
+  # skip phase 3; --dry-run=build must bring it back. --force-target guarantees
+  # a pending target on a steady-state run, so "no phase-3 build" can't pass
+  # trivially by there being nothing left to deliver. Both runs suppress their
+  # check runs — the job's own status is the signal.
+  delivery-dry-run-build-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: --dry-run skips the delivery build, --dry-run=build restores it
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        run: |
+          set -uo pipefail
+          # --warn-not-runnable / --warn-unresolved-digest for the same reasons
+          # as delivery-gha: this deliverable set intentionally contains a
+          # non-runnable target and the stamped, uncacheable py_deliverable.
+          common="--warn-not-runnable --warn-unresolved-digest --github-status-checks:enabled=false --force-target=//examples/deliverable:deliverable_with_digest"
+          preview_common="--dry-run $common"
+          build_common="--dry-run=build $common"
+
+          echo "== --dry-run: expect NO phase-3 build =="
+          out="$(aspect delivery --task:name delivery-dry-run $preview_common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::dry-run delivery failed (exit $code)"; exit 1
+          fi
+          grep -q "Skipping the delivery build" <<<"$out" \
+            || { echo "::error::dry-run did not report skipping the delivery build"; exit 1; }
+          if grep -q "Delivery build took" <<<"$out"; then
+            echo "::error::dry-run ran the phase-3 delivery build; it must be skipped unless --dry-run=build"; exit 1
+          fi
+
+          echo "== --dry-run=build: expect the phase-3 build =="
+          out="$(aspect delivery --task:name delivery-dry-run-build $build_common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::--dry-run=build delivery failed (exit $code)"; exit 1
+          fi
+          grep -q "Delivery build took" <<<"$out" \
+            || { echo "::error::--dry-run=build did not run the phase-3 delivery build"; exit 1; }
+          if grep -q "Skipping the delivery build" <<<"$out"; then
+            echo "::error::--dry-run=build reported skipping the delivery build"; exit 1
+          fi
+  # Regression guard for the reap loop that blocked on a running deliverable:
+  # the task sent no updates until it exited, so the check-run heartbeat those
+  # updates carry stopped and the orphan sweep closed the check as DISCONNECTED
+  # while the target still ran. slow_deliverable runs for 15s and fails unless
+  # a task update (stamped by //.aspect/config.axl) lands meanwhile.
+  delivery-heartbeat-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
+      - name: Delivery keeps sending task updates while a target runs
+        if: env.ASPECT_HAS_API_TOKEN == 'true'
+        env:
+          ASPECT_TEST_TASK_UPDATE_STAMP: ${{ runner.temp }}/delivery-task-update-stamp
+        run: aspect delivery --task:name delivery-heartbeat --track-state=false --mode=always --github-status-checks:enabled=false --query=//examples/deliverable:slow_deliverable
   # The one status check the `main` ruleset requires. Add new jobs to `needs`;
   # `if: always()` lets it report red when a dependency fails or is cancelled.
   # The opt-in Workflows-runner jobs may also be skipped.
@@ -762,7 +899,7 @@ jobs:
     needs:
       - wrapper-test
       - pre-build
-      - dispatch-delivery
+      - dispatch-workflows-runners
       - buildifier-task
       - buildifier-debug-task
       - format-task
@@ -781,7 +918,12 @@ jobs:
       - exec-log-integration
       - cache-diff-task
       - cache-diff-debug-task
-      - runner-smoke
+      - delivery-task
+      - delivery-debug-task
+      - delivery-uncacheable-digest-task
+      - delivery-no-remote-exec-digest-task
+      - delivery-dry-run-build-task
+      - delivery-heartbeat-task
       - axl-tests
       - axl-smoke
       - axl-suites
@@ -794,7 +936,7 @@ jobs:
         run: |
           jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<<"$RESULTS" | sort
           failed=$(jq -r '
-            ["runner-smoke", "dispatch-delivery"] as $optional
+            ["dispatch-workflows-runners"] as $optional
             | to_entries[]
             | select(.value.result != "success")
             | select(.value.result != "skipped" or (.key | IN($optional[]) | not))

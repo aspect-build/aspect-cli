@@ -4,11 +4,12 @@ expose over a Unix socket.
 deliveryd keys state by commit: each target's digest is `record`ed under the
 commit before `query` can answer for it, `deliver` stamps a digest with the
 build URL that delivered it, and `delete` clears one after a failed run. This
-is the default `DeliveryState.connect` (see `delivery_state.axl`).
+is the `DeliveryState.connect` for a deployment without access to the delivery
+API, selected explicitly (see `delivery_state.axl`).
 
     dd = deliveryd.connect(ctx, delivery_state.Params(host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url))
     dd.record(label, digest)
-    delivered = dd.query(digests)      # {label: digest} -> {label: signature}
+    delivered = dd.query(digests)      # {label: digest} -> {label: PriorDeliveries}
     dd.deliver(label, digest)          # after the run succeeded
     dd.delete(digest)                  # after it failed
 """
@@ -137,10 +138,13 @@ def _do_record(c: _Client, label: str, digest: str) -> None:
     _check(c.conn, "record", res)
 
 def _do_query(c: _Client, digests: dict) -> dict:
-    """Which of `{label: digest}` are already delivered → `{label: signature}`,
-    the signature being the build URL that delivered it. The daemon answers for
-    the whole commit, keyed by label, and only for targets a prior `record`
-    registered; the answer is narrowed to the asked-about labels."""
+    """Which of `{label: digest}` are already delivered → `{label:
+    PriorDeliveries}` with `digest_delivery` alone: the daemon tracks no
+    target's latest delivery, and stores only the signature (the build URL
+    that delivered it), so each delivery carries `build_url` and `digest`; not
+    `label`, since a shared digest's signature may be another target's. It
+    answers for the whole commit, keyed by label, and only for targets a prior
+    `record` registered; the answer is narrowed to the asked-about labels."""
     res = _send(c.conn, "POST", "/query", {
         "ci_host": c.host,
         "commit_sha": c.commit,
@@ -151,7 +155,10 @@ def _do_query(c: _Client, digests: dict) -> dict:
     for target in _decode(c.conn, "query", res).get("targets", []) or []:
         label = target.get("label", "")
         if label in digests and target.get("delivered"):
-            delivered[label] = target.get("delivered_by") or ""
+            delivered[label] = delivery_state.PriorDeliveries(digest_delivery = delivery_state.Delivery(
+                build_url = delivery_state.known_or_none(target.get("delivered_by")),
+                digest = digests[label],
+            ))
     return delivered
 
 def _do_deliver(c: _Client, label: str, digest: str, meta: dict = {}) -> None:
@@ -236,7 +243,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
     )
 
 def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
-    """The default `DeliveryState.connect`: deliveryd at `ENDPOINT_ENV`."""
+    """`DeliveryState.connect` for deliveryd at `ENDPOINT_ENV`."""
     return _new(ctx, host = params.host, prefix = params.prefix, commit = params.commit, signature = params.signature)
 
 deliveryd = namespace(

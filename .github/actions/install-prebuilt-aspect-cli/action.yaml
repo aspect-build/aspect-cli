@@ -18,8 +18,8 @@ description: |
 
   By default it pulls the artifact from the *current* workflow run (the
   common case: `pre-build` and the consumer are jobs in the same run). To
-  pull from a *different* run — e.g. `ci-workflows-delivery.yaml`, which is
-  dispatched as its own workflow run by `ci-workflows.yaml` after pre-build —
+  pull from a *different* run — e.g. `ci-workflows-runners.yaml`, which is
+  dispatched as its own workflow run by `ci.yaml` after pre-build —
   pass `run-id` (the upstream run that holds the artifact) and `github-token`.
   `actions/download-artifact` requires both to reach across runs.
 

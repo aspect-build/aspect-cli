@@ -3,16 +3,26 @@
 `aspect delivery` keeps "which digests were already delivered" in a state
 backend. The task never talks to one directly: it builds a `Params` and calls
 whatever `DeliveryState.connect` is set to, getting back a `Backend` record
-whose verbs it drives. `connect = None` (the default) means the deliveryd HTTP
-client in `deliveryd.axl`; `redis_state.axl` offers a direct-Redis alternative
-a config.axl can select:
+whose verbs it drives. `connect = None` (the default) means Aspect's delivery
+API (`delivery_api.axl`), which stores each delivery's metadata and keeps
+attempt history. A config.axl selects the runner's deliveryd (`deliveryd.axl`)
+for a deployment without access to the API, or the direct-Redis
+`redis_state.axl`:
 
-    load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+    load("@aspect//delivery_state.axl", "DeliveryState", "deliveryd")
     if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = redis_state.connect
+        ctx.traits[DeliveryState].connect = deliveryd.connect
 
 A backend reports "not configured" and "unreachable" the same way, through
 `Backend.status.ok`, so the task has one startup error path.
+
+`query` answers with each target's `PriorDeliveries`: its latest successful
+delivery and the delivery of its current digest, each a `Delivery` saying which
+build delivered it, from which commit, when, and the `metadata` stored with
+it. The task's skip policy picks which one decides. A backend that cannot store
+metadata says so with `stores_metadata = False`, and its deliveries carry
+`build_url` only; one that cannot track a target's latest delivery says so
+with `tracks_latest = False`.
 """
 
 load("./text.axl", "format_bytes_iec")
@@ -36,18 +46,56 @@ Health = record(
     error = field(str, default = ""),
 )
 
-# Everything a delivery run holds constant about its state: `host`/`prefix` key
-# the state, `commit`/`signature` (the build URL) are the provenance stored
-# with each delivery.
+# Everything a delivery run holds constant about its state: `host`/`repo`/
+# `prefix` key the state (`repo` is `owner/name`, "" when unknown),
+# `commit`/`signature` (the build URL) are the provenance stored with each
+# delivery, "" or "-" when unknown. `heartbeat`, when set, is called while a
+# backend waits to retry a request, so the task's status surfaces keep
+# updating through a slow backend.
 Params = record(
     host = field(str),
     prefix = field(str),
+    repo = field(str, default = ""),
     commit = field(str, default = ""),
     signature = field(str, default = ""),
+    heartbeat = field(typing.Callable[[], typing.Any] | None, default = None),
+)
+
+# One successful delivery, as `query` reports it: the delivering build's URL
+# and commit, and `at`, when it was recorded (RFC 3339 UTC); each is None when
+# the backend does not know it. `label` is the target delivered ("" when
+# unknown), which under a shared digest may not be the target asked about.
+# `metadata` is the user-owned dict `deliver` stored as `meta`; Aspect never
+# writes inside it.
+Delivery = record(
+    build_url = field(str | None, default = None),
+    commit_sha = field(str | None, default = None),
+    at = field(str | None, default = None),
+    label = field(str, default = ""),
+    digest = field(str, default = ""),
+    metadata = field(dict, default = {}),
+)
+
+# What `query` knows about one target: its most recent successful delivery
+# (`latest_delivery`, whatever the digest) and the delivery of the digest it
+# was asked about (`digest_delivery`, whatever the target). Either may be None.
+PriorDeliveries = record(
+    latest_delivery = field(Delivery | None, default = None),
+    digest_delivery = field(Delivery | None, default = None),
 )
 
 # What `connect` returns. `endpoint` must be credential-free: it is printed.
+# `query` maps `{label: digest}` to `{label: PriorDeliveries}` for the targets
+# it knows anything about. `tracks_latest` says whether it can report
+# `latest_delivery`; a backend that cannot reports `digest_delivery` alone.
 # `deliver` takes `(label, digest, meta)`; implementations default `meta = {}`.
+# A failed run calls `record_failure(label, digest, meta)` when the backend
+# keeps attempt history, otherwise `delete(digest)`. Either clears the digest's
+# delivery, and `record_failure` on a `tracks_latest` backend the target's
+# latest delivery when it has that digest, so the next run delivers it again
+# under either skip policy. `read_only` is non-empty when the credential may
+# query but not record, and says why and how to fix it; such a backend serves
+# a `--dry-run` alone.
 Backend = record(
     endpoint = field(str),
     describe = field(str),
@@ -57,6 +105,10 @@ Backend = record(
     query = field(typing.Callable[[dict], dict]),
     deliver = field(typing.Callable[[str, str, dict], None]),
     delete = field(typing.Callable[[str], None]),
+    record_failure = field(typing.Callable[[str, str, dict], None] | None, default = None),
+    stores_metadata = field(bool, default = False),
+    tracks_latest = field(bool, default = False),
+    read_only = field(str, default = ""),
 )
 
 DeliveryState = trait(
@@ -65,12 +117,18 @@ DeliveryState = trait(
         default = None,
         description = (
             "Connects the delivery state backend: `(ctx, Params) -> Backend`. " +
-            "None (the default) uses the deliveryd HTTP client; set it to " +
+            "None (the default) uses Aspect's delivery API with the Aspect " +
+            "Cloud credential; set it to `deliveryd.connect` to keep state in " +
+            "the runner's deliveryd (an air-gapped deployment), to " +
             "`redis_state.connect` to talk to Redis directly, or to any " +
             "function returning a `delivery_state.Backend`."
         ),
     ),
 )
+
+def known_or_none(value: str | None) -> str | None:
+    """`value`, or None for an unknown-value placeholder ("" or "-")."""
+    return None if value in [None, "", "-"] else value
 
 def _format_pct(pct: float) -> str:
     tenths = int(pct * 10)
@@ -95,7 +153,10 @@ def describe_storage(health: Health) -> str:
 delivery_state = namespace(
     Params = Params,
     Backend = Backend,
+    Delivery = Delivery,
+    PriorDeliveries = PriorDeliveries,
     Health = Health,
     Storage = Storage,
     describe_storage = describe_storage,
+    known_or_none = known_or_none,
 )
