@@ -8,6 +8,9 @@ The startup probe, `GET /health`, picks the API:
     API contract (`/deliveries/...`), driven by `delivery_api.axl` over the
     socket without a credential. It stores metadata, tracks each target's
     latest delivery and keeps attempt history, like Aspect's hosted API.
+    Connecting also calls `POST /legacy/sweep` once, which expires a bounded
+    batch of v1 keys written without a TTL, so a store that served v1 drains
+    its backlog over normal runs. Its answer is ignored.
   - **v1**, any deliveryd without the header. Deprecated, and to be removed
     from the CLI: it keys state by commit, so each target's digest is
     `record`ed under the commit before `query` can answer for it; `deliver`
@@ -258,6 +261,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", rep
     res = _probe(conn, probe_attempts, pause)
 
     if _ok(res) and _advertised_version(res) >= _API_V2:
+        _send(conn, "POST", "/legacy/sweep", {})
         return delivery_api.open(
             conn.http,
             base_url,
