@@ -88,6 +88,9 @@ pub struct Dirs {
     pub bazel_root: PathBuf,
     pub aspect_root: PathBuf,
     pub git_root: Option<PathBuf>,
+    /// The directory the task was invoked from. A run's `directory=` moves
+    /// where Bazel runs, never this, so a tool built from the workspace root
+    /// still acts on the user's directory.
     pub cwd: PathBuf,
 }
 
@@ -110,7 +113,9 @@ impl Runnable {
     /// the `BUILD_*` and `ASPECT_*` variables, the runfiles variables when a
     /// tree exists (with `RUNFILES_MANIFEST_FILE` removed, so a launcher never
     /// inherits the CLI's own manifest), then `env`, and `cwd` defaulting to
-    /// the runfiles workspace directory.
+    /// the runfiles workspace directory, else `dirs.cwd`.
+    /// `BUILD_WORKING_DIRECTORY` and `ASPECT_WORKING_DIRECTORY` are
+    /// `dirs.cwd`; a caller that wants otherwise overrides them through `env`.
     pub fn command(
         &self,
         dirs: &Dirs,
@@ -663,6 +668,60 @@ mod run_tests {
         assert_eq!(dirs.labels(Some("b")).current_package(), "a/b");
         let abs = root.join("a/b").to_string_lossy().into_owned();
         assert_eq!(dirs.labels(Some(&abs)).current_package(), "a/b");
+    }
+
+    #[test]
+    fn directory_moves_label_resolution_but_not_the_working_directory() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        let invoked = root.join("services/api");
+        std::fs::create_dir_all(&invoked).unwrap();
+        let dirs = Dirs {
+            bazel_root: root.to_owned(),
+            aspect_root: root.to_owned(),
+            git_root: None,
+            cwd: invoked.clone(),
+        };
+        let root_dir = root.to_string_lossy().into_owned();
+        assert_eq!(dirs.labels(Some(&root_dir)).current_package(), "");
+
+        let r = Runnable {
+            label: "//tools:fmt".into(),
+            workspace_name: "_main".into(),
+            exec_path: "bazel-out/bin/tools/fmt".into(),
+            runfiles_exec_path: String::new(),
+            path: root.join("bazel-out/bin/tools/fmt"),
+            runfiles_manifest: None,
+            runfiles_dir: None,
+            workspace_dir: None,
+            args: vec![],
+            env: vec![],
+            inherited_env: vec![],
+            tags: vec![],
+            default_outputs: vec![],
+        };
+        let env = |cmd: &Command, k: &str| {
+            cmd.get_envs()
+                .find(|(n, _)| *n == k)
+                .and_then(|(_, v)| v)
+                .map(PathBuf::from)
+        };
+        let cmd = r.command(&dirs, &[], &[], None);
+        assert_eq!(env(&cmd, "BUILD_WORKING_DIRECTORY"), Some(invoked.clone()));
+        assert_eq!(env(&cmd, "ASPECT_WORKING_DIRECTORY"), Some(invoked.clone()));
+        assert_eq!(cmd.get_current_dir(), Some(invoked.as_path()));
+
+        let moved = root.join("elsewhere");
+        let cmd = r.command(
+            &dirs,
+            &[],
+            &[(
+                "BUILD_WORKING_DIRECTORY".into(),
+                Some(moved.to_string_lossy().into_owned()),
+            )],
+            None,
+        );
+        assert_eq!(env(&cmd, "BUILD_WORKING_DIRECTORY"), Some(moved));
     }
 
     #[test]
