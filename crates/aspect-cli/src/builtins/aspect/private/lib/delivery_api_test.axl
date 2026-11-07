@@ -71,9 +71,10 @@ def _test_query_returns_prior_deliveries(ctx):
     dd = _backend({"/deliveries/query": _res(200, {"targets": {
         "//a": {"latest_delivery": _delivery("//a", "bb", "e2"), "digest_delivery": _delivery("//a", "aa", "e1")},
         "//b": {"latest_delivery": None, "digest_delivery": _delivery("//x", "aa", "e1")},
+        "@@//a": {"latest_delivery": None, "digest_delivery": _delivery("//a", "aa", "e1")},
     }, "unanswered_labels": []})}, calls)
     got = dd.query({"//a": "aa", "//b": "aa", "//c": "cc", "//d": ""})
-    _eq("labels the API knows", sorted(got.keys()), ["//a", "//b"])
+    _eq("labels the API knows, of those asked", sorted(got.keys()), ["//a", "//b"])
     _eq("latest delivery", got["//a"].latest_delivery.digest, "bb")
     r = got["//a"].digest_delivery
     _eq("digest delivery", (r.label, r.digest, r.build_url, r.commit_sha, r.at, r.metadata), ("//a", "aa", "https://ci/run/1", "c0", "2025-10-29T01:06:40Z", {"runUrl": "https://gh/run/9"}))
@@ -245,18 +246,16 @@ def _test_open_read_only_credential_can_only_query(ctx):
     dd = delivery_api.open(_http(responses, calls), _BASE, lambda: "tok-1", _PARAMS, _ids())
     _eq("read-only still connects", dd.status.ok, True)
     _eq("names the permission", "aspect.delivery.write" in dd.read_only, True)
-    _eq("names the deliveryd opt-out", "deliveryd.connect" in dd.read_only, True)
     dd.query({"//a": "aa"})
     _eq("read-only queries", calls[-1].body["targets"], {"//a": "aa"})
     ok = delivery_api.open(_http({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": [], "writable": True})}, []), _BASE, lambda: "tok-1", _PARAMS, _ids())
     _eq("writable is not read-only", ok.read_only, "")
 
 def _test_open_refused_credential_names_both_fixes(ctx):
-    for status, fix in [(401, "aspect auth login"), (403, "aspect.delivery.read"), (403, "aspect.delivery.write"), (404, "deliveryd.connect")]:
+    for status, fix in [(401, "aspect auth login"), (403, "aspect.delivery.read"), (403, "aspect.delivery.write"), (404, "HTTP 404")]:
         dd = delivery_api.open(_http({"/deliveries/query": _res(status, {"error": "no"})}, []), _BASE, lambda: "tok-1", _PARAMS, _ids())
         _eq("refused %d is a startup error" % status, dd.status.ok, False)
         _eq("names the fix for %d" % status, fix in dd.status.error, True)
-        _eq("names the deliveryd opt-out %d" % status, "deliveryd.connect" in dd.status.error, True)
 
 def _test_token_is_read_per_request(ctx):
     calls = []

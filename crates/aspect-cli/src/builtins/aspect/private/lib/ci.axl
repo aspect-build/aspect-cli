@@ -1,7 +1,8 @@
 """Cross-CI host, run-identity, and URL helpers.
 
-`detect_ci_host` names the running host, `detect_repository` its repository,
-and `ci_identity` resolves its per-run identity (run id, workflow, job,
+`detect_ci_host` names the running host, `detect_repository` its repository
+(from the host's variables, else the checkout's `origin` remote), and
+`ci_identity` resolves its per-run identity (run id, workflow, job,
 attempt) for the status surfaces that key state by run.
 `detect_build_url` and `detect_artifacts_browse_url` centralize the URL shapes
 status surfaces, build metadata, and the runner job history all need. Each CI
@@ -30,6 +31,7 @@ Shapes by host:
                         Packages API, which has no clean per-job page.
 """
 
+load("./git_checkout.axl", "git_checkout")
 load("./github.axl", "detect_github_actions_build_url", "github_actions_run_url")
 
 # Per-process env var holding the once-resolved build URL. Populated by
@@ -61,8 +63,11 @@ def detect_ci_host(env: std.Env) -> dict | None:
     return None
 
 def repository_from_git_url(url: str) -> str:
-    """`owner/name` (with nested groups, `group/sub/name`) from an HTTPS or SSH
-    git remote URL, else `""`."""
+    """`owner/name` (with nested groups, `group/sub/name`, as GitLab's
+    `CI_PROJECT_PATH` spells it) from an HTTPS or SSH git remote URL, else
+    `""`. Unlike `git_checkout.repository_name`, which shortens a path to its
+    last two parts for display, this keeps the whole path: it identifies the
+    repository."""
     rest = url.strip()
     scheme_end = rest.find("://")
     if scheme_end >= 0:
@@ -78,9 +83,11 @@ def repository_from_git_url(url: str) -> str:
         path = path[:-len(".git")]
     return path if "/" in path else ""
 
-def detect_repository(env: std.Env) -> str:
-    """The running CI job's repository as `owner/name`, or `""` when the host
-    does not say."""
+def detect_repository(std, checkout_dir: str | None = None) -> str:
+    """The repository as `owner/name`: from the CI host's variables, else from
+    the `origin` remote of the checkout `checkout_dir` (default: the Bazel
+    workspace) sits in, or `""` when neither names one."""
+    env = std.env
     if env.var("GITHUB_REPOSITORY"):
         return env.var("GITHUB_REPOSITORY")
     if env.var("BUILDKITE_REPO"):
@@ -89,7 +96,7 @@ def detect_repository(env: std.Env) -> str:
         return env.var("CIRCLE_PROJECT_USERNAME") + "/" + env.var("CIRCLE_PROJECT_REPONAME")
     if env.var("CI_PROJECT_PATH"):
         return env.var("CI_PROJECT_PATH")
-    return ""
+    return repository_from_git_url(git_checkout.origin_url(std, checkout_dir or env.bazel_root_dir()))
 
 def ci_host_link_label(label: str) -> str:
     """The short link label for the host whose `label` is given, e.g.

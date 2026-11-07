@@ -3,15 +3,15 @@
 `aspect delivery` keeps "which digests were already delivered" in a state
 backend. The task never talks to one directly: it builds a `Params` and calls
 whatever `DeliveryState.connect` is set to, getting back a `Backend` record
-whose verbs it drives. `connect = None` (the default) means Aspect's delivery
-API (`delivery_api.axl`), which stores each delivery's metadata and keeps
-attempt history. A config.axl selects the runner's deliveryd (`deliveryd.axl`)
-for a deployment without access to the API, or the direct-Redis
-`redis_state.axl`:
+whose verbs it drives. `connect = None` (the default) means the runner's
+deliveryd (`deliveryd.axl`) on an Aspect Workflows runner that exposes one,
+and Aspect's delivery API (`delivery_api.axl`), which stores each delivery's
+metadata and keeps attempt history, elsewhere. A config.axl picks one
+everywhere, or the direct-Redis `redis_state.axl`:
 
-    load("@aspect//delivery_state.axl", "DeliveryState", "deliveryd")
+    load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
     if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = deliveryd.connect
+        ctx.traits[DeliveryState].connect = delivery_api.connect
 
 A backend reports "not configured" and "unreachable" the same way, through
 `Backend.status.ok`, so the task has one startup error path.
@@ -117,11 +117,13 @@ DeliveryState = trait(
         default = None,
         description = (
             "Connects the delivery state backend: `(ctx, Params) -> Backend`. " +
-            "None (the default) uses Aspect's delivery API with the Aspect " +
-            "Cloud credential; set it to `deliveryd.connect` to keep state in " +
-            "the runner's deliveryd (an air-gapped deployment), to " +
-            "`redis_state.connect` to talk to Redis directly, or to any " +
-            "function returning a `delivery_state.Backend`."
+            "None (the default) uses the runner's deliveryd on an Aspect " +
+            "Workflows runner that exposes one " +
+            "(ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT), and Aspect's delivery " +
+            "API with the Aspect Cloud credential elsewhere. Set it to " +
+            "`delivery_api.connect` or `deliveryd.connect` to pick one " +
+            "everywhere, to `redis_state.connect` to talk to Redis directly, " +
+            "or to any function returning a `delivery_state.Backend`."
         ),
     ),
 )
