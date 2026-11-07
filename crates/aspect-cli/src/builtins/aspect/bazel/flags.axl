@@ -65,8 +65,8 @@ the effective order — lowest precedence first — is:
 
     rank  bazel build        bazel test         bazel query        bazel info
     ----  -----------------  -----------------  -----------------  -----------------
-      1   rc `common`        rc `common`        rc `common`        rc `common`
-      2   rc `always`        rc `always`        rc `always`        rc `always`
+      1   rc `always`        rc `always`        rc `always`        rc `always`
+      2   rc `common`        rc `common`        rc `common`        rc `common`
       3   rc `build`         rc `build`         —                  rc `build`
       4   —                  rc `test`          rc `query`         rc `info`
       5   base_flags         base_flags         base_flags         base_flags
@@ -100,20 +100,13 @@ injected flag — dropping it rather than shadowing it. The exception is a
 there an rc entry or a typed flag simply wins. `aspect query` and the
 sidecar queries read the `query` column; `ctx.bazel.info` reads the `info` one.
 
-Two wrinkles in that table are artifacts of how a bazelrc is rendered rather
-than of Bazel's own order:
-
-* ranks 1 and 2 are swapped relative to vanilla Bazel, which applies `always`
-  before `common`. A `common`-section option is rendered as
-  `--default_override=0:common=…`, which Bazel applies ahead of anything on the
-  command line, while an `always` option is passed literally — so here `always`
-  wins. Pre-existing, and the same reason `aspect setup bazelrc` writes
-  `common`.
-* for the same reason, "every caller flag wins over the rc files" is false for a
-  caller flag that names the `common` section itself — reachable only through
-  the `(flag, version, "common")` tuple escape. Such a flag is rendered as a
-  `--default_override` and loses to a literal rc-file `build` entry. Name a
-  command section, or `always`, rather than `common`.
+One wrinkle in that table is an artifact of how a bazelrc is rendered rather
+than of Bazel's own order: "every caller flag wins over the rc files" is false
+for a caller flag that names the `common` section itself — reachable only
+through the `(flag, version, "common")` tuple escape. Such a flag is rendered as
+`--default_override=0:common=…`, at rc priority, so it loses to an rc-file entry
+in a more specific section such as `build`. Name a command section, or
+`always`, rather than `common`.
 
 Rank 9's expansion position is why a `--config=NAME` listed after a plain entry
 in the same `build`-group list does not override it: the reference is unscoped

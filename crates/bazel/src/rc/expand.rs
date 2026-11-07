@@ -9,6 +9,15 @@ use super::{Bazelrc, BazelrcError, RcOption};
 /// `--config=` flag triggers expansion, its condition is inherited by expanded entries that
 /// have no condition of their own.
 ///
+/// An expanded entry also takes the `command` and `source_index` of the `--config=` request
+/// that pulled it in, not of the `{section}:{config}` line that defined it: Bazel expands a
+/// config in place, so its options rank where the request sits. `partition_expand_all`
+/// renders by section and source, so without this a caller's `--config=ci` would demote
+/// `build:ci` options to rc priority, and an rc `test --config=ci` would file them under
+/// `build`, where the `test` section's own entries beat them. Entries defined in a
+/// `common:{config}` section keep their own section, because `common` is what lets them
+/// reach commands that reject them.
+///
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
 pub(crate) fn expand_configs(
@@ -96,12 +105,7 @@ impl Expander<'_> {
                 index += 1;
                 continue;
             };
-            self.expand_config(
-                config_name,
-                args[index].version_condition.as_deref(),
-                ancestor_chain,
-                result,
-            )?;
+            self.expand_config(config_name, &args[index], ancestor_chain, result)?;
             index += span;
         }
         Ok(())
@@ -110,13 +114,14 @@ impl Expander<'_> {
     /// Expand one `--config=NAME` request in place, or skip it when the section
     /// is absent and that is tolerated.
     ///
-    /// `parent_condition` is the requesting option's `version_condition`, which
-    /// expanded options inherit when they carry none of their own so
-    /// version-gated config sections propagate correctly.
+    /// Expanded options inherit `requester`'s `version_condition` when they carry
+    /// none of their own, so version-gated config sections propagate correctly,
+    /// and its section and source unless defined under `common` (see
+    /// [`expand_configs`]).
     fn expand_config(
         &self,
         config_name: &str,
-        parent_condition: Option<&str>,
+        requester: &RcOption,
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
     ) -> Result<(), BazelrcError> {
@@ -156,7 +161,11 @@ impl Expander<'_> {
 
         for opt in &mut config_opts {
             if opt.version_condition.is_none() {
-                opt.version_condition = parent_condition.map(str::to_owned);
+                opt.version_condition = requester.version_condition.clone();
+            }
+            if opt.command.split(':').next() != Some("common") {
+                opt.command = requester.command.clone();
+                opt.source_index = requester.source_index;
             }
         }
 
