@@ -1177,7 +1177,7 @@ def _check_superseded():
     """A newer numeric run on another SHA supersedes the writer.
 
     That covers a late update from an older push and a re-run of an older
-    commit. An equal or newer run (a fresh push) and non-numeric ids never
+    commit. A newer run (a fresh push), an equal one and non-numeric ids never
     supersede."""
     parsed = {
         "head_sha": "shaB",
