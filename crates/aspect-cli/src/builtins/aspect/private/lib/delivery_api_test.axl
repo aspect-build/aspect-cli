@@ -25,10 +25,10 @@ def _http(responses, calls):
     repeating), or a function of the decoded request body; `None` is a
     transport error."""
 
-    def post(url, headers = {}, data = None):
+    def post(url, headers = {}, data = None, unix_socket = None):
         path = url[len(_BASE):]
         body = json.decode(data)
-        calls.append(struct(path = path, headers = headers, body = body))
+        calls.append(struct(path = path, headers = headers, body = body, socket = unix_socket))
         res = responses[path]
         if type(res) == "list":
             n = len([c for c in calls if c.path == path])
@@ -272,7 +272,19 @@ def _test_open_failing_api_is_a_startup_error(ctx):
         err, _ = catch(dd.query, {"//a": "aa"})
         _eq("verbs refuse", "unavailable" in err.message, True)
 
+_SOCKET_SERVER = delivery_api.Server(endpoint = "unix:///run/d.sock", describe = "API v2", version = 2, socket = "/run/d.sock")
+
+def _test_socket_without_credential(ctx):
+    calls = []
+    dd = delivery_api.open(_http({"/deliveries/query": _res(200, {"targets": {}, "unanswered_labels": [], "writable": True})}, calls), _BASE, None, _PARAMS, _ids(), server = _SOCKET_SERVER)
+    _eq("no token → no Authorization", "Authorization" in calls[0].headers, False)
+    _eq("socket is used", calls[0].socket, "/run/d.sock")
+    _eq("reports the given endpoint", (dd.endpoint, dd.describe, dd.status.version), ("unix:///run/d.sock", "API v2", 2))
+    down = delivery_api.open(_http({"/deliveries/query": None}, []), _BASE, None, _PARAMS, _ids(), pause = lambda ms: None, server = _SOCKET_SERVER)
+    _eq("unavailable keeps the given identity", (down.status.ok, down.endpoint, down.describe), (False, "unix:///run/d.sock", "API v2"))
+
 _UNIT_TESTS = [
+    _test_socket_without_credential,
     _test_query_returns_prior_deliveries,
     _test_query_batches_and_requeries_unanswered,
     _test_query_batches_at_the_limit,

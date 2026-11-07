@@ -2,7 +2,8 @@
 
 A struct-based fake `ctx` (like `deployment_flags_test.axl`) serves canned HTTP
 responses keyed by `"<METHOD> <path>"` and records every request, so each verb
-can be asserted on the wire: which endpoint was called, with which field names.
+can be asserted on the wire: which endpoint was called, with which field names,
+headers and socket. A `/health` answer carrying `Deliveryd-Api: 2` selects v2.
 
 `fail()` cannot be caught in Starlark, so the error paths (non-2xx, corrupt JSON)
 are not exercised here; an unreachable daemon is, since that surfaces through
@@ -18,8 +19,11 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _res(status, body = ""):
-    return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = [])
+def _res(status, body = "", headers = []):
+    return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers)
+
+_V2_HEALTH = _res(200, "ok", headers = [("deliveryd-api", "2")])
+_EMPTY_QUERY = _res(200, {"targets": {}, "unanswered_labels": [], "writable": True})
 
 def _future(res):
     return struct(catch = lambda: struct(block = lambda: (None, res)), block = lambda: res)
@@ -32,10 +36,10 @@ def _ctx(responses, calls, endpoint = _SOCKET):
     None meaning a transport error) and appends each request to `calls`. A list
     value is served in order, one element per request, repeating the last."""
 
-    def respond(method, url, data):
+    def respond(method, url, data, headers, socket):
         path = url[len(_BASE):]
         key = method + " " + path
-        calls.append(struct(method = method, path = path, body = json.try_decode(data, None) if data else None))
+        calls.append(struct(method = method, path = path, body = json.try_decode(data, None) if data else None, headers = headers, socket = socket))
         if key not in responses:
             fail("unexpected deliveryd request: " + key)
         res = responses[key]
@@ -47,8 +51,8 @@ def _ctx(responses, calls, endpoint = _SOCKET):
         return _future(res)
 
     http = struct(
-        get = lambda url, headers = {}, unix_socket = None: respond("GET", url, None),
-        post = lambda url, headers = {}, data = None, unix_socket = None: respond("POST", url, data),
+        get = lambda url, headers = {}, unix_socket = None: respond("GET", url, None, headers, unix_socket),
+        post = lambda url, headers = {}, data = None, unix_socket = None: respond("POST", url, data, headers, unix_socket),
     )
     return struct(
         http = lambda: http,
@@ -65,6 +69,7 @@ def _client(responses, calls, pauses = None, **kwargs):
         commit = kwargs.pop("commit", "abc123"),
         signature = kwargs.pop("signature", "https://ci/build/7"),
         pause = lambda ms: recorded.append(ms),
+        new_id = lambda: "ev-1",
         **kwargs
     )
 
@@ -210,6 +215,82 @@ def _test_health_reprobes(ctx):
     _eq("health re-probes once, no retry", [c.path for c in calls], ["/health", "/health"])
     _eq("health reports the daemon's answer", (health.ok, health.error), (False, "HTTP 503: unhealthy: redis connection failed"))
 
+def _test_v1_is_deprecated(ctx):
+    dd = _client({"GET /health": _res(200, "ok")}, [])
+    _eq("v1 → deprecation names the endpoint", _SOCKET in dd.deprecation, True)
+    _eq("v1 → deprecation says to upgrade", "API v2" in dd.deprecation, True)
+
+def _test_unreachable_is_not_called_deprecated(ctx):
+    # The daemon never answered, so its version is unknown.
+    dd = _client({"GET /health": None}, [])
+    _eq("unreachable → no deprecation", dd.deprecation, "")
+
+def _test_old_version_header_stays_v1(ctx):
+    # CLIs 2026.37–2026.41 read DeliveryD-Version; deliveryd v2 never sends it.
+    dd = _client({"GET /health": _res(200, "ok", headers = [("deliveryd-version", "2")])}, [])
+    _eq("DeliveryD-Version alone → v1", dd.describe, "API v1")
+
+def _test_v2_negotiated_from_health_header(ctx):
+    calls = []
+    dd = _client({"GET /health": _V2_HEALTH, "POST /deliveries/query": _EMPTY_QUERY}, calls, repo = "org/repo")
+    _eq("v2 → probes health, then the API", [c.path for c in calls], ["/health", "/deliveries/query"])
+    _eq("v2 → probe is an empty query", calls[-1].body, {"ci_host": "gh", "repo": "org/repo", "prefix": "deliver", "targets": {}})
+    _eq("v2 → over the socket", calls[-1].socket, "/run/deliveryd.sock")
+    _eq("v2 → no credential", "Authorization" in calls[-1].headers, False)
+    _eq("v2 → ok", (dd.status.ok, dd.status.version), (True, 2))
+    _eq("v2 → describe", dd.describe, "API v2")
+    _eq("v2 → endpoint is the socket URL", dd.endpoint, _SOCKET)
+    _eq("v2 → full backend", (dd.stores_metadata, dd.tracks_latest, dd.record_failure != None), (True, True, True))
+    _eq("v2 → not deprecated", dd.deprecation, "")
+
+def _test_v2_header_case_insensitive(ctx):
+    dd = _client({"GET /health": _res(200, "ok", headers = [("Deliveryd-Api", "2")]), "POST /deliveries/query": _EMPTY_QUERY}, [])
+    _eq("mixed-case header → v2", dd.describe, "API v2")
+
+def _test_v2_verbs_on_the_wire(ctx):
+    calls = []
+    dd = _client({
+        "GET /health": _V2_HEALTH,
+        "POST /deliveries/query": [_EMPTY_QUERY, _res(200, {
+            "targets": {"//pkg:a": {
+                "latest_delivery": {"event_id": "e0", "label": "//pkg:a", "digest": "d-a", "outcome": "ok", "build_url": "https://ci/build/1", "commit_sha": "c0", "recorded_at": "2026-11-01T00:00:00Z", "metadata": {"image": "x"}},
+                "digest_delivery": None,
+            }},
+            "unanswered_labels": [],
+            "writable": True,
+        })],
+        "POST /deliveries/record": _res(200, {"event": {}}),
+    }, calls, repo = "org/repo")
+
+    dd.record("//pkg:a", "d-a")
+    _eq("v2 record → no request", calls[-1].path, "/deliveries/query")
+
+    prior = dd.query({"//pkg:a": "d-a"})["//pkg:a"]
+    _eq("v2 query → latest delivery with metadata", (prior.latest_delivery.build_url, prior.latest_delivery.metadata), ("https://ci/build/1", {"image": "x"}))
+    _eq("v2 query → no digest delivery", prior.digest_delivery, None)
+
+    dd.deliver("//pkg:a", "d-a", {"image": "y"})
+    _eq("v2 deliver → POST /deliveries/record", calls[-1].path, "/deliveries/record")
+    _eq("v2 deliver payload", calls[-1].body, {
+        "ci_host": "gh",
+        "repo": "org/repo",
+        "prefix": "deliver",
+        "event_id": "ev-1",
+        "label": "//pkg:a",
+        "digest": "d-a",
+        "outcome": "ok",
+        "build_url": "https://ci/build/7",
+        "commit_sha": "abc123",
+        "metadata": {"image": "y"},
+    })
+    dd.record_failure("//pkg:a", "d-a", {})
+    _eq("v2 failure → a fail attempt", (calls[-1].path, calls[-1].body["outcome"]), ("/deliveries/record", "fail"))
+
+def _test_v2_unhealthy_is_not_negotiated(ctx):
+    # A 503 health answer carries the header too; it is still a startup error.
+    dd = _client({"GET /health": _res(503, "unhealthy", headers = [("deliveryd-api", "2")])}, [])
+    _eq("v2 503 → not ok", dd.status.ok, False)
+
 _UNIT_TESTS = [
     _test_parse_endpoint,
     _test_probe_fills_status,
@@ -223,6 +304,13 @@ _UNIT_TESTS = [
     _test_query_narrows_to_delivered_labels,
     _test_deliver_and_delete,
     _test_health_reprobes,
+    _test_v1_is_deprecated,
+    _test_unreachable_is_not_called_deprecated,
+    _test_old_version_header_stays_v1,
+    _test_v2_negotiated_from_health_header,
+    _test_v2_header_case_insensitive,
+    _test_v2_verbs_on_the_wire,
+    _test_v2_unhealthy_is_not_negotiated,
 ]
 
 def _test_impl(ctx):

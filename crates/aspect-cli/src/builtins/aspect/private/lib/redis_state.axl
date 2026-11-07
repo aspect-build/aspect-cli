@@ -1,5 +1,9 @@
 """Delivery state straight from Redis — a `DeliveryState.connect` that skips deliveryd.
 
+Deprecated, and to be removed from the CLI: use the runner's deliveryd (the
+default on an Aspect Workflows runner) or `delivery_api.connect`. The backend
+carries `DEPRECATION`, which the task warns with.
+
 Speaks deliveryd's own key scheme, so the two backends interoperate against one
 database and a fleet can move between them without a migration:
 
@@ -36,6 +40,12 @@ load("@std//time.axl", "sleep", "time")
 load("./delivery_state.axl", "delivery_state")
 load("./redis.axl", "redis")
 load("./timestamp.axl", "rfc3339_utc")
+
+DEPRECATION = (
+    "`redis_state.connect` is deprecated and will be removed from the Aspect CLI. " +
+    "Remove it from `DeliveryState.connect` to use the runner's deliveryd, or set " +
+    "`DeliveryState.connect = delivery_api.connect`."
+)
 
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT"
 CA_FILE_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE"
@@ -312,10 +322,12 @@ def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause 
         deliver = lambda label, digest, meta = {}: _deliver(client, p, legacy_ttl_ms, label, digest, meta),
         delete = lambda digest: _delete(client, p, digest),
         stores_metadata = True,
+        deprecation = DEPRECATION,
     )
 
 redis_state = namespace(
     connect = _connect,
+    DEPRECATION = DEPRECATION,
     ENDPOINT_ENV = ENDPOINT_ENV,
     CA_FILE_ENV = CA_FILE_ENV,
     AUTH_ENV = AUTH_ENV,
