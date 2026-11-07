@@ -45,10 +45,9 @@ fn spawn_lines(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Lines holding a call to `name(`, ignoring the `bzl.`/bare import spellings
-/// and anything inside prose.
+/// Lines holding a `bazel_exec_log.<name>(` call outside a `#` comment.
 fn calls(source: &str, name: &str) -> Vec<usize> {
-    let needle = format!("exec_log.{name}(");
+    let needle = format!("bazel_exec_log.{name}(");
     source
         .lines()
         .enumerate()
@@ -98,10 +97,10 @@ struct Wiring {
     path: &'static str,
     /// Real `ctx.bazel.build(` / `.test(` call sites in the file.
     sites: usize,
-    /// `exec_log.open` calls. Fewer than `sites` means some invocation
+    /// `bazel_exec_log.open` calls. Fewer than `sites` means some invocation
     /// dispatches nothing, which `why` has to justify.
     opens: usize,
-    /// `exec_log.pump` calls. Fewer than `opens` means a handle is drained only
+    /// `bazel_exec_log.pump` calls. Fewer than `opens` means a handle is drained only
     /// at the end of its build — correct for a spawn with no event loop to pump
     /// from, and a timeliness difference rather than a lost entry.
     pumps: usize,

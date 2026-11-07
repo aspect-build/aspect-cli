@@ -65,7 +65,7 @@ both sides or neither). The probe resolves flags from the same rc/config as
 """
 
 load("@aspect//bazel/invocation.axl", "target_patterns")
-load("@aspect//bazel.axl", "BazelTrait", bzl = "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
 load("./private/lib/ansi.axl", "ansi")
@@ -259,7 +259,7 @@ def _build_missing_non_test(ctx: TaskContext, bazel_trait, patterns: list, rc, e
     _t = time.monotonic()
     pattern_file = rc.flag_value("--target_pattern_file", command = "test")
     pattern_flags = ["--target_pattern_file=" + pattern_file] if pattern_file else []
-    xl = bzl.exec_log.open(bazel_trait)
+    xl = bazel_exec_log.open(bazel_trait)
     build = ctx.bazel.build(
         rc = rc,
         flags = endpoint_auth_flags + pattern_flags + ["--remote_upload_local_results", "--keep_going"],
@@ -270,7 +270,7 @@ def _build_missing_non_test(ctx: TaskContext, bazel_trait, patterns: list, rc, e
         announce_command = announce_command,
         *patterns
     )
-    bzl.exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
+    bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     status = build.wait()
     timing["build"] = time.monotonic() - _t
     if status.code != 0:
@@ -370,11 +370,11 @@ def _impl(ctx: TaskContext) -> int:
     timing = {}  # seconds per phase — split bazel work vs our analysis at the end
 
     bazel_trait = ctx.traits[BazelTrait]
-    startup_flags = bzl.flags.resolve_startup(ctx)
+    startup_flags = bazel_flags.resolve_startup(ctx)
 
-    # Trait base flags first — same composition as `bazel.setup_command`.
-    flags = list(bazel_trait.base_flags) + bzl.flags.resolve(ctx)
-    announce_version, announce_command = bzl.announce.resolve(ctx)
+    # Trait base flags first — same composition as `bazel_rc.setup`.
+    flags = list(bazel_trait.base_flags) + bazel_flags.resolve(ctx)
+    announce_version, announce_command = bazel_announce.resolve(ctx)
 
     # Share the RC and default output base across selection, precise prebuild,
     # and probe. The salt-delete pass refreshes action execution without
@@ -390,7 +390,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Attach the Aspect login JWT when the cache is an Aspect-owned endpoint;
     # the probe and pre-build below both hit it.
-    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "test")
+    endpoint_auth_flags = bazel_rc.hook_flags(ctx, rc, "test")
 
     # Bazel owns ordered patterns, suite expansion, and test filters. Query's
     # tests() does not have the same selection semantics as `bazel test`.
@@ -555,5 +555,5 @@ diff = task(
                 "from flags with `--` (e.g. `-- //... -//personal/...`)."
             ),
         ),
-    } | bzl.flags.args("the cache-diff probe") | bzl.announce.args("the cache-diff probe"),
+    } | bazel_flags.args("the cache-diff probe") | bazel_announce.args("the cache-diff probe"),
 )

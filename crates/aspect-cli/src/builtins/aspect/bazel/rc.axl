@@ -1,0 +1,98 @@
+"""The `Bazelrc` a task's Bazel calls run under.
+
+`bazel_rc.setup` resolves the task's startup and command flags (see
+`bazel/flags.axl`), parses the workspace `.bazelrc` with them, sets the result
+with `ctx.bazel.use_rc` and prints the parsed-rc disclosure. `sibling` builds
+the same rc around transformed startup flags, for a phase that needs its own
+Bazel server, and sets nothing. `hook_flags` fires the trait's post-rc
+`rc_flags` hooks against an rc, and `with_flags` layers per-invocation extras
+onto one."""
+
+load("@aspect//bazel/announce.axl", "announce_value")
+load(
+    "@aspect//bazel/flags.axl",
+    "bazel_flags",
+    "filter_injected",
+    "requested_config_names",
+    "require_arg",
+)
+load("@aspect//bazel/trait.axl", "BazelTrait")
+load("../private/lib/environment.axl", "color_enabled")
+
+def _parse(ctx, startup_flags: list, base_flags: list) -> tuple:
+    """Parse the workspace `.bazelrc` under `startup_flags` and the task's
+    composed command flags, returning `(rc, flags)`.
+
+    The command flags are `trait.base_flags` (filtered), then the task's own
+    `base_flags`, then everything `bazel_flags.resolve` gives — so a user's
+    `--bazel-flag` overrides both kinds of default."""
+    flags = filter_injected(ctx, list(ctx.traits[BazelTrait].base_flags)) + list(base_flags) + bazel_flags.resolve(ctx)
+    rc = ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = flags,
+        skip_config_if_missing = requested_config_names(flags),
+    )
+    return (rc, flags)
+
+def _setup(ctx, command: str, base_flags: list = []):
+    """Parse the task's rc, set it with `ctx.bazel.use_rc` for the upcoming
+    `ctx.bazel.<command>` calls, print the parsed-rc disclosure, and return it.
+
+    Each later `ctx.bazel.build` / `test` / `query` self-expands that rc and adds
+    `--ignore_all_rc_files`. `base_flags` are the task's defaults, which a
+    `--bazel-flag` overrides (see `_parse`). Built-in tasks reach this through
+    `phases.setup` or the `bazel_invocation` handles, before the health-check
+    hooks, so the check inspects the rc every Bazel call uses."""
+    startup_flags = bazel_flags.resolve_startup(ctx)
+    (rc, flags) = _parse(ctx, startup_flags, base_flags)
+    ctx.bazel.use_rc(rc)
+    trace.event("bazel.flags", fields = {"command": command, "flags": flags, "startup_flags": startup_flags})
+
+    require_arg(ctx, "announce_bazel_rc")
+    if announce_value(ctx, ctx.args.announce_bazel_rc):
+        print(ctx.bazel.announce_rc(rc, command = command, ansi = color_enabled(ctx.std)))
+    trace.log(ctx.bazel.announce_rc(rc, command = command, ansi = False))
+
+    return rc
+
+def _sibling(ctx, startup_transform, base_flags: list = []):
+    """The rc `setup` would parse from the same `base_flags`, with the resolved
+    startup flags run through `startup_transform` (a `list -> list`), for a phase
+    that needs its own Bazel server — e.g. delivery giving its release build a
+    separate `--output_base`.
+
+    Sets nothing and prints nothing: pass the result as a per-call `rc=`."""
+    (rc, _) = _parse(ctx, startup_transform(bazel_flags.resolve_startup(ctx)), base_flags)
+    return rc
+
+def _hook_flags(ctx, rc, command: str) -> list:
+    """Fire the trait's post-rc `rc_flags` hooks against the resolved `rc` and
+    concatenate the flags they return. Applied by every bazel-driving task after
+    resolving its rc."""
+    out = []
+    for hook in ctx.traits[BazelTrait].rc_flags:
+        out.extend(hook(ctx, rc, command))
+    return out
+
+def _with_flags(ctx, rc, flags: list[str]):
+    """`rc` with `flags` layered on top as command-line extras.
+
+    The bazelrc is the only build input `ctx.bazel.run` and `run_all`
+    take, so per-invocation extras (endpoint auth from `hook_flags`, a release
+    build's `--release-bazel-flag`s) reach the build by becoming part of it.
+    The merged command expands `flags` after everything the rc files say, so
+    they win under Bazel's last-wins rule. `rc` comes back unchanged when
+    `flags` is empty."""
+    if not flags:
+        return rc
+    extras = ctx.bazel.new_rc(flags = list(flags))
+    if rc == None:
+        return extras
+    return rc.merge(extras)
+
+bazel_rc = namespace(
+    setup = _setup,
+    sibling = _sibling,
+    hook_flags = _hook_flags,
+    with_flags = _with_flags,
+)

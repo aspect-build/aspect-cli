@@ -1,0 +1,62 @@
+"""The `announce_bazel_rc` / `announce_bazel_version` / `announce_bazel_command`
+CLI args every Bazel-spawning task declares, and their resolution.
+
+Each takes `"auto" | "true" | "false"`; `"auto"` prints on a recognized CI host
+and stays quiet locally. `bazel_announce.resolve` gives the per-spawn pair for
+`ctx.bazel.build` / `.test`; `bazel_rc.setup` reads `announce_bazel_rc` itself,
+through `announce_value`, when it prints the parsed-rc disclosure."""
+
+load("@aspect//bazel/flags.axl", "require_arg")
+load("../private/lib/environment.axl", "detect_ci")
+
+def _announce_value(ctx, value: str) -> bool:
+    """Resolve one `"auto" | "true" | "false"` announce flag to a bool. `"auto"`
+    is on under CI and off locally; `"true"`/`"false"` force it."""
+    if value == "auto":
+        return bool(detect_ci(ctx.std.env))
+    return value == "true"
+
+def _resolve_announce(ctx) -> tuple:
+    """Resolve the per-spawn announce flags to `(version, command)` bools, passed
+    to `ctx.bazel.build`/`.test` as `announce_version=`/`announce_command=`."""
+    require_arg(ctx, "announce_bazel_version")
+    require_arg(ctx, "announce_bazel_command")
+    return (
+        _announce_value(ctx, ctx.args.announce_bazel_version),
+        _announce_value(ctx, ctx.args.announce_bazel_command),
+    )
+
+_ANNOUNCE_AUTO = "'auto' (default) prints on a recognized CI host and is quiet locally."
+_ANNOUNCE_VALUES = ["auto", "true", "false"]
+
+def _announce_args(rc_phrase: str) -> dict:
+    """The three `announce_bazel_*` CLI args every Bazel-spawning task declares.
+    Splat into a task's `args = {...}`; `rc_phrase` names the thing being run
+    (e.g. `"the build"`, `"the lint build"`)."""
+    return {
+        "announce_bazel_rc": args.string(
+            default = "auto",
+            values = _ANNOUNCE_VALUES,
+            long = "announce-bazel-rc",
+            description = "Print the resolved Bazel `.bazelrc` flags before running %s. %s ASPECT_DEBUG=1 logs the same disclosure regardless." % (rc_phrase, _ANNOUNCE_AUTO),
+        ),
+        "announce_bazel_version": args.string(
+            default = "auto",
+            values = _ANNOUNCE_VALUES,
+            long = "announce-bazel-version",
+            description = "Print the detected Bazel version before each bazel spawn. %s" % _ANNOUNCE_AUTO,
+        ),
+        "announce_bazel_command": args.string(
+            default = "auto",
+            values = _ANNOUNCE_VALUES,
+            long = "announce-bazel-command",
+            description = "Print the exact bazel command line before each bazel spawn. %s" % _ANNOUNCE_AUTO,
+        ),
+    }
+
+bazel_announce = namespace(
+    args = _announce_args,
+    resolve = _resolve_announce,
+)
+
+announce_value = _announce_value

@@ -16,7 +16,7 @@
 //! * After the task returns, as the backstop for a task that spawns nothing.
 //!
 //! A task that concludes without running anything can claim to say the omission
-//! was deliberate (`bzl.flags.disclaim_passthrough`).
+//! was deliberate (`bazel_flags.disclaim_passthrough`).
 
 use starlark::values::Value;
 use starlark::values::ValueLike;

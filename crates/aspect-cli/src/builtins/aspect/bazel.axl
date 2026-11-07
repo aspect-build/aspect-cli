@@ -1,37 +1,36 @@
 """Public entrypoint for the Bazel library. The implementation lives in
-`./bazel/*.axl`; this facade assembles the `bazel` namespace and re-exports the
-`BazelTrait` interface, the Bazel exit codes, and the retry constants so existing
-`load("@aspect//bazel.axl", ...)` call sites are unchanged.
+`./bazel/*.axl`, one namespace per concern:
 
-`BazelTrait`, `ExecLogHook`, `exit_codes`, the retry constants and
-`normalize_label` stay top-level (tasks index `ctx.traits[BazelTrait]`, features
-construct `ExecLogHook`, both read the constants directly, and any AXL matching
-labels against the ones tasks report calls `normalize_label`). The flag/rc/auth
-helpers hang off the `bazel` namespace — stateless functions taking `ctx` and
-deriving the active `BazelTrait` from `ctx.traits` themselves (no `trait`
-argument to pass).
+- `bazel_flags`: the `--bazel-flag` / `--bazel-startup-flag` args, the
+  passthrough buckets, flag resolution and `--config` expansion.
+- `bazel_announce`: the `announce_bazel_*` args and their resolution.
+- `bazel_rc`: the `Bazelrc` a task's Bazel calls run under — `setup`,
+  `sibling`, the post-rc `hook_flags`, and `with_flags`.
+- `bazel_invocation`: the `build` / `test` invocation handles and the task arg
+  bundles (`args`, `targets_arg`).
+- `bazel_exec_log`: the execution-log handle (`open` / `pump` / `close`) and
+  its `Hook` type.
 
-A `load` binds privately, so each top-level re-export is an explicit
-assignment from a `_`-aliased load.
+Each is a set of stateless functions taking `ctx` and deriving the active
+`BazelTrait` from `ctx.traits` themselves. None is named `bazel`, so a file can
+load them beside the builtin `bazel` global (`bazel.execution_log`, …) without
+an alias.
 
-A file that also uses the builtin `bazel` global (e.g. `bazel.execution_log`)
-must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so the two
-`bazel` names don't collide.
+`BazelTrait`, `ExecLogHook`, `exit_codes`, the retry constants, the
+`dispatch_bazel_*` hook dispatchers and `normalize_label` stay top-level: tasks
+index `ctx.traits[BazelTrait]`, features construct `ExecLogHook`, tasks driving
+their own attempts fire the trait's hooks through `dispatch_bazel_*`, and any AXL
+matching labels against the ones tasks report calls `normalize_label`.
+
+A `load` binds privately, so each re-export is an explicit assignment from a
+`_`-aliased load.
 """
 
-load("@aspect//bazel/exec_log.axl", _exec_log = "exec_log")
-load(
-    "@aspect//bazel/flags.axl",
-    _announce = "announce",
-    _core_args = "core_args",
-    _flags = "flags",
-    _rc_with_flags = "rc_with_flags",
-    _resolve_rc_flags = "resolve_rc_flags",
-    _setup_command = "setup_command",
-    _sibling_rc = "sibling_rc",
-    _targets_arg = "targets_arg",
-)
-load("@aspect//bazel/invocation.axl", _build = "build", _test = "test")
+load("@aspect//bazel/announce.axl", _bazel_announce = "bazel_announce")
+load("@aspect//bazel/exec_log.axl", _bazel_exec_log = "bazel_exec_log")
+load("@aspect//bazel/flags.axl", _bazel_flags = "bazel_flags")
+load("@aspect//bazel/invocation.axl", _bazel_invocation = "bazel_invocation")
+load("@aspect//bazel/rc.axl", _bazel_rc = "bazel_rc")
 load(
     "@aspect//bazel/trait.axl",
     _BAZEL_RETRY_ATTEMPTS_DESCRIPTION = "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
@@ -45,6 +44,12 @@ load(
 )
 load("./private/lib/runnable.axl", _normalize_label = "normalize_label")
 
+bazel_announce = _bazel_announce
+bazel_exec_log = _bazel_exec_log
+bazel_flags = _bazel_flags
+bazel_invocation = _bazel_invocation
+bazel_rc = _bazel_rc
+
 BAZEL_RETRY_ATTEMPTS_DESCRIPTION = _BAZEL_RETRY_ATTEMPTS_DESCRIPTION
 BazelTrait = _BazelTrait
 DEFAULT_BAZEL_RETRY_ATTEMPTS = _DEFAULT_BAZEL_RETRY_ATTEMPTS
@@ -54,18 +59,3 @@ dispatch_bazel_attempt_end = _dispatch_bazel_attempt_end
 dispatch_bazel_build_end = _dispatch_bazel_build_end
 exit_codes = _exit_codes
 normalize_label = _normalize_label
-
-bazel = namespace(
-    build = _build,
-    exec_log = _exec_log,
-    test = _test,
-    setup_command = _setup_command,
-    sibling_rc = _sibling_rc,
-    core_args = _core_args,
-    targets_arg = _targets_arg,
-    TRAITS = [BazelTrait],
-    flags = _flags,
-    announce = _announce,
-    rc_flags = _resolve_rc_flags,
-    rc_with_flags = _rc_with_flags,
-)

@@ -38,7 +38,7 @@ exit_codes = struct(
 
 # Default attempt budget for the build/test/delivery retry loops. Tasks
 # that wire up `--bazel-retry-attempts` use this as their `args.int`
-# default; the `bazel.build(ctx)` handle / `delivery.axl` retry loops also fall
+# default; the `bazel_invocation.build(ctx)` handle / `delivery.axl` retry loops also fall
 # back to it when a task doesn't define the arg at all, so adding a new
 # bazel-driving task doesn't silently inherit `range(0)` or fail at load
 # time.
@@ -161,7 +161,7 @@ BazelTrait = trait(
     # additional flags to append to the invocation. Fires late enough in the
     # task lifecycle (after the task is known but before Bazel is spawned) that
     # features can inject ctx.task-dependent flags (e.g. --build_metadata=
-    # ASPECT_TASK_NAME=...). Invoked by the `bazel.build(ctx)` handle for
+    # ASPECT_TASK_NAME=...). Invoked by the `bazel_invocation.build(ctx)` handle for
     # build/test and by each task's impl for lint/delivery.
     task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time. Scoped to the `build` rc section like extra_flags, with the same per-entry opt-out: a hook that needs another section returns a `(flag, version, command)` tuple for that flag. That is strictly more expressive than a field would be — a hook can pick the section per flag and at task time — so there are deliberately no build_task_flags/test_task_flags siblings"),
 

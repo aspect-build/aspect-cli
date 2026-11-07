@@ -1,0 +1,82 @@
+"""Tests for the public surface of `@aspect//bazel.axl`.
+
+Each namespace is public API that a repository's `config.axl` loads directly,
+so its member set is pinned here exactly: a member that is renamed, dropped or
+added without updating this list fails, rather than surfacing as a load error
+in someone else's config.
+
+Run with:
+  aspect dev test-bazel-facade
+"""
+
+load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
+load(
+    "@aspect//bazel.axl",
+    "BazelTrait",
+    "ExecLogHook",
+    "bazel_announce",
+    "bazel_exec_log",
+    "bazel_flags",
+    "bazel_invocation",
+    "bazel_rc",
+    "normalize_label",
+)
+
+_MEMBERS = {
+    "bazel_announce": (bazel_announce, ["args", "resolve"]),
+    "bazel_exec_log": (bazel_exec_log, ["Hook", "close", "open", "pump"]),
+    "bazel_flags": (bazel_flags, [
+        "STARTUP_VALUE_FLAGS",
+        "VALUE_FLAGS",
+        "args",
+        "disclaim_passthrough",
+        "expand_config",
+        "passthrough_args",
+        "resolve",
+        "resolve_startup",
+    ]),
+    "bazel_invocation": (bazel_invocation, ["args", "build", "targets_arg", "test"]),
+    "bazel_rc": (bazel_rc, ["hook_flags", "setup", "sibling", "with_flags"]),
+}
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_namespace_members(ctx):
+    for name, (ns, want) in _MEMBERS.items():
+        _eq(name + " members", sorted(dir(ns)), want)
+
+def _test_constants_and_types(ctx):
+    _eq("bazel_flags.VALUE_FLAGS", bazel_flags.VALUE_FLAGS, BAZEL_VALUE_FLAGS)
+    _eq("bazel_flags.STARTUP_VALUE_FLAGS", bazel_flags.STARTUP_VALUE_FLAGS, BAZEL_STARTUP_VALUE_FLAGS)
+    _eq("bazel_exec_log.Hook", bazel_exec_log.Hook, ExecLogHook)
+
+def _test_invocation_args_bundle(ctx):
+    """`bazel_invocation.args` composes the flag and announce bundles, so a task
+    declaring it satisfies every helper's `require_arg` check."""
+    bundle = bazel_invocation.args("the build")
+    for key in list(bazel_flags.args("the build")) + list(bazel_announce.args("the build")):
+        if key not in bundle:
+            fail("bazel_invocation.args is missing %r" % key)
+    _eq("targets_arg keys", list(bazel_invocation.targets_arg("build")), ["targets"])
+
+def _test_top_level_names(ctx):
+    _eq("BazelTrait type", type(BazelTrait), "trait")
+    _eq("normalize_label", normalize_label("//svc"), "//svc:svc")
+
+def _test_impl(ctx: TaskContext) -> int:
+    _test_namespace_members(ctx)
+    _test_constants_and_types(ctx)
+    _test_invocation_args_bundle(ctx)
+    _test_top_level_names(ctx)
+    print("bazel_test.axl: OK (4 sections)")
+    return 0
+
+bazel_facade_tests = task(
+    summary = "Run the @aspect//bazel.axl public-surface AXL unit tests.",
+    kind = "test-bazel-facade",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

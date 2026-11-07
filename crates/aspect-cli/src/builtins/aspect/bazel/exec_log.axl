@@ -238,14 +238,15 @@ def _close(ctx: TaskContext, h: struct) -> None:
     for entry in h.entries:
         _fire(ctx, h, entry)
 
-exec_log = struct(
+bazel_exec_log = namespace(
     open = _open,
     pump = _pump,
     close = _close,
     Hook = ExecLogHook,
-    testonly_union_kinds = _union_kinds,
-    testonly_is_exact = _is_exact,
-    testonly_fire = _fire,
-    testonly_wants = _wants,
-    testonly_wanted_kinds = _wanted_kinds,
 )
+
+testonly_union_kinds = _union_kinds
+testonly_is_exact = _is_exact
+testonly_fire = _fire
+testonly_wants = _wants
+testonly_wanted_kinds = _wanted_kinds

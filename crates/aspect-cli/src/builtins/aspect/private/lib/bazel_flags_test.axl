@@ -1,11 +1,12 @@
-"""Tests for the `bazel` flag/rc/auth helpers (in @aspect//bazel.axl).
+"""Tests for the `bazel_flags`, `bazel_announce` and `bazel_rc` helpers
+(`@aspect//bazel.axl`).
 
 Run with:
   aspect dev test-bazel-flags
 """
 
-load("@aspect//bazel/flags.axl", "testonly_apply_plan", "testonly_config_names", "testonly_flags_delta", "testonly_plan_sections", "testonly_unscoped_injected")
-load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("@aspect//bazel/flags.axl", "requested_config_names", "testonly_apply_plan", "testonly_flags_delta", "testonly_plan_sections", "testonly_unscoped_injected")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_flags", "bazel_rc")
 load("./aspect_flags.axl", "flag_text", "omit_flags")
 load("./auth_fakes.axl", "fake_auth")
 load("./deployment_flags.axl", "deployment_auth_flags")
@@ -15,7 +16,7 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _scope(flags, command, carve_out = False):
-    """`flags` scoped to `command`, composed exactly the way `bazel.flags.resolve`
+    """`flags` scoped to `command`, composed exactly the way `bazel_flags.resolve`
     composes it: plan the sections, then apply them to what the (here absent)
     `trait.flags` transform returned.
 
@@ -58,7 +59,7 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
     """Stand-in for `TaskContext` with the CLI args and trait map the helpers
     read. `ctx.traits[BazelTrait]` resolves against a plain dict — trait types
     are hashable, so a dict keyed by `BazelTrait` mimics the real trait map.
-    `hasattr` returns True for declared args, satisfying `_require_arg`.
+    `hasattr` returns True for declared args, satisfying `require_arg`.
 
     Deliberately declares no passthrough buckets: a task may take the flag args
     without them, and the resolve helpers must tolerate that — so `claim` answers
@@ -104,7 +105,7 @@ def _passthrough_ctx(startup = [], flags = [], passthrough_startup = [], passthr
 
 def _announce_ctx(on_ci, version = "auto", command = "auto"):
     """Stand-in `ctx` whose `std.env.var` reports a CI marker (or not) and whose
-    args carry the announce flags, so `bazel.announce.resolve` is exercisable
+    args carry the announce flags, so `bazel_announce.resolve` is exercisable
     deterministically."""
     env_vars = {"CI": "1"} if on_ci else {}
     return struct(
@@ -113,22 +114,22 @@ def _announce_ctx(on_ci, version = "auto", command = "auto"):
     )
 
 def _test_announce_auto_follows_ci(ctx):
-    _eq("auto on CI", bazel.announce.resolve(_announce_ctx(True)), (True, True))
-    _eq("auto off CI", bazel.announce.resolve(_announce_ctx(False)), (False, False))
+    _eq("auto on CI", bazel_announce.resolve(_announce_ctx(True)), (True, True))
+    _eq("auto off CI", bazel_announce.resolve(_announce_ctx(False)), (False, False))
 
 def _test_announce_explicit_overrides_ci(ctx):
     # Explicit true/false ignore the environment; distinct values catch a
     # swapped or copy-pasted (version, command) read.
     _eq(
         "(version, command) order, explicit",
-        bazel.announce.resolve(_announce_ctx(True, version = "true", command = "false")),
+        bazel_announce.resolve(_announce_ctx(True, version = "true", command = "false")),
         (True, False),
     )
 
 def _test_announce_args_shape(ctx):
-    """`bazel.announce.args` returns exactly the three flags every
+    """`bazel_announce.args` returns exactly the three flags every
     Bazel-spawning task must declare (the resolve contract)."""
-    aa = bazel.announce.args("the build")
+    aa = bazel_announce.args("the build")
     _eq(
         "announce arg keys",
         sorted(aa.keys()),
@@ -139,7 +140,7 @@ def _test_startup_cli_only(ctx):
     """CLI flags pass through when the trait contributes nothing."""
     _eq(
         "startup cli-only",
-        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])),
+        bazel_flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])),
         ["--client"],
     )
 
@@ -147,15 +148,15 @@ def _test_startup_trait_extra_appended(ctx):
     """`trait.extra_startup_flags` is appended after CLI flags."""
     _eq(
         "startup trait extras after CLI",
-        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = _trait(extra_startup = ["--trait"]))),
+        bazel_flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = _trait(extra_startup = ["--trait"]))),
         ["--client", "--trait"],
     )
 
 def _test_startup_input_list_not_mutated(ctx):
-    """`bazel.flags.resolve_startup` must not mutate the caller's CLI flag list
+    """`bazel_flags.resolve_startup` must not mutate the caller's CLI flag list
     (`ctx.args.bazel_startup_flags` is a live reference)."""
     cli = ["--client"]
-    bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = cli, trait = _trait(extra_startup = ["--trait"])))
+    bazel_flags.resolve_startup(_fake_ctx(bazel_startup_flags = cli, trait = _trait(extra_startup = ["--trait"])))
     _eq("startup cli list untouched", cli, ["--client"])
 
 def _test_flags_full_chain_order(ctx):
@@ -177,7 +178,7 @@ def _test_flags_full_chain_order(ctx):
     task_hook = lambda c: ["--from-hook"]
     _eq(
         "resolve full chain",
-        bazel.flags.resolve(
+        bazel_flags.resolve(
             _fake_ctx(
                 bazel_flags = ["--cli"],
                 trait = _trait(
@@ -217,7 +218,7 @@ def _test_injected_flags_carry_their_own_scope(ctx):
     hook = lambda c: [always, gated, scoped]
     _eq(
         "explicit scopes survive",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(task_flags = [hook]))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(task_flags = [hook]))),
         [always, ("--execution_log_compact_file=/x", ">=7.4.0", "build"), scoped],
     )
 
@@ -231,12 +232,12 @@ def _test_injected_config_requests_stay_unscoped(ctx):
     repo's own `.aspect/config.axl`) rests on this."""
     _eq(
         "eq form unscoped",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--config=ci", "--jobs=8"]))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--config=ci", "--jobs=8"]))),
         ["--config=ci", ("--jobs=8", "", "build")],
     )
     _eq(
         "space form keeps its value",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--config", "ci", "--jobs=8"]))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--config", "ci", "--jobs=8"]))),
         ["--config", "ci", ("--jobs=8", "", "build")],
     )
 
@@ -244,7 +245,7 @@ def _test_injected_config_requests_stay_unscoped(ctx):
     # option of its own and is scoped like any other.
     _eq(
         "valueless config does not swallow the next flag",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--config", "--jobs=8"]))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--config", "--jobs=8"]))),
         ["--config", ("--jobs=8", "", "build")],
     )
 
@@ -264,12 +265,12 @@ def _test_flag_transforms(ctx):
     )
     _eq(
         "flags transform replaces the list",
-        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t)),
+        bazel_flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t)),
         ["--cli", ("--trait-keep", "", "build"), "--rewritten"],
     )
     _eq(
         "startup transform replaces the list",
-        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = t)),
+        bazel_flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = t)),
         ["--client", "--startup-rewritten"],
     )
 
@@ -305,7 +306,7 @@ def _test_flag_transform_sees_unscoped_texts(ctx):
         task_flags = [lambda c: ["--remote_hook=1", "--keep_hook"]],
         flags = strip_remote,
     )
-    got = bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t))
+    got = bazel_flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t))
 
     # Every entry the transform was handed was a plain string: `startswith`
     # matched, so none of the `--remote_*` flags survived.
@@ -340,7 +341,7 @@ def _test_flag_transform_additions_stay_unscoped(ctx):
     t = _trait(extra = ["--injected"], flags = lambda flags: flags + ["--invented", "--injected"])
     _eq(
         "invented and surplus entries are unscoped",
-        bazel.flags.resolve(_fake_ctx(trait = t)),
+        bazel_flags.resolve(_fake_ctx(trait = t)),
         [("--injected", "", "build"), "--invented", "--injected"],
     )
 
@@ -348,7 +349,7 @@ def _test_flag_transform_additions_stay_unscoped(ctx):
     # unscoped slot, so a typed flag keeps reaching every command.
     _eq(
         "a typed flag keeps its unscoped slot",
-        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--jobs=8"], trait = _trait(extra = ["--jobs=8"]))),
+        bazel_flags.resolve(_fake_ctx(bazel_flags = ["--jobs=8"], trait = _trait(extra = ["--jobs=8"]))),
         ["--jobs=8", ("--jobs=8", "", "build")],
     )
 
@@ -377,7 +378,7 @@ def _test_flag_transform_may_reorder_freely(ctx):
     )
     _eq(
         "a reversal preserves every section",
-        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = trait)),
+        bazel_flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = trait)),
         [
             ("--info", "", "info"),
             ("--query", "", "query"),
@@ -401,7 +402,7 @@ def _test_flag_transform_respelling_loses_its_section(ctx):
     gate = lambda flags: [(f, ">=8") if flag_text(f).startswith("--flaky") else f for f in flags]
     _eq(
         "a re-spelled entry comes back unscoped",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--flaky_test_attempts=3", "--jobs=8"], flags = gate))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--flaky_test_attempts=3", "--jobs=8"], flags = gate))),
         [("--flaky_test_attempts=3", ">=8"), ("--jobs=8", "", "build")],
     )
 
@@ -425,7 +426,7 @@ def _test_flag_transform_dedupe_takes_the_earlier_section(ctx):
 
     _eq(
         "a dedupe collapses into the earlier section",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra_test = ["--output=label"], extra_query = ["--output=label"], flags = dedupe))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra_test = ["--output=label"], extra_query = ["--output=label"], flags = dedupe))),
         [("--output=label", "", "test")],
     )
 
@@ -434,28 +435,28 @@ def _test_passthrough_flags_follow_explicit_ones(ctx):
     typed for, after the explicit `--bazel-flag` / `--bazel-startup-flag` values
     so the direct spelling wins a collision."""
     post_ctx = _passthrough_ctx(flags = ["--jobs=4"], passthrough = ["--jobs=8"])
-    _eq("post-command passthrough", bazel.flags.resolve(post_ctx), ["--jobs=4", "--jobs=8"])
+    _eq("post-command passthrough", bazel_flags.resolve(post_ctx), ["--jobs=4", "--jobs=8"])
 
     pre_ctx = _passthrough_ctx(startup = ["--client"], passthrough_startup = ["--output_base=/tmp/o"])
-    _eq("pre-command passthrough", bazel.flags.resolve_startup(pre_ctx), ["--client", "--output_base=/tmp/o"])
+    _eq("pre-command passthrough", bazel_flags.resolve_startup(pre_ctx), ["--client", "--output_base=/tmp/o"])
 
 def _test_resolving_claims_the_bucket(ctx):
     """Folding a bucket into the flag list must also claim it — the runtime fails
     the invocation for flags left unclaimed, so a resolve that forgot to claim
     would turn a working command line into an error."""
     post_ctx = _passthrough_ctx(passthrough = ["--jobs=8"])
-    bazel.flags.resolve(post_ctx)
+    bazel_flags.resolve(post_ctx)
     _eq("resolve claims post-command bucket", post_ctx.claimed, ["bazel_passthrough_flags"])
 
     pre_ctx = _passthrough_ctx(passthrough_startup = ["--output_base=/tmp/o"])
-    bazel.flags.resolve_startup(pre_ctx)
+    bazel_flags.resolve_startup(pre_ctx)
     _eq("resolve_startup claims pre-command bucket", pre_ctx.claimed, ["bazel_passthrough_startup_flags"])
 
 def _test_disclaim_accounts_for_both_buckets(ctx):
     """A path that spawns no Bazel claims both buckets, so a legitimate no-op run
     is not reported as having dropped the user's flags."""
     c = _passthrough_ctx(passthrough = ["--jobs=8"], passthrough_startup = ["--output_base=/tmp/o"])
-    bazel.flags.disclaim_passthrough(c)
+    bazel_flags.disclaim_passthrough(c)
     _eq(
         "disclaim claims both buckets",
         sorted(c.claimed),
@@ -465,13 +466,13 @@ def _test_disclaim_accounts_for_both_buckets(ctx):
 def _test_passthrough_buckets_are_optional(ctx):
     """A task that declares the flag args without the passthrough buckets keeps
     resolving — the buckets are additive, not part of the arg contract."""
-    _eq("no buckets, startup", bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])), ["--client"])
-    _eq("no buckets, flags", bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"])), ["--cli"])
+    _eq("no buckets, startup", bazel_flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])), ["--client"])
+    _eq("no buckets, flags", bazel_flags.resolve(_fake_ctx(bazel_flags = ["--cli"])), ["--cli"])
 
 def _test_passthrough_args_shape(ctx):
-    """`bazel.flags.args` declares both buckets, one per command-line slot, plus
+    """`bazel_flags.args` declares both buckets, one per command-line slot, plus
     the value-flag list the post-command bucket reads arities from."""
-    fa = bazel.flags.args("the build")
+    fa = bazel_flags.args("the build")
     _eq(
         "flag arg keys",
         sorted(fa.keys()),
@@ -487,8 +488,8 @@ def _test_passthrough_args_shape(ctx):
 
 def _test_passthrough_args_is_the_opt_in_subset(ctx):
     """`passthrough_args` is what a task with its own `--bazel-flag` wording
-    splats (delivery does); `flags.args` is that plus those two flags."""
-    pa = bazel.flags.passthrough_args()
+    splats (delivery does); `bazel_flags.args` is that plus those two flags."""
+    pa = bazel_flags.passthrough_args()
     _eq(
         "passthrough arg keys",
         sorted(pa.keys()),
@@ -499,15 +500,15 @@ def _test_passthrough_args_is_the_opt_in_subset(ctx):
             "bazel_value_flags",
         ],
     )
-    fa = bazel.flags.args("the build")
+    fa = bazel_flags.args("the build")
     for key in pa.keys():
         if key not in fa:
-            fail("flags.args must include %s" % key)
+            fail("bazel_flags.args must include %s" % key)
 
 def _test_startup_value_flags_cover_the_pre_command_slot(ctx):
     """Startup options are their own slot and their own list, so
     `aspect --output_base /tmp/o build` collects the value the way Bazel does."""
-    listed = bazel.flags.BAZEL_STARTUP_VALUE_FLAGS
+    listed = bazel_flags.STARTUP_VALUE_FLAGS
     for flag in ["--output_base", "--output_user_root", "--bazelrc", "--host_jvm_args"]:
         if flag not in listed:
             fail("expected %s in BAZEL_STARTUP_VALUE_FLAGS" % flag)
@@ -517,7 +518,7 @@ def _test_startup_value_flags_cover_the_pre_command_slot(ctx):
 def _test_value_flags_mirror_bazel(ctx):
     """The generated list carries Bazel's value-taking flags and none of its
     booleans — a boolean in here would swallow the following target pattern."""
-    listed = bazel.flags.BAZEL_VALUE_FLAGS
+    listed = bazel_flags.VALUE_FLAGS
     for flag in ["-c", "-j", "--jobs", "--config", "--compilation_mode", "--test_output"]:
         if flag not in listed:
             fail("expected %s in BAZEL_VALUE_FLAGS" % flag)
@@ -541,11 +542,11 @@ def _test_flags_empty_defaults(ctx):
     """No CLI flags, no trait additions → empty result."""
     _eq(
         "resolve empty",
-        bazel.flags.resolve(_fake_ctx()),
+        bazel_flags.resolve(_fake_ctx()),
         [],
     )
 
-def _test_setup_command_applies_to_ctx_bazel(ctx):
+def _test_rc_setup_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
       - the returned `Bazelrc` is registered as the active rc;
       - the caller's `base_flags` appear in its `build` expansion;
@@ -555,42 +556,42 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
     for a dev test."""
     sentinel = "/tmp/test-setup-command-sentinel"
 
-    # Inject a real trait into the live trait map and let setup_command read it
+    # Inject a real trait into the live trait map and let `bazel_rc.setup` read it
     # back via ctx.traits[BazelTrait] — exercises the production (no-override) path.
     ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + sentinel])
 
-    rc = bazel.setup_command(ctx, "build", base_flags = ["--from-base"])
+    rc = bazel_rc.setup(ctx, "build", base_flags = ["--from-base"])
 
     if rc != ctx.bazel.active_rc():
-        fail("setup_command — returned rc not registered as active")
+        fail("bazel_rc.setup — returned rc not registered as active")
     if "--from-base" not in rc.expand(command = "build"):
-        fail("setup_command — base_flag not in build expansion: %r" % rc.expand(command = "build"))
+        fail("bazel_rc.setup — base_flag not in build expansion: %r" % rc.expand(command = "build"))
 
     startup = list(rc.startup_flags())
     if ("--output_base=" + sentinel) not in startup:
-        fail("setup_command — trait --output_base not on rc startup flags: %r" % startup)
+        fail("bazel_rc.setup — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
-        fail("setup_command — --ignore_all_rc_files not present: %r" % startup)
+        fail("bazel_rc.setup — --ignore_all_rc_files not present: %r" % startup)
 
-def _test_setup_command_trait_base_flags(ctx):
-    """`trait.base_flags` (feature-injected defaults) enter setup_command's
+def _test_rc_setup_trait_base_flags(ctx):
+    """`trait.base_flags` (feature-injected defaults) enter `bazel_rc.setup`'s
     composition ahead of the caller's base flags, so later flags still win
     last-wins."""
     ctx.traits[BazelTrait] = _trait(base = ["--trait-base"])
-    rc = bazel.setup_command(ctx, "build", base_flags = ["--from-base"])
+    rc = bazel_rc.setup(ctx, "build", base_flags = ["--from-base"])
     expanded = rc.expand(command = "build")
     if "--trait-base" not in expanded:
-        fail("setup_command — trait base_flag not in build expansion: %r" % expanded)
+        fail("bazel_rc.setup — trait base_flag not in build expansion: %r" % expanded)
     if expanded.index("--trait-base") > expanded.index("--from-base"):
-        fail("setup_command — trait base_flags must precede caller base_flags: %r" % expanded)
+        fail("bazel_rc.setup — trait base_flags must precede caller base_flags: %r" % expanded)
 
-def _test_setup_command_skips_empty_fields(ctx):
-    """`setup_command` is the only caller that filters `base_flags`, and it skips
+def _test_rc_setup_skips_empty_fields(ctx):
+    """`bazel_rc.setup` is the only caller that filters `base_flags`, and it skips
     an empty one: with nothing injected anywhere, no filter runs.
 
-    Asserted through the real `setup_command` rather than a helper, because the
+    Asserted through the real `bazel_rc.setup` rather than a helper, because the
     `base_flags` and `extra_startup_flags` call sites are reachable no other way
-    — a test driving `bazel.flags.resolve` alone cannot see either."""
+    — a test driving `bazel_flags.resolve` alone cannot see either."""
     calls = []
 
     def add_one(flags):
@@ -598,29 +599,61 @@ def _test_setup_command_skips_empty_fields(ctx):
         return list(flags) + ["--added-by-filter"]
 
     ctx.traits[BazelTrait] = _trait(filters = [add_one])
-    bazel.setup_command(ctx, "build")
+    bazel_rc.setup(ctx, "build")
     _eq("nothing injected, no filter call", calls, [])
 
-def _test_sibling_rc_transforms_startup(ctx):
-    """`bazel.sibling_rc` mirrors setup_command's flags but runs the startup
+def _test_rc_sibling_transforms_startup(ctx):
+    """`bazel_rc.sibling` mirrors `bazel_rc.setup`'s flags but runs the startup
     flags through the transform, and does NOT register itself as active."""
     base = "/tmp/test-sibling-rc-base"
     ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
-    active = bazel.setup_command(ctx, "build")
+    active = bazel_rc.setup(ctx, "build")
 
-    sib = bazel.sibling_rc(ctx, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
+    sib = bazel_rc.sibling(ctx, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
 
     startup = list(sib.startup_flags())
     if ("--output_base=" + base + "-checksum") not in startup:
-        fail("sibling_rc — transform not applied to startup: %r" % startup)
+        fail("bazel_rc.sibling — transform not applied to startup: %r" % startup)
     if ("--output_base=" + base) in startup:
-        fail("sibling_rc — untransformed --output_base leaked: %r" % startup)
+        fail("bazel_rc.sibling — untransformed --output_base leaked: %r" % startup)
     if "--from-extra" not in sib.expand(command = "build"):
-        fail("sibling_rc — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
+        fail("bazel_rc.sibling — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
 
     # Building the sibling must not disturb the active rc.
     if ctx.bazel.active_rc() != active:
-        fail("sibling_rc — must not change ctx.bazel.active_rc()")
+        fail("bazel_rc.sibling — must not change ctx.bazel.active_rc()")
+
+def _test_rc_hook_flags_concatenates_hooks(ctx):
+    """`bazel_rc.hook_flags` calls each `rc_flags` hook in order with the rc and
+    command it was given, and concatenates what they return."""
+    seen = []
+
+    def first(_ctx, rc, command):
+        seen.append(("first", rc, command))
+        return ["--a"]
+
+    def second(_ctx, rc, command):
+        seen.append(("second", rc, command))
+        return ["--b", "--c"]
+
+    fake = _fake_ctx(trait = BazelTrait(rc_flags = [first, second]))
+    _eq("hook flags", bazel_rc.hook_flags(fake, "rc", "test"), ["--a", "--b", "--c"])
+    _eq("hook calls", seen, [("first", "rc", "test"), ("second", "rc", "test")])
+    _eq("no hooks", bazel_rc.hook_flags(_fake_ctx(), "rc", "build"), [])
+
+def _test_rc_with_flags_layers_last(ctx):
+    """`bazel_rc.with_flags` returns `rc` itself for no flags, a fresh rc for no
+    `rc`, and otherwise expands the extras after the rc's own flags."""
+    rc = ctx.bazel.new_rc(flags = ["--from-rc"])
+    if bazel_rc.with_flags(ctx, rc, []) != rc:
+        fail("bazel_rc.with_flags — empty flags must return the rc unchanged")
+    if "--extra" not in bazel_rc.with_flags(ctx, None, ["--extra"]).expand(command = "build"):
+        fail("bazel_rc.with_flags — no rc must yield one carrying the flags")
+    expanded = list(bazel_rc.with_flags(ctx, rc, ["--extra"]).expand(command = "build"))
+    if "--from-rc" not in expanded or "--extra" not in expanded:
+        fail("bazel_rc.with_flags — merged expansion lost a flag: %r" % expanded)
+    if expanded.index("--from-rc") > expanded.index("--extra"):
+        fail("bazel_rc.with_flags — extras must expand after the rc: %r" % expanded)
 
 # A test option: accepted by `build` and every command that inherits it, and
 # rejected outright by `query`, so it is the sharp edge of the scoping contract.
@@ -642,8 +675,8 @@ def _test_injected_flags_never_reach_a_query(ctx):
     Both halves matter: a `query` that silently lost the flags it *should* carry
     would pass the first assertion and resolve against the wrong repo state."""
     ctx.traits[BazelTrait] = _trait(extra = [_QUERY_REJECTS], task_flags = [lambda c: [_QUERY_REJECTS]])
-    active = bazel.setup_command(ctx, "build")
-    sibling = bazel.sibling_rc(ctx, lambda startup: startup)
+    active = bazel_rc.setup(ctx, "build")
+    sibling = bazel_rc.sibling(ctx, lambda startup: startup)
 
     for (label, rc) in [("active rc", active), ("explicit rc=", sibling)]:
         for command in ["build", "test"]:
@@ -675,16 +708,16 @@ _REACH = {
 }
 
 def _rc_over(ctx, trait, task_base = [], user = []):
-    """A `Bazelrc` carrying exactly what `setup_command` would hand
+    """A `Bazelrc` carrying exactly what `bazel_rc.setup` would hand
     `parse_rc` for `trait`, built with `new_rc` so no `.bazelrc` on disk can
     perturb the expansions.
 
-    Composed the way `setup_command` composes it — `trait.base_flags`, then the
-    task's `base_flags=`, then `bazel.flags.resolve` — over a `_fake_ctx` so the
+    Composed the way `bazel_rc.setup` composes it — `trait.base_flags`, then the
+    task's `base_flags=`, then `bazel_flags.resolve` — over a `_fake_ctx` so the
     user's `--bazel-flag` slot is settable from a test. That mirror is the one
-    thing here production also does; `_test_setup_command_trait_base_flags`
-    pins the same two base slots through the real `setup_command`."""
-    resolved = bazel.flags.resolve(_fake_ctx(bazel_flags = user, trait = trait))
+    thing here production also does; `_test_rc_setup_trait_base_flags`
+    pins the same two base slots through the real `bazel_rc.setup`."""
+    resolved = bazel_flags.resolve(_fake_ctx(bazel_flags = user, trait = trait))
     return ctx.bazel.new_rc(flags = list(trait.base_flags) + list(task_base) + resolved)
 
 def _reaches(rc, command, flag):
@@ -934,12 +967,12 @@ def _test_the_carve_out_matches_whole_names_only(ctx):
     near = ["--repo", "--repo_envFOO", "--no-repo_env", "--registryX=1"]
     _eq(
         "near-misses stay scoped to the group",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = near))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = near))),
         [(flag, "", "build") for flag in near],
     )
     _eq(
         "the negated spelling of a listed boolean carves out",
-        bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--noenable_bzlmod"]))),
+        bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--noenable_bzlmod"]))),
         ["--noenable_bzlmod"],
     )
 
@@ -994,7 +1027,7 @@ def _test_injected_config_expands_per_command(ctx):
         ("--keep_going", "", "common:ci"),
         ("--jobs=16", "", "build:ci"),
         ("--output=label", "", "query:ci"),
-    ] + bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--config=ci"]))))
+    ] + bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--config=ci"]))))
 
     for command in ["build", "test", "info"]:
         expanded = [flag_text(f) for f in rc.expand(command = command)]
@@ -1024,7 +1057,7 @@ def _test_injected_config_expands_at_the_unscoped_rank(ctx):
     the same option both ways."""
     rc = ctx.bazel.new_rc(flags = [
         ("--remote_timeout=7200", "", "build:slowlink"),
-    ] + bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--remote_timeout=3600", "--config=slowlink"]))))
+    ] + bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--remote_timeout=3600", "--config=slowlink"]))))
 
     expanded = [flag_text(f) for f in rc.expand(command = "build")]
     _eq("config expands ahead of the scoped entries beside it", expanded, ["--remote_timeout=7200", "--remote_timeout=3600"])
@@ -1048,7 +1081,7 @@ def _test_injected_flag_filters_apply_to_every_field(ctx):
     )
     _eq(
         "every field is filtered, the user's own flag is not",
-        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--dropped=mine"], trait = trait)),
+        bazel_flags.resolve(_fake_ctx(bazel_flags = ["--dropped=mine"], trait = trait)),
         [
             "--dropped=mine",
             ("--kept_extra", "", "build"),
@@ -1075,7 +1108,7 @@ def _test_injected_flag_filters_run_once_per_nonempty_group(ctx):
         calls.append(list(flags))
         return list(flags) + ["--added-by-filter"]
 
-    got = bazel.flags.resolve(_fake_ctx(trait = _trait(extra = ["--one"], filters = [add_one])))
+    got = bazel_flags.resolve(_fake_ctx(trait = _trait(extra = ["--one"], filters = [add_one])))
     _eq("one call for the one non-empty group", len(calls), 1)
     _eq("the filter saw the feature's spelling", calls[0], ["--one"])
     _eq(
@@ -1087,7 +1120,7 @@ def _test_injected_flag_filters_run_once_per_nonempty_group(ctx):
     # Nothing injected at all: no group, so no call. The filters are the user's
     # opt-out policy and there is nothing to ask about an empty list.
     calls.pop()
-    bazel.flags.resolve(_fake_ctx(trait = _trait(filters = [add_one])))
+    bazel_flags.resolve(_fake_ctx(trait = _trait(filters = [add_one])))
     _eq("no injected flags, no filter call", calls, [])
 
 def _test_injected_flag_filters_skip_the_empty_startup_field(ctx):
@@ -1097,8 +1130,8 @@ def _test_injected_flag_filters_skip_the_empty_startup_field(ctx):
     The startup slot is the sharp one. It is a separate Bazel argv position,
     parsed before the command name, so a command flag added there is a hard
     error rather than a misplaced option — and a filter that ADDS is exactly
-    what finds an unguarded call site. `_test_setup_command_skips_empty_fields`
-    covers the `base_flags` slot, which only `setup_command` filters."""
+    what finds an unguarded call site. `_test_rc_setup_skips_empty_fields`
+    covers the `base_flags` slot, which only `bazel_rc.setup` filters."""
     calls = []
 
     def add_one(flags):
@@ -1107,36 +1140,36 @@ def _test_injected_flag_filters_skip_the_empty_startup_field(ctx):
 
     _eq(
         "nothing injected, nothing resolved",
-        bazel.flags.resolve_startup(_fake_ctx(trait = _trait(filters = [add_one]))),
+        bazel_flags.resolve_startup(_fake_ctx(trait = _trait(filters = [add_one]))),
         [],
     )
     _eq("no empty field was filtered", calls, [])
 
     _eq(
         "a non-empty startup field is still filtered",
-        bazel.flags.resolve_startup(_fake_ctx(trait = _trait(extra_startup = ["--host_jvm_debug"], filters = [add_one]))),
+        bazel_flags.resolve_startup(_fake_ctx(trait = _trait(extra_startup = ["--host_jvm_debug"], filters = [add_one]))),
         ["--host_jvm_debug", "--added-by-filter"],
     )
     _eq("one call for the one non-empty field", calls, [["--host_jvm_debug"]])
 
 def _test_config_names(ctx):
-    """`testonly_config_names` extracts `--config=NAME` names from plain and
+    """`requested_config_names` extracts `--config=NAME` names from plain and
     version-gated flags, ignoring everything else."""
-    _eq("no configs", testonly_config_names(["--keep_going", "--show_result=20"]), [])
-    _eq("plain config", testonly_config_names(["--config=release", "--keep_going"]), ["release"])
-    _eq("tuple config", testonly_config_names([("--config=ci", ">=8.0.0")]), ["ci"])
+    _eq("no configs", requested_config_names(["--keep_going", "--show_result=20"]), [])
+    _eq("plain config", requested_config_names(["--config=release", "--keep_going"]), ["release"])
+    _eq("tuple config", requested_config_names([("--config=ci", ">=8.0.0")]), ["ci"])
     _eq(
         "mixed",
-        testonly_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
+        requested_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
 
     # Bazel accepts `--config NAME` too, and a flag forwarded verbatim from the
     # command line arrives in exactly that shape.
-    _eq("space form", testonly_config_names(["--config", "ci"]), ["ci"])
-    _eq("space form mid-list", testonly_config_names(["--keep_going", "--config", "ci", "--jobs=8"]), ["ci"])
-    _eq("space form, no value", testonly_config_names(["--config"]), [])
-    _eq("space form, flag follows", testonly_config_names(["--config", "--keep_going"]), [])
+    _eq("space form", requested_config_names(["--config", "ci"]), ["ci"])
+    _eq("space form mid-list", requested_config_names(["--keep_going", "--config", "ci", "--jobs=8"]), ["ci"])
+    _eq("space form, no value", requested_config_names(["--config"]), [])
+    _eq("space form, flag follows", requested_config_names(["--config", "--keep_going"]), [])
 
 def _test_flags_delta(ctx):
     """`testonly_flags_delta` returns the multiset difference full − base in
@@ -1362,14 +1395,16 @@ def _test_impl(ctx):
     _test_config_names(ctx)
     _test_flags_delta(ctx)
     _test_auth_flags(ctx)
+    _test_rc_hook_flags_concatenates_hooks(ctx)
 
     # Run last: these build real `Bazelrc`s off `ctx.bazel`, and the
-    # `setup_command` ones register an active rc, so keeping them after the pure
+    # `bazel_rc.setup` ones register an active rc, so keeping them after the pure
     # subtests prevents bleed-through.
-    _test_setup_command_applies_to_ctx_bazel(ctx)
-    _test_setup_command_trait_base_flags(ctx)
-    _test_setup_command_skips_empty_fields(ctx)
-    _test_sibling_rc_transforms_startup(ctx)
+    _test_rc_setup_applies_to_ctx_bazel(ctx)
+    _test_rc_setup_trait_base_flags(ctx)
+    _test_rc_setup_skips_empty_fields(ctx)
+    _test_rc_sibling_transforms_startup(ctx)
+    _test_rc_with_flags_layers_last(ctx)
     _test_injected_flags_never_reach_a_query(ctx)
     _test_per_command_fields_reach_exactly_their_command(ctx)
     _test_build_rejected_flags_have_a_home(ctx)
@@ -1379,7 +1414,7 @@ def _test_impl(ctx):
     _test_injected_config_expands_per_command(ctx)
     _test_injected_config_expands_at_the_unscoped_rank(ctx)
 
-    print("bazel_flags_test.axl: OK (46 sections)")
+    print("bazel_flags_test.axl: OK (48 sections)")
     return 0
 
 bazel_flags_tests = task(
