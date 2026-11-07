@@ -53,7 +53,7 @@ jobs:
       # A released CLI cannot load this commit's .aspect config, so the login
       # and the rc generation that setup-aspect would run in the checkout are
       # skipped, and the login runs outside it instead.
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           bazelrc-generate: false
           disk-cache: true
@@ -137,7 +137,7 @@ jobs:
       # run before setup-aspect. That order also lets setup-aspect's
       # built-in `aspect auth login` find the prebuilt `aspect` on PATH.
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -150,7 +150,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -163,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -176,7 +176,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -189,7 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -209,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -222,7 +222,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -235,7 +235,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -253,7 +253,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -266,7 +266,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -279,7 +279,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -292,7 +292,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -305,7 +305,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -343,7 +343,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -429,7 +429,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -443,7 +443,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -474,7 +474,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -496,7 +496,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -602,7 +602,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -656,7 +656,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -699,7 +699,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -720,7 +720,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -745,7 +745,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -790,7 +790,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -830,7 +830,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
@@ -880,7 +880,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}

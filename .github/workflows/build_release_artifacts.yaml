@@ -59,7 +59,7 @@ jobs:
       # login and the rc generation that setup-aspect would run in the checkout
       # are skipped; the two steps below do both from outside it, as
       # .aspect/bootstrap.sh does for the CI pre-build.
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           bazelrc-generate: false
           repository-cache: ${{ github.workflow }}
