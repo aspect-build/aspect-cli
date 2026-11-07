@@ -1231,6 +1231,7 @@ _AGENT_FIELDS = [
     ("id_source", "string", ""),
     ("harness_id", "string", ""),
     ("pid", "int", 0),
+    ("host_pid", "int", 0),
     ("pid_start", "string", ""),
     ("cwd", "string", ""),
     ("project", "string", ""),

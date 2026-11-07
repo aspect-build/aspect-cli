@@ -1798,11 +1798,38 @@ def _of_my_session(me: dict, agent: dict) -> bool:
         return agent["harness_id"] == sid
     return agent.get("id", "") == sid or agent.get("parent_id", "") == sid
 
+def _hosted_lease(std, path: str, here: str, me: dict, holder: dict) -> bool:
+    """Whether `holder` is a lease a bridge took for the caller, so the caller
+    can adopt it.
+
+    A bridge (`host_pid`) leases a slot before the session it is for exists.
+    The session claims it by naming the lease's `--agent-id`, under its kind,
+    from inside the slot. Only a lease that still names the bridge, or names a
+    stopped process, moves: never a live session's.
+    """
+    host = holder.get("host_pid", 0)
+    if not host or me.get("host_pid", 0) or not me.get("id", "") or me.get("id_source", "") != "caller":
+        return False
+    if holder.get("id", "") != me["id"] or holder.get("kind", "") != me.get("kind", ""):
+        return False
+    if here != path and not here.startswith(path + "/"):
+        return False
+    return holder.get("pid", 0) == host or session_state(std, holder) != RUNNING
+
+# Moved to the adopter with its process, so the lease then reads as the
+# adopter's session (`_same_session`), and not the bridge's.
+_ADOPTED_KEYS = ["harness_id", "parent_id"]
+
 def _follow_session(ctx: TaskContext, pool: dict, registry: dict, locked: bool) -> dict:
+    """`_follow_caller`, for the session that runs this command."""
+    return _follow_caller(ctx.std, _me(ctx), ctx.std.env.current_dir(), pool, registry, locked)
+
+def _follow_caller(std, me: dict, here: str, pool: dict, registry: dict, locked: bool) -> dict:
     """`registry`, with every lease of the caller's harness session — its own,
     and its subagents' — moved to the caller's process where it records one
     that is no longer running: a session resumed after its first process
-    exited.
+    exited. A lease a bridge took for the caller (`_hosted_lease`) moves to it
+    the same way, with the session it names.
 
     Liveness is read from the recorded process, and a subagent's is its
     session's, so without this a resumed session and everything it ran read as
@@ -1817,36 +1844,53 @@ def _follow_session(ctx: TaskContext, pool: dict, registry: dict, locked: bool) 
     on, or holds up, an `add`. With the lock busy the leases are left for the
     next call.
     """
-    me = _me(ctx)
     if not me.get("pid", 0):
         return registry
     stale = []
+    hosted = {}
     for slot_id in registry["slots"]:
         holder = (registry["slots"][slot_id].get("lease") or {}).get("agent") or {}
         if (holder.get("id", "") and holder.get("pid", 0) and holder["pid"] != me["pid"] and
-            _of_my_session(me, holder) and session_state(ctx.std, holder) != RUNNING):
+            _of_my_session(me, holder) and session_state(std, holder) != RUNNING):
             stale.append(slot_id)
+        elif (holder and holder.get("pid", 0) != me["pid"] and
+              _hosted_lease(std, slot_path(pool, slot_id), here, me, holder)):
+            stale.append(slot_id)
+            hosted[slot_id] = True
     if not stale:
         return registry
-    token = "" if locked else acquire(ctx.std, pool["dir"], attempts = 1)
+    token = "" if locked else acquire(std, pool["dir"], attempts = 1)
     if not locked and not token:
         return registry
-    fresh = read_registry(ctx.std, pool["dir"])
+    fresh = read_registry(std, pool["dir"])
     moved = False
     for slot_id in stale:
         was = (registry["slots"][slot_id].get("lease") or {}).get("agent") or {}
         slot = fresh["slots"].get(slot_id) or {}
         agent = (slot.get("lease") or {}).get("agent") or {}
-        if slot.get("state", "") == LEASED and agent.get("pid", 0) == was.get("pid", 0):
-            for key in ["pid", "pid_start", "seen_ms"]:
-                if key in me:
-                    agent[key] = me[key]
-                    was[key] = me[key]
-            moved = True
+        if slot.get("state", "") != LEASED or agent.get("pid", 0) != was.get("pid", 0):
+            continue
+        keys = ["pid", "pid_start", "seen_ms"]
+        if hosted.get(slot_id, False):
+            # Read again under the lock: the slot can have been released and
+            # leased to another holder since, with the same pid recorded.
+            if [k for k in ["id", "kind", "pid_start", "host_pid"] if agent.get(k) != was.get(k)]:
+                continue
+            keys = keys + _ADOPTED_KEYS
+        elif agent.get("host_pid", 0) == agent.get("pid", 0) and me.get("host_pid", 0):
+            # A bridge that restarted keeps its session id, and takes over the
+            # leases of the bridge before it. Each one still waits for its
+            # session, so it names the new bridge and stays adoptable.
+            keys = keys + ["host_pid"]
+        for key in keys:
+            if key in me:
+                agent[key] = me[key]
+                was[key] = me[key]
+        moved = True
     if moved and not fresh.get("read_only", False):
-        write_registry(ctx.std, pool["dir"], fresh)
+        write_registry(std, pool["dir"], fresh)
     if token:
-        release(ctx.std, pool["dir"], token)
+        release(std, pool["dir"], token)
     return registry
 
 def _ended_of_my_session(ctx: TaskContext, registry: dict, me: dict) -> list[dict]:
@@ -5441,6 +5485,8 @@ worktree_list = task(
 testonly_base_note = _base_note
 testonly_closest = _closest
 testonly_protected_from = _protected_from
+testonly_follow_caller = _follow_caller
+testonly_hosted_lease = _hosted_lease
 testonly_held_by = _held_by
 testonly_held_elsewhere = _held_elsewhere
 testonly_list_cells = _list_cells

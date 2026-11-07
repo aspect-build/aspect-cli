@@ -257,6 +257,23 @@ Run `aspect dev test-delivery-scheduler` for the unit tests.
 
 ---
 
+## worktree
+
+[`worktree.axl`](worktree.axl) · a pool of checkouts, each leased to the agent session that works in it. `aspect worktree --help` lists its commands.
+
+### A session under `claude remote-control`
+
+The bridge of `claude remote-control` runs the `WorktreeCreate` hook before the session exists, so the lease names the bridge, and it reads as running for as long as the bridge lives. The session takes the lease over with a second hook. Both hooks name the same id, one the bridge can give each session and that does not change when the session resumes:
+
+| Hook              | Runs                                        | From             |
+|-------------------|---------------------------------------------|------------------|
+| `WorktreeCreate`  | `aspect worktree add ... --agent-id <id>`   | The bridge       |
+| `SessionStart`    | `aspect worktree inspect --agent-id <id>`   | Inside the slot  |
+
+The session can then run `aspect worktree release` itself. Without the `SessionStart` hook, the slot stays held while the bridge runs, and each new session takes another slot.
+
+---
+
 ## Cross-cutting features
 
 | Feature                  | File                                                                       | Activation                                              | What it does |

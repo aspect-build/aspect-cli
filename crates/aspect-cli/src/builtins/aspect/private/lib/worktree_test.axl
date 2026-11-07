@@ -16,12 +16,14 @@ load(
     "testonly_capped",
     "testonly_closest",
     "testonly_collected_refusal",
+    "testonly_follow_caller",
     "testonly_free_columns",
     "testonly_held_by",
     "testonly_held_elsewhere",
     "testonly_history_columns",
     "testonly_history_rows",
     "testonly_hook_view",
+    "testonly_hosted_lease",
     "testonly_indented",
     "testonly_is_branch",
     "testonly_list_cells",
@@ -2559,7 +2561,7 @@ def _test_nested_registry_values_are_reset(ctx):
         "aaaa11112222": {
             "state": LEASED,
             "lease": {"name": "fix", "agent": "nope"},
-            "history": ["junk", {"name": 3, "agent": {"pid": "12"}}],
+            "history": ["junk", {"name": 3, "agent": {"pid": "12", "host_pid": "12"}}],
             "reservation": "x",
         },
     }}))
@@ -2568,6 +2570,7 @@ def _test_nested_registry_values_are_reset(ctx):
     _eq("junk history dropped", len(slot["history"]), 1)
     _eq("bad name reset", slot["history"][0]["name"], "")
     _eq("bad pid reset", slot["history"][0]["agent"]["pid"], 0)
+    _eq("bad host_pid reset", slot["history"][0]["agent"]["host_pid"], 0)
     _eq("stray reservation cleared", slot["reservation"], None)
 
 def _test_files_git_ignores_are_not_work(ctx):
@@ -3544,7 +3547,159 @@ def _test_a_stopped_session_is_given_time_to_come_back(ctx):
     _eq("with no grace: taken back", abandoned_lease(ctx.std, env.pool, registry, env.slot_id), True)
     _eq("activity is read", lease_last_active_ms(ctx.std, env.pool, env.slot_id, lease) > 0, True)
 
+def _test_a_session_adopts_only_the_lease_a_bridge_took_for_it(ctx):
+    """A bridge leases a slot before the session it is for exists. The session
+    adopts that lease by naming its id from inside the slot. The id alone, the
+    slot alone, a lease no bridge took, and a live session's lease are not
+    enough. After adoption the lease reads as the adopter's session."""
+    slot = "/pool/aspect-worktree-aaaaaaaaaaaa"
+    me = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-own",
+        "parent_id": "session-own",
+        "pid": 4242,
+    }
+
+    # 99999 and up are past the largest pid macOS hands out, and unlikely on
+    # Linux: a process that is not running.
+    bridge = 999991
+    hosted = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-of-bridge",
+        "parent_id": "session-of-bridge",
+        "pid": bridge,
+        "host_pid": bridge,
+    }
+    _eq("its own, from inside", testonly_hosted_lease(ctx.std, slot, slot + "/src", me, hosted), True)
+    _eq("from the slot's root", testonly_hosted_lease(ctx.std, slot, slot, me, hosted), True)
+    _eq("not from a sibling slot", testonly_hosted_lease(ctx.std, slot, "/pool/aspect-worktree-aaaaaaaaaaab", me, hosted), False)
+    _eq("not from a longer path", testonly_hosted_lease(ctx.std, slot, slot + "x", me, hosted), False)
+    _eq("not from the pool", testonly_hosted_lease(ctx.std, slot, "/pool", me, hosted), False)
+    _eq("not another id", testonly_hosted_lease(ctx.std, slot, slot, me, dict(hosted, id = "bridge-cse_02")), False)
+    _eq("not another kind", testonly_hosted_lease(ctx.std, slot, slot, me, dict(hosted, kind = "codex")), False)
+    _eq("not an id the harness reported", testonly_hosted_lease(ctx.std, slot, slot, dict(me, id_source = ""), hosted), False)
+    _eq("not by a bridge", testonly_hosted_lease(ctx.std, slot, slot, dict(me, host_pid = 7), hosted), False)
+    no_bridge = dict(hosted)
+    no_bridge.pop("host_pid")
+    _eq("not a lease no bridge took", testonly_hosted_lease(ctx.std, slot, slot, me, no_bridge), False)
+
+    live = dict(hosted, pid = ctx.std.process.id(), pid_start = "")
+    _eq("not a live session's adopted lease", testonly_hosted_lease(ctx.std, slot, slot, me, live), False)
+    _eq("a stopped session's, again", testonly_hosted_lease(ctx.std, slot, slot, me, dict(hosted, pid = 999992)), True)
+
+    adopted = dict(hosted, pid = me["pid"], harness_id = me["harness_id"], parent_id = me["parent_id"])
+    _eq("the bridge's lease is not the session's", testonly_same_session(me, hosted), False)
+    _eq("the adopted lease is the session's", testonly_same_session(me, adopted), True)
+
+def _bridge_pool(ctx, agent):
+    """A pool on disk with one slot, whose lease names `agent`."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-bridge")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp}
+    write_registry(ctx.std, tmp, {"slots": {"s1": _leased(pool["git_common_dir"], "fix", agent)}})
+    return struct(pool = pool, here = slot_path(pool, "s1"))
+
+def _lease_on_disk(ctx, pool):
+    return read_registry(ctx.std, pool["dir"])["slots"]["s1"]["lease"]["agent"]
+
+def _test_a_restarted_bridge_keeps_a_waiting_lease_adoptable(ctx):
+    """A bridge that restarted under its session id moves the leases of the
+    old bridge to itself. A lease that still waits for its session names the
+    new bridge, as `pid` and as `host_pid`, so the session can still adopt it."""
+    old = 999991
+    new = ctx.std.process.id()
+    waiting = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-of-bridge",
+        "pid": old,
+        "host_pid": old,
+    }
+    bridge = {
+        "kind": "claude-code",
+        "id": "bridge-cse_02",
+        "id_source": "caller",
+        "harness_id": "session-of-bridge",
+        "pid": new,
+        "host_pid": new,
+    }
+    env = _bridge_pool(ctx, waiting)
+    testonly_follow_caller(ctx.std, bridge, "/elsewhere", env.pool, read_registry(ctx.std, env.pool["dir"]), False)
+    moved = _lease_on_disk(ctx, env.pool)
+    _eq("names the new bridge", moved["pid"], new)
+    _eq("as its bridge too", moved["host_pid"], new)
+
+    session = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-own",
+        "pid": 4242,
+    }
+    _eq("so its session can adopt it", testonly_hosted_lease(ctx.std, env.here, env.here, session, moved), True)
+
+    # A session that resumes under the same session id takes the lease as its
+    # own. It is no bridge, so the lease must not read as one that waits.
+    env = _bridge_pool(ctx, waiting)
+    resumed = dict(bridge, pid = new)
+    resumed.pop("host_pid")
+    testonly_follow_caller(ctx.std, resumed, "/elsewhere", env.pool, read_registry(ctx.std, env.pool["dir"]), False)
+    moved = _lease_on_disk(ctx, env.pool)
+    _eq("a session takes the pid", moved["pid"], new)
+    _eq("and names no new bridge", moved["host_pid"], old)
+
+def _test_adoption_leaves_a_slot_leased_again_since_the_scan_alone(ctx):
+    """The caller scans the registry, then writes under the lock. A slot can be
+    released and leased again in between, with the same pid recorded. The new
+    lease is not the one the caller adopts, so it stays as it is."""
+    bridge = 999991
+    scanned = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-of-bridge",
+        "parent_id": "session-of-bridge",
+        "pid": bridge,
+        "pid_start": "start-1",
+        "host_pid": bridge,
+    }
+    me = {
+        "kind": "claude-code",
+        "id": "bridge-cse_01",
+        "id_source": "caller",
+        "harness_id": "session-own",
+        "parent_id": "session-own",
+        "pid": ctx.std.process.id(),
+    }
+
+    for label, since in [
+        ("another id", dict(scanned, id = "bridge-cse_02")),
+        ("another kind", dict(scanned, kind = "codex")),
+        ("another start of the process", dict(scanned, pid_start = "start-2")),
+        ("another bridge", dict(scanned, host_pid = 999992)),
+    ]:
+        env = _bridge_pool(ctx, since)
+        stale = {"slots": {"s1": _leased(env.pool["git_common_dir"], "fix", dict(scanned))}}
+        testonly_follow_caller(ctx.std, me, env.here, env.pool, stale, False)
+        _eq(label + " is left alone", _lease_on_disk(ctx, env.pool), since)
+
+    # The same read with nothing changed in between moves it, so each case
+    # above stayed alone because of what changed.
+    env = _bridge_pool(ctx, scanned)
+    stale = {"slots": {"s1": _leased(env.pool["git_common_dir"], "fix", dict(scanned))}}
+    testonly_follow_caller(ctx.std, me, env.here, env.pool, stale, False)
+    adopted = _lease_on_disk(ctx, env.pool)
+    _eq("unchanged, it moves", adopted["pid"], me["pid"])
+    _eq("with its session", adopted["harness_id"], "session-own")
+
 _UNIT_TESTS = [
+    _test_a_session_adopts_only_the_lease_a_bridge_took_for_it,
+    _test_a_restarted_bridge_keeps_a_waiting_lease_adoptable,
+    _test_adoption_leaves_a_slot_leased_again_since_the_scan_alone,
     _test_files_git_ignores_are_not_work,
     _test_a_read_only_output_base_is_still_removed,
     _test_nested_registry_values_are_reset,
