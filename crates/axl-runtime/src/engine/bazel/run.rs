@@ -301,10 +301,13 @@ fn runnable_methods(registry: &mut MethodsBuilder) {
     /// environment is `RunEnvironmentInfo`, then `BUILD_WORKSPACE_DIRECTORY`,
     /// `BUILD_WORKING_DIRECTORY` and the `ASPECT_*` directories, then the
     /// runfiles variables when the target has a runfiles tree, then `env`,
-    /// where a `None` value removes the variable. `cwd` defaults to
-    /// `workspace_dir`, the directory `bazel run` uses, else the directory
-    /// the task was invoked from. The command spawns in its own process
-    /// group, so cancelling its token stops everything it started.
+    /// where a `None` value removes the variable. `BUILD_WORKING_DIRECTORY`
+    /// and `ASPECT_WORKING_DIRECTORY` are the directory the task was invoked
+    /// from, even when the build ran elsewhere through `directory`; pass
+    /// them in `env` to say otherwise. `cwd` defaults to `workspace_dir`,
+    /// the directory `bazel run` uses, else the directory the task was
+    /// invoked from. The command spawns in its own process group, so
+    /// cancelling its token stops everything it started.
     ///
     /// ```python
     /// child = r.command(args = ["--port", "8080"]).stdout("piped").spawn()
@@ -830,7 +833,10 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     /// `RunEnvironmentInfo` plus the `BUILD_*`, `ASPECT_*` and runfiles
     /// variables plus `env` (a `None` value removes a variable), and the
     /// working directory is `cwd`, else the runfiles workspace directory
-    /// `bazel run` uses. The process is its own process group bound to
+    /// `bazel run` uses. `directory` moves only the build:
+    /// `BUILD_WORKING_DIRECTORY` and `ASPECT_WORKING_DIRECTORY` stay the
+    /// directory the task was invoked from, so a tool built from the
+    /// workspace root still acts where the user ran it. The process is its own process group bound to
     /// `cancellation`: cancelling the token stops it and everything it
     /// started.
     ///
