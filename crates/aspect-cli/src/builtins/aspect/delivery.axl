@@ -250,6 +250,10 @@ Failure modes
                                                     start; running ones are
                                                     recorded; unstarted FAIL
                                                     as hook_error; exit 1
+  DeliveryTrait.delivery_target raises after a
+    failed build                                  error; the other targets'
+                                                    hooks still fire; exits
+                                                    with Bazel's exit code
   --query matches no targets                      prints "No targets to
                                                     deliver" and returns 0
   --query fails (bad expr, BUILD error)           propagates Bazel's stderr
@@ -346,7 +350,7 @@ DeliveryTrait = trait(
     delivery_end = attr(
         typing.Callable[[], None],
         default = lambda: None,
-        description = "Hook called once at the end of a delivery run, after all targets are delivered.",
+        description = "Hook called once at the end of a delivery run, after all targets are delivered. Not called when the task exits early, such as on a failed build.",
     ),
     delivery_target = attr(
         typing.Callable[[dict], dict],
@@ -713,6 +717,9 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 # `.metadata.json` extension; deleted per target as it is reaped, and the
 # directory when the task ends.
 _DELIVER_DIR_PREFIX = "aspect-delivery-deliver-"
+
+# Appended to a startup error the state backend caused.
+_UNTRACKED_HINT = " (Pass --mode=always --track-state=false --dry-run to preview without delivery state; without --dry-run, that delivers every target.)"
 
 # The FAIL message of a target left unstarted because a `delivery_target` hook raised.
 _HOOK_UNSTARTED = "hook_error: DeliveryTrait.delivery_target raised, so delivery did not start"
@@ -1343,6 +1350,22 @@ def _run_target_hook(delivery_trait, entry: dict, original: dict) -> dict:
         fail("DeliveryTrait.delivery_target left metadata that is not JSON: {}".format(encode_err.message))
     return metadata
 
+def _hook_error(label: str, err) -> str:
+    """The error line for a `delivery_target` hook that raised for `label`."""
+    return "DeliveryTrait.delivery_target raised for {}: {}".format(label, err.message)
+
+def _record_build_failure(data, outcomes, delivery_trait, targets, build_code: int) -> list:
+    """Record a WARN row for each target of a failed change-detection build, so
+    the check run says why, and fire the `delivery_target` hook on each. A hook
+    that raises doesn't stop the rest; returns the error lines of those that did."""
+    hook_errors = []
+    for label in targets:
+        delivery_scheduler.record(data, outcomes, label, "warn", message = "build failed (exit {})".format(build_code))
+        err, _ = catch(_fire_target_hook, data, delivery_trait, None, label)
+        if err:
+            hook_errors.append(_hook_error(label, err))
+    return hook_errors
+
 def _fail_unstarted(data, outcomes, rows, unstarted, message, fire_hook) -> int:
     """Record a FAIL row and result for each `(label, is_forced, output_sha)` in
     `unstarted`, calling `fire_hook(label)` after each. Returns how many."""
@@ -1423,7 +1446,7 @@ def _emit_final(ph, exit_code):
         if repro:
             desc = "Local dry-run preview of every resolved target."
             if ctx.args.mode != "always":
-                desc = "CI ran --mode=%s; --mode=always --track-state=false for off-runner with no state backend." % ctx.args.mode
+                desc = "CI ran --mode=%s; this previews every resolved target without reading or writing delivery state." % ctx.args.mode
             prefix = repro_prefix(ctx)
             data["repro_commands"].append(phases.ReproFixCommand(
                 command = prefix + repro,
@@ -1655,10 +1678,10 @@ def _delivery_impl(ctx):
             heartbeat = lambda: _emit_update(ph, had_failure = data["delivery"]["counts"].get("fail", 0) > 0),
         ))
         if err:
-            error(ctx.std, "Delivery state backend is unavailable: {} (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)".format(err.message))
+            error(ctx.std, "Delivery state backend is unavailable: {}{}".format(err.message, _UNTRACKED_HINT))
             return _emit_final(ph, exit_code = 1)
         if not dd.status.ok:
-            error(ctx.std, "Delivery state backend is unavailable ({}): {} (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)".format(dd.endpoint or dd.describe, dd.status.error))
+            error(ctx.std, "Delivery state backend is unavailable ({}): {}{}".format(dd.endpoint or dd.describe, dd.status.error, _UNTRACKED_HINT))
             return _emit_final(ph, exit_code = 1)
         if dd.read_only and not dry_run:
             error(ctx.std, "Delivery state backend cannot record deliveries ({}): {} (A --dry-run can use it as is.)".format(dd.endpoint or dd.describe, dd.read_only))
@@ -1804,16 +1827,8 @@ def _delivery_impl(ctx):
         if build_code != 0:
             error(ctx.std, "Build failed with exit code {}.".format(build_code))
 
-            # Synthetic warn rows so the check run conveys why it failed.
-            for label in targets:
-                delivery_scheduler.record(
-                    data,
-                    outcomes,
-                    label,
-                    "warn",
-                    message = "build failed (exit {})".format(build_code),
-                )
-                _fire_target_hook(data, delivery_trait, None, label)
+            for hook_error in _record_build_failure(data, outcomes, delivery_trait, targets, build_code):
+                error(ctx.std, hook_error)
             return _emit_final(ph, exit_code = build_code)
     else:
         output_shas = {}
@@ -1902,7 +1917,7 @@ def _delivery_impl(ctx):
                 if release_build["runs"] and not release_build["runs"].done:
                     release_build["runs"].cancellation.cancel()
                     release_build["cancelled"] = True
-            hook_errors.append("DeliveryTrait.delivery_target raised for {}: {}".format(label, err.message))
+            hook_errors.append(_hook_error(label, err))
         return err
 
     # Phase 3: fused download + delivery. Bazel lands a target's outputs +
@@ -2508,7 +2523,7 @@ Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, 
         "mode": args.string(
             default = "selective",
             values = ["selective", "always"],
-            description = "Delivery model. 'selective' (default): only run candidates that haven't already been delivered for this --task:name[:--salt] prefix (uses change detection). 'always': skip change detection entirely and run every resolved target — closest analogue to legacy always-deliver behavior. Combine with --dry-run for a preview and/or --track-state=false for environments without a state backend.",
+            description = "Delivery model. 'selective' (default): only run candidates that haven't already been delivered for this --task:name[:--salt] prefix (uses change detection). 'always': skip change detection entirely and run every resolved target — closest analogue to legacy always-deliver behavior. Combine with --dry-run for a preview and/or --track-state=false for a run without delivery state.",
         ),
         "dry_run": args.string(
             default = DRY_RUN_OFF,
@@ -2518,7 +2533,7 @@ Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, 
         ),
         "track_state": args.boolean(
             default = True,
-            description = "Whether to track delivery state across runs (record what's been delivered, query before re-delivering). Default true. Set to false (--track-state=false) for environments where the state backend isn't available, like local development or non-Aspect-Workflows CI. Change detection cannot decide what to deliver without state, so --mode=selective --track-state=false is rejected; use --mode=always (optionally with --dry-run for a preview) when running without state tracking.",
+            description = "Whether to track delivery state across runs (record what's been delivered, query before re-delivering). Default true. Set to false (--track-state=false) for a run that should neither read nor write delivery state, such as a local preview. Change detection cannot decide what to deliver without state, so --mode=selective --track-state=false is rejected; use --mode=always (optionally with --dry-run for a preview) when running without state tracking.",
         ),
         "max_parallelization": args.int(
             default = 1,
@@ -2570,3 +2585,4 @@ testonly_record_outcome = _record_outcome
 testonly_delivered_dict = _delivered_dict
 testonly_metadata_to_store = _metadata_to_store
 testonly_fire_target_hook = _fire_target_hook
+testonly_record_build_failure = _record_build_failure

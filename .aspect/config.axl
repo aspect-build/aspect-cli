@@ -152,7 +152,7 @@ def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> Rep
     if info.slug != "delivery-repro-local-preview":
         return REPRO_FIX_ACCEPT
     return repro_fix_replace(
-        description = "--mode=always --track-state=false for off-runner with no state backend.",
+        description = "--mode=always --track-state=false: a preview that neither reads nor writes delivery state.",
     )
 
 def _customize_message(s: str, a: str) -> str:

@@ -9,7 +9,7 @@ load(
     "version_gte",
     "version_tuple",
 )
-load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_default_connect = "testonly_default_connect", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
+load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_default_connect = "testonly_default_connect", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_build_failure = "testonly_record_build_failure", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
 load("@aspect//delivery_state.axl", "delivery_api", "delivery_state", "deliveryd")
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
@@ -1975,6 +1975,22 @@ def test_delivery_metadata(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     delivery_add_result(data, "//a", "ok", metadata = {"from_file": 1})
     err, _ = catch(delivery_fire_target_hook, data, struct(delivery_target = lambda entry: fail("boom")), None, "//a", {})
     tc = test_case(tc, err != None and "boom" in err.message, "metadata: a hook's own error surfaces (got %r)" % err)
+
+    fired = []
+
+    def _raise_for_a(entry):
+        fired.append(entry["label"])
+        if entry["label"] == "//a":
+            fail("boom")
+        return {"seen": True}
+
+    data = delivery_init_data()
+    errors = delivery_record_build_failure(data, {}, struct(delivery_target = _raise_for_a), ["//a", "//b"], 34)
+    rows = data["delivery"]["deliveries"]
+    tc = test_case(tc, [r["outcome"] for r in rows] == ["warn", "warn"] and "exit 34" in rows[0]["message"], "build failure: every target gets a warn row (got %r)" % rows)
+    tc = test_case(tc, fired == ["//a", "//b"], "build failure: a raising hook doesn't stop the rest (got %r)" % fired)
+    tc = test_case(tc, len(errors) == 1 and "//a" in errors[0] and "boom" in errors[0], "build failure: the raising hook's error is returned (got %r)" % errors)
+    tc = test_case(tc, rows[1]["metadata"] == {"seen": True}, "build failure: a hook's return lands in metadata (got %r)" % rows[1]["metadata"])
 
     shared = delivery_delivered_dict(delivery_state.Delivery(label = "//other", build_url = "u", commit_sha = "c", at = "2026-11-01T00:00:00Z"))
     tc = test_case(tc, shared == {"label": "//other", "build_url": "u", "commit_sha": "c", "at": "2026-11-01T00:00:00Z"}, "delivered: names the delivering target (got %r)" % shared)
